@@ -332,7 +332,7 @@ describe('MemoryPanel', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Centered on memory #2')).toBeTruthy();
-      expect(within(secondEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
+      expect(within(secondEntry as HTMLElement).getByText('Active node')).toBeTruthy();
     });
 
     const firstEntry = within(memoryList).getByText('Direction Stack layers cascade L1 → L5.').closest('li');
@@ -342,7 +342,7 @@ describe('MemoryPanel', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Centered on memory #1')).toBeTruthy();
-      expect(within(firstEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
+      expect(within(firstEntry as HTMLElement).getByText('Active node')).toBeTruthy();
     });
   });
 
@@ -418,7 +418,7 @@ describe('MemoryPanel', () => {
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
     expect(screen.getByText(/Review queue is intentionally bounded to 120/)).toBeTruthy();
-    expect(screen.getByText(/Apache AGE extension is unavailable/)).toBeTruthy();
+    expect(screen.getAllByTitle(/Apache AGE extension is unavailable/).length).toBeGreaterThan(0);
     expect(screen.getByRole('list', { name: 'Hotspot files' })).toBeTruthy();
     expect(screen.getByRole('list', { name: 'Hotspot specs' })).toBeTruthy();
     expect(screen.getByText('Archived memory for restore drills.')).toBeTruthy();
@@ -586,7 +586,7 @@ describe('MemoryPanel', () => {
 
     renderWithProviders(<MemoryPanel />);
 
-    expect(await screen.findByText(/Ontology explanations unavailable right now/)).toBeTruthy();
+    await waitFor(() => expect(screen.getAllByTitle(/Ontology relation fetch failed/).length).toBeGreaterThan(0));
   });
 
   it('shows a distinct unavailable state when the overview request fails', async () => {
@@ -608,7 +608,7 @@ describe('MemoryPanel', () => {
     await user.click(screen.getByRole('tab', { name: 'Graph' }));
 
     expect(await screen.findByText('Unavailable')).toBeTruthy();
-    expect(screen.getByText('Overview request failed')).toBeTruthy();
+    expect(screen.getAllByText('Overview request failed').length).toBeGreaterThan(0);
   });
 
   it('keeps search, edit, pin, and delete workflows working in split mode', async () => {
@@ -707,7 +707,8 @@ describe('MemoryPanel', () => {
     renderWithProviders(<MemoryPanel />);
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
-    expect(screen.getByText('No active supersession or conflict edges recorded for this memory yet.')).toBeTruthy();
+    await user.click(screen.getAllByRole('button', { name: 'Curate' })[0]);
+    expect(await screen.findByText('No active supersession or conflict edges recorded for this memory yet.')).toBeTruthy();
 
     await user.selectOptions(screen.getByLabelText('Target memory'), '2');
     await user.click(screen.getByRole('button', { name: 'Mark conflict' }));
@@ -734,6 +735,7 @@ describe('MemoryPanel', () => {
     renderWithProviders(<MemoryPanel />);
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getAllByRole('button', { name: 'Curate' })[0]);
     await user.selectOptions(screen.getByLabelText('Target memory'), '2');
 
     expect(screen.getByText('Conflicts: These memories already conflict.')).toBeTruthy();
@@ -761,8 +763,9 @@ describe('MemoryPanel', () => {
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     expect((await screen.findAllByText(/supersedes memory #2/i)).length).toBeGreaterThan(0);
+    await user.click(screen.getAllByRole('button', { name: 'Curate' })[0]);
 
-    await user.click(screen.getByRole('button', { name: 'Remove' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove' }));
 
     await waitFor(() => {
       expect(mockApiFetch).toHaveBeenCalledWith('/api/memory/relations/91', expect.objectContaining({

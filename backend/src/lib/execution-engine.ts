@@ -133,6 +133,7 @@ import {
   getResumeContext,
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
+import { createAutonomousCommandGuard } from './autonomous-command-guard';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -442,6 +443,12 @@ const MAX_RATE_LIMIT_RETRIES = 4;
 const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 240_000];
 const RATE_LIMIT_FAST_EXIT_THRESHOLD_MS = 5_000;
 const DEFAULT_TIMEOUT_MINUTES = 90;
+const PI_AUTONOMOUS_SYSTEM_PROMPT = [
+  'You are running inside a non-interactive autonomous execution pipeline.',
+  'Complete feasible coding tasks by looping through requirements, concise planning, small edits, validation, failure inspection, fixes, progress-log updates, and final requirement comparison.',
+  'Do not stop after inspection or planning only. If you end the turn without making code changes, it will be treated as failure unless you clearly report a concrete blocker with file-level evidence.',
+  'Never run backend Jest/npm-test commands against a live database. If a command is blocked by the Rorca autonomous command guard, choose a safe validation alternative and record the blocked attempt.',
+].join(' ');
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
   (() => {
@@ -1087,6 +1094,10 @@ function buildCleanEnv(): Record<string, string> {
   return env;
 }
 
+function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = buildCleanEnv()): Record<string, string> {
+  return createAutonomousCommandGuard({ cwd, env: baseEnv }).env;
+}
+
 function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
 }
@@ -1165,14 +1176,14 @@ async function startPiRpcServer(
     '--mode', 'rpc',
     '--no-extensions',
     '--tools', 'read,bash,edit,write,grep,find,ls',
-    '--append-system-prompt', 'You are running inside a non-interactive autonomous execution pipeline. Complete feasible coding tasks by reading files, editing code, and validating results in the same turn. Do not stop after inspection or planning only. If you end the turn without making code changes, it will be treated as failure unless you clearly report a concrete blocker with file-level evidence.',
+    '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
     ...explicitExtensions.flatMap(extensionPath => ['--extension', extensionPath]),
     ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
     ...(piSelection.model ? ['--model', piSelection.model] : []),
     ...skillFiles.flatMap(skillFile => ['--skill', skillFile]),
   ];
   logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'} mcp=${mcpServersSignature || 'none'}`);
-  const env = buildCleanEnv();
+  const env = buildGuardedAgentEnv(cwd);
   if (mcpServers?.rorca) {
     env.RORCA_PI_MCP_URL = mcpServers.rorca;
     env.RORCA_PI_API_URL = mcpServers.rorca.replace(/\/mcp\/?$/, '');
@@ -1910,7 +1921,7 @@ function buildPtyCommand(
 ): PtyCommand {
   switch (agentType) {
     case 'claude': {
-      const env = buildCleanEnv();
+      const env = buildGuardedAgentEnv(cwd);
       let mcpConfigPath: string | null = null;
       if (mcpServers && Object.keys(mcpServers).length > 0) {
         const mcpConfig: Record<string, unknown> = { mcpServers: {} };
@@ -1953,10 +1964,10 @@ function buildPtyCommand(
       };
     }
     case 'opencode': {
-      const env = {
+      const env = buildGuardedAgentEnv(cwd, {
         ...buildCleanEnv(),
         ...buildOpenCodeReasoningEnv(agentModel, thinkingEnabled, thinkingBudget, effortLevel),
-      };
+      });
       let openCodeMcpConfigPath: string | null = null;
       const openCodeInjectedMcpNames: string[] = [];
       if (mcpServers && Object.keys(mcpServers).length > 0) {
@@ -2000,7 +2011,7 @@ function buildPtyCommand(
       };
     }
     case 'codex': {
-      const env = buildCleanEnv();
+      const env = buildGuardedAgentEnv(cwd);
       const codexMcpRegisteredNames: string[] = [];
       if (mcpServers && Object.keys(mcpServers).length > 0) {
         for (const [name, url] of Object.entries(mcpServers)) {
@@ -2031,13 +2042,13 @@ function buildPtyCommand(
           '--jsonl',
           '--no-extensions',
           '--tools', 'read,bash,edit,write,grep,find,ls',
-          '--append-system-prompt', 'You are running inside a non-interactive autonomous execution pipeline. Complete feasible coding tasks by reading files, editing code, and validating results in the same turn. Do not stop after inspection or planning only. If you end the turn without making code changes, it will be treated as failure unless you clearly report a concrete blocker with file-level evidence.',
+          '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
           ...resolvePiExtensionPaths().flatMap(extensionPath => ['--extension', extensionPath]),
           ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
           ...(piSelection.model ? ['--model', piSelection.model] : []),
           ...piServerSkillFiles.flatMap(skillFile => ['--skill', skillFile]),
         ],
-        env: buildCleanEnv(),
+        env: buildGuardedAgentEnv(cwd),
         prompt,
       };
     }
@@ -2405,7 +2416,7 @@ function spawnClaude(
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
-    const env = buildCleanEnv();
+    const env = buildGuardedAgentEnv(cwd);
     const startTime = Date.now();
 
     // Claude CLI --mcp-config requires stdio command/args format — NOT { type: 'http', url }.
@@ -2673,10 +2684,10 @@ function spawnOpenCode(
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
-    const env = {
+    const env = buildGuardedAgentEnv(cwd, {
       ...buildCleanEnv(),
       ...buildOpenCodeReasoningEnv(agentModel, thinkingEnabled, thinkingBudget, effortLevel),
-    };
+    });
     const startTime = Date.now();
 
     let openCodeMcpConfigPath: string | null = null;
@@ -2857,7 +2868,7 @@ function spawnCodex(
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
-    const env = buildCleanEnv();
+    const env = buildGuardedAgentEnv(cwd);
     const startTime = Date.now();
 
     const codexMcpRegisteredNames: string[] = [];

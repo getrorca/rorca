@@ -49,6 +49,7 @@ export interface PiProgressLogUpdate {
   modifiedFiles?: string[];
   knownIssues?: string[];
   validationResults?: string[];
+  implementationPlan?: string[];
 }
 
 const SECTION_LIMITS: Record<keyof PiProgressLogUpdate, number> = {
@@ -58,9 +59,11 @@ const SECTION_LIMITS: Record<keyof PiProgressLogUpdate, number> = {
   modifiedFiles: 24,
   knownIssues: 12,
   validationResults: 16,
+  implementationPlan: 12,
 };
 
 const SECTION_HEADINGS: Array<{ key: keyof PiProgressLogUpdate; heading: string }> = [
+  { key: 'implementationPlan', heading: 'Implementation Plan' },
   { key: 'completedWork', heading: 'Completed Work' },
   { key: 'remainingWork', heading: 'Remaining Work' },
   { key: 'keyDecisions', heading: 'Key Decisions' },
@@ -165,13 +168,15 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     'Do not stop at partial implementation. Stay in the loop until the story is implemented, validated, reviewed for obvious regressions, and free of known unresolved bugs, or until you are clearly blocked.',
     '',
     '## Required Loop',
-    '1. Read the progress log before any major step.',
-    '2. Plan the implementation and define what done means.',
-    '3. Implement in small, focused batches.',
-    '4. Run the narrowest useful validation after each meaningful batch.',
-    '5. Review your own work for correctness, completeness, regressions, and edge cases.',
-    '6. Compare the current state back to the original story requirements.',
-    '7. Fix issues and repeat until the story is actually done.',
+    'Repeat this loop until completion is proven, not merely attempted:',
+    '1. Understand the requirements and acceptance criteria.',
+    '2. Create or update a concise implementation plan in the progress log.',
+    '3. Make small, controlled code changes.',
+    '4. Run all relevant safe validation checks.',
+    '5. Inspect failures, fix bugs, and rerun checks.',
+    '6. Compare the result against the original requirements and done definition.',
+    '7. Update the compact progress log so the task survives context compaction.',
+    '8. Continue until there are no known bugs, failing checks, or incomplete requirements.',
     '',
     '## Planning Rules',
     '- Break the task into ordered implementation steps before writing code.',
@@ -194,6 +199,7 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     '## Validation Rules',
     '- Run the narrowest useful checks first, then broader checks before claiming completion.',
     '- Use repository-native validation commands when available: lint, typecheck, unit, integration, e2e, and build.',
+    '- Never run backend Jest or backend npm test against a live database. If the command guard blocks a command, treat that as a safety validation and choose a safe alternative.',
     '- If a check fails, diagnose the root cause, fix it, and rerun the relevant checks.',
     '- Continue until all available and relevant checks pass, or clearly record what is blocked.',
     '- Never claim success while known validation failures remain.',
@@ -202,6 +208,7 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     '- If the task prompt provides a progress log path, use it as the source of truth.',
     '- Read that log before each major step or retry.',
     '- Keep it concise but current with these sections:',
+    '  - Implementation Plan',
     '  - Completed Work',
     '  - Remaining Work',
     '  - Key Decisions',
@@ -218,11 +225,12 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     '',
     '## Final Response Rules',
     'Your final response must include:',
-    '- What was implemented',
-    '- Files changed',
-    '- Validation commands run and their results',
-    '- Remaining risks or limitations',
-    '- Whether the story is fully implemented and validated',
+    '- What was built',
+    '- What files changed',
+    '- What tests/checks were run',
+    '- What passed or failed',
+    '- Any unresolved issues',
+    '- A clear completion status',
   ].join('\n');
 }
 
@@ -291,6 +299,26 @@ export function inferPiCandidateTests(cwd: string, candidateFiles: string[]): st
   return [...candidates];
 }
 
+export function isUnsafeAutonomousValidationCommand(command: string): boolean {
+  const normalized = command.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!normalized) return false;
+
+  const isBackendScope = normalized.startsWith('cd backend &&')
+    || normalized.includes(' backend/')
+    || normalized.includes('/backend/');
+  const isJestLike = /(^|\s)(jest|npx jest)(\s|$)/.test(normalized)
+    || normalized.includes('--testpathpattern')
+    || normalized.includes('npm test')
+    || normalized.includes('yarn test')
+    || normalized.includes('pnpm test');
+
+  return isJestLike && (isBackendScope || normalized.includes('pipeline.test') || normalized.includes('routes/__tests__'));
+}
+
+export function filterUnsafeAutonomousValidationCommands(commands: string[]): string[] {
+  return uniqueItems(commands).filter(command => !isUnsafeAutonomousValidationCommand(command));
+}
+
 export function inferPiValidationCommands(cwd: string, mode: 'impl' | 'qa' | 'journey'): string[] {
   const commands: string[] = [];
   const rootPackageJson = path.join(cwd, 'package.json');
@@ -306,7 +334,6 @@ export function inferPiValidationCommands(cwd: string, mode: 'impl' | 'qa' | 'jo
     commands.push('cd backend && npx tsc --noEmit');
   }
   if (backendScripts.has('lint')) commands.push('cd backend && npm run lint');
-  if (backendScripts.has('test')) commands.push('cd backend && npm test -- --runInBand');
 
   if (mode === 'journey') {
     if (rootScripts.has('auth:test')) commands.push('npm run auth:test');
@@ -315,7 +342,7 @@ export function inferPiValidationCommands(cwd: string, mode: 'impl' | 'qa' | 'jo
 
   if (rootScripts.has('build')) commands.push('npm run build');
 
-  return uniqueItems(commands);
+  return filterUnsafeAutonomousValidationCommands(commands);
 }
 
 export function buildPiDoneChecklist(
@@ -374,8 +401,14 @@ export function ensurePiStoryProgressLog(filePath: string, seed: PiProgressLogSe
   appendSectionBlock(parts, 'Candidate Files', uniqueItems(seed.candidateFiles ?? []));
   appendSectionBlock(parts, 'Candidate Tests', uniqueItems(seed.candidateTests ?? []));
   appendSectionBlock(parts, 'Expected Artifacts', uniqueItems(seed.expectedArtifacts ?? []));
-  appendSectionBlock(parts, 'Validation Plan', uniqueItems(seed.validationCommands ?? []));
+  appendSectionBlock(parts, 'Validation Plan', filterUnsafeAutonomousValidationCommands(seed.validationCommands ?? []));
   appendSectionBlock(parts, 'Execution Risks', uniqueItems(seed.readinessWarnings ?? []));
+  appendSectionBlock(parts, 'Implementation Plan', [
+    'Understand requirements and acceptance criteria.',
+    'Identify affected files and make the smallest safe changes.',
+    'Run safe validation, fix failures, and rerun checks.',
+    'Compare the final result against the original requirements before marking complete.',
+  ]);
   appendSectionBlock(parts, 'Completed Work', ['Initialised progress log.']);
   appendSectionBlock(parts, 'Remaining Work', [
     'Create an implementation plan.',
@@ -419,6 +452,7 @@ export function buildPiStoryPromptContext(context: PiStoryPromptContext): string
     'Before each major step, read this log and keep it updated.',
     'Use the progress log as the source of truth across retries and compaction.',
     'Plan -> implement -> validate -> review -> fix -> repeat until complete.',
+    'Do not run backend Jest/npm-test commands against live databases; the autonomous command guard will block unsafe attempts.',
     '',
   ].filter(Boolean) as string[];
 
@@ -442,7 +476,7 @@ export function buildPiStoryPromptContext(context: PiStoryPromptContext): string
 
   if ((context.validationCommands?.length ?? 0) > 0) {
     lines.push('## Validation Plan');
-    for (const item of uniqueItems(context.validationCommands ?? [])) lines.push(`- ${item}`);
+    for (const item of filterUnsafeAutonomousValidationCommands(context.validationCommands ?? [])) lines.push(`- ${item}`);
     lines.push('');
   }
 

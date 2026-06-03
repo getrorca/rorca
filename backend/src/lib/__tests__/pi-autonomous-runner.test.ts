@@ -15,8 +15,10 @@ import {
   buildPiServerSkillFiles,
   buildPiStoryPromptContext,
   ensurePiStoryProgressLog,
+  filterUnsafeAutonomousValidationCommands,
   inferPiCandidateTests,
   inferPiValidationCommands,
+  isUnsafeAutonomousValidationCommand,
   recordPiStoryProgressLog,
 } from '../pi-autonomous-runner';
 
@@ -29,7 +31,9 @@ describe('pi-autonomous-runner', () => {
     expect(markdown).toContain('## Required Loop');
     expect(markdown).toContain('## Continuous Self-Check Rules');
     expect(markdown).toContain('## Progress Log Rules');
+    expect(markdown).toContain('Implementation Plan');
     expect(markdown).toContain('Validation Results');
+    expect(markdown).toContain('Never run backend Jest');
   });
 
   test('buildPiServerSkillFiles includes generated runner skill plus workspace override skill', () => {
@@ -74,6 +78,7 @@ describe('pi-autonomous-runner', () => {
     expect(created).toContain('## Expected Artifacts');
     expect(created).toContain('## Validation Plan');
     expect(created).toContain('## Execution Risks');
+    expect(created).toContain('## Implementation Plan');
     expect(created).toContain('Implement Pi runner');
     expect(created).toContain('backend/src/lib/pi-autonomous-runner.ts');
 
@@ -164,12 +169,23 @@ describe('pi-autonomous-runner', () => {
       'npx tsc --noEmit',
       'cd backend && npx tsc --noEmit',
       'cd backend && npm run lint',
-      'cd backend && npm test -- --runInBand',
       'npm run auth:test',
       'npm run build',
     ]);
 
     fs.rmSync(wsDir, { recursive: true, force: true });
+  });
+
+  test('filters unsafe autonomous validation commands', () => {
+    expect(isUnsafeAutonomousValidationCommand('cd backend && npm test -- --runInBand')).toBe(true);
+    expect(isUnsafeAutonomousValidationCommand('cd backend && npx jest --runInBand')).toBe(true);
+    expect(isUnsafeAutonomousValidationCommand('npx jest --testPathPattern="pipeline.test"')).toBe(true);
+    expect(isUnsafeAutonomousValidationCommand('cd backend && npx tsc --noEmit')).toBe(false);
+    expect(isUnsafeAutonomousValidationCommand('npx vitest run src/panels/__tests__/MemoryPanel.test.tsx')).toBe(false);
+    expect(filterUnsafeAutonomousValidationCommands([
+      'cd backend && npm test -- --runInBand',
+      'cd backend && npx tsc --noEmit',
+    ])).toEqual(['cd backend && npx tsc --noEmit']);
   });
 
   test('buildPiDoneChecklist folds in acceptance criteria and mode-specific expectations', () => {

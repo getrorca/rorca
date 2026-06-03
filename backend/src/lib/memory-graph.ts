@@ -364,7 +364,14 @@ async function cypherQuery<T = Record<string, unknown>>(
   try {
     return await withAgeSession(client, async () => {
       const result = await client.query(sql);
-      return result.rows.map((row) => parseAgtypeRow<T>(row));
+      return result.rows.map((row) => {
+        const normalized: Record<string, unknown> = {};
+        for (const column of returnColumns) {
+          normalized[column.name] = (row as Record<string, unknown>)[column.name]
+            ?? (row as Record<string, unknown>)[column.name.toLowerCase()];
+        }
+        return parseAgtypeRow<T>(normalized);
+      });
     });
   } finally {
     client.release();
@@ -447,7 +454,7 @@ async function queryAnchorMemories(workspaceId: string, limit: number): Promise<
             m.category AS category,
             COALESCE(m.pinned, false) AS pinned,
             COALESCE(m.updated_at, m.created_at) AS createdAt
-     ORDER BY createdAt DESC, memoryId ASC
+     ORDER BY COALESCE(m.updated_at, m.created_at) DESC, m.id ASC
      LIMIT ${limit}`,
     [
       { name: 'memoryId', type: 'agtype' },
@@ -467,7 +474,7 @@ async function querySingleMemory(workspaceId: string, memoryId: string): Promise
             m.category AS category,
             COALESCE(m.pinned, false) AS pinned,
             COALESCE(m.updated_at, m.created_at) AS createdAt
-     ORDER BY memoryId ASC
+     ORDER BY m.id ASC
      LIMIT 1`,
     [
       { name: 'memoryId', type: 'agtype' },
@@ -489,7 +496,7 @@ async function queryMemoryStories(workspaceId: string, memoryIds: string[], limi
                      s.id AS storyId,
                      s.title AS storyTitle,
                      s.specId AS specId
-     ORDER BY memoryId ASC, storyId ASC
+     ORDER BY m.id ASC, s.id ASC
      LIMIT ${limit}`,
     [
       { name: 'memoryId', type: 'agtype' },
@@ -509,7 +516,7 @@ async function queryMemoryFiles(workspaceId: string, memoryIds: string[], limit:
        AND m.id IN ${stringList(memoryIds)}
      RETURN DISTINCT m.id AS memoryId,
                      f.path AS filePath
-     ORDER BY memoryId ASC, filePath ASC
+     ORDER BY m.id ASC, f.path ASC
      LIMIT ${limit}`,
     [
       { name: 'memoryId', type: 'agtype' },
@@ -529,7 +536,7 @@ async function queryMemorySpecs(workspaceId: string, memoryIds: string[], limit:
                      sp.id AS specId,
                      sp.title AS specTitle,
                      sp.status AS specStatus
-     ORDER BY memoryId ASC, specId ASC
+     ORDER BY m.id ASC, sp.id ASC
      LIMIT ${limit}`,
     [
       { name: 'memoryId', type: 'agtype' },
@@ -552,7 +559,7 @@ async function queryStoryDependencies(workspaceId: string, storyIds: string[], l
                      d.id AS dependsOnId,
                      d.title AS dependsOnTitle,
                      d.specId AS dependsOnSpecId
-     ORDER BY storyId ASC, dependsOnId ASC
+     ORDER BY s.id ASC, d.id ASC
      LIMIT ${limit}`,
     [
       { name: 'storyId', type: 'agtype' },
@@ -574,7 +581,7 @@ async function queryStoryFiles(workspaceId: string, storyIds: string[], limit: n
      RETURN DISTINCT s.id AS storyId,
                      s.specId AS specId,
                      f.path AS filePath
-     ORDER BY storyId ASC, filePath ASC
+     ORDER BY s.id ASC, f.path ASC
      LIMIT ${limit}`,
     [
       { name: 'storyId', type: 'agtype' },
@@ -595,7 +602,7 @@ async function queryStorySpecs(workspaceId: string, storyIds: string[], limit: n
                      sp.id AS specId,
                      sp.title AS specTitle,
                      sp.status AS specStatus
-     ORDER BY storyId ASC, specId ASC
+     ORDER BY s.id ASC, sp.id ASC
      LIMIT ${limit}`,
     [
       { name: 'storyId', type: 'agtype' },
@@ -628,7 +635,7 @@ async function queryMemoryRelations(
                      COALESCE(target.pinned, false) AS targetPinned,
                      COALESCE(target.updated_at, target.created_at) AS targetCreatedAt,
                      '${relationType}' AS relationType
-     ORDER BY sourceMemoryId ASC, targetMemoryId ASC
+     ORDER BY source.id ASC, target.id ASC
      LIMIT ${limit}`,
     [
       { name: 'sourceMemoryId', type: 'agtype' },
@@ -939,7 +946,14 @@ async function queryGraph(
       : await queryAnchorMemories(workspaceId, caps.memories);
     return await buildGraph(workspaceId, scope, caps, anchors);
   } catch (error) {
-    logger.warn({ error, workspaceId, view, memoryId }, '[memory-graph] Graph query failed');
+    logger.warn({
+      error,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      errorStack: error instanceof Error ? error.stack : undefined,
+      workspaceId,
+      view,
+      memoryId,
+    }, '[memory-graph] Graph query failed');
     return buildUnavailable(scope, caps, 'GRAPH_QUERY_FAILED', 'Memory graph unavailable');
   }
 }
