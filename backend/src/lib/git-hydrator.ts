@@ -116,6 +116,22 @@ export function getLatestHash(summaries: GitChunkSummary[]): string | null {
   return summaries[summaries.length - 1].toHash;
 }
 
+/**
+ * Returns the current HEAD commit hash for a workspace, or null if the path is
+ * not a git repository or HEAD cannot be resolved (e.g. empty repo). Never throws —
+ * callers use this to cheaply detect whether new commits exist since the last hydration.
+ */
+export async function getCurrentHead(workspacePath: string): Promise<string | null> {
+  try {
+    const git = simpleGit(workspacePath);
+    if (!(await git.checkIsRepo())) return null;
+    const head = (await git.revparse(['HEAD'])).trim();
+    return head || null;
+  } catch {
+    return null;
+  }
+}
+
 // --- Reduce Step ---
 
 export interface GitReduceOptions {

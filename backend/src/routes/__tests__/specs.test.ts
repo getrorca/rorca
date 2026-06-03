@@ -158,6 +158,28 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
   expect(res.body.diagramsPath).toContain('auth-system-diagrams.md');
 });
 
+test('POST /api/specs/generate surfaces gitRehydration state in contextSummary (CTM-005)', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      workspaceId: 'ws-test',
+      domain: 'backend',
+      title: 'Hydration Trace',
+      brief: 'Observe hydration state',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.contextSummary).toBeDefined();
+  expect(res.body.contextSummary.gitRehydration).toBeDefined();
+  expect(typeof res.body.contextSummary.gitRehydration.triggered).toBe('boolean');
+  // tmpdir workspace is not a git repo, so HEAD cannot be resolved → no rehydration.
+  expect(res.body.contextSummary.gitRehydration.triggered).toBe(false);
+  expect(res.body.contextSummary.gitRehydration.reason).toBe('no_head');
+});
+
 test('POST /api/specs/generate with agentOverride=pi uses the Pi forge drafter path', async () => {
   mockDraftSpecWithPi.mockResolvedValue({
     text: validLlmResponse,
