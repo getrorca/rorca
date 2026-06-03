@@ -15,11 +15,65 @@
  */
 
 import { Pool } from 'pg';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { runPgMigrations } from './src/db/pg-index';
+
+const DEFAULT_NATIVE_PORT = 5433;
+const DOCKER_PORT = 5432;
+
+function getDbModePath(): string {
+  return path.join(os.homedir(), '.rorca', 'db-mode');
+}
+
+function readDbModeFile(): 'docker' | 'native' | 'byop' | null {
+  try {
+    const value = fs.readFileSync(getDbModePath(), 'utf8').trim().toLowerCase();
+    return value === 'docker' || value === 'native' || value === 'byop'
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveNativePort(): number {
+  const candidates = [
+    path.join(__dirname, '..', 'bin', 'rorca.ts'),
+    path.join(__dirname, '..', 'bin', 'rorca.js'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const content = fs.readFileSync(candidate, 'utf8');
+      const match = content.match(/const MANAGED_PG_PORT = (\d+);/);
+      if (match) return parseInt(match[1], 10);
+    } catch {}
+  }
+  return DEFAULT_NATIVE_PORT;
+}
+
+function deriveSelectedBaseUrl(): string {
+  if (process.env.DATABASE_URL_TEST) return process.env.DATABASE_URL_TEST;
+  const current = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5433/rorca';
+  try {
+    const parsed = new URL(current);
+    const host = parsed.hostname.toLowerCase();
+    const isRemote = host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
+    if (isRemote) return current;
+  } catch {
+    return current;
+  }
+
+  const mode = readDbModeFile();
+  if (mode === 'docker') return `postgres://rorca:rorca@localhost:${DOCKER_PORT}/rorca`;
+  if (mode === 'native' || mode === null) return `postgres://rorca:rorca@localhost:${resolveNativePort()}/rorca`;
+  return current;
+}
 
 function deriveTestDbUrl(): string {
   if (process.env.DATABASE_URL_TEST) return process.env.DATABASE_URL_TEST;
-  const prodUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5433/rorca';
+  const prodUrl = deriveSelectedBaseUrl();
   try {
     const parsed = new URL(prodUrl);
     const dbName = parsed.pathname.slice(1);

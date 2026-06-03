@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { queryOne } from '../db';
+import { queryOne } from '../db/index';
 
 export type DbMode = 'native' | 'docker' | 'byop';
 
@@ -48,6 +48,23 @@ function parseDatabasePort(databaseUrl: string): number | null {
   if (!url.port) return 5432;
   const parsed = Number.parseInt(url.port, 10);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseDatabaseName(databaseUrl: string): string | null {
+  const url = parseDatabaseUrl(databaseUrl);
+  if (!url) return null;
+  return url.pathname.replace(/^\//, '') || null;
+}
+
+function isTestDatabaseName(databaseName: string | null): boolean {
+  return typeof databaseName === 'string' && databaseName.endsWith('_test');
+}
+
+function preserveDatabaseName(databaseUrl: string, databaseName: string): string {
+  const url = parseDatabaseUrl(databaseUrl);
+  if (!url) return databaseUrl;
+  url.pathname = `/${databaseName}`;
+  return url.toString();
 }
 
 function isRemoteHost(host: string | null): boolean {
@@ -139,6 +156,7 @@ export function applySelectedDbModeEnvironment(env: NodeJS.ProcessEnv = process.
 } {
   const mode = detectDbMode();
   const current = env.DATABASE_URL?.trim() || '';
+  const currentDatabaseName = parseDatabaseName(current);
 
   if (mode === 'byop') {
     return {
@@ -148,7 +166,11 @@ export function applySelectedDbModeEnvironment(env: NodeJS.ProcessEnv = process.
     };
   }
 
-  const databaseUrl = getDbConnectionString(mode);
+  let databaseUrl = getDbConnectionString(mode);
+  if (isTestDatabaseName(currentDatabaseName)) {
+    databaseUrl = preserveDatabaseName(databaseUrl, currentDatabaseName!);
+  }
+
   const changed = current !== databaseUrl;
   env.DATABASE_URL = databaseUrl;
 
