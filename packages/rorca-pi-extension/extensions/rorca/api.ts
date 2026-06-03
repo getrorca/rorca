@@ -145,6 +145,26 @@ export class RorcaApiClient {
     }, 60_000);
   }
 
+  /**
+   * CTM-008: Trigger retroactive context enrichment for a spec. Returns only the
+   * lightweight retrieval metadata (method + story count) — never raw blobs — so
+   * callers stay trace-safe.
+   */
+  async enrichSpec(specSlug: string, workspaceId: string): Promise<{ retrievalMethod: string; storiesEnriched: number }> {
+    const response = await this.fetchJson<{ retrieval_method?: string; storiesEnriched?: number }>(
+      `/api/specs/${encodeURIComponent(specSlug)}/enrich`,
+      {
+        method: "POST",
+        body: JSON.stringify({ workspaceId }),
+      },
+      600_000,
+    );
+    return {
+      retrievalMethod: response.retrieval_method ?? "direction-only",
+      storiesEnriched: response.storiesEnriched ?? 0,
+    };
+  }
+
   async getRun(runId: number): Promise<PipelineRunDetailResponse> {
     return this.fetchJson<PipelineRunDetailResponse>(`/api/pipeline/runs/${runId}`);
   }

@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { RorcaApiClient } from "./api.js";
-import { parseApproveCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
+import { parseApproveCommand, parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
 import { buildWatchSnapshot, formatRunList, formatRunNotify } from "./format.js";
 import { type RorcaSkillWorkflowRequest } from "./skill-launcher.js";
 import type { ExtensionState, PiModel, SpecDetail, Workspace } from "./types.js";
@@ -183,6 +183,7 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     ctx.ui.notify([
       "/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]",
       "/rorca-approve <spec-slug> [--workspace <id>]",
+      "/rorca-enrich <spec-slug> [--workspace <id>]",
       "/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--sequential] [--no-watch]",
       "/rorca-status [runId|workspaceId] [--workspace <id>]",
       "/rorca-watch [runId]",
@@ -223,6 +224,19 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     ctx.ui.notify("Rorca MCP bridge unavailable; falling back to direct approval.", "warning");
     await deps.api.approveSpec(parsed.specSlug, workspace.id);
     ctx.ui.notify(`Approved ${parsed.specSlug}`, "success");
+  });
+
+  registerCommand("rorca-enrich", "Enrich a Rorca spec's stories with retrieved context annotations", async (args, ctx) => {
+    const parsed = parseEnrichCommand(args, deps.getState().lastSpecSlug);
+    const workspace = await resolveWorkspace(ctx, deps, parsed.workspaceId);
+    deps.updateState({ workspaceId: workspace.id, lastSpecSlug: parsed.specSlug });
+
+    ctx.ui.notify(`Enriching ${parsed.specSlug}…`, "info");
+    const result = await deps.api.enrichSpec(parsed.specSlug, workspace.id);
+    const countNote = result.storiesEnriched > 0
+      ? `${result.storiesEnriched} ${result.storiesEnriched === 1 ? "story" : "stories"}`
+      : "no new stories";
+    ctx.ui.notify(`Enriched ${parsed.specSlug} (${countNote}) via ${result.retrievalMethod}`, "success");
   });
 
   registerCommand("rorca-forge-run", "Deprecated compatibility alias for /rorca-create-spec --approve --run", async (args, ctx) => {

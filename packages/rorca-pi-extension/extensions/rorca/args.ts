@@ -251,6 +251,30 @@ export function parseApproveCommand(input: string, fallbackSpecSlug?: string): {
   return options;
 }
 
+export function parseEnrichCommand(input: string, fallbackSpecSlug?: string): { specSlug: string; workspaceId?: string } {
+  const tokens = tokenizeArgs(input);
+  const options: { specSlug: string; workspaceId?: string } = {
+    specSlug: tokens[0] && !tokens[0].startsWith("--") ? tokens[0] : fallbackSpecSlug || "",
+  };
+
+  if (!options.specSlug) {
+    throw new Error("Usage: /rorca-enrich <spec-slug> [--workspace <id>]");
+  }
+
+  for (let i = tokens[0] && !tokens[0].startsWith("--") ? 1 : 0; i < tokens.length;) {
+    const token = tokens[i];
+    if (token === "--workspace") {
+      const parsed = parseFlagValue(tokens, i, token);
+      options.workspaceId = parsed.value;
+      i = parsed.nextIndex;
+      continue;
+    }
+    throw new Error(`Unknown flag: ${token}`);
+  }
+
+  return options;
+}
+
 export function resolveBriefInput(rawBrief: string, cwd: string = process.cwd()): { brief: string; sourceLabel: string } {
   const trimmed = rawBrief.trim();
   if (!trimmed.startsWith("@")) {

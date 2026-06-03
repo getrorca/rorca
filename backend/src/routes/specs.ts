@@ -12796,9 +12796,13 @@ router.put('/:specId', async (req: Request, res: Response) => {
 
 /**
  * @swagger
- * /api/specs/{id}/enrich:
+ * /api/specs/{specId}/enrich:
  *   post:
  *     summary: Retroactively enrich a spec's user stories with contextual L5 annotations
+ *     operationId: rorca_specs_by_specId_enrich
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Local read-mostly spec enrichment that injects contextual annotations into stories; same stable surface the UI and MCP enrich workflow target, no operator-only side effects."
+ *     x-rorca-public-api: true
  *     description: |
  *       Orchestrates a 4-layer retrieval cascade to gather context, then uses chatComplete()
  *       to generate an L5 annotation block for each UserStory. Annotations are injected into
@@ -12812,7 +12816,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     parameters:
  *       - in: path
- *         name: id
+ *         name: specId
  *         required: true
  *         schema: { type: string }
  *     requestBody:
