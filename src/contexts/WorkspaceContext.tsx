@@ -75,6 +75,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     () => workspaces.find((w) => w.id === workspaceId) ?? null,
     [workspaces, workspaceId],
   );
+  const workspaceReady = Boolean(workspaceId && selectedWorkspace && !workspacesLoading);
 
   const setWorkspaceId = useCallback((id: string) => {
     // sessionStorage = per-tab (primary), localStorage = fallback for brand-new tabs
@@ -95,7 +96,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   // Fetch active runs for the current workspace
   const refreshActiveRuns = useCallback(async () => {
-    if (!workspaceId) { setActiveRuns([]); return; }
+    if (!workspaceId || !workspaceReady) { setActiveRuns([]); return; }
     try {
       const res = await apiFetch<{ items: { id: number; status: string; spec_path: string; started_at: string }[] }>(
         `/api/pipeline/runs?workspaceId=${workspaceId}&limit=10`,
@@ -104,11 +105,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     } catch {
       // Silently ignore — pipeline endpoint may not be available
     }
-  }, [workspaceId]);
+  }, [workspaceId, workspaceReady]);
 
   // Fetch workspace pipeline config (settings)
   const fetchSettings = useCallback(async () => {
-    if (!workspaceId) { setSettings({}); return; }
+    if (!workspaceId || !workspaceReady) { setSettings({}); return; }
     try {
       const res = await apiFetch<{ config: WorkspaceSettings }>(
         `/api/workspaces/${workspaceId}/pipeline-config`,
@@ -117,7 +118,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     } catch {
       setSettings({});
     }
-  }, [workspaceId]);
+  }, [workspaceId, workspaceReady]);
 
   const updateSettings = useCallback(async (patch: Partial<WorkspaceSettings>) => {
     if (!workspaceId) return;

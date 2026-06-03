@@ -44,6 +44,15 @@ vi.mock('../../components/MultiPaneTerminal', () => ({
   )),
 }));
 
+vi.mock('../../components/AppHeader', () => ({
+  default: vi.fn(({ title, actions }: { title?: React.ReactNode; actions?: React.ReactNode }) => (
+    <div data-testid="app-header">
+      <div>{title}</div>
+      <div>{actions}</div>
+    </div>
+  )),
+}));
+
 vi.mock('../../hooks/useIsMobile', () => ({
   useIsMobile: vi.fn(() => false),
 }));
@@ -234,6 +243,60 @@ describe('RunViewPanel', () => {
     }, { timeout: 3000 });
   });
 
+  it('shows clear continuation state in the right rail for resumed runs', async () => {
+    const resumedRun = createMockRun({
+      id: 76,
+      status: 'running',
+      workspace_id: 'ws-1',
+      finished_at: null,
+    });
+
+    mockUsePipelineSSE.mockReturnValue([
+      { event_type: 'story_started', story_id: 'US-003', ts: new Date().toISOString() },
+    ]);
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${resumedRun.id}`)) {
+        return {
+          run: resumedRun,
+          stories: [],
+          specStories: [
+            { id: 'US-001', title: 'One' },
+            { id: 'US-002', title: 'Two' },
+            { id: 'US-003', title: 'Three' },
+          ],
+          runState: {
+            specId: 'resume-spec',
+            runId: resumedRun.id,
+            startedAt: new Date(Date.now() - 60_000).toISOString(),
+            lastUpdatedAt: new Date().toISOString(),
+            completedStories: [
+              { storyId: 'US-001', title: 'One', status: 'passed', startedAt: new Date(Date.now() - 180_000).toISOString(), finishedAt: new Date(Date.now() - 150_000).toISOString(), agentType: 'pi' },
+              { storyId: 'US-002', title: 'Two', status: 'passed', startedAt: new Date(Date.now() - 150_000).toISOString(), finishedAt: new Date(Date.now() - 120_000).toISOString(), agentType: 'pi' },
+            ],
+            failedStories: [],
+            skippedStories: [],
+            currentStory: 'US-003',
+            resumedFromStory: 'US-002',
+          },
+          specModel: 'claude-sonnet-4-6',
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={resumedRun.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('story-list-resume-banner')).toHaveTextContent('Continuing');
+      expect(screen.getByTestId('story-list-resume-banner')).toHaveTextContent('US-003');
+      expect(screen.getByTestId('run-resume-summary')).toHaveTextContent('2 carried forward');
+    }, { timeout: 3000 });
+  });
+
   it('prefers the native terminal renderer for PTY runs even when multiple stories are active', async () => {
     const ptyRun = createMockRun({
       id: 77,
@@ -327,6 +390,47 @@ describe('RunViewPanel', () => {
     expect(summaryBar).toHaveTextContent('1 skill');
     expect(summaryBar).toHaveTextContent('2 files');
     expect(summaryBar).toHaveTextContent(/~1\.5K tokens\/story/);
+  });
+
+  it('top Context shortcut opens the Context tab, not Skills', async () => {
+    const CONTEXT_RUN = createMockRun({
+      id: 56,
+      status: 'done',
+      spec_path: 'forge/specs/approved/ctx-shortcut.json',
+      workspace_id: 'ws-1',
+    });
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${CONTEXT_RUN.id}`)) {
+        return {
+          run: CONTEXT_RUN,
+          stories: [
+            { story_id: 'US-001', status: 'pass', elapsed_seconds: 20, started_at: null, finished_at: null, active_skills: JSON.stringify(['react']) },
+          ],
+          specStories: [{ id: 'US-001', title: 'Build Widget' }],
+          contextComparison: {
+            predicted: { 'US-001': { totalTokens: 1500, injectedFiles: ['src/widget.tsx'] } },
+            actual: { 'US-001': { contextFiles: ['src/widget.tsx'] } },
+          },
+          storyTokenBreakdown: [
+            { storyId: 'US-001', status: 'pass', inputTokens: 1500, outputTokens: 400, modelUsed: 'claude-sonnet-4-6', costUsd: 0 },
+          ],
+        };
+      }
+      if (path.includes('/api/pipeline/runs')) return { items: [], total: 0, hasMore: false };
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={CONTEXT_RUN.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    const shortcut = await screen.findByRole('button', { name: /context →/i });
+    await userEvent.click(shortcut);
+
+    expect(await screen.findByTestId('context-inspector-empty')).toBeInTheDocument();
+    expect(screen.queryByText(/^Skills matched$/i)).not.toBeInTheDocument();
   });
 
   it('handles API error gracefully', async () => {
