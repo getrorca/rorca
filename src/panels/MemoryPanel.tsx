@@ -34,6 +34,53 @@ interface MemoryListResponse {
   categories: string[];
 }
 
+type MemoryGraphNodeType = 'Memory' | 'Story' | 'Spec' | 'File';
+
+type MemoryGraphEdgeType = 'ABOUT' | 'LEARNED_FROM' | 'FROM_SPEC' | 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON';
+
+interface MemoryGraphNode {
+  id: string;
+  type: MemoryGraphNodeType;
+  entityId: string;
+  label: string;
+  selected: boolean;
+  category?: string;
+  pinned?: boolean;
+  storyId?: string;
+  specId?: string;
+  title?: string;
+  path?: string;
+}
+
+interface MemoryGraphSummary {
+  nodeCount: number;
+  edgeCount: number;
+  countsByType: Record<string, number>;
+  countsByEdgeType: Record<MemoryGraphEdgeType, number>;
+  truncated: {
+    nodes: boolean;
+    edges: boolean;
+  };
+}
+
+interface MemoryGraphSelection {
+  selectedMemoryId: string | null;
+  suggestedMemoryIds: string[];
+  relatedStoryIds: string[];
+  relatedSpecIds: string[];
+  relatedFilePaths: string[];
+}
+
+interface MemoryGraphResponse {
+  available: boolean;
+  nodes: MemoryGraphNode[];
+  edges: Array<{ id: string; type: MemoryGraphEdgeType; source: string; target: string }>;
+  summary: MemoryGraphSummary;
+  selection: MemoryGraphSelection;
+  error?: string;
+  hint?: string;
+}
+
 const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha', 'Run Synthesis'] as const;
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -154,11 +201,13 @@ function InlineEditor({ value, onSave, onCancel }: {
 
 // ─── Entry Row ──────────────────────────────────────────────────────────────
 
-function EntryRow({ item, isSelected, isEditing, onToggleSelect, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
+function EntryRow({ item, isSelected, isEditing, isFocused, onToggleSelect, onFocus, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
   item: MemoryItem;
   isSelected: boolean;
   isEditing: boolean;
+  isFocused: boolean;
   onToggleSelect: () => void;
+  onFocus: () => void;
   onEdit: () => void;
   onSaveEdit: (text: string) => void;
   onCancelEdit: () => void;
@@ -168,9 +217,16 @@ function EntryRow({ item, isSelected, isEditing, onToggleSelect, onEdit, onSaveE
   const dateStr = new Date(item.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
   return (
-    <div className={`group p-3 border rounded-lg transition-colors ${
-      item.pinned ? 'border-amber-500/30 bg-amber-500/5' : 'border-border hover:bg-surface-200'
-    }`}>
+    <div
+      onClick={onFocus}
+      className={`group p-3 border rounded-lg transition-colors cursor-pointer ${
+        isFocused
+          ? 'border-accent bg-accent/5'
+          : item.pinned
+            ? 'border-amber-500/30 bg-amber-500/5'
+            : 'border-border hover:bg-surface-200'
+      }`}
+    >
       <div className="flex items-start gap-2">
         {/* Checkbox */}
         <label className="mt-0.5 shrink-0">
@@ -206,6 +262,11 @@ function EntryRow({ item, isSelected, isEditing, onToggleSelect, onEdit, onSaveE
             {item.sourceType && (
               <span className={`px-1 py-0.5 text-[9px] font-medium rounded ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>
                 {SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}
+              </span>
+            )}
+            {isFocused && (
+              <span className="px-1 py-0.5 text-[9px] font-medium rounded bg-accent/10 text-accent">
+                Web focus
               </span>
             )}
             <span className="text-[10px] text-muted tabular-nums ml-auto shrink-0">{dateStr}</span>
@@ -320,6 +381,11 @@ export default function MemoryPanel() {
   const [searchText, setSearchText] = useState('');
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Knowledge Web
+  const [focusedMemoryId, setFocusedMemoryId] = useState<string | null>(null);
+  const [overviewGraph, setOverviewGraph] = useState<MemoryGraphResponse | null>(null);
+  const [neighborhoodGraph, setNeighborhoodGraph] = useState<MemoryGraphResponse | null>(null);
+
   // Reset filters when workspace changes
   useEffect(() => {
     setFilterCategory('');
@@ -327,6 +393,9 @@ export default function MemoryPanel() {
     setFilterRunId('');
     setFilterSourceType('');
     setSearchText('');
+    setFocusedMemoryId(null);
+    setOverviewGraph(null);
+    setNeighborhoodGraph(null);
   }, [workspaceId]);
 
   // Selection
@@ -348,15 +417,57 @@ export default function MemoryPanel() {
 
     try {
       const data = await apiFetch<MemoryListResponse>(`/api/memory/items?${params}`);
-      setItems(Array.isArray(data?.items) ? data.items : []);
+      const nextItems = Array.isArray(data?.items) ? data.items : [];
+      setItems(nextItems);
       setTotalCount(Number(data?.total ?? 0));
       setPinnedCount(Number(data?.pinned ?? 0));
       setRecentRunIds(Array.isArray(data?.recentRunIds) ? data.recentRunIds : []);
+      setFocusedMemoryId((current) => {
+        if (current && nextItems.some(item => String(item.id) === current)) return current;
+        return nextItems[0] ? String(nextItems[0].id) : null;
+      });
     } catch { /* ignore */ }
     setLoaded(true);
   }, [workspaceId, filterCategory, filterConfidence, filterRunId, searchText]);
 
   useEffect(() => { fetchItems(); }, [fetchItems]);
+
+  const fetchOverviewGraph = useCallback(async () => {
+    if (!workspaceId) {
+      setOverviewGraph(null);
+      return;
+    }
+
+    try {
+      const data = await apiFetch<MemoryGraphResponse>(`/api/memory/graph/overview?workspaceId=${encodeURIComponent(workspaceId)}`);
+      setOverviewGraph(data);
+    } catch {
+      setOverviewGraph(null);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void fetchOverviewGraph();
+  }, [fetchOverviewGraph]);
+
+  const fetchNeighborhoodGraph = useCallback(async () => {
+    if (!workspaceId || !focusedMemoryId) {
+      setNeighborhoodGraph(null);
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams({ workspaceId, memoryId: focusedMemoryId });
+      const data = await apiFetch<MemoryGraphResponse>(`/api/memory/graph/neighborhood?${params.toString()}`);
+      setNeighborhoodGraph(data);
+    } catch {
+      setNeighborhoodGraph(null);
+    }
+  }, [workspaceId, focusedMemoryId]);
+
+  useEffect(() => {
+    void fetchNeighborhoodGraph();
+  }, [fetchNeighborhoodGraph]);
 
   // Debounced search
   const handleSearchChange = (val: string) => {
@@ -465,6 +576,13 @@ export default function MemoryPanel() {
   const currentRunCount = recentRunIds.length > 0
     ? filteredItems.filter(i => i.sourceRunId === recentRunIds[0]).length
     : 0;
+
+  const focusedNeighborhoodNodes = (neighborhoodGraph?.nodes ?? [])
+    .filter(node => !(node.type === 'Memory' && node.entityId === neighborhoodGraph?.selection.selectedMemoryId))
+    .slice(0, 4);
+  const suggestionMemoryIds = (overviewGraph?.selection.suggestedMemoryIds ?? []).filter(memoryId =>
+    filteredItems.some(item => String(item.id) === memoryId),
+  );
 
   if (!loaded) {
     return (
@@ -608,6 +726,103 @@ export default function MemoryPanel() {
             })}
           </div>
 
+          {/* Knowledge Web */}
+          <section className="rounded-xl border border-border bg-surface-100/70 p-3 space-y-3" aria-label="Knowledge Web">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-[var(--text)]">Knowledge Web</h2>
+                <p className="text-[11px] text-muted mt-0.5">
+                  Workspace-scoped overview plus a bounded neighborhood for the focused memory.
+                </p>
+              </div>
+              {overviewGraph?.available && (
+                <span className="text-[10px] text-muted">
+                  {overviewGraph.summary.nodeCount} nodes · {overviewGraph.summary.edgeCount} edges
+                </span>
+              )}
+            </div>
+
+            {!overviewGraph ? (
+              <p className="text-xs text-muted">Loading Knowledge Web…</p>
+            ) : !overviewGraph.available ? (
+              <p className="text-xs text-muted">
+                {overviewGraph.error ?? 'Knowledge Web unavailable in lite mode.'}
+                {overviewGraph.hint ? ` ${overviewGraph.hint}` : ''}
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex flex-wrap gap-2 text-[11px] text-muted">
+                  <span>{overviewGraph.summary.nodeCount} overview nodes</span>
+                  <span>•</span>
+                  <span>{overviewGraph.summary.edgeCount} overview edges</span>
+                  <span>•</span>
+                  <span>{overviewGraph.summary.countsByEdgeType.LEARNED_FROM} learned-from links</span>
+                  <span>•</span>
+                  <span>{overviewGraph.summary.countsByType.Memory ?? 0} memories</span>
+                  {((overviewGraph.summary.truncated.nodes) || (overviewGraph.summary.truncated.edges)) && (
+                    <>
+                      <span>•</span>
+                      <span>bounded for density</span>
+                    </>
+                  )}
+                </div>
+
+                {suggestionMemoryIds.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 items-center">
+                    <span className="text-[10px] uppercase tracking-wide text-muted">Suggested</span>
+                    {suggestionMemoryIds.slice(0, 6).map(memoryId => (
+                      <button
+                        key={memoryId}
+                        onClick={() => setFocusedMemoryId(memoryId)}
+                        className={`px-2 py-0.5 text-[10px] font-medium rounded-full border transition-colors ${
+                          focusedMemoryId === memoryId
+                            ? 'border-accent bg-accent/10 text-accent'
+                            : 'border-border text-muted hover:bg-surface-200'
+                        }`}
+                      >
+                        Memory #{memoryId}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {focusedMemoryId && neighborhoodGraph && neighborhoodGraph.available && (
+                  <div className="rounded-lg border border-border bg-bg px-3 py-2 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-xs font-semibold text-[var(--text)]">Focused memory #{focusedMemoryId}</h3>
+                        <p className="text-[11px] text-muted">
+                          {neighborhoodGraph.summary.nodeCount} nodes · {neighborhoodGraph.summary.edgeCount} edges in neighborhood
+                        </p>
+                      </div>
+                      {(neighborhoodGraph.summary.truncated.nodes || neighborhoodGraph.summary.truncated.edges) && (
+                        <span className="text-[10px] text-muted">bounded</span>
+                      )}
+                    </div>
+
+                    {focusedNeighborhoodNodes.length === 0 ? (
+                      <p className="text-xs text-muted">No neighborhood nodes available yet for this memory.</p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {focusedNeighborhoodNodes.map(node => (
+                          <li key={node.id} className="flex items-start justify-between gap-3 text-xs">
+                            <div>
+                              <span className="font-medium text-[var(--text)]">{node.label}</span>
+                              {(node.path || node.storyId || node.specId || node.category) && (
+                                <span className="text-muted"> — {node.path ?? node.storyId ?? node.specId ?? node.category}</span>
+                              )}
+                            </div>
+                            <span className="uppercase tracking-wide text-[10px] text-muted">{node.type}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
           {/* Entries list */}
           <ul role="list" aria-label="Memory entries" className="space-y-2">
             {filteredItems.length === 0 ? (
@@ -636,7 +851,9 @@ export default function MemoryPanel() {
                     item={item}
                     isSelected={selectedIds.has(item.id)}
                     isEditing={editingId === item.id}
+                    isFocused={focusedMemoryId === String(item.id)}
                     onToggleSelect={() => toggleSelect(item.id)}
+                    onFocus={() => setFocusedMemoryId(String(item.id))}
                     onEdit={() => setEditingId(item.id)}
                     onSaveEdit={(text) => handleSaveEdit(item.id, text)}
                     onCancelEdit={() => setEditingId(null)}

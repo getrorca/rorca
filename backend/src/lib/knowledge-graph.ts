@@ -137,7 +137,8 @@ export function parseAgtype<T = unknown>(value: unknown): T {
     const cleaned = value
       .replace(/::vertex$/i, '')
       .replace(/::edge$/i, '')
-      .replace(/::path$/i, '');
+      .replace(/::path$/i, '')
+      .replace(/::agtype$/i, '');
     try {
       return JSON.parse(cleaned) as T;
     } catch {
