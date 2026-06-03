@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseForgeCommand, parseRetryCommand, parseRunCommand, resolveBriefInput, tokenizeArgs } from "../args.js";
+import { parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, resolveBriefInput, tokenizeArgs } from "../args.js";
 
 describe("rorca pi extension args", () => {
   it("tokenizes quoted values", () => {
@@ -47,6 +47,24 @@ describe("rorca pi extension args", () => {
       forceSequential: true,
       autoWatch: false,
     });
+  });
+
+  it("parses enrich with explicit slug and workspace", () => {
+    expect(parseEnrichCommand("oauth-login --workspace ws-3")).toEqual({
+      specSlug: "oauth-login",
+      workspaceId: "ws-3",
+    });
+  });
+
+  it("falls back to the last spec slug for enrich when none is provided", () => {
+    expect(parseEnrichCommand("--workspace ws-3", "billing-flow")).toEqual({
+      specSlug: "billing-flow",
+      workspaceId: "ws-3",
+    });
+  });
+
+  it("throws when enrich has no slug and no fallback", () => {
+    expect(() => parseEnrichCommand("")).toThrow(/Usage: \/rorca-enrich/);
   });
 
   it("loads brief contents from @file", () => {

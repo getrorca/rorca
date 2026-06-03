@@ -6,7 +6,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { getGenerationLogPresentation, parseContextSummary } from '../SpecDetailSlideOver';
+import {
+  getGenerationLogPresentation,
+  parseContextSummary,
+  getRetrievalMethodPresentation,
+  extractStoryContextAnnotations,
+} from '../SpecDetailSlideOver';
 
 describe('parseContextSummary', () => {
   it('extracts a nested contextSummary from persisted explicit-draft logs', () => {
@@ -159,5 +164,64 @@ describe('getGenerationLogPresentation', () => {
       title: 'Enrichment Failed',
       badgeLabel: 'Enriched',
     });
+  });
+});
+
+describe('getRetrievalMethodPresentation', () => {
+  it('maps known retrieval methods to their distinct badge classes', () => {
+    expect(getRetrievalMethodPresentation('pgvector')).toMatchObject({
+      label: 'pgvector',
+      badgeClassName: expect.stringContaining('blue'),
+    });
+    expect(getRetrievalMethodPresentation('graph').badgeClassName).toContain('purple');
+    expect(getRetrievalMethodPresentation('fulltext').badgeClassName).toContain('amber');
+  });
+
+  it('falls back to direction-only styling for unknown methods', () => {
+    const known = getRetrievalMethodPresentation('direction-only');
+    const unknown = getRetrievalMethodPresentation('some-future-method');
+    expect(unknown.label).toBe('some-future-method');
+    expect(unknown.badgeClassName).toBe(known.badgeClassName);
+  });
+});
+
+describe('extractStoryContextAnnotations', () => {
+  it('extracts per-story ## Context previews from story descriptions', () => {
+    const annotations = extractStoryContextAnnotations([
+      {
+        id: 'US-001',
+        title: 'Login flow',
+        description: 'Base description\n\n## Context\nLine 1\nLine 2\nLine 3\nLine 4\n## Notes\nignored',
+      },
+      { id: 'US-002', title: 'No context', description: 'Just a plain description' },
+    ]);
+
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0]).toMatchObject({
+      storyId: 'US-001',
+      storyTitle: 'Login flow',
+      preview: 'Line 1\nLine 2\nLine 3',
+      hasMore: true,
+    });
+    // The trailing ## Notes section must not bleed into the captured context.
+    expect(annotations[0].fullText).toContain('Line 4');
+    expect(annotations[0].fullText).not.toContain('Notes');
+  });
+
+  it('returns no annotations when descriptions lack a ## Context section', () => {
+    expect(
+      extractStoryContextAnnotations([
+        { id: 'US-001', title: 'A', description: 'plain' },
+        { id: 'US-002', title: 'B', description: undefined },
+      ]),
+    ).toEqual([]);
+  });
+
+  it('marks short annotations as not having more lines', () => {
+    const [annotation] = extractStoryContextAnnotations([
+      { id: 'US-009', title: 'Short', description: '## Context\nOnly one line' },
+    ]);
+    expect(annotation.hasMore).toBe(false);
+    expect(annotation.preview).toBe('Only one line');
   });
 });

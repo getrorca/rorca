@@ -10,6 +10,14 @@ const originalFetch = (global as any).fetch;
 
 process.env.NODE_ENV = 'test';
 
+// CTM-008: the enrich MCP tool forwards through the async spec-job bridge, which
+// polls pollSpecJob() after enqueuing. Stub the poller so the handler resolves
+// deterministically with the terminal job result instead of polling the network.
+const mockPollSpecJob = jest.fn();
+jest.mock('../spec-job-poller', () => ({
+  pollSpecJob: (...args: unknown[]) => mockPollSpecJob(...args),
+}));
+
 import { server } from '../server';
 
 const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
@@ -57,6 +65,7 @@ afterAll(() => {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockPollSpecJob.mockReset();
 });
 
 test('explicit spec persistence aliases are registered on the McpServer', () => {
@@ -190,4 +199,61 @@ test('returns MCP error content when persist API returns non-200', async () => {
 
   expect(result.isError).toBe(true);
   expect(result.content[0].text).toContain('Spec already exists');
+});
+
+// ─── CTM-008: enrich MCP forwarding ─────────────────────────────────────────
+
+test('exposes the enrich tool now that the /enrich route carries a public tier', () => {
+  const tools = (server as any)._registeredTools;
+  // The OpenAPI-derived tool and the friendly alias must both register. Before
+  // the route gained x-rorca-tier, getRorcaTier() resolved to 'denied' and the
+  // tool was skipped — this guards that regression.
+  expect(tools['rorca_specs_by_specId_enrich']).toBeDefined();
+  expect(tools['rorca_enrich_spec']).toBeDefined();
+});
+
+test('forwards enrich through the async spec-job bridge and returns the terminal result', async () => {
+  // 1. Enqueue (POST /enrich/async) returns the job handle the bridge expects.
+  mockJsonResponse({ jobId: '11111111-1111-1111-1111-111111111111', status: 'pending', pollUrl: '/api/spec-jobs/11111111-1111-1111-1111-111111111111' }, 202);
+  // 2. The poller resolves to a completed job carrying enrichment metadata only.
+  mockPollSpecJob.mockResolvedValueOnce({
+    id: '11111111-1111-1111-1111-111111111111',
+    status: 'completed',
+    result: { success: true, retrieval_method: 'pgvector', storiesEnriched: 3 },
+  });
+
+  const handler = getToolHandler('rorca_enrich_spec');
+  const result = await handler({ workspaceId: 'ws-789', specId: 'oauth-login' });
+
+  // The bridge must hit the /async endpoint, not the synchronous /enrich route.
+  expect(mockFetch).toHaveBeenCalledWith(
+    `${RORCA_API}/api/specs/oauth-login/enrich/async`,
+    expect.objectContaining({ method: 'POST' }),
+  );
+  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  expect(body).toEqual({ workspaceId: 'ws-789' });
+
+  expect(mockPollSpecJob).toHaveBeenCalledWith(
+    '11111111-1111-1111-1111-111111111111',
+    expect.any(Object),
+  );
+
+  expect(result.isError).toBeUndefined();
+  expect(result.content[0].text).toContain('pgvector');
+  expect(result.content[0].text).toContain('"storiesEnriched": 3');
+});
+
+test('surfaces a failed enrichment job as MCP error content', async () => {
+  mockJsonResponse({ jobId: '22222222-2222-2222-2222-222222222222', status: 'pending', pollUrl: '/api/spec-jobs/22222222-2222-2222-2222-222222222222' }, 202);
+  mockPollSpecJob.mockResolvedValueOnce({
+    id: '22222222-2222-2222-2222-222222222222',
+    status: 'failed',
+    error: 'Spec has an active pipeline run',
+  });
+
+  const handler = getToolHandler('rorca_enrich_spec');
+  const result = await handler({ workspaceId: 'ws-789', specId: 'oauth-login' });
+
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toContain('Spec has an active pipeline run');
 });
