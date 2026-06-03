@@ -37,6 +37,7 @@ import { deduplicateMemory } from '../lib/memory-dedup';
 import { embedText, prepareText } from '../lib/embedding-pipeline';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { resolveStoryMemoryProvenance } from '../lib/memory-provenance';
+import { getMemoryGraphNeighborhood, getMemoryGraphOverview } from '../lib/memory-graph';
 
 const router = Router();
 
@@ -51,6 +52,21 @@ type SourceType = typeof VALID_SOURCE_TYPES[number];
 async function getWorkspacePath(workspaceId: string): Promise<string | null> {
   const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
   return ws?.path ?? null;
+}
+
+async function assertMemoryInWorkspace(workspaceId: string, memoryId: string): Promise<void> {
+  const parsedMemoryId = Number(memoryId);
+  if (!Number.isInteger(parsedMemoryId) || parsedMemoryId <= 0) {
+    throw new ValidationError('memoryId must be a positive integer');
+  }
+
+  const memory = await queryOne<{ id: number }>(
+    'SELECT id FROM memories WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
+    [parsedMemoryId, workspaceId],
+  );
+  if (!memory) {
+    throw new NotFoundError('Memory not found');
+  }
 }
 
 function getLedgerPath(_workspaceId: string): string | undefined {
@@ -1054,6 +1070,81 @@ router.get('/context', async (req: Request, res: Response) => {
 
   const snippet = getContextSnippet(wsPath, parseInt(n as string, 10) || 20, getLedgerPath(workspaceId as string));
   res.json({ snippet, tokenEstimate: Math.ceil(snippet.length / 4) });
+});
+
+/**
+ * @swagger
+ * /api/memory/graph/overview:
+ *   get:
+ *     tags: [Memory]
+ *     summary: Get a bounded workspace memory ontology overview graph
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Workspace-scoped memory graph overviews are read-only operator context with no write or admin side effects."
+ *     x-rorca-public-api: true
+ *     operationId: getMemoryGraphOverview
+ *     description: Returns a deterministic, normalized workspace overview graph using only the V1 explicit edge set and query-layer caps.
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Overview graph or graceful available:false fallback
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/graph/overview', async (req: Request, res: Response) => {
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
+  if (!workspaceId) throw new ValidationError('workspaceId required');
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const graph = await getMemoryGraphOverview(workspaceId);
+  res.json(graph);
+});
+
+/**
+ * @swagger
+ * /api/memory/graph/neighborhood:
+ *   get:
+ *     tags: [Memory]
+ *     summary: Get a bounded selected-memory neighborhood graph
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Selected-memory graph neighborhoods are read-only workspace context for local automation and UI rendering."
+ *     x-rorca-public-api: true
+ *     operationId: getMemoryGraphNeighborhood
+ *     description: Returns a deterministic, normalized neighborhood graph for a selected memory using only the V1 explicit edge set and query-layer caps.
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *       - name: memoryId
+ *         in: query
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Neighborhood graph or graceful available:false fallback
+ *       400: { description: "Missing workspaceId or memoryId" }
+ *       404: { description: "Workspace or memory not found" }
+ */
+router.get('/graph/neighborhood', async (req: Request, res: Response) => {
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
+  const memoryId = typeof req.query.memoryId === 'string' ? req.query.memoryId.trim() : '';
+
+  if (!workspaceId) throw new ValidationError('workspaceId required');
+  if (!memoryId) throw new ValidationError('memoryId required');
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  await assertMemoryInWorkspace(workspaceId, memoryId);
+
+  const graph = await getMemoryGraphNeighborhood(workspaceId, memoryId);
+  res.json(graph);
 });
 
 /**

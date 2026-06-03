@@ -241,3 +241,65 @@ describe('GET /api/memory/context', () => {
     expect(res.status).toBe(400);
   });
 });
+
+// ─── GET /api/memory/graph/* ─────────────────────────────────────────────
+
+describe('GET /api/memory/graph endpoints', () => {
+  test('overview returns 400 when workspaceId is missing', async () => {
+    const res = await request(app)
+      .get('/api/memory/graph/overview')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/workspaceId/i);
+  });
+
+  test('neighborhood validates memoryId at the route boundary', async () => {
+    const res = await request(app)
+      .get('/api/memory/graph/neighborhood')
+      .set('Authorization', `Bearer ${authToken}`)
+      .query({ workspaceId, memoryId: 'abc' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/memoryId/i);
+  });
+
+  test('returns graceful available=false overview payload when graph helper cannot query AGE', async () => {
+    const memoryGraph = require('../../lib/memory-graph');
+    const spy = jest.spyOn(memoryGraph, 'getMemoryGraphOverview').mockResolvedValue({
+      available: false,
+      scope: { workspaceId, view: 'overview', memoryId: null },
+      nodes: [],
+      edges: [],
+      summary: {
+        nodeCount: 0,
+        edgeCount: 0,
+        countsByType: { Memory: 0, Story: 0, Spec: 0, File: 0 },
+        countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 0, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0 },
+        caps: { memories: 12, stories: 18, files: 24, specs: 8, edges: 72, dependencies: 8 },
+        truncated: { nodes: false, edges: false },
+      },
+      selection: {
+        selectedMemoryId: null,
+        suggestedMemoryIds: [],
+        relatedStoryIds: [],
+        relatedSpecIds: [],
+        relatedFilePaths: [],
+      },
+      error: 'Apache AGE extension not available',
+      code: 'AGE_NOT_AVAILABLE',
+      mode: 'lite',
+      hint: 'Run `rorca db start` to enable graph memory (requires Docker)',
+    });
+
+    const res = await request(app)
+      .get('/api/memory/graph/overview')
+      .set('Authorization', `Bearer ${authToken}`)
+      .query({ workspaceId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(false);
+    expect(res.body.code).toBe('AGE_NOT_AVAILABLE');
+    spy.mockRestore();
+  });
+});
