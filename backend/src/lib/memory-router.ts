@@ -51,6 +51,7 @@ import { getHistoricalUsefulnessMap, recordRetrievalSelection } from './retrieva
 import { checkAge } from './age-guard';
 import { resolveGraphScoringRollout } from './graph-scoring-rollout';
 import { loadRorcaConfig, defaultRorcaConfig, type RetrievalGuardrailsConfig } from './rorca-config';
+import { lookupMemoryOntologyAdjustments, type MemoryOntologyLookupResult } from './memory-ontology';
 import { query as dbQuery } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -859,6 +860,34 @@ export async function retrieveContext(
       logger.warn({ err, workspaceId: wsId }, '[memory-router] Graph context retrieval failed — using empty');
       graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
     }
+  }
+
+  // ── Step 4: bounded ontology precedence lookup (post-retrieval) ─────────
+
+  const ontologyCandidateIds = retrievalCandidates
+    .filter((candidate) => candidate.graphNodeType === 'memory' && candidate.canonicalKey && !candidate.id.startsWith('cache:'))
+    .map(candidate => candidate.id);
+
+  let ontologyLookup: MemoryOntologyLookupResult = {
+    applied: false,
+    ageUnavailable: false,
+    candidateIds: [],
+    adjustments: {},
+  };
+
+  try {
+    ontologyLookup = await lookupMemoryOntologyAdjustments(wsId, ontologyCandidateIds);
+  } catch (error) {
+    logger.warn({ error, workspaceId: wsId }, '[memory-router] Ontology precedence lookup failed — using semantic retrieval fallback');
+  }
+
+  const ontologyCandidateIdSet = new Set(ontologyLookup.candidateIds);
+  for (const candidate of retrievalCandidates) {
+    if (!candidate.canonicalKey || candidate.graphNodeType !== 'memory') {
+      continue;
+    }
+    candidate.ontologyLookupApplied = ontologyLookup.applied && ontologyCandidateIdSet.has(candidate.id);
+    candidate.ontologyRelations = ontologyLookup.adjustments[candidate.id]?.relations ?? [];
   }
 
   // ── Phase 2/3: provenance-aware ranking, validator pass, telemetry ──────

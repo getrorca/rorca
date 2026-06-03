@@ -13,6 +13,7 @@ import {
   normalizeGraphFilePath,
 } from './knowledge-graph';
 import { logger } from './logger';
+import type { MemoryOntologyRelation, MemoryOntologyRelationType } from './memory-ontology';
 import type { RetrievalGuardrailsConfig } from './rorca-config';
 
 export interface RetrievalSkill {
@@ -59,6 +60,8 @@ export interface RetrievalCandidateInput {
   graphActive?: boolean | null;
   graphUpdatedAt?: string | null;
   graphSignals?: GraphProjectionSignal[];
+  ontologyRelations?: MemoryOntologyRelation[];
+  ontologyLookupApplied?: boolean;
   canonicalKey?: string;
 }
 
@@ -156,6 +159,29 @@ export interface GraphRagRerankMetadata {
   rerankedBy: 'graph' | 'semantic';
 }
 
+export interface GraphRagOntologyReason {
+  kind: 'suppression' | 'supersession' | 'conflict';
+  code:
+    | 'graph_superseded_memory_suppressed'
+    | 'graph_superseded_by_active_memory'
+    | 'graph_supersedes_older_memory'
+    | 'graph_conflict_requires_arbiter';
+  relationType: MemoryOntologyRelationType;
+  direction: MemoryOntologyRelation['direction'];
+  relationKey: string;
+  otherMemoryId: string;
+  otherCanonicalKey: string;
+  counterpartRetrieved: boolean;
+}
+
+export interface GraphRagOntologyMetadata {
+  applied: boolean;
+  stale: boolean;
+  suppressed: boolean;
+  conflict: boolean;
+  reasons: GraphRagOntologyReason[];
+}
+
 export interface GraphRagScoreContract {
   schemaVersion: GraphRagScoreSchemaVersion;
   score: number;
@@ -163,6 +189,7 @@ export interface GraphRagScoreContract {
   deterministic: true;
   tieBreak: GraphRagTieBreak;
   breakdown: GraphRagScoreBreakdown;
+  ontology: GraphRagOntologyMetadata;
   validation: GraphRagCandidateValidation;
   rerank: GraphRagRerankMetadata;
 }
@@ -196,6 +223,7 @@ export interface GraphRagCandidateExplainability {
   graphNodeType: GraphRagProximityComponent['nodeType'];
   graphSignalCount: number;
   rankReasons: string[];
+  ontology: GraphRagOntologyMetadata;
   preRerankPosition: number | null;
   finalPosition: number | null;
   rerankedBy: 'graph' | 'semantic';
@@ -365,6 +393,91 @@ export function inferGraphRagRetrievalMode(scoring: Pick<GraphRagScoreContract, 
   return 'semantic-only';
 }
 
+function compareOntologyReason(a: GraphRagOntologyReason, b: GraphRagOntologyReason): number {
+  if (a.kind !== b.kind) return a.kind.localeCompare(b.kind);
+  if (a.relationType !== b.relationType) return a.relationType.localeCompare(b.relationType);
+  if (a.otherCanonicalKey !== b.otherCanonicalKey) return a.otherCanonicalKey.localeCompare(b.otherCanonicalKey);
+  return a.relationKey.localeCompare(b.relationKey);
+}
+
+function buildOntologyMetadata(candidate: Pick<RetrievalCandidateInput, 'ontologyRelations' | 'ontologyLookupApplied'>): GraphRagOntologyMetadata {
+  const relations = [...(candidate.ontologyRelations ?? [])].sort((a, b) => {
+    if (a.relationType !== b.relationType) return a.relationType.localeCompare(b.relationType);
+    if (a.direction !== b.direction) return a.direction.localeCompare(b.direction);
+    if (a.otherCanonicalKey !== b.otherCanonicalKey) return a.otherCanonicalKey.localeCompare(b.otherCanonicalKey);
+    return a.relationKey.localeCompare(b.relationKey);
+  });
+
+  const reasons: GraphRagOntologyReason[] = [];
+  let stale = false;
+  let suppressed = false;
+  let conflict = false;
+
+  for (const relation of relations) {
+    if (relation.relationType === 'SUPERSEDES' && relation.direction === 'incoming') {
+      stale = true;
+      suppressed = true;
+      reasons.push({
+        kind: 'supersession',
+        code: 'graph_superseded_by_active_memory',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+      reasons.push({
+        kind: 'suppression',
+        code: 'graph_superseded_memory_suppressed',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+      continue;
+    }
+
+    if (relation.relationType === 'SUPERSEDES' && relation.direction === 'outgoing') {
+      reasons.push({
+        kind: 'supersession',
+        code: 'graph_supersedes_older_memory',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+      continue;
+    }
+
+    if (relation.relationType === 'CONFLICTS_WITH') {
+      conflict = true;
+      reasons.push({
+        kind: 'conflict',
+        code: 'graph_conflict_requires_arbiter',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+    }
+  }
+
+  return {
+    applied: Boolean(candidate.ontologyLookupApplied || relations.length > 0),
+    stale,
+    suppressed,
+    conflict,
+    reasons: reasons.sort(compareOntologyReason),
+  };
+}
+
 export function buildGraphRagExplainability(
   candidate: Pick<RetrievalCandidateInput, 'graphSignals' | 'graphRelationship'> & {
     scoring: GraphRagScoreContract;
@@ -428,6 +541,7 @@ export function buildGraphRagExplainability(
     graphNodeType: scoring.breakdown.directGraphProximity.nodeType ?? 'unknown',
     graphSignalCount: scoring.breakdown.directGraphProximity.signalCount ?? candidate.graphSignals?.length ?? 0,
     rankReasons: candidate.reasons ?? [],
+    ontology: scoring.ontology,
     preRerankPosition: scoring.rerank.preRerankPosition,
     finalPosition: scoring.rerank.finalPosition,
     rerankedBy: scoring.rerank.rerankedBy,
@@ -515,6 +629,21 @@ function tokenize(text: string): string[] {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
+}
+
+function appendUnique(values: string[], value: string): void {
+  if (!value || values.includes(value)) return;
+  values.push(value);
+}
+
+function appendContradiction(
+  contradictions: Array<[string, string]>,
+  left: string,
+  right: string,
+): void {
+  if (!contradictions.some(([a, b]) => (a === left && b === right) || (a === right && b === left))) {
+    contradictions.push([left, right]);
+  }
 }
 
 function tokenOverlap(a: string[], b: string[]): number {
@@ -1470,6 +1599,7 @@ export function rankRetrievalCandidates(input: {
         bounded: true,
         deterministic: true,
         tieBreak: buildTieBreak(candidate, canonicalKey, input.workspaceId),
+        ontology: buildOntologyMetadata(candidate),
         validation,
         breakdown: {
           ...positiveBreakdown,
@@ -1490,6 +1620,59 @@ export function rankRetrievalCandidates(input: {
       },
     };
   });
+
+  const candidatesByKey = new Map(enriched.map(candidate => [candidate.key, candidate]));
+  for (const candidate of enriched) {
+    const ontology = candidate.scoring.ontology;
+    if (!ontology.applied || ontology.reasons.length === 0) {
+      continue;
+    }
+
+    for (const reason of ontology.reasons) {
+      if (reason.kind === 'conflict') {
+        appendUnique(candidate.conflictsWith, reason.otherCanonicalKey);
+        candidate.decision = candidate.supersededBy ? 'drop' : 'conflict';
+        candidate.scoring.breakdown.duplicationPenalty = {
+          score: Math.max(candidate.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.contradiction),
+          comparedTo: reason.otherCanonicalKey,
+          similarity: candidate.scoring.breakdown.duplicationPenalty.similarity,
+        };
+        appendUnique(candidate.reasons, `Conflict flagged by ontology relation to memory ${reason.otherMemoryId}`);
+        if (reason.counterpartRetrieved) {
+          appendContradiction(contradictions, candidate.key, reason.otherCanonicalKey);
+          const counterpart = candidatesByKey.get(reason.otherCanonicalKey);
+          if (counterpart) {
+            appendUnique(counterpart.conflictsWith, candidate.key);
+            if (!counterpart.supersededBy) {
+              counterpart.decision = 'conflict';
+            }
+          }
+        }
+        continue;
+      }
+
+      if (reason.kind === 'suppression') {
+        candidate.supersededBy = reason.otherCanonicalKey;
+        candidate.decision = 'drop';
+        candidate.scoring.breakdown.duplicationPenalty = {
+          score: Math.max(candidate.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.superseded),
+          comparedTo: reason.otherCanonicalKey,
+          similarity: 1,
+        };
+        appendUnique(candidate.reasons, `Suppressed by ontology supersession from memory ${reason.otherMemoryId}`);
+        continue;
+      }
+
+      if (reason.kind === 'supersession' && reason.code === 'graph_superseded_by_active_memory') {
+        appendUnique(candidate.reasons, `Marked stale by ontology supersession from memory ${reason.otherMemoryId}`);
+        continue;
+      }
+
+      if (reason.kind === 'supersession' && reason.code === 'graph_supersedes_older_memory') {
+        appendUnique(candidate.reasons, `Ontology precedence confirms this memory supersedes memory ${reason.otherMemoryId}`);
+      }
+    }
+  }
 
   const bySubject = new Map<string, RankedRetrievalCandidate[]>();
   for (const candidate of enriched) {
@@ -1519,26 +1702,28 @@ export function rankRetrievalCandidates(input: {
         && ((newestNegative && olderPositive) || (olderNegative && newestPositive));
 
       if (conflicting) {
-        newest.conflictsWith.push(older.key);
-        older.conflictsWith.push(newest.key);
-        newest.decision = 'conflict';
+        appendUnique(newest.conflictsWith, older.key);
+        appendUnique(older.conflictsWith, newest.key);
+        if (!newest.supersededBy) {
+          newest.decision = 'conflict';
+        }
         older.decision = 'conflict';
         older.scoring.breakdown.duplicationPenalty = {
-          score: DUPLICATION_PENALTIES.contradiction,
+          score: Math.max(older.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.contradiction),
           comparedTo: newest.key,
           similarity,
         };
-        older.reasons.push(`Conflicts with newer memory ${newest.id}`);
-        contradictions.push([newest.key, older.key]);
-      } else if (similarity >= 0.55) {
+        appendUnique(older.reasons, `Conflicts with newer memory ${newest.id}`);
+        appendContradiction(contradictions, newest.key, older.key);
+      } else if (similarity >= 0.55 && !older.supersededBy) {
         older.supersededBy = newest.key;
         older.decision = 'drop';
         older.scoring.breakdown.duplicationPenalty = {
-          score: DUPLICATION_PENALTIES.superseded,
+          score: Math.max(older.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.superseded),
           comparedTo: newest.key,
           similarity,
         };
-        older.reasons.push(`Superseded by newer memory ${newest.id}`);
+        appendUnique(older.reasons, `Superseded by newer memory ${newest.id}`);
       }
     }
   }

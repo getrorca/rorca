@@ -126,6 +126,72 @@ describe('retrieval-pipeline', () => {
     expect(result.candidates.find(c => c.id === '1')?.conflictsWith).toContain('memory:ws-1::2');
   });
 
+  test('suppresses explicitly superseded memories via ontology precedence even when stale memory scores higher', () => {
+    const newerKey = buildMemoryNodeKey(WORKSPACE_ID, '2');
+    const olderKey = buildMemoryNodeKey(WORKSPACE_ID, '1');
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: '1',
+        text: 'Auth middleware: Always use session cookies for admin auth',
+        origin: 'search',
+        baseScore: 0.92,
+        matchType: 'hybrid',
+        category: 'Convention',
+        confidence: 'high',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        ontologyLookupApplied: true,
+        ontologyRelations: [{
+          relationType: 'SUPERSEDES',
+          relationKey: 'memory-relation:ws-1::SUPERSEDES::2::1',
+          direction: 'incoming',
+          otherMemoryId: '2',
+          otherCanonicalKey: newerKey,
+          counterpartRetrieved: true,
+          active: true,
+          status: 'active',
+          updatedAt: '2026-05-01T00:00:00.000Z',
+        }],
+      },
+      {
+        id: '2',
+        text: 'Auth middleware: Do not use session cookies for admin auth; prefer JWT bearer verification',
+        origin: 'search',
+        baseScore: 0.71,
+        matchType: 'hybrid',
+        category: 'Convention',
+        confidence: 'high',
+        createdAt: '2026-05-01T00:00:00.000Z',
+        ontologyLookupApplied: true,
+        ontologyRelations: [{
+          relationType: 'SUPERSEDES',
+          relationKey: 'memory-relation:ws-1::SUPERSEDES::2::1',
+          direction: 'outgoing',
+          otherMemoryId: '1',
+          otherCanonicalKey: olderKey,
+          counterpartRetrieved: true,
+          active: true,
+          status: 'active',
+          updatedAt: '2026-05-01T00:00:00.000Z',
+        }],
+      },
+    ];
+
+    const result = runRanking(candidates);
+    const stale = result.candidates.find(candidate => candidate.id === '1');
+
+    expect(result.selected.map(candidate => candidate.id)).toEqual(['2']);
+    expect(stale?.decision).toBe('drop');
+    expect(stale?.supersededBy).toBe(newerKey);
+    expect(stale?.scoring.ontology).toMatchObject({
+      applied: true,
+      stale: true,
+      suppressed: true,
+    });
+    expect(stale?.scoring.ontology.reasons.map(reason => reason.kind)).toEqual(
+      expect.arrayContaining(['suppression', 'supersession']),
+    );
+  });
+
   test('drops near-duplicates through supersession/diversity', () => {
     const candidates: RetrievalCandidateInput[] = [
       {
@@ -166,6 +232,68 @@ describe('retrieval-pipeline', () => {
     expect(result.selected.map(candidate => candidate.id)).toContain('3');
     expect(result.selected.map(candidate => candidate.id)).not.toContain('2');
     expect(result.candidates.find(candidate => candidate.id === '2')?.supersededBy).toBe('memory:ws-1::1');
+  });
+
+  test('conflict-flags candidates from explicit ontology relations without suppressing both sides', () => {
+    const leftKey = buildMemoryNodeKey(WORKSPACE_ID, 'left');
+    const rightKey = buildMemoryNodeKey(WORKSPACE_ID, 'right');
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'left',
+        text: 'JWT auth: prefer bearer verification for admin APIs',
+        origin: 'search',
+        baseScore: 0.84,
+        matchType: 'hybrid',
+        category: 'Convention',
+        confidence: 'high',
+        createdAt: '2026-05-04T00:00:00.000Z',
+        ontologyLookupApplied: true,
+        ontologyRelations: [{
+          relationType: 'CONFLICTS_WITH',
+          relationKey: 'memory-relation:ws-1::CONFLICTS_WITH::left::right',
+          direction: 'symmetric',
+          otherMemoryId: 'right',
+          otherCanonicalKey: rightKey,
+          counterpartRetrieved: true,
+          active: true,
+          status: 'active',
+          updatedAt: '2026-05-05T00:00:00.000Z',
+        }],
+      },
+      {
+        id: 'right',
+        text: 'JWT auth: never use bearer verification for admin APIs',
+        origin: 'search',
+        baseScore: 0.82,
+        matchType: 'hybrid',
+        category: 'Convention',
+        confidence: 'high',
+        createdAt: '2026-05-05T00:00:00.000Z',
+        ontologyLookupApplied: true,
+        ontologyRelations: [{
+          relationType: 'CONFLICTS_WITH',
+          relationKey: 'memory-relation:ws-1::CONFLICTS_WITH::left::right',
+          direction: 'symmetric',
+          otherMemoryId: 'left',
+          otherCanonicalKey: leftKey,
+          counterpartRetrieved: true,
+          active: true,
+          status: 'active',
+          updatedAt: '2026-05-05T00:00:00.000Z',
+        }],
+      },
+    ];
+
+    const result = runRanking(candidates);
+
+    expect(result.contradictions).toEqual([[leftKey, rightKey]]);
+    expect(result.selected.map(candidate => candidate.id)).toEqual(['left', 'right']);
+    expect(result.selected.every(candidate => candidate.decision === 'conflict')).toBe(true);
+    expect(result.selected[0]?.scoring.ontology.conflict).toBe(true);
+    expect(result.selected[0]?.scoring.ontology.reasons[0]).toMatchObject({
+      kind: 'conflict',
+      code: 'graph_conflict_requires_arbiter',
+    });
   });
 
   test('returns identical ordering and scores for identical inputs', () => {

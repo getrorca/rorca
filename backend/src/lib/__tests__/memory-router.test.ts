@@ -18,6 +18,7 @@ const mockPersistRetrievalTelemetry = jest.fn();
 const mockRecordRetrievalTelemetry = jest.fn();
 const mockGetHistoricalUsefulnessMap = jest.fn();
 const mockRecordRetrievalSelection = jest.fn();
+const mockLookupMemoryOntologyAdjustments = jest.fn();
 const mockDbQuery = jest.fn();
 
 jest.mock('../context-cache', () => ({
@@ -31,11 +32,15 @@ jest.mock('../search', () => ({
   hybridSearch: (...args: unknown[]) => mockHybridSearch(...args),
 }));
 
-jest.mock('../knowledge-graph', () => ({
-  queryRelated: (...args: unknown[]) => mockQueryRelated(...args),
-  queryImpact: (...args: unknown[]) => mockQueryImpact(...args),
-  graphStats: (...args: unknown[]) => mockGraphStats(...args),
-}));
+jest.mock('../knowledge-graph', () => {
+  const actual = jest.requireActual('../knowledge-graph');
+  return {
+    ...actual,
+    queryRelated: (...args: unknown[]) => mockQueryRelated(...args),
+    queryImpact: (...args: unknown[]) => mockQueryImpact(...args),
+    graphStats: (...args: unknown[]) => mockGraphStats(...args),
+  };
+});
 
 jest.mock('../graph-context', () => ({
   getGraphContext: (...args: unknown[]) => mockGetGraphContext(...args),
@@ -50,6 +55,10 @@ jest.mock('../retrieval-telemetry', () => ({
 jest.mock('../retrieval-feedback', () => ({
   getHistoricalUsefulnessMap: (...args: unknown[]) => mockGetHistoricalUsefulnessMap(...args),
   recordRetrievalSelection: (...args: unknown[]) => mockRecordRetrievalSelection(...args),
+}));
+
+jest.mock('../memory-ontology', () => ({
+  lookupMemoryOntologyAdjustments: (...args: unknown[]) => mockLookupMemoryOntologyAdjustments(...args),
 }));
 
 jest.mock('../../db/index', () => ({
@@ -91,6 +100,19 @@ describe('memory-router execution budgeting', () => {
     mockRecordRetrievalTelemetry.mockImplementation((input: Record<string, unknown>) => ({ id: 'rt-budget', ...input }));
     mockGetHistoricalUsefulnessMap.mockResolvedValue(new Map());
     mockRecordRetrievalSelection.mockResolvedValue(undefined);
+    mockLookupMemoryOntologyAdjustments.mockResolvedValue({
+      applied: true,
+      ageUnavailable: false,
+      candidateIds: ['1845'],
+      adjustments: {
+        '1845': {
+          stale: false,
+          suppressed: false,
+          conflict: false,
+          relations: [],
+        },
+      },
+    });
     mockDbQuery.mockResolvedValue([
       {
         id: '1845',
@@ -126,8 +148,36 @@ describe('memory-router execution budgeting', () => {
 
     expect(retrieved.memory).toHaveLength(1);
     expect(retrieved.memory[0].text).toContain('workspace');
+    expect(retrieved.memory[0].scoring?.ontology).toMatchObject({
+      applied: true,
+      suppressed: false,
+      conflict: false,
+      reasons: [],
+    });
     expect(retrieved.meta.selectedCandidateIds).toEqual(['1845']);
     expect(retrieved.meta.totalTokens).toBeLessThanOrEqual(1000);
+  });
+
+  test('keeps retrieval working when ontology lookup falls back because AGE is unavailable or the lookup errors', async () => {
+    const { retrieveContext } = require('../memory-router');
+    const storyText = 'Ensure confirmation learning keys history and aliases by workspace and prevents leakage.';
+
+    mockLookupMemoryOntologyAdjustments.mockRejectedValueOnce(new Error('AGE unavailable'));
+
+    const retrieved = await retrieveContext('cashflow', storyText, {
+      maxTokens: 1000,
+      budgetMode: 'retrieval-only',
+    });
+
+    expect(retrieved.memory).toHaveLength(1);
+    expect(retrieved.memory[0].text).toContain('workspace');
+    expect(retrieved.memory[0].scoring?.ontology).toMatchObject({
+      applied: false,
+      suppressed: false,
+      conflict: false,
+      reasons: [],
+    });
+    expect(retrieved.meta.selectedCandidateIds).toEqual(['1845']);
   });
 });
 
