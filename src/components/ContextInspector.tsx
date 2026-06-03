@@ -47,15 +47,16 @@ interface ContextInspectorProps {
 // ─── Phase presentation ──────────────────────────────────────────────────────
 
 const PHASE_LABELS: Record<ContextTracePhase, string> = {
-  context: 'Direction / Arbiter',
+  context: 'Spec / CAG / Files',
   skill: 'Skills',
   mcp: 'MCP',
-  memory: 'Retrieval',
+  memory: 'RAG / Memory',
+  graph: 'Knowledge Graph',
   prompt: 'Prompt Assembly',
 };
 
 /** Funnel display order — retrieval flows from raw context → assembled prompt. */
-const FUNNEL_ORDER: ContextTracePhase[] = ['memory', 'context', 'skill', 'mcp', 'prompt'];
+const FUNNEL_ORDER: ContextTracePhase[] = ['context', 'memory', 'graph', 'skill', 'mcp', 'prompt'];
 
 function statusColor(status: ContextTraceStatus): string {
   switch (status) {
@@ -320,21 +321,26 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
             <button
               key={e.rawRef}
               type="button"
-              onClick={() => setActiveRawRef(e.rawRef)}
-              className="w-full flex items-center gap-3 px-4 py-2 text-left border-b border-border/50 hover:bg-panel/50 transition-colors"
+              onClick={() => e.synthetic ? undefined : setActiveRawRef(e.rawRef)}
+              className={`w-full flex items-center gap-3 px-4 py-2 text-left border-b border-border/50 transition-colors ${e.synthetic ? 'cursor-default' : 'hover:bg-panel/50'}`}
               data-testid={`inspector-event-${e.rawRef}`}
             >
               <span className={`shrink-0 w-2 h-2 rounded-full ${statusDot(e.status)}`} />
               <span className="font-mono text-[10px] text-muted shrink-0 w-14">{e.rawRef}</span>
               <span className="shrink-0 text-[11px] text-muted w-28 truncate">{PHASE_LABELS[e.phase]}</span>
-              <span className="flex-1 min-w-0 truncate text-xs text-[var(--text)]">
-                {e.label ?? e.phase}
+              <span className="flex-1 min-w-0 text-xs text-[var(--text)]">
+                <span className="truncate inline-block max-w-full align-bottom">{e.label ?? e.phase}</span>
+                {e.synthetic && e.details && e.details.length > 0 && (
+                  <span className="block mt-0.5 text-[10px] text-muted truncate">{e.details.join(' · ')}</span>
+                )}
               </span>
               {e.storyId && (
                 <span className="font-mono text-[10px] text-muted shrink-0">{e.storyId}</span>
               )}
               <span className={`text-[11px] shrink-0 ${statusColor(e.status)}`}>{e.status}</span>
-              {raw.loading ? (
+              {e.synthetic ? (
+                <span className="shrink-0 text-[10px] text-muted/70">reconstructed</span>
+              ) : raw.loading ? (
                 <Loader2 size={12} className="shrink-0 text-muted animate-spin" />
               ) : (
                 <FileText size={12} className="shrink-0 text-muted/60" />

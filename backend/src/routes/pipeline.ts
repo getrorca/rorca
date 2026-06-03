@@ -3145,6 +3145,171 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/pipeline/runs/:runId/context-inspector-events — Metadata backfill
+// Returns historical context_trace WAL metadata when present. For older or
+// continuation runs that did not emit CTM artifacts, reconstructs trace-like
+// metadata from story_started WAL payloads and story token rows so the Context
+// tab can still explain CAG/RAG/KG/prompt context channels.
+router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) throw new ValidationError('Invalid runId');
+
+    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    if (!run) throw new NotFoundError('Run not found');
+
+    const traceRows = await query<{ id: number; payload: string | Record<string, any> }>(
+      `SELECT id, payload FROM wal_events
+       WHERE event_type = 'context_trace' AND (payload->>'run_id')::bigint = $1
+       ORDER BY id ASC`,
+      [runId],
+    );
+
+    const events: Array<Record<string, any>> = [];
+    for (const row of traceRows) {
+      try {
+        const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+        if (payload && typeof payload === 'object' && payload.rawRef) events.push(payload);
+      } catch { /* skip malformed trace payload */ }
+    }
+
+    if (events.length > 0) {
+      res.json({ events, reconstructed: false });
+      return;
+    }
+
+    const storyRows = await query<{ id: number; ts: string | Date; story_id: string | null; payload: string | Record<string, any> }>(
+      `SELECT id, ts, story_id, payload FROM wal_events
+       WHERE event_type = 'story_started' AND (payload->>'run_id')::bigint = $1
+       ORDER BY id ASC`,
+      [runId],
+    );
+    const tokenRows = await query<{ story_id: string; input_tokens: number | null; output_tokens: number | null }>(
+      `SELECT story_id, input_tokens, output_tokens FROM story_results WHERE run_id = $1 ORDER BY id ASC`,
+      [runId],
+    );
+    const tokenByStory = new Map(tokenRows.map((row) => [row.story_id, row]));
+
+    let seq = 0;
+    const makeEvent = (phase: string, status: 'ok' | 'partial' | 'error' | 'start', label: string, opts: {
+      storyId?: string | null;
+      ts?: string;
+      metrics?: Record<string, number>;
+      details?: string[];
+    } = {}) => {
+      const event = {
+        traceId: `reconstructed:${runId}:${phase}`,
+        runId,
+        storyId: opts.storyId ?? null,
+        seq,
+        rawRef: `synthetic:${runId}:${seq}`,
+        phase,
+        status,
+        ts: opts.ts ?? new Date().toISOString(),
+        metrics: opts.metrics,
+        label,
+        synthetic: true,
+        details: opts.details ?? [],
+      };
+      seq += 1;
+      events.push(event);
+    };
+
+    const seenStories = new Set<string>();
+    for (const row of storyRows) {
+      const storyId = row.story_id;
+      if (!storyId) continue;
+      seenStories.add(storyId);
+      let payload: Record<string, any> = {};
+      try { payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload; } catch { /* keep empty */ }
+      const ts = row.ts instanceof Date ? row.ts.toISOString() : String(row.ts);
+
+      makeEvent('context', 'ok', `spec/cag:${storyId}`, {
+        storyId,
+        ts,
+        details: ['Story title, description, acceptance criteria, dependencies, and execution packet were prompt context.'],
+      });
+
+      const contextFiles = Array.isArray(payload.context_files)
+        ? payload.context_files.filter((value: unknown): value is string => typeof value === 'string')
+        : [];
+      if (contextFiles.length > 0) {
+        makeEvent('context', 'ok', `routed-files:${storyId}`, {
+          storyId,
+          ts,
+          metrics: { fileCount: contextFiles.length },
+          details: contextFiles,
+        });
+      }
+
+      const selectedCount = typeof payload.retrieval_selected_count === 'number' ? payload.retrieval_selected_count : null;
+      const telemetryId = typeof payload.retrieval_telemetry_id === 'string' ? payload.retrieval_telemetry_id : null;
+      const needsMoreEvidence = payload.retrieval_needs_more_evidence === true;
+      const matchedSkills = Array.isArray(payload.retrieval_matched_skills)
+        ? payload.retrieval_matched_skills.filter((value: unknown): value is string => typeof value === 'string')
+        : [];
+      if (selectedCount != null || telemetryId || needsMoreEvidence || matchedSkills.length > 0) {
+        makeEvent('memory', needsMoreEvidence ? 'partial' : 'ok', `retrieval:${storyId}`, {
+          storyId,
+          ts,
+          metrics: selectedCount != null ? { fileCount: selectedCount } : undefined,
+          details: [
+            ...(telemetryId ? [`telemetry: ${telemetryId}`] : []),
+            ...(selectedCount != null ? [`selected: ${selectedCount}`] : []),
+            ...(needsMoreEvidence ? ['needs more evidence'] : []),
+            ...(matchedSkills.length > 0 ? [`matched skills: ${matchedSkills.join(', ')}`] : []),
+          ],
+        });
+      }
+
+      const graphHits = typeof payload.graph_hits === 'number' ? payload.graph_hits : null;
+      if (run.include_graph) {
+        makeEvent('graph', graphHits && graphHits > 0 ? 'ok' : 'partial', `graph:${storyId}`, {
+          storyId,
+          ts,
+          metrics: graphHits != null ? { fileCount: graphHits } : undefined,
+          details: ['Graph context enabled for run.', `hits: ${graphHits ?? 0}`],
+        });
+      }
+
+      const tokens = tokenByStory.get(storyId);
+      const input = Number(tokens?.input_tokens ?? 0);
+      const output = Number(tokens?.output_tokens ?? 0);
+      if (input > 0 || output > 0) {
+        makeEvent('prompt', 'ok', `prompt:${storyId}`, {
+          storyId,
+          ts,
+          metrics: { tokens: input + output },
+          details: [`input tokens: ${input}`, `output tokens: ${output}`],
+        });
+      }
+    }
+
+    for (const row of tokenRows) {
+      if (seenStories.has(row.story_id)) continue;
+      const input = Number(row.input_tokens ?? 0);
+      const output = Number(row.output_tokens ?? 0);
+      if (input > 0 || output > 0) {
+        makeEvent('prompt', 'ok', `prompt:${row.story_id}`, {
+          storyId: row.story_id,
+          metrics: { tokens: input + output },
+          details: [`input tokens: ${input}`, `output tokens: ${output}`],
+        });
+      }
+    }
+
+    if (!run.include_graph && storyRows.length > 0) {
+      makeEvent('graph', 'partial', 'graph:disabled', {
+        details: ['Knowledge graph context was not enabled for this run.'],
+      });
+    }
+
+    res.json({ events, reconstructed: events.length > 0 });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] List context traces');
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId/context-trace/:rawRef — Lazy raw payload ───
 // CTM-002: context-trace metadata streams over SSE without the heavy payload.
 // The browser calls this endpoint only when a user opens a detail view, so the
