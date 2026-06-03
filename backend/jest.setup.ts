@@ -34,6 +34,15 @@ function deriveTestDbUrl(): string {
 
 const TEST_DB_URL = deriveTestDbUrl();
 
+function assertSafeTestDbUrl(url: string): void {
+  const dbName = new URL(url).pathname.slice(1);
+  if (!dbName.endsWith('_test')) {
+    throw new Error(`[jest-setup] Refusing to recreate non-test database "${dbName}"`);
+  }
+}
+
+assertSafeTestDbUrl(TEST_DB_URL);
+
 /**
  * Parse connection string to extract database name and build a "maintenance" URL
  * that connects to the default 'postgres' database (for CREATE DATABASE).
