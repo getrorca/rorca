@@ -12904,7 +12904,9 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
     };
     const userStories = specContent.userStories ?? [];
     if (userStories.length === 0) {
-      res.json({ success: true, retrieval_method: 'direction-only', storiesEnriched: 0 });
+      // No stories means no retrieval ran — report the canonical 'none' tier
+      // used by generate/persist rather than a bespoke vocabulary.
+      res.json({ success: true, retrieval_method: 'none', storiesEnriched: 0 });
       return;
     }
 
@@ -12923,15 +12925,29 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
     let totalOutputTokens = 0;
     let storiesEnriched = 0;
 
-    // Aggregate retrieval metrics across all per-story calls
+    // Aggregate retrieval metrics across all per-story calls.
+    // Mirrors the generate/persist canonical context summary contract so the
+    // Run View Context Inspector reads identical fields regardless of which
+    // flow produced the spec_generation_logs row.
     let totalCagHits = 0;
     let totalRagHits = 0;
     let totalGraphHits = 0;
     let totalRetrievalLatencyMs = 0;
-    // Track highest tier used: graph > rag > cag > direction_only
-    type RetrievalTier = 'graph' | 'rag' | 'cag' | 'direction_only';
-    const tierRank: Record<RetrievalTier, number> = { direction_only: 0, cag: 1, rag: 2, graph: 3 };
-    let highestTier: RetrievalTier = 'direction_only';
+    // Canonical retrieval tier vocabulary shared with memory-router.retrieveContext()
+    // and the generate/persist summary: 'cache' | 'search' | 'hybrid'. A run where
+    // no story retrieved anything reports 'none' as the retrieval_method.
+    type CanonicalRetrievalTier = 'cache' | 'search' | 'hybrid';
+    const tierRank: Record<CanonicalRetrievalTier, number> = { cache: 0, search: 1, hybrid: 2 };
+    let highestTier: CanonicalRetrievalTier | null = null;
+    // Direction-layer presence aggregated across stories (any story that saw a
+    // layer marks it present, matching generate's synthResult.meta booleans).
+    let anyStandards = false;
+    let anyConventions = false;
+    let anyProject = false;
+    // Union of skill names surfaced by retrieval, for the canonical `skills` array.
+    const skillNameSet = new Set<string>();
+    // Distinct memory entries surfaced across stories, for `memoryEntries`.
+    const memoryKeySet = new Set<string>();
 
     const buildPromptForStory = (
       story: typeof userStories[0],
@@ -13016,18 +13032,21 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
         totalGraphHits += ctx.meta.graphHits;
         totalRetrievalLatencyMs += ctx.meta.latencyMs;
 
-        // Determine tier for this story
-        let storyTier: RetrievalTier = 'direction_only';
-        if (ctx.meta.graphHits > 0) {
-          storyTier = 'graph';
-        } else if (ctx.meta.ragHits > 0) {
-          storyTier = 'rag';
-        } else if (ctx.meta.cagHits > 0) {
-          storyTier = 'cag';
-        }
-        if (tierRank[storyTier] > tierRank[highestTier]) {
+        // Promote the run tier to the highest canonical tier observed.
+        // retrieveContext() returns 'cache' | 'search' | 'hybrid' directly — reuse
+        // it verbatim instead of re-deriving a divergent vocabulary.
+        const storyTier = ctx.meta.tier;
+        if (highestTier === null || tierRank[storyTier] > tierRank[highestTier]) {
           highestTier = storyTier;
         }
+
+        // Aggregate direction-layer presence and surfaced skills/memory so the
+        // canonical summary mirrors generate/persist.
+        if (ctx.direction.standards) anyStandards = true;
+        if (ctx.direction.conventions) anyConventions = true;
+        if (ctx.direction.project) anyProject = true;
+        for (const skill of ctx.skills) skillNameSet.add(skill.name);
+        for (const mem of ctx.memory) memoryKeySet.add(mem.canonicalKey ?? mem.id ?? mem.text);
 
         const descWithoutOldContext = (story.description ?? '').replace(/\n\n## Context\n[\s\S]*$/, '');
         story.description = `${descWithoutOldContext}\n\n## Context\n${annotation}`;
@@ -13043,33 +13062,49 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     // Write enriched spec back to disk
     fs.writeFileSync(specFile, JSON.stringify(specContent, null, 2), 'utf8');
 
-    // Insert spec_generation_logs row
+    // Insert spec_generation_logs row.
     const durationMs = Date.now() - start;
-    const contextSummaryJson = {
-      directionLayers: [
-        { layer: 'L1', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
-        { layer: 'L2', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
-        { layer: 'L3', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
-      ],
-      skills: [],
-      memory: {
-        count: storiesEnriched,
-        tier: highestTier,
-        cagHits: totalCagHits,
-        ragHits: totalRagHits,
-        graphHits: totalGraphHits,
-        latencyMs: totalRetrievalLatencyMs,
+    // retrieval_method uses the same vocabulary as generate/persist:
+    // 'cache' | 'search' | 'hybrid' when retrieval ran, 'none' when no story
+    // surfaced any hits (matches the persist seed log's 'none').
+    const retrievalRan = totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0;
+    const retrievalMethod: string = highestTier ?? 'none';
+    const modelContextWindow = getModelInfo(annotationModel)?.contextWindow ?? 200000;
+    const estimatedTokens = totalInputTokens + totalOutputTokens;
+
+    // Build the canonical context_summary_json — identical shape to the
+    // generate flow's precomputedContextSummary and the persist flow's captured
+    // contextSummary, so the Run View Context Inspector renders enrich runs the
+    // same way it renders generate/persist runs.
+    const contextSummaryJson: Record<string, unknown> = {
+      directionLayers: {
+        l1: anyStandards,
+        l2: { present: anyConventions, domain: null },
+        l3: anyProject,
       },
-      tokenBudget: {
-        used: totalInputTokens + totalOutputTokens,
-        limit: 200000,
-        percentage: Math.round(((totalInputTokens + totalOutputTokens) / 200000) * 100),
-      },
-      flags: {
-        agent: false,
-        schema: false,
-        gitMemory: false,
-      },
+      skills: Array.from(skillNameSet),
+      memoryEntries: memoryKeySet.size,
+      agentsMd: false,
+      template: null,
+      schemaSnapshot: false,
+      gitMemory: false,
+      estimatedTokens,
+      modelContextWindow,
+      ...(retrievalRan
+        ? {
+            vectorHits: totalRagHits,
+            graphHits: totalGraphHits,
+            retrievalTier: retrievalMethod,
+            retrievalLatencyMs: totalRetrievalLatencyMs,
+            retrieval: {
+              cagHits: totalCagHits,
+              ragHits: totalRagHits,
+              graphHits: totalGraphHits,
+              tier: retrievalMethod,
+              latencyMs: totalRetrievalLatencyMs,
+            },
+          }
+        : {}),
     };
     await execute(
       `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, enriched, retrieval_method, context_summary_json, status)
@@ -13081,8 +13116,8 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
         durationMs,
         totalInputTokens,
         totalOutputTokens,
-        `Enriched ${storiesEnriched}/${userStories.length} stories via ${highestTier}`,
-        highestTier,
+        `Enriched ${storiesEnriched}/${userStories.length} stories via ${retrievalMethod}`,
+        retrievalMethod,
         JSON.stringify(contextSummaryJson),
       ],
     );
@@ -13091,7 +13126,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     const walPayload = {
       spec_id: specId,
       workspace_id: workspaceId,
-      retrieval_method: highestTier,
+      retrieval_method: retrievalMethod,
       stories_enriched: storiesEnriched,
     };
     const walEvent = await queryOne<WalEvent>(
@@ -13100,7 +13135,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     );
     if (walEvent) broadcastAll(walEvent);
 
-    res.json({ success: true, retrieval_method: highestTier, storiesEnriched });
+    res.json({ success: true, retrieval_method: retrievalMethod, storiesEnriched });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Specs] Enrich context');
   }
