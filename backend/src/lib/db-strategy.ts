@@ -156,9 +156,13 @@ export function applySelectedDbModeEnvironment(env: NodeJS.ProcessEnv = process.
 }
 
 export async function isAgeAvailable(): Promise<boolean> {
-  if (detectDbMode() === 'native') return false;
   const row = await queryOne<ExtensionRow>(
-    "SELECT 1 AS present FROM pg_extension WHERE extname = 'age'"
+    `SELECT 1 AS present
+     FROM pg_extension e
+     JOIN pg_proc p ON p.proname = 'cypher'
+     JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'ag_catalog'
+     WHERE e.extname = 'age'
+     LIMIT 1`
   );
   return row?.present === 1;
 }

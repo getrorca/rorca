@@ -284,6 +284,32 @@ function truncateText(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
 }
 
+function normalizeMemoryText(value: string): string {
+  return value
+    .replace(/^>\s*/gm, '')
+    .replace(/^Rule:\s*/gim, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function splitMemoryContent(value: string): { primary: string; rule: string | null } {
+  const marker = value.match(/\n\s*>?\s*Rule:\s*/i);
+  if (!marker || marker.index === undefined) return { primary: value, rule: null };
+
+  const primary = value.slice(0, marker.index).trim();
+  const rule = value
+    .slice(marker.index + marker[0].length)
+    .replace(/^>\s?/gm, '')
+    .trim();
+
+  if (!primary || !rule || normalizeMemoryText(primary) === normalizeMemoryText(rule)) {
+    return { primary: primary || value, rule: null };
+  }
+
+  return { primary, rule };
+}
+
 function basename(path: string): string {
   const parts = path.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? path;
@@ -1002,6 +1028,37 @@ function OntologyCurationSection({
   );
 }
 
+function OntologyCurationDrawer({
+  open,
+  onClose,
+  ...props
+}: Parameters<typeof OntologyCurationSection>[0] & {
+  open: boolean;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/40" role="dialog" aria-modal="true" aria-label="Ontology curation drawer">
+      <button type="button" className="absolute inset-0 cursor-default" aria-label="Close ontology curation" onClick={onClose} />
+      <div className="relative flex h-full w-full max-w-xl flex-col border-l border-border bg-bg shadow-2xl">
+        <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+          <div>
+            <p className="text-sm font-semibold text-[var(--text)]">Curate memory edge</p>
+            <p className="mt-0.5 text-[11px] text-muted">Link this memory only when you are actively resolving precedence or conflict.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-1.5 text-muted transition-colors hover:bg-surface-200" aria-label="Close curation drawer">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <OntologyCurationSection {...props} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReviewWorkflowSection({
   data,
   loading,
@@ -1017,13 +1074,14 @@ function ReviewWorkflowSection({
   onAction: (memoryId: number, action: MemoryReviewAction) => void;
   onFocusMemory: (memoryId: string) => void;
 }) {
+  const [reviewExpanded, setReviewExpanded] = useState(false);
+
   if (loading) {
     return (
       <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Stale memory review workflow">
-        <div className="flex min-h-[180px] flex-col items-center justify-center text-center">
-          <div className="mb-3 h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-          <p className="text-sm font-medium text-[var(--text)]">Loading stale-memory review queue</p>
-          <p className="mt-1 max-w-md text-xs leading-relaxed text-muted">Preparing bounded stale-memory heuristics and hotspot summaries for operator review.</p>
+        <div className="flex items-center gap-3 text-xs text-muted">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          <span>Loading stale-memory review queue…</span>
         </div>
       </section>
     );
@@ -1067,6 +1125,37 @@ function ReviewWorkflowSection({
   };
   const filesHot = data.hotspots.files;
   const specsHot = data.hotspots.specs;
+  const hotspotCount = filesHot.length + specsHot.length;
+  const ageFallbackReason = data.staleCandidates.reason ?? data.hotspots.reason ?? null;
+  const hasActiveReviewWork = queueItems.length > 0 || recoverableItems.length > 0 || hotspotCount > 0;
+  const showExpandedReview = hasActiveReviewWork || reviewExpanded;
+
+  if (!showExpandedReview) {
+    return (
+      <section className="rounded-xl border border-border bg-surface-100/70 px-3 py-2" aria-label="Stale memory review workflow">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-[var(--text)]">Stale memory review</span>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{queueItems.length} stale</span>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{recoverableItems.length} recoverable</span>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{hotspotCount} hotspots</span>
+            {ageFallbackReason && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300" title={ageFallbackReason}>
+                <AlertTriangle size={10} /> SQL fallback
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setReviewExpanded(true)}
+            className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface-200"
+          >
+            Expand
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Stale memory review workflow">
@@ -1078,17 +1167,20 @@ function ReviewWorkflowSection({
         <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
           <span className="rounded-full border border-border bg-bg px-2 py-0.5">{queueItems.length} in queue</span>
           <span className="rounded-full border border-border bg-bg px-2 py-0.5">{recoverableItems.length} recoverable</span>
-          <span className="rounded-full border border-border bg-bg px-2 py-0.5">{filesHot.length + specsHot.length} hotspots</span>
+          <span className="rounded-full border border-border bg-bg px-2 py-0.5">{hotspotCount} hotspots</span>
+          {ageFallbackReason && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-amber-300" title={ageFallbackReason}>
+              <AlertTriangle size={10} /> SQL fallback
+            </span>
+          )}
+          {!hasActiveReviewWork && (
+            <button type="button" onClick={() => setReviewExpanded(false)} className="rounded-full border border-border bg-bg px-2 py-0.5 transition-colors hover:bg-surface-200">Collapse</button>
+          )}
         </div>
       </div>
 
       <div className="mt-3 space-y-2">
         <div className="rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">{boundedCopy}</div>
-        {data.staleCandidates.reason && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-[var(--text)]">
-            {data.staleCandidates.reason}
-          </div>
-        )}
       </div>
 
       <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
@@ -1287,11 +1379,12 @@ function ReviewWorkflowSection({
 
 // ─── Entry Row ──────────────────────────────────────────────────────────────
 
-function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onToggleSelect, onFocus, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
+function EntryRow({ item, isSelected, isEditing, isFocused, isSplitMode, explainability, onToggleSelect, onFocus, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin, onCurate }: {
   item: MemoryItem;
   isSelected: boolean;
   isEditing: boolean;
   isFocused: boolean;
+  isSplitMode: boolean;
   explainability: MemoryOntologyExplanation[];
   onToggleSelect: () => void;
   onFocus: () => void;
@@ -1300,15 +1393,17 @@ function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onTo
   onCancelEdit: () => void;
   onDelete: () => void;
   onTogglePin: () => void;
+  onCurate: () => void;
 }) {
   const dateStr = new Date(item.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const contentParts = splitMemoryContent(item.content);
 
   return (
     <div
       onClick={onFocus}
       className={`group cursor-pointer rounded-lg border p-3 transition-colors ${
         isFocused
-          ? 'border-accent bg-accent/5'
+          ? `border-accent bg-accent/5 ${isSplitMode ? 'shadow-[0_0_0_1px_var(--accent)]' : ''}`
           : item.pinned
             ? 'border-amber-500/30 bg-amber-500/5'
             : 'border-border hover:bg-surface-200'
@@ -1352,7 +1447,7 @@ function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onTo
             )}
             {isFocused && (
               <span className="rounded bg-accent/10 px-1 py-0.5 text-[9px] font-medium text-accent">
-                Web focus
+                {isSplitMode ? 'Active node' : 'Web focus'}
               </span>
             )}
             <span className="ml-auto shrink-0 tabular-nums text-[10px] text-muted">{dateStr}</span>
@@ -1361,7 +1456,14 @@ function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onTo
           {isEditing ? (
             <InlineEditor value={item.content} onSave={onSaveEdit} onCancel={onCancelEdit} />
           ) : (
-            <p className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--text)]/80">{item.content}</p>
+            <div className="space-y-2 text-xs leading-relaxed">
+              <p className="whitespace-pre-wrap text-[var(--text)]/85">{contentParts.primary}</p>
+              {contentParts.rule && (
+                <blockquote className="border-l-2 border-accent/40 pl-2 text-[var(--text)]/75">
+                  <span className="font-semibold text-[var(--text)]">Rule:</span> {contentParts.rule}
+                </blockquote>
+              )}
+            </div>
           )}
 
           {(item.relatedFiles?.length ?? 0) > 0 && !isEditing && (
@@ -1394,6 +1496,13 @@ function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onTo
               title={item.pinned ? 'Unpin' : 'Pin — always include in prompts'}
             >
               <Pin size={12} className={item.pinned ? 'fill-amber-500 text-amber-500' : 'text-muted'} />
+            </button>
+            <button
+              onClick={(event) => { event.stopPropagation(); onCurate(); }}
+              className="rounded px-1.5 py-1 text-[10px] font-medium text-muted transition-colors hover:bg-accent/10 hover:text-accent"
+              title="Curate edge"
+            >
+              Curate
             </button>
             <button onClick={onDelete} className="rounded p-1.5 transition-colors hover:bg-red-500/10" title="Delete">
               <Trash2 size={12} className="text-red-500/60" />
@@ -1443,7 +1552,7 @@ function BulkActionBar({ count, onDelete, onPin, onClear }: {
 
 // ─── View Tabs ──────────────────────────────────────────────────────────────
 
-function ViewModeTabs({ value, onChange }: { value: MemoryViewMode; onChange: (mode: MemoryViewMode) => void }) {
+function ViewModeTabs({ value, graphIssue, onChange }: { value: MemoryViewMode; graphIssue?: string | null; onChange: (mode: MemoryViewMode) => void }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-surface-100/70 p-3">
       <div>
@@ -1464,9 +1573,14 @@ function ViewModeTabs({ value, onChange }: { value: MemoryViewMode; onChange: (m
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                 active ? 'bg-accent text-white shadow-sm' : 'text-muted hover:bg-surface-200 hover:text-[var(--text)]'
               }`}
-              title={mode.description}
+              title={graphIssue && mode.id !== 'list' ? `${mode.description}: ${graphIssue}` : mode.description}
             >
-              {mode.label}
+              <span className="inline-flex items-center gap-1">
+                {mode.label}
+                {graphIssue && mode.id !== 'list' && (
+                  <AlertTriangle size={11} className={active ? 'text-white/80' : 'text-amber-400'} aria-hidden="true" />
+                )}
+              </span>
             </button>
           );
         })}
@@ -1965,6 +2079,7 @@ function EntriesSection({
   onCancelEdit,
   onDelete,
   onTogglePin,
+  onCurateMemory,
   compact,
 }: {
   filteredItems: MemoryItem[];
@@ -1980,6 +2095,7 @@ function EntriesSection({
   onCancelEdit: () => void;
   onDelete: (id: number) => void;
   onTogglePin: (item: MemoryItem) => void;
+  onCurateMemory: (memoryId: string) => void;
   compact: boolean;
 }) {
   const content = filteredItems.length === 0 ? (
@@ -2009,6 +2125,7 @@ function EntriesSection({
           isSelected={selectedIds.has(item.id)}
           isEditing={editingId === item.id}
           isFocused={selectedMemoryId === String(item.id)}
+          isSplitMode={compact}
           explainability={explainabilityByMemory.get(String(item.id)) ?? []}
           onToggleSelect={() => onToggleSelect(item.id)}
           onFocus={() => onFocusMemory(String(item.id))}
@@ -2017,6 +2134,7 @@ function EntriesSection({
           onCancelEdit={onCancelEdit}
           onDelete={() => onDelete(item.id)}
           onTogglePin={() => onTogglePin(item)}
+          onCurate={() => onCurateMemory(String(item.id))}
         />
       </li>
     ))
@@ -2077,6 +2195,7 @@ export default function MemoryPanel() {
   const [targetMemoryId, setTargetMemoryId] = useState('');
   const [relationMutationKey, setRelationMutationKey] = useState<string | null>(null);
   const [relationNotice, setRelationNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
+  const [curationOpen, setCurationOpen] = useState(false);
   const [reviewData, setReviewData] = useState<MemoryReviewResponse | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
@@ -2119,6 +2238,7 @@ export default function MemoryPanel() {
     setTargetMemoryId('');
     setRelationMutationKey(null);
     setRelationNotice(null);
+    setCurationOpen(false);
     setReviewData(null);
     setReviewLoading(false);
     setReviewError(null);
@@ -2319,6 +2439,12 @@ export default function MemoryPanel() {
     await fetchOverviewGraph();
     await fetchNeighborhoodGraph();
   }, [fetchNeighborhoodGraph, fetchOverviewGraph, fetchRelations, shouldShowGraph]);
+
+  const handleOpenCuration = (memoryId: string) => {
+    setSelectedMemoryId(memoryId);
+    setRelationNotice(null);
+    setCurationOpen(true);
+  };
 
   const handleReviewAction = async (memoryId: number, action: MemoryReviewAction) => {
     if (!workspaceId) return;
@@ -2559,6 +2685,7 @@ export default function MemoryPanel() {
       onCancelEdit={() => setEditingId(null)}
       onDelete={handleDelete}
       onTogglePin={handleTogglePin}
+      onCurateMemory={handleOpenCuration}
       compact={viewMode === 'split'}
     />
   );
@@ -2744,24 +2871,10 @@ export default function MemoryPanel() {
             onFocusMemory={setSelectedMemoryId}
           />
 
-          <ViewModeTabs value={viewMode} onChange={setViewMode} />
-
-          {relationsError && (
-            <div className="rounded-lg border border-border bg-surface-100/70 px-3 py-2 text-xs text-muted">
-              Ontology explanations unavailable right now. {relationsError}
-            </div>
-          )}
-
-          <OntologyCurationSection
-            items={items}
-            selectedMemoryId={selectedMemoryId}
-            relations={relations}
-            targetMemoryId={targetMemoryId}
-            busyKey={relationMutationKey}
-            notice={relationNotice}
-            onTargetMemoryChange={setTargetMemoryId}
-            onCreateRelation={handleCreateRelation}
-            onRemoveRelation={handleRemoveRelation}
+          <ViewModeTabs
+            value={viewMode}
+            graphIssue={relationsError ?? overviewGraphError ?? reviewData?.staleCandidates.reason ?? reviewData?.hotspots.reason ?? null}
+            onChange={setViewMode}
           />
 
           <div
@@ -2781,6 +2894,20 @@ export default function MemoryPanel() {
           </div>
         </div>
       </div>
+
+      <OntologyCurationDrawer
+        open={curationOpen}
+        onClose={() => setCurationOpen(false)}
+        items={items}
+        selectedMemoryId={selectedMemoryId}
+        relations={relations}
+        targetMemoryId={targetMemoryId}
+        busyKey={relationMutationKey}
+        notice={relationNotice}
+        onTargetMemoryChange={setTargetMemoryId}
+        onCreateRelation={handleCreateRelation}
+        onRemoveRelation={handleRemoveRelation}
+      />
 
       <BulkActionBar
         count={selectedIds.size}

@@ -48,12 +48,24 @@ function parseDbUrl(url: string): { dbName: string; maintenanceUrl: string } {
 }
 
 export default async function globalTeardown(): Promise<void> {
+  const destructiveTeardownEnabled = process.env.RORCA_ENABLE_JEST_DB_TEARDOWN === 'true';
+  if (!destructiveTeardownEnabled) {
+    console.log('[jest-teardown] Skipped DB truncate/drop (set RORCA_ENABLE_JEST_DB_TEARDOWN=true to enable on *_test DB only)');
+    return;
+  }
+
   const keepTestDb = process.env.KEEP_TEST_DB !== 'false';
 
   if (keepTestDb) {
     // Truncate all user tables (fast, keeps schema for re-runs)
     const pool = new Pool({ connectionString: TEST_DB_URL });
     try {
+      const db = await pool.query<{ current_database: string }>('SELECT current_database()');
+      const currentDb = db.rows[0]?.current_database ?? '';
+      if (!currentDb.endsWith('_test')) {
+        throw new Error(`[jest-teardown] Refusing to truncate connected database "${currentDb || '(unknown)'}"`);
+      }
+
       const { rows } = await pool.query(`
         SELECT schemaname, tablename FROM pg_tables
         WHERE schemaname IN ('public', 'rorca')
