@@ -27,6 +27,7 @@ import CompareRunsPanel from './CompareRunsPanel';
 import WorktreesPanel from './WorktreesPanel';
 import FinOpsTab from '../components/FinOpsTab';
 import SkillsTab from '../components/SkillsTab';
+import ContextInspector from '../components/ContextInspector';
 import type { PanelId } from '../components/Sidebar';
 import { RunViewSkeleton } from '../components/skeletons';
 import AppHeader from '../components/AppHeader';
@@ -99,11 +100,12 @@ interface CommitEntry {
   author: string;
 }
 
-type RunViewTab = 'terminal' | 'stories' | 'graph' | 'skills' | 'finops' | 'compare' | 'worktrees' | 'commits';
+type RunViewTab = 'terminal' | 'stories' | 'inspector' | 'graph' | 'skills' | 'finops' | 'compare' | 'worktrees' | 'commits';
 
 const TABS: { id: RunViewTab; label: string; icon: typeof ScrollText }[] = [
   { id: 'terminal', label: 'Execution Trace', icon: ScrollText },
   { id: 'stories', label: 'Stories', icon: List },
+  { id: 'inspector', label: 'Context', icon: Layers },
   { id: 'graph', label: 'Graph', icon: GitBranch },
   { id: 'skills', label: 'Skills', icon: Wrench },
   { id: 'finops', label: 'FinOps', icon: DollarSign },
@@ -1476,6 +1478,13 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
             }}
             parallelism={run.parallelism}
             includeGraph={run.include_graph}
+          />
+        );
+      case 'inspector':
+        return (
+          <ContextInspector
+            runId={run.id}
+            runSettled={effectiveStatus !== 'running' && effectiveStatus !== 'paused' && effectiveStatus !== 'blocked'}
           />
         );
       case 'graph':
