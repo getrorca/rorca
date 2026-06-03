@@ -5,11 +5,12 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useState, useEffect, useCallback, useDeferredValue } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue, useMemo } from 'react';
 import {
   Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
-  RefreshCw, GitPullRequest, Users, X, Plus, Zap, Bot, ScrollText,
+  RefreshCw, GitPullRequest, Users, X, Plus, Zap, KeyRound,
+  RadioTower, GitBranch, Activity, Lock, Copy,
 } from 'lucide-react';
 import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -94,6 +95,7 @@ interface GithubStatus {
   repoOwner?: string;
   repoName?: string;
   webhookId?: number;
+  webhookUrl?: string;
   lastWebhookAt?: string | null;
   connectedAt?: string;
   autoPr?: {
@@ -109,6 +111,28 @@ interface GithubAccount {
   avatarUrl?: string;
   connectedAt?: string;
   scopes?: string[];
+  source?: 'workspace-api-key' | 'workspace-oauth' | 'legacy-global' | 'env';
+}
+
+interface GithubWorkflow {
+  id: number;
+  name: string;
+  path: string;
+  state: string;
+  htmlUrl?: string;
+  badgeUrl?: string;
+}
+
+interface PrTemplatePreviewResult {
+  rendered: string;
+  source: 'latest-run' | 'sample';
+  run: {
+    id?: number;
+    status?: string | null;
+    title?: string;
+    storiesPassed?: number;
+    storiesTotal?: number;
+  } | null;
 }
 
 interface TestResult {
@@ -134,6 +158,75 @@ const SCOPE_DESCRIPTIONS: Record<string, string> = {
   'read:packages': 'Download packages',
   'delete:packages': 'Delete packages',
 };
+
+const REQUIRED_CAPABILITIES = [
+  { key: 'repo', label: 'Repository access', scopes: ['repo'] },
+  { key: 'admin:repo_hook', label: 'Webhook management', scopes: ['admin:repo_hook', 'write:repo_hook'] },
+  { key: 'workflow', label: 'Workflow dispatch', scopes: ['workflow'] },
+];
+
+const PR_TEMPLATE_VARIABLES = [
+  '{{spec.title}}', '{{spec.brief}}',
+  '{{run.storiesPassed}}', '{{run.storiesTotal}}',
+  '{{run.storiesFailed}}', '{{run.storiesSkipped}}',
+  '{{run.tokensInput}}', '{{run.tokensOutput}}', '{{run.tokensTotal}}',
+  '{{run.costUsd}}', '{{run.duration}}',
+  '{{run.agentType}}', '{{run.model}}',
+  '{{run.id}}', '{{run.diffStats}}',
+];
+
+function hasAnyScope(scopes: string[] | undefined, candidates: string[]): boolean {
+  return !!scopes?.some(scope => candidates.includes(scope));
+}
+
+function isLocalWebhookUrl(url?: string): boolean {
+  if (!url) return true;
+  try {
+    const parsed = new URL(url);
+    return ['localhost', '127.0.0.1', '0.0.0.0'].includes(parsed.hostname) || parsed.hostname.endsWith('.local');
+  } catch {
+    return true;
+  }
+}
+
+function timeAgo(value?: string | null): string {
+  if (!value) return 'Never received';
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return 'Unknown';
+  const diff = Math.max(0, Date.now() - ts);
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function StatusPill({ ok, label, warn }: { ok: boolean; label: string; warn?: boolean }) {
+  const color = ok
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    : warn
+      ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+      : 'border-border bg-bg text-muted';
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${color}`}>
+      {ok ? <CheckCircle2 size={12} /> : warn ? <AlertCircle size={12} /> : <Lock size={12} />}
+      {label}
+    </span>
+  );
+}
+
+function LockedPanel({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="rounded-lg border border-dashed border-border bg-panel/50 p-4 text-sm text-muted">
+      <div className="flex items-center gap-2 text-[var(--text)] mb-1">
+        <Lock size={14} />
+        <span className="font-medium">{title}</span>
+      </div>
+      {message}
+    </div>
+  );
+}
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -190,9 +283,12 @@ export default function GitHubSettingsPanel() {
   const [prTemplateSaved, setPrTemplateSaved] = useState(false);
   const [prTemplateLoaded, setPrTemplateLoaded] = useState(false);
   const [prTemplatePreviewVisible, setPrTemplatePreviewVisible] = useState(false);
+  const [prTemplatePreview, setPrTemplatePreview] = useState<PrTemplatePreviewResult | null>(null);
+  const [prTemplatePreviewLoading, setPrTemplatePreviewLoading] = useState(false);
+  const [prTemplatePreviewError, setPrTemplatePreviewError] = useState<string | null>(null);
   // Deferred so the preview update doesn't block keystrokes
   const deferredPrTemplate = useDeferredValue(prTemplate);
-  const previewText = renderPreview(deferredPrTemplate);
+  const previewText = prTemplatePreview?.rendered ?? renderPreview(deferredPrTemplate);
 
   // Workflow dispatch config (US-026)
   const [workflowEnabled, setWorkflowEnabled] = useState(false);
@@ -203,6 +299,14 @@ export default function GitHubSettingsPanel() {
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [savedWorkflow, setSavedWorkflow] = useState(false);
   const [workflowInputsError, setWorkflowInputsError] = useState<string | null>(null);
+  const [workflows, setWorkflows] = useState<GithubWorkflow[]>([]);
+  const [workflowsLoading, setWorkflowsLoading] = useState(false);
+  const [workflowsError, setWorkflowsError] = useState<string | null>(null);
+
+  // Webhook health
+  const [pingingWebhook, setPingingWebhook] = useState(false);
+  const [webhookPingResult, setWebhookPingResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [webhookUrlCopied, setWebhookUrlCopied] = useState(false);
 
   // ─── Fetch workspace connection status ─────────────────────────────────────
 
@@ -275,6 +379,58 @@ export default function GitHubSettingsPanel() {
       .catch(() => { setWorkflowConfigLoaded(true); });
   }, [workspaceId, workflowConfigLoaded]);
 
+  const fetchWorkflows = useCallback(async () => {
+    if (!workspaceId || !status?.connected) return;
+    setWorkflowsLoading(true);
+    setWorkflowsError(null);
+    try {
+      const data = await apiFetch<{ workflows: GithubWorkflow[] }>(`/api/workspaces/${workspaceId}/github/workflows`);
+      setWorkflows(data.workflows || []);
+    } catch (err: unknown) {
+      setWorkflowsError(err instanceof Error ? err.message : 'Failed to load workflows');
+      setWorkflows([]);
+    } finally {
+      setWorkflowsLoading(false);
+    }
+  }, [workspaceId, status?.connected]);
+
+  useEffect(() => {
+    if (status?.connected) fetchWorkflows();
+  }, [status?.connected, fetchWorkflows]);
+
+  useEffect(() => {
+    if (!workspaceId || !prTemplatePreviewVisible || !prTemplateLoaded) return;
+    let cancelled = false;
+    setPrTemplatePreviewLoading(true);
+    setPrTemplatePreviewError(null);
+    apiFetch<PrTemplatePreviewResult>(`/api/workspaces/${workspaceId}/github/pr-template-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template: deferredPrTemplate }),
+    })
+      .then(data => { if (!cancelled) setPrTemplatePreview(data); })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setPrTemplatePreview(null);
+          setPrTemplatePreviewError(err instanceof Error ? err.message : 'Using local sample preview');
+        }
+      })
+      .finally(() => { if (!cancelled) setPrTemplatePreviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [workspaceId, prTemplatePreviewVisible, prTemplateLoaded, deferredPrTemplate]);
+
+  const webhookUrl = status?.webhookUrl ?? `${BASE_URL}/api/webhooks/github`;
+  const webhookIsLocal = isLocalWebhookUrl(webhookUrl);
+  const credentialOk = !!account?.connected;
+  const repoOk = !!status?.connected;
+  const webhookOk = !!status?.connected && !!status.webhookId && !webhookIsLocal;
+  const workflowOk = repoOk && workflowEnabled && !!workflowId.trim();
+  const autoPrOk = repoOk && autoPrEnabled;
+  const missingCapabilities = useMemo(() => {
+    if (!account?.connected || !account.scopes?.length) return [];
+    return REQUIRED_CAPABILITIES.filter(capability => !hasAnyScope(account.scopes, capability.scopes));
+  }, [account?.connected, account?.scopes]);
+
   // ─── Handlers ────────────────────────────────────────────────────────────
 
   async function handleConnect() {
@@ -340,10 +496,36 @@ export default function GitHubSettingsPanel() {
         method: 'POST',
       });
       setTestResult(result);
+      fetchAccount();
     } catch {
       setTestResult({ valid: false, error: 'Request failed' });
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function handleCopyWebhookUrl() {
+    try {
+      await navigator.clipboard.writeText(webhookUrl);
+      setWebhookUrlCopied(true);
+      setTimeout(() => setWebhookUrlCopied(false), 1600);
+    } catch {
+      setWebhookUrlCopied(false);
+    }
+  }
+
+  async function handlePingWebhook() {
+    if (!workspaceId || !status?.webhookId) return;
+    setPingingWebhook(true);
+    setWebhookPingResult(null);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/webhook-ping`, { method: 'POST' });
+      setWebhookPingResult({ ok: true, message: 'Ping sent — GitHub should deliver a ping event shortly.' });
+      fetchStatus();
+    } catch (err: unknown) {
+      setWebhookPingResult({ ok: false, message: err instanceof Error ? err.message : 'Webhook ping failed' });
+    } finally {
+      setPingingWebhook(false);
     }
   }
 
@@ -457,12 +639,10 @@ export default function GitHubSettingsPanel() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          workflowConfig: {
-            enabled: workflowEnabled,
-            workflow_id: workflowId.trim(),
-            ref: workflowRef.trim() || 'main',
-            inputs,
-          },
+          enabled: workflowEnabled,
+          workflow_id: workflowId.trim(),
+          ref: workflowRef.trim() || 'main',
+          inputs,
         }),
       });
       setSavedWorkflow(true);
@@ -488,45 +668,90 @@ export default function GitHubSettingsPanel() {
     <div
       role="main"
       aria-label="GitHub Settings"
-      className="h-full overflow-y-auto max-w-2xl mx-auto space-y-8 px-4 sm:px-0"
+      className="h-full overflow-y-auto max-w-5xl mx-auto space-y-6 px-4 pb-10 sm:px-0"
     >
-      {/* ─── Section 1: OAuth Account ─────────────────────────────────── */}
-      <section>
-        <div className="flex items-center gap-2 mb-4">
-          <Github size={20} strokeWidth={1.5} />
-          <h2 className="text-base font-semibold text-[var(--text)]">GitHub Account</h2>
+      <section className="rounded-2xl border border-border bg-panel/80 p-4 shadow-xl shadow-black/10 overflow-hidden relative">
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/60 to-transparent" />
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Github size={22} strokeWidth={1.5} />
+              <h1 className="text-xl font-semibold text-[var(--text)]">GitHub Integration</h1>
+            </div>
+            <p className="max-w-2xl text-sm text-muted">
+              Connect local Rorca to a GitHub repository, then monitor credential health, webhook delivery, workflow dispatch, and auto-PR readiness from one place.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <StatusPill ok={credentialOk} label={credentialOk ? 'Credential connected' : 'Credential missing'} />
+            <StatusPill ok={repoOk} label={repoOk ? 'Repository connected' : 'Repository disconnected'} />
+            <StatusPill ok={webhookOk} warn={repoOk && !webhookOk} label={webhookOk ? 'Webhook reachable' : repoOk ? 'Webhook needs public URL' : 'Webhook locked'} />
+            <StatusPill ok={workflowOk} label={workflowOk ? 'Workflow enabled' : 'Workflow idle'} />
+          </div>
         </div>
 
-        {accountLoading ? (
-          <div className="flex items-center gap-2 text-muted text-sm">
-            <Loader2 size={16} className="animate-spin" /> Loading account...
-          </div>
-        ) : account?.connected ? (
-          <div className="rounded-lg border border-border bg-panel p-4 space-y-4">
-            {/* Account info row */}
-            <div className="flex items-center gap-3">
-              <img
-                src={account.avatarUrl}
-                alt={account.username}
-                loading="lazy"
-                className="w-10 h-10 rounded-full border border-border"
-              />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-[var(--text)] truncate">
-                  @{account.username}
-                </p>
-                <p className="text-xs text-muted">
-                  Connected {account.connectedAt ? new Date(account.connectedAt).toLocaleDateString() : ''}
-                </p>
+        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-5">
+          {[
+            { icon: KeyRound, title: 'Credential', value: credentialOk ? account?.username ? `@${account.username}` : 'Connected' : 'Add PAT', tone: credentialOk ? 'text-emerald-300' : 'text-muted' },
+            { icon: Github, title: 'Repository', value: repoOk ? `${status?.repoOwner}/${status?.repoName}` : 'Not connected', tone: repoOk ? 'text-emerald-300' : 'text-muted' },
+            { icon: RadioTower, title: 'Webhook', value: repoOk ? timeAgo(status?.lastWebhookAt) : 'Locked', tone: webhookOk ? 'text-emerald-300' : repoOk ? 'text-amber-300' : 'text-muted' },
+            { icon: GitBranch, title: 'Workflow', value: workflowOk ? workflowId : workflowsLoading ? 'Loading…' : `${workflows.length} discovered`, tone: workflowOk ? 'text-emerald-300' : 'text-muted' },
+            { icon: GitPullRequest, title: 'Auto PR', value: autoPrOk ? `to ${autoPrBranch}` : 'Disabled', tone: autoPrOk ? 'text-emerald-300' : 'text-muted' },
+          ].map(item => {
+            const Icon = item.icon;
+            return (
+              <div key={item.title} className="rounded-xl border border-border bg-bg/60 p-2.5">
+                <div className="flex items-center gap-2 text-xs text-muted">
+                  <Icon size={14} />
+                  {item.title}
+                </div>
+                <div className={`mt-1.5 truncate text-sm font-medium ${item.tone}`}>{item.value}</div>
               </div>
-              <div className="flex items-center gap-2">
+            );
+          })}
+        </div>
+      </section>
+
+      {/* ─── Section 1: Workspace GitHub Credential ───────────────────── */}
+      <section className="rounded-lg border border-border bg-panel px-4 py-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3 min-w-0">
+            <Github size={18} strokeWidth={1.5} className="mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-semibold text-[var(--text)]">GitHub Credential</h2>
+                {accountLoading ? (
+                  <span className="inline-flex items-center gap-1 text-xs text-muted">
+                    <Loader2 size={12} className="animate-spin" /> Loading
+                  </span>
+                ) : account?.connected ? (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">
+                    <CheckCircle2 size={11} /> @{account.username}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-border bg-bg px-2 py-0.5 text-xs text-muted">
+                    <Lock size={11} /> Not configured
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-muted">
+                {account?.connected
+                  ? `Stored locally and encrypted for this workspace${account.source ? ` · Source: ${account.source}` : ''}.`
+                  : 'Paste a PAT in the repository form below. Rorca stores it locally and encrypted for this workspace.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+            {account?.connected ? (
+              <>
                 <button
                   onClick={handleTestConnection}
                   disabled={testing}
                   className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 >
                   {testing ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                  Test
+                  Validate
                 </button>
                 {!showOAuthDisconnect ? (
                   <button
@@ -553,58 +778,47 @@ export default function GitHubSettingsPanel() {
                     </button>
                   </div>
                 )}
-              </div>
-            </div>
-
-            {/* OAuth disconnect error */}
-            {oauthDisconnectError && (
-              <div className="flex items-center gap-1.5 text-xs text-red-400">
-                <AlertCircle size={12} />
-                {oauthDisconnectError}
-              </div>
-            )}
-
-            {/* Test result */}
-            {testResult && (
-              <div className={`flex items-center gap-1.5 text-xs ${testResult.valid ? 'text-emerald-400' : 'text-red-400'}`}>
-                {testResult.valid ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
-                {testResult.valid ? `Token valid (${testResult.username})` : `Token invalid: ${testResult.error}`}
-              </div>
-            )}
-
-            {/* Scopes */}
-            {account.scopes && account.scopes.length > 0 && (
-              <div>
-                <div className="flex items-center gap-1.5 mb-2">
-                  <Shield size={14} className="text-muted" />
-                  <span className="text-xs font-medium text-muted">Granted Scopes</span>
-                </div>
-                <div className="space-y-1">
-                  {account.scopes.map(scope => (
-                    <div key={scope} className="flex items-center gap-2 text-xs">
-                      <code className="px-1.5 py-0.5 rounded bg-bg border border-border text-[var(--text)] font-mono">
-                        {scope}
-                      </code>
-                      <span className="text-muted">
-                        {SCOPE_DESCRIPTIONS[scope] || 'Access granted'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              </>
+            ) : (
+              REQUIRED_CAPABILITIES.map(capability => (
+                <span key={capability.key} className="inline-flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 text-xs text-muted">
+                  <Shield size={11} />
+                  {capability.label}
+                </span>
+              ))
             )}
           </div>
-        ) : (
-          <div className="rounded-lg border border-border bg-panel p-4">
-            <p className="text-sm text-muted mb-3">
-              No GitHub account connected. Workspace GitHub integration is configured separately from user sign-in.
-            </p>
+        </div>
+
+        {oauthDisconnectError && (
+          <div className="mt-2 flex items-center gap-1.5 text-xs text-red-400">
+            <AlertCircle size={12} />
+            {oauthDisconnectError}
+          </div>
+        )}
+        {testResult && (
+          <div className={`mt-2 flex items-center gap-1.5 text-xs ${testResult.valid ? 'text-emerald-400' : 'text-red-400'}`}>
+            {testResult.valid ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+            {testResult.valid ? `Token valid (${testResult.username})` : `Token invalid: ${testResult.error}`}
+          </div>
+        )}
+        {account?.connected && account.scopes && account.scopes.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5 border-t border-border pt-3">
+            {REQUIRED_CAPABILITIES.map(capability => {
+              const ok = hasAnyScope(account.scopes, capability.scopes);
+              return (
+                <span key={capability.key} className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${ok ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
+                  {ok ? <CheckCircle2 size={11} /> : <AlertCircle size={11} />}
+                  {capability.label}
+                </span>
+              );
+            })}
           </div>
         )}
       </section>
 
       {/* ─── Section 2: Workspace Repository ──────────────────────────── */}
-      <section className="border-t border-border pt-6">
+      <section className="pt-2">
         <div className="flex items-center gap-2 mb-4">
           <Webhook size={20} strokeWidth={1.5} />
           <h2 className="text-base font-semibold text-[var(--text)]">Workspace Repository</h2>
@@ -647,9 +861,63 @@ export default function GitHubSettingsPanel() {
               </div>
 
               {status.webhookId ? (
-                <div className="mt-3 flex items-center gap-2 text-xs text-muted">
-                  <Webhook size={14} />
-                  Events: push, pull_request, issues, check_run
+                <div className="mt-3 space-y-3">
+                  <div className="flex items-center gap-2 text-xs text-muted">
+                    <Webhook size={14} />
+                    Events: push, pull_request, issues, check_run
+                  </div>
+                  <div className="rounded-lg border border-border bg-bg/50 p-3 space-y-2">
+                    <div className="space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted">Webhook URL</span>
+                        <button
+                          type="button"
+                          onClick={handleCopyWebhookUrl}
+                          className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-muted transition-colors hover:text-[var(--text)] hover:bg-bg"
+                        >
+                          <Copy size={11} />
+                          {webhookUrlCopied ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                      <code className="block rounded border border-border bg-panel/80 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-[var(--text)] break-all">
+                        {webhookUrl}
+                      </code>
+                    </div>
+                    {webhookIsLocal && (
+                      <div className="flex items-start gap-2 text-xs text-amber-300">
+                        <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                        <span>Current URL looks local. Rorca does not bundle ngrok/localtunnel; set <code className="bg-bg px-1 rounded">RORCA_API_URL</code> to a public tunnel/host so GitHub can deliver events.</span>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={handlePingWebhook}
+                        disabled={pingingWebhook}
+                        className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {pingingWebhook ? <Loader2 size={12} className="animate-spin" /> : <RadioTower size={12} />}
+                        Ping webhook
+                      </button>
+                      {status.repoOwner && status.repoName && (
+                        <a
+                          href={`https://github.com/${status.repoOwner}/${status.repoName}/settings/hooks/${status.webhookId}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1.5"
+                        >
+                          <ExternalLink size={12} />
+                          Open in GitHub
+                        </a>
+                      )}
+                      <span className="text-xs text-muted">Last event: {timeAgo(status.lastWebhookAt)}</span>
+                    </div>
+                    {webhookPingResult && (
+                      <div className={`flex items-center gap-1.5 text-xs ${webhookPingResult.ok ? 'text-emerald-300' : 'text-red-400'}`}>
+                        {webhookPingResult.ok ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+                        {webhookPingResult.message}
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="mt-3 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1.5">
@@ -709,7 +977,7 @@ export default function GitHubSettingsPanel() {
         ) : (
           <div className="rounded-lg border border-border bg-panel p-4 space-y-3">
             <p className="text-sm text-muted">
-              Connect a GitHub repository to receive push, pull_request, issue, and check_run events via webhook.
+              Connect the repository Rorca should watch and operate on. This unlocks webhook health, workflow discovery, PR templates, and auto-PR settings.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -736,7 +1004,7 @@ export default function GitHubSettingsPanel() {
             </div>
 
             <label className="block text-xs text-muted">
-              GitHub personal access token (needs admin:repo_hook scope)
+              GitHub personal access token
               <input
                 type="password"
                 value={githubToken}
@@ -746,9 +1014,35 @@ export default function GitHubSettingsPanel() {
               />
             </label>
 
-            <p className="text-xs text-muted">
-              The token is only used to create the webhook and is not stored.
-            </p>
+            <div className="rounded-lg border border-border bg-bg/50 p-3 space-y-2">
+              <div className="space-y-1.5 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-muted">Webhook URL</span>
+                  <button
+                    type="button"
+                    onClick={handleCopyWebhookUrl}
+                    className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-muted transition-colors hover:text-[var(--text)] hover:bg-bg"
+                  >
+                    <Copy size={11} />
+                    {webhookUrlCopied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+                <code className="block rounded border border-border bg-panel/80 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-[var(--text)] break-all">
+                  {webhookUrl}
+                </code>
+              </div>
+              {webhookIsLocal && (
+                <div className="flex items-start gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-300">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                  <span>
+                    GitHub cannot deliver webhooks to localhost. Rorca does not bundle ngrok/localtunnel; set <code className="bg-bg px-1 rounded">RORCA_API_URL</code> to a public ngrok, Cloudflare Tunnel, localtunnel, or hosted URL before relying on inbound events.
+                  </span>
+                </div>
+              )}
+              <p className="text-xs text-muted">
+                Stored locally and encrypted for this workspace. Required capabilities: repo, admin/write repo hook, and workflow for dispatch.
+              </p>
+            </div>
 
             {connectError && (
               <div className="flex items-center gap-1.5 text-xs text-red-400">
@@ -756,35 +1050,40 @@ export default function GitHubSettingsPanel() {
               </div>
             )}
 
-            <button
-              onClick={handleConnect}
-              disabled={connecting || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()}
-              className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
-            >
-              {connecting ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" />
-                  Configuring GitHub webhook...
-                </>
-              ) : connectSuccess ? (
-                <>
-                  <CheckCircle2 size={14} className="text-emerald-300" />
-                  Webhook registered
-                </>
-              ) : (
-                <>
-                  <Link2 size={14} />
-                  Connect GitHub
-                </>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={handleConnect}
+                disabled={connecting || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()}
+                className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 disabled:cursor-not-allowed disabled:bg-border disabled:text-muted disabled:hover:opacity-100 transition-colors flex items-center gap-1.5"
+              >
+                {connecting ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    Configuring GitHub webhook...
+                  </>
+                ) : connectSuccess ? (
+                  <>
+                    <CheckCircle2 size={14} className="text-emerald-300" />
+                    Webhook registered
+                  </>
+                ) : (
+                  <>
+                    <Link2 size={14} />
+                    Connect GitHub
+                  </>
+                )}
+              </button>
+              {(!repoOwner.trim() || !repoName.trim() || !githubToken.trim()) && (
+                <span className="text-xs text-muted">Enter owner, repo, and PAT to continue.</span>
               )}
-            </button>
+            </div>
           </div>
         )}
         </div>
       </section>
 
       {/* ─── Section 3: Auto-PR Settings ──────────────────────────────── */}
-      {status?.connected && (
+      {status?.connected ? (
         <section className="border-t border-border pt-6">
           <div className="flex items-center gap-2 mb-4">
             <GitPullRequest size={20} strokeWidth={1.5} />
@@ -888,6 +1187,17 @@ export default function GitHubSettingsPanel() {
             </button>
           </div>
         </section>
+      ) : (
+        <section className="border-t border-border pt-6">
+          <div className="flex items-center gap-2 mb-4">
+            <GitPullRequest size={20} strokeWidth={1.5} />
+            <h2 className="text-base font-semibold text-[var(--text)]">Auto-PR Settings</h2>
+          </div>
+          <LockedPanel
+            title="Connect a repository to enable Auto-PRs"
+            message="Rorca needs repository metadata and a GitHub credential before it can create pull requests after successful runs."
+          />
+        </section>
       )}
 
       {/* ─── Section 4: GitHub Actions YAML ───────────────────────────── */}
@@ -942,16 +1252,16 @@ export default function GitHubSettingsPanel() {
         </div>
 
         {!status?.connected ? (
-          <p className="text-xs text-muted">
-            No workflow configured — add a GitHub Actions workflow to trigger on run completion.
-            Connect a repository above to enable this feature.
-          </p>
+          <LockedPanel
+            title="Connect a repository to enable workflows"
+            message="Rorca will discover GitHub Actions workflows from the connected repo and let you choose a workflow_dispatch target."
+          />
         ) : (
           <div className="space-y-4">
             <p className="text-xs text-muted">
               Automatically trigger a GitHub Actions workflow when a pipeline run completes successfully.
               The workflow must have a <code className="bg-surface px-1 rounded">workflow_dispatch</code> trigger.
-              Requires the <code className="bg-surface px-1 rounded">workflow</code> OAuth scope.
+              Requires the <code className="bg-surface px-1 rounded">workflow</code> PAT scope.
             </p>
 
             {/* Enable toggle */}
@@ -973,17 +1283,57 @@ export default function GitHubSettingsPanel() {
               <div className="space-y-3 pl-0">
                 {/* Workflow file */}
                 <div>
-                  <label className="block text-xs font-medium text-muted mb-1">Workflow filename</label>
-                  <input
-                    type="text"
-                    value={workflowId}
-                    onChange={e => setWorkflowId(e.target.value)}
-                    placeholder="deploy.yml"
-                    className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
-                  />
-                  <p className="text-[11px] text-muted mt-1">
-                    Filename of the workflow (e.g. <code className="bg-surface px-1 rounded">deploy.yml</code>) or numeric workflow ID.
-                  </p>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium text-muted">Workflow</label>
+                    <button
+                      type="button"
+                      onClick={fetchWorkflows}
+                      disabled={workflowsLoading}
+                      className="text-xs text-muted hover:text-[var(--text)] transition-colors flex items-center gap-1 disabled:opacity-50"
+                    >
+                      {workflowsLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      Refresh
+                    </button>
+                  </div>
+                  {workflows.length > 0 ? (
+                    <select
+                      value={workflowId}
+                      onChange={e => setWorkflowId(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                    >
+                      <option value="">Select workflow…</option>
+                      {workflows.map(workflow => (
+                        <option key={workflow.id} value={workflow.path || String(workflow.id)}>
+                          {workflow.name} · {workflow.path} · {workflow.state}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={workflowId}
+                      onChange={e => setWorkflowId(e.target.value)}
+                      placeholder="deploy.yml"
+                      className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                    />
+                  )}
+                  {workflowsError ? (
+                    <p className="text-[11px] text-amber-300 mt-1">{workflowsError}. You can still enter a workflow filename manually.</p>
+                  ) : (
+                    <p className="text-[11px] text-muted mt-1">
+                      Choose a discovered workflow, or enter a filename/numeric ID manually if discovery is unavailable.
+                    </p>
+                  )}
+                  {workflowId && workflows.find(w => (w.path || String(w.id)) === workflowId)?.htmlUrl && (
+                    <a
+                      href={workflows.find(w => (w.path || String(w.id)) === workflowId)?.htmlUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1 inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
+                    >
+                      <ExternalLink size={11} /> Open workflow in GitHub
+                    </a>
+                  )}
                 </div>
 
                 {/* Branch ref */}
@@ -1037,9 +1387,6 @@ export default function GitHubSettingsPanel() {
         )}
       </section>
 
-      {/* ── CI Autofix ───────────────────────────────────────────────────────── */}
-      <CiAutofixSection workspaceId={workspaceId} />
-
       {/* ─── Section 6: PR Template ───────────────────────────────────── */}
       <section className="border-t border-border pt-6 pb-6">
         <div className="flex items-center justify-between mb-3">
@@ -1049,33 +1396,35 @@ export default function GitHubSettingsPanel() {
           </div>
           <button
             onClick={() => setPrTemplatePreviewVisible(v => !v)}
-            className="text-xs text-muted hover:text-[var(--text)] transition-colors border border-border rounded px-2 py-1"
+            disabled={!status?.connected}
+            className="text-xs text-muted hover:text-[var(--text)] transition-colors border border-border rounded px-2 py-1 disabled:opacity-50 disabled:hover:text-muted"
           >
-            {prTemplatePreviewVisible ? 'Hide Preview' : 'Show Preview'}
+            {prTemplatePreviewVisible ? 'Hide Preview' : 'Preview latest run'}
           </button>
         </div>
 
-        <p className="text-xs text-muted mb-3">
-          Customize the PR description used by auto-PR creation (US-028).
-          Supported variables:{' '}
-          {[
-            '{{spec.title}}', '{{spec.brief}}',
-            '{{run.storiesPassed}}', '{{run.storiesTotal}}',
-            '{{run.storiesFailed}}', '{{run.storiesSkipped}}',
-            '{{run.tokensInput}}', '{{run.tokensOutput}}', '{{run.tokensTotal}}',
-            '{{run.costUsd}}', '{{run.duration}}',
-            '{{run.agentType}}', '{{run.model}}',
-            '{{run.id}}', '{{run.diffStats}}',
-          ].map((v, i) => (
-            <span key={v}>
-              <code className="bg-surface px-1 rounded">{v}</code>
-              {i < 14 ? ', ' : ''}
-            </span>
-          ))}
-          . Unrecognized variables are left as-is.
-        </p>
+        <div className="mb-3 space-y-2">
+          <p className="text-xs text-muted">
+            Customize the PR description used by auto-PR creation. Unrecognized variables are left as-is.
+          </p>
+          <details className="rounded-lg border border-border bg-panel/50 px-3 py-2 text-xs text-muted">
+            <summary className="cursor-pointer select-none text-[var(--text)]">Supported template variables</summary>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {PR_TEMPLATE_VARIABLES.map(variable => (
+                <code key={variable} className="rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[11px] text-muted">
+                  {variable}
+                </code>
+              ))}
+            </div>
+          </details>
+        </div>
 
-        {!prTemplateLoaded ? (
+        {!status?.connected ? (
+          <LockedPanel
+            title="Connect a repository to preview PR templates"
+            message="Once a repository is connected, Rorca previews templates with the latest local spec/run data when available and falls back to sample data otherwise."
+          />
+        ) : !prTemplateLoaded ? (
           /* Loading skeleton */
           <div className="space-y-2 mb-3" aria-busy="true" aria-label="Loading PR template">
             {[80, 60, 90, 70, 50].map((w, i) => (
@@ -1104,10 +1453,20 @@ export default function GitHubSettingsPanel() {
             {prTemplatePreviewVisible && (
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs text-muted">Preview (sample data)</label>
+                  <label className="block text-xs text-muted">
+                    Preview ({prTemplatePreview?.source === 'latest-run' ? 'latest run' : 'sample fallback'})
+                  </label>
                 </div>
-                {deferredPrTemplate !== prTemplate ? (
-                  /* Skeleton while deferred value is stale */
+                {prTemplatePreviewError && (
+                  <p className="mb-1 text-[11px] text-amber-300">{prTemplatePreviewError}</p>
+                )}
+                {prTemplatePreview?.run && (
+                  <p className="mb-1 text-[11px] text-muted">
+                    Latest run: {prTemplatePreview.run.title || `Run #${prTemplatePreview.run.id}`} · {prTemplatePreview.run.storiesPassed ?? 0}/{prTemplatePreview.run.storiesTotal ?? 0} stories passed
+                  </p>
+                )}
+                {deferredPrTemplate !== prTemplate || prTemplatePreviewLoading ? (
+                  /* Skeleton while deferred/server value is stale */
                   <div className="rounded bg-bg border border-border p-3 space-y-2 h-[calc(16*1.5rem+0.5rem)] overflow-auto" aria-busy="true" aria-label="Preview loading">
                     {[90, 70, 80, 60, 75, 55, 85, 65].map((w, i) => (
                       <div key={i} className="h-3 rounded bg-border animate-pulse" style={{ width: `${w}%` }} />
@@ -1126,16 +1485,16 @@ export default function GitHubSettingsPanel() {
         <div className="flex items-center gap-2 mt-2">
           <button
             onClick={handleSavePrTemplate}
-            disabled={prTemplateSaving || !prTemplateLoaded}
-            className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
+            disabled={prTemplateSaving || !prTemplateLoaded || !status?.connected}
+            className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:cursor-not-allowed disabled:bg-border disabled:text-muted disabled:hover:opacity-100 transition-colors flex items-center gap-1.5"
           >
             {prTemplateSaving ? <Loader2 size={14} className="animate-spin" /> : null}
             {prTemplateSaved ? 'Saved!' : 'Save Template'}
           </button>
           <button
             onClick={() => { setPrTemplate(''); setPrTemplateSaved(false); }}
-            disabled={!prTemplateLoaded}
-            className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors flex items-center gap-1.5 text-muted disabled:opacity-50"
+            disabled={!prTemplateLoaded || !status?.connected}
+            className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors flex items-center gap-1.5 text-muted disabled:cursor-not-allowed disabled:opacity-50"
             title="Reset to default template"
           >
             <RotateCcw size={12} />
@@ -1167,7 +1526,7 @@ export default function GitHubSettingsPanel() {
             <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 space-y-3">
               <p className="text-sm text-red-400 font-medium">Are you sure?</p>
               <p className="text-xs text-muted">
-                This will revoke the OAuth token and remove all GitHub-specific data.
+                This will remove the stored GitHub credential, repo webhook wiring, and GitHub-specific workspace settings.
                 Pipeline runs will continue but without GitHub integration.
               </p>
 
@@ -1209,260 +1568,5 @@ export default function GitHubSettingsPanel() {
       )}
 
     </div>
-  );
-}
-
-// ─── CI Autofix section (embedded in GitHub settings) ────────────────────────
-
-interface CiAutofixRun {
-  id: number;
-  headSha: string;
-  branchName: string;
-  checkRunName: string;
-  annotationCount: number;
-  agentType: string;
-  status: 'triggered' | 'completed' | 'failed' | 'skipped';
-  errorSummary: string | null;
-  createdAt: string;
-  finishedAt: string | null;
-  runId: number | null;
-}
-
-interface CiAutofixConfig {
-  enabled: boolean;
-  checkPatterns: string[] | null;
-  maxRetries: number;
-  recentRuns: CiAutofixRun[];
-}
-
-function shortSha(sha: string) { return sha.slice(0, 7); }
-
-function ciRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60_000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-function CiStatusBadge({ status }: { status: CiAutofixRun['status'] }) {
-  const map = {
-    triggered: { icon: Loader2, label: 'Running',  cls: 'text-amber-400 bg-amber-400/10', spin: true },
-    completed: { icon: CheckCircle2, label: 'Fixed', cls: 'text-green-400 bg-green-400/10', spin: false },
-    failed:    { icon: AlertCircle,  label: 'Failed', cls: 'text-red-400 bg-red-400/10', spin: false },
-    skipped:   { icon: AlertCircle,  label: 'Skipped', cls: 'text-muted bg-border/30', spin: false },
-  };
-  const { icon: Icon, label, cls, spin } = map[status] ?? map.skipped;
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${cls}`}>
-      <Icon size={11} className={spin ? 'animate-spin' : ''} />
-      {label}
-    </span>
-  );
-}
-
-function CiAutofixSection({ workspaceId }: { workspaceId: string | null }) {
-  const [config, setConfig] = useState<CiAutofixConfig | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [enabled, setEnabled] = useState(false);
-  const [patterns, setPatterns] = useState<string[]>([]);
-  const [maxRetries, setMaxRetries] = useState(2);
-  const [newPattern, setNewPattern] = useState('');
-  const [dirty, setDirty] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  const load = useCallback(async () => {
-    if (!workspaceId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await apiFetch<CiAutofixConfig>(`/api/workspaces/${workspaceId}/ci-autofix`);
-      setConfig(data);
-      setEnabled(data.enabled);
-      setPatterns(data.checkPatterns ?? ['*']);
-      setMaxRetries(data.maxRetries);
-      setDirty(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load');
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceId]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const save = async () => {
-    if (!workspaceId || saving) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await apiFetch(`/api/workspaces/${workspaceId}/ci-autofix`, {
-        method: 'PATCH',
-        body: JSON.stringify({ enabled, checkPatterns: patterns.length > 0 ? patterns : null, maxRetries }),
-      });
-      setDirty(false);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const addPattern = () => {
-    const val = newPattern.trim();
-    if (!val || patterns.includes(val)) return;
-    setPatterns(p => [...p, val]);
-    setNewPattern('');
-    setDirty(true);
-  };
-
-  if (!workspaceId) return null;
-
-  return (
-    <>
-      <hr className="border-border my-2" />
-
-      <section className="space-y-5">
-        {/* Header */}
-        <div className="flex items-center gap-2">
-          <Bot size={16} className="text-accent shrink-0" />
-          <h2 className="text-sm font-semibold text-[var(--text)]">CI Autofix</h2>
-        </div>
-        <p className="text-xs text-muted -mt-3 leading-relaxed">
-          When a GitHub check run fails, Rorca auto-generates a fix spec, runs it with your configured agent, and pushes the fix back to the source branch.
-        </p>
-
-        {error && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
-            <AlertCircle size={13} className="mt-0.5 shrink-0" />
-            {error}
-          </div>
-        )}
-
-        {loading ? (
-          <div className="flex items-center gap-2 text-muted text-sm">
-            <Loader2 size={14} className="animate-spin" /> Loading…
-          </div>
-        ) : (
-          <>
-            {/* Enable toggle */}
-            <label className="flex items-center justify-between p-3 rounded-lg border border-border cursor-pointer hover:border-accent/30 transition-colors">
-              <div>
-                <div className="text-sm font-medium text-[var(--text)]">Enable CI Autofix</div>
-                <div className="text-xs text-muted mt-0.5">
-                  Triggers on <code className="font-mono bg-border/40 px-1 rounded text-[10px]">check_run</code> webhook failures
-                </div>
-              </div>
-              <div className="relative flex items-center justify-center shrink-0 ml-4">
-                <input type="checkbox" checked={enabled} onChange={e => { setEnabled(e.target.checked); setDirty(true); }} className="peer sr-only" />
-                <div className="w-9 h-5 rounded-full bg-border peer-checked:bg-accent transition-colors" />
-                <div className="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
-              </div>
-            </label>
-
-            {/* Check patterns */}
-            <div className="space-y-2">
-              <div className="text-xs font-medium text-muted uppercase tracking-wider">Check Name Patterns</div>
-              <p className="text-xs text-muted">Glob patterns (micromatch) — which check names trigger autofix. Use <code className="font-mono bg-border/40 px-1 rounded">*</code> for all.</p>
-              <div className="flex flex-wrap gap-1.5 min-h-[28px]">
-                {patterns.map((p, i) => (
-                  <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-accent/15 text-accent text-[12px] font-mono border border-accent/20">
-                    {p}
-                    <button type="button" onClick={() => { setPatterns(prev => prev.filter((_, j) => j !== i)); setDirty(true); }} className="hover:text-red-400 transition-colors">
-                      <X size={10} />
-                    </button>
-                  </span>
-                ))}
-                {patterns.length === 0 && <span className="text-xs text-muted/60 italic">No patterns</span>}
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="text" value={newPattern} onChange={e => setNewPattern(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && addPattern()}
-                  placeholder="e.g.  typecheck  or  ci / *"
-                  className="flex-1 px-3 py-1.5 rounded-lg border border-border bg-[var(--bg)] text-sm text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent/60 font-mono"
-                />
-                <button type="button" onClick={addPattern} disabled={!newPattern.trim()}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-border text-sm text-muted hover:border-accent/40 hover:text-accent disabled:opacity-40 transition-colors">
-                  <Plus size={13} /> Add
-                </button>
-              </div>
-            </div>
-
-            {/* Max retries */}
-            <div className="space-y-2">
-              <div className="text-xs font-medium text-muted uppercase tracking-wider">Max Retries per SHA</div>
-              <div className="flex gap-1.5">
-                {[1,2,3,4,5].map(n => (
-                  <button key={n} type="button" onClick={() => { setMaxRetries(n); setDirty(true); }}
-                    className={`w-10 py-1.5 rounded text-sm font-medium border transition-colors ${maxRetries === n ? 'bg-accent text-white border-accent' : 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'}`}>
-                    {n}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Save */}
-            {saved && <p className="text-xs text-green-400">Saved</p>}
-            {dirty && (
-              <div className="flex items-center gap-3">
-                <button type="button" onClick={save} disabled={saving}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-60 transition-colors">
-                  {saving && <RefreshCw size={13} className="animate-spin" />}
-                  {saving ? 'Saving…' : 'Save'}
-                </button>
-                <button type="button" onClick={() => { if (config) { setEnabled(config.enabled); setPatterns(config.checkPatterns ?? ['*']); setMaxRetries(config.maxRetries); setDirty(false); } }}
-                  className="text-sm text-muted hover:text-[var(--text)] transition-colors">Cancel</button>
-              </div>
-            )}
-
-            {/* Recent runs */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-medium text-muted uppercase tracking-wider flex items-center gap-1.5">
-                  <ScrollText size={12} /> Recent Autofix Runs
-                </div>
-                <button type="button" onClick={load} className="text-muted hover:text-[var(--text)] transition-colors" aria-label="Refresh">
-                  <RefreshCw size={12} />
-                </button>
-              </div>
-              {(config?.recentRuns?.length ?? 0) === 0 ? (
-                <div className="p-4 rounded-lg border border-border text-center text-xs text-muted">
-                  No autofix runs yet. Rorca will attempt fixes here once CI checks start failing.
-                </div>
-              ) : (
-                <div className="rounded-lg border border-border overflow-hidden divide-y divide-border">
-                  {(config?.recentRuns ?? []).map(run => (
-                    <div key={run.id} className="flex items-start gap-3 px-3 py-2.5 hover:bg-white/2 transition-colors">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <code className="text-xs font-mono text-[var(--text)]">{shortSha(run.headSha)}</code>
-                          <span className="text-xs text-muted truncate max-w-[140px]">{run.branchName}</span>
-                          <CiStatusBadge status={run.status} />
-                          <span className="text-[10px] text-muted/60 font-mono uppercase">{run.agentType}</span>
-                        </div>
-                        <div className="mt-0.5 text-xs text-muted truncate">{run.checkRunName}</div>
-                        {run.errorSummary && <div className="mt-0.5 text-[11px] text-red-400/80 line-clamp-1">{run.errorSummary}</div>}
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0 text-[10px] text-muted">
-                        <span>{ciRelativeTime(run.createdAt)}</span>
-                        {run.runId && <a href={`/runs/${run.runId}`} className="text-accent hover:underline flex items-center gap-0.5">Run <ExternalLink size={9} /></a>}
-                        <span className="text-muted/50">{run.annotationCount}err</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
-        )}
-      </section>
-    </>
   );
 }
