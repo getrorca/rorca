@@ -7,17 +7,17 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Share2, Globe, Sparkles, Files, Cpu } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Share2, Globe, Sparkles, Files, Cpu, Database, BookOpen } from 'lucide-react';
 import { Github } from './icons/GithubIcon';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 
-/** Safely parse a WAL event payload string into an object. Returns null if unparseable. */
-function parsePayload(payload: string | null): Record<string, unknown> | null {
+/** Safely parse a WAL event payload into an object. Returns null if unparseable. */
+function parsePayload(payload: string | Record<string, unknown> | null): Record<string, unknown> | null {
   if (!payload) return null;
   try {
-    return typeof payload === 'string' ? JSON.parse(payload) : (payload as Record<string, unknown>);
+    return typeof payload === 'string' ? JSON.parse(payload) : payload;
   } catch {
     return null;
   }
@@ -193,6 +193,13 @@ const WAVE_STATUS_STYLES: Record<WaveStatus, { bg: string; text: string; label: 
 
 // ─── Merged story type ───────────────────────────────────────────────────────
 
+interface StoryRetrievalInfo {
+  selectedCount: number | null;
+  needsMoreEvidence: boolean;
+  telemetryId: string | null;
+  matchedSkills: string[];
+}
+
 interface MergedStory {
   storyId: string;
   title: string;
@@ -207,6 +214,7 @@ interface MergedStory {
   prSyncPending: boolean; // US-034: true transiently when PR body is being updated
   graphHits: number | null; // US-007: graph node hit count from WAL event payload
   browserMcp: boolean; // BMC-005: true when story_started WAL event has browser_mcp: true
+  retrieval: StoryRetrievalInfo | null; // RAG/memory retrieval telemetry from story_started WAL payload
 }
 
 // ─── Live elapsed timer ──────────────────────────────────────────────────────
@@ -274,9 +282,13 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   // CTM-004: Per-story context accordion (files / tokens first; skills are routing metadata only)
   const [contextExpanded, setContextExpanded] = useState(false);
   const hasContextTokens = !!context && (context.inputTokens > 0 || context.outputTokens > 0);
-  const hasContextFiles = !!context && context.contextFiles.length > 0;
-  const hasRoutingSkills = !!context && context.skills.length > 0;
-  const hasContext = !!context && (hasContextFiles || hasContextTokens);
+  const contextFiles = context?.contextFiles ?? [];
+  const routingSkills = context?.skills ?? [];
+  const hasContextFiles = contextFiles.length > 0;
+  const hasRoutingSkills = routingSkills.length > 0;
+  const hasRagContext = !!story.retrieval && (story.retrieval.selectedCount != null || story.retrieval.telemetryId != null || story.retrieval.matchedSkills.length > 0 || story.retrieval.needsMoreEvidence);
+  const hasGraphContext = includeGraph || story.graphHits != null;
+  const hasContext = hasContextFiles || hasContextTokens || hasRagContext || hasGraphContext || hasRoutingSkills;
 
   const handleToggleContext = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -454,7 +466,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
       </div>
 
       {/* CTM-004: Per-story context accordion panel */}
-      {hasContext && contextExpanded && context && (
+      {hasContext && contextExpanded && (
         <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2.5 bg-bg/40 border-b border-border/50`}>
           <div className="rounded-lg border border-border/70 bg-panel/70 overflow-hidden">
             <div className="px-2.5 py-2 border-b border-border/60 flex items-start justify-between gap-2">
@@ -463,18 +475,18 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
                   <Files size={10} className="text-blue-400" /> Context used
                 </p>
                 <p className="mt-0.5 text-[10px] text-muted leading-4">
-                  Files and token budget that were available to the story prompt. Skill matches are shown separately as routing metadata.
+                  Prompt context channels for this story. Routed files are only one channel; CAG/spec context, RAG memory, and graph context are shown separately when recorded.
                 </p>
               </div>
               {hasContextTokens && (
                 <div className="shrink-0 grid grid-cols-2 gap-1 text-right">
                   <div className="rounded bg-bg/70 px-1.5 py-1">
                     <div className="text-[9px] uppercase tracking-wider text-muted">In</div>
-                    <div className="text-[10px] font-mono text-[var(--text)]">{context.inputTokens.toLocaleString()}</div>
+                    <div className="text-[10px] font-mono text-[var(--text)]">{(context?.inputTokens ?? 0).toLocaleString()}</div>
                   </div>
                   <div className="rounded bg-bg/70 px-1.5 py-1">
                     <div className="text-[9px] uppercase tracking-wider text-muted">Out</div>
-                    <div className="text-[10px] font-mono text-[var(--text)]">{context.outputTokens.toLocaleString()}</div>
+                    <div className="text-[10px] font-mono text-[var(--text)]">{(context?.outputTokens ?? 0).toLocaleString()}</div>
                   </div>
                 </div>
               )}
@@ -483,22 +495,72 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
             <div className="px-2.5 py-2 space-y-2.5">
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
-                  <Files size={10} className="text-blue-400" /> Context files ({context.contextFiles.length})
+                  <BookOpen size={10} className="text-cyan-400" /> Spec / CAG context
                 </p>
-                {context.contextFiles.length > 0 ? (
+                <div className="rounded border border-border/70 bg-bg/40 px-2 py-1.5 text-[10px] leading-4 text-muted">
+                  Story title, description, acceptance criteria, dependencies, and the execution packet are included in the prompt even when no extra source files are routed.
+                </div>
+              </div>
+
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                  <Database size={10} className="text-emerald-400" /> RAG / memory retrieval
+                </p>
+                {hasRagContext && story.retrieval ? (
+                  <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                    {story.retrieval.selectedCount != null && (
+                      <span className="rounded bg-emerald-500/10 text-emerald-300 px-1.5 py-0.5">
+                        {story.retrieval.selectedCount} selected
+                      </span>
+                    )}
+                    {story.retrieval.needsMoreEvidence && (
+                      <span className="rounded bg-amber-500/10 text-amber-300 px-1.5 py-0.5">needs more evidence</span>
+                    )}
+                    {story.retrieval.telemetryId && (
+                      <code className="rounded bg-bg px-1.5 py-0.5 text-muted border border-border/60" title={story.retrieval.telemetryId}>
+                        {story.retrieval.telemetryId}
+                      </code>
+                    )}
+                    {story.retrieval.matchedSkills.slice(0, 4).map(skill => (
+                      <span key={skill} className="rounded bg-purple-500/10 text-purple-300 px-1.5 py-0.5">{skill}</span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded border border-dashed border-border/70 bg-bg/40 px-2 py-1.5 text-[10px] leading-4 text-muted">
+                    No per-story memory retrieval telemetry was recorded for this run.
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                  <Share2 size={10} className="text-indigo-400" /> Knowledge graph
+                </p>
+                <div className="rounded border border-border/70 bg-bg/40 px-2 py-1.5 text-[10px] leading-4 text-muted">
+                  {includeGraph
+                    ? `Graph context enabled${story.graphHits != null ? ` · ${story.graphHits} hits recorded` : ' · no hits recorded yet'}`
+                    : 'Graph context was not enabled for this run.'}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                  <Files size={10} className="text-blue-400" /> Routed files ({contextFiles.length})
+                </p>
+                {contextFiles.length > 0 ? (
                   <div className="grid gap-1 max-w-full">
-                    {context.contextFiles.slice(0, 20).map(f => (
+                    {contextFiles.slice(0, 20).map(f => (
                       <code key={f} className="block min-w-0 truncate px-1.5 py-0.5 rounded bg-bg text-[10px] font-mono text-accent/85 border border-border/60" title={f}>
                         {f}
                       </code>
                     ))}
-                    {context.contextFiles.length > 20 && (
-                      <span className="text-[10px] text-muted">+{context.contextFiles.length - 20} more files</span>
+                    {contextFiles.length > 20 && (
+                      <span className="text-[10px] text-muted">+{contextFiles.length - 20} more files</span>
                     )}
                   </div>
                 ) : (
                   <div className="rounded border border-dashed border-border/70 bg-bg/40 px-2 py-1.5 text-[10px] leading-4 text-muted">
-                    No file-level context was recorded for this story. Token usage is available, but the run did not persist a per-story file list.
+                    No extra source/doc files were routed for this story. This does not mean the story had no CAG/RAG context.
                   </div>
                 )}
               </div>
@@ -506,10 +568,10 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
               {hasRoutingSkills && (
                 <div>
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
-                    <Sparkles size={10} className="text-purple-400" /> Routing skills ({context.skills.length})
+                    <Sparkles size={10} className="text-purple-400" /> Routing skills ({routingSkills.length})
                   </p>
                   <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto pr-1">
-                    {context.skills.map(sk => (
+                    {routingSkills.map(sk => (
                       <span
                         key={sk.name}
                         className="inline-flex min-w-0 max-w-full items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-300 text-[10px] font-medium"
@@ -863,15 +925,37 @@ export default function RunStoryList({
     for (const evt of walEvents) {
       if (!evt.story_id) continue;
       if (evt.event_type === 'story_started' && evt.payload) {
-        try {
-          const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload;
-          if (payload.browser_mcp === true) {
-            set.add(evt.story_id);
-          }
-        } catch { /* ignore */ }
+        const payload = parsePayload(evt.payload);
+        if (payload?.browser_mcp === true) {
+          set.add(evt.story_id);
+        }
       }
     }
     return set;
+  }, [walEvents]);
+
+  // CTM/MOG: Extract per-story RAG/memory retrieval telemetry from story_started WAL payloads.
+  const retrievalMap = useMemo(() => {
+    const map = new Map<string, StoryRetrievalInfo>();
+    for (const evt of walEvents) {
+      if (!evt.story_id || evt.event_type !== 'story_started' || !evt.payload) continue;
+      const payload = parsePayload(evt.payload);
+      if (!payload) continue;
+      const matchedSkills = Array.isArray(payload.retrieval_matched_skills)
+        ? payload.retrieval_matched_skills.filter((value): value is string => typeof value === 'string')
+        : [];
+      const selectedCount = typeof payload.retrieval_selected_count === 'number'
+        ? payload.retrieval_selected_count
+        : null;
+      const telemetryId = typeof payload.retrieval_telemetry_id === 'string'
+        ? payload.retrieval_telemetry_id
+        : null;
+      const needsMoreEvidence = payload.retrieval_needs_more_evidence === true;
+      if (selectedCount != null || telemetryId || needsMoreEvidence || matchedSkills.length > 0) {
+        map.set(evt.story_id, { selectedCount, telemetryId, needsMoreEvidence, matchedSkills });
+      }
+    }
+    return map;
   }, [walEvents]);
 
   // Merge spec stories with results to derive status
@@ -976,9 +1060,10 @@ export default function RunStoryList({
         prSyncPending: prSyncActive && (status === 'pass' || status === 'fail'),
         graphHits: graphHitsMap.get(spec.id) ?? null,
         browserMcp: browserMcpStoryIds.has(spec.id),
+        retrieval: retrievalMap.get(spec.id) ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, runState]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
