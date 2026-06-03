@@ -28,14 +28,9 @@ const WORKSPACE_RESPONSE = { items: [WORKSPACE_ROW], total: 1, hasMore: false };
 
 const MOCK_GITHUB_STATUS = {
   connected: false,
-  repoOwner: null,
-  repoName: null,
-  installationId: null,
 };
 
 const MOCK_GITHUB_ACCOUNT = {
-  login: null,
-  avatarUrl: null,
   connected: false,
 };
 
@@ -43,13 +38,19 @@ const MOCK_CONNECTED_STATUS = {
   connected: true,
   repoOwner: 'testorg',
   repoName: 'test-repo',
-  installationId: '12345',
+  webhookId: 12345,
+  autoPr: {
+    enabled: false,
+    targetBranch: 'main',
+    reviewers: [],
+  },
 };
 
 const MOCK_CONNECTED_ACCOUNT = {
-  login: 'testuser',
+  username: 'testuser',
   avatarUrl: 'https://avatars.githubusercontent.com/u/123456?v=4',
   connected: true,
+  scopes: ['repo', 'admin:repo_hook'],
 };
 
 beforeAll(() => {
@@ -65,75 +66,81 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.setItem('rorca_workspaceId', 'ws-1');
-  mockApiFetch.mockResolvedValue({ items: [], total: 0, hasMore: false });
 });
+
+function mockWorkspaceApi(overrides?: {
+  status?: Record<string, unknown>;
+  account?: Record<string, unknown>;
+  workflowConfig?: Record<string, unknown> | null;
+  throwGithub?: boolean;
+}) {
+  mockApiFetch.mockImplementation(async (path: string) => {
+    if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+    if (path === '/api/workspaces/ws-1/github') {
+      if (overrides?.throwGithub) throw new Error('GitHub API error');
+      return overrides?.status ?? MOCK_GITHUB_STATUS;
+    }
+    if (path === '/api/workspaces/ws-1/github/account') {
+      if (overrides?.throwGithub) throw new Error('GitHub API error');
+      return overrides?.account ?? MOCK_GITHUB_ACCOUNT;
+    }
+    if (path === '/api/workspaces/ws-1/rorca-config') return { config: {} };
+    if (path === '/api/workspaces/ws-1/github/workflow-config') {
+      return { workflowConfig: overrides?.workflowConfig ?? null };
+    }
+    return {};
+  });
+}
 
 describe('GitHubSettingsPanel', () => {
   it('renders without crashing', async () => {
-    mockApiFetch.mockImplementation(async (path: string) => {
-      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('/github') && path.includes('ws-1')) return MOCK_GITHUB_STATUS;
-      if (path === '/api/github/account') return MOCK_GITHUB_ACCOUNT;
-      if (path.includes('/api/github/pr-template')) return { template: '' };
-      return {};
-    });
+    mockWorkspaceApi();
 
     renderWithProviders(<GitHubSettingsPanel />);
-    expect(document.body).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(document.body).toBeInTheDocument();
+    });
   });
 
   it('shows disconnected state when not connected', async () => {
-    mockApiFetch.mockImplementation(async (path: string) => {
-      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('/github') && path.includes('ws-1')) return MOCK_GITHUB_STATUS;
-      if (path === '/api/github/account') return MOCK_GITHUB_ACCOUNT;
-      if (path.includes('/api/github/pr-template')) return { template: '' };
-      return {};
-    });
+    mockWorkspaceApi();
 
     renderWithProviders(<GitHubSettingsPanel />);
 
-    await waitFor(
-      () => {
-        expect(document.body).toBeInTheDocument();
-      },
-      { timeout: 3000 },
-    );
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Workspace Repository');
+      expect(document.body.textContent).toContain('Connect GitHub');
+      expect(document.body.textContent).toContain('Rorca does not bundle ngrok/localtunnel');
+      expect(document.body.textContent).toMatch(/stored locally and encrypted/i);
+      expect(document.body.textContent).not.toContain('only used to create the webhook and is not stored');
+    });
   });
 
   it('shows connected state when GitHub is connected', async () => {
-    mockApiFetch.mockImplementation(async (path: string) => {
-      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('/github') && path.includes('ws-1')) return MOCK_CONNECTED_STATUS;
-      if (path === '/api/github/account') return MOCK_CONNECTED_ACCOUNT;
-      if (path.includes('/api/github/pr-template')) return { template: '' };
-      return {};
+    mockWorkspaceApi({
+      status: MOCK_CONNECTED_STATUS,
+      account: MOCK_CONNECTED_ACCOUNT,
     });
 
     renderWithProviders(<GitHubSettingsPanel />);
 
-    await waitFor(
-      () => {
-        expect(document.body).toBeInTheDocument();
-      },
-      { timeout: 3000 },
-    );
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('testorg/test-repo');
+      expect(document.body.textContent).toContain('@testuser');
+      expect(document.body.textContent).toContain('Webhook management');
+      expect(document.body.textContent).toContain('Ping webhook');
+      expect(document.body.textContent).toContain('Preview latest run');
+    });
   });
 
   it('handles API error gracefully', async () => {
-    mockApiFetch.mockImplementation(async (path: string) => {
-      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('/github')) throw new Error('GitHub API error');
-      return {};
-    });
+    mockWorkspaceApi({ throwGithub: true });
 
     renderWithProviders(<GitHubSettingsPanel />);
 
-    await waitFor(
-      () => {
-        expect(document.body).toBeInTheDocument();
-      },
-      { timeout: 3000 },
-    );
+    await waitFor(() => {
+      expect(document.body).toBeInTheDocument();
+    });
   });
 });
