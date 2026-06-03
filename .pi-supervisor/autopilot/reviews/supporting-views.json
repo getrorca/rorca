@@ -1,0 +1,22 @@
+{
+  "phase_id": "supporting-views",
+  "cycle": 62,
+  "approved": false,
+  "confidence": 0.0,
+  "summary": "Auto-review found remaining work or insufficient evidence.",
+  "bugs": [
+    "timed out after 105 seconds; tool call budget exceeded (24 > 18); required artifact was not produced: /Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/handoffs/supporting-views.json",
+    "timed out after 105 seconds",
+    "tool call budget exceeded (24 > 18)",
+    "required artifact was not produced: /Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/handoffs/supporting-views.json"
+  ],
+  "regressions": [],
+  "missing_validation": [],
+  "required_followups": [
+    "Implementer has not yet declared the phase done.",
+    "Raise implementer confidence to at least 0.90 with stronger evidence.",
+    "Review the latest changed files and decide whether additional refinement is needed.",
+    "Write a real implementer handoff artifact before timeout instead of relying on the synthetic fallback."
+  ],
+  "notes": "auto review synthesized by the supervisor from implementer output and external validators"
+}

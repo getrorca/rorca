@@ -15,6 +15,7 @@ Core service libraries. None are Express routes — they're pure logic called by
 | `spec-writer.ts` | Write generated spec JSON to disk |
 | `diagram-generator.ts` | Generate Mermaid + ASCII dep graphs from story list |
 | `execution-engine.ts` | Universal TypeScript execution engine — spawns claude/opencode/codex per story, handles retries, writes WAL events. **Built by rorca-opencode-integration spec.** |
+| `context-trace.ts` | Canonical context-trace contract (CTM-001). `ContextTraceEvent` (lightweight SSE/WAL metadata) + `ContextTraceArtifactWriter` (append-only gzip NDJSON raw-payload artifacts under `.rorca/traces/<runId>.ndjson.gz`). Deterministic `rawRef` = `r{runId}:{seq}`. All writer ops are nonfatal. |
 
 ## llm-client.ts
 
@@ -123,6 +124,38 @@ Planned canonical execution engine — replaces the legacy bash runner entirely.
 **RORCA_AGENT values**: `claude` (default, subscription) | `opencode` (OpenCode CLI) | `codex` (Codex CLI, ChatGPT subscription)
 
 **Model cascading**: only active when `RORCA_AGENT=opencode` with API keys (Haiku → Sonnet → Opus on failure). Disabled for `claude` and `codex` (flat-rate subscriptions).
+
+## context-trace.ts
+
+```typescript
+import { createContextTraceWriter, lookupTraceRecord } from '../lib/context-trace';
+import { broadcastAll } from '../lib/sse-hub';
+
+// Per run: open an append-only artifact writer (nonfatal — never throws).
+const writer = createContextTraceWriter(cwd, runId);
+
+// Append a heavy raw payload OFF the hot path, get a lightweight event back.
+const event = writer.appendEvent('context', heavyContextPayload, {
+  status: 'ok',
+  storyId: 'US-001',
+  metrics: { tokens: 1234, fileCount: 3 },
+  label: 'L1-L5 synthesis',
+});
+// event.rawRef === 'r<runId>:<seq>' — emit the lightweight event only.
+if (event) broadcastAll(/* map event into WalEvent shape */);
+
+await writer.close(); // idempotent
+
+// Later: lazily recover the full payload by rawRef (no schema guessing).
+const record = lookupTraceRecord(cwd, event!.rawRef);
+```
+
+**Contract invariants**:
+- `rawRef` is deterministic + monotonic *within a run*: `r{runId}:{seq}` (gap-free, seq zero-based). Safe for SSE de-dup (last-seq-wins) and lazy lookup.
+- Raw payloads live ONLY in the artifact (`.rorca/traces/<runId>.ndjson.gz`), never on the event.
+- Every writer op (`start`/`append`/`flush`/`close`) is **nonfatal** — failures disable the writer and log, never throw into story execution.
+- Phases reserve room for future surfaces: `context | skill | mcp | memory | prompt`.
+- Retention: `pruneExpiredTraceArtifacts(cwd)` bounds local disk; window via `RORCA_TRACE_RETENTION_DAYS` (default 14).
 
 ## Common Mistakes
 

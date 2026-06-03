@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { RorcaApiClient } from "./api.js";
-import { parseApproveCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
+import { parseApproveCommand, parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
 import { buildWatchSnapshot, formatRunList, formatRunNotify } from "./format.js";
 import { type RorcaSkillWorkflowRequest } from "./skill-launcher.js";
 import type { ExtensionState, PiModel, SpecDetail, Workspace } from "./types.js";
@@ -95,6 +95,24 @@ async function canUseSkillWorkflow(deps: CommandDependencies, input: RorcaSkillW
   return deps.canLaunchSkillWorkflow(input);
 }
 
+/**
+ * CTM-006: Surface the canonical workspace-context routing decision before a run so
+ * the operator is warned when a workspace is context blind (missing the
+ * .rorca / AGENTS.md / MEMORY.md routing contract). Nonfatal — a failed lookup or
+ * missing endpoint never blocks the run.
+ */
+async function notifyContextRoutingHealth(ctx: ExtensionContext, deps: CommandDependencies, workspaceId: string): Promise<void> {
+  try {
+    const routing = await deps.api.getContextRouting(workspaceId);
+    if (!routing?.contract?.satisfied) {
+      const unmet = routing?.contract?.unmet?.length ? routing.contract.unmet.join("; ") : "missing routing context";
+      ctx.ui.notify(`Context routing warning for ${workspaceId} (richness ${routing?.richnessScore ?? 0}/100): ${unmet}`, "warning");
+    }
+  } catch {
+    // Endpoint unavailable or older backend — routing health is advisory, never blocking.
+  }
+}
+
 async function dispatchSkillFirstCreateSpec(
   args: string,
   ctx: ExtensionContext,
@@ -165,6 +183,7 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     ctx.ui.notify([
       "/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]",
       "/rorca-approve <spec-slug> [--workspace <id>]",
+      "/rorca-enrich <spec-slug> [--workspace <id>]",
       "/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--sequential] [--no-watch]",
       "/rorca-status [runId|workspaceId] [--workspace <id>]",
       "/rorca-watch [runId]",
@@ -207,6 +226,19 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     ctx.ui.notify(`Approved ${parsed.specSlug}`, "success");
   });
 
+  registerCommand("rorca-enrich", "Enrich a Rorca spec's stories with retrieved context annotations", async (args, ctx) => {
+    const parsed = parseEnrichCommand(args, deps.getState().lastSpecSlug);
+    const workspace = await resolveWorkspace(ctx, deps, parsed.workspaceId);
+    deps.updateState({ workspaceId: workspace.id, lastSpecSlug: parsed.specSlug });
+
+    ctx.ui.notify(`Enriching ${parsed.specSlug}…`, "info");
+    const result = await deps.api.enrichSpec(parsed.specSlug, workspace.id);
+    const countNote = result.storiesEnriched > 0
+      ? `${result.storiesEnriched} ${result.storiesEnriched === 1 ? "story" : "stories"}`
+      : "no new stories";
+    ctx.ui.notify(`Enriched ${parsed.specSlug} (${countNote}) via ${result.retrievalMethod}`, "success");
+  });
+
   registerCommand("rorca-forge-run", "Deprecated compatibility alias for /rorca-create-spec --approve --run", async (args, ctx) => {
     await dispatchSkillFirstCreateSpec(args, ctx, deps, {
       usageCommand: "/rorca-forge-run",
@@ -220,6 +252,8 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     const parsed = parseRunCommand(args);
     const workspace = await resolveWorkspace(ctx, deps, parsed.workspaceId);
     deps.updateState({ workspaceId: workspace.id, lastSpecSlug: parsed.specSlug });
+
+    await notifyContextRoutingHealth(ctx, deps, workspace.id);
 
     const skillInput: RorcaSkillWorkflowRequest = {
       workflow: "run",

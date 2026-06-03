@@ -1,0 +1,160 @@
+{
+  "updatedAt": "2026-05-06T08:28:27.756885+00:00",
+  "cycle": 2,
+  "currentPhaseId": "run-cockpit",
+  "phases": {
+    "run-cockpit": {
+      "status": "pending",
+      "cycles": 2,
+      "greenStreak": 0,
+      "completedAt": null,
+      "lastImplementerSummary": "Refined the Pi-native run cockpit in ~/.pi/agent/extensions/rorca/tui/run-view.ts to surface active failures and progress more clearly: the story list now shows retries, blocked/pending dependency hints, and inline failure reasons, and the header now shows an alert line for failed stories or the active story. Re-ran extension and repo validation after the change.",
+      "lastReviewerSummary": null,
+      "lastKnownBugs": [],
+      "lastRegressions": [],
+      "lastRequiredMissing": [],
+      "lastValidationFailedCommands": [],
+      "lastBlockers": [
+        "implementer did not declare phase done",
+        "reviewer did not approve",
+        "reviewer found bugs",
+        "reviewer found regressions",
+        "implementer confidence below threshold",
+        "reviewer confidence below threshold",
+        "timed out after 45 seconds",
+        "tool call budget exceeded (20 > 12)",
+        "required artifact was not produced: /Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/reviews/run-cockpit.json"
+      ],
+      "lastChangedFiles": [
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts"
+      ],
+      "lastImplementerSessionDelta": {
+        "assistant_messages": 7,
+        "tool_calls": 17,
+        "tool_results": 17,
+        "write_calls": 1,
+        "edit_calls": 1,
+        "bash_calls": 6,
+        "read_calls": 9,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "lastReviewerSessionDelta": {
+        "assistant_messages": 4,
+        "tool_calls": 20,
+        "tool_results": 20,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 2,
+        "read_calls": 15,
+        "grep_calls": 3,
+        "find_calls": 0,
+        "ls_calls": 0
+      }
+    }
+  },
+  "consecutiveImplementerFailures": 0,
+  "consecutiveReviewerFailures": 1,
+  "consecutiveValidationFailures": 0,
+  "completedAt": null,
+  "lastCycle": {
+    "phaseId": "run-cockpit",
+    "cycle": 1,
+    "implementer": {
+      "role": "implementer",
+      "exit_code": 0,
+      "log_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-implementer.log",
+      "duration_seconds": 91.20724216697272,
+      "session_file": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/sessions/run-cockpit-implementer-r000.jsonl",
+      "timed_out": false,
+      "diagnostics": [],
+      "session_delta": {
+        "assistant_messages": 7,
+        "tool_calls": 17,
+        "tool_results": 17,
+        "write_calls": 1,
+        "edit_calls": 1,
+        "bash_calls": 6,
+        "read_calls": 9,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "changed_files": [
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts"
+      ],
+      "artifact_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/handoffs/run-cockpit.json",
+      "artifact_updated": true,
+      "passed": true
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "exit_code": 124,
+      "log_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-reviewer.log",
+      "duration_seconds": 45.011096208007075,
+      "session_file": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/sessions/run-cockpit-reviewer-r000.jsonl",
+      "timed_out": true,
+      "diagnostics": [
+        "timed out after 45 seconds",
+        "tool call budget exceeded (20 > 12)",
+        "required artifact was not produced: /Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/reviews/run-cockpit.json"
+      ],
+      "session_delta": {
+        "assistant_messages": 4,
+        "tool_calls": 20,
+        "tool_results": 20,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 2,
+        "read_calls": 15,
+        "grep_calls": 3,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "changed_files": [],
+      "artifact_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/reviews/run-cockpit.json",
+      "artifact_updated": false,
+      "passed": false
+    },
+    "validators": [
+      {
+        "command": "npx tsc --noEmit",
+        "exit_code": 0,
+        "duration_seconds": 6.75518237502547,
+        "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-validator-01.stdout.log",
+        "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-validator-01.stderr.log",
+        "passed": true
+      },
+      {
+        "command": "python3 scripts/validate_rorca_pi_extension.py",
+        "exit_code": 0,
+        "duration_seconds": 0.024887415987905115,
+        "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-validator-02.stdout.log",
+        "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-validator-02.stderr.log",
+        "passed": true
+      },
+      {
+        "command": "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit",
+        "exit_code": 0,
+        "duration_seconds": 0.8419736250070855,
+        "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-validator-03.stdout.log",
+        "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c001-validator-03.stderr.log",
+        "passed": true
+      }
+    ],
+    "accepted": false,
+    "blockers": [
+      "implementer did not declare phase done",
+      "reviewer did not approve",
+      "reviewer found bugs",
+      "reviewer found regressions",
+      "implementer confidence below threshold",
+      "reviewer confidence below threshold",
+      "timed out after 45 seconds",
+      "tool call budget exceeded (20 > 12)",
+      "required artifact was not produced: /Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/reviews/run-cockpit.json"
+    ],
+    "requiredMissing": []
+  }
+}
