@@ -385,11 +385,11 @@ describe('RunViewPanel', () => {
     await userEvent.click(storiesTab);
 
     // The aggregate context summary bar reflects the wired per-story context:
-    // 1 unique skill, 2 unique context files, and avg input tokens per story.
+    // avg input tokens, 2 unique context files, and 1 routing skill.
     const summaryBar = await screen.findByLabelText('Run context usage summary', {}, { timeout: 3000 });
-    expect(summaryBar).toHaveTextContent('1 skill');
-    expect(summaryBar).toHaveTextContent('2 files');
     expect(summaryBar).toHaveTextContent(/~1\.5K tokens\/story/);
+    expect(summaryBar).toHaveTextContent('2 files');
+    expect(summaryBar).toHaveTextContent('1 routing skill');
   });
 
   it('top Context shortcut opens the Context tab, not Skills', async () => {
