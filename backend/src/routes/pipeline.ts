@@ -3081,37 +3081,41 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       }
     } catch { /* non-fatal */ }
 
-    // CIE-016: Build actual vs predicted context comparison
+    // CIE-016: Build actual vs predicted context comparison.
+    // Predicted context comes from pipeline_runs.context_preview when a preview was
+    // generated. Actual context comes from story_started WAL events and must be
+    // exposed even for continuation/historical runs that do not have a preview.
     let contextComparison: {
       predicted: Record<string, { totalTokens: number; injectedFiles: string[] }>;
       actual: Record<string, { contextFiles: string[] }>;
     } | null = null;
 
+    const predictedMap: Record<string, { totalTokens: number; injectedFiles: string[] }> = {};
     const predictedRaw = (run as any).context_preview;
     if (predictedRaw) {
       try {
-        const predicted = JSON.parse(predictedRaw);
-        const predictedMap: Record<string, { totalTokens: number; injectedFiles: string[] }> = {};
+        const predicted = typeof predictedRaw === 'string' ? JSON.parse(predictedRaw) : predictedRaw;
         for (const s of (predicted.stories ?? [])) {
           predictedMap[s.storyId] = { totalTokens: s.totalTokens, injectedFiles: s.injectedFiles };
         }
-
-        // Collect actual context_files from story_started WAL events
-        const actualMap: Record<string, { contextFiles: string[] }> = {};
-        try {
-          const walRows = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND (payload->>'run_id')::bigint = $1`, [runId]);
-          for (const row of walRows) {
-            try {
-              const p = JSON.parse(row.payload);
-              if (p.context_files) {
-                actualMap[row.story_id] = { contextFiles: p.context_files };
-              }
-            } catch { /* skip */ }
-          }
-        } catch { /* non-fatal */ }
-
-        contextComparison = { predicted: predictedMap, actual: actualMap };
       } catch { /* malformed context_preview */ }
+    }
+
+    const actualMap: Record<string, { contextFiles: string[] }> = {};
+    try {
+      const walRows = await query<{ story_id: string; payload: string | Record<string, any> }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND (payload->>'run_id')::bigint = $1 ORDER BY id ASC`, [runId]);
+      for (const row of walRows) {
+        try {
+          const p = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+          if (Array.isArray(p?.context_files)) {
+            actualMap[row.story_id] = { contextFiles: p.context_files };
+          }
+        } catch { /* skip malformed payload */ }
+      }
+    } catch { /* non-fatal */ }
+
+    if (Object.keys(predictedMap).length > 0 || Object.keys(actualMap).length > 0) {
+      contextComparison = { predicted: predictedMap, actual: actualMap };
     }
 
     res.json({
