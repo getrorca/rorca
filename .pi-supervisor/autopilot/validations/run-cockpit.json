@@ -1,0 +1,32 @@
+{
+  "updatedAt": "2026-05-06T09:37:38.192045+00:00",
+  "cycle": 35,
+  "allPassed": true,
+  "failedCommands": [],
+  "results": [
+    {
+      "command": "npx tsc --noEmit",
+      "exit_code": 0,
+      "duration_seconds": 6.741035708982963,
+      "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c035-validator-01.stdout.log",
+      "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c035-validator-01.stderr.log",
+      "passed": true
+    },
+    {
+      "command": "python3 scripts/validate_rorca_pi_extension.py",
+      "exit_code": 0,
+      "duration_seconds": 0.025706499989610165,
+      "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c035-validator-02.stdout.log",
+      "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c035-validator-02.stderr.log",
+      "passed": true
+    },
+    {
+      "command": "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit",
+      "exit_code": 0,
+      "duration_seconds": 0.6785476250224747,
+      "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c035-validator-03.stdout.log",
+      "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/run-cockpit-c035-validator-03.stderr.log",
+      "passed": true
+    }
+  ]
+}
