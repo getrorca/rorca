@@ -6,7 +6,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../../test/helpers';
 import MemoryPanel from '../MemoryPanel';
 
@@ -70,12 +71,13 @@ const OVERVIEW_GRAPH_RESPONSE = {
   ],
   edges: [
     { id: 'LEARNED_FROM:memory:ws-1::1->story:ws-1::spec-a::MOG-001', type: 'LEARNED_FROM', source: 'memory:ws-1::1', target: 'story:ws-1::spec-a::MOG-001' },
+    { id: 'LEARNED_FROM:memory:ws-1::2->story:ws-1::spec-a::MOG-001', type: 'LEARNED_FROM', source: 'memory:ws-1::2', target: 'story:ws-1::spec-a::MOG-001' },
   ],
   summary: {
     nodeCount: 3,
-    edgeCount: 1,
+    edgeCount: 2,
     countsByType: { Memory: 2, Story: 1, Spec: 0, File: 0 },
-    countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 1, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0 },
+    countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 2, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0 },
     caps: { memories: 12, stories: 18, files: 24, specs: 8, edges: 72, dependencies: 8 },
     truncated: { nodes: false, edges: false },
   },
@@ -147,19 +149,73 @@ function mockPanelData(overrides?: {
 }
 
 describe('MemoryPanel', () => {
-  it('renders memory entries alongside Knowledge Web summaries', async () => {
+  it('defaults to list mode and lets operators switch to graph and split views', async () => {
+    const user = userEvent.setup();
     mockPanelData();
 
     renderWithProviders(<MemoryPanel />);
 
-    await screen.findByText('Knowledge Web');
-    expect(screen.getByText('Direction Stack layers cascade L1 → L5.')).toBeTruthy();
-    expect(screen.getByText('3 overview nodes')).toBeTruthy();
-    expect(await screen.findByText('Focused memory #1')).toBeTruthy();
-    expect(screen.getAllByText('backend/src/routes/memory.ts').length).toBeGreaterThan(0);
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    expect(screen.queryByText('Knowledge Web')).toBeNull();
+
+    await user.click(screen.getByRole('tab', { name: 'Graph' }));
+
+    expect(await screen.findByText('Knowledge Web')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Knowledge Web graph canvas' })).toBeTruthy();
+
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    expect(await screen.findByText('Ledger')).toBeTruthy();
+    expect(screen.getByText('Knowledge Web')).toBeTruthy();
   });
 
-  it('shows a graceful lite-mode fallback when the graph is unavailable', async () => {
+  it('keeps list and graph selection in sync in split mode', async () => {
+    const user = userEvent.setup();
+    mockPanelData();
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    expect(await screen.findByText('Focused memory #1')).toBeTruthy();
+
+    const secondEntry = screen.getByText('Bound node and edge counts in the query layer.').closest('li');
+    expect(secondEntry).toBeTruthy();
+
+    await user.click(screen.getByLabelText('Focus memory 2 from graph'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Focused memory #2')).toBeTruthy();
+      expect(within(secondEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
+    });
+
+    const firstEntry = screen.getByText('Direction Stack layers cascade L1 → L5.').closest('li');
+    expect(firstEntry).toBeTruthy();
+
+    await user.click(screen.getByText('Direction Stack layers cascade L1 → L5.'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Focused memory #1')).toBeTruthy();
+      expect(within(firstEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
+    });
+  });
+
+  it('shows a graph empty state when filters remove the current corpus', async () => {
+    const user = userEvent.setup();
+    mockPanelData();
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.selectOptions(screen.getByLabelText('Filter by source type'), 'import');
+    await user.click(screen.getByRole('tab', { name: 'Graph' }));
+
+    expect(await screen.findByText('No graph results for the current filters')).toBeTruthy();
+  });
+
+  it('shows a graceful AGE-unavailable fallback in graph mode', async () => {
+    const user = userEvent.setup();
     mockPanelData({
       overviewGraph: {
         ...OVERVIEW_GRAPH_RESPONSE,
@@ -174,8 +230,10 @@ describe('MemoryPanel', () => {
 
     renderWithProviders(<MemoryPanel />);
 
-    await screen.findByText('Knowledge Web');
-    expect(screen.getByText(/Apache AGE extension not available/)).toBeTruthy();
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Graph' }));
+
+    expect(await screen.findByText(/Apache AGE extension not available/)).toBeTruthy();
   });
 
   it('handles empty memory lists', async () => {
