@@ -110,6 +110,44 @@ describe('memory-graph helper', () => {
         };
       }
 
+      if (sql.includes('MATCH (source:Memory)-[r:SUPERSEDES]->(target:Memory)')) {
+        return {
+          rows: [
+            {
+              sourceMemoryId: ag('42'),
+              sourceCategory: ag('Architecture'),
+              sourcePinned: ag(true),
+              sourceCreatedAt: ag('2026-06-02T10:00:00.000Z'),
+              targetMemoryId: ag('84'),
+              targetCategory: ag('Decision'),
+              targetPinned: ag(false),
+              targetCreatedAt: ag('2026-06-01T10:00:00.000Z'),
+              relationType: ag('SUPERSEDES'),
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+
+      if (sql.includes('MATCH (source:Memory)-[r:CONFLICTS_WITH]->(target:Memory)')) {
+        return {
+          rows: [
+            {
+              sourceMemoryId: ag('42'),
+              sourceCategory: ag('Architecture'),
+              sourcePinned: ag(true),
+              sourceCreatedAt: ag('2026-06-02T10:00:00.000Z'),
+              targetMemoryId: ag('84'),
+              targetCategory: ag('Decision'),
+              targetPinned: ag(false),
+              targetCreatedAt: ag('2026-06-01T10:00:00.000Z'),
+              relationType: ag('CONFLICTS_WITH'),
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+
       if (sql.includes('MATCH (s:Story)-[:DEPENDS_ON]->(d:Story)')) {
         return {
           rows: [
@@ -156,6 +194,8 @@ describe('memory-graph helper', () => {
       TOUCHES: 1,
       BELONGS_TO: 2,
       DEPENDS_ON: 1,
+      SUPERSEDES: 1,
+      CONFLICTS_WITH: 1,
     });
     expect(result.edges.map(edge => edge.type)).toEqual([
       'ABOUT',
@@ -168,13 +208,17 @@ describe('memory-graph helper', () => {
       'BELONGS_TO',
       'BELONGS_TO',
       'DEPENDS_ON',
+      'SUPERSEDES',
+      'CONFLICTS_WITH',
     ]);
 
     const sql = cypherSqlCalls().join('\n');
     expect(sql).toContain("WHERE (m.workspaceId = 'ws-1' OR m.workspace_id = 'ws-1')");
     expect(sql).toContain("AND m.id IN ['42', '84']");
     expect(sql).toContain('LIMIT 12');
-    expect(sql).toContain('LIMIT 8');
+    expect(sql).toContain('LIMIT 6');
+    expect(sql).toContain('MATCH (source:Memory)-[r:SUPERSEDES]->(target:Memory)');
+    expect(sql).toContain('MATCH (source:Memory)-[r:CONFLICTS_WITH]->(target:Memory)');
   });
 
   it('returns a selected-memory neighborhood graph centered on the requested memory', async () => {

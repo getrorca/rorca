@@ -38,6 +38,14 @@ import { embedText, prepareText } from '../lib/embedding-pipeline';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { resolveStoryMemoryProvenance } from '../lib/memory-provenance';
 import { getMemoryGraphNeighborhood, getMemoryGraphOverview } from '../lib/memory-graph';
+import {
+  createMemoryRelation,
+  listMemoryRelations,
+  MEMORY_RELATION_SEMANTICS,
+  MEMORY_RELATION_STATUSES,
+  MEMORY_RELATION_TYPES,
+  updateMemoryRelationStatus,
+} from '../lib/memory-relations';
 
 const router = Router();
 
@@ -1145,6 +1153,167 @@ router.get('/graph/neighborhood', async (req: Request, res: Response) => {
 
   const graph = await getMemoryGraphNeighborhood(workspaceId, memoryId);
   res.json(graph);
+});
+
+/**
+ * @swagger
+ * /api/memory/relations:
+ *   get:
+ *     tags: [Memory]
+ *     summary: List memory-to-memory ontology relations
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Workspace-scoped ontology relation listing is read-only local project context with no billing or admin side effects."
+ *     x-rorca-public-api: true
+ *     operationId: listMemoryRelations
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *       - name: memoryId
+ *         in: query
+ *         schema: { type: integer }
+ *       - name: includeInactive
+ *         in: query
+ *         schema: { type: boolean, default: false }
+ *     responses:
+ *       200: { description: Relations list }
+ *       400: { description: "Missing workspaceId or invalid memoryId" }
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/relations', async (req: Request, res: Response) => {
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
+  if (!workspaceId) throw new ValidationError('workspaceId required');
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const memoryId = req.query.memoryId !== undefined
+    ? parseInt(req.query.memoryId as string, 10)
+    : undefined;
+  if (req.query.memoryId !== undefined && Number.isNaN(memoryId)) {
+    throw new ValidationError('memoryId must be a positive integer');
+  }
+
+  const items = await listMemoryRelations({
+    workspaceId,
+    memoryId,
+    includeInactive: req.query.includeInactive === 'true',
+  });
+
+  res.json({
+    items,
+    total: items.length,
+    relationTypes: MEMORY_RELATION_TYPES,
+    relationSemantics: MEMORY_RELATION_SEMANTICS,
+  });
+});
+
+/**
+ * @swagger
+ * /api/memory/relations:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Create or restore a canonical memory-to-memory ontology relation
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Persisting workspace ontology links is core local project memory management with relational truth in Postgres before graph projection."
+ *     x-rorca-public-api: true
+ *     operationId: createMemoryRelation
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, sourceMemoryId, targetMemoryId, relationType]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               sourceMemoryId: { type: integer }
+ *               targetMemoryId: { type: integer }
+ *               relationType: { type: string, enum: [SUPERSEDES, CONFLICTS_WITH] }
+ *               note: { type: string, nullable: true }
+ *     responses:
+ *       201: { description: Relation created or restored }
+ *       400: { description: "Invalid input" }
+ *       404: { description: "Workspace or memory not found" }
+ */
+router.post('/relations', async (req: Request, res: Response) => {
+  const { workspaceId, sourceMemoryId, targetMemoryId, relationType, note } = req.body as {
+    workspaceId?: string;
+    sourceMemoryId?: number | string;
+    targetMemoryId?: number | string;
+    relationType?: string;
+    note?: string | null;
+  };
+
+  if (!workspaceId) throw new ValidationError('workspaceId required');
+  if (sourceMemoryId === undefined || targetMemoryId === undefined || !relationType) {
+    throw new ValidationError('sourceMemoryId, targetMemoryId, and relationType are required');
+  }
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const relation = await createMemoryRelation({
+    workspaceId,
+    sourceMemoryId: Number(sourceMemoryId),
+    targetMemoryId: Number(targetMemoryId),
+    relationType: relationType as (typeof MEMORY_RELATION_TYPES)[number],
+    note,
+  });
+
+  res.status(201).json({ relation, semantics: MEMORY_RELATION_SEMANTICS[relation.relationType] });
+});
+
+/**
+ * @swagger
+ * /api/memory/relations/{id}:
+ *   patch:
+ *     tags: [Memory]
+ *     summary: Update a memory relation lifecycle state
+ *     operationId: updateMemoryRelationStatus
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, status]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               status: { type: string, enum: [active, superseded, deleted] }
+ *     responses:
+ *       200: { description: Relation updated }
+ *       404: { description: "Relation not found" }
+ */
+router.patch('/relations/:id', async (req: Request, res: Response) => {
+  const relationId = parseInt(req.params.id as string, 10);
+  if (Number.isNaN(relationId)) throw new ValidationError('Invalid relation id');
+
+  const { workspaceId, status } = req.body as {
+    workspaceId?: string;
+    status?: string;
+  };
+
+  if (!workspaceId || !status) {
+    throw new ValidationError('workspaceId and status are required');
+  }
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const relation = await updateMemoryRelationStatus(
+    workspaceId,
+    relationId,
+    status as (typeof MEMORY_RELATION_STATUSES)[number],
+  );
+
+  res.json({ relation, semantics: MEMORY_RELATION_SEMANTICS[relation.relationType] });
 });
 
 /**
