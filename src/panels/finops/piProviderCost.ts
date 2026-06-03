@@ -6,7 +6,9 @@
  */
 
 export function formatPiProviderCostLabel(provider: string, cost: number): string {
-  if (cost === 0 && provider !== 'omlx') {
+  const normalizedProvider = provider.toLowerCase();
+  const isSubscriptionProvider = normalizedProvider === 'claude' || normalizedProvider === 'codex';
+  if (cost === 0 && isSubscriptionProvider) {
     return 'Sub';
   }
 

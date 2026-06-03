@@ -46,6 +46,8 @@ interface Totals {
 interface FinOpsData {
   runId: number;
   agentType: string;
+  agentModel?: string;
+  usageAvailable?: boolean;
   isSubscription: boolean;
   runSummary: RunSummaryRow[];
   totals: Totals;
@@ -147,11 +149,13 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
     <div className="flex-1 overflow-y-auto">
       <div className="p-4 space-y-4">
 
-        {/* Subscription notice */}
-        {data.isSubscription && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-500/10 border border-orange-500/20 text-xs text-orange-400">
+        {/* Usage availability notice */}
+        {data.usageAvailable === false && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-500/10 border border-blue-500/20 text-xs text-blue-400">
             <Info size={14} className="shrink-0" />
-            <span>Claude subscription — token counts shown, no dollar cost (flat-rate billing).</span>
+            <span>
+              Waiting for token usage from {data.agentType}{data.agentModel ? ` (${data.agentModel})` : ''}. Provider/model rows are shown now and will update when usage events arrive.
+            </span>
           </div>
         )}
 
@@ -171,13 +175,10 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
           </div>
           <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
             <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">
-              {data.isSubscription ? 'Total Tokens' : 'Total Cost'}
+              Total Cost
             </div>
             <div className="text-lg font-mono font-medium">
-              {data.isSubscription
-                ? formatTokens(data.totals.inputTokens + data.totals.outputTokens)
-                : data.totals.cost != null ? formatCost(data.totals.cost) : '—'
-              }
+              {data.totals.cost != null ? formatCost(data.totals.cost) : '—'}
             </div>
           </div>
         </div>
@@ -226,9 +227,7 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
                   <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Stories</th>
                   <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Tokens In</th>
                   <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Tokens Out</th>
-                  {!data.isSubscription && (
-                    <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Cost</th>
-                  )}
+                  <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -243,9 +242,7 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
                     <td className="px-3 py-1.5 text-right font-mono">{row.stories}</td>
                     <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{formatTokens(row.inputTokens)}</td>
                     <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{formatTokens(row.outputTokens)}</td>
-                    {!data.isSubscription && (
-                      <td className="px-3 py-1.5 text-right font-mono">{formatCost(row.cost)}</td>
-                    )}
+                    <td className="px-3 py-1.5 text-right font-mono">{formatCost(row.cost)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -284,13 +281,9 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
                     <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Tier</th>
                     <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Tokens In</th>
                     <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Tokens Out</th>
-                    {!data.isSubscription && (
-                      <>
-                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Cost</th>
-                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Opus Baseline</th>
-                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Saved</th>
-                      </>
-                    )}
+                    <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Cost</th>
+                    <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Opus Baseline</th>
+                    <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Saved</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -306,15 +299,11 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
                         </td>
                         <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{formatTokens(s.inputTokens)}</td>
                         <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{formatTokens(s.outputTokens)}</td>
-                        {!data.isSubscription && (
-                          <>
-                            <td className="px-3 py-1.5 text-right font-mono">{formatCost(s.actualCost)}</td>
-                            <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)] line-through opacity-60">{formatCost(s.opusBaseline)}</td>
-                            <td className={`px-3 py-1.5 text-right font-mono ${saved > 0 ? 'text-emerald-400' : saved < 0 ? 'text-red-400' : 'text-[var(--text-muted)]'}`}>
-                              {saved > 0 ? '+' : ''}{formatCost(saved)}
-                            </td>
-                          </>
-                        )}
+                        <td className="px-3 py-1.5 text-right font-mono">{formatCost(s.actualCost)}</td>
+                        <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)] line-through opacity-60">{formatCost(s.opusBaseline)}</td>
+                        <td className={`px-3 py-1.5 text-right font-mono ${saved > 0 ? 'text-emerald-400' : saved < 0 ? 'text-red-400' : 'text-[var(--text-muted)]'}`}>
+                          {saved > 0 ? '+' : ''}{formatCost(saved)}
+                        </td>
                       </tr>
                     );
                   })}

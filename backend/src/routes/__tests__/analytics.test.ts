@@ -285,6 +285,64 @@ describe('GET /api/analytics/pricing', () => {
   });
 });
 
+describe('GET /api/analytics/finops/run/:runId', () => {
+  test('returns provider/model rows for running runs before token_usage exists', async () => {
+    fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
+    fs.writeFileSync(path.join(wsDir, 'forge', 'specs', 'approved', 'finops-pending.json'), JSON.stringify({
+      title: 'Pending FinOps',
+      userStories: [
+        { id: 'US-001', title: 'Story one' },
+        { id: 'US-002', title: 'Story two' },
+      ],
+    }), 'utf8');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)
+       VALUES ('forge/specs/approved/finops-pending.json', $1, 'running', 'pi', 'pi', 'openrouter/google/gemini-2.5-pro')
+       RETURNING id`,
+      [WS_ID],
+    );
+
+    const res = await get(`/api/analytics/finops/run/${run!.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentType).toBe('pi');
+    expect(res.body.agentModel).toBe('openrouter/google/gemini-2.5-pro');
+    expect(res.body.usageAvailable).toBe(false);
+    expect(res.body.totals.stories).toBe(2);
+    expect(res.body.runSummary[0]).toMatchObject({
+      model: 'openrouter/google/gemini-2.5-pro',
+      stories: 2,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+  });
+
+  test('uses live story_token_update WAL events when token_usage is not finalized', async () => {
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)
+       VALUES ('forge/specs/approved/live-finops.json', $1, 'running', 'opencode', 'opencode', 'openai/gpt-4o')
+       RETURNING id`,
+      [WS_ID],
+    );
+
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_token_update', $1, 'US-001', $2::jsonb)`,
+      [WS_ID, JSON.stringify({ run_id: run!.id, model: 'openai/gpt-4o', input_tokens: 1200, output_tokens: 300, cost_usd: 0.01 })],
+    );
+
+    const res = await get(`/api/analytics/finops/run/${run!.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.usageAvailable).toBe(true);
+    expect(res.body.totals.stories).toBe(1);
+    expect(res.body.totals.inputTokens).toBe(1200);
+    expect(res.body.totals.outputTokens).toBe(300);
+    expect(res.body.perStory[0]).toMatchObject({ storyId: 'US-001', model: 'openai/gpt-4o' });
+  });
+});
+
 describe('GET /api/analytics/pi-providers', () => {
   test('returns empty array when no pi runs exist', async () => {
     const res = await get(`/api/analytics/pi-providers?workspace_id=${WS_ID}`);
@@ -293,16 +351,17 @@ describe('GET /api/analytics/pi-providers', () => {
     expect(res.body).toEqual([]);
   });
 
-  test('aggregates usage by pi provider', async () => {
+  test('aggregates usage by all execution providers', async () => {
     await seedPiProviderData(WS_ID, authId);
 
     const res = await get(`/api/analytics/pi-providers?workspace_id=${WS_ID}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(2);
+    expect(res.body).toHaveLength(3);
 
     const openai = res.body.find((row: any) => row.provider === 'openai');
     const omlx = res.body.find((row: any) => row.provider === 'omlx');
+    const claude = res.body.find((row: any) => row.provider === 'claude');
 
     expect(openai).toMatchObject({
       provider: 'openai',
@@ -324,6 +383,16 @@ describe('GET /api/analytics/pi-providers', () => {
       totalCost: 0,
       avgCostPerStory: 0,
     });
+
+    expect(claude).toMatchObject({
+      provider: 'claude',
+      totalRuns: 1,
+      totalStories: 1,
+      totalInputTokens: 999,
+      totalOutputTokens: 999,
+      totalCost: 9.99,
+      avgCostPerStory: 9.99,
+    });
   });
 
   test('applies workspace RLS via withUserClient', async () => {
@@ -334,9 +403,10 @@ describe('GET /api/analytics/pi-providers', () => {
     const res = await get('/api/analytics/pi-providers');
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(2);
+    expect(res.body).toHaveLength(3);
     expect(res.body.find((row: any) => row.provider === 'openai')?.totalStories).toBe(2);
     expect(res.body.find((row: any) => row.provider === 'omlx')?.totalStories).toBe(1);
+    expect(res.body.find((row: any) => row.provider === 'claude')?.totalStories).toBe(1);
   });
 
   test('requires authentication', async () => {
