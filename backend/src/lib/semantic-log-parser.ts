@@ -317,16 +317,59 @@ export function parseCodexLine(line: string): SemanticStep[] {
 }
 
 /**
+ * Parse Rorca engine/operator log lines into semantic steps. These lines are
+ * often wrapped by pino JSON at the route layer, then unwrapped to messages like
+ * `[memory-router] Context retrieved` or `[agent] Launching claude for US-001`.
+ */
+export function parseRorcaEngineLine(line: string): SemanticStep[] {
+  const clean = normalizeCodexLine(line);
+  if (!clean) return [];
+  const ts = new Date().toISOString();
+
+  const bracket = clean.match(/^\s*\[([^\]]+)\]\s*(.*)$/);
+  if (bracket) {
+    const [, rawPrefix, rawDetail] = bracket;
+    const prefix = rawPrefix.toLowerCase();
+    const detail = rawDetail.trim();
+    const isError = /failed|error|rate limited|timeout/i.test(detail);
+
+    if (['memory-router', 'retrieval', 'graph-context', 'context', 'search'].includes(prefix)) {
+      return [{ type: 'search', label: detail || rawPrefix, detail: clean, ts, toolName: prefix, isError: isError || undefined }];
+    }
+    if (['agent', 'engine', 'impl', 'run-state', 'db', 'pg-migrate'].includes(prefix)) {
+      return [{ type: isError ? 'unknown' : 'plan', label: detail || rawPrefix, detail: clean, ts, toolName: prefix, isError: isError || undefined }];
+    }
+  }
+
+  const rateLimit = clean.match(/^([A-Z]+-\d+)\s+rate limited\s+\(([^)]+)\)\.\s*(.*)$/i);
+  if (rateLimit) {
+    return [{
+      type: 'unknown',
+      label: `${rateLimit[1]} rate limited`,
+      detail: `${rateLimit[2]}${rateLimit[3] ? ` — ${rateLimit[3]}` : ''}`,
+      ts,
+      toolName: 'rate-limit',
+      isError: true,
+    }];
+  }
+
+  return [];
+}
+
+/**
  * Parse a log line using the appropriate parser based on agent type.
  * Returns an array of SemanticStep objects (empty array if nothing to emit).
  * Falls back to claude parser if agent is unknown.
  */
 export function parseLine(line: string, agent: string): SemanticStep[] {
+  let structured: SemanticStep[] = [];
   if (agent === 'opencode' || agent === 'pi') {
-    return parseOpenCodeLine(line);
+    structured = parseOpenCodeLine(line);
+  } else if (agent === 'codex') {
+    structured = parseCodexLine(line);
+  } else {
+    structured = parseStreamJsonLine(line);
   }
-  if (agent === 'codex') {
-    return parseCodexLine(line);
-  }
-  return parseStreamJsonLine(line);
+
+  return structured.length > 0 ? structured : parseRorcaEngineLine(line);
 }
