@@ -119,6 +119,46 @@ export interface ContextTraceRawRecord {
   payload: unknown;
 }
 
+// ─── WAL transport (CTM-002) ─────────────────────────────────────────────────
+
+/**
+ * WAL / SSE event type carrying a context-trace metadata event. The browser
+ * filters on this type, parses the embedded {@link ContextTraceEvent} from the
+ * WAL `payload`, and resolves the raw payload lazily via `rawRef`.
+ */
+export const CONTEXT_TRACE_WAL_EVENT_TYPE = 'context_trace';
+
+/**
+ * Shape of the WAL `payload` for a `context_trace` event. It carries the full
+ * lightweight {@link ContextTraceEvent} plus `run_id` for the run-scoped SSE
+ * filtering convention used by other engine WAL events (snake_case `run_id`).
+ *
+ * It deliberately never carries the raw payload — only the `rawRef` pointer.
+ */
+export interface ContextTraceWalPayload extends ContextTraceEvent {
+  run_id: number;
+}
+
+/**
+ * Build the metadata-only WAL payload for a context-trace event. Pure mapping —
+ * guarantees the heavy payload is never embedded on the hot path.
+ */
+export function toContextTraceWalPayload(event: ContextTraceEvent): ContextTraceWalPayload {
+  return {
+    traceId: event.traceId,
+    runId: event.runId,
+    storyId: event.storyId ?? null,
+    seq: event.seq,
+    rawRef: event.rawRef,
+    phase: event.phase,
+    status: event.status,
+    ts: event.ts,
+    metrics: event.metrics,
+    label: event.label,
+    run_id: event.runId,
+  };
+}
+
 // ─── Deterministic rawRef scheme ─────────────────────────────────────────────
 
 const RAW_REF_PATTERN = /^r(\d+):(\d+)$/;

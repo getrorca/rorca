@@ -19,6 +19,8 @@ import {
   lookupTraceRecord,
   pruneExpiredTraceArtifacts,
   getTraceRetentionDays,
+  toContextTraceWalPayload,
+  CONTEXT_TRACE_WAL_EVENT_TYPE,
 } from '../context-trace';
 
 /** Decompress and parse all NDJSON records from a run's artifact. */
@@ -273,6 +275,35 @@ describe('context-trace', () => {
       const writer = new ContextTraceArtifactWriter({ cwd: tmpDir, runId: 77 });
       expect(writer.runId).toBe(77);
       expect(writer.artifactPath).toBe(getTraceArtifactPath(tmpDir, 77));
+    });
+  });
+
+  // CTM-002: WAL transport mapping — metadata-only, raw payload never embedded.
+  describe('toContextTraceWalPayload (metadata-only WAL transport)', () => {
+    it('carries the lightweight event + snake_case run_id, never the raw payload', () => {
+      const writer = createContextTraceWriter(tmpDir, 5);
+      const event = writer.appendEvent('prompt', { prompt: 'X'.repeat(5000) }, {
+        status: 'ok',
+        storyId: 'US-001',
+        metrics: { bytes: 5000 },
+        label: 'prompt:US-001',
+      });
+      expect(event).not.toBeNull();
+
+      const wal = toContextTraceWalPayload(event!);
+      expect(wal.rawRef).toBe(event!.rawRef);
+      expect(wal.run_id).toBe(5);
+      expect(wal.runId).toBe(5);
+      expect(wal.phase).toBe('prompt');
+      expect(wal.status).toBe('ok');
+      expect(wal.label).toBe('prompt:US-001');
+      // The heavy payload must not leak onto the metadata transport.
+      expect(JSON.stringify(wal)).not.toContain('XXXXX');
+      expect((wal as unknown as Record<string, unknown>).payload).toBeUndefined();
+    });
+
+    it('exposes the constant WAL event type', () => {
+      expect(CONTEXT_TRACE_WAL_EVENT_TYPE).toBe('context_trace');
     });
   });
 });
