@@ -190,6 +190,12 @@ describe('retrieval-pipeline', () => {
     expect(stale?.scoring.ontology.reasons.map(reason => reason.kind)).toEqual(
       expect.arrayContaining(['suppression', 'supersession']),
     );
+
+    const staleExplainability = buildGraphRagExplainability(stale!);
+    expect(staleExplainability.ontologyExplainability.status).toBe('available');
+    expect(staleExplainability.ontologyExplainability.explanations.map(item => item.label)).toEqual(
+      expect.arrayContaining(['Superseded by memory #2']),
+    );
   });
 
   test('drops near-duplicates through supersession/diversity', () => {
@@ -423,10 +429,17 @@ describe('retrieval-pipeline', () => {
       scoringVersion: GRAPH_RAG_SCORE_SCHEMA_VERSION,
       retrievalMode: 'graph-reranked',
       provenanceEdges: ['DEPENDS_ON x2', 'CITED_BY x1'],
+      provenanceEdgeOverflow: 0,
       provenanceConfidence: 'high',
       provenanceSourceType: 'memory',
       provenanceSource: 'retrieval-feedback',
       graphSignalCount: 3,
+      rankReasonOverflow: 0,
+      ontologyReasonOverflow: 0,
+      ontologyExplainability: {
+        status: 'partial',
+        explanations: [],
+      },
       rerankedBy: expect.stringMatching(/graph|semantic/),
       tieBreak: {
         canonicalKey: 'memory:ws-1::debug-1',

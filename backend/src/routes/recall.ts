@@ -273,11 +273,13 @@ async function fetchMemories(
 
   assertWorkspaceScopedDebug(workspaceId, topMemories);
 
-  const debugMeta = debug && ctx.memory[0]?.explainability
+  const firstExplainability = ctx.memory[0]?.explainability;
+  const debugMeta = debug
     ? {
-        scoringVersion: ctx.memory[0].explainability.scoringVersion,
-        retrievalMode: ctx.memory[0].explainability.retrievalMode,
+        scoringVersion: firstExplainability?.scoringVersion ?? null,
+        retrievalMode: firstExplainability?.retrievalMode ?? null,
         telemetryId: ctx.meta.telemetryId ?? null,
+        ontologyExplainability: ctx.meta.ontologyExplainability,
       }
     : undefined;
 

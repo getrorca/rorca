@@ -212,18 +212,52 @@ export interface GraphRagExplainabilityScoreBreakdown {
   duplicationPenalty: number;
 }
 
+export type GraphRagOntologyExplainabilityStatus = 'available' | 'partial' | 'unavailable';
+
+export interface GraphRagOntologyExplanationItem {
+  tone: 'active' | 'suppressed' | 'conflict';
+  label: string;
+  relationType: MemoryOntologyRelationType;
+  relationKey: string;
+  otherMemoryId: string;
+  otherCanonicalKey: string;
+  counterpartRetrieved: boolean;
+}
+
+export interface GraphRagOntologyExplainability {
+  status: GraphRagOntologyExplainabilityStatus;
+  message: string;
+  explanations: GraphRagOntologyExplanationItem[];
+  totalExplanationCount: number;
+  hiddenExplanationCount: number;
+}
+
+export interface GraphRagOntologySurfaceSummary {
+  status: GraphRagOntologyExplainabilityStatus;
+  activeCount: number;
+  suppressedCount: number;
+  conflictCount: number;
+  hiddenExplanationCount: number;
+  examples: string[];
+  message: string;
+}
+
 export interface GraphRagCandidateExplainability {
   scoringVersion: GraphRagScoreSchemaVersion;
   retrievalMode: GraphRagRetrievalMode;
   scoreBreakdown: GraphRagExplainabilityScoreBreakdown;
   provenanceEdges: string[];
+  provenanceEdgeOverflow: number;
   provenanceConfidence: string | null;
   provenanceSourceType: string | null;
   provenanceSource: string | null;
   graphNodeType: GraphRagProximityComponent['nodeType'];
   graphSignalCount: number;
   rankReasons: string[];
+  rankReasonOverflow: number;
   ontology: GraphRagOntologyMetadata;
+  ontologyReasonOverflow: number;
+  ontologyExplainability: GraphRagOntologyExplainability;
   preRerankPosition: number | null;
   finalPosition: number | null;
   rerankedBy: 'graph' | 'semantic';
@@ -341,6 +375,12 @@ export const GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION: GraphRagScoreContractDocume
     },
   ],
 };
+
+const MAX_EXPLAINABILITY_PROVENANCE_EDGES = 4;
+const MAX_EXPLAINABILITY_RANK_REASONS = 4;
+const MAX_EXPLAINABILITY_ONTOLOGY_REASONS = 4;
+const MAX_EXPLAINABILITY_ONTOLOGY_EXPLANATIONS = 3;
+const MAX_ONTOLOGY_SUMMARY_EXAMPLES = 3;
 
 const STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'then', 'have', 'been',
@@ -478,6 +518,127 @@ function buildOntologyMetadata(candidate: Pick<RetrievalCandidateInput, 'ontolog
   };
 }
 
+function buildOntologyExplanationLabel(reason: GraphRagOntologyReason): string {
+  switch (reason.code) {
+    case 'graph_superseded_memory_suppressed':
+    case 'graph_superseded_by_active_memory':
+      return `Superseded by memory #${reason.otherMemoryId}`;
+    case 'graph_supersedes_older_memory':
+      return `Active rule supersedes memory #${reason.otherMemoryId}`;
+    case 'graph_conflict_requires_arbiter':
+      return `Conflicts with memory #${reason.otherMemoryId}`;
+    default:
+      return `Related to memory #${reason.otherMemoryId}`;
+  }
+}
+
+function buildOntologyExplainability(
+  scoring: GraphRagScoreContract,
+  retrievalMode: GraphRagRetrievalMode,
+): GraphRagOntologyExplainability {
+  const boundedReasons = scoring.ontology.reasons.slice(0, MAX_EXPLAINABILITY_ONTOLOGY_EXPLANATIONS);
+  const explanations = boundedReasons.map<GraphRagOntologyExplanationItem>((reason) => ({
+    tone: reason.kind === 'conflict'
+      ? 'conflict'
+      : reason.kind === 'suppression'
+        ? 'suppressed'
+        : 'active',
+    label: buildOntologyExplanationLabel(reason),
+    relationType: reason.relationType,
+    relationKey: reason.relationKey,
+    otherMemoryId: reason.otherMemoryId,
+    otherCanonicalKey: reason.otherCanonicalKey,
+    counterpartRetrieved: reason.counterpartRetrieved,
+  }));
+
+  const hiddenExplanationCount = Math.max(0, scoring.ontology.reasons.length - explanations.length);
+  const status: GraphRagOntologyExplainabilityStatus = scoring.ontology.applied
+    ? 'available'
+    : retrievalMode === 'semantic-only-lite'
+      ? 'unavailable'
+      : 'partial';
+
+  const message = status === 'available'
+    ? explanations.length > 0
+      ? 'Ontology explanations were derived from explicit memory relation edges.'
+      : 'No supersession or conflict edges were recorded for this memory.'
+    : status === 'unavailable'
+      ? 'Ontology explanations unavailable because graph retrieval is running in lite mode.'
+      : 'Ontology explanations were not available for this candidate.';
+
+  return {
+    status,
+    message,
+    explanations,
+    totalExplanationCount: scoring.ontology.reasons.length,
+    hiddenExplanationCount,
+  };
+}
+
+export function summarizeGraphRagOntologySurface(
+  candidates: Array<Pick<GraphRagCandidateExplainability, 'ontologyExplainability'>>,
+): GraphRagOntologySurfaceSummary {
+  if (candidates.length === 0) {
+    return {
+      status: 'partial',
+      activeCount: 0,
+      suppressedCount: 0,
+      conflictCount: 0,
+      hiddenExplanationCount: 0,
+      examples: [],
+      message: 'No ranked memory candidates were available for ontology explainability.',
+    };
+  }
+
+  let activeCount = 0;
+  let suppressedCount = 0;
+  let conflictCount = 0;
+  let hiddenExplanationCount = 0;
+  const examples: string[] = [];
+  let sawAvailable = false;
+  let sawUnavailable = false;
+  let sawPartial = false;
+
+  for (const candidate of candidates) {
+    const ontology = candidate.ontologyExplainability;
+    if (ontology.status === 'available') sawAvailable = true;
+    if (ontology.status === 'unavailable') sawUnavailable = true;
+    if (ontology.status === 'partial') sawPartial = true;
+    hiddenExplanationCount += ontology.hiddenExplanationCount;
+
+    for (const explanation of ontology.explanations) {
+      if (explanation.tone === 'active') activeCount += 1;
+      if (explanation.tone === 'suppressed') suppressedCount += 1;
+      if (explanation.tone === 'conflict') conflictCount += 1;
+      if (examples.length < MAX_ONTOLOGY_SUMMARY_EXAMPLES && !examples.includes(explanation.label)) {
+        examples.push(explanation.label);
+      }
+    }
+  }
+
+  const status: GraphRagOntologyExplainabilityStatus = sawAvailable
+    ? (sawUnavailable || sawPartial ? 'partial' : 'available')
+    : sawUnavailable
+      ? 'unavailable'
+      : 'partial';
+
+  const message = status === 'available'
+    ? 'Ontology explanations are available for the ranked memory set.'
+    : status === 'unavailable'
+      ? 'Ontology explanations are unavailable because graph retrieval is in lite mode.'
+      : 'Ontology explanations are only partially available for the ranked memory set.';
+
+  return {
+    status,
+    activeCount,
+    suppressedCount,
+    conflictCount,
+    hiddenExplanationCount,
+    examples,
+    message,
+  };
+}
+
 export function buildGraphRagExplainability(
   candidate: Pick<RetrievalCandidateInput, 'graphSignals' | 'graphRelationship'> & {
     scoring: GraphRagScoreContract;
@@ -485,6 +646,7 @@ export function buildGraphRagExplainability(
   },
 ): GraphRagCandidateExplainability {
   const { scoring } = candidate;
+  const retrievalMode = inferGraphRagRetrievalMode(scoring);
   const semanticMultiplier = 1 - scoring.rerank.appliedGraphScoreWeight;
   const scoreBreakdown: GraphRagExplainabilityScoreBreakdown = {
     total: roundScore(scoring.score),
@@ -530,18 +692,29 @@ export function buildGraphRagExplainability(
     duplicationPenalty: roundScore(-1 * scoring.breakdown.duplicationPenalty.score * semanticMultiplier),
   };
 
+  const provenanceEdges = summarizeProvenanceEdges(candidate);
+  const boundedRankReasons = (candidate.reasons ?? []).slice(0, MAX_EXPLAINABILITY_RANK_REASONS);
+  const boundedOntologyReasons = scoring.ontology.reasons.slice(0, MAX_EXPLAINABILITY_ONTOLOGY_REASONS);
+
   return {
     scoringVersion: scoring.schemaVersion,
-    retrievalMode: inferGraphRagRetrievalMode(scoring),
+    retrievalMode,
     scoreBreakdown,
-    provenanceEdges: summarizeProvenanceEdges(candidate),
+    provenanceEdges: provenanceEdges.slice(0, MAX_EXPLAINABILITY_PROVENANCE_EDGES),
+    provenanceEdgeOverflow: Math.max(0, provenanceEdges.length - MAX_EXPLAINABILITY_PROVENANCE_EDGES),
     provenanceConfidence: scoring.breakdown.provenanceConfidence.confidence,
     provenanceSourceType: scoring.breakdown.provenanceConfidence.sourceType,
     provenanceSource: scoring.breakdown.provenanceConfidence.source,
     graphNodeType: scoring.breakdown.directGraphProximity.nodeType ?? 'unknown',
     graphSignalCount: scoring.breakdown.directGraphProximity.signalCount ?? candidate.graphSignals?.length ?? 0,
-    rankReasons: candidate.reasons ?? [],
-    ontology: scoring.ontology,
+    rankReasons: boundedRankReasons,
+    rankReasonOverflow: Math.max(0, (candidate.reasons ?? []).length - boundedRankReasons.length),
+    ontology: {
+      ...scoring.ontology,
+      reasons: boundedOntologyReasons,
+    },
+    ontologyReasonOverflow: Math.max(0, scoring.ontology.reasons.length - boundedOntologyReasons.length),
+    ontologyExplainability: buildOntologyExplainability(scoring, retrievalMode),
     preRerankPosition: scoring.rerank.preRerankPosition,
     finalPosition: scoring.rerank.finalPosition,
     rerankedBy: scoring.rerank.rerankedBy,

@@ -32,6 +32,15 @@ const FULL_SUMMARY: ContextSummary = {
     graphHits: 1,
     tier: 'hybrid',
     latencyMs: 42,
+    ontologyExplainability: {
+      status: 'partial',
+      activeCount: 1,
+      suppressedCount: 1,
+      conflictCount: 0,
+      hiddenExplanationCount: 0,
+      examples: ['Superseded by memory #2'],
+      message: 'Ontology explanations are only partially available for the ranked memory set.',
+    },
   },
 };
 
@@ -306,6 +315,15 @@ describe('ContextSummaryCard', () => {
       render(<ContextSummaryCard summary={FULL_SUMMARY} />);
       expandCard();
       expect(screen.getByText('42ms')).toBeInTheDocument();
+    });
+
+    it('shows ontology explainability state when retrieval metadata includes it', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText('Ontology')).toBeInTheDocument();
+      expect(screen.getByText('partial')).toBeInTheDocument();
+      expect(screen.getByText(/1 active • 1 superseded • 0 conflicts/)).toBeInTheDocument();
+      expect(screen.getByText(/Superseded by memory #2/)).toBeInTheDocument();
     });
 
     it('renders without retrieval data (no crash, no blank box)', () => {

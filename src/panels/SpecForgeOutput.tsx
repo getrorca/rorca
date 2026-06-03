@@ -58,6 +58,15 @@ export interface ContextSummary {
     graphHits: number;
     tier: 'cache' | 'search' | 'hybrid';
     latencyMs: number;
+    ontologyExplainability?: {
+      status: 'available' | 'partial' | 'unavailable';
+      activeCount: number;
+      suppressedCount: number;
+      conflictCount: number;
+      hiddenExplanationCount: number;
+      examples: string[];
+      message: string;
+    };
   };
   /** CU-004: Predicted injected file paths from context-router (up to 30 paths) */
   predictedFiles?: string[];

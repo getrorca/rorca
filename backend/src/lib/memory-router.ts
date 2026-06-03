@@ -41,8 +41,10 @@ import { getGraphContext } from './graph-context';
 import {
   buildGraphRagExplainability,
   rankRetrievalCandidates,
+  summarizeGraphRagOntologySurface,
   type GraphProjectionSignal,
   type GraphRagCandidateExplainability,
+  type GraphRagOntologySurfaceSummary,
   type GraphRagScoreContract,
   type RetrievalCandidateInput,
 } from './retrieval-pipeline';
@@ -133,6 +135,7 @@ export interface RetrievedContext {
     graphRerankChanged?: boolean;
     graphRerankedCandidateKeys?: string[];
     telemetryId?: string;
+    ontologyExplainability?: GraphRagOntologySurfaceSummary;
   };
 }
 
@@ -928,6 +931,9 @@ export async function retrieveContext(
     explainability: options?.explain ? buildGraphRagExplainability(candidate) : undefined,
   }));
   memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
+  const ontologyExplainability = summarizeGraphRagOntologySurface(
+    ranked.candidates.map(candidate => buildGraphRagExplainability(candidate)),
+  );
 
   const skillScoreMap = new Map(ranked.matchedSkills.map(skill => [skill.name.toLowerCase(), skill.score]));
   skills.sort((a, b) => (skillScoreMap.get(b.name.toLowerCase()) || 0) - (skillScoreMap.get(a.name.toLowerCase()) || 0));
@@ -1045,6 +1051,7 @@ export async function retrieveContext(
       graphRerankChanged: ranked.graphRerankChanged,
       graphRerankedCandidateKeys: ranked.graphRerankedCandidateKeys,
       telemetryId: telemetry.id,
+      ontologyExplainability,
     },
   };
 }
