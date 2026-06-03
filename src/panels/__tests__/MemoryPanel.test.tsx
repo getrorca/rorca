@@ -178,7 +178,7 @@ describe('MemoryPanel', () => {
     await screen.findByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
 
-    expect(await screen.findByText('Focused memory #1')).toBeTruthy();
+    expect(await screen.findByText('Centered on memory #1')).toBeTruthy();
 
     const secondEntry = screen.getByText('Bound node and edge counts in the query layer.').closest('li');
     expect(secondEntry).toBeTruthy();
@@ -186,7 +186,7 @@ describe('MemoryPanel', () => {
     await user.click(screen.getByLabelText('Focus memory 2 from graph'));
 
     await waitFor(() => {
-      expect(screen.getByText('Focused memory #2')).toBeTruthy();
+      expect(screen.getByText('Centered on memory #2')).toBeTruthy();
       expect(within(secondEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
     });
 
@@ -196,7 +196,7 @@ describe('MemoryPanel', () => {
     await user.click(screen.getByText('Direction Stack layers cascade L1 → L5.'));
 
     await waitFor(() => {
-      expect(screen.getByText('Focused memory #1')).toBeTruthy();
+      expect(screen.getByText('Centered on memory #1')).toBeTruthy();
       expect(within(firstEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
     });
   });
@@ -234,6 +234,165 @@ describe('MemoryPanel', () => {
     await user.click(screen.getByRole('tab', { name: 'Graph' }));
 
     expect(await screen.findByText(/Apache AGE extension not available/)).toBeTruthy();
+  });
+
+  it('renders a bounded blast-radius summary and cap warnings for the current selection', async () => {
+    const user = userEvent.setup();
+    mockPanelData({
+      overviewGraph: {
+        ...OVERVIEW_GRAPH_RESPONSE,
+        summary: {
+          ...OVERVIEW_GRAPH_RESPONSE.summary,
+          truncated: { nodes: true, edges: false },
+        },
+      },
+      neighborhoodGraph: {
+        ...NEIGHBORHOOD_GRAPH_RESPONSE,
+        summary: {
+          ...NEIGHBORHOOD_GRAPH_RESPONSE.summary,
+          truncated: { nodes: false, edges: true },
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    expect(await screen.findByLabelText('Blast radius summary')).toBeTruthy();
+    expect(screen.getByText('Centered on memory #1')).toBeTruthy();
+    expect(screen.getByText('Moderate')).toBeTruthy();
+    expect(screen.getByText(/Workspace overview is intentionally capped before rendering/)).toBeTruthy();
+    expect(screen.getByText(/Focused neighborhood is intentionally capped before rendering/)).toBeTruthy();
+
+    const summary = screen.getByLabelText('Blast radius summary');
+    expect(within(summary).getByText('Spec spec-a')).toBeTruthy();
+    expect(within(summary).getByText('memory.ts')).toBeTruthy();
+    expect(within(summary).getByText('Memory #2')).toBeTruthy();
+  });
+
+  it('shows a distinct loading state before the graph resolves', async () => {
+    const user = userEvent.setup();
+    let resolveOverview!: (value: typeof OVERVIEW_GRAPH_RESPONSE) => void;
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/graph/overview?')) {
+        return await new Promise<typeof OVERVIEW_GRAPH_RESPONSE>((resolve) => {
+          resolveOverview = resolve;
+        });
+      }
+      if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
+      return {};
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Graph' }));
+
+    expect(await screen.findByText('Loading Knowledge Web')).toBeTruthy();
+
+    resolveOverview(OVERVIEW_GRAPH_RESPONSE);
+
+    expect(await screen.findByText('Blast radius')).toBeTruthy();
+  });
+
+  it('shows a distinct unavailable state when the overview request fails', async () => {
+    const user = userEvent.setup();
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/graph/overview?')) throw new Error('Overview request failed');
+      if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
+      return {};
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Graph' }));
+
+    expect(await screen.findByText('Unavailable')).toBeTruthy();
+    expect(screen.getByText('Overview request failed')).toBeTruthy();
+  });
+
+  it('keeps search, edit, pin, and delete workflows working in split mode', async () => {
+    const user = userEvent.setup();
+
+    mockApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) {
+        const search = new URL(`http://localhost${path}`).searchParams.get('search')?.toLowerCase() ?? '';
+        if (!search) return MEMORY_LIST_RESPONSE;
+        const items = MEMORY_LIST_RESPONSE.items.filter((item) => item.content.toLowerCase().includes(search));
+        return {
+          ...MEMORY_LIST_RESPONSE,
+          items,
+          total: items.length,
+          pinned: items.filter((item) => item.pinned).length,
+        };
+      }
+      if (path.startsWith('/api/memory/graph/overview?')) return OVERVIEW_GRAPH_RESPONSE;
+      if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
+      if (path === '/api/memory/items/1' && init?.method === 'PATCH') return {};
+      if (path === '/api/memory/items/1' && init?.method === 'DELETE') return {};
+      return {};
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+    await user.click(screen.getByLabelText('Focus memory 2 from graph'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Centered on memory #2')).toBeTruthy();
+    });
+
+    const search = screen.getByLabelText('Search memories');
+    await user.type(search, 'Bound node');
+    await waitFor(() => {
+      expect(screen.queryByText('Direction Stack layers cascade L1 → L5.')).toBeNull();
+    });
+
+    await user.clear(search);
+    await waitFor(() => {
+      expect(screen.getByText('Direction Stack layers cascade L1 → L5.')).toBeTruthy();
+    });
+
+    const memoryList = screen.getByRole('list', { name: 'Memory entries' });
+    let firstEntry = within(memoryList).getByText('Direction Stack layers cascade L1 → L5.').closest('li') as HTMLElement;
+    await user.click(within(firstEntry).getByTitle('Edit content'));
+    const editor = within(firstEntry).getByRole('textbox');
+    await user.clear(editor);
+    await user.type(editor, 'Updated memory copy');
+    await user.click(within(firstEntry).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/memory/items/1', expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ content: 'Updated memory copy' }),
+      }));
+    });
+
+    firstEntry = within(memoryList).getByText('Direction Stack layers cascade L1 → L5.').closest('li') as HTMLElement;
+    await user.click(within(firstEntry).getByTitle('Unpin'));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/memory/items/1', expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ pinned: false }),
+      }));
+    });
+
+    firstEntry = within(memoryList).getByText('Direction Stack layers cascade L1 → L5.').closest('li') as HTMLElement;
+    await user.click(within(firstEntry).getByTitle('Delete'));
+
+    expect(await screen.findByText('Memory deleted. Undo?')).toBeTruthy();
+    expect(mockApiFetch).toHaveBeenCalledWith('/api/memory/items/1', expect.objectContaining({ method: 'DELETE' }));
   });
 
   it('handles empty memory lists', async () => {

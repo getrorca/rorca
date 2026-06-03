@@ -5,8 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2 } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef, useMemo, type ReactNode } from 'react';
+import { AlertTriangle, BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 
@@ -40,6 +40,15 @@ type MemoryGraphNodeType = 'Memory' | 'Story' | 'Spec' | 'File';
 
 type MemoryGraphEdgeType = 'ABOUT' | 'LEARNED_FROM' | 'FROM_SPEC' | 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON';
 
+interface MemoryGraphCaps {
+  memories: number;
+  stories: number;
+  files: number;
+  specs: number;
+  edges: number;
+  dependencies: number;
+}
+
 interface MemoryGraphNode {
   id: string;
   type: MemoryGraphNodeType;
@@ -66,6 +75,7 @@ interface MemoryGraphSummary {
   edgeCount: number;
   countsByType: Record<string, number>;
   countsByEdgeType: Record<MemoryGraphEdgeType, number>;
+  caps?: MemoryGraphCaps;
   truncated: {
     nodes: boolean;
     edges: boolean;
@@ -196,21 +206,39 @@ function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
 }
 
+function createEmptyCaps(): MemoryGraphCaps {
+  return {
+    memories: 0,
+    stories: 0,
+    files: 0,
+    specs: 0,
+    edges: 0,
+    dependencies: 0,
+  };
+}
+
 function createEmptySummary(): MemoryGraphSummary {
   return {
     nodeCount: 0,
     edgeCount: 0,
     countsByType: { Memory: 0, Story: 0, Spec: 0, File: 0 },
     countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 0, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0 },
+    caps: createEmptyCaps(),
     truncated: { nodes: false, edges: false },
   };
 }
 
-function summarizeGraph(nodes: MemoryGraphNode[], edges: MemoryGraphEdge[], truncated: MemoryGraphSummary['truncated']): MemoryGraphSummary {
+function summarizeGraph(
+  nodes: MemoryGraphNode[],
+  edges: MemoryGraphEdge[],
+  truncated: MemoryGraphSummary['truncated'],
+  caps?: MemoryGraphCaps,
+): MemoryGraphSummary {
   const summary = createEmptySummary();
   summary.nodeCount = nodes.length;
   summary.edgeCount = edges.length;
   summary.truncated = truncated;
+  summary.caps = caps ?? createEmptyCaps();
 
   for (const node of nodes) {
     summary.countsByType[node.type] = (summary.countsByType[node.type] ?? 0) + 1;
@@ -221,6 +249,63 @@ function summarizeGraph(nodes: MemoryGraphNode[], edges: MemoryGraphEdge[], trun
   }
 
   return summary;
+}
+
+function formatGraphCaps(caps?: MemoryGraphCaps): string {
+  if (!caps) return 'bounded before rendering';
+  return `${caps.memories} memories, ${caps.stories} stories, ${caps.specs} specs, ${caps.files} files, ${caps.edges} edges`;
+}
+
+function buildBlastRadiusSummary(graph: FilteredGraphData, selectedMemoryId: string | null) {
+  const relatedMemoryIds = graph.nodes
+    .filter((node) => node.type === 'Memory' && node.entityId !== selectedMemoryId)
+    .map((node) => node.entityId);
+  const relatedStoryIds = unique(graph.selection.relatedStoryIds);
+  const relatedSpecIds = unique(graph.selection.relatedSpecIds);
+  const relatedFilePaths = unique(graph.selection.relatedFilePaths);
+  const totalReach = relatedMemoryIds.length + relatedStoryIds.length + relatedSpecIds.length + relatedFilePaths.length;
+
+  if (!selectedMemoryId) {
+    return {
+      assessment: 'Workspace overview',
+      detail: 'Showing the bounded Knowledge Web for the current filtered memory corpus.',
+      relatedMemoryIds,
+      relatedStoryIds,
+      relatedSpecIds,
+      relatedFilePaths,
+    };
+  }
+
+  if (totalReach <= 2) {
+    return {
+      assessment: 'Focused',
+      detail: 'Changes appear tightly scoped around this memory selection.',
+      relatedMemoryIds,
+      relatedStoryIds,
+      relatedSpecIds,
+      relatedFilePaths,
+    };
+  }
+
+  if (totalReach <= 6) {
+    return {
+      assessment: 'Moderate',
+      detail: 'Expect follow-on checks in nearby stories, specs, and files.',
+      relatedMemoryIds,
+      relatedStoryIds,
+      relatedSpecIds,
+      relatedFilePaths,
+    };
+  }
+
+  return {
+    assessment: 'Wide',
+    detail: 'This memory touches a broad neighborhood; validate the wider surface before shipping.',
+    relatedMemoryIds,
+    relatedStoryIds,
+    relatedSpecIds,
+    relatedFilePaths,
+  };
 }
 
 function sortGraphNodes(nodes: MemoryGraphNode[], selectedMemoryId: string | null): MemoryGraphNode[] {
@@ -295,12 +380,13 @@ function buildFilteredGraphData(
   const nodes = sortGraphNodes(Array.from(nodeMap.values()), selectedMemoryId);
   const nodeIds = new Set(nodes.map((node) => node.id));
   const edges = Array.from(edgeMap.values()).filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+  const selectionSource = selectedAllowed && neighborhoodGraph?.available ? neighborhoodGraph.selection : overviewGraph.selection;
   const selection = {
     selectedMemoryId: selectedAllowed ? selectedMemoryId : null,
     suggestedMemoryIds: unique((overviewGraph.selection.suggestedMemoryIds ?? []).filter((memoryId) => allowedMemoryIds.has(memoryId))),
-    relatedStoryIds: unique((selectedAllowed ? neighborhoodGraph?.selection.relatedStoryIds : overviewGraph.selection.relatedStoryIds) ?? []),
-    relatedSpecIds: unique((selectedAllowed ? neighborhoodGraph?.selection.relatedSpecIds : overviewGraph.selection.relatedSpecIds) ?? []),
-    relatedFilePaths: unique((selectedAllowed ? neighborhoodGraph?.selection.relatedFilePaths : overviewGraph.selection.relatedFilePaths) ?? []),
+    relatedStoryIds: unique(selectionSource.relatedStoryIds ?? []),
+    relatedSpecIds: unique(selectionSource.relatedSpecIds ?? []),
+    relatedFilePaths: unique(selectionSource.relatedFilePaths ?? []),
   };
 
   return {
@@ -308,10 +394,15 @@ function buildFilteredGraphData(
     nodes,
     edges,
     selection,
-    summary: summarizeGraph(nodes, edges, {
-      nodes: overviewGraph.summary.truncated.nodes || Boolean(neighborhoodGraph?.summary.truncated.nodes),
-      edges: overviewGraph.summary.truncated.edges || Boolean(neighborhoodGraph?.summary.truncated.edges),
-    }),
+    summary: summarizeGraph(
+      nodes,
+      edges,
+      {
+        nodes: overviewGraph.summary.truncated.nodes || Boolean(neighborhoodGraph?.available && neighborhoodGraph.summary.truncated.nodes),
+        edges: overviewGraph.summary.truncated.edges || Boolean(neighborhoodGraph?.available && neighborhoodGraph.summary.truncated.edges),
+      },
+      overviewGraph.summary.caps,
+    ),
   };
 }
 
@@ -659,12 +750,70 @@ function ViewModeTabs({ value, onChange }: { value: MemoryViewMode; onChange: (m
 
 // ─── Graph View ─────────────────────────────────────────────────────────────
 
+function GraphMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-border bg-surface-100/60 px-3 py-2">
+      <p className="text-[10px] uppercase tracking-wide text-muted">{label}</p>
+      <p className="mt-1 text-lg font-semibold text-[var(--text)]">{value}</p>
+    </div>
+  );
+}
+
+function GraphRelationGroup({
+  label,
+  items,
+  renderItem,
+}: {
+  label: string;
+  items: string[];
+  renderItem: (item: string) => string;
+}) {
+  if (items.length === 0) return null;
+
+  const visibleItems = items.slice(0, 4);
+  const remaining = items.length - visibleItems.length;
+
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wide text-muted">{label}</p>
+      <div className="mt-1.5 flex flex-wrap gap-1.5">
+        {visibleItems.map((item) => (
+          <span key={item} className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">
+            {renderItem(item)}
+          </span>
+        ))}
+        {remaining > 0 && <span className="rounded-full bg-surface-200 px-2 py-0.5 text-[10px] text-muted">+{remaining} more</span>}
+      </div>
+    </div>
+  );
+}
+
+function GraphNotice({ tone = 'default', children }: { tone?: 'default' | 'warning'; children: ReactNode }) {
+  const toneClass = tone === 'warning'
+    ? 'border-amber-500/30 bg-amber-500/10 text-[var(--text)]'
+    : 'border-border bg-bg text-muted';
+
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-xs ${toneClass}`}>
+      <div className="flex items-start gap-2">
+        <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+        <p className="leading-relaxed">{children}</p>
+      </div>
+    </div>
+  );
+}
+
 function GraphView({
   graph,
   selectedMemoryId,
   onSelectMemory,
   filteredItems,
   memoryById,
+  loading,
+  overviewGraph,
+  overviewError,
+  neighborhoodGraph,
+  neighborhoodError,
   loadingNeighborhood,
 }: {
   graph: FilteredGraphData | null;
@@ -672,6 +821,11 @@ function GraphView({
   onSelectMemory: (memoryId: string) => void;
   filteredItems: MemoryItem[];
   memoryById: Map<string, MemoryItem>;
+  loading: boolean;
+  overviewGraph: MemoryGraphResponse | null;
+  overviewError: string | null;
+  neighborhoodGraph: MemoryGraphResponse | null;
+  neighborhoodError: string | null;
   loadingNeighborhood: boolean;
 }) {
   const layout = useMemo(() => {
@@ -683,11 +837,61 @@ function GraphView({
   const presentEdgeTypes = GRAPH_EDGE_ORDER.filter((type) => (graph?.summary.countsByEdgeType[type] ?? 0) > 0);
   const suggestedMemoryIds = (graph?.selection.suggestedMemoryIds ?? []).filter((memoryId) => memoryById.has(memoryId));
   const focusedMemory = selectedMemoryId ? memoryById.get(selectedMemoryId) : null;
+  const blastRadius = graph?.available ? buildBlastRadiusSummary(graph, selectedMemoryId) : null;
+  const overviewBounded = Boolean(overviewGraph?.available && (overviewGraph.summary.truncated.nodes || overviewGraph.summary.truncated.edges));
+  const neighborhoodBounded = Boolean(
+    selectedMemoryId
+    && neighborhoodGraph?.available
+    && (neighborhoodGraph.summary.truncated.nodes || neighborhoodGraph.summary.truncated.edges),
+  );
+  const neighborhoodUnavailableMessage = selectedMemoryId && neighborhoodGraph && !neighborhoodGraph.available
+    ? `${neighborhoodGraph.error ?? 'Focused neighborhood unavailable.'}${neighborhoodGraph.hint ? ` ${neighborhoodGraph.hint}` : ''}`
+    : neighborhoodError;
+
+  if (loading) {
+    return (
+      <section className="rounded-xl border border-border bg-surface-100/70 p-4" aria-label="Knowledge Web graph">
+        <div className="flex min-h-[240px] flex-col items-center justify-center text-center">
+          <div className="mb-3 h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          <p className="text-sm font-medium text-[var(--text)]">Loading Knowledge Web</p>
+          <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted">
+            Preparing the bounded V1 Knowledge Web from existing ontology edges for this workspace.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  if (!graph && overviewError) {
+    return (
+      <section className="rounded-xl border border-border bg-surface-100/70 p-4" aria-label="Knowledge Web graph">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-[var(--text)]">Knowledge Web</h2>
+              <p className="mt-0.5 text-[11px] text-muted">V1 is a bounded Knowledge Web built from existing ontology edges.</p>
+            </div>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">Unavailable</span>
+          </div>
+          <p className="rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">{overviewError}</p>
+        </div>
+      </section>
+    );
+  }
 
   if (!graph) {
     return (
       <section className="rounded-xl border border-border bg-surface-100/70 p-4" aria-label="Knowledge Web graph">
-        <p className="text-xs text-muted">Loading Knowledge Web…</p>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-[var(--text)]">Knowledge Web</h2>
+              <p className="mt-0.5 text-[11px] text-muted">V1 is a bounded Knowledge Web built from existing ontology edges.</p>
+            </div>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">Unavailable</span>
+          </div>
+          <p className="rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">Knowledge Web data is unavailable right now.</p>
+        </div>
       </section>
     );
   }
@@ -699,7 +903,7 @@ function GraphView({
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-semibold text-[var(--text)]">Knowledge Web</h2>
-              <p className="mt-0.5 text-[11px] text-muted">Graph mode is available when the AGE-backed memory graph is enabled.</p>
+              <p className="mt-0.5 text-[11px] text-muted">V1 is a bounded Knowledge Web built from existing ontology edges.</p>
             </div>
             <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">Unavailable</span>
           </div>
@@ -719,7 +923,7 @@ function GraphView({
           <BookOpen size={24} className="mb-3 text-muted" />
           <p className="text-sm font-medium text-[var(--text)]">No graph results for the current filters</p>
           <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted">
-            Clear or change the search and filters to repopulate the bounded Knowledge Web.
+            Clear or change the search and filters to repopulate the bounded V1 Knowledge Web.
           </p>
         </div>
       </section>
@@ -733,7 +937,7 @@ function GraphView({
           <BookOpen size={24} className="mb-3 text-muted" />
           <p className="text-sm font-medium text-[var(--text)]">No graph links available yet</p>
           <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted">
-            The current filtered memories do not have bounded story, file, or spec relations to display.
+            The current bounded selection does not expose existing ontology edges to stories, files, or specs.
           </p>
         </div>
       </section>
@@ -745,7 +949,7 @@ function GraphView({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-[var(--text)]">Knowledge Web</h2>
-          <p className="mt-0.5 text-[11px] text-muted">Bounded to the currently filtered memory corpus for this workspace.</p>
+          <p className="mt-0.5 text-[11px] text-muted">V1 is a bounded Knowledge Web built from existing ontology edges and the current filtered memory corpus.</p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
           <span className="rounded-full border border-border bg-bg px-2 py-0.5">{graph.summary.nodeCount} nodes</span>
@@ -756,7 +960,25 @@ function GraphView({
         </div>
       </div>
 
-      <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+      <div className="mt-3 space-y-2">
+        {overviewBounded && (
+          <GraphNotice tone="warning">
+            Workspace overview is intentionally capped before rendering at {formatGraphCaps(overviewGraph?.summary.caps)} so large workspaces stay responsive.
+          </GraphNotice>
+        )}
+        {neighborhoodBounded && (
+          <GraphNotice tone="warning">
+            Focused neighborhood is intentionally capped before rendering at {formatGraphCaps(neighborhoodGraph?.summary.caps)} for the current selection.
+          </GraphNotice>
+        )}
+        {neighborhoodUnavailableMessage && (
+          <GraphNotice>
+            Focused neighborhood unavailable; showing the bounded workspace overview for this selection. {neighborhoodUnavailableMessage}
+          </GraphNotice>
+        )}
+      </div>
+
+      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start">
         <div className="flex flex-wrap gap-1.5">
           {presentNodeTypes.map((type) => (
             <span key={type} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${GRAPH_NODE_META[type].badgeClass}`}>
@@ -770,29 +992,49 @@ function GraphView({
           ))}
         </div>
 
-        <div className="rounded-lg border border-border bg-bg px-3 py-2 text-[11px] text-muted lg:min-w-[240px]">
-          <p className="font-medium text-[var(--text)]">
-            {selectedMemoryId ? `Focused memory #${selectedMemoryId}` : 'No focused memory'}
-          </p>
-          <p className="mt-1 leading-relaxed">
+        <div className="rounded-xl border border-border bg-bg p-3 text-[11px] text-muted" aria-label="Blast radius summary">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="font-medium text-[var(--text)]">Blast radius</p>
+              <p className="mt-0.5 text-[10px] uppercase tracking-wide text-muted">
+                {selectedMemoryId ? `Centered on memory #${selectedMemoryId}` : 'Workspace overview'}
+              </p>
+            </div>
+            <span className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] font-medium text-[var(--text)]">
+              {blastRadius?.assessment ?? 'Unknown'}
+            </span>
+          </div>
+
+          <p className="mt-2 leading-relaxed">
             {focusedMemory
               ? truncateText(focusedMemory.content, 120)
               : 'Select a memory from the ledger or graph to inspect its bounded neighborhood.'}
           </p>
-          {(graph.selection.relatedFilePaths.length > 0 || graph.selection.relatedSpecIds.length > 0 || graph.selection.relatedStoryIds.length > 0) && (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {graph.selection.relatedStoryIds.slice(0, 2).map((storyId) => (
-                <span key={storyId} className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">Story {storyId}</span>
-              ))}
-              {graph.selection.relatedSpecIds.slice(0, 2).map((specId) => (
-                <span key={specId} className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">Spec {specId}</span>
-              ))}
-              {graph.selection.relatedFilePaths.slice(0, 2).map((path) => (
-                <span key={path} className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">{basename(path)}</span>
-              ))}
-            </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <GraphMetric label="Related memories" value={blastRadius?.relatedMemoryIds.length ?? 0} />
+            <GraphMetric label="Related stories" value={blastRadius?.relatedStoryIds.length ?? 0} />
+            <GraphMetric label="Related specs" value={blastRadius?.relatedSpecIds.length ?? 0} />
+            <GraphMetric label="Related files" value={blastRadius?.relatedFilePaths.length ?? 0} />
+          </div>
+
+          <p className="mt-3 text-xs leading-relaxed text-muted">{blastRadius?.detail}</p>
+
+          <div className="mt-3 space-y-3">
+            <GraphRelationGroup label="Related memories" items={blastRadius?.relatedMemoryIds ?? []} renderItem={(memoryId) => `Memory #${memoryId}`} />
+            <GraphRelationGroup label="Related stories" items={blastRadius?.relatedStoryIds ?? []} renderItem={(storyId) => `Story ${storyId}`} />
+            <GraphRelationGroup label="Related specs" items={blastRadius?.relatedSpecIds ?? []} renderItem={(specId) => `Spec ${specId}`} />
+            <GraphRelationGroup label="Related files" items={blastRadius?.relatedFilePaths ?? []} renderItem={(path) => basename(path)} />
+          </div>
+
+          {(blastRadius?.relatedMemoryIds.length ?? 0) === 0
+            && (blastRadius?.relatedStoryIds.length ?? 0) === 0
+            && (blastRadius?.relatedSpecIds.length ?? 0) === 0
+            && (blastRadius?.relatedFilePaths.length ?? 0) === 0 && (
+              <p className="mt-3 text-xs text-muted">No related memories, stories, specs, or files were surfaced for this bounded selection.</p>
           )}
-          {loadingNeighborhood && selectedMemoryId && <p className="mt-2 text-[10px] text-muted">Refreshing focused neighborhood…</p>}
+
+          {loadingNeighborhood && selectedMemoryId && <p className="mt-3 text-[10px] text-muted">Refreshing focused neighborhood…</p>}
         </div>
       </div>
 
@@ -932,7 +1174,7 @@ function GraphView({
           <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
           <span>Pinned memory</span>
         </div>
-        <span>Tap any memory node to sync the ledger selection.</span>
+        <span>Tap any memory node to sync the ledger selection without mutating the ledger state.</span>
       </div>
     </section>
   );
@@ -1056,6 +1298,8 @@ export default function MemoryPanel() {
   const [neighborhoodGraph, setNeighborhoodGraph] = useState<MemoryGraphResponse | null>(null);
   const [overviewGraphLoading, setOverviewGraphLoading] = useState(false);
   const [neighborhoodGraphLoading, setNeighborhoodGraphLoading] = useState(false);
+  const [overviewGraphError, setOverviewGraphError] = useState<string | null>(null);
+  const [neighborhoodGraphError, setNeighborhoodGraphError] = useState<string | null>(null);
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -1083,6 +1327,8 @@ export default function MemoryPanel() {
     setSelectedMemoryId(null);
     setOverviewGraph(null);
     setNeighborhoodGraph(null);
+    setOverviewGraphError(null);
+    setNeighborhoodGraphError(null);
     setSelectedIds(new Set());
     setEditingId(null);
   }, [workspaceId]);
@@ -1120,12 +1366,14 @@ export default function MemoryPanel() {
   const fetchOverviewGraph = useCallback(async () => {
     if (!workspaceId || !shouldShowGraph) return;
     setOverviewGraphLoading(true);
+    setOverviewGraphError(null);
 
     try {
       const data = await apiFetch<MemoryGraphResponse>(`/api/memory/graph/overview?workspaceId=${encodeURIComponent(workspaceId)}`);
       setOverviewGraph(data);
-    } catch {
+    } catch (error) {
       setOverviewGraph(null);
+      setOverviewGraphError(error instanceof Error ? error.message : 'Knowledge Web unavailable right now.');
     } finally {
       setOverviewGraphLoading(false);
     }
@@ -1151,17 +1399,20 @@ export default function MemoryPanel() {
   const fetchNeighborhoodGraph = useCallback(async () => {
     if (!workspaceId || !selectedMemoryId || !shouldShowGraph) {
       setNeighborhoodGraph(null);
+      setNeighborhoodGraphError(null);
       return;
     }
 
     setNeighborhoodGraphLoading(true);
     setNeighborhoodGraph(null);
+    setNeighborhoodGraphError(null);
     try {
       const params = new URLSearchParams({ workspaceId, memoryId: selectedMemoryId });
       const data = await apiFetch<MemoryGraphResponse>(`/api/memory/graph/neighborhood?${params.toString()}`);
       setNeighborhoodGraph(data);
-    } catch {
+    } catch (error) {
       setNeighborhoodGraph(null);
+      setNeighborhoodGraphError(error instanceof Error ? error.message : 'Focused neighborhood unavailable right now.');
     } finally {
       setNeighborhoodGraphLoading(false);
     }
@@ -1283,6 +1534,7 @@ export default function MemoryPanel() {
     () => buildFilteredGraphData(overviewGraph, neighborhoodGraph, filteredItems, selectedMemoryId),
     [overviewGraph, neighborhoodGraph, filteredItems, selectedMemoryId],
   );
+  const graphLoading = shouldShowGraph && (overviewGraphLoading || (!overviewGraph && !overviewGraphError));
 
   if (!loaded) {
     return (
@@ -1312,11 +1564,16 @@ export default function MemoryPanel() {
 
   const graphSection = shouldShowGraph ? (
     <GraphView
-      graph={overviewGraphLoading ? null : filteredGraph}
+      graph={filteredGraph}
       selectedMemoryId={selectedMemoryId}
       onSelectMemory={setSelectedMemoryId}
       filteredItems={filteredItems}
       memoryById={memoryById}
+      loading={graphLoading}
+      overviewGraph={overviewGraph}
+      overviewError={overviewGraphError}
+      neighborhoodGraph={neighborhoodGraph}
+      neighborhoodError={neighborhoodGraphError}
       loadingNeighborhood={neighborhoodGraphLoading}
     />
   ) : null;
