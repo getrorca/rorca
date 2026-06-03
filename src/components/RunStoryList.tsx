@@ -57,9 +57,42 @@ export interface StoryContextInfo {
   outputTokens: number;
 }
 
+interface RunStateStoryEntry {
+  storyId: string;
+  title: string;
+  status: 'passed' | 'failed' | 'skipped';
+  startedAt: string;
+  finishedAt: string;
+  agentType: string;
+  model?: string;
+  retries?: number;
+  elapsedMs?: number;
+  failReason?: string;
+}
+
+interface RunStateSnapshot {
+  specId: string;
+  runId: number;
+  startedAt: string;
+  lastUpdatedAt: string;
+  completedStories: RunStateStoryEntry[];
+  failedStories: RunStateStoryEntry[];
+  skippedStories: RunStateStoryEntry[];
+  currentStory: string | null;
+  resumedFromStory?: string | null;
+}
+
+interface ResumeSummary {
+  continueFromId: string | null;
+  resumedAfterId: string | null;
+  carriedForwardCount: number;
+}
+
 interface RunStoryListProps {
   runId: number;
   walEvents: WalEvent[];
+  runState?: RunStateSnapshot | null;
+  resumeSummary?: ResumeSummary | null;
   onStoryClick?: (storyId: string) => void;
   onRetryStory?: (storyId: string, newRunId: number) => void;
   parallelism?: number;
@@ -615,7 +648,17 @@ type VirtualItem =
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function RunStoryList({ runId, walEvents, onStoryClick, onRetryStory, parallelism, includeGraph, storyContext }: RunStoryListProps) {
+export default function RunStoryList({
+  runId,
+  walEvents,
+  runState,
+  resumeSummary,
+  onStoryClick,
+  onRetryStory,
+  parallelism,
+  includeGraph,
+  storyContext,
+}: RunStoryListProps) {
   const [storyResults, setStoryResults] = useState<StoryResult[]>([]);
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -815,15 +858,34 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     const source: SpecStory[] = specStories.length > 0
       ? specStories
       : storyResults.map(r => ({ id: r.story_id, title: r.story_id }));
+    const carriedPassed = new Map((runState?.completedStories ?? []).map((story) => [story.storyId, story]));
+    const carriedFailed = new Map((runState?.failedStories ?? []).map((story) => [story.storyId, story]));
+    const carriedSkipped = new Map((runState?.skippedStories ?? []).map((story) => [story.storyId, story]));
+    if (carriedPassed.size === 0 && resumeSummary?.continueFromId) {
+      const continueIndex = source.findIndex((story) => story.id === resumeSummary.continueFromId);
+      if (continueIndex > 0) {
+        for (const prior of source.slice(0, continueIndex)) {
+          carriedPassed.set(prior.id, {
+            storyId: prior.id,
+            title: prior.title,
+            status: 'passed',
+            startedAt: '',
+            finishedAt: '',
+            agentType: 'resume',
+          });
+        }
+      }
+    }
 
     return source.map((spec): MergedStory => {
       const result = resultMap.get(spec.id);
+      const carriedPass = carriedPassed.get(spec.id);
+      const carriedFail = carriedFailed.get(spec.id);
+      const carriedSkip = carriedSkipped.get(spec.id);
       let status: DerivedStatus = 'pending';
       let blockedBy: string[] | null = null;
 
-      if (spec.passes === true && (!result || result.status === 'skip')) {
-        status = 'excluded';
-      } else if (result) {
+      if (result) {
         if (result.status === 'pass') status = 'pass';
         else if (result.status === 'fail') status = 'fail';
         else if (result.status === 'skip') {
@@ -835,6 +897,14 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         }
         else if (result.status === 'retry') status = 'retry';
         else status = result.status as DerivedStatus;
+      } else if (carriedPass) {
+        status = 'pass';
+      } else if (carriedFail) {
+        status = 'fail';
+      } else if (carriedSkip) {
+        status = 'skip';
+      } else if (spec.passes === true) {
+        status = 'excluded';
       }
 
       // Also check WAL events for blocked_by info if not in story_results
@@ -862,6 +932,8 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
       // SSE override: if this story is currently running
       if (runningStoryIds.has(spec.id) && (!result || result.status === 'retry')) {
         status = 'running';
+      } else if (runState?.currentStory === spec.id && !result) {
+        status = 'running';
       }
 
       // Local retry override: show as running immediately after retry button click
@@ -873,9 +945,9 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         storyId: spec.id,
         title: spec.title,
         status,
-        elapsed: result?.elapsed_seconds ?? null,
-        retries: result?.retries ?? null,
-        startedAt: storyStartTimes.get(spec.id) ?? null,
+        elapsed: result?.elapsed_seconds ?? (carriedPass?.elapsedMs != null ? Math.round(carriedPass.elapsedMs / 1000) : carriedFail?.elapsedMs != null ? Math.round(carriedFail.elapsedMs / 1000) : carriedSkip?.elapsedMs != null ? Math.round(carriedSkip.elapsedMs / 1000) : null),
+        retries: result?.retries ?? carriedFail?.retries ?? carriedSkip?.retries ?? null,
+        startedAt: storyStartTimes.get(spec.id) ?? (runState?.currentStory === spec.id ? Date.parse(runState.lastUpdatedAt) : null),
         rateLimitRetryAt: rlInfo?.retryAt ?? null,
         rateLimitAttempt: rlInfo?.attempt ?? null,
         blockedBy,
@@ -885,7 +957,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         browserMcp: browserMcpStoryIds.has(spec.id),
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap, browserMcpStoryIds]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, runState]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -1150,6 +1222,18 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
           </span>
         )}
       </div>
+
+      {resumeSummary && (resumeSummary.continueFromId || resumeSummary.resumedAfterId || resumeSummary.carriedForwardCount > 0) && (
+        <div className="shrink-0 px-3 py-2 border-b border-amber-500/20 bg-amber-500/5 flex items-center gap-2" data-testid="story-list-resume-banner">
+          <RotateCcw size={12} className="text-amber-400 shrink-0" />
+          <div className="min-w-0 text-[11px] leading-4 text-amber-200/90">
+            <span className="font-medium">Continuing</span>
+            {resumeSummary.continueFromId && <span> from <span className="font-mono">{resumeSummary.continueFromId}</span></span>}
+            {resumeSummary.resumedAfterId && <span className="text-amber-200/70"> after <span className="font-mono">{resumeSummary.resumedAfterId}</span></span>}
+            {resumeSummary.carriedForwardCount > 0 && <span className="text-amber-200/70"> · {resumeSummary.carriedForwardCount} carried forward</span>}
+          </div>
+        </div>
+      )}
 
       {/* CTM-004: Context usage summary bar — aggregate skills/files/tokens */}
       {contextSummary && (

@@ -82,6 +82,37 @@ interface ContextComparisonData {
   actual: Record<string, { contextFiles: string[] }>;
 }
 
+interface RunStateStoryEntry {
+  storyId: string;
+  title: string;
+  status: 'passed' | 'failed' | 'skipped';
+  startedAt: string;
+  finishedAt: string;
+  agentType: string;
+  model?: string;
+  retries?: number;
+  elapsedMs?: number;
+  failReason?: string;
+}
+
+interface RunStateSnapshot {
+  specId: string;
+  runId: number;
+  startedAt: string;
+  lastUpdatedAt: string;
+  completedStories: RunStateStoryEntry[];
+  failedStories: RunStateStoryEntry[];
+  skippedStories: RunStateStoryEntry[];
+  currentStory: string | null;
+  resumedFromStory?: string | null;
+}
+
+interface ResumeSummary {
+  continueFromId: string | null;
+  resumedAfterId: string | null;
+  carriedForwardCount: number;
+}
+
 interface RunApiResponse {
   run: PipelineRun;
   stories: StoryResultSeed[];
@@ -90,6 +121,7 @@ interface RunApiResponse {
   agentType?: string;
   agentModel?: string | null;
   tokenSummary?: { inputTokens: number; outputTokens: number };
+  runState?: RunStateSnapshot | null;
   contextComparison?: ContextComparisonData | null;
   storyTokenBreakdown?: StoryTokenEntry[];
 }
@@ -553,12 +585,12 @@ function ContextSummaryBar({
   dbStories,
   contextComparison,
   storyTokenBreakdown,
-  onSkillsClick,
+  onContextClick,
 }: {
   dbStories: StoryResultSeed[];
   contextComparison: ContextComparisonData | null;
   storyTokenBreakdown: StoryTokenEntry[];
-  onSkillsClick: () => void;
+  onContextClick: () => void;
 }) {
   const { skillCount, fileCount, avgTokens } = useMemo(() => {
     // Unique skills across all story_results.active_skills
@@ -625,7 +657,7 @@ function ContextSummaryBar({
         </>
       )}
       <button
-        onClick={onSkillsClick}
+        onClick={onContextClick}
         className="ml-auto text-[10px] text-accent hover:underline shrink-0"
       >
         Context →
@@ -909,6 +941,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const [dbStories, setDbStories] = useState<StoryResultSeed[]>([]);
   const [specStories, setSpecStories] = useState<{ id: string; title: string; suggestedSkills?: Array<{ name: string; relevance: number; reason: string }> }[]>([]);
   const [storyTokenBreakdown, setStoryTokenBreakdown] = useState<StoryTokenEntry[]>([]);
+  const [runState, setRunState] = useState<RunStateSnapshot | null>(null);
   // Seed from story_results on initial load so graph colors are correct for in-progress/historical runs
   const [seedStatuses, setSeedStatuses] = useState<Map<string, DerivedStatus>>(new Map());
 
@@ -938,6 +971,35 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
   // SSE for live status updates — scoped to workspace
   const walEvents = usePipelineSSE(String(runId), workspaceId);
+
+  const resumeSummary = useMemo<ResumeSummary | null>(() => {
+    const finishedIds = new Set([
+      ...(runState?.completedStories ?? []).map((story) => story.storyId),
+      ...(runState?.failedStories ?? []).map((story) => story.storyId),
+      ...(runState?.skippedStories ?? []).map((story) => story.storyId),
+    ]);
+    const lastStartedStoryId = [...walEvents]
+      .reverse()
+      .find((event) => event.event_type === 'story_started' && event.story_id)?.story_id ?? null;
+
+    let carriedForwardCount = runState?.completedStories.length ?? 0;
+    let continueFromId = runState?.currentStory
+      ?? specStories.find((story) => !finishedIds.has(story.id))?.id
+      ?? lastStartedStoryId
+      ?? null;
+    let resumedAfterId = runState?.resumedFromStory ?? null;
+
+    if ((!runState || carriedForwardCount === 0) && continueFromId && specStories.length > 0) {
+      const continueIndex = specStories.findIndex((story) => story.id === continueFromId);
+      if (continueIndex > 0) {
+        carriedForwardCount = continueIndex;
+        resumedAfterId = resumedAfterId ?? specStories[continueIndex - 1]?.id ?? null;
+      }
+    }
+
+    if (!continueFromId && !resumedAfterId && carriedForwardCount === 0) return null;
+    return { continueFromId, resumedAfterId, carriedForwardCount };
+  }, [runState, specStories, walEvents]);
 
   // Derive effective status from SSE events
   const effectiveStatus = useMemo(() => {
@@ -1199,6 +1261,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       }
       if (data.specModel !== undefined) setSpecModel(data.specModel);
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
+      if (data.runState !== undefined) setRunState(data.runState ?? null);
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
       if (data.specStories) { setTotalStories(data.specStories.length); setSpecStories(data.specStories); }
       if (data.stories) {
@@ -1524,6 +1587,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                   <RunStoryList
                     runId={run.id}
                     walEvents={walEvents}
+                    runState={runState}
+                    resumeSummary={resumeSummary}
                     onStoryClick={useMultiPane ? undefined : (storyId) => terminalRef.current?.scrollToStory(storyId)}
                     parallelism={run.parallelism}
                     includeGraph={run.include_graph}
@@ -1538,6 +1603,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                   walEvents={walEvents}
                   onKill={() => setShowKillConfirm(true)}
                   contextComparison={contextComparison}
+                  resumeSummary={resumeSummary}
                 />
               </div>
             }
@@ -1548,6 +1614,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           <RunStoryList
             runId={run.id}
             walEvents={walEvents}
+            runState={runState}
+            resumeSummary={resumeSummary}
             onStoryClick={(storyId) => {
               handleTabChange('terminal');
               setTimeout(() => terminalRef.current?.scrollToStory(storyId), 100);
@@ -1771,7 +1839,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         dbStories={dbStories}
         contextComparison={contextComparison}
         storyTokenBreakdown={storyTokenBreakdown}
-        onSkillsClick={() => handleTabChange('skills')}
+        onContextClick={() => handleTabChange('inspector')}
       />
 
       {/* Merge status — visible only for worktree runs with auto-merge */}

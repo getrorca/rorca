@@ -902,6 +902,13 @@ function getProgress(stories: UserStory[]): { passed: number; total: number } {
   };
 }
 
+export function getStoriesFromStart(stories: UserStory[], startFromStoryId?: string): UserStory[] {
+  if (!startFromStoryId) return stories;
+  const startIndex = stories.findIndex((story) => story.id === startFromStoryId);
+  if (startIndex < 0) return stories;
+  return stories.slice(startIndex);
+}
+
 function getNextStory(stories: UserStory[]): UserStory | null {
   const allIds = new Set(stories.map(s => s.id));
   const passedIds = new Set(stories.filter(isPassed).map(s => s.id));
@@ -5743,13 +5750,16 @@ async function main(): Promise<void> {
   const mode = detectMode(spec);
   const playbook = spec.playbook;
   const stories = getStories(spec);
+  const initialExecutableStories = config.specificStory
+    ? stories
+    : getStoriesFromStart(stories, config.startFromStoryId);
 
   const modeLabel = mode === 'qa' ? 'QA Testing' : mode === 'journey' ? 'Journey' : 'Implementation';
-  const progress = getProgress(stories);
+  const progress = getProgress(initialExecutableStories);
 
   // ── Scan per-story agent assignments ────────────────────────────────
-  const requiredEngines = scanRequiredEngines(stories, config.agentType);
-  const engineCounts = countStoriesByEngine(stories, config.agentType);
+  const requiredEngines = scanRequiredEngines(initialExecutableStories, config.agentType);
+  const engineCounts = countStoriesByEngine(initialExecutableStories, config.agentType);
 
   if (config.agentType === 'opencode' || requiredEngines.has('opencode')) requireOpenCode();
   if (config.agentType === 'codex' || requiredEngines.has('codex')) requireCodex();
@@ -5876,7 +5886,7 @@ async function main(): Promise<void> {
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
   if (config.parallelism > 1 && !config.specificStory) {
-    process.exitCode = await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, personaRegistry);
+    process.exitCode = await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, initialExecutableStories, personaRegistry);
     return;
   }
 
@@ -5896,6 +5906,9 @@ async function main(): Promise<void> {
 
     const currentSpec: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
     const currentStories = getStories(currentSpec);
+    const executableStories = config.specificStory
+      ? currentStories
+      : getStoriesFromStart(currentStories, config.startFromStoryId);
 
     let story: UserStory | null;
 
@@ -5907,15 +5920,15 @@ async function main(): Promise<void> {
         return;
       }
     } else {
-      story = getNextStory(currentStories);
+      story = getNextStory(executableStories);
     }
 
     if (!story) {
-      const finalProgress = getProgress(currentStories);
+      const finalProgress = getProgress(executableStories);
       logger.info('');
       if (finalProgress.passed === 0 && finalProgress.total > 0) {
         // No stories executed — likely a dependency resolution issue
-        const blocked = currentStories.filter(s => !isPassed(s) && !s.skipped && !s.excluded);
+        const blocked = executableStories.filter(s => !isPassed(s) && !s.skipped && !s.excluded);
         logger.error(`ERROR: 0/${finalProgress.total} stories executed — all stories blocked!`);
         for (const b of blocked) {
           const deps = b.dependsOn ?? [];
@@ -5938,7 +5951,7 @@ async function main(): Promise<void> {
       // autoMergeAfterRun() with agentic conflict resolution, WAL events, and
       // merge_status tracking. Running both would cause a double-merge race.
       if (config.worktreePath && config.branchName && config.workspacePath && process.env.RORCA_PROCESS_ROLE !== 'engine') {
-        const allPassed = currentStories.every(s => s.excluded || isPassed(s));
+        const allPassed = executableStories.every(s => s.excluded || isPassed(s));
         if (allPassed) {
           autoMergeRunWorktree(config.workspacePath, config.worktreePath, config.branchName);
         } else {
@@ -5950,7 +5963,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    const currentProgress = getProgress(currentStories);
+    const currentProgress = getProgress(executableStories);
     const _timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
     const storyAgent = resolveStoryAgent(story, config.agentType);
@@ -5971,7 +5984,7 @@ async function main(): Promise<void> {
 
     const seqResult = await executeStory(
       story, config, mode, playbook, logDir, workspaceId, retryCounts,
-      undefined, undefined, undefined, currentStories,
+      undefined, undefined, undefined, executableStories,
       undefined, undefined, personaRegistry,
       undefined, // waveIndex
       currentSpec, // spec — for storyWantsBrowserMcp()

@@ -7,6 +7,7 @@
 
 import {
   classifyStoryWorkingTreeChanges,
+  getStoriesFromStart,
   isMeaningfulStoryChange,
 } from '../execution-engine';
 
@@ -43,5 +44,18 @@ describe('execution-engine meaningful change detection', () => {
   test('treats project-local pi extension source as meaningful code', () => {
     expect(isMeaningfulStoryChange('.pi/agent/extensions/rorca/lib/story-executor.ts')).toBe(true);
     expect(isMeaningfulStoryChange('.pi/extensions/rorca-mcp/index.ts')).toBe(true);
+  });
+
+  test('restricts sequential continuation to the requested start story and following stories', () => {
+    const stories = [
+      { id: 'CTM-001', title: 'One', description: 'One' },
+      { id: 'CTM-002', title: 'Two', description: 'Two' },
+      { id: 'CTM-003', title: 'Three', description: 'Three' },
+      { id: 'CTM-004', title: 'Four', description: 'Four' },
+    ];
+
+    expect(getStoriesFromStart(stories, 'CTM-003').map((story) => story.id)).toEqual(['CTM-003', 'CTM-004']);
+    expect(getStoriesFromStart(stories, 'CTM-999').map((story) => story.id)).toEqual(['CTM-001', 'CTM-002', 'CTM-003', 'CTM-004']);
+    expect(getStoriesFromStart(stories).map((story) => story.id)).toEqual(['CTM-001', 'CTM-002', 'CTM-003', 'CTM-004']);
   });
 });

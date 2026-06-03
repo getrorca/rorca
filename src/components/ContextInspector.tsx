@@ -220,8 +220,9 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
           <>
             <span className="text-sm font-medium">No context traces for this run</span>
             <span className="text-xs opacity-70 max-w-sm">
-              This run did not emit any context-assembly traces, or its trace artifact
-              has been pruned. Newer runs stream retrieval, skill, and prompt phases here.
+              This view only shows low-level context-trace artifacts. This run still may
+              have context files, skills, retrieval telemetry, and token usage recorded in
+              the Stories and Skills tabs; it just did not emit the newer trace artifact.
             </span>
           </>
         ) : (

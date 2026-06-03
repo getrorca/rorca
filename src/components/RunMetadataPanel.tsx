@@ -19,6 +19,7 @@ import {
   Loader2,
   Zap,
   FileText,
+  RotateCcw,
 } from 'lucide-react';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 import AgentBadge from './AgentBadge';
@@ -29,6 +30,12 @@ import { normalizeAgentType } from '../lib/agent-display';
 interface ContextComparisonData {
   predicted: Record<string, { totalTokens: number; injectedFiles: string[] }>;
   actual: Record<string, { contextFiles: string[] }>;
+}
+
+interface ResumeSummary {
+  continueFromId: string | null;
+  resumedAfterId: string | null;
+  carriedForwardCount: number;
 }
 
 interface RunMetadataPanelProps {
@@ -49,6 +56,7 @@ interface RunMetadataPanelProps {
   walEvents: WalEvent[];
   onKill?: () => void;
   contextComparison?: ContextComparisonData | null;
+  resumeSummary?: ResumeSummary | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -141,6 +149,7 @@ export default function RunMetadataPanel({
   walEvents,
   onKill,
   contextComparison,
+  resumeSummary,
 }: RunMetadataPanelProps) {
   const [now, setNow] = useState(Date.now());
 
@@ -188,6 +197,28 @@ export default function RunMetadataPanel({
       <div className="px-3 py-1.5 border-b border-border/50">
         <span className="text-[10px] font-semibold text-muted uppercase tracking-wider">Run Info</span>
       </div>
+
+      {resumeSummary && (resumeSummary.continueFromId || resumeSummary.resumedAfterId || resumeSummary.carriedForwardCount > 0) && (
+        <MetaRow icon={RotateCcw} label="Continue">
+          <div className="flex flex-wrap items-center gap-1.5" data-testid="run-resume-summary">
+            {resumeSummary.continueFromId && (
+              <span className="font-mono text-[10px] text-amber-400">
+                from {resumeSummary.continueFromId}
+              </span>
+            )}
+            {resumeSummary.resumedAfterId && (
+              <span className="text-[10px] text-muted">
+                after {resumeSummary.resumedAfterId}
+              </span>
+            )}
+            {resumeSummary.carriedForwardCount > 0 && (
+              <span className="text-[10px] text-muted">
+                {resumeSummary.carriedForwardCount} carried forward
+              </span>
+            )}
+          </div>
+        </MetaRow>
+      )}
 
       {/* Tokens */}
       <MetaRow icon={Cpu} label="Tokens">
