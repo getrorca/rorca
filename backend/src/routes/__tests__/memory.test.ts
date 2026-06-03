@@ -10,7 +10,6 @@ import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
-import { getAuthToken } from './helpers/auth-helper';
 import { execute, queryOne } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
@@ -34,10 +33,40 @@ beforeAll(async () => {
 
   const serverMod = require('../../server');
   app = serverMod.default;
+
+  await execute('ALTER TABLE memories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ');
+  await execute('UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL');
+  await execute('ALTER TABLE memories ALTER COLUMN updated_at SET DEFAULT NOW()');
+  await execute(`CREATE TABLE IF NOT EXISTS memory_relations (
+    id BIGSERIAL PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation_type TEXT NOT NULL CHECK (relation_type IN ('SUPERSEDES', 'CONFLICTS_WITH')),
+    canonical_key TEXT NOT NULL,
+    note TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded', 'deleted')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ,
+    restored_at TIMESTAMPTZ,
+    superseded_at TIMESTAMPTZ,
+    CHECK (source_memory_id <> target_memory_id),
+    CHECK (
+      (status = 'active' AND deleted_at IS NULL AND superseded_at IS NULL)
+      OR (status = 'deleted' AND deleted_at IS NOT NULL)
+      OR (status = 'superseded' AND superseded_at IS NOT NULL)
+    ),
+    UNIQUE (workspace_id, relation_type, source_memory_id, target_memory_id),
+    UNIQUE (workspace_id, canonical_key)
+  )`);
+  await execute('CREATE INDEX IF NOT EXISTS idx_memory_relations_workspace_status ON memory_relations (workspace_id, status, updated_at DESC)');
+  await execute('CREATE INDEX IF NOT EXISTS idx_memory_relations_source ON memory_relations (workspace_id, source_memory_id, updated_at DESC)');
+  await execute('CREATE INDEX IF NOT EXISTS idx_memory_relations_target ON memory_relations (workspace_id, target_memory_id, updated_at DESC)');
 }, 60_000);
 
 beforeEach(async () => {
-  authToken = await getAuthToken(app);
+  authToken = 'local-test-token';
 
   workspaceId = 'ws-memory-test-' + Date.now();
   await execute(
@@ -56,16 +85,28 @@ async function insertMemory(overrides: Partial<{
   category: string;
   content: string;
   sourceStoryId: string | null;
+  sourceSpecId: string | null;
+  sourceRunId: number | null;
+  confidence: string;
+  relatedFiles: string[];
+  sourceType: string;
+  source: string | null;
 }> = {}): Promise<number> {
   const row = await queryOne<{ id: number }>(
-    `INSERT INTO memories (workspace_id, category, content, source_story_id, confidence, related_files, source_type, source)
-     VALUES ($1, $2, $3, $4, 'high', '[]'::jsonb, 'manual', 'test-suite')
+    `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, source_type, source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
      RETURNING id`,
     [
       overrides.workspaceId ?? workspaceId,
       overrides.category ?? 'Decision',
       overrides.content ?? `Memory ${Date.now()}`,
       overrides.sourceStoryId ?? null,
+      overrides.sourceSpecId ?? null,
+      overrides.sourceRunId ?? null,
+      overrides.confidence ?? 'high',
+      JSON.stringify(overrides.relatedFiles ?? []),
+      overrides.sourceType ?? 'manual',
+      overrides.source ?? 'test-suite',
     ],
   );
 
@@ -322,6 +363,139 @@ describe('GET /api/memory/graph endpoints', () => {
     expect(res.body.available).toBe(false);
     expect(res.body.code).toBe('AGE_NOT_AVAILABLE');
     spy.mockRestore();
+  });
+});
+
+describe('GET /api/memory/review', () => {
+  test('returns bounded stale candidates, hotspots, and explicit AGE fallback metadata', async () => {
+    const supersededMemory = await insertMemory({
+      category: 'Architecture',
+      content: 'Older graph rule that should be reviewed.',
+      sourceSpecId: 'spec-memory',
+      sourceStoryId: 'MOG-008',
+      relatedFiles: ['backend/src/routes/memory.ts'],
+    });
+    const newerMemory = await insertMemory({
+      category: 'Architecture',
+      content: 'Newer graph rule that replaces the older one.',
+      sourceSpecId: 'spec-memory',
+      sourceStoryId: 'MOG-008',
+      relatedFiles: ['backend/src/routes/memory.ts'],
+    });
+    await insertMemory({
+      category: 'Decision',
+      content: 'Another hotspot signal for the same file and spec.',
+      sourceSpecId: 'spec-memory',
+      sourceStoryId: 'MOG-008',
+      relatedFiles: ['backend/src/routes/memory.ts'],
+    });
+    const lowConfidenceMemory = await insertMemory({
+      category: 'Pattern',
+      content: 'Low confidence memory with weak provenance.',
+      confidence: 'low',
+      relatedFiles: [],
+      sourceSpecId: null,
+      sourceStoryId: null,
+    });
+
+    await execute(
+      `UPDATE memories
+          SET updated_at = NOW() - INTERVAL '70 days'
+        WHERE id IN ($1, $2)`,
+      [supersededMemory, lowConfidenceMemory],
+    );
+    await execute(
+      `INSERT INTO memory_relations (workspace_id, source_memory_id, target_memory_id, relation_type, canonical_key, status)
+       VALUES ($1, $2, $3, 'SUPERSEDES', $4, 'active')`,
+      [workspaceId, newerMemory, supersededMemory, `memory-relation:${workspaceId}::SUPERSEDES::${newerMemory}::${supersededMemory}`],
+    );
+
+    const ageGuard = require('../../lib/age-guard');
+    const ageSpy = jest.spyOn(ageGuard, 'checkAge').mockResolvedValue(false);
+
+    const res = await request(app)
+      .get('/api/memory/review')
+      .set('Authorization', `Bearer ${authToken}`)
+      .query({ workspaceId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+    expect(res.body.staleCandidates.heuristics.scanLimit).toBe(120);
+    expect(res.body.staleCandidates.mode).toBe('bounded-sql-fallback');
+    expect(res.body.staleCandidates.reason).toMatch(/Apache AGE extension is unavailable/i);
+    expect(res.body.staleCandidates.items.some((item: { id: number; reasons: Array<{ code: string }> }) => (
+      item.id === supersededMemory && item.reasons.some((reason) => reason.code === 'superseded_by_newer_memory')
+    ))).toBe(true);
+    expect(res.body.staleCandidates.items.some((item: { id: number; reasons: Array<{ code: string }> }) => (
+      item.id === lowConfidenceMemory && item.reasons.some((reason) => reason.code === 'weak_story_spec_provenance')
+    ))).toBe(true);
+    expect(res.body.hotspots.files[0]).toMatchObject({
+      key: 'backend/src/routes/memory.ts',
+      memoryCount: expect.any(Number),
+    });
+    expect(res.body.hotspots.specs[0]).toMatchObject({ key: 'spec-memory' });
+    ageSpy.mockRestore();
+  });
+});
+
+describe('POST /api/memory/review/:id/action', () => {
+  test('archives and restores memory candidates with audited provenance and soft deletes', async () => {
+    const memoryId = await insertMemory({
+      category: 'Decision',
+      content: 'Archive me but preserve provenance.',
+      sourceSpecId: 'spec-memory',
+      sourceStoryId: 'MOG-008',
+      sourceRunId: 77,
+      relatedFiles: ['src/panels/MemoryPanel.tsx'],
+      sourceType: 'manual',
+      source: 'MOG-008',
+    });
+
+    const archiveRes = await request(app)
+      .post(`/api/memory/review/${memoryId}/action`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId, action: 'archive' });
+
+    expect(archiveRes.status).toBe(200);
+    expect(archiveRes.body.status).toBe('archived');
+
+    const archivedRow = await queryOne<{ deleted_at: string | null }>('SELECT deleted_at FROM memories WHERE id = $1', [memoryId]);
+    expect(archivedRow?.deleted_at).toBeTruthy();
+
+    const archiveAudit = await queryOne<{ payload: Record<string, unknown> | string }>(
+      `SELECT payload FROM wal_events WHERE workspace_id = $1 AND event_type = 'memory_reviewed' ORDER BY id DESC LIMIT 1`,
+      [workspaceId],
+    );
+    const archivePayload = typeof archiveAudit?.payload === 'string' ? JSON.parse(archiveAudit.payload) : archiveAudit?.payload;
+    expect(archivePayload).toMatchObject({
+      memoryId,
+      action: 'archive',
+      nextStatus: 'archived',
+      provenance: {
+        sourceSpecId: 'spec-memory',
+        sourceStoryId: 'MOG-008',
+        sourceRunId: 77,
+        relatedFiles: ['src/panels/MemoryPanel.tsx'],
+      },
+    });
+
+    const restoreRes = await request(app)
+      .post(`/api/memory/review/${memoryId}/action`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId, action: 'restore' });
+
+    expect(restoreRes.status).toBe(200);
+    expect(restoreRes.body.status).toBe('candidate');
+
+    const restoredRow = await queryOne<{ deleted_at: string | null }>('SELECT deleted_at FROM memories WHERE id = $1', [memoryId]);
+    expect(restoredRow?.deleted_at).toBeNull();
+
+    const restoreAudit = await queryOne<{ payload: Record<string, unknown> | string }>(
+      `SELECT payload FROM wal_events WHERE workspace_id = $1 AND event_type = 'memory_reviewed' ORDER BY id DESC LIMIT 1`,
+      [workspaceId],
+    );
+    const restorePayload = typeof restoreAudit?.payload === 'string' ? JSON.parse(restoreAudit.payload) : restoreAudit?.payload;
+    expect(restorePayload).toMatchObject({ memoryId, action: 'restore', nextStatus: 'candidate' });
   });
 });
 
