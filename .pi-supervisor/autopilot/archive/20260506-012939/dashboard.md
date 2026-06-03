@@ -1,0 +1,67 @@
+# Rorca Pi Extension Autopilot
+
+- Updated: `2026-05-06T08:28:27.756454+00:00`
+- Cycle: `1`
+- Current phase: `run-cockpit`
+- Implementer failures: `0`
+- Reviewer failures: `1`
+- Validation failures: `0`
+
+## Last cycle
+
+- accepted: `False`
+- blockers: `implementer did not declare phase done, reviewer did not approve, reviewer found bugs, reviewer found regressions, implementer confidence below threshold, reviewer confidence below threshold, timed out after 45 seconds, tool call budget exceeded (20 > 12), required artifact was not produced: /Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/reviews/run-cockpit.json`
+- required missing: `none`
+
+## Phase status
+
+### run-cockpit — Pi-native run cockpit
+- status: `pending`
+- cycles: `1`
+- green streak: `0` / `2`
+- completedAt: `None`
+- implementer: Refined the Pi-native run cockpit in ~/.pi/agent/extensions/rorca/tui/run-view.ts to surface active failures and progress more clearly: the story list now shows retries, blocked/pending dependency hints, and inline failure reasons, and the header now shows an alert line for failed stories or the active story. Re-ran extension and repo validation after the change.
+- reviewer: n/a
+- last blockers: `implementer did not declare phase done, reviewer did not approve, reviewer found bugs, reviewer found regressions, implementer confidence below threshold, reviewer confidence below threshold, timed out after 45 seconds, tool call budget exceeded (20 > 12), required artifact was not produced: /Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/reviews/run-cockpit.json`
+- last progress files: `/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts`
+
+### board-and-detail — Pi-native spec board and spec detail
+- status: `pending`
+- cycles: `0`
+- green streak: `0` / `2`
+- completedAt: `None`
+- implementer: n/a
+- reviewer: n/a
+- last blockers: `none`
+- last progress files: `none`
+
+### supporting-views — Memory, direction, and workspace views
+- status: `pending`
+- cycles: `0`
+- green streak: `0` / `2`
+- completedAt: `None`
+- implementer: n/a
+- reviewer: n/a
+- last blockers: `none`
+- last progress files: `none`
+
+### command-surface — Safe command wiring and re-enable only validated views
+- status: `pending`
+- cycles: `0`
+- green streak: `0` / `2`
+- completedAt: `None`
+- implementer: n/a
+- reviewer: n/a
+- last blockers: `none`
+- last progress files: `none`
+
+### ship-review — Full extension final review and regression sweep
+- status: `pending`
+- cycles: `0`
+- green streak: `0` / `3`
+- completedAt: `None`
+- implementer: n/a
+- reviewer: n/a
+- last blockers: `none`
+- last progress files: `none`
+

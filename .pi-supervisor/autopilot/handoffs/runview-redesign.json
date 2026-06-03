@@ -1,0 +1,27 @@
+{
+  "phase_id": "runview-redesign",
+  "cycle": 4,
+  "summary": "Reshaped the Pi-native run cockpit toward the approved screenshot target: denser story rows with visible [Graph]/[View Log] affordances, a structured RUN INFO pane with TOKENS/BRANCH/WORKTREE labels, and a default run-info right pane closer to the desired dashboard feel.",
+  "done": true,
+  "confidence": 0.94,
+  "files_changed": [
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts"
+  ],
+  "validations_attempted": [
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "python3 scripts/validate_rorca_runview_target.py",
+    "npx tsc --noEmit",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "validations_passed": [
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "python3 scripts/validate_rorca_runview_target.py",
+    "npx tsc --noEmit",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "known_bugs": [],
+  "remaining_work": [
+    "Perform final regression sweep for the redesigned run view"
+  ],
+  "notes": "Manually finalized because the autopilot implementer repeatedly timed out before writing its artifact even after validators went green."
+}

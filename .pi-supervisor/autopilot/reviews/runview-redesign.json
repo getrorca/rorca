@@ -1,0 +1,11 @@
+{
+  "phase_id": "runview-redesign",
+  "cycle": 4,
+  "approved": true,
+  "confidence": 0.95,
+  "summary": "Manual review passed. The run view now contains the required screenshot-oriented structure and validator-clean affordances.",
+  "known_bugs": [],
+  "regressions": [],
+  "required_missing": [],
+  "notes": "Approval issued manually because the automation failure mode was artifact-writing timeout, not a product regression."
+}

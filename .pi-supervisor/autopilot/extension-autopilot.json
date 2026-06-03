@@ -1,0 +1,119 @@
+{
+  "name": "Rorca Pi Extension Autopilot",
+  "masterGoalFile": ".pi-supervisor/autopilot/master-goal.md",
+  "minimumConfidence": 0.9,
+  "stabilityPasses": 2,
+  "commonValidators": [
+    "npx tsc --noEmit",
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "globalRequiredFiles": [
+    "~/.pi/agent/extensions/rorca/index.ts",
+    "~/.pi/agent/extensions/rorca/tui/shared.ts"
+  ],
+  "phases": [
+    {
+      "id": "run-cockpit",
+      "title": "Pi-native run cockpit",
+      "goalFile": ".pi-supervisor/autopilot/goals/01-run-cockpit.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/shared.ts",
+        "~/.pi/agent/extensions/rorca/index.ts"
+      ],
+      "stabilityPasses": 2,
+      "minimumConfidence": 0.9
+    },
+    {
+      "id": "board-and-detail",
+      "title": "Pi-native spec board and spec detail",
+      "goalFile": ".pi-supervisor/autopilot/goals/02-board-and-detail.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/tui/spec-board.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-detail.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/tui/spec-board.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-detail.ts",
+        "~/.pi/agent/extensions/rorca/tui/shared.ts"
+      ],
+      "stabilityPasses": 2,
+      "minimumConfidence": 0.9
+    },
+    {
+      "id": "supporting-views",
+      "title": "Memory, direction, and workspace views",
+      "goalFile": ".pi-supervisor/autopilot/goals/03-supporting-views.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/tui/memory-browser.ts",
+        "~/.pi/agent/extensions/rorca/tui/direction-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/workspace-view.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/tui/memory-browser.ts",
+        "~/.pi/agent/extensions/rorca/tui/direction-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/workspace-view.ts"
+      ],
+      "stabilityPasses": 2,
+      "minimumConfidence": 0.9
+    },
+    {
+      "id": "command-surface",
+      "title": "Safe command wiring and re-enable only validated views",
+      "goalFile": ".pi-supervisor/autopilot/goals/04-command-surface.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/index.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/index.ts",
+        "~/.pi/agent/extensions/rorca/tui/shared.ts"
+      ],
+      "stabilityPasses": 2,
+      "minimumConfidence": 0.92
+    },
+    {
+      "id": "spec-authoring",
+      "title": "Pi-native spec authoring flow",
+      "goalFile": ".pi-supervisor/autopilot/goals/06-spec-authoring.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/index.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-author.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/tui/spec-author.ts",
+        "~/.pi/agent/extensions/rorca/index.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-detail.ts"
+      ],
+      "stabilityPasses": 2,
+      "minimumConfidence": 0.92
+    },
+    {
+      "id": "ship-review",
+      "title": "Full extension final review and regression sweep",
+      "goalFile": ".pi-supervisor/autopilot/goals/05-ship-review.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/index.ts",
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-board.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-detail.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-author.ts",
+        "~/.pi/agent/extensions/rorca/tui/memory-browser.ts",
+        "~/.pi/agent/extensions/rorca/tui/direction-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/workspace-view.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/index.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-author.ts",
+        "~/.pi/agent/extensions/rorca/tui/spec-detail.ts",
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/shared.ts"
+      ],
+      "stabilityPasses": 3,
+      "minimumConfidence": 0.95
+    }
+  ]
+}

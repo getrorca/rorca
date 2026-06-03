@@ -1,0 +1,37 @@
+{
+  "phase_id": "run-cockpit",
+  "cycle": 1,
+  "summary": "Implemented a Pi-native /rorca:run cockpit with live polling, wave-aware story navigation, output/story/run panes, and safe retry/pause/resume/cancel hooks. Rewired the extension command to resolve a run id or spec slug, removed terminal-owning code from shared/run surfaces, and stubbed still-disabled legacy embedded views so the Pi extension safety validator passes cleanly.",
+  "done": false,
+  "confidence": 0.78,
+  "files_changed": [
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/index.ts",
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/shared.ts",
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts",
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/spec-board.ts",
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/memory-browser.ts",
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/direction-view.ts",
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/workspace-view.ts",
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/spec-detail.ts"
+  ],
+  "validations_attempted": [
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit",
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "npx tsc --noEmit",
+    "cd backend && npx tsc --noEmit"
+  ],
+  "validations_passed": [
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit",
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "npx tsc --noEmit"
+  ],
+  "known_bugs": [
+    "Supervisor validation 'cd backend && npx tsc --noEmit' still fails in this checkout because backend typings/dev dependencies are unresolved (missing jest/@types module declarations); this is pre-existing and outside the Pi run cockpit changes."
+  ],
+  "remaining_work": [
+    "Smoke-test /rorca:run inside Pi against a real running pipeline to validate pane updates, polling, and action hooks end-to-end.",
+    "Decide whether to add a Pi-native run picker overlay instead of the current latest-run/spec-slug resolution in /rorca:run.",
+    "Resolve the unrelated backend TypeScript environment failures if supervisor gating requires all independent validators green."
+  ],
+  "notes": "The new cockpit is Pi-native and validator-safe; legacy memory/direction/workspace/spec-detail embedded views remain intentionally disabled via safe stubs until migrated."
+}
