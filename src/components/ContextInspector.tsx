@@ -317,35 +317,38 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
       <div className="flex-1 overflow-y-auto" data-testid="inspector-events">
         {ordered.map((e) => {
           const raw = getRawState(e.rawRef);
+          const displayRef = e.synthetic ? `synthetic:${e.seq}` : e.rawRef;
           return (
             <button
               key={e.rawRef}
               type="button"
               onClick={() => e.synthetic ? undefined : setActiveRawRef(e.rawRef)}
-              className={`w-full flex items-center gap-3 px-4 py-2 text-left border-b border-border/50 transition-colors ${e.synthetic ? 'cursor-default' : 'hover:bg-panel/50'}`}
+              className={`w-full grid grid-cols-[auto_7.5rem_8.5rem_minmax(0,1fr)_4.5rem_4rem_7rem_auto] items-center gap-3 px-4 py-2 text-left border-b border-border/50 transition-colors ${e.synthetic ? 'cursor-default' : 'hover:bg-panel/50'}`}
               data-testid={`inspector-event-${e.rawRef}`}
             >
-              <span className={`shrink-0 w-2 h-2 rounded-full ${statusDot(e.status)}`} />
-              <span className="font-mono text-[10px] text-muted shrink-0 w-14">{e.rawRef}</span>
-              <span className="shrink-0 text-[11px] text-muted w-28 truncate">{PHASE_LABELS[e.phase]}</span>
-              <span className="flex-1 min-w-0 text-xs text-[var(--text)]">
-                <span className="truncate inline-block max-w-full align-bottom">{e.label ?? e.phase}</span>
+              <span className={`w-2 h-2 rounded-full ${statusDot(e.status)}`} />
+              <span className="font-mono text-[10px] text-muted truncate" title={e.rawRef}>{displayRef}</span>
+              <span className="text-[11px] text-muted truncate">{PHASE_LABELS[e.phase]}</span>
+              <span className="min-w-0 text-xs text-[var(--text)] leading-4">
+                <span className="block truncate">{e.label ?? e.phase}</span>
                 {e.synthetic && e.details && e.details.length > 0 && (
-                  <span className="block mt-0.5 text-[10px] text-muted truncate">{e.details.join(' · ')}</span>
+                  <span className="block mt-0.5 text-[10px] text-muted truncate" title={e.details.join(' · ')}>{e.details.join(' · ')}</span>
                 )}
               </span>
-              {e.storyId && (
-                <span className="font-mono text-[10px] text-muted shrink-0">{e.storyId}</span>
-              )}
-              <span className={`text-[11px] shrink-0 ${statusColor(e.status)}`}>{e.status}</span>
+              <span className="font-mono text-[10px] text-muted truncate">{e.storyId ?? ''}</span>
+              <span className={`text-[11px] truncate ${statusColor(e.status)}`}>{e.status}</span>
               {e.synthetic ? (
-                <span className="shrink-0 text-[10px] text-muted/70">reconstructed</span>
+                <span className="text-[10px] text-muted/70 truncate">reconstructed</span>
               ) : raw.loading ? (
-                <Loader2 size={12} className="shrink-0 text-muted animate-spin" />
+                <Loader2 size={12} className="text-muted animate-spin" />
               ) : (
-                <FileText size={12} className="shrink-0 text-muted/60" />
+                <FileText size={12} className="text-muted/60" />
               )}
-              <ChevronRight size={12} className="shrink-0 text-muted/60" />
+              {e.synthetic ? (
+                <span aria-hidden="true" />
+              ) : (
+                <ChevronRight size={12} className="text-muted/60" />
+              )}
             </button>
           );
         })}
