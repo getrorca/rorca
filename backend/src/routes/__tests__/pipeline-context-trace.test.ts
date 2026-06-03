@@ -81,7 +81,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 async function insertRun(): Promise<number> {
