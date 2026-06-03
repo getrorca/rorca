@@ -41,6 +41,7 @@ import { requireAge } from '../lib/age-guard';
 import { autoSynthesizeSpecMemory, maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
+import { routeWorkspaceContext } from '../lib/workspace-context-routing';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { getWorkspaceEnvVars } from './env-vars';
 import { score as scoreStory, type ScorerStory } from '../lib/complexity-scorer';
@@ -1602,6 +1603,12 @@ async function buildForgeContextBundle(input: {
   const estimatedTokens = synthResult.meta.totalTokens + catalogTokens;
   const modelInfo = getModelInfo(input.resolvedModel);
   const modelContextWindow = modelInfo?.contextWindow ?? 200000;
+
+  // CTM-006: Detect stack, missing context files, and richness through the single
+  // canonical workspace-context path so spec generation and quick-run agree on
+  // whether the workspace is context blind. Nonfatal — never blocks generation.
+  const workspaceRouting = routeWorkspaceContext(workspace.path);
+
   const contextSummary: Record<string, unknown> = {
     directionLayers: {
       l1: synthResult.meta.standards,
@@ -1621,6 +1628,12 @@ async function buildForgeContextBundle(input: {
     schemaSnapshot: synthResult.meta.schema,
     estimatedTokens,
     modelContextWindow,
+    workspaceRouting: {
+      stack: workspaceRouting.stack.map(s => s.name),
+      missingContextFiles: workspaceRouting.missingContextFiles,
+      richnessScore: workspaceRouting.richnessScore,
+      contract: workspaceRouting.contract,
+    },
     ...(retrievalMeta ? {
       vectorHits: retrievalMeta.ragHits,
       graphHits: retrievalMeta.graphHits,

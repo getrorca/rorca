@@ -11,6 +11,7 @@ import type {
   SpecDetail,
   TriggerPipelineResponse,
   Workspace,
+  WorkspaceContextRoutingResponse,
 } from "./types.js";
 
 export class RorcaApiClient {
@@ -95,6 +96,17 @@ export class RorcaApiClient {
 
   async getSpec(specSlug: string, workspaceId: string): Promise<SpecDetail> {
     return this.fetchJson<SpecDetail>(`/api/specs/${encodeURIComponent(specSlug)}?workspaceId=${encodeURIComponent(workspaceId)}`);
+  }
+
+  /**
+   * CTM-006: Fetch the canonical workspace-context routing decision so run/quick-run
+   * dispatch can warn when the workspace is context blind before launching.
+   */
+  async getContextRouting(workspaceId: string): Promise<WorkspaceContextRoutingResponse["routing"]> {
+    const response = await this.fetchJson<WorkspaceContextRoutingResponse>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/context-routing`,
+    );
+    return response.routing;
   }
 
   async getPiModels(): Promise<PiModel[]> {
