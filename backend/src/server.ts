@@ -8,7 +8,13 @@
 // Load environment variables before any other imports so module-level constants
 // (e.g. GITHUB_CLIENT_ID in auth.ts) pick up the correct values.
 import dotenv from 'dotenv';
+import { applySelectedDbModeEnvironment } from './lib/db-strategy';
+
 dotenv.config();
+const dbModeBootstrap = applySelectedDbModeEnvironment();
+if (dbModeBootstrap.changed) {
+  console.info(`[db-mode] Using ${dbModeBootstrap.mode} database ${dbModeBootstrap.databaseUrl}`);
+}
 
 // Patch Express 4 to catch async route handler rejections — must be first import
 import './lib/async-handler';
@@ -32,6 +38,7 @@ import schedulesRouter from './routes/schedules';
 import envVarsRouter from './routes/env-vars';
 import webhooksRouter from './routes/webhooks';
 import githubChecksRouter from './routes/github-checks';
+import workspaceGithubRouter from './routes/workspace-github';
 import activityRouter from './routes/activity';
 import analyticsRouter from './routes/analytics';
 import budgetRouter from './routes/budget';
@@ -45,9 +52,6 @@ import doctorRouter from './routes/doctor';
 import versionRouter from './routes/version';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
-import { registerCiAutofixHandler } from './lib/ci-autofix/webhook-handler';
-import { startCiAutofixOrchestrator } from './lib/ci-autofix/fix-orchestrator';
-import ciAutofixRouter from './routes/ci-autofix';
 import agentHooksRouter from './routes/agent-hooks';
 import agentProfilesRouter from './routes/agent-profiles';
 import notificationsRouter from './routes/notifications';
@@ -246,7 +250,6 @@ app.use('/api/webhooks', webhooksRouter);
 app.use('/api/review', rateLimiter, publicReviewRouter);
 if (BACKGROUND_RUNTIME_ENABLED) {
   registerWebhookHandlers();
-  registerCiAutofixHandler();
 }
 
 // CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
@@ -374,8 +377,8 @@ app.use('/api/workspaces/:id/env-vars', envVarsRouter);
 app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
-app.use('/api/workspaces/:id/ci-autofix', ciAutofixRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
+app.use('/api/workspaces', workspaceGithubRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/analytics', analyticsRouter);
@@ -444,9 +447,6 @@ if (BACKGROUND_RUNTIME_ENABLED) {
 
   // US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
   startCheckRunPoster();
-
-  // CAF-002: Subscribe CI autofix orchestrator to generate fix specs on ci_check_failed events
-  startCiAutofixOrchestrator();
 
   // PR-019: Auto-rotate memory after each pipeline run completion
   // PR-018: Auto-deduplicate memory after rotation (post-run)

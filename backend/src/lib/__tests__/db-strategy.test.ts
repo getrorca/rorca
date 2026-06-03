@@ -29,7 +29,11 @@ jest.mock('../../db', () => ({
 describe('db-strategy', () => {
   beforeEach(() => {
     jest.resetModules();
-    jest.clearAllMocks();
+    mockReadFileSync.mockReset();
+    mockWriteFileSync.mockReset();
+    mockMkdirSync.mockReset();
+    mockChmodSync.mockReset();
+    mockQueryOne.mockReset();
     delete process.env.DATABASE_URL;
   });
 
@@ -56,6 +60,15 @@ describe('db-strategy', () => {
     expect(detectDbMode()).toBe('native');
   });
 
+  it('infers docker mode from a local 5432 DATABASE_URL when no mode file exists', () => {
+    process.env.DATABASE_URL = 'postgres://rorca:rorca@localhost:5432/rorca';
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error('missing');
+    });
+    const { detectDbMode } = require('../db-strategy');
+    expect(detectDbMode()).toBe('docker');
+  });
+
   it('writes db-mode file with chmod 0600', () => {
     const { setDbMode } = require('../db-strategy');
     setDbMode('docker');
@@ -75,6 +88,32 @@ describe('db-strategy', () => {
     });
     const { getDbConnectionString } = require('../db-strategy');
     expect(getDbConnectionString('native')).toBe('postgres://rorca:rorca@localhost:5433/rorca');
+  });
+
+  it('rewrites a local DATABASE_URL to the persisted docker mode target', () => {
+    process.env.DATABASE_URL = 'postgres://rorca:rorca@localhost:5433/rorca';
+    mockReadFileSync.mockImplementation((target: string) => {
+      if (target.endsWith('/db-mode')) return 'docker\n';
+      if (String(target).includes('/bin/rorca.ts')) return 'const MANAGED_PG_PORT = 5433;';
+      throw new Error('missing');
+    });
+    const { applySelectedDbModeEnvironment } = require('../db-strategy');
+    expect(applySelectedDbModeEnvironment()).toEqual({
+      mode: 'docker',
+      databaseUrl: 'postgres://rorca:rorca@localhost:5432/rorca',
+      changed: true,
+    });
+    expect(process.env.DATABASE_URL).toBe('postgres://rorca:rorca@localhost:5432/rorca');
+  });
+
+  it('preserves remote DATABASE_URL values in byop mode', () => {
+    process.env.DATABASE_URL = 'postgres://user:pass@db.example.com:5432/rorca';
+    const { applySelectedDbModeEnvironment } = require('../db-strategy');
+    expect(applySelectedDbModeEnvironment()).toEqual({
+      mode: 'byop',
+      databaseUrl: 'postgres://user:pass@db.example.com:5432/rorca',
+      changed: false,
+    });
   });
 
   it('returns false for AGE in native mode without querying the database', async () => {
