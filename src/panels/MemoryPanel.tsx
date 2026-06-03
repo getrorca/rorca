@@ -34,11 +34,30 @@ interface MemoryListResponse {
   categories: string[];
 }
 
+interface MemoryRelationListItem {
+  id: number;
+  relationType: 'SUPERSEDES' | 'CONFLICTS_WITH';
+  status: 'active' | 'superseded' | 'deleted';
+  sourceMemoryId: number;
+  targetMemoryId: number;
+}
+
+interface MemoryRelationsResponse {
+  items: MemoryRelationListItem[];
+  total: number;
+}
+
+interface MemoryOntologyExplanation {
+  tone: 'active' | 'suppressed' | 'conflict';
+  label: string;
+  relatedMemoryId: string;
+}
+
 type MemoryViewMode = 'list' | 'graph' | 'split';
 
 type MemoryGraphNodeType = 'Memory' | 'Story' | 'Spec' | 'File';
 
-type MemoryGraphEdgeType = 'ABOUT' | 'LEARNED_FROM' | 'FROM_SPEC' | 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON';
+type MemoryGraphEdgeType = 'ABOUT' | 'LEARNED_FROM' | 'FROM_SPEC' | 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'SUPERSEDES' | 'CONFLICTS_WITH';
 
 interface MemoryGraphCaps {
   memories: number;
@@ -180,10 +199,12 @@ const GRAPH_EDGE_META: Record<MemoryGraphEdgeType, { label: string; badgeClass: 
   TOUCHES: { label: 'Touches', badgeClass: 'border-amber-500/20 bg-amber-500/10 text-amber-500', tintClass: 'text-amber-500', dash: '4 6' },
   BELONGS_TO: { label: 'Belongs to', badgeClass: 'border-cyan-500/20 bg-cyan-500/10 text-cyan-500', tintClass: 'text-cyan-500', dash: '0' },
   DEPENDS_ON: { label: 'Depends on', badgeClass: 'border-rose-500/20 bg-rose-500/10 text-rose-500', tintClass: 'text-rose-500', dash: '10 5' },
+  SUPERSEDES: { label: 'Supersedes', badgeClass: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500', tintClass: 'text-emerald-500', dash: '0' },
+  CONFLICTS_WITH: { label: 'Conflicts', badgeClass: 'border-red-500/20 bg-red-500/10 text-red-400', tintClass: 'text-red-400', dash: '2 6' },
 };
 
 const GRAPH_TYPE_ORDER: MemoryGraphNodeType[] = ['Memory', 'Story', 'Spec', 'File'];
-const GRAPH_EDGE_ORDER: MemoryGraphEdgeType[] = ['ABOUT', 'LEARNED_FROM', 'FROM_SPEC', 'TOUCHES', 'BELONGS_TO', 'DEPENDS_ON'];
+const GRAPH_EDGE_ORDER: MemoryGraphEdgeType[] = ['ABOUT', 'LEARNED_FROM', 'FROM_SPEC', 'TOUCHES', 'BELONGS_TO', 'DEPENDS_ON', 'SUPERSEDES', 'CONFLICTS_WITH'];
 const GRAPH_NODE_SIZES: Record<MemoryGraphNodeType, { width: number; height: number }> = {
   Memory: { width: 182, height: 60 },
   Story: { width: 166, height: 54 },
@@ -222,7 +243,7 @@ function createEmptySummary(): MemoryGraphSummary {
     nodeCount: 0,
     edgeCount: 0,
     countsByType: { Memory: 0, Story: 0, Spec: 0, File: 0 },
-    countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 0, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0 },
+    countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 0, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0, SUPERSEDES: 0, CONFLICTS_WITH: 0 },
     caps: createEmptyCaps(),
     truncated: { nodes: false, edges: false },
   };
@@ -254,6 +275,57 @@ function summarizeGraph(
 function formatGraphCaps(caps?: MemoryGraphCaps): string {
   if (!caps) return 'bounded before rendering';
   return `${caps.memories} memories, ${caps.stories} stories, ${caps.specs} specs, ${caps.files} files, ${caps.edges} edges`;
+}
+
+function pushMemoryExplanation(map: Map<string, MemoryOntologyExplanation[]>, memoryId: string, explanation: MemoryOntologyExplanation) {
+  const existing = map.get(memoryId) ?? [];
+  if (existing.some((item) => item.label === explanation.label)) return;
+  map.set(memoryId, [...existing, explanation]);
+}
+
+function buildMemoryExplainabilityMap(relations: MemoryRelationListItem[]): Map<string, MemoryOntologyExplanation[]> {
+  const map = new Map<string, MemoryOntologyExplanation[]>();
+
+  for (const relation of relations) {
+    if (relation.status !== 'active') continue;
+    const sourceMemoryId = String(relation.sourceMemoryId);
+    const targetMemoryId = String(relation.targetMemoryId);
+
+    if (relation.relationType === 'SUPERSEDES') {
+      pushMemoryExplanation(map, sourceMemoryId, {
+        tone: 'active',
+        label: `Active rule — supersedes memory #${targetMemoryId}`,
+        relatedMemoryId: targetMemoryId,
+      });
+      pushMemoryExplanation(map, targetMemoryId, {
+        tone: 'suppressed',
+        label: `Superseded by memory #${sourceMemoryId}`,
+        relatedMemoryId: sourceMemoryId,
+      });
+      continue;
+    }
+
+    pushMemoryExplanation(map, sourceMemoryId, {
+      tone: 'conflict',
+      label: `Conflicts with memory #${targetMemoryId}`,
+      relatedMemoryId: targetMemoryId,
+    });
+    pushMemoryExplanation(map, targetMemoryId, {
+      tone: 'conflict',
+      label: `Conflicts with memory #${sourceMemoryId}`,
+      relatedMemoryId: sourceMemoryId,
+    });
+  }
+
+  return new Map(
+    [...map.entries()].map(([memoryId, explanations]) => [
+      memoryId,
+      explanations.sort((left, right) => {
+        const order = { suppressed: 0, conflict: 1, active: 2 } as const;
+        return order[left.tone] - order[right.tone] || left.label.localeCompare(right.label);
+      }),
+    ]),
+  );
 }
 
 function buildBlastRadiusSummary(graph: FilteredGraphData, selectedMemoryId: string | null) {
@@ -573,11 +645,12 @@ function InlineEditor({ value, onSave, onCancel }: {
 
 // ─── Entry Row ──────────────────────────────────────────────────────────────
 
-function EntryRow({ item, isSelected, isEditing, isFocused, onToggleSelect, onFocus, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
+function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onToggleSelect, onFocus, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
   item: MemoryItem;
   isSelected: boolean;
   isEditing: boolean;
   isFocused: boolean;
+  explainability: MemoryOntologyExplanation[];
   onToggleSelect: () => void;
   onFocus: () => void;
   onEdit: () => void;
@@ -652,6 +725,13 @@ function EntryRow({ item, isSelected, isEditing, isFocused, onToggleSelect, onFo
               {(item.relatedFiles?.length ?? 0) > 3 && (
                 <span className="text-[9px] text-muted">+{(item.relatedFiles?.length ?? 0) - 3} more</span>
               )}
+            </div>
+          )}
+
+          {!isEditing && explainability.length > 0 && (
+            <div className="mt-2 space-y-1">
+              <p className="text-[10px] uppercase tracking-wide text-muted">Ontology</p>
+              <OntologyExplanationChips explanations={explainability} />
             </div>
           )}
         </div>
@@ -803,9 +883,36 @@ function GraphNotice({ tone = 'default', children }: { tone?: 'default' | 'warni
   );
 }
 
+function OntologyExplanationChips({ explanations, emptyMessage }: { explanations: MemoryOntologyExplanation[]; emptyMessage?: string }) {
+  if (explanations.length === 0) {
+    return emptyMessage ? <p className="text-[11px] text-muted">{emptyMessage}</p> : null;
+  }
+
+  const visible = explanations.slice(0, 2);
+  const overflow = explanations.length - visible.length;
+  const toneClass = {
+    active: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400',
+    suppressed: 'border-amber-500/20 bg-amber-500/10 text-amber-400',
+    conflict: 'border-red-500/20 bg-red-500/10 text-red-300',
+  } as const;
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {visible.map((explanation) => (
+        <span key={`${explanation.tone}:${explanation.label}`} className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${toneClass[explanation.tone]}`}>
+          {explanation.label}
+        </span>
+      ))}
+      {overflow > 0 && <span className="rounded-full bg-surface-200 px-2 py-0.5 text-[10px] text-muted">+{overflow} more</span>}
+    </div>
+  );
+}
+
 function GraphView({
   graph,
   selectedMemoryId,
+  selectedExplainability,
+  ontologyError,
   onSelectMemory,
   filteredItems,
   memoryById,
@@ -818,6 +925,8 @@ function GraphView({
 }: {
   graph: FilteredGraphData | null;
   selectedMemoryId: string | null;
+  selectedExplainability: MemoryOntologyExplanation[];
+  ontologyError: string | null;
   onSelectMemory: (memoryId: string) => void;
   filteredItems: MemoryItem[];
   memoryById: Map<string, MemoryItem>;
@@ -976,6 +1085,11 @@ function GraphView({
             Focused neighborhood unavailable; showing the bounded workspace overview for this selection. {neighborhoodUnavailableMessage}
           </GraphNotice>
         )}
+        {ontologyError && (
+          <GraphNotice>
+            Ontology explanations unavailable; showing graph topology without precedence summaries. {ontologyError}
+          </GraphNotice>
+        )}
       </div>
 
       <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start">
@@ -1019,6 +1133,14 @@ function GraphView({
           </div>
 
           <p className="mt-3 text-xs leading-relaxed text-muted">{blastRadius?.detail}</p>
+
+          <div className="mt-3 space-y-2">
+            <p className="text-[10px] uppercase tracking-wide text-muted">Ontology</p>
+            <OntologyExplanationChips
+              explanations={selectedExplainability}
+              emptyMessage={selectedMemoryId ? 'No supersession or conflict edges recorded for this memory.' : 'Select a memory to inspect ontology precedence and conflicts.'}
+            />
+          </div>
 
           <div className="mt-3 space-y-3">
             <GraphRelationGroup label="Related memories" items={blastRadius?.relatedMemoryIds ?? []} renderItem={(memoryId) => `Memory #${memoryId}`} />
@@ -1188,6 +1310,7 @@ function EntriesSection({
   selectedIds,
   editingId,
   selectedMemoryId,
+  explainabilityByMemory,
   onToggleSelect,
   onFocusMemory,
   onEdit,
@@ -1202,6 +1325,7 @@ function EntriesSection({
   selectedIds: Set<number>;
   editingId: number | null;
   selectedMemoryId: string | null;
+  explainabilityByMemory: Map<string, MemoryOntologyExplanation[]>;
   onToggleSelect: (id: number) => void;
   onFocusMemory: (memoryId: string) => void;
   onEdit: (id: number) => void;
@@ -1238,6 +1362,7 @@ function EntriesSection({
           isSelected={selectedIds.has(item.id)}
           isEditing={editingId === item.id}
           isFocused={selectedMemoryId === String(item.id)}
+          explainability={explainabilityByMemory.get(String(item.id)) ?? []}
           onToggleSelect={() => onToggleSelect(item.id)}
           onFocus={() => onFocusMemory(String(item.id))}
           onEdit={() => onEdit(item.id)}
@@ -1300,6 +1425,8 @@ export default function MemoryPanel() {
   const [neighborhoodGraphLoading, setNeighborhoodGraphLoading] = useState(false);
   const [overviewGraphError, setOverviewGraphError] = useState<string | null>(null);
   const [neighborhoodGraphError, setNeighborhoodGraphError] = useState<string | null>(null);
+  const [relations, setRelations] = useState<MemoryRelationListItem[]>([]);
+  const [relationsError, setRelationsError] = useState<string | null>(null);
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -1331,6 +1458,8 @@ export default function MemoryPanel() {
     setNeighborhoodGraphError(null);
     setSelectedIds(new Set());
     setEditingId(null);
+    setRelations([]);
+    setRelationsError(null);
   }, [workspaceId]);
 
   const fetchItems = useCallback(async () => {
@@ -1360,6 +1489,22 @@ export default function MemoryPanel() {
   useEffect(() => {
     void fetchItems();
   }, [fetchItems]);
+
+  const fetchRelations = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const data = await apiFetch<MemoryRelationsResponse>(`/api/memory/relations?workspaceId=${encodeURIComponent(workspaceId)}`);
+      setRelations(Array.isArray(data?.items) ? data.items : []);
+      setRelationsError(null);
+    } catch (error) {
+      setRelations([]);
+      setRelationsError(error instanceof Error ? error.message : 'Ontology explanations unavailable right now.');
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void fetchRelations();
+  }, [fetchRelations]);
 
   const shouldShowGraph = viewMode !== 'list';
 
@@ -1530,6 +1675,8 @@ export default function MemoryPanel() {
 
   const currentRunCount = recentRunIds.length > 0 ? filteredItems.filter((item) => item.sourceRunId === recentRunIds[0]).length : 0;
   const memoryById = useMemo(() => new Map(items.map((item) => [String(item.id), item])), [items]);
+  const explainabilityByMemory = useMemo(() => buildMemoryExplainabilityMap(relations), [relations]);
+  const selectedExplainability = selectedMemoryId ? (explainabilityByMemory.get(selectedMemoryId) ?? []) : [];
   const filteredGraph = useMemo(
     () => buildFilteredGraphData(overviewGraph, neighborhoodGraph, filteredItems, selectedMemoryId),
     [overviewGraph, neighborhoodGraph, filteredItems, selectedMemoryId],
@@ -1551,6 +1698,7 @@ export default function MemoryPanel() {
       selectedIds={selectedIds}
       editingId={editingId}
       selectedMemoryId={selectedMemoryId}
+      explainabilityByMemory={explainabilityByMemory}
       onToggleSelect={toggleSelect}
       onFocusMemory={setSelectedMemoryId}
       onEdit={setEditingId}
@@ -1566,6 +1714,8 @@ export default function MemoryPanel() {
     <GraphView
       graph={filteredGraph}
       selectedMemoryId={selectedMemoryId}
+      selectedExplainability={selectedExplainability}
+      ontologyError={relationsError}
       onSelectMemory={setSelectedMemoryId}
       filteredItems={filteredItems}
       memoryById={memoryById}
@@ -1696,6 +1846,12 @@ export default function MemoryPanel() {
           </div>
 
           <ViewModeTabs value={viewMode} onChange={setViewMode} />
+
+          {relationsError && (
+            <div className="rounded-lg border border-border bg-surface-100/70 px-3 py-2 text-xs text-muted">
+              Ontology explanations unavailable right now. {relationsError}
+            </div>
+          )}
 
           <div
             id={`memory-view-${viewMode}`}

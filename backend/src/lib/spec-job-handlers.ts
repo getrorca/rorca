@@ -64,6 +64,15 @@ export interface MatchSkillsResult {
       graphHits: number;
       tier: string;
       latencyMs: number;
+      ontologyExplainability?: {
+        status: string;
+        activeCount: number;
+        suppressedCount: number;
+        conflictCount: number;
+        hiddenExplanationCount: number;
+        examples: string[];
+        message: string;
+      };
     };
     skillEffectiveness?: Array<{
       skill: string;
@@ -254,7 +263,7 @@ export async function runMatchSkillsJob(
 
   let skillGraphSection = '';
   let retrievalSelections: RetrievalSelection[] = [];
-  let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+  let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string; ontologyExplainability?: { status: string; activeCount: number; suppressedCount: number; conflictCount: number; hiddenExplanationCount: number; examples: string[]; message: string } } | undefined;
   try {
     const storyBrief = stories.map((s) => `${s.title}: ${s.description ?? ''}`).join('\n');
     const retrieved = await retrieveContext(workspaceId, storyBrief, {
@@ -271,6 +280,7 @@ export async function runMatchSkillsJob(
       graphHits: retrieved.meta.graphHits,
       latencyMs: retrieved.meta.latencyMs,
       tier: retrieved.meta.tier,
+      ontologyExplainability: retrieved.meta.ontologyExplainability,
     };
   } catch (err) {
     logger.warn({ err, workspaceId }, '[spec-job-handlers] match-skills: retrieveContext failed — using catalog context only');
@@ -420,6 +430,7 @@ ${storyList}`;
         graphHits: retrievalMeta.graphHits,
         tier: retrievalMeta.tier,
         latencyMs: retrievalMeta.latencyMs,
+        ontologyExplainability: retrievalMeta.ontologyExplainability,
       },
     } : {}),
     ...(skillEffectivenessData.length > 0 ? {

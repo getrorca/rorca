@@ -102,6 +102,7 @@ export default function ContextSummaryCard({ summary, isGenerating, skillDetails
   const graphHits = retrieval?.graphHits ?? summary.graphHits;
   const retrievalTier = retrieval?.tier ?? summary.retrievalTier;
   const retrievalLatencyMs = retrieval?.latencyMs ?? summary.retrievalLatencyMs;
+  const ontologyExplainability = retrieval?.ontologyExplainability;
 
   return (
     <div
@@ -191,50 +192,71 @@ export default function ContextSummaryCard({ summary, isGenerating, skillDetails
           </div>
 
           {/* Semantic retrieval */}
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span
-              className={`inline-flex items-center gap-1 ${cagHits > 0 ? 'text-text' : 'text-zinc-400'}`}
-              title="Cache-augmented generation: direction layers, memory, and skills resolved from in-memory cache"
-            >
-              <Brain className="w-3 h-3" />
-              Cache (CAG){' '}
-              {cagHits > 0
-                ? <span className="text-success">{cagHits} hit{cagHits !== 1 ? 's' : ''}</span>
-                : <span>0 hits</span>}
-            </span>
-            {/* Only show Vector (RAG) when it has hits or was explicitly skipped */}
-            {(vectorHits != null && vectorHits > 0) || retrievalTier === 'cache' ? (
+          <div className="space-y-1.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
               <span
-                className={`inline-flex items-center gap-1 ${vectorHits && vectorHits > 0 ? 'text-text' : 'text-zinc-400'}`}
-                title="Retrieval-augmented generation: hybrid vector+keyword search for unfamiliar concepts"
+                className={`inline-flex items-center gap-1 ${cagHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+                title="Cache-augmented generation: direction layers, memory, and skills resolved from in-memory cache"
               >
-                <Search className="w-3 h-3" />
-                Vector (RAG){' '}
-                {vectorHits != null && vectorHits > 0
-                  ? <span className="text-success">{vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
-                  : <span>— skipped (cache sufficient)</span>}
+                <Brain className="w-3 h-3" />
+                Cache (CAG){' '}
+                {cagHits > 0
+                  ? <span className="text-success">{cagHits} hit{cagHits !== 1 ? 's' : ''}</span>
+                  : <span>0 hits</span>}
               </span>
-            ) : null}
-            {/* Only show Graph when it has hits or was explicitly skipped */}
-            {(graphHits != null && graphHits > 0) || retrievalTier === 'cache' ? (
-              <span
-                className={`inline-flex items-center gap-1 ${graphHits && graphHits > 0 ? 'text-text' : 'text-zinc-400'}`}
-                title="Knowledge graph context via Apache AGE"
-              >
-                <Share2 className="w-3 h-3" />
-                Graph{' '}
-                {graphHits != null && graphHits > 0
-                  ? <span className="text-success">{graphHits} node{graphHits !== 1 ? 's' : ''}</span>
-                  : <span>— skipped (cache sufficient)</span>}
-              </span>
-            ) : null}
-            {retrievalTier && (
-              <span className="px-1.5 py-0 rounded bg-muted/15 text-[10px] font-medium text-muted" title="cache = in-memory (~0ms), search = vector+keyword (50-200ms), hybrid = both">
-                {retrievalTier}
-              </span>
-            )}
-            {retrievalLatencyMs != null && (
-              <span className="text-muted text-[10px]">{retrievalLatencyMs}ms</span>
+              {(vectorHits != null && vectorHits > 0) || retrievalTier === 'cache' ? (
+                <span
+                  className={`inline-flex items-center gap-1 ${vectorHits && vectorHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+                  title="Retrieval-augmented generation: hybrid vector+keyword search for unfamiliar concepts"
+                >
+                  <Search className="w-3 h-3" />
+                  Vector (RAG){' '}
+                  {vectorHits != null && vectorHits > 0
+                    ? <span className="text-success">{vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
+                    : <span>— skipped (cache sufficient)</span>}
+                </span>
+              ) : null}
+              {(graphHits != null && graphHits > 0) || retrievalTier === 'cache' ? (
+                <span
+                  className={`inline-flex items-center gap-1 ${graphHits && graphHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+                  title="Knowledge graph context via Apache AGE"
+                >
+                  <Share2 className="w-3 h-3" />
+                  Graph{' '}
+                  {graphHits != null && graphHits > 0
+                    ? <span className="text-success">{graphHits} node{graphHits !== 1 ? 's' : ''}</span>
+                    : <span>— skipped (cache sufficient)</span>}
+                </span>
+              ) : null}
+              {retrievalTier && (
+                <span className="px-1.5 py-0 rounded bg-muted/15 text-[10px] font-medium text-muted" title="cache = in-memory (~0ms), search = vector+keyword (50-200ms), hybrid = both">
+                  {retrievalTier}
+                </span>
+              )}
+              {retrievalLatencyMs != null && (
+                <span className="text-muted text-[10px]">{retrievalLatencyMs}ms</span>
+              )}
+            </div>
+            {ontologyExplainability && (
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                <span className="inline-flex items-center gap-1">
+                  <Share2 className="w-3 h-3" />
+                  Ontology
+                </span>
+                <span className={`rounded-full px-1.5 py-0.5 font-medium ${ontologyExplainability.status === 'available' ? 'bg-success/15 text-success' : ontologyExplainability.status === 'partial' ? 'bg-warning/15 text-warning' : 'bg-muted/15 text-muted'}`}>
+                  {ontologyExplainability.status}
+                </span>
+                {(ontologyExplainability.activeCount + ontologyExplainability.suppressedCount + ontologyExplainability.conflictCount) > 0 ? (
+                  <span>
+                    {ontologyExplainability.activeCount} active • {ontologyExplainability.suppressedCount} superseded • {ontologyExplainability.conflictCount} conflicts
+                  </span>
+                ) : null}
+                {ontologyExplainability.examples.length > 0 ? (
+                  <span className="truncate">{ontologyExplainability.examples.join(' • ')}{ontologyExplainability.hiddenExplanationCount > 0 ? ` • +${ontologyExplainability.hiddenExplanationCount} more` : ''}</span>
+                ) : (
+                  <span>{ontologyExplainability.message}</span>
+                )}
+              </div>
             )}
           </div>
 

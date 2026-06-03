@@ -61,6 +61,19 @@ const MEMORY_LIST_RESPONSE = {
   categories: ['Architecture', 'Decision'],
 };
 
+const MEMORY_RELATIONS_RESPONSE = {
+  items: [
+    {
+      id: 91,
+      relationType: 'SUPERSEDES',
+      status: 'active',
+      sourceMemoryId: 2,
+      targetMemoryId: 1,
+    },
+  ],
+  total: 1,
+};
+
 const OVERVIEW_GRAPH_RESPONSE = {
   available: true,
   scope: { workspaceId: 'ws-1', view: 'overview', memoryId: null },
@@ -138,10 +151,12 @@ function mockPanelData(overrides?: {
   memoryList?: typeof MEMORY_LIST_RESPONSE;
   overviewGraph?: any;
   neighborhoodGraph?: any;
+  relations?: typeof MEMORY_RELATIONS_RESPONSE;
 }) {
   mockApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
     if (path.startsWith('/api/memory/items?')) return overrides?.memoryList ?? MEMORY_LIST_RESPONSE;
+    if (path.startsWith('/api/memory/relations?')) return overrides?.relations ?? MEMORY_RELATIONS_RESPONSE;
     if (path.startsWith('/api/memory/graph/overview?')) return overrides?.overviewGraph ?? OVERVIEW_GRAPH_RESPONSE;
     if (path.startsWith('/api/memory/graph/neighborhood?')) return overrides?.neighborhoodGraph ?? NEIGHBORHOOD_GRAPH_RESPONSE;
     return {};
@@ -199,6 +214,20 @@ describe('MemoryPanel', () => {
       expect(screen.getByText('Centered on memory #1')).toBeTruthy();
       expect(within(firstEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
     });
+  });
+
+  it('shows superseded ontology reasoning in the ledger and graph surfaces', async () => {
+    const user = userEvent.setup();
+    mockPanelData();
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    expect(screen.getByText('Superseded by memory #2')).toBeTruthy();
+
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+    expect((await screen.findAllByText('Superseded by memory #2')).length).toBeGreaterThan(0);
+    expect(screen.getByText('Active rule — supersedes memory #1')).toBeTruthy();
   });
 
   it('shows a graph empty state when filters remove the current corpus', async () => {
@@ -270,6 +299,7 @@ describe('MemoryPanel', () => {
     expect(within(summary).getByText('Spec spec-a')).toBeTruthy();
     expect(within(summary).getByText('memory.ts')).toBeTruthy();
     expect(within(summary).getByText('Memory #2')).toBeTruthy();
+    expect(within(summary).getByText('Superseded by memory #2')).toBeTruthy();
   });
 
   it('shows a distinct loading state before the graph resolves', async () => {
@@ -279,6 +309,7 @@ describe('MemoryPanel', () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
       if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/relations?')) return MEMORY_RELATIONS_RESPONSE;
       if (path.startsWith('/api/memory/graph/overview?')) {
         return await new Promise<typeof OVERVIEW_GRAPH_RESPONSE>((resolve) => {
           resolveOverview = resolve;
@@ -300,12 +331,28 @@ describe('MemoryPanel', () => {
     expect(await screen.findByText('Blast radius')).toBeTruthy();
   });
 
+  it('shows an explicit unavailable ontology state when relation reasons cannot be loaded', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/relations?')) throw new Error('Ontology relation fetch failed');
+      if (path.startsWith('/api/memory/graph/overview?')) return OVERVIEW_GRAPH_RESPONSE;
+      if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
+      return {};
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText(/Ontology explanations unavailable right now/)).toBeTruthy();
+  });
+
   it('shows a distinct unavailable state when the overview request fails', async () => {
     const user = userEvent.setup();
 
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
       if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/relations?')) return MEMORY_RELATIONS_RESPONSE;
       if (path.startsWith('/api/memory/graph/overview?')) throw new Error('Overview request failed');
       if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
       return {};
@@ -336,6 +383,7 @@ describe('MemoryPanel', () => {
           pinned: items.filter((item) => item.pinned).length,
         };
       }
+      if (path.startsWith('/api/memory/relations?')) return MEMORY_RELATIONS_RESPONSE;
       if (path.startsWith('/api/memory/graph/overview?')) return OVERVIEW_GRAPH_RESPONSE;
       if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
       if (path === '/api/memory/items/1' && init?.method === 'PATCH') return {};
