@@ -13,6 +13,7 @@ import { createBackup, pruneOldBackups } from './backup';
 import { logger } from './logger';
 import { pruneExpiredMcpAuditLogs, runMcpAuditAnomalyScan } from './mcp-audit';
 import { getRunPtyRetentionDays, pruneExpiredRunPtyCaptures } from './run-pty-store';
+import { getContextTraceRetentionDays, pruneExpiredContextTraceArtifacts } from './trace-artifact-writer';
 
 interface ScheduleRow {
   id: number;
@@ -218,9 +219,11 @@ let lastBackupDate: string | null = null;
 let backupIntervalHandle: ReturnType<typeof setInterval> | null = null;
 let lastMcpAuditPruneDate: string | null = null;
 let lastRunPtyPruneDate: string | null = null;
+let lastContextTracePruneDate: string | null = null;
 let mcpAuditAnomalyHandle: ReturnType<typeof setInterval> | null = null;
 let mcpAuditRetentionHandle: ReturnType<typeof setInterval> | null = null;
 let runPtyRetentionHandle: ReturnType<typeof setInterval> | null = null;
+let contextTraceRetentionHandle: ReturnType<typeof setInterval> | null = null;
 
 async function checkDailyBackup(): Promise<void> {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -335,6 +338,50 @@ export function stopRunPtyRetentionScheduler(): void {
   runPtyRetentionHandle = null;
 }
 
+async function checkDailyContextTraceRetention(): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastContextTracePruneDate === today) return;
+
+  const now = new Date();
+  if (now.getHours() < 5) return;
+
+  lastContextTracePruneDate = today;
+
+  try {
+    const workspaces = await query<{ id: string; path: string }>(
+      `SELECT id, path FROM workspaces WHERE path IS NOT NULL AND path <> ''`,
+    );
+    const retentionDays = getContextTraceRetentionDays();
+    let deletedFiles = 0;
+
+    for (const workspace of workspaces) {
+      deletedFiles += await pruneExpiredContextTraceArtifacts(workspace.path, retentionDays);
+    }
+
+    logger.info({ deletedFiles, retentionDays, workspaceCount: workspaces.length }, '[Scheduler] Context trace retention run completed');
+  } catch (err) {
+    lastContextTracePruneDate = null;
+    logger.error({ err }, '[Scheduler] Context trace retention check error');
+  }
+}
+
+export function startContextTraceRetentionScheduler(): void {
+  if (contextTraceRetentionHandle) return;
+
+  logger.info('[Scheduler] Starting context trace retention check — running every 60s');
+  contextTraceRetentionHandle = setInterval(() => {
+    checkDailyContextTraceRetention().catch((err) => logger.error({ err }, '[Scheduler] Context trace retention interval error'));
+  }, 60_000);
+  contextTraceRetentionHandle.unref();
+  checkDailyContextTraceRetention().catch((err) => logger.error({ err }, '[Scheduler] Initial context trace retention check error'));
+}
+
+export function stopContextTraceRetentionScheduler(): void {
+  if (!contextTraceRetentionHandle) return;
+  clearInterval(contextTraceRetentionHandle);
+  contextTraceRetentionHandle = null;
+}
+
 // ─── Legacy API shim (used by server.ts) ────────────────────────────────────
 // The Express server no longer handles cron scheduling (that's the worker's job),
 // but it still manages the daily backup interval.
@@ -343,10 +390,12 @@ export function startScheduler(): void {
   startDailyBackupScheduler();
   startMcpAuditScheduler();
   startRunPtyRetentionScheduler();
+  startContextTraceRetentionScheduler();
 }
 
 export function stopScheduler(): void {
   stopDailyBackupScheduler();
   stopMcpAuditScheduler();
   stopRunPtyRetentionScheduler();
+  stopContextTraceRetentionScheduler();
 }
