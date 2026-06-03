@@ -131,4 +131,83 @@ describe('story-execution-packet', () => {
     expect(detectExecutionModeFromSpec({ phases: [{ stories: [] }] })).toBe('qa');
     expect(detectExecutionModeFromSpec({})).toBe('impl');
   });
+
+  // CTM-006: workspace-context signal folds the canonical routing decision into
+  // readiness so a context-blind workspace is flagged here, not re-derived ad hoc.
+  test('assessStoryExecutionReadiness rewards a context-rich workspace', () => {
+    const story = {
+      id: 'US-CTX-RICH',
+      title: 'Patch backend feature',
+      description: 'Update backend/src/lib/feature.ts and add backend/src/lib/__tests__/feature.test.ts coverage.',
+      acceptanceCriteria: ['Add the patch', 'Add regression test'],
+    };
+    const baseline = assessStoryExecutionReadiness(story, 'impl', ['backend/src/lib/feature.ts'], ['backend/src/lib/__tests__/feature.test.ts']);
+    const enriched = assessStoryExecutionReadiness(
+      story,
+      'impl',
+      ['backend/src/lib/feature.ts'],
+      ['backend/src/lib/__tests__/feature.test.ts'],
+      { contractSatisfied: true, richnessScore: 82 },
+    );
+
+    expect(enriched.score).toBe(baseline.score + 8);
+    expect(enriched.strengths).toContain('Workspace carries rich routing context (stack, .rorca, governance).');
+    expect(enriched.warnings).not.toContain('Workspace is context blind — missing .rorca / AGENTS.md / MEMORY.md routing context.');
+  });
+
+  test('assessStoryExecutionReadiness flags a context-blind workspace', () => {
+    const story = {
+      id: 'US-CTX-BLIND',
+      title: 'Patch backend feature',
+      description: 'Update backend/src/lib/feature.ts and add backend/src/lib/__tests__/feature.test.ts coverage.',
+      acceptanceCriteria: ['Add the patch', 'Add regression test'],
+    };
+    const baseline = assessStoryExecutionReadiness(story, 'impl', ['backend/src/lib/feature.ts'], ['backend/src/lib/__tests__/feature.test.ts']);
+    const blind = assessStoryExecutionReadiness(
+      story,
+      'impl',
+      ['backend/src/lib/feature.ts'],
+      ['backend/src/lib/__tests__/feature.test.ts'],
+      { contractSatisfied: false, richnessScore: 12 },
+    );
+
+    expect(blind.score).toBe(baseline.score - 8);
+    expect(blind.warnings).toContain('Workspace is context blind — missing .rorca / AGENTS.md / MEMORY.md routing context.');
+    expect(blind.strengths).not.toContain('Workspace carries rich routing context (stack, .rorca, governance).');
+  });
+
+  test('assessStoryExecutionReadiness leaves score unchanged for a neutral workspace signal', () => {
+    const story = {
+      id: 'US-CTX-NEUTRAL',
+      title: 'Patch backend feature',
+      description: 'Update backend/src/lib/feature.ts and add backend/src/lib/__tests__/feature.test.ts coverage.',
+      acceptanceCriteria: ['Add the patch'],
+    };
+    const baseline = assessStoryExecutionReadiness(story, 'impl', ['backend/src/lib/feature.ts'], ['backend/src/lib/__tests__/feature.test.ts']);
+    const neutral = assessStoryExecutionReadiness(
+      story,
+      'impl',
+      ['backend/src/lib/feature.ts'],
+      ['backend/src/lib/__tests__/feature.test.ts'],
+      { richnessScore: 45 },
+    );
+
+    expect(neutral.score).toBe(baseline.score);
+  });
+
+  test('buildStoryExecutionPacket threads the workspace-context signal into readiness', () => {
+    const packet = buildStoryExecutionPacket(
+      process.cwd(),
+      {
+        id: 'US-CTX-PACKET',
+        title: 'Patch backend feature',
+        description: 'Update backend/src/lib/feature.ts',
+        acceptanceCriteria: ['Add the patch'],
+      },
+      'impl',
+      { contractSatisfied: false, richnessScore: 10 },
+    );
+
+    expect(packet.readiness.warnings).toContain('Workspace is context blind — missing .rorca / AGENTS.md / MEMORY.md routing context.');
+  });
 });

@@ -95,6 +95,24 @@ async function canUseSkillWorkflow(deps: CommandDependencies, input: RorcaSkillW
   return deps.canLaunchSkillWorkflow(input);
 }
 
+/**
+ * CTM-006: Surface the canonical workspace-context routing decision before a run so
+ * the operator is warned when a workspace is context blind (missing the
+ * .rorca / AGENTS.md / MEMORY.md routing contract). Nonfatal — a failed lookup or
+ * missing endpoint never blocks the run.
+ */
+async function notifyContextRoutingHealth(ctx: ExtensionContext, deps: CommandDependencies, workspaceId: string): Promise<void> {
+  try {
+    const routing = await deps.api.getContextRouting(workspaceId);
+    if (!routing?.contract?.satisfied) {
+      const unmet = routing?.contract?.unmet?.length ? routing.contract.unmet.join("; ") : "missing routing context";
+      ctx.ui.notify(`Context routing warning for ${workspaceId} (richness ${routing?.richnessScore ?? 0}/100): ${unmet}`, "warning");
+    }
+  } catch {
+    // Endpoint unavailable or older backend — routing health is advisory, never blocking.
+  }
+}
+
 async function dispatchSkillFirstCreateSpec(
   args: string,
   ctx: ExtensionContext,
@@ -220,6 +238,8 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     const parsed = parseRunCommand(args);
     const workspace = await resolveWorkspace(ctx, deps, parsed.workspaceId);
     deps.updateState({ workspaceId: workspace.id, lastSpecSlug: parsed.specSlug });
+
+    await notifyContextRoutingHealth(ctx, deps, workspace.id);
 
     const skillInput: RorcaSkillWorkflowRequest = {
       workflow: "run",

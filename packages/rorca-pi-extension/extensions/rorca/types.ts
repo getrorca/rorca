@@ -58,6 +58,26 @@ export type SpecDetail = {
   stories?: StorySummary[];
 };
 
+export type WorkspaceContextRoutingResponse = {
+  routing: {
+    workspacePath: string;
+    stack: Array<{ name: string; version?: string; source: string }>;
+    missingContextFiles: string[];
+    richnessScore: number;
+    contract: {
+      hasRorcaDir: boolean;
+      hasRorcaConfig: boolean;
+      hasAgentsMd: boolean;
+      hasMemoryMd: boolean;
+      memoryPath: string | null;
+      satisfied: boolean;
+      unmet: string[];
+    };
+    suggestions: string[];
+    scannedAt: string;
+  };
+};
+
 export type TriggerPipelineResponse = {
   dryRun?: boolean;
   estimate?: unknown;

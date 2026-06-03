@@ -39,6 +39,7 @@ import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/con
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
+import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
@@ -235,8 +236,15 @@ function buildExecutionReadinessSummary(
   }>;
 } {
   const mode = detectExecutionModeFromSpec(specJson as { mode?: string; phases?: unknown });
+  // CTM-006: Resolve the workspace-context signal once through the canonical path
+  // so every story's readiness reflects the same context-blindness verdict.
+  const wsRouting = routeWorkspaceContext(workspacePath);
+  const workspaceContext = {
+    richnessScore: wsRouting.richnessScore,
+    contractSatisfied: wsRouting.contract.satisfied,
+  };
   const stories = ((specJson.userStories ?? []) as CapabilityStory[]).map((story) => {
-    const packet = buildStoryExecutionPacket(workspacePath, story, mode);
+    const packet = buildStoryExecutionPacket(workspacePath, story, mode, workspaceContext);
     return {
       storyId: story.id,
       storyTitle: story.title,
@@ -2340,38 +2348,41 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 8. Generate 1-story spec via LLM
-    // Read MEMORY.md from workspace root (best-effort, silent on error)
+    // CTM-006: Route quick-run context injection through the canonical workspace-context path.
+    // Validate the .rorca / AGENTS.md / MEMORY.md contract once, then resolve MEMORY.md and
+    // installed skills against it so quick-run specs are never context blind by accident.
+    const routingContract = validateRoutingContract(workspace.path);
+
+    // Read MEMORY.md from workspace root (best-effort, silent on error).
+    // Keep the root-relative read so the contract's resolved path can never break a
+    // workspace whose ledger lives at the conventional root MEMORY.md.
     let memoryContent = '';
     try {
-      const memoryRaw = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
-      memoryContent = memoryRaw.slice(0, 2000);
+      memoryContent = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
     } catch (err: unknown) {
-      // ENOENT or any read error — silently skip
+      // ENOENT or any read error — fall back to the contract-resolved ledger (also nonfatal)
       if (err instanceof Error) void err.message;
+      memoryContent = readContractMemory(workspace.path, routingContract);
     }
 
     // Fetch installed skills for this workspace (best-effort, silent on error)
-    let skillsContext = '';
+    let installedSkills: Array<{ name: string; description: string | null }> = [];
     try {
-      const skillRows = await query<{ name: string; description: string | null }>(
+      installedSkills = await query<{ name: string; description: string | null }>(
         `SELECT name, description FROM installed_skills ORDER BY name`,
         [],
       );
-      if (skillRows.length > 0) {
-        const skillLines = skillRows.map(s => `- ${s.name}: ${s.description ?? ''}`).join('\n');
-        skillsContext = `=== INSTALLED SKILLS ===\n${skillLines}`;
-      }
     } catch (err: unknown) {
       // DB error — silently skip
       if (err instanceof Error) void err.message;
     }
 
-    // Build ordered context blocks and filter empty entries
-    const contextBlocks = [
-      directionContext.trim() ? `=== DIRECTION STACK ===\n${directionContext.trim()}` : '',
-      memoryContent.trim() ? `=== MEMORY.md ===\n${memoryContent.trim()}` : '',
-      skillsContext,
-    ].filter(Boolean);
+    // Build ordered, non-empty context blocks via the single deterministic assembler.
+    const { blocks: contextBlocks } = buildQuickRunContextBlocks({
+      directionContext,
+      memoryContent,
+      installedSkills,
+    });
 
     const instructions = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
