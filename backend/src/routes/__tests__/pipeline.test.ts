@@ -503,6 +503,34 @@ describe('GET /api/pipeline/runs/:runId', () => {
     expect(res.body.stories[1].status).toBe('fail');
   });
 
+  test('returns actual story context files from WAL even when no context preview exists', async () => {
+    const runId = await seedRun({ status: 'done' });
+
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, input_tokens, output_tokens, finished_at)
+       VALUES ($1, 'US-001', 'pass', 1200, 300, NOW())`,
+      [runId]
+    );
+    await execute(
+      `INSERT INTO wal_events (workspace_id, spec_id, story_id, event_type, actor, payload)
+       VALUES ('ws-pipe', 'test-spec', 'US-001', 'story_started', 'ralph', $1::jsonb)`,
+      [JSON.stringify({ run_id: runId, story_id: 'US-001', context_files: ['AGENTS.md', 'src/App.tsx'] })]
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.run.context_preview).toBeNull();
+    expect(res.body.contextComparison).toEqual({
+      predicted: {},
+      actual: {
+        'US-001': { contextFiles: ['AGENTS.md', 'src/App.tsx'] },
+      },
+    });
+  });
+
   test('returns 404 for nonexistent run', async () => {
     const res = await request(app)
       .get('/api/pipeline/runs/99999')
