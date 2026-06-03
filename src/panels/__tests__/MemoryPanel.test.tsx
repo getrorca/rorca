@@ -34,6 +34,7 @@ const MEMORY_LIST_RESPONSE = {
       category: 'Architecture',
       content: 'Direction Stack layers cascade L1 → L5.',
       sourceStoryId: 'MOG-001',
+      sourceSpecId: 'spec-a',
       sourceRunId: 42,
       confidence: 'high',
       relatedFiles: ['backend/src/routes/memory.ts'],
@@ -47,6 +48,7 @@ const MEMORY_LIST_RESPONSE = {
       category: 'Decision',
       content: 'Bound node and edge counts in the query layer.',
       sourceStoryId: 'MOG-001',
+      sourceSpecId: 'spec-a',
       sourceRunId: 42,
       confidence: 'high',
       relatedFiles: ['backend/src/lib/memory-graph.ts'],
@@ -195,7 +197,8 @@ describe('MemoryPanel', () => {
 
     expect(await screen.findByText('Centered on memory #1')).toBeTruthy();
 
-    const secondEntry = screen.getByText('Bound node and edge counts in the query layer.').closest('li');
+    const memoryList = screen.getByRole('list', { name: 'Memory entries' });
+    const secondEntry = within(memoryList).getByText('Bound node and edge counts in the query layer.').closest('li');
     expect(secondEntry).toBeTruthy();
 
     await user.click(screen.getByLabelText('Focus memory 2 from graph'));
@@ -205,10 +208,10 @@ describe('MemoryPanel', () => {
       expect(within(secondEntry as HTMLElement).getByText('Web focus')).toBeTruthy();
     });
 
-    const firstEntry = screen.getByText('Direction Stack layers cascade L1 → L5.').closest('li');
+    const firstEntry = within(memoryList).getByText('Direction Stack layers cascade L1 → L5.').closest('li');
     expect(firstEntry).toBeTruthy();
 
-    await user.click(screen.getByText('Direction Stack layers cascade L1 → L5.'));
+    await user.click(within(memoryList).getByText('Direction Stack layers cascade L1 → L5.'));
 
     await waitFor(() => {
       expect(screen.getByText('Centered on memory #1')).toBeTruthy();
@@ -223,7 +226,7 @@ describe('MemoryPanel', () => {
     renderWithProviders(<MemoryPanel />);
 
     await screen.findByText('Direction Stack layers cascade L1 → L5.');
-    expect(screen.getByText('Superseded by memory #2')).toBeTruthy();
+    expect(screen.getAllByText('Superseded by memory #2').length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole('tab', { name: 'Split' }));
     expect((await screen.findAllByText('Superseded by memory #2')).length).toBeGreaterThan(0);
@@ -409,7 +412,7 @@ describe('MemoryPanel', () => {
 
     await user.clear(search);
     await waitFor(() => {
-      expect(screen.getByText('Direction Stack layers cascade L1 → L5.')).toBeTruthy();
+      expect(screen.getAllByText('Direction Stack layers cascade L1 → L5.').length).toBeGreaterThan(0);
     });
 
     const memoryList = screen.getByRole('list', { name: 'Memory entries' });
@@ -441,6 +444,91 @@ describe('MemoryPanel', () => {
 
     expect(await screen.findByText('Memory deleted. Undo?')).toBeTruthy();
     expect(mockApiFetch).toHaveBeenCalledWith('/api/memory/items/1', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('creates ontology relations from the focused curation workflow and synchronizes ledger state after mutation', async () => {
+    const user = userEvent.setup();
+    let relationItems: Array<{ id: number; relationType: 'SUPERSEDES' | 'CONFLICTS_WITH'; status: 'active' | 'superseded' | 'deleted'; sourceMemoryId: number; targetMemoryId: number }> = [];
+
+    mockApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/relations?')) return { items: relationItems, total: relationItems.length };
+      if (path === '/api/memory/relations' && init?.method === 'POST') {
+        relationItems = [{ id: 92, relationType: 'CONFLICTS_WITH', status: 'active', sourceMemoryId: 1, targetMemoryId: 2 }];
+        return { relation: relationItems[0] };
+      }
+      return {};
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    expect(screen.getByText('No active supersession or conflict edges recorded for this memory yet.')).toBeTruthy();
+
+    await user.selectOptions(screen.getByLabelText('Target memory'), '2');
+    await user.click(screen.getByRole('button', { name: 'Mark conflict' }));
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/memory/relations', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          workspaceId: 'ws-1',
+          sourceMemoryId: 1,
+          targetMemoryId: 2,
+          relationType: 'CONFLICTS_WITH',
+        }),
+      }));
+    });
+
+    expect((await screen.findAllByText('Conflicts with memory #2')).length).toBeGreaterThan(0);
+  });
+
+  it('blocks duplicate conflict edges in the UI before a mutation request is sent', async () => {
+    const user = userEvent.setup();
+    mockPanelData({ relations: { items: [{ id: 91, relationType: 'CONFLICTS_WITH', status: 'active', sourceMemoryId: 1, targetMemoryId: 2 }], total: 1 } });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    await user.selectOptions(screen.getByLabelText('Target memory'), '2');
+
+    expect(screen.getByText('Conflicts: These memories already conflict.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mark conflict' })).toBeDisabled();
+    expect(mockApiFetch).not.toHaveBeenCalledWith('/api/memory/relations', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('removes active ontology relations from the focused curation workflow and clears stale state', async () => {
+    const user = userEvent.setup();
+    let relationItems = [{ id: 91, relationType: 'SUPERSEDES' as const, status: 'active' as const, sourceMemoryId: 1, targetMemoryId: 2 }];
+
+    mockApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/relations?')) return { items: relationItems, total: relationItems.length };
+      if (path === '/api/memory/relations/91' && init?.method === 'DELETE') {
+        relationItems = [];
+        return {};
+      }
+      return {};
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findByText('Direction Stack layers cascade L1 → L5.');
+    expect((await screen.findAllByText(/supersedes memory #2/i)).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/memory/relations/91', expect.objectContaining({
+        method: 'DELETE',
+        body: JSON.stringify({ workspaceId: 'ws-1' }),
+      }));
+    });
+
+    expect(await screen.findByText('No active supersession or conflict edges recorded for this memory yet.')).toBeTruthy();
+    expect(screen.queryByText(/supersedes memory #2/i)).toBeNull();
   });
 
   it('handles empty memory lists', async () => {

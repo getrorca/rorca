@@ -6,7 +6,7 @@
  */
 
 import { query, queryOne, transaction } from '../db/index';
-import { NotFoundError, ValidationError } from './errors';
+import { ConflictError, NotFoundError, ValidationError } from './errors';
 import {
   buildMemoryRelationEdgeKey,
   type MemoryRelationProjectionRow,
@@ -72,11 +72,25 @@ export interface MemoryRelationListItem extends MemoryRelationRecord {
     id: number;
     category: string;
     content: string;
+    sourceStoryId: string | null;
+    sourceSpecId: string | null;
+    sourceRunId: number | null;
+    sourceType: string | null;
+    relatedFiles: string[];
+    pinned: boolean;
+    createdAt: string | null;
   };
   targetMemory: {
     id: number;
     category: string;
     content: string;
+    sourceStoryId: string | null;
+    sourceSpecId: string | null;
+    sourceRunId: number | null;
+    sourceType: string | null;
+    relatedFiles: string[];
+    pinned: boolean;
+    createdAt: string | null;
   };
   semantics: (typeof MEMORY_RELATION_SEMANTICS)[MemoryRelationType];
 }
@@ -93,6 +107,25 @@ export interface ListMemoryRelationsInput {
   workspaceId: string;
   memoryId?: number;
   includeInactive?: boolean;
+}
+
+function parseRelatedFiles(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === 'string');
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
 }
 
 interface MemoryOwnershipRow {
@@ -287,10 +320,31 @@ export async function createMemoryRelation(input: CreateMemoryRelationInput): Pr
   assertRelationType(input.relationType);
 
   if (input.sourceMemoryId === input.targetMemoryId) {
+    if (input.relationType === 'SUPERSEDES') {
+      throw new ValidationError('A memory cannot supersede itself');
+    }
     throw new ValidationError('Memory relations require two distinct memories');
   }
 
   await assertMemoriesBelongToWorkspace(input.workspaceId, input.sourceMemoryId, input.targetMemoryId);
+
+  if (input.relationType === 'SUPERSEDES') {
+    const reverseActive = await queryOne<{ id: number }>(
+      `SELECT id
+         FROM memory_relations
+        WHERE workspace_id = $1
+          AND relation_type = 'SUPERSEDES'
+          AND source_memory_id = $2
+          AND target_memory_id = $3
+          AND status = 'active'
+        LIMIT 1`,
+      [input.workspaceId, input.targetMemoryId, input.sourceMemoryId],
+    );
+
+    if (reverseActive) {
+      throw new ConflictError('Supersession already points the other way for these memories; archive the existing edge before reversing it');
+    }
+  }
 
   const normalized = normalizeRelationPair(input.relationType, input.sourceMemoryId, input.targetMemoryId);
   const canonicalKey = buildMemoryRelationCanonicalKey(
@@ -319,6 +373,10 @@ export async function createMemoryRelation(input: CreateMemoryRelationInput): Pr
     );
 
     if (existingResult.rows[0]) {
+      if (existingResult.rows[0].status === 'active') {
+        throw new ConflictError(`${input.relationType} relation already exists for these memories`);
+      }
+
       const updated = await client.query<MemoryRelationRow>(
         `UPDATE memory_relations
             SET note = $1,
@@ -326,7 +384,7 @@ export async function createMemoryRelation(input: CreateMemoryRelationInput): Pr
                 updated_at = NOW(),
                 deleted_at = NULL,
                 superseded_at = NULL,
-                restored_at = CASE WHEN status <> 'active' THEN NOW() ELSE restored_at END
+                restored_at = NOW()
           WHERE id = $2
         RETURNING id, workspace_id, source_memory_id, target_memory_id, relation_type, canonical_key,
                   note, status, created_at, updated_at, deleted_at, restored_at, superseded_at`,
@@ -428,8 +486,22 @@ export async function listMemoryRelations(
   const rows = await query<MemoryRelationRow & {
     source_category: string;
     source_content: string;
+    source_story_id: string | null;
+    source_spec_id: string | null;
+    source_run_id: number | string | null;
+    source_type: string | null;
+    source_related_files: string[] | string | null;
+    source_pinned: boolean;
+    source_created_at: string | null;
     target_category: string;
     target_content: string;
+    target_story_id: string | null;
+    target_spec_id: string | null;
+    target_run_id: number | string | null;
+    target_type: string | null;
+    target_related_files: string[] | string | null;
+    target_pinned: boolean;
+    target_created_at: string | null;
   }>(
     `SELECT mr.id,
             mr.workspace_id,
@@ -446,8 +518,22 @@ export async function listMemoryRelations(
             mr.superseded_at,
             sm.category AS source_category,
             sm.content AS source_content,
+            sm.source_story_id,
+            sm.source_spec_id,
+            sm.source_run_id,
+            sm.source_type,
+            sm.related_files AS source_related_files,
+            COALESCE(sm.pinned, false) AS source_pinned,
+            sm.created_at AS source_created_at,
             tm.category AS target_category,
-            tm.content AS target_content
+            tm.content AS target_content,
+            tm.source_story_id AS target_story_id,
+            tm.source_spec_id AS target_spec_id,
+            tm.source_run_id AS target_run_id,
+            tm.source_type AS target_type,
+            tm.related_files AS target_related_files,
+            COALESCE(tm.pinned, false) AS target_pinned,
+            tm.created_at AS target_created_at
        FROM memory_relations mr
        JOIN memories sm ON sm.id = mr.source_memory_id
        JOIN memories tm ON tm.id = mr.target_memory_id
@@ -462,11 +548,25 @@ export async function listMemoryRelations(
       id: Number(row.source_memory_id),
       category: row.source_category,
       content: row.source_content,
+      sourceStoryId: row.source_story_id,
+      sourceSpecId: row.source_spec_id,
+      sourceRunId: row.source_run_id === null ? null : Number(row.source_run_id),
+      sourceType: row.source_type,
+      relatedFiles: parseRelatedFiles(row.source_related_files),
+      pinned: Boolean(row.source_pinned),
+      createdAt: row.source_created_at,
     },
     targetMemory: {
       id: Number(row.target_memory_id),
       category: row.target_category,
       content: row.target_content,
+      sourceStoryId: row.target_story_id,
+      sourceSpecId: row.target_spec_id,
+      sourceRunId: row.target_run_id === null ? null : Number(row.target_run_id),
+      sourceType: row.target_type,
+      relatedFiles: parseRelatedFiles(row.target_related_files),
+      pinned: Boolean(row.target_pinned),
+      createdAt: row.target_created_at,
     },
     semantics: MEMORY_RELATION_SEMANTICS[row.relation_type],
   }));
