@@ -245,6 +245,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.setItem('rorca_workspaceId', 'ws-1');
+  sessionStorage.removeItem('rorca_memory_analytics_drilldown');
 });
 
 function mockPanelData(overrides?: {
@@ -266,6 +267,32 @@ function mockPanelData(overrides?: {
 }
 
 describe('MemoryPanel', () => {
+  it('applies analytics drill-down focus from ontology health without breaking ledger and graph workflows', async () => {
+    mockPanelData();
+    sessionStorage.setItem('rorca_memory_analytics_drilldown', JSON.stringify({
+      source: 'ontology-health',
+      workspaceId: 'ws-1',
+      metric: 'conflicts',
+      label: 'Active conflicts',
+      description: 'Conflict drill-down from analytics.',
+      memoryIds: [2],
+      specIds: [],
+      filePaths: [],
+      createdAt: '2026-06-03T12:00:00.000Z',
+    }));
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Analytics drill-down: Active conflicts')).toBeTruthy();
+    expect(screen.getByText('Conflict drill-down from analytics.')).toBeTruthy();
+    const memoryList = screen.getByRole('list', { name: 'Memory entries' });
+    expect(within(memoryList).getByText('Bound node and edge counts in the query layer.')).toBeTruthy();
+    expect(within(memoryList).queryByText('Direction Stack layers cascade L1 → L5.')).toBeNull();
+    await waitFor(() => {
+      expect(screen.getByText('Centered on memory #2')).toBeTruthy();
+    });
+  });
+
   it('defaults to list mode and lets operators switch to graph and split views', async () => {
     const user = userEvent.setup();
     mockPanelData();

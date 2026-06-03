@@ -12,6 +12,7 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { queryOne, execute } from '../../db/index';
+import * as ageGuard from '../../lib/age-guard';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -53,11 +54,14 @@ process.env.AUTH_REQUIRED = 'true';
   app = serverMod.default;
   authId = `00000000-0000-4000-8000-${Math.floor(Math.random() * 1_000_000_000_000).toString().padStart(12, '0')}`;
   authToken = await getAuthToken(app, { authId });
+  jest.spyOn(ageGuard, 'checkAge').mockResolvedValue(true);
 
   // Create workspace directory and DB record
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
   // Clean analytics-specific tables so tests run against a clean state regardless of prior test files
+  await execute(`DELETE FROM memory_relations WHERE workspace_id = $1`, [WS_ID]);
+  await execute(`DELETE FROM memories WHERE workspace_id = $1`, [WS_ID]);
   await execute(`DELETE FROM token_usage WHERE workspace_id = $1`, [WS_ID]);
   await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
   await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [WS_ID]);
@@ -71,6 +75,7 @@ process.env.AUTH_REQUIRED = 'true';
 });
 
 afterEach(async () => {
+  jest.restoreAllMocks();
   // Use require() to get the CURRENT module instance (post-resetModules) for cleanup
   try {
     const db = require('../../db/index');
@@ -114,6 +119,49 @@ async function seedAnalyticsData() {
   }
 
   return runId;
+}
+
+async function seedOntologyData() {
+  const memory1 = await queryOne<{ id: number }>(
+    `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, confidence, related_files, source_type, source, updated_at)
+     VALUES ($1, 'Architecture', 'Legacy direction should stay active', 'MOG-001', 'spec-a', 'high', $2::jsonb, 'manual', 'MOG-001', NOW() - INTERVAL '1 day')
+     RETURNING id`,
+    [WS_ID, JSON.stringify(['backend/src/routes/memory.ts'])],
+  );
+  const memory2 = await queryOne<{ id: number }>(
+    `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, confidence, related_files, source_type, source, updated_at)
+     VALUES ($1, 'Decision', 'New direction conflicts with the legacy rule', 'MOG-009', 'spec-b', 'high', $2::jsonb, 'manual', 'MOG-009', NOW() - INTERVAL '12 hours')
+     RETURNING id`,
+    [WS_ID, JSON.stringify(['src/panels/MemoryPanel.tsx'])],
+  );
+  const memory3 = await queryOne<{ id: number }>(
+    `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, confidence, related_files, source_type, source, updated_at)
+     VALUES ($1, 'Convention', 'Old cleanup guidance', 'MOG-002', 'spec-a', 'medium', $2::jsonb, 'manual', 'MOG-002', NOW() - INTERVAL '8 hours')
+     RETURNING id`,
+    [WS_ID, JSON.stringify(['src/panels/MemoryPanel.tsx'])],
+  );
+  const memory4 = await queryOne<{ id: number }>(
+    `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, confidence, related_files, source_type, source, updated_at)
+     VALUES ($1, 'Convention', 'New cleanup guidance', 'MOG-009', 'spec-a', 'high', $2::jsonb, 'manual', 'MOG-009', NOW() - INTERVAL '2 hours')
+     RETURNING id`,
+    [WS_ID, JSON.stringify(['src/panels/MemoryPanel.tsx'])],
+  );
+
+  await execute(
+    `INSERT INTO memory_relations (workspace_id, source_memory_id, target_memory_id, relation_type, canonical_key, status, updated_at)
+     VALUES ($1, $2, $3, 'CONFLICTS_WITH', $4, 'active', NOW() - INTERVAL '30 minutes')`,
+    [WS_ID, memory1!.id, memory2!.id, `conflict:${memory1!.id}:${memory2!.id}`],
+  );
+  await execute(
+    `INSERT INTO memory_relations (workspace_id, source_memory_id, target_memory_id, relation_type, canonical_key, status, updated_at)
+     VALUES ($1, $2, $3, 'SUPERSEDES', $4, 'active', NOW() - INTERVAL '15 minutes')`,
+    [WS_ID, memory4!.id, memory3!.id, `supersedes:${memory4!.id}:${memory3!.id}`],
+  );
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload, ts)
+     VALUES ('memory_reviewed', $1, 'spec-a', 'MOG-009', 'user', $2::jsonb, NOW() - INTERVAL '10 minutes')`,
+    [WS_ID, JSON.stringify({ memoryId: memory3!.id, action: 'keep', provenance: { sourceSpecId: 'spec-a', relatedFiles: ['src/panels/MemoryPanel.tsx'] } })],
+  );
 }
 
 async function seedPiProviderData(workspaceId: string, authIdForWorkspace?: string) {
@@ -545,6 +593,63 @@ describe('GET /api/analytics/completion-rates', () => {
   test('requires authentication', async () => {
     const res = await request(app).get('/api/analytics/completion-rates');
     expect(res.status).toBe(401);
+  });
+});
+
+// ─── GET /api/analytics/ontology-health ──────────────────────────────────────
+
+describe('GET /api/analytics/ontology-health', () => {
+  test('returns bounded ontology summary metrics and drilldown data', async () => {
+    await seedOntologyData();
+
+    const res = await get(`/api/analytics/ontology-health?workspace_id=${WS_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+    expect(res.body.dataAvailable).toBe(true);
+    expect(res.body.summary.activeConflictCount).toBe(1);
+    expect(res.body.summary.supersededMemoryCount).toBe(1);
+    expect(res.body.summary.hotspotDensityPct).toBeGreaterThan(0);
+    expect(res.body.summary.recentCurationCount).toBeGreaterThan(0);
+    expect(res.body.drilldowns.conflicts.items[0]).toMatchObject({
+      relationId: expect.any(Number),
+      sourceMemoryId: expect.any(Number),
+      targetMemoryId: expect.any(Number),
+      specIds: expect.arrayContaining(['spec-a', 'spec-b']),
+    });
+    expect(res.body.drilldowns.superseded.items[0]).toMatchObject({
+      memoryId: expect.any(Number),
+      supersededByMemoryId: expect.any(Number),
+      sourceSpecId: 'spec-a',
+    });
+    expect(res.body.drilldowns.hotspots.items[0]).toMatchObject({
+      scopeType: expect.stringMatching(/file|spec/),
+      memoryCount: expect.any(Number),
+    });
+    expect(res.body.drilldowns.recentCuration.items[0]).toMatchObject({
+      kind: expect.stringMatching(/review|relation/),
+      summary: expect.any(String),
+    });
+  });
+
+  test('returns explicit fallback metadata when AGE is unavailable', async () => {
+    jest.spyOn(ageGuard, 'checkAge').mockResolvedValue(false);
+    await seedOntologyData();
+
+    const res = await get(`/api/analytics/ontology-health?workspace_id=${WS_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ageAvailable).toBe(false);
+    expect(res.body.mode).toBe('bounded-sql-fallback');
+    expect(res.body.reason).toMatch(/Apache AGE extension is unavailable/i);
+  });
+
+  test('returns explicit no-data copy when ontology data is missing', async () => {
+    const res = await get(`/api/analytics/ontology-health?workspace_id=${WS_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.dataAvailable).toBe(false);
+    expect(res.body.emptyReason).toMatch(/No ontology memories or relations recorded yet/i);
   });
 });
 
