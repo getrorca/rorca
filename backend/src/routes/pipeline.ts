@@ -5254,7 +5254,7 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT id, spec_path, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { id: number; spec_path: string; workspace_id: string } | undefined;
+    const run = await queryOne('SELECT id, spec_path, workspace_id, status FROM pipeline_runs WHERE id = $1', [runId]) as { id: number; spec_path: string; workspace_id: string; status: string } | undefined;
 
     if (!run) {
       throw new NotFoundError('Run not found');
@@ -5300,24 +5300,31 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
       descriptionMap.set(sk.name, sk.description);
     }
 
-    // Build per-story data
+    // Build per-story data. During an active run, story_results may not exist yet;
+    // fall back to spec stories so matched/scheduled skills are visible while execution is in progress.
     const skillCounts = new Map<string, { count: number; passCount: number; totalCount: number }>();
+    const storyRowMap = new Map(storyRows.map((row) => [row.story_id, row]));
+    const orderedStoryIds = [
+      ...specStories.map((story) => story.id),
+      ...storyRows.map((row) => row.story_id).filter((storyId) => !titleMap.has(storyId)),
+    ];
 
-    const perStory = storyRows.map((row) => {
+    const perStory = orderedStoryIds.map((storyId) => {
+      const row = storyRowMap.get(storyId);
       let activeSkillNames: string[] = [];
-      if (row.active_skills) {
+      if (row?.active_skills) {
         try {
           activeSkillNames = JSON.parse(row.active_skills);
         } catch { /* malformed JSON */ }
       }
 
-      const suggestions = skillSuggestionsMap.get(row.story_id) || [];
+      const suggestions = skillSuggestionsMap.get(storyId) || [];
       const suggestionMap = new Map<string, { relevance: number; reason: string }>();
       for (const s of suggestions) {
         suggestionMap.set(s.name, { relevance: s.relevance, reason: s.reason });
       }
 
-      // If active_skills was never recorded (older runs), fall back to suggestedSkills from spec
+      // If active_skills was never recorded (older runs or in-flight stories), fall back to suggestedSkills from spec.
       const skillNamesToShow = activeSkillNames.length > 0
         ? activeSkillNames
         : suggestions.map(s => s.name);
@@ -5333,19 +5340,21 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
         };
       });
 
+      const storyStatus = row?.status ?? (run.status === 'running' || run.status === 'queued' ? 'pending' : 'not_run');
+
       // Update frequency counts (use the names actually shown)
       for (const name of skillNamesToShow) {
         const existing = skillCounts.get(name) || { count: 0, passCount: 0, totalCount: 0 };
         existing.count++;
         existing.totalCount++;
-        if (row.status === 'pass') existing.passCount++;
+        if (storyStatus === 'pass') existing.passCount++;
         skillCounts.set(name, existing);
       }
 
       return {
-        storyId: row.story_id,
-        storyTitle: titleMap.get(row.story_id) || row.story_id,
-        storyStatus: row.status,
+        storyId,
+        storyTitle: titleMap.get(storyId) || storyId,
+        storyStatus,
         skills,
       };
     });

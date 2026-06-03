@@ -540,6 +540,51 @@ describe('GET /api/pipeline/runs/:runId', () => {
   });
 });
 
+// ─── GET /api/pipeline/runs/:runId/skills ───────────────────────────────────
+
+describe('GET /api/pipeline/runs/:runId/skills', () => {
+  test('shows matched spec skills for in-flight runs before story_results exist', async () => {
+    const specPath = path.join(wsDir, 'forge', 'specs', 'approved', 'skills-run.json');
+    fs.writeFileSync(specPath, JSON.stringify({
+      title: 'Skills Run',
+      userStories: [
+        {
+          id: 'US-001',
+          title: 'Build API',
+          description: 'Desc',
+          acceptanceCriteria: ['AC1'],
+          suggestedSkills: [
+            { name: 'api-documentation', relevance: 9, reason: 'New API endpoint' },
+            { name: 'data-validation', relevance: 7, reason: 'Route validation' },
+          ],
+        },
+        {
+          id: 'US-002',
+          title: 'Build UI',
+          description: 'Desc',
+          acceptanceCriteria: ['AC1'],
+          suggestedSkills: [
+            { name: 'react-review', relevance: 8, reason: 'React UI work' },
+          ],
+        },
+      ],
+    }), 'utf8');
+
+    const runId = await seedRun({ status: 'running', spec_path: 'forge/specs/approved/skills-run.json' });
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/skills`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.perStory).toHaveLength(2);
+    expect(res.body.perStory[0]).toMatchObject({ storyId: 'US-001', storyStatus: 'pending' });
+    expect(res.body.perStory[0].skills.map((skill: any) => skill.name)).toEqual(['api-documentation', 'data-validation']);
+    expect(res.body.summary.totalSkillInjections).toBe(3);
+    expect(res.body.summary.storiesWithSkills).toBe(2);
+  });
+});
+
 // ─── POST /api/pipeline/runs/:runId/pause ───────────────────────────────────
 
 describe('POST /api/pipeline/runs/:runId/pause', () => {

@@ -1849,6 +1849,20 @@ interface FinOpsStoryRow {
   cost_usd: number;
 }
 
+interface StoryResultUsageRow {
+  story_id: string;
+  model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+}
+
+interface TokenWalRow {
+  story_id: string;
+  payload: string | Record<string, unknown> | null;
+  ts: string;
+}
+
 interface EscalationWalRow {
   story_id: string;
   payload: string;
@@ -1864,6 +1878,32 @@ function tierFromModel(model: string): string {
   if (lower.includes('haiku') || lower.includes('mini') || lower.includes('flash')) return 'haiku';
   if (lower.includes('opus') || lower.includes('o3') || lower.includes('pro')) return 'opus';
   return 'sonnet';
+}
+
+function parseWalPayload(payload: string | Record<string, unknown> | null): Record<string, unknown> {
+  if (!payload) return {};
+  if (typeof payload === 'string') {
+    try { return JSON.parse(payload) as Record<string, unknown>; } catch { return {}; }
+  }
+  return payload;
+}
+
+function pricingCandidates(model: string): string[] {
+  const parts = model.split('/').filter(Boolean);
+  return Array.from(new Set([
+    model,
+    parts.length > 1 ? parts.slice(1).join('/') : model,
+    parts.length > 2 ? parts.slice(2).join('/') : model,
+    parts.at(-1) ?? model,
+  ]));
+}
+
+function resolvePricing(pricingMap: Map<string, { input: number; output: number }>, model: string): { input: number; output: number } | undefined {
+  for (const candidate of pricingCandidates(model)) {
+    const pricing = pricingMap.get(candidate);
+    if (pricing) return pricing;
+  }
+  return undefined;
 }
 
 /**
@@ -1916,8 +1956,8 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
     }
 
     // Check run exists and get agent info
-    const run = await queryOne<{ id: number; agent: string | null; agent_model: string | null; workspace_id: string; spec_path: string }>(
-      'SELECT id, agent, agent_model, workspace_id, spec_path FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ id: number; agent: string | null; agent_type: string | null; agent_model: string | null; workspace_id: string; spec_path: string; status: string }>(
+      'SELECT id, agent, agent_type, agent_model, workspace_id, spec_path, status FROM pipeline_runs WHERE id = $1',
       [runId]
     );
 
@@ -1926,16 +1966,92 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       return;
     }
 
-    const agentType = run.agent || 'claude';
-    const isSubscription = agentType === 'claude' || agentType === 'codex';
+    const agentType = run.agent_type || run.agent || 'claude';
+    const fallbackModel = run.agent_model || agentType;
 
-    // Per-story token usage
-    const stories = await query<FinOpsStoryRow>(`
+    // Per-story token usage from all available sources. token_usage is the canonical analytics table,
+    // story_results is a completion-time fallback, and story_token_update WAL events provide live data
+    // while a run is still executing.
+    const tokenUsageRows = await query<FinOpsStoryRow>(`
       SELECT story_id, model, input_tokens, output_tokens, cost_usd
       FROM token_usage
       WHERE run_id = $1
       ORDER BY recorded_at ASC
     `, [runId]);
+
+    const storyResultRows = await query<StoryResultUsageRow>(`
+      SELECT story_id, model_used AS model, input_tokens, output_tokens, cost_usd
+      FROM story_results
+      WHERE run_id = $1
+        AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cost_usd IS NOT NULL)
+      ORDER BY id ASC
+    `, [runId]);
+
+    const tokenWalRows = await query<TokenWalRow>(`
+      SELECT story_id, payload, ts
+      FROM wal_events
+      WHERE event_type = 'story_token_update'
+        AND (payload->>'run_id')::bigint = $1
+      ORDER BY ts ASC
+    `, [runId]);
+
+    const stories: FinOpsStoryRow[] = [...tokenUsageRows];
+    const coveredStoryIds = new Set(stories.map((story) => story.story_id));
+
+    for (const row of storyResultRows) {
+      if (coveredStoryIds.has(row.story_id)) continue;
+      stories.push({
+        story_id: row.story_id,
+        model: row.model || fallbackModel,
+        input_tokens: Number(row.input_tokens ?? 0),
+        output_tokens: Number(row.output_tokens ?? 0),
+        cost_usd: Number(row.cost_usd ?? 0),
+      });
+      coveredStoryIds.add(row.story_id);
+    }
+
+    const liveByStory = new Map<string, FinOpsStoryRow>();
+    for (const row of tokenWalRows) {
+      if (coveredStoryIds.has(row.story_id)) continue;
+      const payload = parseWalPayload(row.payload);
+      const previous = liveByStory.get(row.story_id) ?? {
+        story_id: row.story_id,
+        model: String(payload.model ?? fallbackModel),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+      };
+      const hasCumulative = payload.cumulative_input_tokens != null || payload.cumulative_output_tokens != null;
+      liveByStory.set(row.story_id, {
+        story_id: row.story_id,
+        model: String(payload.model ?? previous.model ?? fallbackModel),
+        input_tokens: hasCumulative ? Number(payload.cumulative_input_tokens ?? previous.input_tokens ?? 0) : previous.input_tokens + Number(payload.input_tokens ?? 0),
+        output_tokens: hasCumulative ? Number(payload.cumulative_output_tokens ?? previous.output_tokens ?? 0) : previous.output_tokens + Number(payload.output_tokens ?? 0),
+        cost_usd: payload.cumulative_cost_usd != null
+          ? Number(payload.cumulative_cost_usd)
+          : previous.cost_usd + Number(payload.cost_usd ?? 0),
+      });
+    }
+    stories.push(...liveByStory.values());
+
+    let usageAvailable = stories.some((story) => story.input_tokens > 0 || story.output_tokens > 0 || story.cost_usd > 0);
+
+    if (stories.length === 0) {
+      const workspace = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]);
+      if (workspace) {
+        try {
+          const absSpecPath = path.join(workspace.path, run.spec_path);
+          const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
+          const specStories = Array.isArray(specJson.userStories) ? specJson.userStories : [];
+          for (const story of specStories) {
+            if (!story?.id) continue;
+            stories.push({ story_id: story.id, model: fallbackModel, input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+          }
+        } catch { /* spec fallback is best-effort */ }
+      }
+    }
+
+    usageAvailable = usageAvailable || stories.some((story) => story.input_tokens > 0 || story.output_tokens > 0 || story.cost_usd > 0);
 
     // Get model pricing for calculating costs from tokens
     const pricingRows = await query<{ model_id: string; input_cost_per_1m: number | null; output_cost_per_1m: number | null; input_cost_per_1k: number; output_cost_per_1k: number }>(
@@ -1952,7 +2068,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
 
     // Build per-story breakdown
     const perStory = stories.map(s => {
-      const pricing = pricingMap.get(s.model);
+      const pricing = resolvePricing(pricingMap, s.model);
       const actualCost = pricing
         ? (s.input_tokens / 1_000_000) * pricing.input + (s.output_tokens / 1_000_000) * pricing.output
         : s.cost_usd;
@@ -2045,9 +2161,11 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
     res.json({
       runId,
       agentType,
-      isSubscription,
+      agentModel: fallbackModel,
+      usageAvailable,
+      isSubscription: false,
       runSummary,
-      savings: isSubscription ? null : {
+      savings: {
         opusBaseline: Math.round(totalOpusBaseline * 100) / 100,
         actual: Math.round(totalActual * 100) / 100,
         saved: Math.round(totalSaved * 100) / 100,
@@ -2057,7 +2175,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
         stories: totalStories,
         inputTokens: perStory.reduce((sum, s) => sum + s.inputTokens, 0),
         outputTokens: perStory.reduce((sum, s) => sum + s.outputTokens, 0),
-        cost: isSubscription ? null : Math.round(totalActual * 100) / 100,
+        cost: Math.round(totalActual * 100) / 100,
       },
       modelDistribution,
       perStory,
@@ -2254,15 +2372,8 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
     const opusBaseline = baselineResult?.opus_baseline || 0;
     const actualCost = baselineResult?.actual_cost || 0;
 
-    // Detect if all runs are subscription (claude)
-    const agentCheckSql = `
-      SELECT DISTINCT pr.agent
-      FROM pipeline_runs pr
-      JOIN token_usage tu ON tu.run_id = pr.id
-      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
-    `;
-    const agents = await query<{ agent: string | null }>(agentCheckSql, params);
-    const allSubscription = agents.length > 0 && agents.every(a => !a.agent || a.agent === 'claude' || a.agent === 'codex');
+    // FinOps should display estimated token cost for all providers when pricing/usage exists.
+    const allSubscription = false;
 
     res.json({
       dailyTrend: dailyTrend.map(d => ({
@@ -2313,19 +2424,19 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /api/analytics/pi-providers — Pi provider FinOps aggregation ───────
+// ─── GET /api/analytics/pi-providers — Provider FinOps aggregation (compat path) ───────
 
 /**
  * @swagger
  * /api/analytics/pi-providers:
  *   get:
  *     tags: [Analytics]
- *     summary: Get Pi provider usage aggregates
+ *     summary: Get provider usage aggregates
  *     operationId: getPiProviderAnalytics
  *     x-rorca-tier: paid
  *     x-rorca-capability: finops
- *     x-rorca-rationale: "Pi provider cost analytics are part of the paid FinOps surface and should not be reachable from the free CLI contract."
- *     description: Returns FinOps aggregates for Pi runs grouped by Pi provider. Data is derived from token_usage joined with pipeline_runs, filtered to pipeline runs where the execution agent is pi. Providers are parsed from Pi model identifiers such as pi/openai/gpt-4.1 or pi/omlx/local.
+ *     x-rorca-rationale: "Provider cost analytics are part of the paid FinOps surface and should not be reachable from the free CLI contract."
+ *     description: Compatibility path that returns FinOps aggregates for all execution providers. Data is derived from token_usage joined with pipeline_runs. Provider names are parsed from model identifiers such as pi/openai/gpt-4.1, openrouter/google/gemini, openai/gpt-4o, or fallback agent type for un-prefixed models.
  *     parameters:
  *       - in: query
  *         name: workspace_id
@@ -2370,7 +2481,11 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
 
       const sql = `
         SELECT
-          split_part(tu.model, '/', 2) AS provider,
+          CASE
+            WHEN tu.model LIKE 'pi/%' THEN split_part(tu.model, '/', 2)
+            WHEN position('/' in tu.model) > 0 THEN split_part(tu.model, '/', 1)
+            ELSE COALESCE(pr.agent_type, pr.agent, 'unknown')
+          END AS provider,
           COUNT(DISTINCT tu.run_id)::int AS total_runs,
           COUNT(DISTINCT (tu.run_id, tu.story_id))::int AS total_stories,
           COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
@@ -2380,10 +2495,9 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
           MAX(tu.recorded_at)::text AS last_used
         FROM token_usage tu
         JOIN pipeline_runs pr ON pr.id = tu.run_id
-        WHERE COALESCE(pr.agent_type, pr.agent, 'claude') = 'pi'
-          AND tu.model LIKE 'pi/%'
+        WHERE 1 = 1
           ${workspaceFilter}
-        GROUP BY split_part(tu.model, '/', 2)
+        GROUP BY provider
         ORDER BY MAX(tu.recorded_at) DESC, provider ASC
       `;
 
@@ -2402,7 +2516,7 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
       lastUsed: row.last_used,
     })));
   } catch (error: any) {
-    handleRouteError(res, error, '[Analytics] Pi provider query');
+    handleRouteError(res, error, '[Analytics] Provider query');
   }
 });
 

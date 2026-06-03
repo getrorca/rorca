@@ -169,7 +169,7 @@ export default function FinOpsDashboardPanel() {
       setPiProviders(result);
     } catch (err: any) {
       setPiProviders([]);
-      setPiProvidersError(err.message || 'Failed to load Pi providers');
+      setPiProvidersError(err.message || 'Failed to load provider aggregates');
     } finally {
       setPiProvidersLoading(false);
     }
@@ -620,10 +620,10 @@ export default function FinOpsDashboardPanel() {
             <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between gap-3">
               <div>
                 <div className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
-                  Pi Providers
+                  Providers
                 </div>
                 <div className="text-xs text-[var(--text-muted)] mt-0.5">
-                  Provider-level usage and marginal cost for Pi runs
+                  Provider-level usage and marginal cost across all execution providers
                 </div>
               </div>
               {piProvidersLoading && (
@@ -638,7 +638,7 @@ export default function FinOpsDashboardPanel() {
               </div>
             ) : piProvidersLoading ? (
               <div className="px-4 py-6 text-sm text-[var(--text-muted)]">
-                Loading Pi provider aggregates...
+                Loading provider aggregates...
               </div>
             ) : (
               <>
