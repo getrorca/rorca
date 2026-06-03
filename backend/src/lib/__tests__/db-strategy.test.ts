@@ -116,10 +116,34 @@ describe('db-strategy', () => {
     });
   });
 
-  it('returns false for AGE in native mode without querying the database', async () => {
+  it('preserves a local *_test database name while applying the selected mode host/port', () => {
+    process.env.DATABASE_URL = 'postgres://rorca:rorca@localhost:5433/rorca_test';
+    mockReadFileSync.mockImplementation((target: string) => {
+      if (target.endsWith('/db-mode')) return 'docker\n';
+      if (String(target).includes('/bin/rorca.ts')) return 'const MANAGED_PG_PORT = 5433;';
+      throw new Error('missing');
+    });
+    const { applySelectedDbModeEnvironment } = require('../db-strategy');
+    expect(applySelectedDbModeEnvironment()).toEqual({
+      mode: 'docker',
+      databaseUrl: 'postgres://rorca:rorca@localhost:5432/rorca_test',
+      changed: true,
+    });
+    expect(process.env.DATABASE_URL).toBe('postgres://rorca:rorca@localhost:5432/rorca_test');
+  });
+
+  it('returns false for AGE when the extension probe does not find AGE/cypher', async () => {
+    mockQueryOne.mockResolvedValue(undefined);
     const { isAgeAvailable } = require('../db-strategy');
     await expect(isAgeAvailable()).resolves.toBe(false);
-    expect(mockQueryOne).not.toHaveBeenCalled();
+    expect(mockQueryOne).toHaveBeenCalledWith(
+      `SELECT 1 AS present
+     FROM pg_extension e
+     JOIN pg_proc p ON p.proname = 'cypher'
+     JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'ag_catalog'
+     WHERE e.extname = 'age'
+     LIMIT 1`
+    );
   });
 
   it('returns true for AGE when the extension row exists', async () => {
@@ -128,7 +152,12 @@ describe('db-strategy', () => {
     const { isAgeAvailable } = require('../db-strategy');
     await expect(isAgeAvailable()).resolves.toBe(true);
     expect(mockQueryOne).toHaveBeenCalledWith(
-      "SELECT 1 AS present FROM pg_extension WHERE extname = 'age'"
+      `SELECT 1 AS present
+     FROM pg_extension e
+     JOIN pg_proc p ON p.proname = 'cypher'
+     JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'ag_catalog'
+     WHERE e.extname = 'age'
+     LIMIT 1`
     );
   });
 });

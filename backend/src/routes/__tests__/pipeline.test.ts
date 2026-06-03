@@ -143,6 +143,21 @@ function seedSpec(status: 'pending' | 'approved', slug: string) {
   return spec;
 }
 
+function createDeterministicSpecWorktree(specSlug: string): { branchName: string; worktreePath: string } {
+  const branchName = `feat/${specSlug}`;
+  const branchSlug = branchName.replace(/\//g, '-');
+  const repoName = path.basename(wsDir);
+  const worktreePath = path.resolve(wsDir, '..', `${repoName}-${branchSlug}`);
+  execSync(`git worktree add -b "${branchName}" "${worktreePath}" HEAD`, { cwd: wsDir, stdio: 'pipe' });
+  return { branchName, worktreePath };
+}
+
+function advanceWorkspaceMain(marker: string): void {
+  fs.writeFileSync(path.join(wsDir, 'README.md'), `${marker}\n`, 'utf8');
+  execSync('git add README.md', { cwd: wsDir, stdio: 'pipe' });
+  execSync(`git commit -m "${marker}"`, { cwd: wsDir, stdio: 'pipe' });
+}
+
 /** Create a run-loop.sh stub that exits immediately */
 function createRunLoopStub(exitCode = 0) {
   const scriptPath = path.join(wsDir, 'forge', 'run-loop.sh');
@@ -220,6 +235,67 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.status).toBe(200);
     expect(res.body.conflict).toBe(true);
     expect(res.body.activeRunId).toBeDefined();
+  });
+
+  test('rejects a stale reusable worktree before queueing a run', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'stale-worktree-trigger');
+    const { worktreePath } = createDeterministicSpecWorktree('stale-worktree-trigger');
+    advanceWorkspaceMain('advance-main-after-worktree');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/stale-worktree-trigger.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: true,
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Reusable worktree is stale or invalid');
+    expect(res.body.error).toContain(worktreePath);
+    expect(mockSend).not.toHaveBeenCalled();
+
+    const runs = await query(
+      `SELECT id FROM pipeline_runs WHERE spec_path = 'forge/specs/approved/stale-worktree-trigger.json'`,
+    );
+    expect(runs).toHaveLength(0);
+  });
+
+  test('rejects a stale reusable branch before recreating its worktree', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'stale-branch-trigger');
+    const { worktreePath } = createDeterministicSpecWorktree('stale-branch-trigger');
+    execSync(`git worktree remove --force "${worktreePath}"`, { cwd: wsDir, stdio: 'pipe' });
+    advanceWorkspaceMain('advance-main-after-worktree-removal');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/stale-branch-trigger.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: true,
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Reusable branch is stale or invalid');
+    expect(res.body.error).toContain('feat/stale-branch-trigger');
+    expect(mockSend).not.toHaveBeenCalled();
+
+    const runs = await query(
+      `SELECT id FROM pipeline_runs WHERE spec_path = 'forge/specs/approved/stale-branch-trigger.json'`,
+    );
+    expect(runs).toHaveLength(0);
   });
 
   test('spawns run-loop.sh and returns 201 with runId', async () => {
@@ -1371,6 +1447,46 @@ describe('POST /api/pipeline/runs/:runId/retry', () => {
       }),
       expect.any(Object),
     );
+  });
+
+  test('rejects retry when the original reusable worktree is stale before queueing', async () => {
+    seedSpec('approved', 'retry-stale-worktree');
+    const { branchName, worktreePath } = createDeterministicSpecWorktree('retry-stale-worktree');
+    advanceWorkspaceMain('advance-main-before-retry');
+
+    const originalRun = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, parallelism, branch_name, worktree_path)
+       VALUES ('forge/specs/approved/retry-stale-worktree.json', 'ws-pipe', 'failed', 1, $1, $2)
+       RETURNING id`,
+      [branchName, worktreePath],
+    );
+    expect(originalRun?.id).toBeDefined();
+
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, retries)
+       VALUES ($1, 'US-001', 'fail', 0)`,
+      [originalRun!.id],
+    );
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${originalRun!.id}/retry`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Reusable worktree is stale or invalid');
+    expect(res.body.error).toContain(worktreePath);
+    expect(mockSend).not.toHaveBeenCalled();
+
+    const retryRuns = await query(
+      `SELECT id FROM pipeline_runs WHERE retried_from_run_id = $1`,
+      [originalRun!.id],
+    );
+    expect(retryRuns).toHaveLength(0);
   });
 });
 

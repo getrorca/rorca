@@ -63,6 +63,7 @@ import { FlushBuffer } from './lib/flush-buffer';
 import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
+import { validateReusableWorktree } from './lib/worktree-freshness';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -767,6 +768,32 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
 
+    if (worktreePath) {
+      const worktreeValidation = validateReusableWorktree({
+        workspacePath,
+        worktreePath,
+        expectedBranchName: payload.branchName ?? null,
+      });
+      if (!worktreeValidation.ok) {
+        logger.error(
+          { runId, workspacePath, worktreePath, worktreeValidation },
+          '[worker] refusing to execute run in stale or invalid reusable worktree',
+        );
+        await execute(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = $2 WHERE id = $1`,
+          [runId, `worktree_guard:${worktreeValidation.reason}`],
+        );
+        await emitWalEvent('run_finished', workspaceId, {
+          run_id: runId,
+          status: 'failed',
+          reason: 'stale_worktree',
+          worktree_path: worktreePath,
+          validation: worktreeValidation,
+        });
+        return;
+      }
+    }
+
     // 1b. Per-workspace concurrency lock (DB-based, survives restarts).
     // Task-Monitor pattern: pg-boss jobs complete immediately after spawn, so pg-boss
     // queue locks no longer enforce concurrency. We check pipeline_runs directly.
@@ -1296,15 +1323,42 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     const cwd = worktreePath ?? workspacePath;
 
     // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null }>(
-      'SELECT workspace_id, parallelism, terminal_mode FROM pipeline_runs WHERE id = $1',
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null }>(
+      'SELECT workspace_id, parallelism, terminal_mode, branch_name FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
       logger.error({ jobId, runId }, '[worker] pipeline:retry run row not found — skipping');
       return;
     }
-    const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode } = runRow;
+    const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
+
+    if (worktreePath) {
+      const worktreeValidation = validateReusableWorktree({
+        workspacePath,
+        worktreePath,
+        expectedBranchName: branchName,
+      });
+      if (!worktreeValidation.ok) {
+        logger.error(
+          { runId, originalRunId, workspacePath, worktreePath, worktreeValidation },
+          '[worker] refusing to execute retry in stale or invalid reusable worktree',
+        );
+        await execute(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = $2 WHERE id = $1`,
+          [runId, `worktree_guard:${worktreeValidation.reason}`],
+        );
+        await emitWalEvent('run_finished', workspaceId, {
+          run_id: runId,
+          original_run_id: originalRunId,
+          status: 'failed',
+          reason: 'stale_worktree',
+          worktree_path: worktreePath,
+          validation: worktreeValidation,
+        });
+        return;
+      }
+    }
 
     // 3. Mark the new run as running — set worker_id so orphan sweep knows this run belongs to us
     await execute(

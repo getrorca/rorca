@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { queryOne } from '../db';
+import { queryOne } from '../db/index.js';
 const DEFAULT_NATIVE_PORT = 5433;
 const DOCKER_PORT = 5432;
 const DB_MODE_FILENAME = 'db-mode';
@@ -18,13 +18,41 @@ function getRorcaHome() {
 function getDbModePath() {
     return path.join(getRorcaHome(), DB_MODE_FILENAME);
 }
-function parseDatabaseHost(databaseUrl) {
+function parseDatabaseUrl(databaseUrl) {
     try {
-        return new URL(databaseUrl).hostname.toLowerCase();
+        return new URL(databaseUrl);
     }
     catch {
         return null;
     }
+}
+function parseDatabaseHost(databaseUrl) {
+    return parseDatabaseUrl(databaseUrl)?.hostname.toLowerCase() ?? null;
+}
+function parseDatabasePort(databaseUrl) {
+    const url = parseDatabaseUrl(databaseUrl);
+    if (!url)
+        return null;
+    if (!url.port)
+        return 5432;
+    const parsed = Number.parseInt(url.port, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+function parseDatabaseName(databaseUrl) {
+    const url = parseDatabaseUrl(databaseUrl);
+    if (!url)
+        return null;
+    return url.pathname.replace(/^\//, '') || null;
+}
+function isTestDatabaseName(databaseName) {
+    return typeof databaseName === 'string' && databaseName.endsWith('_test');
+}
+function preserveDatabaseName(databaseUrl, databaseName) {
+    const url = parseDatabaseUrl(databaseUrl);
+    if (!url)
+        return databaseUrl;
+    url.pathname = `/${databaseName}`;
+    return url.toString();
 }
 function isRemoteHost(host) {
     if (!host)
@@ -73,7 +101,16 @@ export function detectDbMode() {
     if (databaseUrl && isRemoteHost(parseDatabaseHost(databaseUrl))) {
         return 'byop';
     }
-    return readDbModeFile() === 'docker' ? 'docker' : 'native';
+    const persistedMode = readDbModeFile();
+    if (persistedMode === 'docker' || persistedMode === 'native') {
+        return persistedMode;
+    }
+    const localPort = databaseUrl ? parseDatabasePort(databaseUrl) : null;
+    if (localPort === DOCKER_PORT)
+        return 'docker';
+    if (localPort === resolveNativePort())
+        return 'native';
+    return 'native';
 }
 export function setDbMode(mode) {
     const rorcaHome = getRorcaHome();
@@ -91,9 +128,33 @@ export function getDbConnectionString(mode) {
     }
     return `postgres://rorca:rorca@localhost:${resolveNativePort()}/rorca`;
 }
+export function applySelectedDbModeEnvironment(env = process.env) {
+    const mode = detectDbMode();
+    const current = env.DATABASE_URL?.trim() || '';
+    const currentDatabaseName = parseDatabaseName(current);
+    if (mode === 'byop') {
+        return {
+            mode,
+            databaseUrl: current,
+            changed: false,
+        };
+    }
+    let databaseUrl = getDbConnectionString(mode);
+    if (isTestDatabaseName(currentDatabaseName)) {
+        databaseUrl = preserveDatabaseName(databaseUrl, currentDatabaseName);
+    }
+    const changed = current !== databaseUrl;
+    env.DATABASE_URL = databaseUrl;
+    return { mode, databaseUrl, changed };
+}
 export async function isAgeAvailable() {
     if (detectDbMode() === 'native')
         return false;
-    const row = await queryOne("SELECT 1 AS present FROM pg_extension WHERE extname = 'age'");
+    const row = await queryOne(`SELECT 1 AS present
+     FROM pg_extension e
+     JOIN pg_proc p ON p.proname = 'cypher'
+     JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'ag_catalog'
+     WHERE e.extname = 'age'
+     LIMIT 1`);
     return row?.present === 1;
 }

@@ -60,6 +60,7 @@ import {
   requestRunPtyResize,
 } from '../lib/run-pty-store';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
+import { validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -347,6 +348,41 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
   'CLAUDE_AGENT_SDK_VERSION',
   'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
 ];
+
+function assertReusableWorktreeFresh(
+  workspacePath: string,
+  worktreePath: string,
+  branchName?: string | null,
+): void {
+  const result = validateReusableWorktree({
+    workspacePath,
+    worktreePath,
+    expectedBranchName: branchName ?? null,
+  });
+
+  if (result.ok) {
+    return;
+  }
+
+  const detail = result.detail ? ` ${result.detail}.` : '';
+  throw new ConflictError(
+    `Reusable worktree is stale or invalid (${result.reason}). ` +
+    `Refresh or remove ${worktreePath} before retrying.${detail}`,
+  );
+}
+
+function assertReusableBranchFresh(workspacePath: string, branchName: string): void {
+  const result = validateReusableBranch({ workspacePath, branchName });
+  if (result.ok) {
+    return;
+  }
+
+  const detail = result.detail ? ` ${result.detail}.` : '';
+  throw new ConflictError(
+    `Reusable branch is stale or invalid (${result.reason}). ` +
+    `Refresh or recreate ${branchName} before retrying.${detail}`,
+  );
+}
 
 /**
  * Write synthesized direction stack to `.opencode/skills/rorca.md` in the workspace.
@@ -1702,12 +1738,14 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const git = simpleGit(workspace.path);
 
       if (fs.existsSync(worktreePath)) {
+        assertReusableWorktreeFresh(workspace.path, worktreePath, branchName);
         // Reuse existing worktree — engine will skip already-passed stories
         logger.info({ specSlug, worktreePath }, '[trigger] Reusing existing worktree');
       } else {
         // Create fresh worktree on the deterministic branch
         const branchExists = (await git.branchLocal()).all.includes(branchName);
         if (branchExists) {
+          assertReusableBranchFresh(workspace.path, branchName);
           await git.raw(['worktree', 'add', worktreePath, branchName]);
         } else {
           await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
@@ -3549,6 +3587,14 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;
+    }
+
+    if (originalRun.worktree_path) {
+      assertReusableWorktreeFresh(
+        workspace.path,
+        originalRun.worktree_path,
+        originalRun.branch_name ?? null,
+      );
     }
 
     // 5. Duplicate-job guard — check for an active pipeline:retry job for this runId.
