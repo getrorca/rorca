@@ -13,7 +13,12 @@
  */
 
 import { z } from 'zod';
-import type { GraphRagCandidateExplainability, GraphRagRetrievalMode, GraphRagScoreSchemaVersion } from '../lib/retrieval-pipeline';
+import type {
+  GraphRagCandidateExplainability,
+  GraphRagOntologySurfaceSummary,
+  GraphRagRetrievalMode,
+  GraphRagScoreSchemaVersion,
+} from '../lib/retrieval-pipeline';
 import type { MemoryEntry } from '../lib/memory-ledger';
 import type { EcholocationReport } from '../lib/workspace-echolocation';
 
@@ -93,9 +98,10 @@ export interface WorkspaceMetadata {
 export type RetrievalTier = 'cag' | 'rag' | 'graph' | 'none';
 
 export interface RecallDebugMeta {
-  scoringVersion: GraphRagScoreSchemaVersion;
-  retrievalMode: GraphRagRetrievalMode;
+  scoringVersion: GraphRagScoreSchemaVersion | null;
+  retrievalMode: GraphRagRetrievalMode | null;
   telemetryId: string | null;
+  ontologyExplainability?: GraphRagOntologySurfaceSummary;
 }
 
 export interface RecallMemoryEntry extends MemoryEntry {

@@ -10,9 +10,9 @@ import path from 'path';
 import fs from 'fs';
 import { query, queryOne, execute } from '../db/index';
 import { withUserClient } from '../db/user-client';
-import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { checkAge } from '../lib/age-guard';
 
 const router = Router();
 
@@ -44,6 +44,211 @@ interface PiProviderRow {
   total_cost: number;
   avg_cost_per_story: number;
   last_used: string;
+}
+
+const ONTOLOGY_RELATION_LIMIT = 12;
+const ONTOLOGY_ACTIVITY_LIMIT = 12;
+const ONTOLOGY_ACTIVITY_WINDOW_DAYS = 14;
+const ONTOLOGY_HOTSPOT_MEMORY_WINDOW = 400;
+const ONTOLOGY_HOTSPOT_RESULT_LIMIT = 6;
+
+type OntologyHotspotScope = 'file' | 'spec';
+
+interface OntologyCountsRow {
+  active_conflict_count: number | string;
+  superseded_memory_count: number | string;
+  active_memory_count: number | string;
+}
+
+interface OntologyRelationRow {
+  id: number | string;
+  relation_type: 'SUPERSEDES' | 'CONFLICTS_WITH';
+  status: 'active' | 'superseded' | 'deleted';
+  updated_at: string;
+  created_at: string;
+  source_memory_id: number | string;
+  target_memory_id: number | string;
+  source_content: string;
+  target_content: string;
+  source_category: string;
+  target_category: string;
+  source_spec_id: string | null;
+  target_spec_id: string | null;
+  source_story_id: string | null;
+  target_story_id: string | null;
+  source_related_files: string[] | string | null;
+  target_related_files: string[] | string | null;
+}
+
+interface OntologyHotspotRow {
+  key: string;
+  memory_count: number | string;
+  conflict_count: number | string;
+  superseded_count: number | string;
+  last_touched_at: string | null;
+  sample_memory_ids: number[] | string | null;
+}
+
+interface OntologyActivityRow {
+  ts: string;
+  event_type: string;
+  payload: Record<string, unknown> | string | null;
+  spec_id: string | null;
+  story_id: string | null;
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function parseNumericArray(value: unknown): number[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0);
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? parsed.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values.filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
+}
+
+async function getAnalyticsWorkspacePath(workspaceId: string): Promise<string | null> {
+  const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+  return ws?.path ?? null;
+}
+
+async function loadOntologyHotspots(workspaceId: string, scope: OntologyHotspotScope): Promise<OntologyHotspotRow[]> {
+  if (scope === 'file') {
+    return query<OntologyHotspotRow>(
+      `WITH recent_memories AS (
+         SELECT id, related_files, updated_at
+           FROM memories
+          WHERE workspace_id = $1
+            AND deleted_at IS NULL
+          ORDER BY updated_at DESC, id DESC
+          LIMIT $2
+       ),
+       relation_counts AS (
+         SELECT rm.id AS memory_id,
+                COUNT(*) FILTER (WHERE mr.relation_type = 'CONFLICTS_WITH' AND mr.status = 'active')::int AS conflict_count,
+                COUNT(*) FILTER (WHERE mr.relation_type = 'SUPERSEDES' AND mr.status = 'active')::int AS superseded_count
+           FROM recent_memories rm
+           LEFT JOIN memory_relations mr
+             ON mr.workspace_id = $1
+            AND (mr.source_memory_id = rm.id OR mr.target_memory_id = rm.id)
+          GROUP BY rm.id
+       ),
+       file_refs AS (
+         SELECT rm.id,
+                rm.updated_at,
+                jsonb_array_elements_text(rm.related_files) AS file_path
+           FROM recent_memories rm
+          WHERE jsonb_typeof(rm.related_files) = 'array'
+       )
+       SELECT fr.file_path AS key,
+              COUNT(DISTINCT fr.id)::int AS memory_count,
+              COUNT(DISTINCT fr.id) FILTER (WHERE COALESCE(rc.conflict_count, 0) > 0)::int AS conflict_count,
+              COUNT(DISTINCT fr.id) FILTER (WHERE COALESCE(rc.superseded_count, 0) > 0)::int AS superseded_count,
+              MAX(fr.updated_at) AS last_touched_at,
+              ARRAY(
+                SELECT DISTINCT fr2.id
+                  FROM file_refs fr2
+                 WHERE fr2.file_path = fr.file_path
+                 ORDER BY fr2.id ASC
+                 LIMIT 6
+              ) AS sample_memory_ids
+         FROM file_refs fr
+         LEFT JOIN relation_counts rc ON rc.memory_id = fr.id
+        GROUP BY fr.file_path
+        ORDER BY memory_count DESC, conflict_count DESC, last_touched_at DESC, key ASC
+        LIMIT $3`,
+      [workspaceId, ONTOLOGY_HOTSPOT_MEMORY_WINDOW, ONTOLOGY_HOTSPOT_RESULT_LIMIT],
+    );
+  }
+
+  return query<OntologyHotspotRow>(
+    `WITH recent_memories AS (
+       SELECT id, source_spec_id, updated_at
+         FROM memories
+        WHERE workspace_id = $1
+          AND deleted_at IS NULL
+          AND source_spec_id IS NOT NULL
+        ORDER BY updated_at DESC, id DESC
+        LIMIT $2
+     ),
+     relation_counts AS (
+       SELECT rm.id AS memory_id,
+              COUNT(*) FILTER (WHERE mr.relation_type = 'CONFLICTS_WITH' AND mr.status = 'active')::int AS conflict_count,
+              COUNT(*) FILTER (WHERE mr.relation_type = 'SUPERSEDES' AND mr.status = 'active')::int AS superseded_count
+         FROM recent_memories rm
+         LEFT JOIN memory_relations mr
+           ON mr.workspace_id = $1
+          AND (mr.source_memory_id = rm.id OR mr.target_memory_id = rm.id)
+        GROUP BY rm.id
+     )
+     SELECT rm.source_spec_id AS key,
+            COUNT(DISTINCT rm.id)::int AS memory_count,
+            COUNT(DISTINCT rm.id) FILTER (WHERE COALESCE(rc.conflict_count, 0) > 0)::int AS conflict_count,
+            COUNT(DISTINCT rm.id) FILTER (WHERE COALESCE(rc.superseded_count, 0) > 0)::int AS superseded_count,
+            MAX(rm.updated_at) AS last_touched_at,
+            ARRAY(
+              SELECT DISTINCT rm2.id
+                FROM recent_memories rm2
+               WHERE rm2.source_spec_id = rm.source_spec_id
+               ORDER BY rm2.id ASC
+               LIMIT 6
+            ) AS sample_memory_ids
+       FROM recent_memories rm
+       LEFT JOIN relation_counts rc ON rc.memory_id = rm.id
+      GROUP BY rm.source_spec_id
+      ORDER BY memory_count DESC, conflict_count DESC, last_touched_at DESC, key ASC
+      LIMIT $3`,
+    [workspaceId, ONTOLOGY_HOTSPOT_MEMORY_WINDOW, ONTOLOGY_HOTSPOT_RESULT_LIMIT],
+  );
+}
+
+function mapOntologyHotspotItems(rows: OntologyHotspotRow[], scopeType: OntologyHotspotScope) {
+  return rows.map((row) => ({
+    scopeType,
+    key: row.key,
+    label: row.key,
+    memoryCount: Number(row.memory_count),
+    conflictCount: Number(row.conflict_count),
+    supersededCount: Number(row.superseded_count),
+    lastTouchedAt: row.last_touched_at,
+    sampleMemoryIds: parseNumericArray(row.sample_memory_ids),
+  }));
 }
 
 // ─── GET /api/analytics/usage — Aggregated token usage ───────────────────────
@@ -2421,6 +2626,314 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Analytics] FinOps historical query');
+  }
+});
+
+// ─── GET /api/analytics/ontology-health — Bounded ontology health summary ───
+
+/**
+ * @swagger
+ * /api/analytics/ontology-health:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Get bounded ontology health analytics
+ *     operationId: getOntologyHealthAnalytics
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Workspace ontology health is read-only operational context that helps local users understand conflict, supersession, and curation pressure without mutating data."
+ *     x-rorca-public-api: true
+ *     description: Returns bounded ontology health summary metrics and drill-down payloads for active conflicts, superseded memories, hotspot density, and recent curation activity. Falls back to SQL-only mode when Apache AGE is unavailable.
+ *     parameters:
+ *       - in: query
+ *         name: workspace_id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace slug/id to inspect.
+ *     responses:
+ *       200:
+ *         description: Ontology health analytics
+ *       400:
+ *         description: Missing workspace_id
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/ontology-health', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = typeof req.query.workspace_id === 'string' ? req.query.workspace_id.trim() : '';
+    if (!workspaceId) {
+      throw new ValidationError('workspace_id is required');
+    }
+
+    const wsPath = await getAnalyticsWorkspacePath(workspaceId);
+    if (!wsPath) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const ageAvailable = await checkAge();
+    const [counts, conflictRows, supersededRows, fileHotspotRows, specHotspotRows, reviewActivityRows, relationActivityRows] = await Promise.all([
+      queryOne<OntologyCountsRow>(
+        `SELECT
+           COUNT(*) FILTER (WHERE relation_type = 'CONFLICTS_WITH' AND status = 'active')::int AS active_conflict_count,
+           COUNT(DISTINCT target_memory_id) FILTER (WHERE relation_type = 'SUPERSEDES' AND status = 'active')::int AS superseded_memory_count,
+           (SELECT COUNT(*)::int FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL) AS active_memory_count
+         FROM memory_relations
+         WHERE workspace_id = $1`,
+        [workspaceId],
+      ),
+      query<OntologyRelationRow>(
+        `SELECT
+           mr.id,
+           mr.relation_type,
+           mr.status,
+           mr.updated_at,
+           mr.created_at,
+           mr.source_memory_id,
+           mr.target_memory_id,
+           sm.content AS source_content,
+           tm.content AS target_content,
+           sm.category AS source_category,
+           tm.category AS target_category,
+           sm.source_spec_id AS source_spec_id,
+           tm.source_spec_id AS target_spec_id,
+           sm.source_story_id AS source_story_id,
+           tm.source_story_id AS target_story_id,
+           sm.related_files AS source_related_files,
+           tm.related_files AS target_related_files
+         FROM memory_relations mr
+         JOIN memories sm ON sm.id = mr.source_memory_id
+         JOIN memories tm ON tm.id = mr.target_memory_id
+         WHERE mr.workspace_id = $1
+           AND mr.status = 'active'
+           AND mr.relation_type = 'CONFLICTS_WITH'
+         ORDER BY mr.updated_at DESC, mr.id DESC
+         LIMIT $2`,
+        [workspaceId, ONTOLOGY_RELATION_LIMIT],
+      ),
+      query<OntologyRelationRow>(
+        `SELECT
+           mr.id,
+           mr.relation_type,
+           mr.status,
+           mr.updated_at,
+           mr.created_at,
+           mr.source_memory_id,
+           mr.target_memory_id,
+           sm.content AS source_content,
+           tm.content AS target_content,
+           sm.category AS source_category,
+           tm.category AS target_category,
+           sm.source_spec_id AS source_spec_id,
+           tm.source_spec_id AS target_spec_id,
+           sm.source_story_id AS source_story_id,
+           tm.source_story_id AS target_story_id,
+           sm.related_files AS source_related_files,
+           tm.related_files AS target_related_files
+         FROM memory_relations mr
+         JOIN memories sm ON sm.id = mr.target_memory_id
+         JOIN memories tm ON tm.id = mr.source_memory_id
+         WHERE mr.workspace_id = $1
+           AND mr.status = 'active'
+           AND mr.relation_type = 'SUPERSEDES'
+         ORDER BY mr.updated_at DESC, mr.id DESC
+         LIMIT $2`,
+        [workspaceId, ONTOLOGY_RELATION_LIMIT],
+      ),
+      loadOntologyHotspots(workspaceId, 'file'),
+      loadOntologyHotspots(workspaceId, 'spec'),
+      query<OntologyActivityRow>(
+        `SELECT ts, event_type, payload, spec_id, story_id
+           FROM wal_events
+          WHERE workspace_id = $1
+            AND event_type = 'memory_reviewed'
+            AND ts >= NOW() - ($2 || ' days')::interval
+          ORDER BY ts DESC
+          LIMIT $3`,
+        [workspaceId, ONTOLOGY_ACTIVITY_WINDOW_DAYS, ONTOLOGY_ACTIVITY_LIMIT],
+      ),
+      query<OntologyRelationRow>(
+        `SELECT
+           mr.id,
+           mr.relation_type,
+           mr.status,
+           mr.updated_at,
+           mr.created_at,
+           mr.source_memory_id,
+           mr.target_memory_id,
+           sm.content AS source_content,
+           tm.content AS target_content,
+           sm.category AS source_category,
+           tm.category AS target_category,
+           sm.source_spec_id AS source_spec_id,
+           tm.source_spec_id AS target_spec_id,
+           sm.source_story_id AS source_story_id,
+           tm.source_story_id AS target_story_id,
+           sm.related_files AS source_related_files,
+           tm.related_files AS target_related_files
+         FROM memory_relations mr
+         JOIN memories sm ON sm.id = mr.source_memory_id
+         JOIN memories tm ON tm.id = mr.target_memory_id
+         WHERE mr.workspace_id = $1
+           AND mr.updated_at >= NOW() - ($2 || ' days')::interval
+         ORDER BY mr.updated_at DESC, mr.id DESC
+         LIMIT $3`,
+        [workspaceId, ONTOLOGY_ACTIVITY_WINDOW_DAYS, ONTOLOGY_ACTIVITY_LIMIT],
+      ),
+    ]);
+
+    const fileHotspots = mapOntologyHotspotItems(fileHotspotRows, 'file');
+    const specHotspots = mapOntologyHotspotItems(specHotspotRows, 'spec');
+    const hotspotItems = [...fileHotspots, ...specHotspots]
+      .sort((left, right) => right.memoryCount - left.memoryCount || right.conflictCount - left.conflictCount || (right.lastTouchedAt ?? '').localeCompare(left.lastTouchedAt ?? '') || left.key.localeCompare(right.key));
+    const densestHotspot = hotspotItems[0] ?? null;
+    const activeMemoryCount = Number(counts?.active_memory_count ?? 0);
+    const hotspotDensityPct = densestHotspot && activeMemoryCount > 0
+      ? Math.round((densestHotspot.memoryCount / Math.min(activeMemoryCount, ONTOLOGY_HOTSPOT_MEMORY_WINDOW)) * 1000) / 10
+      : 0;
+
+    const conflictItems = conflictRows.map((row) => ({
+      relationId: Number(row.id),
+      relationType: row.relation_type,
+      status: row.status,
+      updatedAt: row.updated_at,
+      sourceMemoryId: Number(row.source_memory_id),
+      targetMemoryId: Number(row.target_memory_id),
+      sourceCategory: row.source_category,
+      targetCategory: row.target_category,
+      sourceContent: row.source_content,
+      targetContent: row.target_content,
+      sourceSpecId: row.source_spec_id,
+      targetSpecId: row.target_spec_id,
+      sourceStoryId: row.source_story_id,
+      targetStoryId: row.target_story_id,
+      sourceFiles: parseStringArray(row.source_related_files),
+      targetFiles: parseStringArray(row.target_related_files),
+      memoryIds: uniqueNumbers([Number(row.source_memory_id), Number(row.target_memory_id)]),
+      specIds: uniqueStrings([row.source_spec_id, row.target_spec_id]),
+      filePaths: uniqueStrings([...parseStringArray(row.source_related_files), ...parseStringArray(row.target_related_files)]),
+    }));
+
+    const supersededItems = supersededRows.map((row) => ({
+      relationId: Number(row.id),
+      relationType: row.relation_type,
+      status: row.status,
+      updatedAt: row.updated_at,
+      memoryId: Number(row.target_memory_id),
+      supersededByMemoryId: Number(row.source_memory_id),
+      category: row.source_category,
+      content: row.source_content,
+      supersedingCategory: row.target_category,
+      supersedingContent: row.target_content,
+      sourceSpecId: row.source_spec_id,
+      supersedingSpecId: row.target_spec_id,
+      sourceStoryId: row.source_story_id,
+      supersedingStoryId: row.target_story_id,
+      relatedFiles: parseStringArray(row.source_related_files),
+      supersedingFiles: parseStringArray(row.target_related_files),
+      memoryIds: uniqueNumbers([Number(row.source_memory_id), Number(row.target_memory_id)]),
+      specIds: uniqueStrings([row.source_spec_id, row.target_spec_id]),
+      filePaths: uniqueStrings([...parseStringArray(row.source_related_files), ...parseStringArray(row.target_related_files)]),
+    }));
+
+    const reviewActivities = reviewActivityRows.map((row) => {
+      const payload = typeof row.payload === 'string'
+        ? JSON.parse(row.payload)
+        : (row.payload ?? {});
+      const rawRelatedFiles = Array.isArray((payload as Record<string, unknown>).relatedFiles)
+        ? (payload as Record<string, unknown>).relatedFiles as unknown[]
+        : Array.isArray(((payload as Record<string, unknown>).provenance as Record<string, unknown> | undefined)?.relatedFiles)
+          ? (((payload as Record<string, unknown>).provenance as Record<string, unknown>).relatedFiles as unknown[])
+          : [];
+      const relatedFiles = rawRelatedFiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+      const memoryId = Number((payload as Record<string, unknown>).memoryId);
+      const action = typeof (payload as Record<string, unknown>).action === 'string'
+        ? (payload as Record<string, unknown>).action
+        : 'review';
+      const sourceSpecId = typeof ((payload as Record<string, unknown>).provenance as Record<string, unknown> | undefined)?.sourceSpecId === 'string'
+        ? (((payload as Record<string, unknown>).provenance as Record<string, unknown>).sourceSpecId as string)
+        : row.spec_id;
+      return {
+        kind: 'review' as const,
+        at: row.ts,
+        action,
+        summary: `Review action: ${action}`,
+        memoryIds: Number.isInteger(memoryId) && memoryId > 0 ? [memoryId] : [],
+        specIds: uniqueStrings([sourceSpecId]),
+        filePaths: uniqueStrings(relatedFiles),
+      };
+    });
+
+    const relationActivities = relationActivityRows.map((row) => ({
+      kind: 'relation' as const,
+      at: row.updated_at,
+      action: row.status === 'deleted' ? 'remove' : row.created_at === row.updated_at ? 'create' : 'update',
+      relationType: row.relation_type,
+      summary: row.relation_type === 'CONFLICTS_WITH'
+        ? `Conflict pair updated (#${row.source_memory_id} ↔ #${row.target_memory_id})`
+        : `Supersession updated (#${row.source_memory_id} → #${row.target_memory_id})`,
+      memoryIds: uniqueNumbers([Number(row.source_memory_id), Number(row.target_memory_id)]),
+      specIds: uniqueStrings([row.source_spec_id, row.target_spec_id]),
+      filePaths: uniqueStrings([...parseStringArray(row.source_related_files), ...parseStringArray(row.target_related_files)]),
+      status: row.status,
+    }));
+
+    const recentCurationItems = [...reviewActivities, ...relationActivities]
+      .sort((left, right) => right.at.localeCompare(left.at))
+      .slice(0, ONTOLOGY_ACTIVITY_LIMIT);
+    const recentCurationCount = recentCurationItems.length;
+    const dataAvailable = activeMemoryCount > 0 || conflictItems.length > 0 || supersededItems.length > 0 || hotspotItems.length > 0 || recentCurationCount > 0;
+    const fallbackReason = ageAvailable
+      ? null
+      : 'Apache AGE extension is unavailable. Ontology health is using bounded SQL summaries and direct provenance drill-downs only.';
+
+    res.json({
+      available: true,
+      dataAvailable,
+      workspaceId,
+      ageAvailable,
+      mode: ageAvailable ? 'bounded-sql' : 'bounded-sql-fallback',
+      reason: fallbackReason,
+      emptyReason: dataAvailable ? null : 'No ontology memories or relations recorded yet for this workspace.',
+      bounds: {
+        relationLimit: ONTOLOGY_RELATION_LIMIT,
+        hotspotMemoryWindow: ONTOLOGY_HOTSPOT_MEMORY_WINDOW,
+        hotspotResultLimit: ONTOLOGY_HOTSPOT_RESULT_LIMIT,
+        activityLimit: ONTOLOGY_ACTIVITY_LIMIT,
+        activityWindowDays: ONTOLOGY_ACTIVITY_WINDOW_DAYS,
+      },
+      summary: {
+        activeConflictCount: Number(counts?.active_conflict_count ?? 0),
+        supersededMemoryCount: Number(counts?.superseded_memory_count ?? 0),
+        hotspotDensityPct,
+        hotspotCount: hotspotItems.length,
+        densestHotspot: densestHotspot,
+        recentCurationCount,
+      },
+      drilldowns: {
+        conflicts: {
+          total: Number(counts?.active_conflict_count ?? 0),
+          truncated: Number(counts?.active_conflict_count ?? 0) > conflictItems.length,
+          items: conflictItems,
+        },
+        superseded: {
+          total: Number(counts?.superseded_memory_count ?? 0),
+          truncated: Number(counts?.superseded_memory_count ?? 0) > supersededItems.length,
+          items: supersededItems,
+        },
+        hotspots: {
+          total: hotspotItems.length,
+          truncated: fileHotspots.length >= ONTOLOGY_HOTSPOT_RESULT_LIMIT || specHotspots.length >= ONTOLOGY_HOTSPOT_RESULT_LIMIT,
+          items: hotspotItems,
+          files: fileHotspots,
+          specs: specHotspots,
+        },
+        recentCuration: {
+          total: recentCurationCount,
+          truncated: reviewActivities.length >= ONTOLOGY_ACTIVITY_LIMIT || relationActivities.length >= ONTOLOGY_ACTIVITY_LIMIT,
+          items: recentCurationItems,
+        },
+      },
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Analytics] Ontology health query');
   }
 });
 

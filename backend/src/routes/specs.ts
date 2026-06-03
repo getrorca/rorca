@@ -1543,7 +1543,7 @@ async function buildForgeContextBundle(input: {
   const synthesized = synthResult.text;
 
   let semanticGraphSection = '';
-  let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+  let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string; ontologyExplainability?: { status: string; activeCount: number; suppressedCount: number; conflictCount: number; hiddenExplanationCount: number; examples: string[]; message: string } } | undefined;
   try {
     const retrieved = await retrieveContext(input.workspaceId, input.brief, {
       maxTokens: 16000,
@@ -1558,6 +1558,7 @@ async function buildForgeContextBundle(input: {
       graphHits: retrieved.meta.graphHits,
       latencyMs: retrieved.meta.latencyMs,
       tier: retrieved.meta.tier,
+      ontologyExplainability: retrieved.meta.ontologyExplainability,
     };
   } catch (err) {
     logger.warn({ err, workspaceId: input.workspaceId }, '[Specs] buildForgeContextBundle retrieveContext failed — using plaintext context only');
@@ -1645,6 +1646,7 @@ async function buildForgeContextBundle(input: {
         graphHits: retrievalMeta.graphHits,
         tier: retrievalMeta.tier,
         latencyMs: retrievalMeta.latencyMs,
+        ontologyExplainability: retrievalMeta.ontologyExplainability,
       },
     } : {}),
   };
@@ -2330,7 +2332,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 6a. Semantic retrieval via memory-router (CAG/RAG + knowledge graph)
     let semanticGraphSection = '';
-    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string; ontologyExplainability?: { status: string; activeCount: number; suppressedCount: number; conflictCount: number; hiddenExplanationCount: number; examples: string[]; message: string } } | undefined;
     try {
       const retrieved = await retrieveContext(workspaceId, brief, {
         maxTokens: 16000,
@@ -2346,6 +2348,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         graphHits: retrieved.meta.graphHits,
         latencyMs: retrieved.meta.latencyMs,
         tier: retrieved.meta.tier,
+        ontologyExplainability: retrieved.meta.ontologyExplainability,
       };
     } catch (err) {
       // Graph/embeddings unavailable — fall through to plaintext context
@@ -6122,7 +6125,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     // Semantic retrieval via memory-router (CAG/RAG + knowledge graph)
     let semanticGraphSection = '';
-    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string; ontologyExplainability?: { status: string; activeCount: number; suppressedCount: number; conflictCount: number; hiddenExplanationCount: number; examples: string[]; message: string } } | undefined;
     try {
       const retrieved = await retrieveContext(workspaceId, brief || specContent.title || specId, {
         maxTokens: 16000,
@@ -6138,6 +6141,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
         graphHits: retrieved.meta.graphHits,
         latencyMs: retrieved.meta.latencyMs,
         tier: retrieved.meta.tier,
+        ontologyExplainability: retrieved.meta.ontologyExplainability,
       };
     } catch (err) {
       logger.warn({ err, workspaceId }, '[Specs] add-stories: retrieveContext failed — using plaintext context only');
@@ -11318,7 +11322,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     // Semantic retrieval via memory-router (CAG/RAG + knowledge graph)
     // Graph context about past skill effectiveness (Skill-USED_IN->Story edges) helps matching
     let skillGraphSection = '';
-    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string; ontologyExplainability?: { status: string; activeCount: number; suppressedCount: number; conflictCount: number; hiddenExplanationCount: number; examples: string[]; message: string } } | undefined;
     try {
       const storyBrief = stories.map(s => `${s.title}: ${s.description ?? ''}`).join('\n');
       const retrieved = await retrieveContext(workspaceId, storyBrief, {
@@ -11335,6 +11339,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
         graphHits: retrieved.meta.graphHits,
         latencyMs: retrieved.meta.latencyMs,
         tier: retrieved.meta.tier,
+        ontologyExplainability: retrieved.meta.ontologyExplainability,
       };
     } catch (err) {
       logger.warn({ err, workspaceId }, '[Specs] match-skills: retrieveContext failed — using catalog context only');

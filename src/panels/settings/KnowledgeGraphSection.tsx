@@ -41,21 +41,43 @@ interface ScoreBreakdown {
   duplicationPenalty: number;
 }
 
+interface OntologyExplainabilityItem {
+  tone: 'active' | 'suppressed' | 'conflict';
+  label: string;
+  relationType: 'SUPERSEDES' | 'CONFLICTS_WITH';
+  relationKey: string;
+  otherMemoryId: string;
+  otherCanonicalKey: string;
+  counterpartRetrieved: boolean;
+}
+
 interface CandidateExplainability {
   scoringVersion: string;
   retrievalMode: string;
   scoreBreakdown: ScoreBreakdown;
   provenanceEdges: string[];
+  provenanceEdgeOverflow: number;
   provenanceConfidence: string | null;
   provenanceSourceType: string | null;
   provenanceSource: string | null;
   graphSignalCount: number;
   rankReasons: string[];
+  rankReasonOverflow: number;
+  ontologyExplainability: {
+    status: 'available' | 'partial' | 'unavailable';
+    message: string;
+    explanations: OntologyExplainabilityItem[];
+    totalExplanationCount: number;
+    hiddenExplanationCount: number;
+  };
 }
 
 interface RetrievalDebugCandidate {
   key: string;
   finalScore: number;
+  decision?: 'keep' | 'drop' | 'needs-more' | 'conflict';
+  supersededBy?: string;
+  conflictsWith?: string[];
   explainability?: CandidateExplainability;
 }
 
@@ -80,6 +102,13 @@ function formatTimestamp(iso: string | null): string {
 
 function formatScore(score: number): string {
   return score >= 0 ? `+${score.toFixed(3)}` : score.toFixed(3);
+}
+
+function decisionBadgeClass(decision?: RetrievalDebugCandidate['decision']): string {
+  if (decision === 'drop') return 'border-amber-500/20 bg-amber-500/10 text-amber-400';
+  if (decision === 'conflict') return 'border-red-500/20 bg-red-500/10 text-red-300';
+  if (decision === 'needs-more') return 'border-blue-500/20 bg-blue-500/10 text-blue-300';
+  return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400';
 }
 
 /* ─── Component ───────────────────────────────────────────────────────────── */
@@ -349,14 +378,21 @@ export function KnowledgeGraphSection() {
                               <div key={candidate.key} className="rounded-lg border border-border bg-bg p-3">
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                   <p className="text-xs font-mono text-primary break-all">{candidate.key}</p>
-                                  <span className="text-xs font-medium text-[var(--text)]">score {candidate.finalScore.toFixed(3)}</span>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    {candidate.decision && (
+                                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${decisionBadgeClass(candidate.decision)}`}>
+                                        {candidate.decision}
+                                      </span>
+                                    )}
+                                    <span className="text-xs font-medium text-[var(--text)]">score {candidate.finalScore.toFixed(3)}</span>
+                                  </div>
                                 </div>
 
                                 {!candidate.explainability ? (
                                   <p className="mt-2 text-xs text-muted">No debug data for this candidate.</p>
                                 ) : (
                                   <div className="mt-3 space-y-3">
-                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                                    <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
                                       {Object.entries(candidate.explainability.scoreBreakdown).map(([label, value]) => (
                                         <div key={label} className="rounded-md border border-border bg-surface px-2 py-1.5">
                                           <p className="text-[10px] uppercase tracking-wide text-muted">{label}</p>
@@ -364,11 +400,50 @@ export function KnowledgeGraphSection() {
                                         </div>
                                       ))}
                                     </div>
-                                    <div className="space-y-1 text-xs text-muted">
-                                      <p>Edges: {candidate.explainability.provenanceEdges.length > 0 ? candidate.explainability.provenanceEdges.join(', ') : 'No graph edges recorded'}</p>
+                                    <div className="space-y-2 text-xs text-muted">
+                                      <p>
+                                        Edges: {candidate.explainability.provenanceEdges.length > 0 ? candidate.explainability.provenanceEdges.join(', ') : 'No graph edges recorded'}
+                                        {candidate.explainability.provenanceEdgeOverflow > 0 ? ` (+${candidate.explainability.provenanceEdgeOverflow} more)` : ''}
+                                      </p>
                                       <p>Provenance: {candidate.explainability.provenanceSourceType ?? 'unknown'} / {candidate.explainability.provenanceConfidence ?? 'unknown'}</p>
                                       {candidate.explainability.rankReasons.length > 0 && (
-                                        <p>Why it ranked: {candidate.explainability.rankReasons.join(' • ')}</p>
+                                        <p>
+                                          Why it ranked: {candidate.explainability.rankReasons.join(' • ')}
+                                          {candidate.explainability.rankReasonOverflow > 0 ? ` • +${candidate.explainability.rankReasonOverflow} more` : ''}
+                                        </p>
+                                      )}
+                                    </div>
+
+                                    <div className="space-y-2 rounded-md border border-border bg-surface px-3 py-2">
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">Ontology</span>
+                                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${candidate.explainability.ontologyExplainability.status === 'available' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : candidate.explainability.ontologyExplainability.status === 'partial' ? 'border-amber-500/20 bg-amber-500/10 text-amber-400' : 'border-border bg-bg text-muted'}`}>
+                                          {candidate.explainability.ontologyExplainability.status}
+                                        </span>
+                                      </div>
+                                      <p className="text-xs text-muted">{candidate.explainability.ontologyExplainability.message}</p>
+                                      {candidate.explainability.ontologyExplainability.explanations.length > 0 ? (
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {candidate.explainability.ontologyExplainability.explanations.map((explanation) => (
+                                            <span
+                                              key={explanation.relationKey}
+                                              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${explanation.tone === 'active' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : explanation.tone === 'suppressed' ? 'border-amber-500/20 bg-amber-500/10 text-amber-400' : 'border-red-500/20 bg-red-500/10 text-red-300'}`}
+                                            >
+                                              {explanation.label}
+                                            </span>
+                                          ))}
+                                          {candidate.explainability.ontologyExplainability.hiddenExplanationCount > 0 && (
+                                            <span className="rounded-full bg-bg px-2 py-0.5 text-[10px] text-muted">
+                                              +{candidate.explainability.ontologyExplainability.hiddenExplanationCount} more
+                                            </span>
+                                          )}
+                                        </div>
+                                      ) : null}
+                                      {candidate.supersededBy && (
+                                        <p className="text-xs text-amber-300">Suppressed by {candidate.supersededBy}</p>
+                                      )}
+                                      {(candidate.conflictsWith?.length ?? 0) > 0 && (
+                                        <p className="text-xs text-red-300">Conflicts with {candidate.conflictsWith?.slice(0, 2).join(', ')}{(candidate.conflictsWith?.length ?? 0) > 2 ? ` +${(candidate.conflictsWith?.length ?? 0) - 2} more` : ''}</p>
                                       )}
                                     </div>
                                   </div>

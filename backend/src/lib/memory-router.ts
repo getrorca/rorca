@@ -41,8 +41,10 @@ import { getGraphContext } from './graph-context';
 import {
   buildGraphRagExplainability,
   rankRetrievalCandidates,
+  summarizeGraphRagOntologySurface,
   type GraphProjectionSignal,
   type GraphRagCandidateExplainability,
+  type GraphRagOntologySurfaceSummary,
   type GraphRagScoreContract,
   type RetrievalCandidateInput,
 } from './retrieval-pipeline';
@@ -51,6 +53,7 @@ import { getHistoricalUsefulnessMap, recordRetrievalSelection } from './retrieva
 import { checkAge } from './age-guard';
 import { resolveGraphScoringRollout } from './graph-scoring-rollout';
 import { loadRorcaConfig, defaultRorcaConfig, type RetrievalGuardrailsConfig } from './rorca-config';
+import { lookupMemoryOntologyAdjustments, type MemoryOntologyLookupResult } from './memory-ontology';
 import { query as dbQuery } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -132,6 +135,7 @@ export interface RetrievedContext {
     graphRerankChanged?: boolean;
     graphRerankedCandidateKeys?: string[];
     telemetryId?: string;
+    ontologyExplainability?: GraphRagOntologySurfaceSummary;
   };
 }
 
@@ -861,6 +865,34 @@ export async function retrieveContext(
     }
   }
 
+  // ── Step 4: bounded ontology precedence lookup (post-retrieval) ─────────
+
+  const ontologyCandidateIds = retrievalCandidates
+    .filter((candidate) => candidate.graphNodeType === 'memory' && candidate.canonicalKey && !candidate.id.startsWith('cache:'))
+    .map(candidate => candidate.id);
+
+  let ontologyLookup: MemoryOntologyLookupResult = {
+    applied: false,
+    ageUnavailable: false,
+    candidateIds: [],
+    adjustments: {},
+  };
+
+  try {
+    ontologyLookup = await lookupMemoryOntologyAdjustments(wsId, ontologyCandidateIds);
+  } catch (error) {
+    logger.warn({ error, workspaceId: wsId }, '[memory-router] Ontology precedence lookup failed — using semantic retrieval fallback');
+  }
+
+  const ontologyCandidateIdSet = new Set(ontologyLookup.candidateIds);
+  for (const candidate of retrievalCandidates) {
+    if (!candidate.canonicalKey || candidate.graphNodeType !== 'memory') {
+      continue;
+    }
+    candidate.ontologyLookupApplied = ontologyLookup.applied && ontologyCandidateIdSet.has(candidate.id);
+    candidate.ontologyRelations = ontologyLookup.adjustments[candidate.id]?.relations ?? [];
+  }
+
   // ── Phase 2/3: provenance-aware ranking, validator pass, telemetry ──────
 
   const historicalUsefulness = await getHistoricalUsefulnessMap(
@@ -899,6 +931,9 @@ export async function retrieveContext(
     explainability: options?.explain ? buildGraphRagExplainability(candidate) : undefined,
   }));
   memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
+  const ontologyExplainability = summarizeGraphRagOntologySurface(
+    ranked.candidates.map(candidate => buildGraphRagExplainability(candidate)),
+  );
 
   const skillScoreMap = new Map(ranked.matchedSkills.map(skill => [skill.name.toLowerCase(), skill.score]));
   skills.sort((a, b) => (skillScoreMap.get(b.name.toLowerCase()) || 0) - (skillScoreMap.get(a.name.toLowerCase()) || 0));
@@ -1016,6 +1051,7 @@ export async function retrieveContext(
       graphRerankChanged: ranked.graphRerankChanged,
       graphRerankedCandidateKeys: ranked.graphRerankedCandidateKeys,
       telemetryId: telemetry.id,
+      ontologyExplainability,
     },
   };
 }
