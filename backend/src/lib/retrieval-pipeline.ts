@@ -13,6 +13,7 @@ import {
   normalizeGraphFilePath,
 } from './knowledge-graph';
 import { logger } from './logger';
+import type { MemoryOntologyRelation, MemoryOntologyRelationType } from './memory-ontology';
 import type { RetrievalGuardrailsConfig } from './rorca-config';
 
 export interface RetrievalSkill {
@@ -59,6 +60,8 @@ export interface RetrievalCandidateInput {
   graphActive?: boolean | null;
   graphUpdatedAt?: string | null;
   graphSignals?: GraphProjectionSignal[];
+  ontologyRelations?: MemoryOntologyRelation[];
+  ontologyLookupApplied?: boolean;
   canonicalKey?: string;
 }
 
@@ -156,6 +159,29 @@ export interface GraphRagRerankMetadata {
   rerankedBy: 'graph' | 'semantic';
 }
 
+export interface GraphRagOntologyReason {
+  kind: 'suppression' | 'supersession' | 'conflict';
+  code:
+    | 'graph_superseded_memory_suppressed'
+    | 'graph_superseded_by_active_memory'
+    | 'graph_supersedes_older_memory'
+    | 'graph_conflict_requires_arbiter';
+  relationType: MemoryOntologyRelationType;
+  direction: MemoryOntologyRelation['direction'];
+  relationKey: string;
+  otherMemoryId: string;
+  otherCanonicalKey: string;
+  counterpartRetrieved: boolean;
+}
+
+export interface GraphRagOntologyMetadata {
+  applied: boolean;
+  stale: boolean;
+  suppressed: boolean;
+  conflict: boolean;
+  reasons: GraphRagOntologyReason[];
+}
+
 export interface GraphRagScoreContract {
   schemaVersion: GraphRagScoreSchemaVersion;
   score: number;
@@ -163,6 +189,7 @@ export interface GraphRagScoreContract {
   deterministic: true;
   tieBreak: GraphRagTieBreak;
   breakdown: GraphRagScoreBreakdown;
+  ontology: GraphRagOntologyMetadata;
   validation: GraphRagCandidateValidation;
   rerank: GraphRagRerankMetadata;
 }
@@ -185,17 +212,52 @@ export interface GraphRagExplainabilityScoreBreakdown {
   duplicationPenalty: number;
 }
 
+export type GraphRagOntologyExplainabilityStatus = 'available' | 'partial' | 'unavailable';
+
+export interface GraphRagOntologyExplanationItem {
+  tone: 'active' | 'suppressed' | 'conflict';
+  label: string;
+  relationType: MemoryOntologyRelationType;
+  relationKey: string;
+  otherMemoryId: string;
+  otherCanonicalKey: string;
+  counterpartRetrieved: boolean;
+}
+
+export interface GraphRagOntologyExplainability {
+  status: GraphRagOntologyExplainabilityStatus;
+  message: string;
+  explanations: GraphRagOntologyExplanationItem[];
+  totalExplanationCount: number;
+  hiddenExplanationCount: number;
+}
+
+export interface GraphRagOntologySurfaceSummary {
+  status: GraphRagOntologyExplainabilityStatus;
+  activeCount: number;
+  suppressedCount: number;
+  conflictCount: number;
+  hiddenExplanationCount: number;
+  examples: string[];
+  message: string;
+}
+
 export interface GraphRagCandidateExplainability {
   scoringVersion: GraphRagScoreSchemaVersion;
   retrievalMode: GraphRagRetrievalMode;
   scoreBreakdown: GraphRagExplainabilityScoreBreakdown;
   provenanceEdges: string[];
+  provenanceEdgeOverflow: number;
   provenanceConfidence: string | null;
   provenanceSourceType: string | null;
   provenanceSource: string | null;
   graphNodeType: GraphRagProximityComponent['nodeType'];
   graphSignalCount: number;
   rankReasons: string[];
+  rankReasonOverflow: number;
+  ontology: GraphRagOntologyMetadata;
+  ontologyReasonOverflow: number;
+  ontologyExplainability: GraphRagOntologyExplainability;
   preRerankPosition: number | null;
   finalPosition: number | null;
   rerankedBy: 'graph' | 'semantic';
@@ -314,6 +376,12 @@ export const GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION: GraphRagScoreContractDocume
   ],
 };
 
+const MAX_EXPLAINABILITY_PROVENANCE_EDGES = 4;
+const MAX_EXPLAINABILITY_RANK_REASONS = 4;
+const MAX_EXPLAINABILITY_ONTOLOGY_REASONS = 4;
+const MAX_EXPLAINABILITY_ONTOLOGY_EXPLANATIONS = 3;
+const MAX_ONTOLOGY_SUMMARY_EXAMPLES = 3;
+
 const STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'then', 'have', 'been',
   'will', 'your', 'about', 'there', 'their', 'would', 'could', 'should', 'after', 'only',
@@ -365,6 +433,212 @@ export function inferGraphRagRetrievalMode(scoring: Pick<GraphRagScoreContract, 
   return 'semantic-only';
 }
 
+function compareOntologyReason(a: GraphRagOntologyReason, b: GraphRagOntologyReason): number {
+  if (a.kind !== b.kind) return a.kind.localeCompare(b.kind);
+  if (a.relationType !== b.relationType) return a.relationType.localeCompare(b.relationType);
+  if (a.otherCanonicalKey !== b.otherCanonicalKey) return a.otherCanonicalKey.localeCompare(b.otherCanonicalKey);
+  return a.relationKey.localeCompare(b.relationKey);
+}
+
+function buildOntologyMetadata(candidate: Pick<RetrievalCandidateInput, 'ontologyRelations' | 'ontologyLookupApplied'>): GraphRagOntologyMetadata {
+  const relations = [...(candidate.ontologyRelations ?? [])].sort((a, b) => {
+    if (a.relationType !== b.relationType) return a.relationType.localeCompare(b.relationType);
+    if (a.direction !== b.direction) return a.direction.localeCompare(b.direction);
+    if (a.otherCanonicalKey !== b.otherCanonicalKey) return a.otherCanonicalKey.localeCompare(b.otherCanonicalKey);
+    return a.relationKey.localeCompare(b.relationKey);
+  });
+
+  const reasons: GraphRagOntologyReason[] = [];
+  let stale = false;
+  let suppressed = false;
+  let conflict = false;
+
+  for (const relation of relations) {
+    if (relation.relationType === 'SUPERSEDES' && relation.direction === 'incoming') {
+      stale = true;
+      suppressed = true;
+      reasons.push({
+        kind: 'supersession',
+        code: 'graph_superseded_by_active_memory',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+      reasons.push({
+        kind: 'suppression',
+        code: 'graph_superseded_memory_suppressed',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+      continue;
+    }
+
+    if (relation.relationType === 'SUPERSEDES' && relation.direction === 'outgoing') {
+      reasons.push({
+        kind: 'supersession',
+        code: 'graph_supersedes_older_memory',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+      continue;
+    }
+
+    if (relation.relationType === 'CONFLICTS_WITH') {
+      conflict = true;
+      reasons.push({
+        kind: 'conflict',
+        code: 'graph_conflict_requires_arbiter',
+        relationType: relation.relationType,
+        direction: relation.direction,
+        relationKey: relation.relationKey,
+        otherMemoryId: relation.otherMemoryId,
+        otherCanonicalKey: relation.otherCanonicalKey,
+        counterpartRetrieved: relation.counterpartRetrieved,
+      });
+    }
+  }
+
+  return {
+    applied: Boolean(candidate.ontologyLookupApplied || relations.length > 0),
+    stale,
+    suppressed,
+    conflict,
+    reasons: reasons.sort(compareOntologyReason),
+  };
+}
+
+function buildOntologyExplanationLabel(reason: GraphRagOntologyReason): string {
+  switch (reason.code) {
+    case 'graph_superseded_memory_suppressed':
+    case 'graph_superseded_by_active_memory':
+      return `Superseded by memory #${reason.otherMemoryId}`;
+    case 'graph_supersedes_older_memory':
+      return `Active rule supersedes memory #${reason.otherMemoryId}`;
+    case 'graph_conflict_requires_arbiter':
+      return `Conflicts with memory #${reason.otherMemoryId}`;
+    default:
+      return `Related to memory #${reason.otherMemoryId}`;
+  }
+}
+
+function buildOntologyExplainability(
+  scoring: GraphRagScoreContract,
+  retrievalMode: GraphRagRetrievalMode,
+): GraphRagOntologyExplainability {
+  const boundedReasons = scoring.ontology.reasons.slice(0, MAX_EXPLAINABILITY_ONTOLOGY_EXPLANATIONS);
+  const explanations = boundedReasons.map<GraphRagOntologyExplanationItem>((reason) => ({
+    tone: reason.kind === 'conflict'
+      ? 'conflict'
+      : reason.kind === 'suppression'
+        ? 'suppressed'
+        : 'active',
+    label: buildOntologyExplanationLabel(reason),
+    relationType: reason.relationType,
+    relationKey: reason.relationKey,
+    otherMemoryId: reason.otherMemoryId,
+    otherCanonicalKey: reason.otherCanonicalKey,
+    counterpartRetrieved: reason.counterpartRetrieved,
+  }));
+
+  const hiddenExplanationCount = Math.max(0, scoring.ontology.reasons.length - explanations.length);
+  const status: GraphRagOntologyExplainabilityStatus = scoring.ontology.applied
+    ? 'available'
+    : retrievalMode === 'semantic-only-lite'
+      ? 'unavailable'
+      : 'partial';
+
+  const message = status === 'available'
+    ? explanations.length > 0
+      ? 'Ontology explanations were derived from explicit memory relation edges.'
+      : 'No supersession or conflict edges were recorded for this memory.'
+    : status === 'unavailable'
+      ? 'Ontology explanations unavailable because graph retrieval is running in lite mode.'
+      : 'Ontology explanations were not available for this candidate.';
+
+  return {
+    status,
+    message,
+    explanations,
+    totalExplanationCount: scoring.ontology.reasons.length,
+    hiddenExplanationCount,
+  };
+}
+
+export function summarizeGraphRagOntologySurface(
+  candidates: Array<Pick<GraphRagCandidateExplainability, 'ontologyExplainability'>>,
+): GraphRagOntologySurfaceSummary {
+  if (candidates.length === 0) {
+    return {
+      status: 'partial',
+      activeCount: 0,
+      suppressedCount: 0,
+      conflictCount: 0,
+      hiddenExplanationCount: 0,
+      examples: [],
+      message: 'No ranked memory candidates were available for ontology explainability.',
+    };
+  }
+
+  let activeCount = 0;
+  let suppressedCount = 0;
+  let conflictCount = 0;
+  let hiddenExplanationCount = 0;
+  const examples: string[] = [];
+  let sawAvailable = false;
+  let sawUnavailable = false;
+  let sawPartial = false;
+
+  for (const candidate of candidates) {
+    const ontology = candidate.ontologyExplainability;
+    if (ontology.status === 'available') sawAvailable = true;
+    if (ontology.status === 'unavailable') sawUnavailable = true;
+    if (ontology.status === 'partial') sawPartial = true;
+    hiddenExplanationCount += ontology.hiddenExplanationCount;
+
+    for (const explanation of ontology.explanations) {
+      if (explanation.tone === 'active') activeCount += 1;
+      if (explanation.tone === 'suppressed') suppressedCount += 1;
+      if (explanation.tone === 'conflict') conflictCount += 1;
+      if (examples.length < MAX_ONTOLOGY_SUMMARY_EXAMPLES && !examples.includes(explanation.label)) {
+        examples.push(explanation.label);
+      }
+    }
+  }
+
+  const status: GraphRagOntologyExplainabilityStatus = sawAvailable
+    ? (sawUnavailable || sawPartial ? 'partial' : 'available')
+    : sawUnavailable
+      ? 'unavailable'
+      : 'partial';
+
+  const message = status === 'available'
+    ? 'Ontology explanations are available for the ranked memory set.'
+    : status === 'unavailable'
+      ? 'Ontology explanations are unavailable because graph retrieval is in lite mode.'
+      : 'Ontology explanations are only partially available for the ranked memory set.';
+
+  return {
+    status,
+    activeCount,
+    suppressedCount,
+    conflictCount,
+    hiddenExplanationCount,
+    examples,
+    message,
+  };
+}
+
 export function buildGraphRagExplainability(
   candidate: Pick<RetrievalCandidateInput, 'graphSignals' | 'graphRelationship'> & {
     scoring: GraphRagScoreContract;
@@ -372,6 +646,7 @@ export function buildGraphRagExplainability(
   },
 ): GraphRagCandidateExplainability {
   const { scoring } = candidate;
+  const retrievalMode = inferGraphRagRetrievalMode(scoring);
   const semanticMultiplier = 1 - scoring.rerank.appliedGraphScoreWeight;
   const scoreBreakdown: GraphRagExplainabilityScoreBreakdown = {
     total: roundScore(scoring.score),
@@ -417,17 +692,29 @@ export function buildGraphRagExplainability(
     duplicationPenalty: roundScore(-1 * scoring.breakdown.duplicationPenalty.score * semanticMultiplier),
   };
 
+  const provenanceEdges = summarizeProvenanceEdges(candidate);
+  const boundedRankReasons = (candidate.reasons ?? []).slice(0, MAX_EXPLAINABILITY_RANK_REASONS);
+  const boundedOntologyReasons = scoring.ontology.reasons.slice(0, MAX_EXPLAINABILITY_ONTOLOGY_REASONS);
+
   return {
     scoringVersion: scoring.schemaVersion,
-    retrievalMode: inferGraphRagRetrievalMode(scoring),
+    retrievalMode,
     scoreBreakdown,
-    provenanceEdges: summarizeProvenanceEdges(candidate),
+    provenanceEdges: provenanceEdges.slice(0, MAX_EXPLAINABILITY_PROVENANCE_EDGES),
+    provenanceEdgeOverflow: Math.max(0, provenanceEdges.length - MAX_EXPLAINABILITY_PROVENANCE_EDGES),
     provenanceConfidence: scoring.breakdown.provenanceConfidence.confidence,
     provenanceSourceType: scoring.breakdown.provenanceConfidence.sourceType,
     provenanceSource: scoring.breakdown.provenanceConfidence.source,
     graphNodeType: scoring.breakdown.directGraphProximity.nodeType ?? 'unknown',
     graphSignalCount: scoring.breakdown.directGraphProximity.signalCount ?? candidate.graphSignals?.length ?? 0,
-    rankReasons: candidate.reasons ?? [],
+    rankReasons: boundedRankReasons,
+    rankReasonOverflow: Math.max(0, (candidate.reasons ?? []).length - boundedRankReasons.length),
+    ontology: {
+      ...scoring.ontology,
+      reasons: boundedOntologyReasons,
+    },
+    ontologyReasonOverflow: Math.max(0, scoring.ontology.reasons.length - boundedOntologyReasons.length),
+    ontologyExplainability: buildOntologyExplainability(scoring, retrievalMode),
     preRerankPosition: scoring.rerank.preRerankPosition,
     finalPosition: scoring.rerank.finalPosition,
     rerankedBy: scoring.rerank.rerankedBy,
@@ -515,6 +802,21 @@ function tokenize(text: string): string[] {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
+}
+
+function appendUnique(values: string[], value: string): void {
+  if (!value || values.includes(value)) return;
+  values.push(value);
+}
+
+function appendContradiction(
+  contradictions: Array<[string, string]>,
+  left: string,
+  right: string,
+): void {
+  if (!contradictions.some(([a, b]) => (a === left && b === right) || (a === right && b === left))) {
+    contradictions.push([left, right]);
+  }
 }
 
 function tokenOverlap(a: string[], b: string[]): number {
@@ -1470,6 +1772,7 @@ export function rankRetrievalCandidates(input: {
         bounded: true,
         deterministic: true,
         tieBreak: buildTieBreak(candidate, canonicalKey, input.workspaceId),
+        ontology: buildOntologyMetadata(candidate),
         validation,
         breakdown: {
           ...positiveBreakdown,
@@ -1490,6 +1793,59 @@ export function rankRetrievalCandidates(input: {
       },
     };
   });
+
+  const candidatesByKey = new Map(enriched.map(candidate => [candidate.key, candidate]));
+  for (const candidate of enriched) {
+    const ontology = candidate.scoring.ontology;
+    if (!ontology.applied || ontology.reasons.length === 0) {
+      continue;
+    }
+
+    for (const reason of ontology.reasons) {
+      if (reason.kind === 'conflict') {
+        appendUnique(candidate.conflictsWith, reason.otherCanonicalKey);
+        candidate.decision = candidate.supersededBy ? 'drop' : 'conflict';
+        candidate.scoring.breakdown.duplicationPenalty = {
+          score: Math.max(candidate.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.contradiction),
+          comparedTo: reason.otherCanonicalKey,
+          similarity: candidate.scoring.breakdown.duplicationPenalty.similarity,
+        };
+        appendUnique(candidate.reasons, `Conflict flagged by ontology relation to memory ${reason.otherMemoryId}`);
+        if (reason.counterpartRetrieved) {
+          appendContradiction(contradictions, candidate.key, reason.otherCanonicalKey);
+          const counterpart = candidatesByKey.get(reason.otherCanonicalKey);
+          if (counterpart) {
+            appendUnique(counterpart.conflictsWith, candidate.key);
+            if (!counterpart.supersededBy) {
+              counterpart.decision = 'conflict';
+            }
+          }
+        }
+        continue;
+      }
+
+      if (reason.kind === 'suppression') {
+        candidate.supersededBy = reason.otherCanonicalKey;
+        candidate.decision = 'drop';
+        candidate.scoring.breakdown.duplicationPenalty = {
+          score: Math.max(candidate.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.superseded),
+          comparedTo: reason.otherCanonicalKey,
+          similarity: 1,
+        };
+        appendUnique(candidate.reasons, `Suppressed by ontology supersession from memory ${reason.otherMemoryId}`);
+        continue;
+      }
+
+      if (reason.kind === 'supersession' && reason.code === 'graph_superseded_by_active_memory') {
+        appendUnique(candidate.reasons, `Marked stale by ontology supersession from memory ${reason.otherMemoryId}`);
+        continue;
+      }
+
+      if (reason.kind === 'supersession' && reason.code === 'graph_supersedes_older_memory') {
+        appendUnique(candidate.reasons, `Ontology precedence confirms this memory supersedes memory ${reason.otherMemoryId}`);
+      }
+    }
+  }
 
   const bySubject = new Map<string, RankedRetrievalCandidate[]>();
   for (const candidate of enriched) {
@@ -1519,26 +1875,28 @@ export function rankRetrievalCandidates(input: {
         && ((newestNegative && olderPositive) || (olderNegative && newestPositive));
 
       if (conflicting) {
-        newest.conflictsWith.push(older.key);
-        older.conflictsWith.push(newest.key);
-        newest.decision = 'conflict';
+        appendUnique(newest.conflictsWith, older.key);
+        appendUnique(older.conflictsWith, newest.key);
+        if (!newest.supersededBy) {
+          newest.decision = 'conflict';
+        }
         older.decision = 'conflict';
         older.scoring.breakdown.duplicationPenalty = {
-          score: DUPLICATION_PENALTIES.contradiction,
+          score: Math.max(older.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.contradiction),
           comparedTo: newest.key,
           similarity,
         };
-        older.reasons.push(`Conflicts with newer memory ${newest.id}`);
-        contradictions.push([newest.key, older.key]);
-      } else if (similarity >= 0.55) {
+        appendUnique(older.reasons, `Conflicts with newer memory ${newest.id}`);
+        appendContradiction(contradictions, newest.key, older.key);
+      } else if (similarity >= 0.55 && !older.supersededBy) {
         older.supersededBy = newest.key;
         older.decision = 'drop';
         older.scoring.breakdown.duplicationPenalty = {
-          score: DUPLICATION_PENALTIES.superseded,
+          score: Math.max(older.scoring.breakdown.duplicationPenalty.score, DUPLICATION_PENALTIES.superseded),
           comparedTo: newest.key,
           similarity,
         };
-        older.reasons.push(`Superseded by newer memory ${newest.id}`);
+        appendUnique(older.reasons, `Superseded by newer memory ${newest.id}`);
       }
     }
   }

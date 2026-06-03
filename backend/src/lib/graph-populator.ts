@@ -35,6 +35,7 @@ import {
 } from './knowledge-graph';
 import { queryOne } from '../db/index';
 import { logger } from './logger';
+import { reconcileMemoryRelationProjection } from './memory-relations';
 
 /**
  * Start the graph populator subscriber.
@@ -295,6 +296,8 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
     await addMemoryAboutFile(memoryId, filePath, workspaceId, metadata);
   }
 
+  await reconcileMemoryRelationProjection(workspaceId);
+
   logger.info(
     { memoryId, sourceStoryId, sourceSpecId, categories, relatedFiles, provenance: persisted ? 'db' : 'wal' },
     '[graph-populator] Memory graph edges created',
@@ -386,6 +389,7 @@ async function handleWorkspaceCleanup(event: WalEvent): Promise<void> {
   if (!workspaceId) return;
 
   await reconcileWorkspaceProjection(workspaceId);
+  await reconcileMemoryRelationProjection(workspaceId);
 }
 
 async function handleRunFinished(event: WalEvent): Promise<void> {

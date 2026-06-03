@@ -62,14 +62,20 @@ function attachTelemetryExplainability(
   const candidates = event.candidates
     .filter(candidate => candidateMatchesSpec(candidate, workspaceId, specId))
     .map((candidate) => {
-      const explainability = candidate.explainability
-        ?? (candidate.scoring
+      const explainability = (
+        candidate.explainability
+        && 'ontologyExplainability' in candidate.explainability
+        && 'provenanceEdgeOverflow' in candidate.explainability
+        && 'rankReasonOverflow' in candidate.explainability
+      )
+        ? candidate.explainability
+        : (candidate.scoring
           ? buildGraphRagExplainability({
               scoring: candidate.scoring,
               reasons: candidate.reasons,
               graphRelationship: candidate.scoring.breakdown.directGraphProximity.relationship,
             })
-          : undefined);
+          : candidate.explainability);
 
       if (
         explainability

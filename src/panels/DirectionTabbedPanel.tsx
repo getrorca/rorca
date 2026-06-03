@@ -11,6 +11,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import DirectionStackPanel from './DirectionStackPanel';
 import MemoryPanel from './MemoryPanel';
+import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY } from '../lib/memoryAnalyticsDrilldown';
 
 // OSS edition: Stack + Memory only
 
@@ -51,6 +52,13 @@ export default function DirectionTabbedPanel() {
   const [healthLevel, setHealthLevel] = useState<HealthLevel>('amber');
   const [healthScore, setHealthScore] = useState<number | null>(null);
   const [memoryCounts, setMemoryCounts] = useState<{ total: number; pinned: number } | null>(null);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    if (sessionStorage.getItem(MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY)) {
+      setActiveTab('memory');
+    }
+  }, [workspaceId]);
 
   // Fetch workspace health score for the indicator
   useEffect(() => {
