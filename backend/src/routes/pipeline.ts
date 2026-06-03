@@ -180,11 +180,25 @@ function autoSelectOrchestration(userStories: WaveUserStory[]): {
   };
 }
 
+/** Extract user-visible text from pino JSON log lines before semantic parsing. */
+function unwrapSemanticLogLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{')) return line;
+  try {
+    const parsed = JSON.parse(trimmed) as { msg?: unknown; message?: unknown };
+    const message = typeof parsed.msg === 'string' ? parsed.msg : parsed.message;
+    return typeof message === 'string' ? message : line;
+  } catch {
+    return line;
+  }
+}
+
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
   const lines = text.split('\n');
   for (const line of lines) {
-    const steps = parseLine(line, agent);
+    const semanticLine = unwrapSemanticLogLine(line);
+    const steps = parseLine(semanticLine, agent);
     for (const step of steps) {
       res.write(`event: semantic_step\ndata: ${JSON.stringify(step)}\n\n`);
     }
@@ -4370,18 +4384,24 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // Resolve agent type for semantic parsing (defaults to 'claude')
   const runRow = await queryOne('SELECT agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
-  const terminalMode = normalizeTerminalMode(runRow?.terminal_mode);
-  const isPty = terminalMode === 'pty';
+  const requestedTerminalMode = normalizeTerminalMode(runRow?.terminal_mode);
+  const ptyStatusAtOpen = requestedTerminalMode === 'pty' ? await getRunPtySessionStatus(runId) : null;
+  // A run may be marked PTY before/without a PTY session if the child spawn fails
+  // early. In that case the engine still mirrors logs to run_output_chunks. Late
+  // joiners must see those chunks instead of a blank native terminal.
+  const usePtyCapture = requestedTerminalMode === 'pty' && ptyStatusAtOpen !== null;
+  const terminalMode = usePtyCapture ? 'pty' : 'ansi-html';
+  const isPty = usePtyCapture;
 
   // Emit run metadata so frontend knows which renderer to use
-  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null, terminalMode, terminal_mode: terminalMode, isPty })}\n\n`);
+  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null, terminalMode, terminal_mode: terminalMode, requestedTerminalMode: requestedTerminalMode, isPty })}\n\n`);
 
   // ── Replay all existing chunks (late-join support) ────────────────────────
   interface ChunkRow { sequence: number; chunk: Buffer }
   const terminalStatuses = ['done', 'failed', 'cancelled'];
   let lastSequence = 0;
 
-  if (terminalMode === 'pty') {
+  if (usePtyCapture) {
     const existingChunks = await listRunPtyChunks(runId);
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
@@ -4414,7 +4434,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // Checks every 200 ms; uses lastSequence to fetch only new rows efficiently.
   const pollInterval = setInterval(async () => {
     try {
-      if (terminalMode === 'pty') {
+      if (usePtyCapture) {
         const newChunks = await listRunPtyChunks(runId, lastSequence);
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
@@ -4437,9 +4457,9 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
       const [statusRow, ptyStatus] = await Promise.all([
         queryOne<{ status: string }>('SELECT status FROM pipeline_runs WHERE id = $1', [runId]),
-        terminalMode === 'pty' ? getRunPtySessionStatus(runId) : Promise.resolve(null),
+        usePtyCapture ? getRunPtySessionStatus(runId) : Promise.resolve(null),
       ]);
-      const ptyTerminal = terminalMode === 'pty' && ptyStatus !== null && ptyStatus !== 'active';
+      const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
       if (!statusRow || terminalStatuses.includes(statusRow.status) || ptyTerminal) {
         clearInterval(pollInterval);
         clearInterval(hb);
