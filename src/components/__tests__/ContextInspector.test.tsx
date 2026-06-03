@@ -202,8 +202,11 @@ describe('ContextInspector — lazy raw fetch', () => {
     render(<ContextInspector runId={42} runSettled />);
     push(makeTraceWalEvent(42, 0, { phase: 'prompt', label: 'prompt:US-001' }));
 
-    // No raw fetch should have happened before the user opens a detail view.
-    expect(mockApiFetch).not.toHaveBeenCalled();
+    // Metadata backfill may run on mount, but raw payload fetch must wait until
+    // the user opens a detail view.
+    expect(mockApiFetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('/api/pipeline/runs/42/context-trace/'),
+    );
 
     fireEvent.click(screen.getByTestId('inspector-event-r42:0'));
 

@@ -29,7 +29,7 @@ import { apiFetch } from '../lib/apiFetch';
 // ─── Browser-safe mirror of the backend contract (context-trace.ts) ──────────
 // Kept local to avoid importing Node-only modules (fs/zlib) into the bundle.
 
-export type ContextTracePhase = 'context' | 'skill' | 'mcp' | 'memory' | 'prompt';
+export type ContextTracePhase = 'context' | 'skill' | 'mcp' | 'memory' | 'graph' | 'prompt';
 export type ContextTraceStatus = 'start' | 'ok' | 'partial' | 'error';
 
 export interface ContextTraceMetrics {
@@ -50,6 +50,10 @@ export interface ContextTraceEvent {
   ts: string;
   metrics?: ContextTraceMetrics;
   label?: string;
+  /** True for retroactively reconstructed metadata without a raw artifact. */
+  synthetic?: boolean;
+  /** Human-readable reconstruction details for synthetic events. */
+  details?: string[];
 }
 
 export interface ContextTraceRawRecord {
@@ -99,6 +103,19 @@ function isContextTraceEvent(p: unknown): p is ContextTraceEvent {
   );
 }
 
+function mergeTraceEvents(prev: ContextTraceEvent[], incoming: ContextTraceEvent[], maxEvents: number): ContextTraceEvent[] {
+  if (incoming.length === 0) return prev;
+  const byRawRef = new Map(prev.map((event) => [event.rawRef, event]));
+  for (const event of incoming) {
+    if (!byRawRef.has(event.rawRef)) byRawRef.set(event.rawRef, event);
+  }
+  const next = Array.from(byRawRef.values()).sort((a, b) => {
+    if (a.seq !== b.seq) return a.seq - b.seq;
+    return a.rawRef.localeCompare(b.rawRef);
+  });
+  return next.length > maxEvents ? next.slice(next.length - maxEvents) : next;
+}
+
 export function useContextTrace(
   runId: string | null,
   opts?: { maxEvents?: number },
@@ -138,19 +155,23 @@ export function useContextTrace(
 
     const trace = parsed as ContextTraceEvent;
 
-    setEvents((prev) => {
-      // De-duplicate by rawRef (monotonic + unique per run). A duplicate
-      // delivery carries an identical payload, so we keep the existing one.
-      if (prev.some((e) => e.rawRef === trace.rawRef)) return prev;
-
-      const next = [...prev, trace];
-      // Bound memory: drop oldest beyond the cap.
-      if (next.length > maxEvents) {
-        return next.slice(next.length - maxEvents);
-      }
-      return next;
-    });
+    setEvents((prev) => mergeTraceEvents(prev, [trace], maxEvents));
   });
+
+  // Historical backfill: the SSE stream only delivers live events. On mount,
+  // load persisted context_trace metadata, or reconstructed metadata for older
+  // runs that have story_started/retrieval/token signals but no trace artifact.
+  useEffect(() => {
+    if (!runId) return;
+    let cancelled = false;
+    Promise.resolve(apiFetch<{ events?: ContextTraceEvent[] }>(`/api/pipeline/runs/${runId}/context-inspector-events`))
+      .then((response) => {
+        if (cancelled || !response || !Array.isArray(response.events)) return;
+        setEvents((prev) => mergeTraceEvents(prev, response.events!, maxEvents));
+      })
+      .catch(() => { /* non-fatal: live SSE may still deliver traces */ });
+    return () => { cancelled = true; };
+  }, [runId, maxEvents]);
 
   const getRawState = useCallback((rawRef: string): RawState => {
     return rawCacheRef.current.get(rawRef) ?? { loading: false, record: null, error: null };
