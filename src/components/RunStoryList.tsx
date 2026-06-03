@@ -271,10 +271,12 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   const [failureReason, setFailureReason] = useState<string | null>(null);
   const [retryLoading, setRetryLoading] = useState(false);
 
-  // CTM-004: Per-story context accordion (skills / files / tokens)
+  // CTM-004: Per-story context accordion (files / tokens first; skills are routing metadata only)
   const [contextExpanded, setContextExpanded] = useState(false);
   const hasContextTokens = !!context && (context.inputTokens > 0 || context.outputTokens > 0);
-  const hasContext = !!context && (context.skills.length > 0 || context.contextFiles.length > 0 || hasContextTokens);
+  const hasContextFiles = !!context && context.contextFiles.length > 0;
+  const hasRoutingSkills = !!context && context.skills.length > 0;
+  const hasContext = !!context && (hasContextFiles || hasContextTokens);
 
   const handleToggleContext = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -453,59 +455,78 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
 
       {/* CTM-004: Per-story context accordion panel */}
       {hasContext && contextExpanded && context && (
-        <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2 bg-bg/40 border-b border-border/50`}>
-          <div className="flex flex-col gap-2.5">
-            {context.skills.length > 0 && (
+        <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2.5 bg-bg/40 border-b border-border/50`}>
+          <div className="rounded-lg border border-border/70 bg-panel/70 overflow-hidden">
+            <div className="px-2.5 py-2 border-b border-border/60 flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-accent flex items-center gap-1">
+                  <Files size={10} className="text-blue-400" /> Context used
+                </p>
+                <p className="mt-0.5 text-[10px] text-muted leading-4">
+                  Files and token budget that were available to the story prompt. Skill matches are shown separately as routing metadata.
+                </p>
+              </div>
+              {hasContextTokens && (
+                <div className="shrink-0 grid grid-cols-2 gap-1 text-right">
+                  <div className="rounded bg-bg/70 px-1.5 py-1">
+                    <div className="text-[9px] uppercase tracking-wider text-muted">In</div>
+                    <div className="text-[10px] font-mono text-[var(--text)]">{context.inputTokens.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded bg-bg/70 px-1.5 py-1">
+                    <div className="text-[9px] uppercase tracking-wider text-muted">Out</div>
+                    <div className="text-[10px] font-mono text-[var(--text)]">{context.outputTokens.toLocaleString()}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-2.5 py-2 space-y-2.5">
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
-                  <Sparkles size={10} className="text-purple-400" /> Skills
+                  <Files size={10} className="text-blue-400" /> Context files ({context.contextFiles.length})
                 </p>
-                <div className="flex flex-wrap gap-1">
-                  {context.skills.map(sk => (
-                    <span
-                      key={sk.name}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400 text-[10px] font-medium"
-                      title={sk.reason ?? undefined}
-                    >
-                      {sk.name}
-                      {sk.relevance != null && (
-                        <span className={`text-[9px] font-semibold ${sk.relevance >= 7 ? 'text-purple-300' : 'text-purple-500/70'}`}>
-                          {sk.relevance}/10
-                        </span>
-                      )}
-                    </span>
-                  ))}
-                </div>
+                {context.contextFiles.length > 0 ? (
+                  <div className="grid gap-1 max-w-full">
+                    {context.contextFiles.slice(0, 20).map(f => (
+                      <code key={f} className="block min-w-0 truncate px-1.5 py-0.5 rounded bg-bg text-[10px] font-mono text-accent/85 border border-border/60" title={f}>
+                        {f}
+                      </code>
+                    ))}
+                    {context.contextFiles.length > 20 && (
+                      <span className="text-[10px] text-muted">+{context.contextFiles.length - 20} more files</span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded border border-dashed border-border/70 bg-bg/40 px-2 py-1.5 text-[10px] leading-4 text-muted">
+                    No file-level context was recorded for this story. Token usage is available, but the run did not persist a per-story file list.
+                  </div>
+                )}
               </div>
-            )}
-            {context.contextFiles.length > 0 && (
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
-                  <Files size={10} className="text-blue-400" /> Context Files ({context.contextFiles.length})
-                </p>
-                <div className="flex flex-wrap gap-1">
-                  {context.contextFiles.slice(0, 20).map(f => (
-                    <code key={f} className="px-1.5 py-0.5 rounded bg-panel text-[10px] font-mono text-accent/80 border border-border/60 break-all">
-                      {f}
-                    </code>
-                  ))}
-                  {context.contextFiles.length > 20 && (
-                    <span className="text-[10px] text-muted">+{context.contextFiles.length - 20} more</span>
-                  )}
+
+              {hasRoutingSkills && (
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                    <Sparkles size={10} className="text-purple-400" /> Routing skills ({context.skills.length})
+                  </p>
+                  <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto pr-1">
+                    {context.skills.map(sk => (
+                      <span
+                        key={sk.name}
+                        className="inline-flex min-w-0 max-w-full items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-300 text-[10px] font-medium"
+                        title={sk.reason ?? undefined}
+                      >
+                        <span className="truncate">{sk.name}</span>
+                        {sk.relevance != null && (
+                          <span className={`shrink-0 text-[9px] font-semibold ${sk.relevance >= 7 ? 'text-purple-200' : 'text-purple-500/70'}`}>
+                            {sk.relevance}/10
+                          </span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
-            {hasContextTokens && (
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
-                  <Cpu size={10} className="text-emerald-400" /> Tokens
-                </p>
-                <div className="flex items-center gap-4 text-[11px]">
-                  <span className="text-muted">In: <span className="text-[var(--text)] font-mono">{context.inputTokens.toLocaleString()}</span></span>
-                  <span className="text-muted">Out: <span className="text-[var(--text)] font-mono">{context.outputTokens.toLocaleString()}</span></span>
-                </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1241,10 +1262,12 @@ export default function RunStoryList({
           className="shrink-0 px-3 py-1.5 border-b border-border bg-panel/60 flex items-center gap-3 text-[11px] text-muted"
           aria-label="Run context usage summary"
         >
-          {contextSummary.skillCount > 0 && (
+          {contextSummary.avgTokens > 0 && (
             <span className="flex items-center gap-1">
-              <Sparkles size={11} className="text-purple-400 shrink-0" />
-              {contextSummary.skillCount} {contextSummary.skillCount === 1 ? 'skill' : 'skills'}
+              <Cpu size={11} className="text-emerald-400 shrink-0" />
+              {contextSummary.avgTokens >= 1000
+                ? `~${(contextSummary.avgTokens / 1000).toFixed(1)}K`
+                : `~${Math.round(contextSummary.avgTokens)}`} tokens/story
             </span>
           )}
           {contextSummary.fileCount > 0 && (
@@ -1253,12 +1276,10 @@ export default function RunStoryList({
               {contextSummary.fileCount} {contextSummary.fileCount === 1 ? 'file' : 'files'}
             </span>
           )}
-          {contextSummary.avgTokens > 0 && (
+          {contextSummary.skillCount > 0 && (
             <span className="flex items-center gap-1">
-              <Cpu size={11} className="text-emerald-400 shrink-0" />
-              {contextSummary.avgTokens >= 1000
-                ? `~${(contextSummary.avgTokens / 1000).toFixed(1)}K`
-                : `~${Math.round(contextSummary.avgTokens)}`} tokens/story
+              <Sparkles size={11} className="text-purple-400 shrink-0" />
+              {contextSummary.skillCount} routing {contextSummary.skillCount === 1 ? 'skill' : 'skills'}
             </span>
           )}
         </div>
@@ -1286,14 +1307,15 @@ export default function RunStoryList({
 
             return (
               <div
-                key={vItem.index}
+                key={vItem.key}
                 data-index={vItem.index}
+                ref={virtualizer.measureElement}
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
                   width: '100%',
-                  height: ROW_HEIGHT,
+                  minHeight: ROW_HEIGHT,
                   transform: `translateY(${vItem.start}px)`,
                 }}
                 role="option"
