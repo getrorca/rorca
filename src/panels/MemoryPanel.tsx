@@ -48,6 +48,70 @@ interface MemoryRelationsResponse {
   total: number;
 }
 
+type MemoryReviewAction = 'archive' | 'delete' | 'keep' | 'revisit' | 'restore';
+type MemoryReviewStatus = 'candidate' | 'kept' | 'revisit' | 'archived' | 'deleted';
+
+interface MemoryReviewReason {
+  code: string;
+  label: string;
+}
+
+interface MemoryReviewItem extends MemoryItem {
+  source: string | null;
+  updatedAt: string;
+  deletedAt: string | null;
+  staleScore: number;
+  reasons: MemoryReviewReason[];
+  status: MemoryReviewStatus;
+  lastAction: {
+    action: MemoryReviewAction;
+    at: string;
+    previousStatus: string | null;
+    nextStatus: MemoryReviewStatus | null;
+  } | null;
+}
+
+interface MemoryHotspotItem {
+  scopeType: 'file' | 'spec';
+  key: string;
+  label: string;
+  memoryCount: number;
+  conflictCount: number;
+  supersededCount: number;
+  lastTouchedAt: string | null;
+  sampleMemoryIds: number[];
+}
+
+interface MemoryReviewResponse {
+  available: boolean;
+  staleCandidates: {
+    items: MemoryReviewItem[];
+    total: number;
+    truncated: boolean;
+    heuristics: {
+      scanLimit: number;
+      resultLimit: number;
+      scoreThreshold: number;
+      staleAfterDays: number;
+      lowConfidenceAfterDays: number;
+    };
+    ageAvailable: boolean;
+    mode: string;
+    reason?: string | null;
+  };
+  hotspots: {
+    files: MemoryHotspotItem[];
+    specs: MemoryHotspotItem[];
+    total: number;
+    truncated: boolean;
+    ageAvailable: boolean;
+    mode: string;
+    reason?: string | null;
+    windowSize: number;
+    resultLimit: number;
+  };
+}
+
 interface MemoryOntologyExplanation {
   tone: 'active' | 'suppressed' | 'conflict';
   label: string;
@@ -937,6 +1001,289 @@ function OntologyCurationSection({
   );
 }
 
+function ReviewWorkflowSection({
+  data,
+  loading,
+  error,
+  busyKey,
+  onAction,
+  onFocusMemory,
+}: {
+  data: MemoryReviewResponse | null;
+  loading: boolean;
+  error: string | null;
+  busyKey: string | null;
+  onAction: (memoryId: number, action: MemoryReviewAction) => void;
+  onFocusMemory: (memoryId: string) => void;
+}) {
+  if (loading) {
+    return (
+      <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Stale memory review workflow">
+        <div className="flex min-h-[180px] flex-col items-center justify-center text-center">
+          <div className="mb-3 h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          <p className="text-sm font-medium text-[var(--text)]">Loading stale-memory review queue</p>
+          <p className="mt-1 max-w-md text-xs leading-relaxed text-muted">Preparing bounded stale-memory heuristics and hotspot summaries for operator review.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Stale memory review workflow">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-[var(--text)]">Stale memory review</h2>
+              <p className="mt-0.5 text-[11px] text-muted">Review candidates, hotspots, and recoverable memory decisions.</p>
+            </div>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">Unavailable</span>
+          </div>
+          <p className="rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">{error}</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (!data) return null;
+
+  const queueItems = data.staleCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted');
+  const recoverableItems = data.staleCandidates.items.filter((item) => item.status === 'archived' || item.status === 'deleted');
+  const boundedCopy = `Review queue is intentionally bounded to ${data.staleCandidates.heuristics.scanLimit} low-recency memories and ${data.hotspots.windowSize} recent active memories.`;
+  const statusClass: Record<MemoryReviewStatus, string> = {
+    candidate: 'border-amber-500/20 bg-amber-500/10 text-amber-400',
+    kept: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400',
+    revisit: 'border-cyan-500/20 bg-cyan-500/10 text-cyan-400',
+    archived: 'border-violet-500/20 bg-violet-500/10 text-violet-400',
+    deleted: 'border-red-500/20 bg-red-500/10 text-red-300',
+  };
+  const statusLabel: Record<MemoryReviewStatus, string> = {
+    candidate: 'Candidate',
+    kept: 'Kept',
+    revisit: 'Revisit',
+    archived: 'Archived',
+    deleted: 'Deleted',
+  };
+  const filesHot = data.hotspots.files;
+  const specsHot = data.hotspots.specs;
+
+  return (
+    <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Stale memory review workflow">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--text)]">Stale memory review</h2>
+          <p className="mt-0.5 max-w-2xl text-[11px] leading-relaxed text-muted">Archive or soft-delete stale memories, keep or revisit live ones, restore recoverable decisions, and inspect direct file/spec hotspots before cleanup.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+          <span className="rounded-full border border-border bg-bg px-2 py-0.5">{queueItems.length} in queue</span>
+          <span className="rounded-full border border-border bg-bg px-2 py-0.5">{recoverableItems.length} recoverable</span>
+          <span className="rounded-full border border-border bg-bg px-2 py-0.5">{filesHot.length + specsHot.length} hotspots</span>
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        <div className="rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">{boundedCopy}</div>
+        {data.staleCandidates.reason && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-[var(--text)]">
+            {data.staleCandidates.reason}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
+        <div className="space-y-3">
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Review queue</p>
+              <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{data.staleCandidates.total} items</span>
+            </div>
+            {queueItems.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border bg-bg px-3 py-3 text-[11px] text-muted">No stale review candidates surfaced inside the current bounded heuristic window.</p>
+            ) : (
+              <ul className="space-y-3" role="list" aria-label="Stale memory review queue">
+                {queueItems.map((item) => {
+                  const lastActionAt = item.lastAction?.at ? new Date(item.lastAction.at).toLocaleString() : null;
+                  return (
+                    <li key={item.id} className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusClass[item.status]}`}>{statusLabel[item.status]}</span>
+                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${CATEGORY_COLORS[item.category] ?? 'bg-gray-500/10 text-gray-500'}`}>{item.category}</span>
+                            <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">score {item.staleScore}</span>
+                            {item.sourceType && <span className={`rounded px-1.5 py-0.5 text-[10px] ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>{SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}</span>}
+                          </div>
+                          <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/85">{item.content}</p>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {item.sourceStoryId && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-500">Story {item.sourceStoryId}</span>}
+                            {item.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {item.sourceSpecId}</span>}
+                            {item.sourceRunId && <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">Run #{item.sourceRunId}</span>}
+                            {(item.relatedFiles ?? []).slice(0, 2).map((file) => (
+                              <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
+                            ))}
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {item.reasons.map((reason) => (
+                              <span key={reason.code} className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{reason.label}</span>
+                            ))}
+                          </div>
+                          {lastActionAt && (
+                            <p className="mt-2 text-[10px] text-muted">Last review action: {item.lastAction?.action} · {lastActionAt}</p>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 flex-col gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onFocusMemory(String(item.id))}
+                            className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface-200"
+                          >
+                            Focus
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onAction(item.id, 'keep')}
+                            disabled={busyKey === `review:${item.id}`}
+                            className="rounded-md bg-emerald-500 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-emerald-500/90 disabled:opacity-60"
+                          >
+                            Keep
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onAction(item.id, 'revisit')}
+                            disabled={busyKey === `review:${item.id}`}
+                            className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] font-medium text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:opacity-60"
+                          >
+                            Revisit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onAction(item.id, 'archive')}
+                            disabled={busyKey === `review:${item.id}`}
+                            className="rounded-md border border-violet-500/30 bg-violet-500/10 px-2 py-1 text-[11px] font-medium text-violet-300 transition-colors hover:bg-violet-500/20 disabled:opacity-60"
+                          >
+                            Archive
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onAction(item.id, 'delete')}
+                            disabled={busyKey === `review:${item.id}`}
+                            className="rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-60"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Recoverable decisions</p>
+              <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{recoverableItems.length}</span>
+            </div>
+            {recoverableItems.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border bg-bg px-3 py-3 text-[11px] text-muted">Nothing is archived or soft-deleted from this bounded review window right now.</p>
+            ) : (
+              <ul className="space-y-2" role="list" aria-label="Recoverable memory decisions">
+                {recoverableItems.map((item) => (
+                  <li key={item.id} className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusClass[item.status]}`}>{statusLabel[item.status]}</span>
+                          <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">Memory #{item.id}</span>
+                          {item.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {item.sourceSpecId}</span>}
+                        </div>
+                        <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/85">{truncateText(item.content, 180)}</p>
+                        {item.lastAction?.at && <p className="mt-2 text-[10px] text-muted">Last action: {item.lastAction.action} · {new Date(item.lastAction.at).toLocaleString()}</p>}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onAction(item.id, 'restore')}
+                        disabled={busyKey === `review:${item.id}`}
+                        className="inline-flex items-center gap-1 rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-60"
+                      >
+                        <Undo2 size={11} />
+                        Restore
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="rounded-xl border border-border bg-bg p-3 text-[11px] text-muted">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="font-medium text-[var(--text)]">Hotspot files</p>
+                <p className="mt-0.5 text-[10px] uppercase tracking-wide text-muted">Bounded direct-provenance activity</p>
+              </div>
+              <span className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{filesHot.length}</span>
+            </div>
+            {filesHot.length === 0 ? (
+              <p className="mt-3 text-xs text-muted">No hotspot files surfaced within the current bounded workspace window.</p>
+            ) : (
+              <ul className="mt-3 space-y-2" role="list" aria-label="Hotspot files">
+                {filesHot.map((item) => (
+                  <li key={item.key} className="rounded-lg border border-border bg-surface-100/60 px-3 py-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-mono text-[10px] text-[var(--text)]">{item.label}</p>
+                        <p className="mt-1 text-[10px] text-muted">{item.memoryCount} memories · {item.conflictCount} conflicts · {item.supersededCount} superseded links</p>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {item.sampleMemoryIds.map((memoryId) => (
+                          <button
+                            key={memoryId}
+                            type="button"
+                            onClick={() => onFocusMemory(String(memoryId))}
+                            className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-200"
+                          >
+                            #{memoryId}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-border bg-bg p-3 text-[11px] text-muted">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="font-medium text-[var(--text)]">Hotspot specs</p>
+                <p className="mt-0.5 text-[10px] uppercase tracking-wide text-muted">Specs with repeated memory pressure</p>
+              </div>
+              <span className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{specsHot.length}</span>
+            </div>
+            {specsHot.length === 0 ? (
+              <p className="mt-3 text-xs text-muted">No hotspot specs surfaced within the current bounded workspace window.</p>
+            ) : (
+              <ul className="mt-3 space-y-2" role="list" aria-label="Hotspot specs">
+                {specsHot.map((item) => (
+                  <li key={item.key} className="rounded-lg border border-border bg-surface-100/60 px-3 py-2">
+                    <p className="text-[11px] font-medium text-[var(--text)]">{item.label}</p>
+                    <p className="mt-1 text-[10px] text-muted">{item.memoryCount} memories · {item.conflictCount} conflicts · {item.supersededCount} superseded links</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ─── Entry Row ──────────────────────────────────────────────────────────────
 
 function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onToggleSelect, onFocus, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
@@ -1729,6 +2076,10 @@ export default function MemoryPanel() {
   const [targetMemoryId, setTargetMemoryId] = useState('');
   const [relationMutationKey, setRelationMutationKey] = useState<string | null>(null);
   const [relationNotice, setRelationNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
+  const [reviewData, setReviewData] = useState<MemoryReviewResponse | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewBusyKey, setReviewBusyKey] = useState<string | null>(null);
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -1765,6 +2116,10 @@ export default function MemoryPanel() {
     setTargetMemoryId('');
     setRelationMutationKey(null);
     setRelationNotice(null);
+    setReviewData(null);
+    setReviewLoading(false);
+    setReviewError(null);
+    setReviewBusyKey(null);
   }, [workspaceId]);
 
   const fetchItems = useCallback(async () => {
@@ -1794,6 +2149,26 @@ export default function MemoryPanel() {
   useEffect(() => {
     void fetchItems();
   }, [fetchItems]);
+
+  const fetchReviewData = useCallback(async () => {
+    if (!workspaceId) return;
+    setReviewLoading(true);
+    setReviewError(null);
+
+    try {
+      const data = await apiFetch<MemoryReviewResponse>(`/api/memory/review?workspaceId=${encodeURIComponent(workspaceId)}`);
+      setReviewData(data);
+    } catch (error) {
+      setReviewData(null);
+      setReviewError(error instanceof Error ? error.message : 'Memory review queue unavailable right now.');
+    } finally {
+      setReviewLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void fetchReviewData();
+  }, [fetchReviewData]);
 
   const fetchRelations = useCallback(async () => {
     if (!workspaceId) return;
@@ -1894,6 +2269,24 @@ export default function MemoryPanel() {
     await fetchOverviewGraph();
     await fetchNeighborhoodGraph();
   }, [fetchNeighborhoodGraph, fetchOverviewGraph, fetchRelations, shouldShowGraph]);
+
+  const handleReviewAction = async (memoryId: number, action: MemoryReviewAction) => {
+    if (!workspaceId) return;
+
+    try {
+      setReviewBusyKey(`review:${memoryId}`);
+      await apiFetch(`/api/memory/review/${memoryId}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, action }),
+      });
+      await Promise.all([fetchItems(), fetchReviewData(), refreshOntologyState()]);
+    } catch (error) {
+      setReviewError(error instanceof Error ? error.message : 'Unable to apply the memory review action right now.');
+    } finally {
+      setReviewBusyKey(null);
+    }
+  };
 
   const handleCreateRelation = async (relationType: MemoryRelationListItem['relationType']) => {
     if (!workspaceId || !selectedMemoryId) return;
@@ -2248,6 +2641,15 @@ export default function MemoryPanel() {
               );
             })}
           </div>
+
+          <ReviewWorkflowSection
+            data={reviewData}
+            loading={reviewLoading}
+            error={reviewError}
+            busyKey={reviewBusyKey}
+            onAction={handleReviewAction}
+            onFocusMemory={setSelectedMemoryId}
+          />
 
           <ViewModeTabs value={viewMode} onChange={setViewMode} />
 

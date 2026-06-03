@@ -38,6 +38,7 @@ import { embedText, prepareText } from '../lib/embedding-pipeline';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { resolveStoryMemoryProvenance } from '../lib/memory-provenance';
 import { getMemoryGraphNeighborhood, getMemoryGraphOverview } from '../lib/memory-graph';
+import { checkAge } from '../lib/age-guard';
 import {
   createMemoryRelation,
   listMemoryRelations,
@@ -194,6 +195,481 @@ async function emitMemoryCreatedWalEvent(params: {
     specId: params.specId,
     relatedFiles: params.relatedFiles,
   });
+}
+
+const STALE_REVIEW_SCAN_LIMIT = 120;
+const STALE_REVIEW_RESULT_LIMIT = 12;
+const STALE_REVIEW_SCORE_THRESHOLD = 30;
+const STALE_REVIEW_DAYS = 45;
+const STALE_LOW_CONFIDENCE_DAYS = 21;
+const HOTSPOT_MEMORY_WINDOW = 400;
+const HOTSPOT_RESULT_LIMIT = 6;
+const REVIEW_ACTION_HISTORY_LIMIT = 96;
+
+type MemoryReviewAction = 'archive' | 'delete' | 'keep' | 'revisit' | 'restore';
+type MemoryReviewCandidateStatus = 'candidate' | 'kept' | 'revisit' | 'archived' | 'deleted';
+
+interface MemoryReviewReason {
+  code: string;
+  label: string;
+}
+
+interface MemoryReviewMemoryRow {
+  id: number;
+  workspace_id: string;
+  category: string;
+  content: string;
+  source_story_id: string | null;
+  source_spec_id: string | null;
+  source_run_id: number | string | null;
+  confidence: string;
+  related_files: string[] | string | null;
+  pinned: boolean;
+  source_type: string | null;
+  source: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+interface MemoryReviewCandidateRow extends MemoryReviewMemoryRow {
+  incoming_supersedes: number | string | null;
+  outgoing_supersedes: number | string | null;
+  active_conflicts: number | string | null;
+}
+
+interface MemoryReviewActionRecord {
+  memoryId: number;
+  action: MemoryReviewAction;
+  at: string;
+  previousStatus: string | null;
+  nextStatus: MemoryReviewCandidateStatus | null;
+}
+
+interface MemoryHotspotRow {
+  key: string;
+  memory_count: number | string;
+  conflict_count: number | string;
+  superseded_count: number | string;
+  last_touched_at: string | null;
+  sample_memory_ids: number[] | string | null;
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function parseNumericArray(value: unknown): number[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0);
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? parsed.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values.filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function daysSince(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return null;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 86_400_000));
+}
+
+function parseReviewAction(value: unknown): MemoryReviewAction | null {
+  if (value === 'archive' || value === 'delete' || value === 'keep' || value === 'revisit' || value === 'restore') {
+    return value;
+  }
+  return null;
+}
+
+function statusForReviewAction(action: MemoryReviewAction, deletedAt: string | null): MemoryReviewCandidateStatus {
+  if (action === 'archive') return 'archived';
+  if (action === 'delete') return 'deleted';
+  if (action === 'keep') return 'kept';
+  if (action === 'revisit') return 'revisit';
+  return deletedAt ? 'archived' : 'candidate';
+}
+
+function buildStaleReviewReasons(row: MemoryReviewCandidateRow): { staleScore: number; reasons: MemoryReviewReason[] } {
+  const reasons: MemoryReviewReason[] = [];
+  let staleScore = 0;
+  const ageDays = daysSince(row.updated_at) ?? 0;
+  const incomingSupersedes = Number(row.incoming_supersedes ?? 0);
+  const activeConflicts = Number(row.active_conflicts ?? 0);
+  const relatedFiles = parseStringArray(row.related_files);
+
+  if (incomingSupersedes > 0) {
+    staleScore += 60;
+    reasons.push({ code: 'superseded_by_newer_memory', label: 'Superseded by a newer canonical memory.' });
+  }
+
+  if (ageDays >= STALE_REVIEW_DAYS) {
+    staleScore += 25;
+    reasons.push({ code: 'untouched_for_45d', label: `Not updated for ${ageDays} days.` });
+  }
+
+  if (row.confidence === 'low' && ageDays >= STALE_LOW_CONFIDENCE_DAYS) {
+    staleScore += 15;
+    reasons.push({ code: 'low_confidence_aging', label: 'Low-confidence memory has gone stale without a refresh.' });
+  }
+
+  if (activeConflicts > 0) {
+    staleScore += 10;
+    reasons.push({ code: 'conflict_needs_review', label: 'Conflicts with another active memory and needs operator review.' });
+  }
+
+  if (relatedFiles.length === 0) {
+    staleScore += 8;
+    reasons.push({ code: 'missing_file_provenance', label: 'No related file provenance is attached.' });
+  }
+
+  if (!row.source_spec_id && !row.source_story_id) {
+    staleScore += 8;
+    reasons.push({ code: 'weak_story_spec_provenance', label: 'Missing source story/spec provenance for future audits.' });
+  }
+
+  return { staleScore, reasons };
+}
+
+function mapMemoryReviewItem(
+  row: MemoryReviewMemoryRow,
+  review: { staleScore: number; reasons: MemoryReviewReason[] } | null,
+  latestAction?: MemoryReviewActionRecord,
+) {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    category: row.category,
+    content: row.content,
+    sourceStoryId: row.source_story_id,
+    sourceSpecId: row.source_spec_id,
+    sourceRunId: toRunId(row.source_run_id),
+    confidence: row.confidence,
+    relatedFiles: parseStringArray(row.related_files),
+    pinned: Boolean(row.pinned),
+    sourceType: row.source_type,
+    source: row.source,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+    staleScore: review?.staleScore ?? 0,
+    reasons: review?.reasons ?? [],
+    status: latestAction ? statusForReviewAction(latestAction.action, row.deleted_at) : 'candidate',
+    lastAction: latestAction
+      ? {
+        action: latestAction.action,
+        at: latestAction.at,
+        previousStatus: latestAction.previousStatus,
+        nextStatus: latestAction.nextStatus,
+      }
+      : null,
+  };
+}
+
+async function loadMemoryReviewActionHistory(workspaceId: string): Promise<MemoryReviewActionRecord[]> {
+  const rows = await dbQuery<{ ts: string; payload: Record<string, unknown> | string | null }>(
+    `SELECT ts, payload
+       FROM wal_events
+      WHERE workspace_id = $1
+        AND event_type = 'memory_reviewed'
+      ORDER BY ts DESC
+      LIMIT $2`,
+    [workspaceId, REVIEW_ACTION_HISTORY_LIMIT],
+  );
+
+  const seen = new Set<number>();
+  const actions: MemoryReviewActionRecord[] = [];
+
+  for (const row of rows) {
+    const payload = typeof row.payload === 'string'
+      ? JSON.parse(row.payload)
+      : (row.payload ?? {});
+    const memoryId = Number((payload as Record<string, unknown>).memoryId);
+    const action = parseReviewAction((payload as Record<string, unknown>).action);
+    if (!Number.isInteger(memoryId) || memoryId <= 0 || !action || seen.has(memoryId)) {
+      continue;
+    }
+
+    seen.add(memoryId);
+    actions.push({
+      memoryId,
+      action,
+      at: row.ts,
+      previousStatus: typeof (payload as Record<string, unknown>).previousStatus === 'string'
+        ? (payload as Record<string, unknown>).previousStatus as string
+        : null,
+      nextStatus: typeof (payload as Record<string, unknown>).nextStatus === 'string'
+        ? (payload as Record<string, unknown>).nextStatus as MemoryReviewCandidateStatus
+        : null,
+    });
+  }
+
+  return actions;
+}
+
+async function loadMemoryReviewRows(workspaceId: string, ids: number[]): Promise<MemoryReviewMemoryRow[]> {
+  const targetIds = uniqueNumbers(ids);
+  if (targetIds.length === 0) return [];
+
+  return dbQuery<MemoryReviewMemoryRow>(
+    `SELECT id, workspace_id, category, content, source_story_id, source_spec_id, source_run_id,
+            confidence, related_files, pinned, source_type, source, created_at, updated_at, deleted_at
+       FROM memories
+      WHERE workspace_id = $1
+        AND id = ANY($2::int[])
+      ORDER BY updated_at DESC, id DESC`,
+    [workspaceId, targetIds],
+  );
+}
+
+async function loadStaleReviewCandidates(workspaceId: string): Promise<MemoryReviewCandidateRow[]> {
+  return dbQuery<MemoryReviewCandidateRow>(
+    `WITH candidate_pool AS (
+       SELECT m.id,
+              m.workspace_id,
+              m.category,
+              m.content,
+              m.source_story_id,
+              m.source_spec_id,
+              m.source_run_id,
+              m.confidence,
+              m.related_files,
+              COALESCE(m.pinned, false) AS pinned,
+              m.source_type,
+              m.source,
+              m.created_at,
+              m.updated_at,
+              m.deleted_at
+         FROM memories m
+        WHERE m.workspace_id = $1
+          AND m.deleted_at IS NULL
+          AND COALESCE(m.pinned, false) = false
+        ORDER BY m.updated_at ASC, m.id ASC
+        LIMIT $2
+     ),
+     relation_stats AS (
+       SELECT cp.id AS memory_id,
+              COUNT(*) FILTER (WHERE mr.relation_type = 'SUPERSEDES' AND mr.status = 'active' AND mr.target_memory_id = cp.id)::int AS incoming_supersedes,
+              COUNT(*) FILTER (WHERE mr.relation_type = 'SUPERSEDES' AND mr.status = 'active' AND mr.source_memory_id = cp.id)::int AS outgoing_supersedes,
+              COUNT(*) FILTER (WHERE mr.relation_type = 'CONFLICTS_WITH' AND mr.status = 'active')::int AS active_conflicts
+         FROM candidate_pool cp
+         LEFT JOIN memory_relations mr
+           ON mr.workspace_id = $1
+          AND (mr.source_memory_id = cp.id OR mr.target_memory_id = cp.id)
+        GROUP BY cp.id
+     )
+     SELECT cp.id,
+            cp.workspace_id,
+            cp.category,
+            cp.content,
+            cp.source_story_id,
+            cp.source_spec_id,
+            cp.source_run_id,
+            cp.confidence,
+            cp.related_files,
+            cp.pinned,
+            cp.source_type,
+            cp.source,
+            cp.created_at,
+            cp.updated_at,
+            cp.deleted_at,
+            COALESCE(rs.incoming_supersedes, 0) AS incoming_supersedes,
+            COALESCE(rs.outgoing_supersedes, 0) AS outgoing_supersedes,
+            COALESCE(rs.active_conflicts, 0) AS active_conflicts
+       FROM candidate_pool cp
+       LEFT JOIN relation_stats rs ON rs.memory_id = cp.id
+      ORDER BY cp.updated_at ASC, cp.id ASC`,
+    [workspaceId, STALE_REVIEW_SCAN_LIMIT],
+  );
+}
+
+async function loadHotspotRows(workspaceId: string, scope: 'file' | 'spec'): Promise<MemoryHotspotRow[]> {
+  if (scope === 'file') {
+    return dbQuery<MemoryHotspotRow>(
+      `WITH recent_memories AS (
+         SELECT id, source_spec_id, related_files, updated_at
+           FROM memories
+          WHERE workspace_id = $1
+            AND deleted_at IS NULL
+          ORDER BY updated_at DESC, id DESC
+          LIMIT $2
+       ),
+       relation_counts AS (
+         SELECT rm.id AS memory_id,
+                COUNT(*) FILTER (WHERE mr.relation_type = 'CONFLICTS_WITH' AND mr.status = 'active')::int AS conflict_count,
+                COUNT(*) FILTER (WHERE mr.relation_type = 'SUPERSEDES' AND mr.status = 'active')::int AS superseded_count
+           FROM recent_memories rm
+           LEFT JOIN memory_relations mr
+             ON mr.workspace_id = $1
+            AND (mr.source_memory_id = rm.id OR mr.target_memory_id = rm.id)
+          GROUP BY rm.id
+       ),
+       file_refs AS (
+         SELECT rm.id,
+                rm.updated_at,
+                jsonb_array_elements_text(rm.related_files) AS file_path
+           FROM recent_memories rm
+          WHERE jsonb_typeof(rm.related_files) = 'array'
+       )
+       SELECT fr.file_path AS key,
+              COUNT(DISTINCT fr.id)::int AS memory_count,
+              COUNT(DISTINCT fr.id) FILTER (WHERE COALESCE(rc.conflict_count, 0) > 0)::int AS conflict_count,
+              COUNT(DISTINCT fr.id) FILTER (WHERE COALESCE(rc.superseded_count, 0) > 0)::int AS superseded_count,
+              MAX(fr.updated_at) AS last_touched_at,
+              ARRAY(
+                SELECT DISTINCT fr2.id
+                  FROM file_refs fr2
+                 WHERE fr2.file_path = fr.file_path
+                 ORDER BY fr2.id ASC
+                 LIMIT 3
+              ) AS sample_memory_ids
+         FROM file_refs fr
+         LEFT JOIN relation_counts rc ON rc.memory_id = fr.id
+        GROUP BY fr.file_path
+        ORDER BY memory_count DESC, conflict_count DESC, last_touched_at DESC, key ASC
+        LIMIT $3`,
+      [workspaceId, HOTSPOT_MEMORY_WINDOW, HOTSPOT_RESULT_LIMIT],
+    );
+  }
+
+  return dbQuery<MemoryHotspotRow>(
+    `WITH recent_memories AS (
+       SELECT id, source_spec_id, updated_at
+         FROM memories
+        WHERE workspace_id = $1
+          AND deleted_at IS NULL
+          AND source_spec_id IS NOT NULL
+        ORDER BY updated_at DESC, id DESC
+        LIMIT $2
+     ),
+     relation_counts AS (
+       SELECT rm.id AS memory_id,
+              COUNT(*) FILTER (WHERE mr.relation_type = 'CONFLICTS_WITH' AND mr.status = 'active')::int AS conflict_count,
+              COUNT(*) FILTER (WHERE mr.relation_type = 'SUPERSEDES' AND mr.status = 'active')::int AS superseded_count
+         FROM recent_memories rm
+         LEFT JOIN memory_relations mr
+           ON mr.workspace_id = $1
+          AND (mr.source_memory_id = rm.id OR mr.target_memory_id = rm.id)
+        GROUP BY rm.id
+     )
+     SELECT rm.source_spec_id AS key,
+            COUNT(DISTINCT rm.id)::int AS memory_count,
+            COUNT(DISTINCT rm.id) FILTER (WHERE COALESCE(rc.conflict_count, 0) > 0)::int AS conflict_count,
+            COUNT(DISTINCT rm.id) FILTER (WHERE COALESCE(rc.superseded_count, 0) > 0)::int AS superseded_count,
+            MAX(rm.updated_at) AS last_touched_at,
+            ARRAY(
+              SELECT DISTINCT rm2.id
+                FROM recent_memories rm2
+               WHERE rm2.source_spec_id = rm.source_spec_id
+               ORDER BY rm2.id ASC
+               LIMIT 3
+            ) AS sample_memory_ids
+       FROM recent_memories rm
+       LEFT JOIN relation_counts rc ON rc.memory_id = rm.id
+      GROUP BY rm.source_spec_id
+      ORDER BY memory_count DESC, conflict_count DESC, last_touched_at DESC, key ASC
+      LIMIT $3`,
+    [workspaceId, HOTSPOT_MEMORY_WINDOW, HOTSPOT_RESULT_LIMIT],
+  );
+}
+
+function mapHotspotItems(rows: MemoryHotspotRow[], scopeType: 'file' | 'spec') {
+  return rows.map((row) => ({
+    scopeType,
+    key: row.key,
+    label: row.key,
+    memoryCount: Number(row.memory_count),
+    conflictCount: Number(row.conflict_count),
+    supersededCount: Number(row.superseded_count),
+    lastTouchedAt: row.last_touched_at,
+    sampleMemoryIds: parseNumericArray(row.sample_memory_ids),
+  }));
+}
+
+async function emitMemoryReviewWalEvent(params: {
+  workspaceId: string;
+  memoryId: number;
+  action: MemoryReviewAction;
+  previousStatus: string;
+  nextStatus: MemoryReviewCandidateStatus;
+  memory: MemoryReviewMemoryRow;
+  staleScore: number;
+  reasons: MemoryReviewReason[];
+}): Promise<void> {
+  const payload = {
+    memoryId: params.memoryId,
+    action: params.action,
+    previousStatus: params.previousStatus,
+    nextStatus: params.nextStatus,
+    staleScore: params.staleScore,
+    reasons: params.reasons,
+    provenance: {
+      category: params.memory.category,
+      content: params.memory.content,
+      source: params.memory.source,
+      sourceStoryId: params.memory.source_story_id,
+      sourceSpecId: params.memory.source_spec_id,
+      sourceRunId: toRunId(params.memory.source_run_id),
+      sourceType: params.memory.source_type,
+      relatedFiles: parseStringArray(params.memory.related_files),
+      createdAt: params.memory.created_at,
+      updatedAt: params.memory.updated_at,
+      deletedAt: params.memory.deleted_at,
+    },
+  };
+
+  try {
+    const walEvent = await queryOne<{ id: number }>(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
+       VALUES ('memory_reviewed', $1, $2, $3, 'user', $4)
+       RETURNING id`,
+      [params.workspaceId, params.memory.source_spec_id, params.memory.source_story_id, JSON.stringify(payload)],
+    );
+
+    if (walEvent) {
+      broadcastAll({
+        id: walEvent.id,
+        event_type: 'memory_reviewed',
+        workspace_id: params.workspaceId,
+        spec_id: params.memory.source_spec_id,
+        story_id: params.memory.source_story_id,
+        actor: 'user',
+        payload,
+        ts: new Date().toISOString(),
+      } as any);
+    }
+  } catch {
+    // Best-effort review audit trail — do not block operator workflow.
+  }
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -1808,6 +2284,257 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
 
   const result = await deduplicateMemory(wsPath, workspaceId, dryRun);
   res.json(result);
+});
+
+/**
+ * @swagger
+ * /api/memory/review:
+ *   get:
+ *     tags: [Memory]
+ *     summary: List bounded stale-memory review candidates and hotspot summaries
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Workspace memory review queues are read-only operator context for local cleanup, audit, and retrieval explainability workflows."
+ *     x-rorca-public-api: true
+ *     operationId: listMemoryReviewQueue
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Review candidates and hotspot summaries }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/review', async (req: Request, res: Response) => {
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
+  if (!workspaceId) throw new ValidationError('workspaceId required');
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const ageAvailable = await checkAge();
+  const staleRows = await loadStaleReviewCandidates(workspaceId);
+  const recentActions = await loadMemoryReviewActionHistory(workspaceId);
+  const latestActionByMemoryId = new Map(recentActions.map((action) => [action.memoryId, action]));
+
+  const scoredCandidates = staleRows
+    .map((row) => ({ row, review: buildStaleReviewReasons(row) }))
+    .filter(({ review }) => review.staleScore >= STALE_REVIEW_SCORE_THRESHOLD)
+    .sort((left, right) => right.review.staleScore - left.review.staleScore || left.row.updated_at.localeCompare(right.row.updated_at) || left.row.id - right.row.id);
+
+  const candidateIds = scoredCandidates.map(({ row }) => row.id);
+  const historyIds = recentActions.map((action) => action.memoryId);
+  const reviewRows = await loadMemoryReviewRows(workspaceId, [...candidateIds, ...historyIds]);
+  const memoryById = new Map(reviewRows.map((row) => [row.id, row]));
+
+  const itemsMap = new Map<number, ReturnType<typeof mapMemoryReviewItem>>();
+
+  for (const candidate of scoredCandidates) {
+    const memoryRow = memoryById.get(candidate.row.id) ?? candidate.row;
+    const latestAction = latestActionByMemoryId.get(candidate.row.id);
+    itemsMap.set(candidate.row.id, mapMemoryReviewItem(memoryRow, candidate.review, latestAction));
+  }
+
+  for (const action of recentActions) {
+    const memoryRow = memoryById.get(action.memoryId);
+    if (!memoryRow) continue;
+    const existing = itemsMap.get(action.memoryId);
+    if (existing) {
+      itemsMap.set(action.memoryId, {
+        ...existing,
+        status: statusForReviewAction(action.action, memoryRow.deleted_at),
+        lastAction: {
+          action: action.action,
+          at: action.at,
+          previousStatus: action.previousStatus,
+          nextStatus: action.nextStatus,
+        },
+      });
+      continue;
+    }
+
+    if (action.action === 'restore') continue;
+    itemsMap.set(action.memoryId, mapMemoryReviewItem(memoryRow, null, action));
+  }
+
+  const reviewItems = [...itemsMap.values()]
+    .sort((left, right) => {
+      const order: Record<MemoryReviewCandidateStatus, number> = {
+        candidate: 0,
+        revisit: 1,
+        kept: 2,
+        archived: 3,
+        deleted: 4,
+      };
+      const statusOrder = order[left.status] - order[right.status];
+      if (statusOrder !== 0) return statusOrder;
+      if (left.staleScore !== right.staleScore) return right.staleScore - left.staleScore;
+      return right.updatedAt.localeCompare(left.updatedAt) || right.id - left.id;
+    })
+    .slice(0, STALE_REVIEW_RESULT_LIMIT + 6);
+
+  const fileHotspots = mapHotspotItems(await loadHotspotRows(workspaceId, 'file'), 'file');
+  const specHotspots = mapHotspotItems(await loadHotspotRows(workspaceId, 'spec'), 'spec');
+  const fallbackReason = ageAvailable
+    ? null
+    : 'Apache AGE extension is unavailable. Review candidates and hotspots are using direct SQL provenance and relation fallbacks only.';
+
+  res.json({
+    available: true,
+    staleCandidates: {
+      items: reviewItems,
+      total: reviewItems.length,
+      truncated: scoredCandidates.length > STALE_REVIEW_RESULT_LIMIT,
+      heuristics: {
+        scanLimit: STALE_REVIEW_SCAN_LIMIT,
+        resultLimit: STALE_REVIEW_RESULT_LIMIT,
+        scoreThreshold: STALE_REVIEW_SCORE_THRESHOLD,
+        staleAfterDays: STALE_REVIEW_DAYS,
+        lowConfidenceAfterDays: STALE_LOW_CONFIDENCE_DAYS,
+      },
+      ageAvailable,
+      mode: ageAvailable ? 'bounded-sql' : 'bounded-sql-fallback',
+      reason: fallbackReason,
+    },
+    hotspots: {
+      files: fileHotspots,
+      specs: specHotspots,
+      total: fileHotspots.length + specHotspots.length,
+      truncated: fileHotspots.length >= HOTSPOT_RESULT_LIMIT || specHotspots.length >= HOTSPOT_RESULT_LIMIT,
+      ageAvailable,
+      mode: ageAvailable ? 'bounded-sql' : 'bounded-sql-fallback',
+      reason: fallbackReason,
+      windowSize: HOTSPOT_MEMORY_WINDOW,
+      resultLimit: HOTSPOT_RESULT_LIMIT,
+    },
+  });
+});
+
+/**
+ * @swagger
+ * /api/memory/review/{id}/action:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Audit and apply a stale-memory review action
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Operators need auditable local memory curation actions that preserve provenance, soft-delete state, and restoration paths."
+ *     x-rorca-public-api: true
+ *     operationId: reviewMemoryCandidate
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, action]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               action: { type: string, enum: [archive, delete, keep, revisit, restore] }
+ *     responses:
+ *       200: { description: Reviewed memory candidate }
+ *       400: { description: "Invalid input" }
+ *       404: { description: "Memory not found" }
+ */
+router.post('/review/:id/action', async (req: Request, res: Response) => {
+  const memoryId = parsePositiveInteger(req.params.id as string, 'memoryId');
+  const { workspaceId, action } = req.body as { workspaceId?: string; action?: string };
+
+  if (!workspaceId || !action) {
+    throw new ValidationError('workspaceId and action are required');
+  }
+
+  const parsedAction = parseReviewAction(action);
+  if (!parsedAction) {
+    throw new ValidationError('action must be one of: archive, delete, keep, revisit, restore');
+  }
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const existing = await queryOne<MemoryReviewMemoryRow>(
+    `SELECT id, workspace_id, category, content, source_story_id, source_spec_id, source_run_id,
+            confidence, related_files, pinned, source_type, source, created_at, updated_at, deleted_at
+       FROM memories
+      WHERE id = $1
+        AND workspace_id = $2`,
+    [memoryId, workspaceId],
+  );
+  if (!existing) throw new NotFoundError('Memory not found');
+
+  if (parsedAction === 'restore') {
+    if (!existing.deleted_at) {
+      throw new ValidationError('Only archived or deleted memories can be restored');
+    }
+
+    await execute('UPDATE memories SET deleted_at = NULL, updated_at = NOW() WHERE id = $1', [memoryId]);
+    await emitMemoryWalEvent({
+      eventType: 'memory_restored',
+      workspaceId,
+      memoryId: String(memoryId),
+      category: existing.category,
+      content: existing.content,
+      storyId: existing.source_story_id,
+      specId: existing.source_spec_id,
+      relatedFiles: parseStringArray(existing.related_files),
+    });
+    await emitMemoryReviewWalEvent({
+      workspaceId,
+      memoryId,
+      action: parsedAction,
+      previousStatus: 'archived',
+      nextStatus: 'candidate',
+      memory: existing,
+      staleScore: 0,
+      reasons: [],
+    });
+    invalidateMemory(workspaceId);
+    res.json({ ok: true, id: memoryId, action: parsedAction, status: 'candidate' });
+    return;
+  }
+
+  if (existing.deleted_at) {
+    throw new ValidationError('Restore this memory before applying another review action');
+  }
+
+  const review = buildStaleReviewReasons(existing as MemoryReviewCandidateRow);
+  const previousStatus: MemoryReviewCandidateStatus = 'candidate';
+  const nextStatus = statusForReviewAction(parsedAction, parsedAction === 'archive' || parsedAction === 'delete' ? new Date().toISOString() : null);
+
+  if (parsedAction === 'archive' || parsedAction === 'delete') {
+    await execute('UPDATE memories SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1', [memoryId]);
+    await emitMemoryWalEvent({
+      eventType: 'memory_deleted',
+      workspaceId,
+      memoryId: String(memoryId),
+      category: existing.category,
+      content: existing.content,
+      storyId: existing.source_story_id,
+      specId: existing.source_spec_id,
+      relatedFiles: parseStringArray(existing.related_files),
+    });
+  } else if (parsedAction === 'keep') {
+    await execute('UPDATE memories SET updated_at = NOW() WHERE id = $1', [memoryId]);
+  }
+
+  await emitMemoryReviewWalEvent({
+    workspaceId,
+    memoryId,
+    action: parsedAction,
+    previousStatus,
+    nextStatus,
+    memory: existing,
+    staleScore: review.staleScore,
+    reasons: review.reasons,
+  });
+  invalidateMemory(workspaceId);
+
+  res.json({ ok: true, id: memoryId, action: parsedAction, status: nextStatus });
 });
 
 // ─── PG-022: DB-backed memory CRUD for curation ─────────────────────────────
