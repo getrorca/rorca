@@ -328,7 +328,7 @@ describe('GET /api/memory/graph endpoints', () => {
 // ─── /api/memory/relations ───────────────────────────────────────────────
 
 describe('memory ontology relation routes', () => {
-  test('creates a canonical CONFLICTS_WITH relation, suppresses duplicates, and exposes semantics', async () => {
+  test('creates a canonical CONFLICTS_WITH relation, rejects active duplicates, and exposes contextual semantics', async () => {
     const memoryA = await insertMemory({ content: 'A: Prefer local-first auth defaults.' });
     const memoryB = await insertMemory({ content: 'B: External auth redirect is required.' });
 
@@ -360,8 +360,8 @@ describe('memory ontology relation routes', () => {
         relationType: 'CONFLICTS_WITH',
       });
 
-    expect(second.status).toBe(201);
-    expect(second.body.relation.id).toBe(first.body.relation.id);
+    expect(second.status).toBe(409);
+    expect(second.body.error).toMatch(/already exists/i);
 
     const countRow = await queryOne<{ cnt: string }>(
       `SELECT COUNT(*)::text AS cnt FROM memory_relations WHERE workspace_id = $1 AND relation_type = 'CONFLICTS_WITH'`,
@@ -377,6 +377,52 @@ describe('memory ontology relation routes', () => {
     expect(listRes.status).toBe(200);
     expect(listRes.body.items).toHaveLength(1);
     expect(listRes.body.items[0].semantics.summary).toMatch(/cannot both be applied/i);
+    expect(listRes.body.items[0].sourceMemory.content).toContain('Prefer local-first auth defaults');
+    expect(listRes.body.items[0].sourceMemory.relatedFiles).toEqual([]);
+    expect(listRes.body.items[0].targetMemory.content).toContain('External auth redirect is required');
+  });
+
+  test('rejects self-supersession with clear validation feedback', async () => {
+    const memoryId = await insertMemory({ content: 'Do not replace yourself.' });
+
+    const res = await request(app)
+      .post('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId,
+        sourceMemoryId: memoryId,
+        targetMemoryId: memoryId,
+        relationType: 'SUPERSEDES',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cannot supersede itself/i);
+  });
+
+  test('rejects invalid relation payloads at the route boundary', async () => {
+    const sourceMemoryId = await insertMemory({ content: 'New policy memory.' });
+    const targetMemoryId = await insertMemory({ content: 'Older policy memory.' });
+
+    const invalidType = await request(app)
+      .post('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId,
+        sourceMemoryId,
+        targetMemoryId,
+        relationType: 'DEPENDS_ON',
+      });
+
+    expect(invalidType.status).toBe(400);
+    expect(invalidType.body.error).toMatch(/relationType must be one of/i);
+
+    const invalidStatus = await request(app)
+      .patch('/api/memory/relations/0')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId, status: 'archived' });
+
+    expect(invalidStatus.status).toBe(400);
+    expect(invalidStatus.body.error).toMatch(/relationId must be a positive integer/i);
   });
 
   test('tracks deleted, restored, and superseded relation lifecycle states', async () => {
@@ -397,9 +443,9 @@ describe('memory ontology relation routes', () => {
     const relationId = created.body.relation.id as number;
 
     const deleted = await request(app)
-      .patch(`/api/memory/relations/${relationId}`)
+      .delete(`/api/memory/relations/${relationId}`)
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId, status: 'deleted' });
+      .send({ workspaceId });
     expect(deleted.status).toBe(200);
     expect(deleted.body.relation.status).toBe('deleted');
     expect(deleted.body.relation.deletedAt).toBeTruthy();

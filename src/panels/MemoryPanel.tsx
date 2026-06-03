@@ -18,6 +18,7 @@ interface MemoryItem {
   category: string;
   content: string;
   sourceStoryId: string | null;
+  sourceSpecId: string | null;
   sourceRunId: number | null;
   confidence: string;
   relatedFiles: string[];
@@ -225,6 +226,85 @@ function basename(path: string): string {
 
 function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
+}
+
+function formatMemoryOptionLabel(item: MemoryItem): string {
+  return `#${item.id} · ${item.category} · ${truncateText(item.content.replace(/\s+/g, ' '), 64)}`;
+}
+
+function matchesRelationPair(
+  relation: MemoryRelationListItem,
+  relationType: MemoryRelationListItem['relationType'],
+  sourceMemoryId: number,
+  targetMemoryId: number,
+): boolean {
+  if (relation.relationType !== relationType) return false;
+  if (relationType === 'CONFLICTS_WITH') {
+    return [relation.sourceMemoryId, relation.targetMemoryId].sort((left, right) => left - right).join(':')
+      === [sourceMemoryId, targetMemoryId].sort((left, right) => left - right).join(':');
+  }
+
+  return relation.sourceMemoryId === sourceMemoryId && relation.targetMemoryId === targetMemoryId;
+}
+
+function buildRelationDraftError(
+  relationType: MemoryRelationListItem['relationType'],
+  sourceMemoryId: number | null,
+  targetMemoryId: number | null,
+  relations: MemoryRelationListItem[],
+): string | null {
+  if (!sourceMemoryId) return 'Select a memory to curate.';
+  if (!targetMemoryId) return null;
+  if (sourceMemoryId === targetMemoryId) {
+    return relationType === 'SUPERSEDES'
+      ? 'A memory cannot supersede itself.'
+      : 'Memory relations require two distinct memories.';
+  }
+
+  const activeRelations = relations.filter((relation) => relation.status === 'active');
+  if (activeRelations.some((relation) => matchesRelationPair(relation, relationType, sourceMemoryId, targetMemoryId))) {
+    return relationType === 'SUPERSEDES'
+      ? 'This supersession is already recorded.'
+      : 'These memories already conflict.';
+  }
+
+  if (
+    relationType === 'SUPERSEDES'
+    && activeRelations.some((relation) => matchesRelationPair(relation, 'SUPERSEDES', targetMemoryId, sourceMemoryId))
+  ) {
+    return 'Archive the existing supersession before reversing it.';
+  }
+
+  return null;
+}
+
+function describeRelationForSelection(relation: MemoryRelationListItem, selectedMemoryId: number): {
+  label: string;
+  counterpartId: number;
+  tone: MemoryOntologyExplanation['tone'];
+} {
+  if (relation.relationType === 'SUPERSEDES') {
+    if (relation.sourceMemoryId === selectedMemoryId) {
+      return {
+        label: `Supersedes memory #${relation.targetMemoryId}`,
+        counterpartId: relation.targetMemoryId,
+        tone: 'active',
+      };
+    }
+
+    return {
+      label: `Superseded by memory #${relation.sourceMemoryId}`,
+      counterpartId: relation.sourceMemoryId,
+      tone: 'suppressed',
+    };
+  }
+
+  const counterpartId = relation.sourceMemoryId === selectedMemoryId ? relation.targetMemoryId : relation.sourceMemoryId;
+  return {
+    label: `Conflicts with memory #${counterpartId}`,
+    counterpartId,
+    tone: 'conflict',
+  };
 }
 
 function createEmptyCaps(): MemoryGraphCaps {
@@ -643,6 +723,220 @@ function InlineEditor({ value, onSave, onCancel }: {
   );
 }
 
+function MemoryRelationPreviewCard({
+  label,
+  item,
+  emptyMessage,
+}: {
+  label: string;
+  item: MemoryItem | null;
+  emptyMessage: string;
+}) {
+  if (!item) {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-bg px-3 py-3 text-[11px] text-muted">
+        <p className="font-medium text-[var(--text)]">{label}</p>
+        <p className="mt-2 leading-relaxed">{emptyMessage}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <p className="font-medium text-[var(--text)]">{label}</p>
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${CATEGORY_COLORS[item.category] ?? 'bg-gray-500/10 text-gray-500'}`}>
+          {item.category}
+        </span>
+        {item.pinned && <Pin size={10} className="fill-amber-500 text-amber-500" />}
+      </div>
+      <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/80">{truncateText(item.content, 180)}</p>
+      <div className="mt-2 flex flex-wrap gap-1">
+        <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">Memory #{item.id}</span>
+        {item.sourceStoryId && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-500">Story {item.sourceStoryId}</span>}
+        {item.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {item.sourceSpecId}</span>}
+        {item.sourceRunId && <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">Run #{item.sourceRunId}</span>}
+        {item.sourceType && <span className={`rounded px-1.5 py-0.5 text-[10px] ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>{SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}</span>}
+      </div>
+      {(item.relatedFiles?.length ?? 0) > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {(item.relatedFiles ?? []).slice(0, 3).map((file) => (
+            <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
+          ))}
+          {(item.relatedFiles?.length ?? 0) > 3 && (
+            <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">+{(item.relatedFiles?.length ?? 0) - 3} more</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OntologyCurationSection({
+  items,
+  selectedMemoryId,
+  relations,
+  targetMemoryId,
+  busyKey,
+  notice,
+  onTargetMemoryChange,
+  onCreateRelation,
+  onRemoveRelation,
+}: {
+  items: MemoryItem[];
+  selectedMemoryId: string | null;
+  relations: MemoryRelationListItem[];
+  targetMemoryId: string;
+  busyKey: string | null;
+  notice: { tone: 'success' | 'error'; message: string } | null;
+  onTargetMemoryChange: (memoryId: string) => void;
+  onCreateRelation: (relationType: MemoryRelationListItem['relationType']) => void;
+  onRemoveRelation: (relationId: number) => void;
+}) {
+  const selectedMemory = items.find((item) => String(item.id) === selectedMemoryId) ?? null;
+  const targetMemory = items.find((item) => String(item.id) === targetMemoryId) ?? null;
+  const selectedId = selectedMemory?.id ?? null;
+  const targetId = targetMemory?.id ?? null;
+  const supersedesError = buildRelationDraftError('SUPERSEDES', selectedId, targetId, relations);
+  const conflictError = buildRelationDraftError('CONFLICTS_WITH', selectedId, targetId, relations);
+  const activeRelations = selectedId === null
+    ? []
+    : relations
+      .filter((relation) => relation.status === 'active' && (relation.sourceMemoryId === selectedId || relation.targetMemoryId === selectedId))
+      .sort((left, right) => left.relationType.localeCompare(right.relationType) || left.id - right.id);
+  const candidateTargets = items.filter((item) => item.id !== selectedId);
+
+  return (
+    <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Ontology curation">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--text)]">Ontology curation</h2>
+          <p className="mt-0.5 max-w-2xl text-[11px] leading-relaxed text-muted">
+            Relate the focused memory to another workspace memory, preserve relation history through soft deletion, and keep the Knowledge Web in sync.
+          </p>
+        </div>
+        {selectedMemory && <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">Focused memory #{selectedMemory.id}</span>}
+      </div>
+
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <label className="text-[11px] font-medium text-[var(--text)]" htmlFor="ontology-target-memory">Target memory</label>
+        <select
+          id="ontology-target-memory"
+          value={targetMemoryId}
+          onChange={(event) => onTargetMemoryChange(event.target.value)}
+          aria-label="Target memory"
+          disabled={Boolean(busyKey) || candidateTargets.length === 0}
+          className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <option value="">Choose another memory…</option>
+          {candidateTargets.map((item) => (
+            <option key={item.id} value={item.id}>{formatMemoryOptionLabel(item)}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        <MemoryRelationPreviewCard label="Focused memory" item={selectedMemory} emptyMessage="Select a memory from the ledger or Knowledge Web to start curation." />
+        <MemoryRelationPreviewCard label="Target memory" item={targetMemory} emptyMessage="Choose the other memory you want to supersede or mark as conflicting." />
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => onCreateRelation('SUPERSEDES')}
+          disabled={Boolean(busyKey) || !targetMemory || Boolean(supersedesError)}
+          className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-500/90 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          Mark as superseding
+        </button>
+        <button
+          type="button"
+          onClick={() => onCreateRelation('CONFLICTS_WITH')}
+          disabled={Boolean(busyKey) || !targetMemory || Boolean(conflictError)}
+          className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          Mark conflict
+        </button>
+      </div>
+
+      <div className="mt-2 space-y-1 text-[11px] text-muted">
+        {targetMemory ? (
+          <>
+            {supersedesError && <p>Supersedes: {supersedesError}</p>}
+            {conflictError && conflictError !== supersedesError && <p>Conflicts: {conflictError}</p>}
+            {!supersedesError && !conflictError && selectedMemory && (
+              <p>Choose supersedes when the focused memory is the newer rule. Choose conflict when both memories must stay visible but cannot both be applied cleanly.</p>
+            )}
+          </>
+        ) : (
+          <p>Choose a second memory to compare provenance, spec scope, and file context before adding an ontology edge.</p>
+        )}
+      </div>
+
+      {notice && (
+        <div className={`mt-3 rounded-lg border px-3 py-2 text-xs ${notice.tone === 'success' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300' : 'border-red-500/20 bg-red-500/10 text-red-300'}`}>
+          {notice.message}
+        </div>
+      )}
+
+      <div className="mt-4 space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Active relations for the focused memory</p>
+          <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{activeRelations.length}</span>
+        </div>
+        {activeRelations.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border bg-bg px-3 py-2 text-[11px] text-muted">No active supersession or conflict edges recorded for this memory yet.</p>
+        ) : (
+          <ul className="space-y-2" role="list" aria-label="Active ontology relations">
+            {activeRelations.map((relation) => {
+              const summary = describeRelationForSelection(relation, selectedId as number);
+              const counterpart = items.find((item) => item.id === summary.counterpartId) ?? null;
+              const toneClass = {
+                active: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400',
+                suppressed: 'border-amber-500/20 bg-amber-500/10 text-amber-400',
+                conflict: 'border-red-500/20 bg-red-500/10 text-red-300',
+              } as const;
+
+              return (
+                <li key={relation.id} className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${toneClass[summary.tone]}`}>{summary.label}</span>
+                        <span className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">Relation #{relation.id}</span>
+                      </div>
+                      {counterpart && (
+                        <>
+                          <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/80">{truncateText(counterpart.content, 160)}</p>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {counterpart.sourceStoryId && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-500">Story {counterpart.sourceStoryId}</span>}
+                            {counterpart.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {counterpart.sourceSpecId}</span>}
+                            {counterpart.relatedFiles.slice(0, 2).map((file) => (
+                              <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveRelation(relation.id)}
+                      disabled={Boolean(busyKey)}
+                      className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
 // ─── Entry Row ──────────────────────────────────────────────────────────────
 
 function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onToggleSelect, onFocus, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
@@ -695,6 +989,11 @@ function EntryRow({ item, isSelected, isEditing, isFocused, explainability, onTo
               <span className="inline-flex items-center gap-0.5 rounded bg-cyan-500/10 px-1 py-0.5 text-[9px] font-medium text-cyan-500">
                 <Bot size={9} />
                 {item.sourceStoryId}
+              </span>
+            )}
+            {item.sourceSpecId && (
+              <span className="rounded bg-violet-500/10 px-1 py-0.5 text-[9px] font-medium text-violet-400">
+                {item.sourceSpecId}
               </span>
             )}
             {item.sourceRunId && <span className="font-mono text-[9px] text-muted">run #{item.sourceRunId}</span>}
@@ -1427,6 +1726,9 @@ export default function MemoryPanel() {
   const [neighborhoodGraphError, setNeighborhoodGraphError] = useState<string | null>(null);
   const [relations, setRelations] = useState<MemoryRelationListItem[]>([]);
   const [relationsError, setRelationsError] = useState<string | null>(null);
+  const [targetMemoryId, setTargetMemoryId] = useState('');
+  const [relationMutationKey, setRelationMutationKey] = useState<string | null>(null);
+  const [relationNotice, setRelationNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -1460,6 +1762,9 @@ export default function MemoryPanel() {
     setEditingId(null);
     setRelations([]);
     setRelationsError(null);
+    setTargetMemoryId('');
+    setRelationMutationKey(null);
+    setRelationNotice(null);
   }, [workspaceId]);
 
   const fetchItems = useCallback(async () => {
@@ -1541,6 +1846,21 @@ export default function MemoryPanel() {
     });
   }, [filteredItems]);
 
+  useEffect(() => {
+    if (!selectedMemoryId) {
+      setTargetMemoryId('');
+      return;
+    }
+
+    setTargetMemoryId((current) => {
+      if (current && current !== selectedMemoryId && items.some((item) => String(item.id) === current)) {
+        return current;
+      }
+      return '';
+    });
+    setRelationNotice(null);
+  }, [items, selectedMemoryId]);
+
   const fetchNeighborhoodGraph = useCallback(async () => {
     if (!workspaceId || !selectedMemoryId || !shouldShowGraph) {
       setNeighborhoodGraph(null);
@@ -1567,6 +1887,90 @@ export default function MemoryPanel() {
     if (!shouldShowGraph) return;
     void fetchNeighborhoodGraph();
   }, [fetchNeighborhoodGraph, shouldShowGraph]);
+
+  const refreshOntologyState = useCallback(async () => {
+    await fetchRelations();
+    if (!shouldShowGraph) return;
+    await fetchOverviewGraph();
+    await fetchNeighborhoodGraph();
+  }, [fetchNeighborhoodGraph, fetchOverviewGraph, fetchRelations, shouldShowGraph]);
+
+  const handleCreateRelation = async (relationType: MemoryRelationListItem['relationType']) => {
+    if (!workspaceId || !selectedMemoryId) return;
+
+    const sourceMemoryId = Number(selectedMemoryId);
+    const parsedTargetMemoryId = Number(targetMemoryId);
+    const normalizedSourceMemoryId = Number.isInteger(sourceMemoryId) ? sourceMemoryId : null;
+    const normalizedTargetMemoryId = Number.isInteger(parsedTargetMemoryId) && parsedTargetMemoryId > 0 ? parsedTargetMemoryId : null;
+
+    if (!normalizedTargetMemoryId) {
+      setRelationNotice({ tone: 'error', message: 'Choose another memory to relate.' });
+      return;
+    }
+
+    const validationError = buildRelationDraftError(
+      relationType,
+      normalizedSourceMemoryId,
+      normalizedTargetMemoryId,
+      relations,
+    );
+
+    if (validationError) {
+      setRelationNotice({ tone: 'error', message: validationError });
+      return;
+    }
+
+    try {
+      setRelationMutationKey(`create:${relationType}`);
+      await apiFetch('/api/memory/relations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          sourceMemoryId,
+          targetMemoryId: normalizedTargetMemoryId,
+          relationType,
+        }),
+      });
+      setTargetMemoryId('');
+      setRelationNotice({
+        tone: 'success',
+        message: relationType === 'SUPERSEDES'
+          ? `Memory #${sourceMemoryId} now supersedes memory #${normalizedTargetMemoryId}.`
+          : `Memory #${sourceMemoryId} now conflicts with memory #${normalizedTargetMemoryId}.`,
+      });
+      await refreshOntologyState();
+    } catch (error) {
+      setRelationNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'Unable to save the ontology relation right now.',
+      });
+    } finally {
+      setRelationMutationKey(null);
+    }
+  };
+
+  const handleRemoveRelation = async (relationId: number) => {
+    if (!workspaceId) return;
+
+    try {
+      setRelationMutationKey(`delete:${relationId}`);
+      await apiFetch(`/api/memory/relations/${relationId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      setRelationNotice({ tone: 'success', message: `Relation #${relationId} removed from the active ontology.` });
+      await refreshOntologyState();
+    } catch (error) {
+      setRelationNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'Unable to remove the ontology relation right now.',
+      });
+    } finally {
+      setRelationMutationKey(null);
+    }
+  };
 
   const handleSearchChange = (value: string) => {
     setSearchInput(value);
@@ -1852,6 +2256,18 @@ export default function MemoryPanel() {
               Ontology explanations unavailable right now. {relationsError}
             </div>
           )}
+
+          <OntologyCurationSection
+            items={items}
+            selectedMemoryId={selectedMemoryId}
+            relations={relations}
+            targetMemoryId={targetMemoryId}
+            busyKey={relationMutationKey}
+            notice={relationNotice}
+            onTargetMemoryChange={setTargetMemoryId}
+            onCreateRelation={handleCreateRelation}
+            onRemoveRelation={handleRemoveRelation}
+          />
 
           <div
             id={`memory-view-${viewMode}`}

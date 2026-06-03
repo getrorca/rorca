@@ -118,6 +118,26 @@ function normalizeRelatedFiles(value: unknown): string[] {
   return [...new Set(value.filter((file): file is string => typeof file === 'string' && file.trim().length > 0))];
 }
 
+function parsePositiveInteger(value: number | string, fieldName: string): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new ValidationError(`${fieldName} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function assertMemoryRelationType(value: string): asserts value is (typeof MEMORY_RELATION_TYPES)[number] {
+  if (!MEMORY_RELATION_TYPES.includes(value as (typeof MEMORY_RELATION_TYPES)[number])) {
+    throw new ValidationError(`relationType must be one of: ${MEMORY_RELATION_TYPES.join(', ')}`);
+  }
+}
+
+function assertMemoryRelationStatus(value: string): asserts value is (typeof MEMORY_RELATION_STATUSES)[number] {
+  if (!MEMORY_RELATION_STATUSES.includes(value as (typeof MEMORY_RELATION_STATUSES)[number])) {
+    throw new ValidationError(`status must be one of: ${MEMORY_RELATION_STATUSES.join(', ')}`);
+  }
+}
+
 async function emitMemoryWalEvent(params: {
   eventType: 'memory_created' | 'memory_deleted' | 'memory_restored';
   workspaceId: string;
@@ -1189,11 +1209,8 @@ router.get('/relations', async (req: Request, res: Response) => {
   if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const memoryId = req.query.memoryId !== undefined
-    ? parseInt(req.query.memoryId as string, 10)
+    ? parsePositiveInteger(req.query.memoryId as string, 'memoryId')
     : undefined;
-  if (req.query.memoryId !== undefined && Number.isNaN(memoryId)) {
-    throw new ValidationError('memoryId must be a positive integer');
-  }
 
   const items = await listMemoryRelations({
     workspaceId,
@@ -1236,6 +1253,7 @@ router.get('/relations', async (req: Request, res: Response) => {
  *       201: { description: Relation created or restored }
  *       400: { description: "Invalid input" }
  *       404: { description: "Workspace or memory not found" }
+ *       409: { description: "An active canonical relation already exists" }
  */
 router.post('/relations', async (req: Request, res: Response) => {
   const { workspaceId, sourceMemoryId, targetMemoryId, relationType, note } = req.body as {
@@ -1251,14 +1269,25 @@ router.post('/relations', async (req: Request, res: Response) => {
     throw new ValidationError('sourceMemoryId, targetMemoryId, and relationType are required');
   }
 
+  const parsedSourceMemoryId = parsePositiveInteger(sourceMemoryId, 'sourceMemoryId');
+  const parsedTargetMemoryId = parsePositiveInteger(targetMemoryId, 'targetMemoryId');
+  assertMemoryRelationType(relationType);
+
+  if (parsedSourceMemoryId === parsedTargetMemoryId) {
+    if (relationType === 'SUPERSEDES') {
+      throw new ValidationError('A memory cannot supersede itself');
+    }
+    throw new ValidationError('Memory relations require two distinct memories');
+  }
+
   const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const relation = await createMemoryRelation({
     workspaceId,
-    sourceMemoryId: Number(sourceMemoryId),
-    targetMemoryId: Number(targetMemoryId),
-    relationType: relationType as (typeof MEMORY_RELATION_TYPES)[number],
+    sourceMemoryId: parsedSourceMemoryId,
+    targetMemoryId: parsedTargetMemoryId,
+    relationType,
     note,
   });
 
@@ -1271,6 +1300,9 @@ router.post('/relations', async (req: Request, res: Response) => {
  *   patch:
  *     tags: [Memory]
  *     summary: Update a memory relation lifecycle state
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Operators may archive or restore workspace-scoped ontology relations while preserving relational truth and audit history."
+ *     x-rorca-public-api: true
  *     operationId: updateMemoryRelationStatus
  *     parameters:
  *       - name: id
@@ -1292,8 +1324,7 @@ router.post('/relations', async (req: Request, res: Response) => {
  *       404: { description: "Relation not found" }
  */
 router.patch('/relations/:id', async (req: Request, res: Response) => {
-  const relationId = parseInt(req.params.id as string, 10);
-  if (Number.isNaN(relationId)) throw new ValidationError('Invalid relation id');
+  const relationId = parsePositiveInteger(req.params.id as string, 'relationId');
 
   const { workspaceId, status } = req.body as {
     workspaceId?: string;
@@ -1304,14 +1335,63 @@ router.patch('/relations/:id', async (req: Request, res: Response) => {
     throw new ValidationError('workspaceId and status are required');
   }
 
+  assertMemoryRelationStatus(status);
+
   const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const relation = await updateMemoryRelationStatus(
     workspaceId,
     relationId,
-    status as (typeof MEMORY_RELATION_STATUSES)[number],
+    status,
   );
+
+  res.json({ relation, semantics: MEMORY_RELATION_SEMANTICS[relation.relationType] });
+});
+
+/**
+ * @swagger
+ * /api/memory/relations/{id}:
+ *   delete:
+ *     tags: [Memory]
+ *     summary: Soft-delete a memory relation while preserving audit history
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Relation removal is a workspace-scoped ontology curation action that should preserve auditability via soft-state rather than hard deletion."
+ *     x-rorca-public-api: true
+ *     operationId: deleteMemoryRelation
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200: { description: Relation soft-deleted }
+ *       404: { description: "Relation not found" }
+ */
+router.delete('/relations/:id', async (req: Request, res: Response) => {
+  const relationId = parsePositiveInteger(req.params.id as string, 'relationId');
+
+  const { workspaceId } = req.body as {
+    workspaceId?: string;
+  };
+
+  if (!workspaceId) {
+    throw new ValidationError('workspaceId is required');
+  }
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const relation = await updateMemoryRelationStatus(workspaceId, relationId, 'deleted');
 
   res.json({ relation, semantics: MEMORY_RELATION_SEMANTICS[relation.relationType] });
 });
