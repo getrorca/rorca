@@ -61,6 +61,7 @@ Use tools/internal operations to gather context such as:
 - relevant approved spec lookup
 - graph/retrieval queries
 - curated skill-library previews if available
+- `rorca_specs_generation_context` when available, so you can fetch the canonical skill-first forge context bundle (`prompt`, `contextUsed`, `contextSummary`) before persisting
 
 ### Mutation and persistence
 Use structured operations for:
@@ -182,13 +183,14 @@ Your responsibility is to produce the best draft possible and then hand it off c
 ## Persistence contract behavior
 
 Once you have a complete draft:
-1. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
-2. prefer enrichment enabled where available
-3. read the saved spec back via `rorca_get_specs_by_specId` if possible
-4. verify that a real slug/id exists
-5. verify that the saved story set broadly matches the draft
-6. if `autoApprove` is true, approve via `rorca_approve_spec`
-7. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
+1. if you fetched `rorca_specs_generation_context`, carry its `contextUsed` and `contextSummary` through the persist call so the saved spec and Context tab preserve what context informed the draft
+2. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
+3. prefer enrichment enabled where available
+4. read the saved spec back via `rorca_get_specs_by_specId` if possible
+5. verify that a real slug/id exists
+6. verify that the saved story set broadly matches the draft
+7. if `autoApprove` is true, approve via `rorca_approve_spec`
+8. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
 
 Do not claim the spec was saved unless a structured operation confirms it.
 

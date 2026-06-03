@@ -61,6 +61,7 @@ export interface GeneratedSpec {
   mermaidDiagram?: string;
   model?: string;
   contextUsed?: ContextUsed;
+  contextSummary?: Record<string, unknown>;
   reasoning?: SpecReasoning;
   source?: string;
 }
@@ -104,6 +105,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
     })),
     ...(spec.mermaidDiagram ? { mermaidDiagram: spec.mermaidDiagram } : {}),
     ...(spec.contextUsed ? { contextUsed: spec.contextUsed } : {}),
+    ...(spec.contextSummary ? { contextSummary: spec.contextSummary } : {}),
     ...(spec.source ? { source: spec.source } : {}),
   };
   fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');

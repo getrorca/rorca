@@ -84,6 +84,22 @@ test('calls POST /api/specs/persist with the explicit drafted spec body', async 
     ],
     overwrite: true,
     source: 'skill-first',
+    contextUsed: {
+      text: 'L1/L2/L3 context text',
+      meta: { standards: true, conventions: true, project: true, totalTokens: 1234, scopesMatched: [] },
+    },
+    contextSummary: {
+      directionLayers: { l1: true, l2: { present: true, domain: 'devtools' }, l3: true },
+      skills: ['rorca-forge'],
+      memoryEntries: 2,
+      agentsMd: true,
+      template: null,
+      schemaSnapshot: true,
+      gitMemory: false,
+      estimatedTokens: 1234,
+      modelContextWindow: 200000,
+      retrieval: { cagHits: 1, ragHits: 3, graphHits: 2, tier: 'hybrid', latencyMs: 25 },
+    },
   });
 
   expect(mockFetch).toHaveBeenCalledWith(
@@ -110,6 +126,22 @@ test('calls POST /api/specs/persist with the explicit drafted spec body', async 
     ],
     overwrite: true,
     source: 'skill-first',
+    contextUsed: {
+      text: 'L1/L2/L3 context text',
+      meta: { standards: true, conventions: true, project: true, totalTokens: 1234, scopesMatched: [] },
+    },
+    contextSummary: {
+      directionLayers: { l1: true, l2: { present: true, domain: 'devtools' }, l3: true },
+      skills: ['rorca-forge'],
+      memoryEntries: 2,
+      agentsMd: true,
+      template: null,
+      schemaSnapshot: true,
+      gitMemory: false,
+      estimatedTokens: 1234,
+      modelContextWindow: 200000,
+      retrieval: { cagHits: 1, ragHits: 3, graphHits: 2, tier: 'hybrid', latencyMs: 25 },
+    },
   });
 });
 

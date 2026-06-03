@@ -13,9 +13,9 @@ The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (defaul
 | Tool | Inputs | Output |
 |------|--------|--------|
 | `rorca_get_context` | `workspaceId`, `specBrief`, `storyAnnotations?` | Synthesized Direction Stack (all 5 layers merged) |
-| `rorca_create_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?` | Canonical explicit cross-client spec-creation path |
+| `rorca_create_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?`, `contextUsed?`, `contextSummary?`, `postSave?` | Canonical explicit cross-client spec-creation path |
 | `rorca_generate_spec` | `workspaceId`, `specBrief`, `title`, `storyCount?` | Legacy/fallback brief→spec generation when you want Rorca to draft |
-| `rorca_persist_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?` | Compatibility alias for explicit-draft persistence |
+| `rorca_persist_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?`, `contextUsed?`, `contextSummary?`, `postSave?` | Compatibility alias for explicit-draft persistence |
 | `rorca_approve_spec` | `workspaceId`, `specSlug` | Approval confirmation, new version number |
 | `rorca_list_specs` | `workspaceId`, `status?` (pending/approved) | Array of spec summaries |
 | `rorca_list_workspaces` | (none) | All registered workspaces |
@@ -34,7 +34,7 @@ The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (defaul
 Preferred universal skill-first flow:
 1. caller/skill retrieves context via MCP tools
 2. caller drafts the spec content locally
-3. caller persists the explicit draft with `rorca_create_spec` (or compatibility alias `rorca_persist_spec`)
+3. caller persists the explicit draft with `rorca_create_spec` (or compatibility alias `rorca_persist_spec`), carrying `contextUsed` + `contextSummary` when available so spec detail can show the real drafting context
 4. backend validates, normalizes, saves, and can run post-save enrichment
 
 `rorca_generate_spec` remains available as the legacy/fallback path when the caller wants backend-side drafting.

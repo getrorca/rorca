@@ -589,6 +589,39 @@ describe('POST /api/specs/persist', () => {
         stories: [
           { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
         ],
+        contextUsed: {
+          text: 'SYNTHESIZED CONTEXT',
+          meta: {
+            standards: true,
+            conventions: true,
+            project: true,
+            schema: true,
+            totalTokens: 1234,
+            scopesMatched: [],
+          },
+        },
+        contextSummary: {
+          directionLayers: {
+            l1: true,
+            l2: { present: true, domain: 'devtools' },
+            l3: true,
+          },
+          skills: ['rorca-forge'],
+          memoryEntries: 3,
+          agentsMd: true,
+          template: null,
+          schemaSnapshot: true,
+          gitMemory: false,
+          estimatedTokens: 1234,
+          modelContextWindow: 200000,
+          retrieval: {
+            cagHits: 2,
+            ragHits: 5,
+            graphHits: 1,
+            tier: 'hybrid',
+            latencyMs: 31,
+          },
+        },
       });
 
     expect(persistRes.status).toBe(200);
@@ -611,6 +644,24 @@ describe('POST /api/specs/persist', () => {
     expect(summary.storyCount).toBe(1);
     expect(summary.pendingEnrichment).toBe(true);
     expect(summary.postSave).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
+    const contextUsed = summary.contextUsed as { text: string };
+    const contextSummary = summary.contextSummary as {
+      directionLayers: unknown;
+      retrieval: unknown;
+    };
+    expect(contextUsed.text).toBe('SYNTHESIZED CONTEXT');
+    expect(contextSummary.directionLayers).toEqual({
+      l1: true,
+      l2: { present: true, domain: 'devtools' },
+      l3: true,
+    });
+    expect(contextSummary.retrieval).toEqual({
+      cagHits: 2,
+      ragHits: 5,
+      graphHits: 1,
+      tier: 'hybrid',
+      latencyMs: 31,
+    });
   });
 
   test('normalizes duplicate and missing story IDs while preserving valid dependencies', async () => {

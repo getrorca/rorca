@@ -79,6 +79,7 @@ export function formatSkillLaunchPrompt(input: RorcaSkillWorkflowRequest): strin
       `queue: ${input.queue}`,
       ...(input.modelOverride ? [`modelOverride: ${input.modelOverride}`] : []),
       "availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, rorca_create_spec, rorca_persist_spec, rorca_approve_spec, rorca_trigger_run, rorca_pipeline_trigger]",
+      "persistenceHint: when available, fetch rorca_specs_generation_context first and pass both contextUsed and contextSummary into rorca_create_spec so the saved spec Context tab reflects the real drafting context",
       "brief: |",
       indentBlock(input.brief),
     ].join("\n");
