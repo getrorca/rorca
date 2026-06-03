@@ -21,9 +21,11 @@ import {
 import { validateBody } from '../lib/validate';
 import { chatComplete } from '../lib/llm-client';
 import { handleRouteError } from '../lib/async-handler';
-import { ValidationError, UnprocessableError } from '../lib/errors';
+import { ValidationError, UnprocessableError, NotFoundError } from '../lib/errors';
 import { createJob, updateJobStatus } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
+import { queryOne } from '../db/index';
+import { buildContextHealthSummary } from '../lib/auto-memory';
 
 const router = Router();
 
@@ -348,6 +350,65 @@ router.post('/enrich/async', async (req: Request, res: Response) => {
     res.status(202).json(payload);
   } catch (error) {
     handleRouteError(res, error, '[context] enrich async');
+  }
+});
+
+/**
+ * @swagger
+ * /api/context/health/{workspaceId}:
+ *   get:
+ *     tags: [Context]
+ *     summary: Get workspace context readiness/health summary
+ *     operationId: rorca_context_health
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only context readiness summary so local/MCP clients can show hydration state before generating specs; no side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Context readiness summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspaceId: { type: string }
+ *                 schemaPresent: { type: boolean }
+ *                 schemaTableCount: { type: integer }
+ *                 schemaHydratedAt: { type: string, format: date-time, nullable: true }
+ *                 gitHydrated: { type: boolean }
+ *                 gitCommitCount: { type: integer }
+ *                 gitMemoryHydratedAt: { type: string, format: date-time, nullable: true }
+ *                 gitMemoryStale: { type: boolean }
+ *                 claudeMdPresent: { type: boolean }
+ *                 contextScore: { type: integer }
+ *                 readiness: { type: string, enum: [ready, partial, absent] }
+ *                 needsHydration: { type: boolean }
+ *                 nudge: { type: string, nullable: true }
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/health/:workspaceId', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = String(req.params.workspaceId);
+    const workspace = await queryOne<{ path: string }>(
+      'SELECT path FROM workspaces WHERE id = $1',
+      [workspaceId],
+    );
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const summary = await buildContextHealthSummary({
+      workspaceId,
+      workspacePath: workspace.path,
+    });
+    res.json(summary);
+  } catch (error) {
+    handleRouteError(res, error, '[context] health');
   }
 });
 

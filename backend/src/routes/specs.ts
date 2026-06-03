@@ -38,7 +38,7 @@ import { retrieveContext } from '../lib/memory-router';
 import { recordRetrievedContextOutcome } from '../lib/retrieval-outcome';
 import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, graphStats, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { requireAge } from '../lib/age-guard';
-import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
+import { autoSynthesizeSpecMemory, maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
 import { loadRorcaConfig } from '../lib/rorca-config';
@@ -2291,6 +2291,19 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     const schemaSnapshot = ctx?.schema_snapshot || undefined;
 
+    // 5c. CTM-005: Rehydrate git memory in the background when HEAD has moved and
+    // the last hydration is stale or missing. Fire-and-forget — never blocks spec gen.
+    let gitRehydration: { triggered: boolean; reason: string } = { triggered: false, reason: 'skipped' };
+    try {
+      gitRehydration = await maybeRehydrateGitMemoryOnSpecGen({
+        workspaceId: String(workspaceId),
+        workspacePath: workspace.path as string,
+        workspaceLabel: (workspace.label as string) ?? String(workspaceId),
+      });
+    } catch (err) {
+      logger.warn({ err, workspaceId }, '[Specs] git rehydration check failed — continuing without it');
+    }
+
     // 6. Synthesize direction stack
     const synthResult = synthesizeWithMeta({
       l1: l1Row?.content_yaml,
@@ -2404,6 +2417,9 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       schemaSnapshot: synthResult.meta.schema,
       estimatedTokens,
       modelContextWindow,
+      // CTM-005: Surface git-memory rehydration decision so the UI/trace can show
+      // whether context was refreshed for this generation.
+      gitRehydration: { triggered: gitRehydration.triggered, reason: gitRehydration.reason },
       ...(retrievalMeta ? {
         vectorHits: retrievalMeta.ragHits,
         graphHits: retrievalMeta.graphHits,
