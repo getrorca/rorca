@@ -275,6 +275,14 @@ export function getMcpToolTier(definition: Pick<McpToolDefinition, 'capturedMeth
 export function buildMcpToolTierResolver(spec: OpenAPISpec): (toolName: string) => McpTier {
   const definitions = getMcpToolDefinitions(spec);
   const toolTierMap = new Map(definitions.map((definition) => [definition.toolName, getMcpToolTier(definition)]));
+  const definitionByRoute = new Map(definitions.map((definition) => [`${definition.capturedMethod} ${definition.capturedPath}`, definition]));
+
+  for (const alias of MCP_FRIENDLY_ALIASES) {
+    const definition = definitionByRoute.get(`${alias.method} ${alias.path}`);
+    if (!definition) continue;
+    toolTierMap.set(alias.toolName, getMcpToolTier(definition));
+  }
+
   return (toolName: string) => toolTierMap.get(toolName) ?? 'admin';
 }
 
@@ -1056,56 +1064,81 @@ export function getMcpTransportCount(): number {
  * Supports POST (client→server), GET (SSE notifications), DELETE (session close).
  */
 export function createMcpRequestHandler(spec: OpenAPISpec) {
+  async function createTransport(remoteAddr: string, requestTier: McpTier | undefined, options: { stateful: boolean }): Promise<StreamableHTTPServerTransport> {
+    let transport: StreamableHTTPServerTransport;
+    const mcpServer = createMcpHttpServer(spec, {
+      resolveSessionTier: (sid) => {
+        if (sid) {
+          return transportTiers.get(sid);
+        }
+        return requestTier;
+      },
+      getSessionRemoteAddr: (sid) => {
+        if (!sid) return remoteAddr;
+        return transportRemoteAddrs.get(sid) ?? remoteAddr;
+      },
+    });
+
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: options.stateful ? () => randomUUID() : undefined,
+      ...(options.stateful
+        ? {
+            onsessioninitialized: (sid: string) => {
+              transports.set(sid, transport);
+              if (requestTier) {
+                transportTiers.set(sid, requestTier);
+              }
+              transportRemoteAddrs.set(sid, remoteAddr);
+            },
+          }
+        : {}),
+      enableJsonResponse: true,
+    });
+
+    transport.onclose = () => {
+      if (transport.sessionId) {
+        transports.delete(transport.sessionId);
+        transportTiers.delete(transport.sessionId);
+        transportRemoteAddrs.delete(transport.sessionId);
+      }
+    };
+
+    await mcpServer.connect(transport);
+    return transport;
+  }
+
   async function handlePost(req: Request, res: Response) {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     const remoteAddr = req.ip || req.socket.remoteAddress || 'unknown';
+    const requestTier = (req as Request & { mcpTier?: McpTier }).mcpTier;
     let transport: StreamableHTTPServerTransport;
+    let ephemeral = false;
 
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId)!;
       transportRemoteAddrs.set(sessionId, remoteAddr);
     } else if (!sessionId && isInitializeRequest(req.body)) {
-      const requestTier = (req as Request & { mcpTier?: McpTier }).mcpTier;
-      const mcpServer = createMcpHttpServer(spec, {
-        resolveSessionTier: (sid) => {
-          if (sid) {
-            return transportTiers.get(sid);
-          }
-          return requestTier;
-        },
-        getSessionRemoteAddr: (sid) => {
-          if (!sid) return remoteAddr;
-          return transportRemoteAddrs.get(sid) ?? remoteAddr;
-        },
-      });
-
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (sid: string) => {
-          transports.set(sid, transport);
-          if (requestTier) {
-            transportTiers.set(sid, requestTier);
-          }
-          transportRemoteAddrs.set(sid, remoteAddr);
-        },
-        enableJsonResponse: true,
-      });
-
-      transport.onclose = () => {
-        if (transport.sessionId) {
-          transports.delete(transport.sessionId);
-          transportTiers.delete(transport.sessionId);
-          transportRemoteAddrs.delete(transport.sessionId);
-        }
-      };
-
-      await mcpServer.connect(transport);
+      transport = await createTransport(remoteAddr, requestTier, { stateful: true });
+    } else if (!sessionId || (sessionId && !transports.has(sessionId) && !isInitializeRequest(req.body))) {
+      // Compatibility mode for one-shot callers that invoke /mcp directly without
+      // first persisting an MCP session, or that present a stale session id after
+      // a backend restart. Proper MCP clients should still initialize and reuse the
+      // returned mcp-session-id, but stateless POSTs for tools/list and tools/call
+      // can be served safely through a per-request transport.
+      transport = await createTransport(remoteAddr, requestTier, { stateful: false });
+      ephemeral = true;
     } else {
       res.status(400).json({ error: 'Missing or invalid mcp-session-id header' });
       return;
     }
 
-    await transport.handleRequest(req, res, req.body);
+    try {
+      await transport.handleRequest(req, res, req.body);
+    } finally {
+      if (ephemeral) {
+        await transport.close().catch(() => {});
+      }
+    }
   }
 
   async function handleGet(req: Request, res: Response) {
