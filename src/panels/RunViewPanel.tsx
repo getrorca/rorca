@@ -19,6 +19,7 @@ import MultiPaneTerminal from '../components/MultiPaneTerminal';
 
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
+import type { StoryContextInfo } from '../components/RunStoryList';
 import RunMetadataPanel from '../components/RunMetadataPanel';
 import AgentBadge from '../components/AgentBadge';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
@@ -1006,6 +1007,80 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return map;
   }, [walEvents, seedStatuses]);
 
+  // CTM-004: Per-story context map for the Stories accordion. Combines:
+  //   - skills from spec suggestedSkills (relevance/reason) ∪ executed active_skills
+  //   - injected/context files from contextComparison.actual (fallback predicted)
+  //   - per-story token usage from storyTokenBreakdown
+  // Keyed by story ID; tolerates older runs where any source is absent.
+  const storyContextMap = useMemo(() => {
+    const map = new Map<string, StoryContextInfo>();
+
+    // Suggested skills (with relevance) keyed by story
+    const suggestedByStory = new Map<string, Map<string, { relevance: number; reason: string }>>();
+    for (const s of specStories) {
+      if (Array.isArray(s.suggestedSkills) && s.suggestedSkills.length > 0) {
+        const inner = new Map<string, { relevance: number; reason: string }>();
+        for (const sk of s.suggestedSkills) inner.set(sk.name, { relevance: sk.relevance, reason: sk.reason });
+        suggestedByStory.set(s.id, inner);
+      }
+    }
+
+    // Active (executed) skills from DB story_results
+    const activeByStory = new Map<string, string[]>();
+    for (const s of dbStories) {
+      if (s.active_skills) {
+        try {
+          const parsed = JSON.parse(s.active_skills);
+          if (Array.isArray(parsed)) activeByStory.set(s.story_id, parsed.filter((x): x is string => typeof x === 'string'));
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Token usage keyed by story
+    const tokenByStory = new Map<string, StoryTokenEntry>();
+    for (const t of storyTokenBreakdown) tokenByStory.set(t.storyId, t);
+
+    // Union of all story IDs that have any context data
+    const ids = new Set<string>();
+    for (const s of specStories) ids.add(s.id);
+    for (const id of activeByStory.keys()) ids.add(id);
+    for (const id of tokenByStory.keys()) ids.add(id);
+    if (contextComparison?.actual) for (const id of Object.keys(contextComparison.actual)) ids.add(id);
+    if (contextComparison?.predicted) for (const id of Object.keys(contextComparison.predicted)) ids.add(id);
+
+    for (const id of ids) {
+      // Skills: prefer executed active_skills; fall back to suggested. Attach relevance from suggested.
+      const suggested = suggestedByStory.get(id);
+      const active = activeByStory.get(id) ?? [];
+      const skillNames = active.length > 0 ? active : (suggested ? Array.from(suggested.keys()) : []);
+      const skills = skillNames.map(name => ({
+        name,
+        relevance: suggested?.get(name)?.relevance ?? null,
+        reason: suggested?.get(name)?.reason ?? null,
+      }));
+
+      // Files: actual context files preferred; fall back to predicted injected files
+      const contextFiles = contextComparison?.actual?.[id]?.contextFiles
+        ?? contextComparison?.predicted?.[id]?.injectedFiles
+        ?? [];
+
+      const tokens = tokenByStory.get(id);
+      const info: StoryContextInfo = {
+        skills,
+        contextFiles,
+        inputTokens: tokens?.inputTokens ?? 0,
+        outputTokens: tokens?.outputTokens ?? 0,
+      };
+
+      // Only include stories that actually carry context data
+      if (info.skills.length > 0 || info.contextFiles.length > 0 || info.inputTokens > 0 || info.outputTokens > 0) {
+        map.set(id, info);
+      }
+    }
+
+    return map;
+  }, [specStories, dbStories, storyTokenBreakdown, contextComparison]);
+
   // US-008: Story completion markers are now injected server-side into run_output_chunks
   // by marker-injector.ts — they arrive via the chunk SSE stream and are replayed for late-joiners.
 
@@ -1452,6 +1527,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                     onStoryClick={useMultiPane ? undefined : (storyId) => terminalRef.current?.scrollToStory(storyId)}
                     parallelism={run.parallelism}
                     includeGraph={run.include_graph}
+                    storyContext={storyContextMap}
                   />
                 </div>
                 <RunMetadataPanel
@@ -1478,6 +1554,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
             }}
             parallelism={run.parallelism}
             includeGraph={run.include_graph}
+            storyContext={storyContextMap}
           />
         );
       case 'inspector':

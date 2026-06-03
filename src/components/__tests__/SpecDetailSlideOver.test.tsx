@@ -53,6 +53,79 @@ describe('parseContextSummary', () => {
       },
     });
   });
+
+  it('preserves the richer summary shape (layer titles, token sizes, injected files)', () => {
+    const summary = parseContextSummary({
+      context_summary_json: JSON.stringify({
+        directionLayers: {
+          l1: true,
+          l2: { present: true, domain: 'frontend' },
+          l3: true,
+          l1Title: 'Engineering Standards',
+          l2Title: 'React Conventions',
+          l3Title: 'Rorca Project',
+          l1Tokens: 1200,
+          l2Tokens: 800,
+          l3Tokens: 400,
+        },
+        skills: ['react', 'tailwind'],
+        memoryEntries: 3,
+        agentsMd: true,
+        template: 'feature',
+        schemaSnapshot: true,
+        gitMemory: true,
+        estimatedTokens: 5400,
+        modelContextWindow: 200000,
+        predictedFiles: ['src/App.tsx', 'src/main.tsx'],
+      }),
+    } as any);
+
+    // Standard-shaped payload passes through untouched, retaining the richer fields.
+    expect(summary).toMatchObject({
+      directionLayers: {
+        l1Title: 'Engineering Standards',
+        l2Title: 'React Conventions',
+        l3Title: 'Rorca Project',
+        l1Tokens: 1200,
+        l2Tokens: 800,
+        l3Tokens: 400,
+      },
+      predictedFiles: ['src/App.tsx', 'src/main.tsx'],
+    });
+  });
+
+  it('stays backward compatible with older flat contextUsed/meta payloads', () => {
+    // Older logs persisted only a contextUsed.meta blob without directionLayers.
+    const summary = parseContextSummary({
+      context_summary_json: JSON.stringify({
+        contextUsed: {
+          meta: {
+            standards: true,
+            conventions: false,
+            project: true,
+            schema: true,
+            totalTokens: 2048,
+          },
+        },
+      }),
+    } as any);
+
+    expect(summary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: false, domain: null },
+        l3: true,
+      },
+      schemaSnapshot: true,
+      estimatedTokens: 2048,
+    });
+  });
+
+  it('returns null for empty or unparseable context payloads', () => {
+    expect(parseContextSummary({ context_summary_json: '{}' } as any)).toBeNull();
+    expect(parseContextSummary({ context_summary_json: 'not json' } as any)).toBeNull();
+    expect(parseContextSummary({} as any)).toBeNull();
+  });
 });
 
 describe('getGenerationLogPresentation', () => {
