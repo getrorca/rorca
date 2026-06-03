@@ -17,6 +17,7 @@ import {
   buildFileNodeKey,
   buildSpecNodeKey,
   buildMemoryNodeKey,
+  buildMemoryRelationEdgeKey,
   buildConventionNodeKey,
   buildSkillNodeKey,
   normalizeGraphFilePath,
@@ -67,6 +68,18 @@ describe('Graph Canonical Key Identity (GI-003)', () => {
       expect(key1).toBe('convention:ws-1::tailwind');
       expect(key2).toBe('convention:ws-2::tailwind');
       expect(key1).not.toBe(key2);
+    });
+
+    it('buildMemoryRelationEdgeKey scopes by workspaceId and relation type', () => {
+      const key1 = buildMemoryRelationEdgeKey('ws-1', 'SUPERSEDES', '8', '3');
+      const key2 = buildMemoryRelationEdgeKey('ws-2', 'SUPERSEDES', '8', '3');
+      const key3 = buildMemoryRelationEdgeKey('ws-1', 'CONFLICTS_WITH', '3', '8');
+
+      expect(key1).toBe('memory-relation:ws-1::SUPERSEDES::8::3');
+      expect(key2).toBe('memory-relation:ws-2::SUPERSEDES::8::3');
+      expect(key3).toBe('memory-relation:ws-1::CONFLICTS_WITH::3::8');
+      expect(key1).not.toBe(key2);
+      expect(key1).not.toBe(key3);
     });
 
     it('buildSkillNodeKey scopes by source to prevent cross-source collisions', () => {

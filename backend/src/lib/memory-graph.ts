@@ -19,7 +19,7 @@ import {
 import { logger } from './logger';
 
 export type MemoryGraphNodeType = 'Memory' | 'Story' | 'Spec' | 'File';
-export type MemoryGraphEdgeType = 'ABOUT' | 'LEARNED_FROM' | 'FROM_SPEC' | 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON';
+export type MemoryGraphEdgeType = 'ABOUT' | 'LEARNED_FROM' | 'FROM_SPEC' | 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'SUPERSEDES' | 'CONFLICTS_WITH';
 export type MemoryGraphView = 'overview' | 'neighborhood';
 export type MemoryGraphUnavailableCode = 'AGE_NOT_AVAILABLE' | 'GRAPH_QUERY_FAILED';
 
@@ -147,6 +147,18 @@ interface StorySpecRow {
   specStatus: string | null;
 }
 
+interface MemoryRelationRow {
+  sourceMemoryId: string;
+  sourceCategory: string | null;
+  sourcePinned: boolean | null;
+  sourceCreatedAt: string | null;
+  targetMemoryId: string;
+  targetCategory: string | null;
+  targetPinned: boolean | null;
+  targetCreatedAt: string | null;
+  relationType: 'SUPERSEDES' | 'CONFLICTS_WITH';
+}
+
 const EDGE_TYPE_ORDER: MemoryGraphEdgeType[] = [
   'ABOUT',
   'LEARNED_FROM',
@@ -154,6 +166,8 @@ const EDGE_TYPE_ORDER: MemoryGraphEdgeType[] = [
   'TOUCHES',
   'BELONGS_TO',
   'DEPENDS_ON',
+  'SUPERSEDES',
+  'CONFLICTS_WITH',
 ];
 const NODE_TYPE_ORDER: MemoryGraphNodeType[] = ['Memory', 'Story', 'Spec', 'File'];
 
@@ -187,6 +201,8 @@ function emptyEdgeCounts(): Record<MemoryGraphEdgeType, number> {
     TOUCHES: 0,
     BELONGS_TO: 0,
     DEPENDS_ON: 0,
+    SUPERSEDES: 0,
+    CONFLICTS_WITH: 0,
   };
 }
 
@@ -357,8 +373,8 @@ async function cypherQuery<T = Record<string, unknown>>(
 
 function allocateEdgeBudgets(view: MemoryGraphView, edgeLimit: number): Record<MemoryGraphEdgeType, number> {
   const weights: Record<MemoryGraphEdgeType, number> = view === 'overview'
-    ? { ABOUT: 4, LEARNED_FROM: 4, FROM_SPEC: 2, TOUCHES: 4, BELONGS_TO: 2, DEPENDS_ON: 2 }
-    : { ABOUT: 3, LEARNED_FROM: 3, FROM_SPEC: 2, TOUCHES: 3, BELONGS_TO: 2, DEPENDS_ON: 3 };
+    ? { ABOUT: 4, LEARNED_FROM: 4, FROM_SPEC: 2, TOUCHES: 4, BELONGS_TO: 2, DEPENDS_ON: 2, SUPERSEDES: 3, CONFLICTS_WITH: 3 }
+    : { ABOUT: 3, LEARNED_FROM: 3, FROM_SPEC: 2, TOUCHES: 3, BELONGS_TO: 2, DEPENDS_ON: 3, SUPERSEDES: 3, CONFLICTS_WITH: 3 };
   const totalWeight = EDGE_TYPE_ORDER.reduce((sum, type) => sum + weights[type], 0);
   const budgets = EDGE_TYPE_ORDER.reduce((acc, type) => ({ ...acc, [type]: 0 }), {} as Record<MemoryGraphEdgeType, number>);
 
@@ -590,6 +606,44 @@ async function queryStorySpecs(workspaceId: string, storyIds: string[], limit: n
   );
 }
 
+async function queryMemoryRelations(
+  workspaceId: string,
+  memoryIds: string[],
+  relationType: 'SUPERSEDES' | 'CONFLICTS_WITH',
+  limit: number,
+): Promise<MemoryRelationRow[]> {
+  if (memoryIds.length === 0 || limit <= 0) return [];
+  return cypherQuery<MemoryRelationRow>(
+    `MATCH (source:Memory)-[r:${relationType}]->(target:Memory)
+     WHERE ${workspacePredicate('source', workspaceId)}
+       AND ${workspacePredicate('target', workspaceId)}
+       AND COALESCE(r.active, true) = true
+       AND (source.id IN ${stringList(memoryIds)} OR target.id IN ${stringList(memoryIds)})
+     RETURN DISTINCT source.id AS sourceMemoryId,
+                     source.category AS sourceCategory,
+                     COALESCE(source.pinned, false) AS sourcePinned,
+                     COALESCE(source.updated_at, source.created_at) AS sourceCreatedAt,
+                     target.id AS targetMemoryId,
+                     target.category AS targetCategory,
+                     COALESCE(target.pinned, false) AS targetPinned,
+                     COALESCE(target.updated_at, target.created_at) AS targetCreatedAt,
+                     '${relationType}' AS relationType
+     ORDER BY sourceMemoryId ASC, targetMemoryId ASC
+     LIMIT ${limit}`,
+    [
+      { name: 'sourceMemoryId', type: 'agtype' },
+      { name: 'sourceCategory', type: 'agtype' },
+      { name: 'sourcePinned', type: 'agtype' },
+      { name: 'sourceCreatedAt', type: 'agtype' },
+      { name: 'targetMemoryId', type: 'agtype' },
+      { name: 'targetCategory', type: 'agtype' },
+      { name: 'targetPinned', type: 'agtype' },
+      { name: 'targetCreatedAt', type: 'agtype' },
+      { name: 'relationType', type: 'agtype' },
+    ],
+  );
+}
+
 function addMemoryNodes(
   workspaceId: string,
   graph: ReturnType<typeof createAccumulator>,
@@ -608,6 +662,42 @@ function addMemoryNodes(
       pinned: row.pinned ?? false,
       createdAt: row.createdAt ?? null,
     });
+  }
+}
+
+function addRelatedMemoryNodes(
+  workspaceId: string,
+  graph: ReturnType<typeof createAccumulator>,
+  rows: MemoryRelationRow[],
+  selectedMemoryId: string | null,
+): void {
+  for (const row of rows) {
+    for (const memory of [
+      {
+        memoryId: row.sourceMemoryId,
+        category: row.sourceCategory,
+        pinned: row.sourcePinned,
+        createdAt: row.sourceCreatedAt,
+      },
+      {
+        memoryId: row.targetMemoryId,
+        category: row.targetCategory,
+        pinned: row.targetPinned,
+        createdAt: row.targetCreatedAt,
+      },
+    ]) {
+      graph.addNode({
+        id: buildMemoryNodeKey(workspaceId, memory.memoryId),
+        type: 'Memory',
+        entityId: memory.memoryId,
+        label: memory.memoryId,
+        workspaceId,
+        selected: selectedMemoryId ? memory.memoryId === selectedMemoryId : true,
+        category: memory.category ?? undefined,
+        pinned: memory.pinned ?? false,
+        createdAt: memory.createdAt ?? null,
+      });
+    }
   }
 }
 
@@ -674,6 +764,20 @@ function addFileNodes(
       selected: false,
       path: filePath,
     });
+  }
+}
+
+function addMemoryRelationEdges(
+  workspaceId: string,
+  graph: ReturnType<typeof createAccumulator>,
+  rows: MemoryRelationRow[],
+): void {
+  for (const row of rows) {
+    graph.addEdge(
+      row.relationType,
+      buildMemoryNodeKey(workspaceId, row.sourceMemoryId),
+      buildMemoryNodeKey(workspaceId, row.targetMemoryId),
+    );
   }
 }
 
@@ -771,6 +875,10 @@ async function buildGraph(
   const memoryStories = await queryMemoryStories(workspaceId, memoryIds, edgeBudgets.LEARNED_FROM);
   const memoryFiles = await queryMemoryFiles(workspaceId, memoryIds, edgeBudgets.ABOUT);
   const memorySpecs = await queryMemorySpecs(workspaceId, memoryIds, edgeBudgets.FROM_SPEC);
+  const supersedes = await queryMemoryRelations(workspaceId, memoryIds, 'SUPERSEDES', edgeBudgets.SUPERSEDES);
+  const conflicts = await queryMemoryRelations(workspaceId, memoryIds, 'CONFLICTS_WITH', edgeBudgets.CONFLICTS_WITH);
+
+  addRelatedMemoryNodes(workspaceId, graph, [...supersedes, ...conflicts], scope.memoryId);
 
   addStoryNodes(workspaceId, graph, memoryStories, (row) => ({
     storyId: (row as MemoryStoryRow).storyId,
@@ -805,6 +913,8 @@ async function buildGraph(
   }));
 
   addDirectEdges(workspaceId, graph, memoryStories, memoryFiles, memorySpecs);
+  addMemoryRelationEdges(workspaceId, graph, supersedes);
+  addMemoryRelationEdges(workspaceId, graph, conflicts);
   addStoryEdges(workspaceId, graph, storyFiles, storySpecs, dependencies);
 
   return buildSuccess(scope, caps, [...graph.nodes.values()], [...graph.edges.values()]);

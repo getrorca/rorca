@@ -452,6 +452,31 @@ export interface MemoryProjectionMetadata {
   updatedAt?: string | null;
 }
 
+export type MemoryRelationEdgeType = 'SUPERSEDES' | 'CONFLICTS_WITH';
+
+export interface MemoryRelationProjectionRow {
+  id: number | string;
+  workspace_id: string;
+  source_memory_id: number | string;
+  target_memory_id: number | string;
+  relation_type: MemoryRelationEdgeType;
+  canonical_key: string;
+  status: 'active' | 'superseded' | 'deleted';
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  restored_at: string | null;
+  superseded_at: string | null;
+  source_category: string | null;
+  source_pinned: boolean | null;
+  source_created_at: string | null;
+  source_updated_at: string | null;
+  target_category: string | null;
+  target_pinned: boolean | null;
+  target_created_at: string | null;
+  target_updated_at: string | null;
+}
+
 export interface SpecNode {
   id: string;
   title: string;
@@ -495,6 +520,15 @@ export function buildSpecNodeKey(workspaceId: string, specId: string): string {
 
 export function buildMemoryNodeKey(workspaceId: string, memoryId: string): string {
   return `memory:${workspaceId}::${memoryId}`;
+}
+
+export function buildMemoryRelationEdgeKey(
+  workspaceId: string,
+  relationType: MemoryRelationEdgeType,
+  sourceMemoryId: string,
+  targetMemoryId: string,
+): string {
+  return `memory-relation:${workspaceId}::${relationType}::${sourceMemoryId}::${targetMemoryId}`;
 }
 
 export function buildConventionNodeKey(workspaceId: string, conventionName: string): string {
@@ -661,6 +695,74 @@ export async function addMemorySourceSpec(
   logger.debug({ memoryId, specId, workspaceId }, '[knowledge-graph] Memory-from-spec edge added');
 }
 
+function cypherNullableString(value: string | null | undefined): string {
+  return value ? `'${escCypher(value)}'` : 'NULL';
+}
+
+/**
+ * Upsert a first-class memory-to-memory relation edge from relational truth.
+ * The edge key is deterministic and workspace-scoped so replays are idempotent.
+ * Lifecycle fields mirror Postgres so active, superseded, deleted, and restored
+ * states remain auditable in the derived graph view.
+ */
+export async function upsertMemoryRelationProjection(
+  row: MemoryRelationProjectionRow,
+): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
+  const workspaceId = row.workspace_id;
+  const sourceMemoryId = String(row.source_memory_id);
+  const targetMemoryId = String(row.target_memory_id);
+  const relationType = row.relation_type;
+  const edgeKey = row.canonical_key || buildMemoryRelationEdgeKey(
+    workspaceId,
+    relationType,
+    sourceMemoryId,
+    targetMemoryId,
+  );
+
+  const sourceCreatedAt = escCypher(row.source_created_at || row.created_at || CYPHER_NOW_PLACEHOLDER);
+  const sourceUpdatedAt = escCypher(row.source_updated_at || row.updated_at || row.created_at || CYPHER_NOW_PLACEHOLDER);
+  const targetCreatedAt = escCypher(row.target_created_at || row.created_at || CYPHER_NOW_PLACEHOLDER);
+  const targetUpdatedAt = escCypher(row.target_updated_at || row.updated_at || row.created_at || CYPHER_NOW_PLACEHOLDER);
+  const active = row.status === 'active' ? 'true' : 'false';
+
+  const cypher = `
+    MERGE (source:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, sourceMemoryId))}'})
+    ON CREATE SET source.created_at = '${sourceCreatedAt}'
+    SET source.id = '${escCypher(sourceMemoryId)}',
+        source.category = COALESCE(source.category, '${escCypher(row.source_category || '')}'),
+        source.workspaceId = '${escCypher(workspaceId)}',
+        source.workspace_id = '${escCypher(workspaceId)}',
+        source.updated_at = '${sourceUpdatedAt}',
+        source.pinned = ${row.source_pinned ? 'true' : 'false'}
+    MERGE (target:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, targetMemoryId))}'})
+    ON CREATE SET target.created_at = '${targetCreatedAt}'
+    SET target.id = '${escCypher(targetMemoryId)}',
+        target.category = COALESCE(target.category, '${escCypher(row.target_category || '')}'),
+        target.workspaceId = '${escCypher(workspaceId)}',
+        target.workspace_id = '${escCypher(workspaceId)}',
+        target.updated_at = '${targetUpdatedAt}',
+        target.pinned = ${row.target_pinned ? 'true' : 'false'}
+    MERGE (source)-[r:${relationType} {key: '${escCypher(edgeKey)}'}]->(target)
+    SET r.key = '${escCypher(edgeKey)}',
+        r.relationId = '${escCypher(String(row.id))}',
+        r.relationType = '${escCypher(relationType)}',
+        r.workspaceId = '${escCypher(workspaceId)}',
+        r.workspace_id = '${escCypher(workspaceId)}',
+        r.status = '${escCypher(row.status)}',
+        r.active = ${active},
+        r.created_at = '${escCypher(row.created_at)}',
+        r.updated_at = '${escCypher(row.updated_at)}',
+        r.deleted_at = ${cypherNullableString(row.deleted_at)},
+        r.restored_at = ${cypherNullableString(row.restored_at)},
+        r.superseded_at = ${cypherNullableString(row.superseded_at)}
+  `;
+
+  await cypherMutate(cypher);
+  logger.debug({ relationId: row.id, relationType, workspaceId, edgeKey }, '[knowledge-graph] Memory relation projection upserted');
+}
+
 /**
  * Link a Convention to a File pattern it governs.
  * PG-019: No-op if AGE is unavailable.
@@ -816,7 +918,7 @@ export async function addStoryDependency(storyId: string, dependsOnId: string, s
 // ── Query Operations ────────────────────────────────────────────────────────
 
 export type NodeType = 'Story' | 'File' | 'Memory' | 'Spec' | 'Convention' | 'Workspace' | 'Skill';
-export type EdgeType = 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'LEARNED_FROM' | 'ABOUT' | 'APPLIES_TO' | 'VIOLATED_BY' | 'USED_IN' | 'IN_WORKSPACE' | 'FROM_SPEC';
+export type EdgeType = 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'LEARNED_FROM' | 'ABOUT' | 'APPLIES_TO' | 'VIOLATED_BY' | 'USED_IN' | 'IN_WORKSPACE' | 'FROM_SPEC' | MemoryRelationEdgeType;
 
 export interface CypherResult {
   id: unknown;

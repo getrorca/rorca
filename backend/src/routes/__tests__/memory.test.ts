@@ -51,6 +51,27 @@ afterAll(async () => {
   delete process.env.NODE_ENV;
 });
 
+async function insertMemory(overrides: Partial<{
+  workspaceId: string;
+  category: string;
+  content: string;
+  sourceStoryId: string | null;
+}> = {}): Promise<number> {
+  const row = await queryOne<{ id: number }>(
+    `INSERT INTO memories (workspace_id, category, content, source_story_id, confidence, related_files, source_type, source)
+     VALUES ($1, $2, $3, $4, 'high', '[]'::jsonb, 'manual', 'test-suite')
+     RETURNING id`,
+    [
+      overrides.workspaceId ?? workspaceId,
+      overrides.category ?? 'Decision',
+      overrides.content ?? `Memory ${Date.now()}`,
+      overrides.sourceStoryId ?? null,
+    ],
+  );
+
+  return Number(row!.id);
+}
+
 // ─── GET /api/memory ──────────────────────────────────────────────────────
 
 describe('GET /api/memory', () => {
@@ -275,7 +296,7 @@ describe('GET /api/memory/graph endpoints', () => {
         nodeCount: 0,
         edgeCount: 0,
         countsByType: { Memory: 0, Story: 0, Spec: 0, File: 0 },
-        countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 0, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0 },
+        countsByEdgeType: { ABOUT: 0, LEARNED_FROM: 0, FROM_SPEC: 0, TOUCHES: 0, BELONGS_TO: 0, DEPENDS_ON: 0, SUPERSEDES: 0, CONFLICTS_WITH: 0 },
         caps: { memories: 12, stories: 18, files: 24, specs: 8, edges: 72, dependencies: 8 },
         truncated: { nodes: false, edges: false },
       },
@@ -301,5 +322,135 @@ describe('GET /api/memory/graph endpoints', () => {
     expect(res.body.available).toBe(false);
     expect(res.body.code).toBe('AGE_NOT_AVAILABLE');
     spy.mockRestore();
+  });
+});
+
+// ─── /api/memory/relations ───────────────────────────────────────────────
+
+describe('memory ontology relation routes', () => {
+  test('creates a canonical CONFLICTS_WITH relation, suppresses duplicates, and exposes semantics', async () => {
+    const memoryA = await insertMemory({ content: 'A: Prefer local-first auth defaults.' });
+    const memoryB = await insertMemory({ content: 'B: External auth redirect is required.' });
+
+    const first = await request(app)
+      .post('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId,
+        sourceMemoryId: memoryB,
+        targetMemoryId: memoryA,
+        relationType: 'CONFLICTS_WITH',
+        note: 'Conflicting deployment assumptions.',
+      });
+
+    expect(first.status).toBe(201);
+    expect(first.body.relation.relationType).toBe('CONFLICTS_WITH');
+    expect(first.body.relation.sourceMemoryId).toBe(Math.min(memoryA, memoryB));
+    expect(first.body.relation.targetMemoryId).toBe(Math.max(memoryA, memoryB));
+    expect(first.body.relation.canonicalKey).toContain(`memory-relation:${workspaceId}::CONFLICTS_WITH::${Math.min(memoryA, memoryB)}::${Math.max(memoryA, memoryB)}`);
+    expect(first.body.semantics.summary).toMatch(/cannot both be applied/i);
+
+    const second = await request(app)
+      .post('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId,
+        sourceMemoryId: memoryA,
+        targetMemoryId: memoryB,
+        relationType: 'CONFLICTS_WITH',
+      });
+
+    expect(second.status).toBe(201);
+    expect(second.body.relation.id).toBe(first.body.relation.id);
+
+    const countRow = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM memory_relations WHERE workspace_id = $1 AND relation_type = 'CONFLICTS_WITH'`,
+      [workspaceId],
+    );
+    expect(Number(countRow!.cnt)).toBe(1);
+
+    const listRes = await request(app)
+      .get('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .query({ workspaceId, memoryId: memoryA });
+
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.items).toHaveLength(1);
+    expect(listRes.body.items[0].semantics.summary).toMatch(/cannot both be applied/i);
+  });
+
+  test('tracks deleted, restored, and superseded relation lifecycle states', async () => {
+    const newerMemory = await insertMemory({ content: 'New: Use scoped relation keys for replay safety.' });
+    const olderMemory = await insertMemory({ content: 'Old: Use raw relation labels without canonical keys.' });
+
+    const created = await request(app)
+      .post('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId,
+        sourceMemoryId: newerMemory,
+        targetMemoryId: olderMemory,
+        relationType: 'SUPERSEDES',
+      });
+
+    expect(created.status).toBe(201);
+    const relationId = created.body.relation.id as number;
+
+    const deleted = await request(app)
+      .patch(`/api/memory/relations/${relationId}`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId, status: 'deleted' });
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.relation.status).toBe('deleted');
+    expect(deleted.body.relation.deletedAt).toBeTruthy();
+
+    const restored = await request(app)
+      .patch(`/api/memory/relations/${relationId}`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId, status: 'active' });
+    expect(restored.status).toBe(200);
+    expect(restored.body.relation.status).toBe('active');
+    expect(restored.body.relation.restoredAt).toBeTruthy();
+
+    const superseded = await request(app)
+      .patch(`/api/memory/relations/${relationId}`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId, status: 'superseded' });
+    expect(superseded.status).toBe(200);
+    expect(superseded.body.relation.status).toBe('superseded');
+    expect(superseded.body.relation.supersededAt).toBeTruthy();
+
+    const inactiveList = await request(app)
+      .get('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .query({ workspaceId, includeInactive: true });
+    expect(inactiveList.status).toBe(200);
+    expect(inactiveList.body.items.some((item: { id: number; status: string }) => item.id === relationId && item.status === 'superseded')).toBe(true);
+  });
+
+  test('rejects cross-workspace memory relations', async () => {
+    const localMemory = await insertMemory({ content: 'Local memory.' });
+    const foreignWorkspaceId = `ws-memory-foreign-${Date.now()}`;
+    await execute(
+      `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
+      [foreignWorkspaceId, 'Foreign Memory Workspace', tmpDir],
+    );
+    const foreignMemory = await insertMemory({
+      workspaceId: foreignWorkspaceId,
+      content: 'Foreign memory.',
+    });
+
+    const res = await request(app)
+      .post('/api/memory/relations')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId,
+        sourceMemoryId: localMemory,
+        targetMemoryId: foreignMemory,
+        relationType: 'SUPERSEDES',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/single workspace/i);
   });
 });
