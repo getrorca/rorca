@@ -423,6 +423,11 @@ function SpecDetailContent({
   const [enrichState, setEnrichState] = useState<'idle' | 'enriching'>('idle');
   const [enrichRefreshKey, setEnrichRefreshKey] = useState(0);
 
+  // Above-the-fold context summary — parsed from the latest generation log so
+  // context usage is visible without opening the Context tab. Null when no
+  // persisted context exists yet (older specs predate context logging).
+  const [headlineContext, setHeadlineContext] = useState<ContextSummary | null>(null);
+
   // Approve/Reject
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -475,6 +480,22 @@ function SpecDetailContent({
 
   // Reset tab on spec change
   useEffect(() => { setActiveTab(initialTab ?? 'stories'); }, [specId, initialTab]);
+
+  // Fetch the latest generation log so the context summary can be surfaced
+  // above the fold. Re-runs after enrichment so the headline reflects the
+  // richer summary. Tolerates older logs that lack a parseable summary.
+  useEffect(() => {
+    if (!specId) return;
+    let cancelled = false;
+    apiFetch<GenerationLog | { logs: GenerationLog[] }>(`/api/specs/${specId}/generation-log`)
+      .then(res => {
+        if (cancelled) return;
+        const latest = 'logs' in res ? res.logs[0] : res;
+        setHeadlineContext(latest ? parseContextSummary(latest) : null);
+      })
+      .catch(() => { if (!cancelled) setHeadlineContext(null); });
+    return () => { cancelled = true; };
+  }, [specId, enrichRefreshKey]);
 
   // Check if workspace has an active run (so we can show Queue button upfront)
   useEffect(() => {
@@ -640,6 +661,24 @@ function SpecDetailContent({
     return seen.size;
   }, [stories]);
 
+  // Skill relevance details for the above-the-fold context card — derived from
+  // story suggestedSkills (max relevance per unique name).
+  const headlineSkillDetails = useMemo(() => {
+    const toSkill = (raw: unknown): SuggestedSkill =>
+      typeof raw === 'string' ? { name: raw } : (raw as SuggestedSkill);
+    const map = new Map<string, SuggestedSkill>();
+    for (const story of stories) {
+      for (const raw of ((story as any).suggestedSkills ?? [])) {
+        const sk = toSkill(raw);
+        const existing = map.get(sk.name);
+        if (!existing || (sk.relevance ?? 0) > (existing.relevance ?? 0)) {
+          map.set(sk.name, sk);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [stories]);
+
   const tabs: { id: PreviewTab; label: string; badge?: string; icon?: typeof History }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
     { id: 'history', label: 'History', icon: History },
@@ -733,6 +772,18 @@ function SpecDetailContent({
         <div className="flex-1 flex items-center justify-center text-muted text-sm">Failed to load spec detail</div>
       ) : (
         <>
+          {/* Above-the-fold context summary — visible regardless of active tab
+              whenever persisted context exists, so users see direction layers,
+              skill relevance, and injected files without opening the Context tab. */}
+          {headlineContext && (
+            <div className="px-4 pt-3 pb-1 shrink-0 border-b border-border">
+              <ContextSummaryCard
+                summary={headlineContext}
+                skillDetails={headlineSkillDetails.length > 0 ? headlineSkillDetails : undefined}
+              />
+            </div>
+          )}
+
           {/* Tab strip */}
           <div role="tablist" className="flex border-b border-border shrink-0 overflow-x-auto">
             {tabs.map(tab => (
