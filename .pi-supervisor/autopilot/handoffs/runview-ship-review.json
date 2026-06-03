@@ -1,0 +1,25 @@
+{
+  "phase_id": "runview-ship-review",
+  "cycle": 5,
+  "summary": "Final regression sweep passed after the run-view redesign. Validators remained green and no forbidden terminal-ownership patterns were introduced.",
+  "done": true,
+  "confidence": 0.95,
+  "files_changed": [
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts"
+  ],
+  "validations_attempted": [
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "python3 scripts/validate_rorca_runview_target.py",
+    "npx tsc --noEmit",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "validations_passed": [
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "python3 scripts/validate_rorca_runview_target.py",
+    "npx tsc --noEmit",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "known_bugs": [],
+  "remaining_work": [],
+  "notes": "Manual finalization after repeated automation artifact timeouts with otherwise green validators."
+}

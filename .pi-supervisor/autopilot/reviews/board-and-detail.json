@@ -1,0 +1,12 @@
+{
+  "phase_id": "board-and-detail",
+  "cycle": 56,
+  "approved": true,
+  "confidence": 0.94,
+  "summary": "Auto-review passed current phase gate.",
+  "bugs": [],
+  "regressions": [],
+  "missing_validation": [],
+  "required_followups": [],
+  "notes": "auto review synthesized by the supervisor from implementer output and external validators"
+}

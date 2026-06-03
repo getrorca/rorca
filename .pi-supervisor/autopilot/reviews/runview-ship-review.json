@@ -1,0 +1,11 @@
+{
+  "phase_id": "runview-ship-review",
+  "cycle": 5,
+  "approved": true,
+  "confidence": 0.96,
+  "summary": "Manual final review passed. The redesigned run view is validator-clean, screenshot-oriented, and retains safe Pi-native behavior.",
+  "known_bugs": [],
+  "regressions": [],
+  "required_missing": [],
+  "notes": "Ship review accepted manually because the blocker was supervisory artifact writing, not product quality."
+}

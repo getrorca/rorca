@@ -1,0 +1,50 @@
+{
+  "name": "Rorca Run View Redesign Autopilot",
+  "masterGoalFile": ".pi-supervisor/autopilot/runview-redesign-master-goal.md",
+  "minimumConfidence": 0.92,
+  "stabilityPasses": 2,
+  "commonValidators": [
+    "npx tsc --noEmit",
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "python3 scripts/validate_rorca_runview_target.py",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "globalRequiredFiles": [
+    "~/.pi/agent/extensions/rorca/tui/shared.ts",
+    "~/.pi/agent/extensions/rorca/tui/run-view.ts"
+  ],
+  "phases": [
+    {
+      "id": "runview-redesign",
+      "title": "Make the Pi-native run cockpit look and feel much closer to the approved screenshot",
+      "goalFile": ".pi-supervisor/autopilot/goals/07-runview-redesign.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/clipboard-2026-05-06-200736-0B0BEC36.png",
+        "/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/clipboard-2026-05-06-200809-7FAB1CAB.png",
+        "~/.pi/agent/extensions/rorca/tui/shared.ts"
+      ],
+      "stabilityPasses": 2,
+      "minimumConfidence": 0.92
+    },
+    {
+      "id": "runview-ship-review",
+      "title": "Final review and regression sweep for the run-view redesign",
+      "goalFile": ".pi-supervisor/autopilot/goals/08-runview-ship-review.md",
+      "requiredFiles": [
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/shared.ts"
+      ],
+      "mustReadFirst": [
+        "~/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "~/.pi/agent/extensions/rorca/tui/shared.ts",
+        ".pi-supervisor/autopilot/goals/07-runview-redesign.md"
+      ],
+      "stabilityPasses": 3,
+      "minimumConfidence": 0.95
+    }
+  ]
+}
