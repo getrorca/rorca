@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback, useRef, useMemo, type ReactNode } fro
 import { AlertTriangle, BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, type MemoryAnalyticsDrilldown } from '../lib/memoryAnalyticsDrilldown';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -2080,6 +2081,8 @@ export default function MemoryPanel() {
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewBusyKey, setReviewBusyKey] = useState<string | null>(null);
+  const [analyticsDrilldown, setAnalyticsDrilldown] = useState<MemoryAnalyticsDrilldown | null>(null);
+  const [analyticsDrilldownActive, setAnalyticsDrilldownActive] = useState(false);
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -2120,6 +2123,39 @@ export default function MemoryPanel() {
     setReviewLoading(false);
     setReviewError(null);
     setReviewBusyKey(null);
+    setAnalyticsDrilldown(null);
+    setAnalyticsDrilldownActive(false);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      setAnalyticsDrilldown(null);
+      setAnalyticsDrilldownActive(false);
+      return;
+    }
+
+    try {
+      const raw = sessionStorage.getItem(MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY);
+      if (!raw) {
+        setAnalyticsDrilldown(null);
+        setAnalyticsDrilldownActive(false);
+        return;
+      }
+
+      const parsed = JSON.parse(raw) as MemoryAnalyticsDrilldown;
+      if (parsed?.source !== 'ontology-health' || parsed.workspaceId !== workspaceId) {
+        setAnalyticsDrilldown(null);
+        setAnalyticsDrilldownActive(false);
+        return;
+      }
+
+      setAnalyticsDrilldown(parsed);
+      setAnalyticsDrilldownActive(true);
+      setViewMode('split');
+    } catch {
+      setAnalyticsDrilldown(null);
+      setAnalyticsDrilldownActive(false);
+    }
   }, [workspaceId]);
 
   const fetchItems = useCallback(async () => {
@@ -2209,10 +2245,24 @@ export default function MemoryPanel() {
     void fetchOverviewGraph();
   }, [fetchOverviewGraph, shouldShowGraph]);
 
-  const filteredItems = useMemo(
+  const sourceTypeFilteredItems = useMemo(
     () => (filterSourceType ? items.filter((item) => (item.sourceType ?? 'manual') === filterSourceType) : items),
     [items, filterSourceType],
   );
+
+  const filteredItems = useMemo(() => {
+    if (!analyticsDrilldownActive || !analyticsDrilldown) return sourceTypeFilteredItems;
+
+    const memoryIdSet = new Set(analyticsDrilldown.memoryIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0));
+    const specIdSet = new Set(analyticsDrilldown.specIds.filter((value) => value.trim().length > 0));
+    const filePathSet = new Set(analyticsDrilldown.filePaths.filter((value) => value.trim().length > 0));
+
+    return sourceTypeFilteredItems.filter((item) => {
+      if (memoryIdSet.has(item.id)) return true;
+      if (item.sourceSpecId && specIdSet.has(item.sourceSpecId)) return true;
+      return item.relatedFiles.some((file) => filePathSet.has(file));
+    });
+  }, [analyticsDrilldown, analyticsDrilldownActive, sourceTypeFilteredItems]);
 
   useEffect(() => {
     setSelectedMemoryId((current) => {
@@ -2470,6 +2520,12 @@ export default function MemoryPanel() {
     return acc;
   }, {});
 
+  const analyticsDrilldownCounts = useMemo(() => ({
+    memories: analyticsDrilldown?.memoryIds.length ?? 0,
+    specs: analyticsDrilldown?.specIds.length ?? 0,
+    files: analyticsDrilldown?.filePaths.length ?? 0,
+  }), [analyticsDrilldown]);
+
   const currentRunCount = recentRunIds.length > 0 ? filteredItems.filter((item) => item.sourceRunId === recentRunIds[0]).length : 0;
   const memoryById = useMemo(() => new Map(items.map((item) => [String(item.id), item])), [items]);
   const explainabilityByMemory = useMemo(() => buildMemoryExplainabilityMap(relations), [relations]);
@@ -2539,6 +2595,43 @@ export default function MemoryPanel() {
             )}
             {currentRunCount > 0 && <span className="text-cyan-500">{currentRunCount} this run</span>}
           </div>
+
+          {analyticsDrilldown && (
+            <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-3 text-xs text-[var(--text)]">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-semibold">Analytics drill-down: {analyticsDrilldown.label}</p>
+                  <p className="mt-1 max-w-3xl leading-relaxed text-[var(--text)]/80">{analyticsDrilldown.description}</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-cyan-100/90">
+                    {analyticsDrilldownCounts.memories > 0 && <span className="rounded-full border border-cyan-400/30 px-2 py-0.5">{analyticsDrilldownCounts.memories} memories</span>}
+                    {analyticsDrilldownCounts.specs > 0 && <span className="rounded-full border border-cyan-400/30 px-2 py-0.5">{analyticsDrilldownCounts.specs} specs</span>}
+                    {analyticsDrilldownCounts.files > 0 && <span className="rounded-full border border-cyan-400/30 px-2 py-0.5">{analyticsDrilldownCounts.files} files</span>}
+                    <span className="rounded-full border border-cyan-400/30 px-2 py-0.5">{analyticsDrilldownActive ? `${filteredItems.length} in focus` : 'Focus cleared'}</span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAnalyticsDrilldownActive((current) => !current)}
+                    className="rounded-md border border-cyan-400/30 px-2.5 py-1 text-[11px] font-medium text-cyan-100 transition-colors hover:bg-cyan-500/10"
+                  >
+                    {analyticsDrilldownActive ? 'Show all memories' : 'Refocus drill-down'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sessionStorage.removeItem(MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY);
+                      setAnalyticsDrilldown(null);
+                      setAnalyticsDrilldownActive(false);
+                    }}
+                    className="rounded-md border border-cyan-400/30 px-2.5 py-1 text-[11px] font-medium text-cyan-100 transition-colors hover:bg-cyan-500/10"
+                  >
+                    Clear drill-down
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative min-w-[180px] flex-1">

@@ -6,10 +6,12 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle, ShieldCheck, ChevronDown, ChevronRight, Loader2, Network, Braces, Search, Zap } from 'lucide-react';
+import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle, ShieldCheck, ChevronDown, ChevronRight, Loader2, Network, Braces, Search, Zap, GitMerge, Flame, History, ArrowRight } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { BASE_URL, apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useAppNavigate } from '../routes';
+import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, type MemoryAnalyticsDrilldown, type MemoryAnalyticsDrilldownMetric } from '../lib/memoryAnalyticsDrilldown';
 
 interface HealthBasic {
   status: string;
@@ -73,6 +75,101 @@ interface DriftReportResponse {
   report: DriftReport;
 }
 
+interface OntologyMetricReference {
+  memoryIds: number[];
+  specIds: string[];
+  filePaths: string[];
+}
+
+interface OntologyConflictItem extends OntologyMetricReference {
+  relationId: number;
+  relationType: 'CONFLICTS_WITH';
+  status: 'active' | 'superseded' | 'deleted';
+  updatedAt: string;
+  sourceMemoryId: number;
+  targetMemoryId: number;
+  sourceCategory: string;
+  targetCategory: string;
+  sourceContent: string;
+  targetContent: string;
+  sourceSpecId: string | null;
+  targetSpecId: string | null;
+  sourceStoryId: string | null;
+  targetStoryId: string | null;
+  sourceFiles: string[];
+  targetFiles: string[];
+}
+
+interface OntologySupersededItem extends OntologyMetricReference {
+  relationId: number;
+  relationType: 'SUPERSEDES';
+  status: 'active' | 'superseded' | 'deleted';
+  updatedAt: string;
+  memoryId: number;
+  supersededByMemoryId: number;
+  category: string;
+  content: string;
+  supersedingCategory: string;
+  supersedingContent: string;
+  sourceSpecId: string | null;
+  supersedingSpecId: string | null;
+  sourceStoryId: string | null;
+  supersedingStoryId: string | null;
+  relatedFiles: string[];
+  supersedingFiles: string[];
+}
+
+interface OntologyHotspotItem extends OntologyMetricReference {
+  scopeType: 'file' | 'spec';
+  key: string;
+  label: string;
+  memoryCount: number;
+  conflictCount: number;
+  supersededCount: number;
+  lastTouchedAt: string | null;
+  sampleMemoryIds: number[];
+}
+
+interface OntologyActivityItem extends OntologyMetricReference {
+  kind: 'review' | 'relation';
+  at: string;
+  action: string;
+  summary: string;
+  relationType?: 'SUPERSEDES' | 'CONFLICTS_WITH';
+  status?: 'active' | 'superseded' | 'deleted';
+}
+
+interface OntologyHealthResponse {
+  available: boolean;
+  dataAvailable: boolean;
+  workspaceId: string;
+  ageAvailable: boolean;
+  mode: string;
+  reason: string | null;
+  emptyReason: string | null;
+  bounds: {
+    relationLimit: number;
+    hotspotMemoryWindow: number;
+    hotspotResultLimit: number;
+    activityLimit: number;
+    activityWindowDays: number;
+  };
+  summary: {
+    activeConflictCount: number;
+    supersededMemoryCount: number;
+    hotspotDensityPct: number;
+    hotspotCount: number;
+    densestHotspot: OntologyHotspotItem | null;
+    recentCurationCount: number;
+  };
+  drilldowns: {
+    conflicts: { total: number; truncated: boolean; items: OntologyConflictItem[] };
+    superseded: { total: number; truncated: boolean; items: OntologySupersededItem[] };
+    hotspots: { total: number; truncated: boolean; items: OntologyHotspotItem[]; files: OntologyHotspotItem[]; specs: OntologyHotspotItem[] };
+    recentCuration: { total: number; truncated: boolean; items: OntologyActivityItem[] };
+  };
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -104,8 +201,19 @@ function formatRelativeTime(iso: string): string {
   return `${days}d ago`;
 }
 
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values.filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
+}
+
+type OntologyMetricKey = MemoryAnalyticsDrilldownMetric;
+
 export default function HealthDashboardPanel() {
   const { workspaceId } = useWorkspace();
+  const navigateTo = useAppNavigate();
   const [health, setHealth] = useState<HealthDetailed | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -121,6 +229,11 @@ export default function HealthDashboardPanel() {
   // SW-009: Semantic engine state
   const [semantic, setSemantic] = useState<SemanticStats | null>(null);
   const [backfilling, setBackfilling] = useState(false);
+
+  const [ontology, setOntology] = useState<OntologyHealthResponse | null>(null);
+  const [ontologyLoading, setOntologyLoading] = useState(false);
+  const [ontologyError, setOntologyError] = useState<string | null>(null);
+  const [selectedOntologyMetric, setSelectedOntologyMetric] = useState<OntologyMetricKey>('conflicts');
 
   const fetchHealth = useCallback(async () => {
     try {
@@ -162,13 +275,38 @@ export default function HealthDashboardPanel() {
     }
   }, []);
 
+  const fetchOntologyHealth = useCallback(async () => {
+    if (!workspaceId) {
+      setOntology(null);
+      setOntologyError(null);
+      return;
+    }
+
+    setOntologyLoading(true);
+    try {
+      const data = await apiFetch<OntologyHealthResponse>(`/api/analytics/ontology-health?workspace_id=${encodeURIComponent(workspaceId)}`);
+      setOntology(data);
+      setOntologyError(null);
+    } catch (error) {
+      setOntology(null);
+      setOntologyError(error instanceof Error ? error.message : 'Ontology health unavailable right now.');
+    } finally {
+      setOntologyLoading(false);
+    }
+  }, [workspaceId]);
+
+  const refreshPanel = useCallback(() => {
+    void fetchHealth();
+    void fetchOntologyHealth();
+  }, [fetchHealth, fetchOntologyHealth]);
+
   useEffect(() => {
-    fetchHealth();
-    timerRef.current = setInterval(fetchHealth, pollInterval * 1000);
+    refreshPanel();
+    timerRef.current = setInterval(refreshPanel, pollInterval * 1000);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [fetchHealth, pollInterval]);
+  }, [pollInterval, refreshPanel]);
 
   // Fetch latest drift report on mount and when workspace changes
   const fetchDriftReport = useCallback(async () => {
@@ -220,6 +358,10 @@ export default function HealthDashboardPanel() {
     fetchSemantic();
   }, [fetchSemantic]);
 
+  useEffect(() => {
+    setSelectedOntologyMetric('conflicts');
+  }, [workspaceId]);
+
   const handleBackfill = useCallback(async () => {
     if (!workspaceId) return;
     setBackfilling(true);
@@ -240,6 +382,59 @@ export default function HealthDashboardPanel() {
 
   const statusColor = health?.status === 'healthy' ? 'text-green-400' : health?.status === 'degraded' ? 'text-yellow-400' : 'text-red-400';
   const statusBg = health?.status === 'healthy' ? 'bg-green-500/10 border-green-500/30' : health?.status === 'degraded' ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-red-500/10 border-red-500/30';
+
+  const drilldownConfig = ontology ? {
+    conflicts: {
+      title: 'Active conflicts',
+      description: 'Active conflicts are contradiction records that need arbitration — they are not ordinary graph connectivity.',
+      label: 'Active conflicts',
+      memoryIds: uniqueNumbers(ontology.drilldowns.conflicts.items.flatMap((item) => item.memoryIds)),
+      specIds: uniqueStrings(ontology.drilldowns.conflicts.items.flatMap((item) => item.specIds)),
+      filePaths: uniqueStrings(ontology.drilldowns.conflicts.items.flatMap((item) => item.filePaths)),
+    },
+    superseded: {
+      title: 'Superseded memories',
+      description: 'Supersession is healthy when it retires older guidance on purpose; repeated turnover in the same scopes can signal churn.',
+      label: 'Superseded memories',
+      memoryIds: uniqueNumbers(ontology.drilldowns.superseded.items.flatMap((item) => item.memoryIds)),
+      specIds: uniqueStrings(ontology.drilldowns.superseded.items.flatMap((item) => item.specIds)),
+      filePaths: uniqueStrings(ontology.drilldowns.superseded.items.flatMap((item) => item.filePaths)),
+    },
+    hotspots: {
+      title: 'Hotspot density',
+      description: 'Density highlights where ontology pressure is clustering across files and specs inside the bounded recent-memory window.',
+      label: 'Hotspot density',
+      memoryIds: uniqueNumbers(ontology.drilldowns.hotspots.items.flatMap((item) => item.sampleMemoryIds)),
+      specIds: uniqueStrings(ontology.drilldowns.hotspots.items.filter((item) => item.scopeType === 'spec').map((item) => item.key)),
+      filePaths: uniqueStrings(ontology.drilldowns.hotspots.items.filter((item) => item.scopeType === 'file').map((item) => item.key)),
+    },
+    recentCuration: {
+      title: 'Recent curation activity',
+      description: `Recent curation combines review actions and relation edits from the last ${ontology.bounds.activityWindowDays} days.`,
+      label: 'Recent curation activity',
+      memoryIds: uniqueNumbers(ontology.drilldowns.recentCuration.items.flatMap((item) => item.memoryIds)),
+      specIds: uniqueStrings(ontology.drilldowns.recentCuration.items.flatMap((item) => item.specIds)),
+      filePaths: uniqueStrings(ontology.drilldowns.recentCuration.items.flatMap((item) => item.filePaths)),
+    },
+  } : null;
+
+  const handleOpenMemoryDrilldown = (metric: OntologyMetricKey) => {
+    if (!workspaceId || !drilldownConfig) return;
+    const selection = drilldownConfig[metric];
+    const payload: MemoryAnalyticsDrilldown = {
+      source: 'ontology-health',
+      workspaceId,
+      metric,
+      label: selection.label,
+      description: selection.description,
+      memoryIds: selection.memoryIds,
+      specIds: selection.specIds,
+      filePaths: selection.filePaths,
+      createdAt: new Date().toISOString(),
+    };
+    sessionStorage.setItem(MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, JSON.stringify(payload));
+    navigateTo('direction');
+  };
 
   return (
     <div
@@ -265,7 +460,7 @@ export default function HealthDashboardPanel() {
             <option value={60}>60s</option>
           </select>
           <button
-            onClick={fetchHealth}
+            onClick={refreshPanel}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-accent/10 text-accent rounded text-sm hover:bg-accent/20 transition-colors"
           >
             <RefreshCw size={14} />
@@ -486,6 +681,195 @@ export default function HealthDashboardPanel() {
                   </span>
                 </div>
               </div>
+            </div>
+          )}
+
+          {workspaceId && (
+            <div className="bg-panel border border-border rounded-lg p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <GitMerge size={16} className="text-accent" />
+                    <h2 className="text-sm font-semibold">Ontology Health</h2>
+                    {ontology && (
+                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${ontology.ageAvailable ? 'bg-green-500/15 text-green-400' : 'bg-amber-500/15 text-amber-400'}`}>
+                        {ontology.ageAvailable ? 'Graph-aware' : 'SQL fallback'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-muted max-w-3xl">
+                    Conflict pressure, healthy supersession, hotspot density, and recent governance actions for the workspace memory ontology.
+                  </p>
+                </div>
+                {ontology?.reason && (
+                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-400">
+                    {ontology.reason}
+                  </span>
+                )}
+              </div>
+
+              {ontologyLoading && !ontology ? (
+                <div className="flex items-center gap-2 text-sm text-muted py-6">
+                  <Loader2 size={14} className="animate-spin" />
+                  Loading ontology health…
+                </div>
+              ) : ontologyError ? (
+                <div className="rounded-lg border border-border bg-bg px-3 py-3 text-sm text-muted">
+                  Ontology health unavailable. {ontologyError}
+                </div>
+              ) : ontology && !ontology.dataAvailable ? (
+                <div className="rounded-lg border border-border bg-bg px-3 py-3 text-sm text-muted">
+                  {ontology.emptyReason ?? 'Ontology data has not been recorded for this workspace yet.'}
+                </div>
+              ) : ontology ? (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                    <OntologyMetricCard
+                      selected={selectedOntologyMetric === 'conflicts'}
+                      icon={<AlertTriangle size={16} />}
+                      label="Active conflicts"
+                      value={String(ontology.summary.activeConflictCount)}
+                      hint="Contradictory memories only — not ordinary graph edges."
+                      tone="danger"
+                      onClick={() => setSelectedOntologyMetric('conflicts')}
+                    />
+                    <OntologyMetricCard
+                      selected={selectedOntologyMetric === 'superseded'}
+                      icon={<GitMerge size={16} />}
+                      label="Superseded memories"
+                      value={String(ontology.summary.supersededMemoryCount)}
+                      hint="Healthy cleanup unless the same scopes keep flipping."
+                      tone="success"
+                      onClick={() => setSelectedOntologyMetric('superseded')}
+                    />
+                    <OntologyMetricCard
+                      selected={selectedOntologyMetric === 'hotspots'}
+                      icon={<Flame size={16} />}
+                      label="Hotspot density"
+                      value={`${ontology.summary.hotspotDensityPct.toFixed(1)}%`}
+                      hint={ontology.summary.densestHotspot
+                        ? `${ontology.summary.densestHotspot.memoryCount} memories in densest ${ontology.summary.densestHotspot.scopeType}`
+                        : 'No dense scopes surfaced'}
+                      tone="warning"
+                      onClick={() => setSelectedOntologyMetric('hotspots')}
+                    />
+                    <OntologyMetricCard
+                      selected={selectedOntologyMetric === 'recentCuration'}
+                      icon={<History size={16} />}
+                      label="Recent curation"
+                      value={String(ontology.summary.recentCurationCount)}
+                      hint={`Last ${ontology.bounds.activityWindowDays} days of reviews and relation edits.`}
+                      tone="default"
+                      onClick={() => setSelectedOntologyMetric('recentCuration')}
+                    />
+                  </div>
+
+                  <div className="mt-4 rounded-lg border border-border bg-bg p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+                      <div>
+                        <h3 className="text-sm font-semibold">{drilldownConfig?.[selectedOntologyMetric].title}</h3>
+                        <p className="mt-1 text-xs text-muted max-w-3xl">{drilldownConfig?.[selectedOntologyMetric].description}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenMemoryDrilldown(selectedOntologyMetric)}
+                        className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-[var(--text)] transition-colors hover:bg-surface-200"
+                      >
+                        Open in Memory panel
+                        <ArrowRight size={13} />
+                      </button>
+                    </div>
+
+                    {selectedOntologyMetric === 'conflicts' && (
+                      <div className="space-y-2" aria-label="Conflict drilldown">
+                        {ontology.drilldowns.conflicts.items.length === 0 ? (
+                          <p className="text-sm text-muted">No active ontology conflicts are recorded right now.</p>
+                        ) : (
+                          ontology.drilldowns.conflicts.items.map((item) => (
+                            <div key={item.relationId} className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-3 text-xs">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-red-400">Conflict #{item.relationId}</span>
+                                <span className="text-muted">Memory #{item.sourceMemoryId} ↔ Memory #{item.targetMemoryId}</span>
+                                <span className="text-muted">Updated {formatRelativeTime(item.updatedAt)}</span>
+                              </div>
+                              <p className="mt-2 text-[var(--text)]">{item.sourceContent}</p>
+                              <p className="mt-1 text-muted">↔ {item.targetContent}</p>
+                              <p className="mt-2 text-muted">Specs: {uniqueStrings([item.sourceSpecId, item.targetSpecId]).join(', ') || '—'} · Files: {uniqueStrings([...item.sourceFiles, ...item.targetFiles]).slice(0, 3).join(', ') || '—'}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+
+                    {selectedOntologyMetric === 'superseded' && (
+                      <div className="space-y-2" aria-label="Superseded drilldown">
+                        {ontology.drilldowns.superseded.items.length === 0 ? (
+                          <p className="text-sm text-muted">No active supersession records are recorded right now.</p>
+                        ) : (
+                          ontology.drilldowns.superseded.items.map((item) => (
+                            <div key={item.relationId} className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-3 text-xs">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-400">Superseded memory #{item.memoryId}</span>
+                                <span className="text-muted">Replaced by memory #{item.supersededByMemoryId}</span>
+                                <span className="text-muted">Updated {formatRelativeTime(item.updatedAt)}</span>
+                              </div>
+                              <p className="mt-2 text-[var(--text)]">{item.content}</p>
+                              <p className="mt-1 text-muted">Newer rule: {item.supersedingContent}</p>
+                              <p className="mt-2 text-muted">Specs: {uniqueStrings([item.sourceSpecId, item.supersedingSpecId]).join(', ') || '—'} · Files: {uniqueStrings([...item.relatedFiles, ...item.supersedingFiles]).slice(0, 3).join(', ') || '—'}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+
+                    {selectedOntologyMetric === 'hotspots' && (
+                      <div className="space-y-2" aria-label="Hotspot drilldown">
+                        {ontology.drilldowns.hotspots.items.length === 0 ? (
+                          <p className="text-sm text-muted">No file or spec hotspots surfaced in the bounded recent-memory window.</p>
+                        ) : (
+                          ontology.drilldowns.hotspots.items.map((item) => (
+                            <div key={`${item.scopeType}:${item.key}`} className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-3 text-xs">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-400">{item.scopeType === 'file' ? 'File hotspot' : 'Spec hotspot'}</span>
+                                <span className="text-[var(--text)]">{item.label}</span>
+                                <span className="text-muted">{item.memoryCount} memories</span>
+                                <span className="text-muted">{item.conflictCount} conflicts</span>
+                                <span className="text-muted">{item.supersededCount} superseded</span>
+                              </div>
+                              <p className="mt-2 text-muted">Sample memories: {item.sampleMemoryIds.length > 0 ? item.sampleMemoryIds.map((id) => `#${id}`).join(', ') : '—'}{item.lastTouchedAt ? ` · touched ${formatRelativeTime(item.lastTouchedAt)}` : ''}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+
+                    {selectedOntologyMetric === 'recentCuration' && (
+                      <div className="space-y-2" aria-label="Recent curation drilldown">
+                        {ontology.drilldowns.recentCuration.items.length === 0 ? (
+                          <p className="text-sm text-muted">No ontology review or relation-edit activity was recorded in the recent window.</p>
+                        ) : (
+                          ontology.drilldowns.recentCuration.items.map((item, index) => (
+                            <div key={`${item.kind}-${item.at}-${index}`} className="rounded-lg border border-border px-3 py-3 text-xs">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className={`rounded-full px-2 py-0.5 ${item.kind === 'review' ? 'bg-cyan-500/15 text-cyan-400' : 'bg-violet-500/15 text-violet-400'}`}>
+                                  {item.kind === 'review' ? 'Review' : item.relationType === 'CONFLICTS_WITH' ? 'Conflict edit' : 'Supersession edit'}
+                                </span>
+                                <span className="text-[var(--text)]">{item.summary}</span>
+                                <span className="text-muted">{formatRelativeTime(item.at)}</span>
+                              </div>
+                              <p className="mt-2 text-muted">Memories: {item.memoryIds.length > 0 ? item.memoryIds.map((id) => `#${id}`).join(', ') : '—'} · Specs: {item.specIds.join(', ') || '—'} · Files: {item.filePaths.slice(0, 3).join(', ') || '—'}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-lg border border-border bg-bg px-3 py-3 text-sm text-muted">
+                  Ontology health metrics appear once a workspace is selected.
+                </div>
+              )}
             </div>
           )}
 
@@ -748,6 +1132,46 @@ export default function HealthDashboardPanel() {
         </div>
       )}
     </div>
+  );
+}
+
+function OntologyMetricCard({
+  icon,
+  label,
+  value,
+  hint,
+  selected,
+  tone,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  hint: string;
+  selected: boolean;
+  tone: 'default' | 'success' | 'warning' | 'danger';
+  onClick: () => void;
+}) {
+  const toneClass = {
+    default: 'text-accent',
+    success: 'text-emerald-400',
+    warning: 'text-amber-400',
+    danger: 'text-red-400',
+  } as const;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg border p-3 text-left transition-colors ${selected ? 'border-accent bg-accent/5' : 'border-border bg-bg hover:bg-surface-100'}`}
+    >
+      <div className={`flex items-center gap-1.5 text-xs ${toneClass[tone]} mb-1`}>
+        {icon}
+        {label}
+      </div>
+      <div className="text-lg font-semibold text-[var(--text)]">{value}</div>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted">{hint}</p>
+    </button>
   );
 }
 

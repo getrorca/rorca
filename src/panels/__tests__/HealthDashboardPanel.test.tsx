@@ -6,9 +6,20 @@
  */
 
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { waitFor } from '@testing-library/react';
+import { screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../../test/helpers';
 import HealthDashboardPanel from '../HealthDashboardPanel';
+
+const mockNavigateTo = vi.fn();
+
+vi.mock('../../routes', async () => {
+  const actual = await vi.importActual<typeof import('../../routes')>('../../routes');
+  return {
+    ...actual,
+    useAppNavigate: vi.fn(() => mockNavigateTo),
+  };
+});
 
 vi.mock('../../lib/apiFetch', () => ({
   apiFetch: vi.fn(),
@@ -60,6 +71,148 @@ const MOCK_WORKSPACE_HEALTH = {
   scannedAt: new Date().toISOString(),
 };
 
+const MOCK_ONTOLOGY_HEALTH = {
+  available: true,
+  dataAvailable: true,
+  workspaceId: 'ws-1',
+  ageAvailable: true,
+  mode: 'bounded-sql',
+  reason: null,
+  emptyReason: null,
+  bounds: {
+    relationLimit: 12,
+    hotspotMemoryWindow: 400,
+    hotspotResultLimit: 6,
+    activityLimit: 12,
+    activityWindowDays: 14,
+  },
+  summary: {
+    activeConflictCount: 1,
+    supersededMemoryCount: 2,
+    hotspotDensityPct: 8.5,
+    hotspotCount: 2,
+    densestHotspot: {
+      scopeType: 'file',
+      key: 'backend/src/routes/memory.ts',
+      label: 'backend/src/routes/memory.ts',
+      memoryCount: 34,
+      conflictCount: 1,
+      supersededCount: 2,
+      lastTouchedAt: '2026-06-02T10:00:00.000Z',
+      sampleMemoryIds: [1, 2],
+      memoryIds: [1, 2],
+      specIds: ['spec-a'],
+      filePaths: ['backend/src/routes/memory.ts'],
+    },
+    recentCurationCount: 3,
+  },
+  drilldowns: {
+    conflicts: {
+      total: 1,
+      truncated: false,
+      items: [
+        {
+          relationId: 91,
+          relationType: 'CONFLICTS_WITH',
+          status: 'active',
+          updatedAt: '2026-06-03T10:00:00.000Z',
+          sourceMemoryId: 1,
+          targetMemoryId: 2,
+          sourceCategory: 'Architecture',
+          targetCategory: 'Decision',
+          sourceContent: 'Direction Stack says follow the old flow.',
+          targetContent: 'Recent review says use the new flow.',
+          sourceSpecId: 'spec-a',
+          targetSpecId: 'spec-b',
+          sourceStoryId: 'MOG-001',
+          targetStoryId: 'MOG-009',
+          sourceFiles: ['backend/src/routes/memory.ts'],
+          targetFiles: ['src/panels/MemoryPanel.tsx'],
+          memoryIds: [1, 2],
+          specIds: ['spec-a', 'spec-b'],
+          filePaths: ['backend/src/routes/memory.ts', 'src/panels/MemoryPanel.tsx'],
+        },
+      ],
+    },
+    superseded: {
+      total: 2,
+      truncated: false,
+      items: [
+        {
+          relationId: 92,
+          relationType: 'SUPERSEDES',
+          status: 'active',
+          updatedAt: '2026-06-03T09:00:00.000Z',
+          memoryId: 4,
+          supersededByMemoryId: 5,
+          category: 'Convention',
+          content: 'Old guidance',
+          supersedingCategory: 'Convention',
+          supersedingContent: 'New guidance',
+          sourceSpecId: 'spec-a',
+          supersedingSpecId: 'spec-a',
+          sourceStoryId: 'MOG-002',
+          supersedingStoryId: 'MOG-009',
+          relatedFiles: ['src/panels/MemoryPanel.tsx'],
+          supersedingFiles: ['src/panels/MemoryPanel.tsx'],
+          memoryIds: [4, 5],
+          specIds: ['spec-a'],
+          filePaths: ['src/panels/MemoryPanel.tsx'],
+        },
+      ],
+    },
+    hotspots: {
+      total: 2,
+      truncated: false,
+      items: [
+        {
+          scopeType: 'file',
+          key: 'backend/src/routes/memory.ts',
+          label: 'backend/src/routes/memory.ts',
+          memoryCount: 34,
+          conflictCount: 1,
+          supersededCount: 2,
+          lastTouchedAt: '2026-06-02T10:00:00.000Z',
+          sampleMemoryIds: [1, 2],
+          memoryIds: [1, 2],
+          specIds: [],
+          filePaths: ['backend/src/routes/memory.ts'],
+        },
+        {
+          scopeType: 'spec',
+          key: 'spec-a',
+          label: 'spec-a',
+          memoryCount: 20,
+          conflictCount: 1,
+          supersededCount: 1,
+          lastTouchedAt: '2026-06-02T10:00:00.000Z',
+          sampleMemoryIds: [4, 5],
+          memoryIds: [4, 5],
+          specIds: ['spec-a'],
+          filePaths: [],
+        },
+      ],
+      files: [],
+      specs: [],
+    },
+    recentCuration: {
+      total: 3,
+      truncated: false,
+      items: [
+        {
+          kind: 'review',
+          at: '2026-06-03T11:00:00.000Z',
+          action: 'keep',
+          summary: 'Review action: keep',
+          memoryIds: [1],
+          specIds: ['spec-a'],
+          filePaths: ['backend/src/routes/memory.ts'],
+        },
+      ],
+    },
+  },
+};
+
 beforeAll(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -71,78 +224,78 @@ afterAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockNavigateTo.mockReset();
   localStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.setItem('rorca_workspaceId', 'ws-1');
+  sessionStorage.removeItem('rorca_memory_analytics_drilldown');
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    json: async () => MOCK_HEALTH_DETAILED,
+  })) as unknown as typeof fetch);
   mockApiFetch.mockResolvedValue({ items: [], total: 0, hasMore: false });
 });
 
 describe('HealthDashboardPanel', () => {
-  it('renders without crashing', async () => {
+  it('renders ontology health metrics and drilldowns on the analytics surface', async () => {
+    const user = userEvent.setup();
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('detailed=true')) return MOCK_HEALTH_DETAILED;
-      if (path.includes('/api/health')) return MOCK_HEALTH_BASIC;
-      if (path.includes('/health')) return MOCK_WORKSPACE_HEALTH;
+      if (path === '/api/analytics/ontology-health?workspace_id=ws-1') return MOCK_ONTOLOGY_HEALTH;
+      if (path === '/api/workspaces/ws-1/health') return { ...MOCK_WORKSPACE_HEALTH, semantic: undefined };
+      if (path === '/api/conventions/drift/ws-1') throw new Error('no report');
       return {};
     });
 
     renderWithProviders(<HealthDashboardPanel />);
-    expect(document.body).toBeInTheDocument();
+
+    expect(await screen.findByText('Ontology Health')).toBeInTheDocument();
+    expect(screen.getAllByText('Active conflicts').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Hotspot density').length).toBeGreaterThan(0);
+    expect(screen.getByText('Direction Stack says follow the old flow.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Hotspot density/i }));
+    expect(await screen.findByText('backend/src/routes/memory.ts')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Open in Memory panel/i }));
+    expect(mockNavigateTo).toHaveBeenCalledWith('direction');
+    const stored = JSON.parse(sessionStorage.getItem('rorca_memory_analytics_drilldown') || '{}');
+    expect(stored.metric).toBe('hotspots');
+    expect(stored.filePaths).toContain('backend/src/routes/memory.ts');
   });
 
-  it('displays health metrics when data is available', async () => {
+  it('shows explicit SQL fallback copy when AGE-backed ontology data is unavailable', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('detailed=true')) return MOCK_HEALTH_DETAILED;
-      if (path.includes('/api/health')) return MOCK_HEALTH_BASIC;
-      if (path.includes('/health')) return MOCK_WORKSPACE_HEALTH;
+      if (path === '/api/analytics/ontology-health?workspace_id=ws-1') {
+        return {
+          ...MOCK_ONTOLOGY_HEALTH,
+          ageAvailable: false,
+          mode: 'bounded-sql-fallback',
+          reason: 'Apache AGE extension is unavailable. Ontology health is using bounded SQL summaries and direct provenance drill-downs only.',
+        };
+      }
+      if (path === '/api/workspaces/ws-1/health') return { ...MOCK_WORKSPACE_HEALTH, semantic: undefined };
+      if (path === '/api/conventions/drift/ws-1') throw new Error('no report');
       return {};
     });
 
     renderWithProviders(<HealthDashboardPanel />);
 
-    await waitFor(
-      () => {
-        expect(document.body).toBeInTheDocument();
-      },
-      { timeout: 3000 },
-    );
+    expect(await screen.findByText('SQL fallback')).toBeInTheDocument();
+    expect(screen.getByText(/bounded SQL summaries/i)).toBeInTheDocument();
   });
 
-  it('shows workspace health score with correct percentages', async () => {
+  it('shows ontology unavailable copy when the analytics endpoint fails', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('detailed=true')) return MOCK_HEALTH_DETAILED;
-      if (path.includes('/api/health')) return MOCK_HEALTH_BASIC;
-      if (path.includes('/health')) return MOCK_WORKSPACE_HEALTH;
+      if (path === '/api/analytics/ontology-health?workspace_id=ws-1') throw new Error('Ontology request failed');
+      if (path === '/api/workspaces/ws-1/health') return { ...MOCK_WORKSPACE_HEALTH, semantic: undefined };
+      if (path === '/api/conventions/drift/ws-1') throw new Error('no report');
       return {};
     });
 
     renderWithProviders(<HealthDashboardPanel />);
 
-    await waitFor(
-      () => {
-        // Panel renders with workspace health data present
-        expect(document.body).toBeInTheDocument();
-      },
-      { timeout: 3000 },
-    );
-  });
-
-  it('handles API error gracefully', async () => {
-    mockApiFetch.mockImplementation(async (path: string) => {
-      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('/api/health')) throw new Error('Server error');
-      return {};
-    });
-
-    renderWithProviders(<HealthDashboardPanel />);
-
-    await waitFor(
-      () => {
-        expect(document.body).toBeInTheDocument();
-      },
-      { timeout: 3000 },
-    );
+    expect(await screen.findByText(/Ontology health unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/Ontology request failed/)).toBeInTheDocument();
   });
 });
