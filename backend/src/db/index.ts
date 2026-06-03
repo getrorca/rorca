@@ -117,8 +117,26 @@ function parseConnectionParams(connectionString: string): {
 
 // ── Pool Config Builder ──────────────────────────────────────────────────
 
+function assertTestDatabaseSafety(databaseUrl?: string): void {
+  if (process.env.NODE_ENV !== 'test') return;
+
+  let dbName = process.env.PGDATABASE || '';
+  if (databaseUrl) {
+    try {
+      dbName = new URL(databaseUrl).pathname.slice(1);
+    } catch {
+      dbName = '';
+    }
+  }
+
+  if (!dbName.endsWith('_test')) {
+    throw new Error(`[db] Refusing to use non-test database "${dbName || '(unknown)'}" while NODE_ENV=test`);
+  }
+}
+
 function buildPoolConfig(): PoolConfig {
   const databaseUrl = process.env.DATABASE_URL;
+  assertTestDatabaseSafety(databaseUrl);
   const configuredPoolSize = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
   const ssl = buildSslConfig(databaseUrl);
 

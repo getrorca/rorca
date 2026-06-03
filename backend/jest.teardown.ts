@@ -31,6 +31,15 @@ function deriveTestDbUrl(): string {
 
 const TEST_DB_URL = deriveTestDbUrl();
 
+function assertSafeTestDbUrl(url: string): void {
+  const dbName = new URL(url).pathname.slice(1);
+  if (!dbName.endsWith('_test')) {
+    throw new Error(`[jest-teardown] Refusing to truncate/drop non-test database "${dbName}"`);
+  }
+}
+
+assertSafeTestDbUrl(TEST_DB_URL);
+
 function parseDbUrl(url: string): { dbName: string; maintenanceUrl: string } {
   const parsed = new URL(url);
   const dbName = parsed.pathname.slice(1);
