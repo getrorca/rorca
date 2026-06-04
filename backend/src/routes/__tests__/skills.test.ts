@@ -161,6 +161,20 @@ describe('POST /api/skills/install', () => {
 
 // ─── GET /api/skills/:name/content ────────────────────────────────────────
 
+describe('POST /api/skills/search', () => {
+  test('returns 400 for queries shorter than 2 characters', async () => {
+    const res = await request(app)
+      .post('/api/skills/search')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ query: 'g' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/at least 2 characters/i);
+  });
+});
+
+// ─── GET /api/skills/:name/content ────────────────────────────────────────
+
 describe('GET /api/skills/:name/content', () => {
   test('returns content for an installed skill', async () => {
     // Install a skill first

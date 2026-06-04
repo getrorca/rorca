@@ -975,11 +975,16 @@ router.post('/search', async (req: Request, res: Response) => {
       return;
     }
 
+    const trimmedQuery = searchQuery.trim();
+    if (trimmedQuery.length < 2) {
+      throw new ValidationError('query must be at least 2 characters');
+    }
+
     const searchLimit = typeof limit === 'number' && limit > 0 ? Math.min(limit, 100) : 20;
 
     // Proxy to skills.sh search API
     const searchUrl = new URL('https://skills.sh/api/search');
-    searchUrl.searchParams.set('q', searchQuery.trim());
+    searchUrl.searchParams.set('q', trimmedQuery);
     searchUrl.searchParams.set('limit', String(searchLimit));
 
     let response: globalThis.Response;
@@ -1017,13 +1022,20 @@ router.post('/search', async (req: Request, res: Response) => {
           : [];
 
     res.json({
-      results: results.slice(0, searchLimit).map((r: any) => ({
-        name: r.name || r.slug || '',
-        description: r.description || r.summary || '',
-        author: r.author || r.owner || '',
-        url: r.url || r.homepage || '',
-      })),
-      query: searchQuery.trim(),
+      results: Array.from(
+        new Map(
+          results.slice(0, searchLimit).map((r: any) => {
+            const name = r.name || r.slug || '';
+            return [name.toLowerCase(), {
+              name,
+              description: r.description || r.summary || '',
+              author: r.author || r.owner || '',
+              url: r.url || r.homepage || '',
+            }];
+          }),
+        ).values(),
+      ).filter((r: any) => r.name),
+      query: trimmedQuery,
       total: data?.total ?? results.length,
     });
   } catch (error: any) {
