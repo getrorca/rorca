@@ -6,7 +6,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check, TrendingUp, X, ExternalLink } from 'lucide-react';
+import { Wrench, Search, Loader2, Download, AlertTriangle, Trash2, Check, TrendingUp, X, ExternalLink } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -15,7 +15,6 @@ import { renderMarkdown } from '../lib/renderMarkdown';
 
 /* ─── Types ───────────────────────────────────────────────────── */
 
-type MarketplaceTab = 'skills' | 'templates' | 'packs';
 type SourceFilter = 'skills.sh' | 'github' | 'custom';
 
 interface SkillResult {
@@ -58,13 +57,7 @@ interface MarketplacePanelProps {
   onNavigate: (panel: PanelId) => void;
 }
 
-/* ─── Tab Definition ──────────────────────────────────────────── */
-
-const TABS: { id: MarketplaceTab; label: string; icon: typeof Package }[] = [
-  { id: 'skills', label: 'Skills', icon: Wrench },
-  { id: 'templates', label: 'Templates', icon: FileText },
-  { id: 'packs', label: 'Convention Packs', icon: Package },
-];
+/* ─── Source Definition ───────────────────────────────────────── */
 
 const SOURCE_PILLS: { id: SourceFilter; label: string }[] = [
   { id: 'skills.sh', label: 'skills.sh' },
@@ -93,6 +86,18 @@ function inferCategory(name: string, description: string): string {
   if (/sql|postgres|mysql|mongo|redis|database|prisma|drizzle/.test(text)) return 'database';
   if (/test|jest|vitest|playwright|cypress|testing|spec/.test(text)) return 'testing';
   return 'general';
+}
+
+function dedupeByKey<T>(items: T[], getKey: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const deduped: T[] = [];
+  for (const item of items) {
+    const key = getKey(item).trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
 }
 
 /* ─── Skill Preview Modal ─────────────────────────────────────── */
@@ -242,7 +247,6 @@ function SkillPreviewModal({
 
 export default function MarketplacePanel({ onNavigate: _onNavigate }: MarketplacePanelProps) {
   const { workspaceId } = useWorkspace();
-  const [activeTab, setActiveTab] = useState<MarketplaceTab>('skills');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSource, setActiveSource] = useState<SourceFilter>('skills.sh');
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -276,6 +280,9 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   const openPreview = useCallback((name: string, installed: boolean, source?: string, category?: string) => {
     setPreviewSkill({ name, installed, source, category });
   }, []);
+
+  const trimmedSearchQuery = searchQuery.trim();
+  const searchTooShort = activeSource === 'skills.sh' && trimmedSearchQuery.length > 0 && trimmedSearchQuery.length < 2;
 
   // Export installed skills as JSON
   const handleExportSkills = useCallback(() => {
@@ -314,7 +321,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
     try {
       const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
       const data = await apiFetch<{ skills: InstalledSkill[] }>(`/api/skills${params}`);
-      setInstalledSkills(data.skills);
+      setInstalledSkills(dedupeByKey(data.skills, (skill) => skill.filePath || skill.name));
     } catch { /* silent */ } finally {
       setLoadingInstalled(false);
     }
@@ -327,7 +334,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (activeTab !== 'skills' || activeSource !== 'skills.sh') {
+    if (activeSource !== 'skills.sh') {
       setSkills([]);
       setError(null);
       return;
@@ -337,6 +344,13 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
 
     const trimmed = searchQuery.trim();
 
+    if (trimmed.length > 0 && trimmed.length < 2) {
+      setSkills([]);
+      setError(null);
+      setLoading(false);
+      return () => clearTimeout(debounceRef.current ?? undefined);
+    }
+
     if (trimmed) {
       setLoading(true);
       debounceRef.current = setTimeout(async () => {
@@ -345,8 +359,9 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query: trimmed, limit: 20 }),
+            silent: true,
           });
-          setSkills(data.results);
+          setSkills(dedupeByKey(data.results, (skill) => skill.name));
           setError(null);
         } catch (err: unknown) {
           setError(err instanceof Error ? err.message : 'Failed to search skills');
@@ -357,9 +372,9 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
     } else {
       // No query — fetch top skills leaderboard
       setLoading(true);
-      apiFetch<SkillSearchResponse>('/api/skills/top')
+      apiFetch<SkillSearchResponse>('/api/skills/top', { silent: true })
         .then((data) => {
-          setSkills(data.results);
+          setSkills(dedupeByKey(data.results, (skill) => skill.name));
           setError(null);
         })
         .catch((err: unknown) => {
@@ -371,7 +386,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
     }
 
     return () => clearTimeout(debounceRef.current ?? undefined);
-  }, [searchQuery, activeTab, activeSource]);
+  }, [searchQuery, activeSource]);
 
   // Cleanup debounce on unmount
   useEffect(() => {
@@ -495,49 +510,19 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
 
   return (
     <div className="flex flex-col h-full">
-      <h1 className="sr-only">Marketplace</h1>
+      <h1 className="sr-only">Skills</h1>
 
-      {/* Tab bar */}
-      <div
-        className="flex items-center border-b border-border bg-panel shrink-0"
-        role="tablist"
-        aria-label="Marketplace tabs"
-      >
-        {TABS.map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              role="tab"
-              aria-selected={isActive}
-              aria-controls={`marketplace-tabpanel-${tab.id}`}
-              id={`marketplace-tab-${tab.id}`}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-colors relative ${
-                isActive
-                  ? 'text-text border-b-2 border-accent'
-                  : 'text-muted hover:text-text'
-              }`}
-            >
-              <Icon size={13} aria-hidden="true" />
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+        <div className="border-b border-border bg-panel px-4 py-3 shrink-0">
+          <div className="flex items-center gap-2">
+            <Wrench size={15} className="text-accent" />
+            <h2 className="text-sm font-semibold text-text">Skills</h2>
+          </div>
+          <p className="mt-1 text-xs text-muted">Browse skills.sh, add from a GitHub repo, or install a custom SKILL.md.</p>
+        </div>
 
-      {/* Tab content */}
-      <div
-        className="flex-1 min-h-0 overflow-hidden flex flex-col"
-        role="tabpanel"
-        id={`marketplace-tabpanel-${activeTab}`}
-        aria-labelledby={`marketplace-tab-${activeTab}`}
-      >
-        {/* Search bar + Source pills — only for skills tab */}
-        {activeTab === 'skills' && (
-          <>
-            <div className="px-4 pt-3 pb-2 shrink-0">
+        <>
+          <div className="px-4 pt-3 pb-2 shrink-0">
               <div className="relative">
                 <Search
                   size={14}
@@ -550,6 +535,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search skills.sh..."
+                  aria-label="Search skills"
                   className="w-full pl-9 pr-3 py-2 text-sm bg-surface border border-border rounded-md
                              text-text placeholder:text-muted
                              focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent
@@ -558,37 +544,36 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
               </div>
             </div>
 
-            <div className="flex items-center gap-2 px-4 pb-3 shrink-0">
-              {SOURCE_PILLS.map((source) => {
-                const isActive = activeSource === source.id;
-                return (
-                  <button
-                    key={source.id}
-                    onClick={() => setActiveSource(source.id)}
-                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
-                      isActive
-                        ? 'bg-accent text-white'
-                        : 'bg-surface border border-border text-muted hover:text-text hover:border-text/20'
-                    }`}
-                    aria-pressed={isActive}
-                  >
-                    {source.label}
-                  </button>
-                );
-              })}
-            </div>
-          </>
-        )}
+          <div className="flex items-center gap-2 px-4 pb-3 shrink-0">
+            {SOURCE_PILLS.map((source) => {
+              const isActive = activeSource === source.id;
+              return (
+                <button
+                  key={source.id}
+                  onClick={() => setActiveSource(source.id)}
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+                    isActive
+                      ? 'bg-accent text-white'
+                      : 'bg-surface border border-border text-muted hover:text-text hover:border-text/20'
+                  }`}
+                  aria-pressed={isActive}
+                >
+                  {source.label}
+                </button>
+              );
+            })}
+          </div>
+        </>
 
         {/* Split view: Discovery (60%) | Your Library (40%) */}
         <div className="flex-1 min-h-0 flex gap-0">
           {/* Left panel — Discovery / Browse */}
           <div className="w-[60%] border-r border-border overflow-y-auto p-4">
             {/* skills.sh source */}
-            {activeTab === 'skills' && activeSource === 'skills.sh' && (
+            {activeSource === 'skills.sh' && (
               <>
                 <h2 className="text-sm font-semibold text-text mb-3">
-                  {searchQuery.trim() ? 'Search Results' : 'Top Skills'}
+                  {trimmedSearchQuery ? 'Search Results' : 'Top Skills'}
                   {!loading && skills.length > 0 && (
                     <span className="ml-2 text-xs font-normal text-muted">({skills.length})</span>
                   )}
@@ -597,7 +582,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                 {loading && (
                   <div className="flex items-center justify-center h-32 text-muted text-xs">
                     <Loader2 size={16} className="animate-spin mr-2" />
-                    {searchQuery.trim() ? 'Searching skills.sh...' : 'Loading top skills...'}
+                    {trimmedSearchQuery ? 'Searching skills.sh...' : 'Loading top skills...'}
                   </div>
                 )}
 
@@ -608,7 +593,13 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   </div>
                 )}
 
-                {!loading && !error && skills.length === 0 && (
+                {!loading && !error && searchTooShort && (
+                  <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
+                    Type at least 2 characters to search skills.sh
+                  </div>
+                )}
+
+                {!loading && !error && !searchTooShort && skills.length === 0 && (
                   <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
                     {searchQuery
                       ? `No skills matching "${searchQuery}"`
@@ -616,7 +607,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   </div>
                 )}
 
-                {!loading && !error && skills.length > 0 && (
+                {!loading && !error && !searchTooShort && skills.length > 0 && (
                   <div className="grid grid-cols-2 gap-4">
                     {skills.map((skill) => {
                       const category = inferCategory(skill.name, skill.description);
@@ -625,7 +616,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                       const installing = installState[skill.name] === 'installing';
                       return (
                         <div
-                          key={skill.name}
+                          key={`${skill.name}:${skill.url || 'marketplace'}`}
                           onClick={() => openPreview(skill.name, installed, skill.url, inferCategory(skill.name, skill.description))}
                           className={`flex flex-col gap-2 p-3 bg-surface border rounded-lg transition-colors cursor-pointer ${
                             installed
@@ -688,7 +679,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
             )}
 
             {/* GitHub source */}
-            {activeTab === 'skills' && activeSource === 'github' && (
+            {activeSource === 'github' && (
               <>
                 <h2 className="text-sm font-semibold text-text mb-3">Browse GitHub Repository</h2>
 
@@ -793,7 +784,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
             )}
 
             {/* Custom source */}
-            {activeTab === 'skills' && activeSource === 'custom' && (
+            {activeSource === 'custom' && (
               <>
                 <h2 className="text-sm font-semibold text-text mb-3">Install Custom Skill</h2>
 
@@ -840,31 +831,11 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
               </>
             )}
 
-            {activeTab === 'templates' && (
-              <>
-                <h2 className="text-sm font-semibold text-text mb-3">Browse Templates</h2>
-                <div className="flex flex-col items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md gap-2">
-                  <FileText size={24} className="opacity-40" />
-                  Templates marketplace coming soon
-                </div>
-              </>
-            )}
-
-            {activeTab === 'packs' && (
-              <>
-                <h2 className="text-sm font-semibold text-text mb-3">Browse Convention Packs</h2>
-                <div className="flex flex-col items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md gap-2">
-                  <Package size={24} className="opacity-40" />
-                  Convention packs marketplace coming soon
-                </div>
-              </>
-            )}
           </div>
 
-          {/* Right panel — Your Library / Your Items */}
+          {/* Right panel — Your Library */}
           <div className="w-[40%] overflow-y-auto p-4">
-            {activeTab === 'skills' && (
-              <>
+            <>
                 <div className="flex items-center justify-between mb-1">
                   <h2 className="text-sm font-semibold text-text">
                     Your Library{' '}
@@ -913,7 +884,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                       const isRemoving = removingSkill === skill.name;
                       return (
                         <div
-                          key={skill.name}
+                          key={skill.filePath || skill.name}
                           onClick={() => openPreview(skill.name, true, skill.source, inferCategory(skill.name, skill.description))}
                           className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group cursor-pointer"
                         >
@@ -945,36 +916,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                     })}
                   </div>
                 )}
-              </>
-            )}
-
-            {activeTab === 'templates' && (
-              <>
-                <h2 className="text-sm font-semibold text-text mb-1">
-                  Your Templates <span className="text-xs font-normal text-muted">(0)</span>
-                </h2>
-                <p className="text-xs text-muted mb-4">
-                  Saved templates will appear here
-                </p>
-                <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
-                  No templates saved yet
-                </div>
-              </>
-            )}
-
-            {activeTab === 'packs' && (
-              <>
-                <h2 className="text-sm font-semibold text-text mb-1">
-                  Your Packs <span className="text-xs font-normal text-muted">(0)</span>
-                </h2>
-                <p className="text-xs text-muted mb-4">
-                  Installed packs will appear here
-                </p>
-                <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
-                  No packs installed yet
-                </div>
-              </>
-            )}
+            </>
           </div>
         </div>
       </div>
