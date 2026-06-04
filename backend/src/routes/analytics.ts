@@ -2078,11 +2078,57 @@ interface EscalationWalRow {
 const OPUS_INPUT_PER_1M = 15.0;
 const OPUS_OUTPUT_PER_1M = 75.0;
 
+function normalizeFinOpsModel(model: string | null | undefined): string | null {
+  if (typeof model !== 'string') return null;
+  const trimmed = model.trim();
+  if (!trimmed) return null;
+
+  const lower = trimmed.toLowerCase();
+  if (lower === 'unknown' || lower === 'null' || lower === 'undefined' || lower === '?') return null;
+
+  return trimmed;
+}
+
+function finOpsModelPriority(model: string | null | undefined, fallbackModel: string, agentType: string): number {
+  const normalized = normalizeFinOpsModel(model);
+  if (!normalized) return 0;
+
+  const lower = normalized.toLowerCase();
+  if (lower === agentType.toLowerCase()) return 1;
+  if (lower === fallbackModel.toLowerCase()) return 2;
+  return 3;
+}
+
+function choosePreferredFinOpsModel(
+  current: string | null | undefined,
+  incoming: string | null | undefined,
+  fallbackModel: string,
+  agentType: string,
+): string | null {
+  const currentNormalized = normalizeFinOpsModel(current);
+  const incomingNormalized = normalizeFinOpsModel(incoming);
+
+  if (!currentNormalized) return incomingNormalized;
+  if (!incomingNormalized) return currentNormalized;
+
+  return finOpsModelPriority(incomingNormalized, fallbackModel, agentType) > finOpsModelPriority(currentNormalized, fallbackModel, agentType)
+    ? incomingNormalized
+    : currentNormalized;
+}
+
+function finalizeFinOpsModel(model: string | null | undefined, fallbackModel: string, agentType: string): string {
+  return choosePreferredFinOpsModel(null, model, fallbackModel, agentType) ?? fallbackModel;
+}
+
 function tierFromModel(model: string): string {
-  const lower = model.toLowerCase();
+  const normalized = normalizeFinOpsModel(model);
+  if (!normalized) return 'unknown';
+
+  const lower = normalized.toLowerCase();
   if (lower.includes('haiku') || lower.includes('mini') || lower.includes('flash')) return 'haiku';
   if (lower.includes('opus') || lower.includes('o3') || lower.includes('pro')) return 'opus';
-  return 'sonnet';
+  if (lower.includes('sonnet')) return 'sonnet';
+  return 'unknown';
 }
 
 function parseWalPayload(payload: string | Record<string, unknown> | null): Record<string, unknown> {
@@ -2094,12 +2140,15 @@ function parseWalPayload(payload: string | Record<string, unknown> | null): Reco
 }
 
 function pricingCandidates(model: string): string[] {
-  const parts = model.split('/').filter(Boolean);
+  const normalized = normalizeFinOpsModel(model);
+  if (!normalized) return [];
+
+  const parts = normalized.split('/').filter(Boolean);
   return Array.from(new Set([
-    model,
-    parts.length > 1 ? parts.slice(1).join('/') : model,
-    parts.length > 2 ? parts.slice(2).join('/') : model,
-    parts.at(-1) ?? model,
+    normalized,
+    parts.length > 1 ? parts.slice(1).join('/') : normalized,
+    parts.length > 2 ? parts.slice(2).join('/') : normalized,
+    parts.at(-1) ?? normalized,
   ]));
 }
 
@@ -2200,14 +2249,38 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       ORDER BY ts ASC
     `, [runId]);
 
-    const stories: FinOpsStoryRow[] = [...tokenUsageRows];
+    const stories: FinOpsStoryRow[] = tokenUsageRows.map((row) => ({
+      story_id: row.story_id,
+      model: finalizeFinOpsModel(row.model, fallbackModel, agentType),
+      input_tokens: Number(row.input_tokens ?? 0),
+      output_tokens: Number(row.output_tokens ?? 0),
+      cost_usd: Number(row.cost_usd ?? 0),
+    }));
     const coveredStoryIds = new Set(stories.map((story) => story.story_id));
+    const storyIndexes = new Map<string, number[]>();
+    for (const [index, story] of stories.entries()) {
+      const existing = storyIndexes.get(story.story_id) ?? [];
+      existing.push(index);
+      storyIndexes.set(story.story_id, existing);
+    }
 
     for (const row of storyResultRows) {
-      if (coveredStoryIds.has(row.story_id)) continue;
+      const matchingIndexes = storyIndexes.get(row.story_id);
+      if (matchingIndexes && matchingIndexes.length > 0) {
+        for (const index of matchingIndexes) {
+          stories[index].model = finalizeFinOpsModel(
+            choosePreferredFinOpsModel(stories[index].model, row.model, fallbackModel, agentType),
+            fallbackModel,
+            agentType,
+          );
+        }
+        coveredStoryIds.add(row.story_id);
+        continue;
+      }
+
       stories.push({
         story_id: row.story_id,
-        model: row.model || fallbackModel,
+        model: finalizeFinOpsModel(row.model, fallbackModel, agentType),
         input_tokens: Number(row.input_tokens ?? 0),
         output_tokens: Number(row.output_tokens ?? 0),
         cost_usd: Number(row.cost_usd ?? 0),
@@ -2221,19 +2294,26 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       const payload = parseWalPayload(row.payload);
       const previous = liveByStory.get(row.story_id) ?? {
         story_id: row.story_id,
-        model: String(payload.model ?? fallbackModel),
+        model: fallbackModel,
         input_tokens: 0,
         output_tokens: 0,
         cost_usd: 0,
       };
-      const hasCumulative = payload.cumulative_input_tokens != null || payload.cumulative_output_tokens != null;
+      const cumulativeInput = payload.cumulative_input ?? payload.cumulative_input_tokens;
+      const cumulativeOutput = payload.cumulative_output ?? payload.cumulative_output_tokens;
+      const cumulativeCost = payload.cumulative_cost_usd;
+      const hasCumulative = cumulativeInput != null || cumulativeOutput != null;
       liveByStory.set(row.story_id, {
         story_id: row.story_id,
-        model: String(payload.model ?? previous.model ?? fallbackModel),
-        input_tokens: hasCumulative ? Number(payload.cumulative_input_tokens ?? previous.input_tokens ?? 0) : previous.input_tokens + Number(payload.input_tokens ?? 0),
-        output_tokens: hasCumulative ? Number(payload.cumulative_output_tokens ?? previous.output_tokens ?? 0) : previous.output_tokens + Number(payload.output_tokens ?? 0),
-        cost_usd: payload.cumulative_cost_usd != null
-          ? Number(payload.cumulative_cost_usd)
+        model: finalizeFinOpsModel(
+          choosePreferredFinOpsModel(previous.model, payload.model as string | null | undefined, fallbackModel, agentType),
+          fallbackModel,
+          agentType,
+        ),
+        input_tokens: hasCumulative ? Number(cumulativeInput ?? previous.input_tokens ?? 0) : previous.input_tokens + Number(payload.input_tokens ?? 0),
+        output_tokens: hasCumulative ? Number(cumulativeOutput ?? previous.output_tokens ?? 0) : previous.output_tokens + Number(payload.output_tokens ?? 0),
+        cost_usd: cumulativeCost != null
+          ? Number(cumulativeCost)
           : previous.cost_usd + Number(payload.cost_usd ?? 0),
       });
     }
