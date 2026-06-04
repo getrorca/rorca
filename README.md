@@ -1,6 +1,12 @@
-# Rorca
+<p align="center">
+  <a href="https://github.com/getrorca/rorca">
+    <img src="./public/rorca-readme-banner.svg" alt="Rorca banner" />
+  </a>
+</p>
 
-**Rorca is an AI spec orchestration platform for autonomous software development.**
+<h1 align="center">Rorca</h1>
+
+<p align="center"><strong>Rorca is an AI spec orchestration platform for autonomous software development.</strong></p>
 
 It turns a plain-English product brief into a structured spec, helps you review and approve it, then runs the work story-by-story with live progress, retrieval-backed context, and a feedback system that gets smarter over time.
 
@@ -101,6 +107,13 @@ If you were looking for **BYOK**, the product-level docs usually frame that idea
 The broader app settings also support other provider/model sources for non-execution surfaces, including **Anthropic API**, **OpenAI-compatible**, **OpenRouter**, and **local** paths. The public docs keep the first-class execution story focused on Claude Code, OpenCode, Codex CLI, and Pi CLI, with the Pi extension called out separately as an operator surface.
 
 ---
+
+## Recent highlights
+
+- **Skills-first public surface:** the launch UI now uses Skills terminology end-to-end instead of Marketplace labels.
+- **Spec-Centric Memory Relevance Graph:** run-time and pre-flight context graph views make retrieval explainability visible in the product.
+- **Memory provenance cleanup:** imported / provenance-poor memories now have a separate review lane instead of being hidden inside stale review.
+- **GitHub integration polish:** the dashboard and docs now focus on repo wiring, webhooks, workflow dispatch, and PR automation.
 
 ## The mental model
 
