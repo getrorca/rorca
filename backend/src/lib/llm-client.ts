@@ -193,8 +193,27 @@ export interface ModelInfo {
 }
 
 /** All known models across providers. */
+function normalizeClaudeModelId(modelId: string): string {
+  const trimmed = modelId.trim();
+  if (!trimmed.startsWith('claude-')) return trimmed;
+  return trimmed.replace(/-(\d+)\.(\d+)(?:(-\d{8})?)$/, '-$1-$2$3');
+}
+
 export const ALL_MODELS: ModelInfo[] = [
-  // ── Anthropic (claude-cli or anthropic SDK) ──
+  // ── Anthropic (Claude API + subscription / claude-cli) ──
+  {
+    id: 'claude-sonnet-4-5-20250929',
+    label: 'Claude Sonnet 4.5',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    costPer1kInput: 0.003,
+    costPer1kOutput: 0.015,
+    contextWindow: 200000,
+    speedTier: 'medium',
+    costTier: 'medium',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high'],
+  },
   {
     id: 'claude-sonnet-4-6',
     label: 'Claude Sonnet 4.6',
@@ -205,6 +224,34 @@ export const ALL_MODELS: ModelInfo[] = [
     contextWindow: 200000,
     speedTier: 'medium',
     costTier: 'medium',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high'],
+  },
+  {
+    id: 'claude-sonnet-4-7',
+    label: 'Claude Sonnet 4.7',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    costPer1kInput: 0.003,
+    costPer1kOutput: 0.015,
+    contextWindow: 200000,
+    speedTier: 'medium',
+    costTier: 'medium',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high'],
+  },
+  {
+    id: 'claude-sonnet-4-8',
+    label: 'Claude Sonnet 4.8',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    costPer1kInput: 0.003,
+    costPer1kOutput: 0.015,
+    contextWindow: 200000,
+    speedTier: 'medium',
+    costTier: 'medium',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high'],
   },
   {
     id: 'claude-opus-4-6',
@@ -216,6 +263,8 @@ export const ALL_MODELS: ModelInfo[] = [
     contextWindow: 200000,
     speedTier: 'slow',
     costTier: 'premium',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high', 'max'],
   },
   {
     id: 'claude-opus-4-7',
@@ -229,6 +278,21 @@ export const ALL_MODELS: ModelInfo[] = [
     contextWindow: 200000,
     speedTier: 'slow',
     costTier: 'premium',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high', 'max'],
+  },
+  {
+    id: 'claude-opus-4-8',
+    label: 'Claude Opus 4.8',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    costPer1kInput: 0.015,
+    costPer1kOutput: 0.075,
+    contextWindow: 200000,
+    speedTier: 'slow',
+    costTier: 'premium',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high', 'max'],
   },
   {
     id: 'claude-haiku-4-5-20251001',
@@ -240,6 +304,8 @@ export const ALL_MODELS: ModelInfo[] = [
     contextWindow: 200000,
     speedTier: 'fast',
     costTier: 'low',
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high'],
   },
   // ── OpenAI-compat (covers OpenAI, Groq, Together, DeepSeek, Mistral, Ollama) ──
   {
@@ -423,9 +489,13 @@ export const ALL_MODELS: ModelInfo[] = [
  * New code should use ALL_MODELS and filter by providerType.
  */
 export const SUPPORTED_MODELS = [
+  'claude-sonnet-4-5-20250929',
   'claude-sonnet-4-6',
+  'claude-sonnet-4-7',
+  'claude-sonnet-4-8',
   'claude-opus-4-6',
   'claude-opus-4-7',
+  'claude-opus-4-8',
   'claude-haiku-4-5-20251001',
 ] as const;
 
@@ -437,17 +507,15 @@ export const DEFAULT_MODEL: SupportedModel = 'claude-sonnet-4-6';
  * Backward-compat MODEL_INFO keyed by SupportedModel.
  * New code should use ALL_MODELS instead.
  */
-export const MODEL_INFO: Record<SupportedModel, ModelInfo> = {
-  'claude-sonnet-4-6': ALL_MODELS.find(m => m.id === 'claude-sonnet-4-6')!,
-  'claude-opus-4-6': ALL_MODELS.find(m => m.id === 'claude-opus-4-6')!,
-  'claude-opus-4-7': ALL_MODELS.find(m => m.id === 'claude-opus-4-7')!,
-  'claude-haiku-4-5-20251001': ALL_MODELS.find(m => m.id === 'claude-haiku-4-5-20251001')!,
-};
+export const MODEL_INFO = Object.fromEntries(
+  SUPPORTED_MODELS.map((modelId) => [modelId, ALL_MODELS.find(m => m.id === modelId)!]),
+) as Record<SupportedModel, ModelInfo>;
 
 /** Check if model ID exists in the full registry. */
 export function isValidModel(model: string): model is SupportedModel {
-  return ALL_MODELS.some(m => m.id === model) ||
-    (SUPPORTED_MODELS as readonly string[]).includes(model);
+  const normalized = normalizeClaudeModelId(model);
+  return ALL_MODELS.some(m => m.id === normalized) ||
+    (SUPPORTED_MODELS as readonly string[]).includes(normalized);
 }
 
 /** Get ModelInfo for any registered model. */

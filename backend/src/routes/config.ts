@@ -60,7 +60,13 @@ const OPENCODE_MODELS: OpenCodeModel[] = [
   { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'Google', contextWindow: 1048576, costPer1kInput: 0.000075, costPer1kOutput: 0.0003, speedTier: 'fast', costTier: 'low' },
   { id: 'google/gemini-2.0-flash', name: 'Gemini 2.0 Flash', provider: 'Google', contextWindow: 1048576, costPer1kInput: 0.0001, costPer1kOutput: 0.0004, speedTier: 'fast', costTier: 'low' },
   // Anthropic
+  { id: 'anthropic/claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.003, costPer1kOutput: 0.015, speedTier: 'medium', costTier: 'medium' },
+  { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.003, costPer1kOutput: 0.015, speedTier: 'medium', costTier: 'medium' },
+  { id: 'anthropic/claude-sonnet-4-7', name: 'Claude Sonnet 4.7', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.003, costPer1kOutput: 0.015, speedTier: 'medium', costTier: 'medium' },
+  { id: 'anthropic/claude-sonnet-4-8', name: 'Claude Sonnet 4.8', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.003, costPer1kOutput: 0.015, speedTier: 'medium', costTier: 'medium' },
   { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.015, costPer1kOutput: 0.075, speedTier: 'slow', costTier: 'premium' },
+  { id: 'anthropic/claude-opus-4-7', name: 'Claude Opus 4.7', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.015, costPer1kOutput: 0.075, speedTier: 'slow', costTier: 'premium' },
+  { id: 'anthropic/claude-opus-4-8', name: 'Claude Opus 4.8', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.015, costPer1kOutput: 0.075, speedTier: 'slow', costTier: 'premium' },
   { id: 'anthropic/claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.0008, costPer1kOutput: 0.004, speedTier: 'fast', costTier: 'low' },
   // OpenRouter
   { id: 'openrouter/auto', name: 'Auto (Best Available)', provider: 'OpenRouter', contextWindow: 200000, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'medium', costTier: 'medium' },
