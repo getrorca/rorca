@@ -99,8 +99,25 @@ function parseConnectionParams(connectionString) {
     }
 }
 // ── Pool Config Builder ──────────────────────────────────────────────────
+function assertTestDatabaseSafety(databaseUrl) {
+    if (process.env.NODE_ENV !== 'test')
+        return;
+    let dbName = process.env.PGDATABASE || '';
+    if (databaseUrl) {
+        try {
+            dbName = new URL(databaseUrl).pathname.slice(1);
+        }
+        catch {
+            dbName = '';
+        }
+    }
+    if (!dbName.endsWith('_test')) {
+        throw new Error(`[db] Refusing to use non-test database "${dbName || '(unknown)'}" while NODE_ENV=test`);
+    }
+}
 function buildPoolConfig() {
     const databaseUrl = process.env.DATABASE_URL;
+    assertTestDatabaseSafety(databaseUrl);
     const configuredPoolSize = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
     const ssl = buildSslConfig(databaseUrl);
     // Explicitly pin search_path so all queries and migrations consistently hit the
@@ -407,10 +424,23 @@ async function seedWorkerSettings() {
 async function seedDefaultAdmin() {
     const existing = await queryOne("SELECT id FROM users WHERE email = 'admin@rorca.local'");
     if (!existing) {
-        // bcrypt hash of 'rorca123' (cost 10)
-        const defaultHash = '$2b$10$BMXqmRMejhhifW5gs6Ju.eI.cxoG/k7iW5sGJ86Nb4WloLowY.qxy';
-        await execute(`INSERT INTO users (id, email, display_name, password_hash, role, plan, email_verified_at)
-       VALUES ('local-admin', 'admin@rorca.local', 'Admin', $1, 'admin', 'pro', NOW())`, [defaultHash]);
+        const hasPasswordHash = await queryOne(`SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'users'
+           AND column_name = 'password_hash'
+       ) AS exists`);
+        if (hasPasswordHash?.exists) {
+            // bcrypt hash of 'rorca123' (cost 10) for legacy/local-auth schemas.
+            const defaultHash = '$2b$10$BMXqmRMejhhifW5gs6Ju.eI.cxoG/k7iW5sGJ86Nb4WloLowY.qxy';
+            await execute(`INSERT INTO users (id, email, display_name, password_hash, role, plan, email_verified_at)
+         VALUES ('local-admin', 'admin@rorca.local', 'Admin', $1, 'admin', 'pro', NOW())`, [defaultHash]);
+        }
+        else {
+            await execute(`INSERT INTO users (id, email, display_name, role, plan, email_verified_at)
+         VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'admin', 'pro', NOW())`);
+        }
         logger.info('[db] Seeded default admin user (admin@rorca.local)');
     }
     else {

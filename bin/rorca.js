@@ -10,7 +10,7 @@ import net from 'node:net';
 import readline from 'node:readline/promises';
 import { execa } from 'execa';
 import { ensureMcpToken, getMcpAdminToken, getMcpAdminTokenPath, getMcpPublicToken, getMcpPublicTokenPath, rotateMcpToken, } from '../backend/src/lib/mcp-auth';
-import { detectDbMode, isAgeAvailable } from '../backend/src/lib/db-strategy';
+import { detectDbMode, getDbConnectionString, isAgeAvailable, setDbMode } from '../backend/src/lib/db-strategy';
 import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar';
 import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
 import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
@@ -246,6 +246,8 @@ async function handleDbCommand(action, options = {}) {
         }
         await waitForDatabaseReady();
         await enableDbExtensions();
+        setDbMode('docker');
+        process.env.DATABASE_URL = getDbConnectionString('docker');
         if (!options.quiet) {
             console.log(green('Database ready at postgres://rorca:rorca@127.0.0.1:5432/rorca'));
         }
