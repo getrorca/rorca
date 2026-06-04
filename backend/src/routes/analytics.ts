@@ -13,6 +13,22 @@ import { withUserClient } from '../db/user-client';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { checkAge } from '../lib/age-guard';
+import {
+  rowToBillingProfile,
+  type BillingProfile,
+  type BillingProfileRow,
+  type BillingMode,
+} from '../lib/finops-types';
+import {
+  computeAccounting,
+  computeAccountingPerRecord,
+  classifyUsage,
+  meteredCost,
+  type AccountingContext,
+  type AccountingResult,
+  type PricingRate,
+  type UsageRecord,
+} from '../lib/finops-accounting';
 
 const router = Router();
 
@@ -321,6 +337,25 @@ router.get('/usage', async (req: Request, res: Response) => {
     const groupCol = groupColumn[groupBy];
     const needsJoin = groupBy === 'spec';
 
+    // Pricing-derived total cost so usage totals stay consistent with the FinOps
+    // dashboard and /costs endpoint, which always price from model_pricing. The
+    // recorded tu.cost_usd is only a fallback for models that have no pricing
+    // entry, so unpriced legacy rows still surface their stored cost rather than
+    // collapsing to zero. Requires a `LEFT JOIN model_pricing mp` on each query.
+    const PRICED_TOTAL_COST_SQL = `
+        SUM(
+          CASE WHEN mp.model_id IS NOT NULL THEN
+            (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+              THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+              ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+            END)
+            + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+              THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+              ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+            END)
+          ELSE COALESCE(tu.cost_usd, 0) END
+        )`;
+
     let paramIdx = 1;
     let sql = `
       SELECT
@@ -328,9 +363,10 @@ router.get('/usage', async (req: Request, res: Response) => {
         SUM(tu.input_tokens) AS total_input_tokens,
         SUM(tu.output_tokens) AS total_output_tokens,
         COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
-        SUM(tu.cost_usd) AS total_cost_usd,
+        ${PRICED_TOTAL_COST_SQL} AS total_cost_usd,
         COUNT(*)::int AS count
       FROM token_usage tu
+      LEFT JOIN model_pricing mp ON tu.model = mp.model_id
     `;
     if (needsJoin) {
       sql += ' JOIN pipeline_runs pr ON tu.run_id = pr.id';
@@ -357,8 +393,9 @@ router.get('/usage', async (req: Request, res: Response) => {
         SUM(tu.input_tokens) AS total_input_tokens,
         SUM(tu.output_tokens) AS total_output_tokens,
         COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
-        SUM(tu.cost_usd) AS total_cost_usd
+        ${PRICED_TOTAL_COST_SQL} AS total_cost_usd
       FROM token_usage tu
+      LEFT JOIN model_pricing mp ON tu.model = mp.model_id
       WHERE tu.recorded_at >= $${tsParamIdx++} AND tu.recorded_at <= $${tsParamIdx++}
     `;
     const tsParams: (string | number)[] = [from, to];
@@ -377,9 +414,10 @@ router.get('/usage', async (req: Request, res: Response) => {
         COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
         COALESCE(SUM(tu.output_tokens), 0) AS total_output_tokens,
         COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
-        COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
+        COALESCE(${PRICED_TOTAL_COST_SQL}, 0) AS total_cost_usd,
         COUNT(*)::int AS total_records
       FROM token_usage tu
+      LEFT JOIN model_pricing mp ON tu.model = mp.model_id
       WHERE tu.recorded_at >= $${totParamIdx++} AND tu.recorded_at <= $${totParamIdx++}
     `;
     const totParams: (string | number)[] = [from, to];
@@ -532,7 +570,19 @@ router.get('/costs', async (req: Request, res: Response) => {
             THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
             ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
           END) AS output_cost_usd,
-          SUM(tu.cost_usd) AS total_cost_usd,
+          -- Pricing-derived total with a raw-cost fallback for unpriced models.
+          SUM(
+            CASE WHEN mp.model_id IS NOT NULL THEN
+              (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+                THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+                ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+              END)
+              + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+                THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+                ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+              END)
+            ELSE COALESCE(tu.cost_usd, 0) END
+          ) AS total_cost_usd,
           COUNT(*)::int AS story_count
         FROM token_usage tu
         LEFT JOIN model_pricing mp ON tu.model = mp.model_id
@@ -570,7 +620,23 @@ router.get('/costs', async (req: Request, res: Response) => {
           THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
           ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
         END) AS output_cost_usd,
-        SUM(tu.cost_usd) AS total_cost_usd,
+        -- total_cost_usd is the pricing-derived cost (input + output) so it stays
+        -- consistent with the per-component cost columns and the FinOps dashboard,
+        -- which always price from model_pricing. The recorded tu.cost_usd is only a
+        -- fallback for rows whose model has no pricing entry, so unpriced legacy
+        -- rows still surface their stored cost instead of dropping to zero.
+        SUM(
+          CASE WHEN mp.model_id IS NOT NULL THEN
+            (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+              THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+              ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+            END)
+            + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+              THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+              ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+            END)
+          ELSE COALESCE(tu.cost_usd, 0) END
+        ) AS total_cost_usd,
         COUNT(*)::int AS story_count
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
@@ -578,7 +644,10 @@ router.get('/costs', async (req: Request, res: Response) => {
       WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
       ${wsFilter}
       GROUP BY group_key
-      ORDER BY total_cost_usd DESC
+      -- Newest-first by the group's most recent usage, capped at the 20 most
+      -- recent groups so the breakdown stays a bounded, recency-ordered view.
+      ORDER BY MAX(tu.recorded_at) DESC
+      LIMIT 20
     `;
 
     const rawBreakdown = await query<CostRow>(sql, wsParams);
@@ -601,7 +670,20 @@ router.get('/costs', async (req: Request, res: Response) => {
           THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
           ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
         END), 0) AS total_output_cost_usd,
-        COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
+        -- Pricing-derived total with a raw-cost fallback for unpriced models,
+        -- mirroring the per-row breakdown above so totals reconcile with rows.
+        COALESCE(SUM(
+          CASE WHEN mp.model_id IS NOT NULL THEN
+            (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+              THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+              ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+            END)
+            + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+              THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+              ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+            END)
+          ELSE COALESCE(tu.cost_usd, 0) END
+        ), 0) AS total_cost_usd,
         COUNT(*)::int AS total_stories
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
@@ -2170,7 +2252,19 @@ function resolvePricing(pricingMap: Map<string, { input: number; output: number 
  *     x-rorca-tier: paid
  *     x-rorca-capability: finops
  *     x-rorca-rationale: "Per-run FinOps analytics are commercial cost visibility features and must stay outside the free CLI/MCP surface."
- *     description: Returns detailed FinOps data for a specific pipeline run, including per-story cost breakdown with model tier classification, run summary aggregated by model, savings vs all-Opus baseline, model distribution for pie charts, and escalation log from WAL events. For subscription-based agents (claude, codex), savings and cost fields are null.
+ *     description: >-
+ *       Returns accounting-mode-aware FinOps data for a specific pipeline run. Instead
+ *       of one ambiguous cost field, the response separates marginal metered API spend
+ *       (accounting.meteredCostUsd), allocated subscription cost
+ *       (accounting.allocatedSubscriptionCostUsd), and blended effective cost
+ *       (accounting.blendedEffectiveCostUsd), classified via the shared FinOps
+ *       accounting engine against the active billing profiles. Live runs surface
+ *       provider/model rows immediately and update usage as story_token_update WAL
+ *       events arrive. Subscription-only runs report truthful subscription usage volume
+ *       with isSubscription=true, no fabricated per-run spend, and a null savings field.
+ *       Mixed-provider runs aggregate across token_usage, story_results, and WAL updates.
+ *       Per-story rows carry billingMode and metered cost; provenance carries billing
+ *       mode, pricing coverage, and allocation modes.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -2188,6 +2282,9 @@ function resolvePricing(pricingMap: Map<string, { input: number; output: number 
  *                 runId: { type: integer }
  *                 agentType: { type: string }
  *                 isSubscription: { type: boolean }
+ *                 billingMode: { type: string }
+ *                 accounting: { type: object, description: "metered/allocated/blended totals, subscription usage, byMode, coverage" }
+ *                 provenance: { type: object, description: "billing mode + pricing coverage + allocation provenance labels" }
  *                 runSummary: { type: array, items: { type: object } }
  *                 savings: { type: object, nullable: true }
  *                 totals: { type: object }
@@ -2210,8 +2307,8 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
     }
 
     // Check run exists and get agent info
-    const run = await queryOne<{ id: number; agent: string | null; agent_type: string | null; agent_model: string | null; workspace_id: string; spec_path: string; status: string }>(
-      'SELECT id, agent, agent_type, agent_model, workspace_id, spec_path, status FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ id: number; agent: string | null; agent_type: string | null; agent_model: string | null; workspace_id: string; spec_path: string; status: string; started_at: string | null; finished_at: string | null }>(
+      'SELECT id, agent, agent_type, agent_model, workspace_id, spec_path, status, started_at::text AS started_at, finished_at::text AS finished_at FROM pipeline_runs WHERE id = $1',
       [runId]
     );
 
@@ -2351,20 +2448,65 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       });
     }
 
-    // Build per-story breakdown
+    // FIN-004: classify this run's usage with the shared FIN-002 accounting engine
+    // against the active FIN-001 billing profiles instead of assuming everything is
+    // metered. Profiles are loaded for the run's lifetime window (started→finished),
+    // falling back to a wide window for live runs that have not finished yet so an
+    // in-flight subscription run is still classified truthfully.
+    const profileFrom = run.started_at ?? new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+    const profileTo = run.finished_at ?? new Date().toISOString();
+    const profiles = await loadActiveBillingProfiles(profileFrom, profileTo, run.workspace_id);
+    const accountingCtx = buildAccountingContext(pricingMap, profiles);
+
+    // Project each accumulated story onto an accounting usage row. runId drives
+    // by_runs allocation; story_id drives by_stories. reasoning_tokens is unknown
+    // at this granularity, so it is zero (output already includes it upstream).
+    const usageRows: HistoricalUsageRow[] = stories.map((s) => ({
+      model: s.model,
+      input_tokens: s.input_tokens,
+      output_tokens: s.output_tokens,
+      reasoning_tokens: 0,
+      cost_usd: s.cost_usd,
+      run_id: runId,
+      story_id: s.story_id,
+      recorded_at: run.started_at ?? null,
+    }));
+    const accounting = summarizeUsage(usageRows, accountingCtx);
+
+    // The run's headline billing mode is the dominant mode across its rows. A run
+    // is subscription-backed when no row is metered_api and at least one is a
+    // subscription — these runs must NOT imply invoice-backed per-run spend.
+    const billingMode: BillingMode = providerBillingMode(accounting);
+    const meteredRecordCount = accounting.byMode.find((m) => m.mode === 'metered_api')?.recordCount ?? 0;
+    const isSubscription = accounting.subscriptionUsage.recordCount > 0 && meteredRecordCount === 0;
+
+    // Build per-story breakdown. `actualCost` is the marginal metered cost for the
+    // story (zero for subscription/unpriced rows — never a fabricated number), while
+    // `meteredCost` exposes the same value explicitly alongside the billing mode.
     const perStory = stories.map(s => {
-      const pricing = resolvePricing(pricingMap, s.model);
-      const actualCost = pricing
-        ? (s.input_tokens / 1_000_000) * pricing.input + (s.output_tokens / 1_000_000) * pricing.output
-        : s.cost_usd;
+      const record = toUsageRecord({
+        model: s.model,
+        input_tokens: s.input_tokens,
+        output_tokens: s.output_tokens,
+        reasoning_tokens: 0,
+        cost_usd: s.cost_usd,
+        run_id: runId,
+        story_id: s.story_id,
+        recorded_at: run.started_at ?? null,
+      });
+      const cls = classifyUsage(record, accountingCtx);
+      const rate = accountingCtx.pricingFor(record);
+      const metered = cls.mode === 'metered_api' ? (meteredCost(record, rate) ?? 0) : 0;
       const opusBaseline = (s.input_tokens / 1_000_000) * OPUS_INPUT_PER_1M + (s.output_tokens / 1_000_000) * OPUS_OUTPUT_PER_1M;
       return {
         storyId: s.story_id,
         model: s.model,
         tier: tierFromModel(s.model),
+        billingMode: cls.mode,
         inputTokens: s.input_tokens,
         outputTokens: s.output_tokens,
-        actualCost: Math.round(actualCost * 10000) / 10000,
+        meteredCost: Math.round(metered * 10000) / 10000,
+        actualCost: Math.round(metered * 10000) / 10000,
         opusBaseline: Math.round(opusBaseline * 10000) / 10000,
       };
     });
@@ -2376,7 +2518,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       existing.stories++;
       existing.inputTokens += s.inputTokens;
       existing.outputTokens += s.outputTokens;
-      existing.cost += s.actualCost;
+      existing.cost += s.meteredCost;
       modelSummary.set(s.model, existing);
     }
 
@@ -2389,10 +2531,12 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       cost: Math.round(data.cost * 10000) / 10000,
     }));
 
-    // Totals
-    const totalActual = perStory.reduce((sum, s) => sum + s.actualCost, 0);
+    // Totals — savings compares marginal metered spend against an all-Opus metered
+    // baseline, so subscription/unpriced rows contribute zero metered cost (and are
+    // excluded from a misleading savings number for subscription-only runs below).
+    const totalMetered = accounting.meteredCostUsd;
     const totalOpusBaseline = perStory.reduce((sum, s) => sum + s.opusBaseline, 0);
-    const totalSaved = totalOpusBaseline - totalActual;
+    const totalSaved = totalOpusBaseline - totalMetered;
     const savingsPct = totalOpusBaseline > 0 ? (totalSaved / totalOpusBaseline) * 100 : 0;
 
     // Model distribution (for pie chart)
@@ -2448,11 +2592,39 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       agentType,
       agentModel: fallbackModel,
       usageAvailable,
-      isSubscription: false,
+      isSubscription,
+      billingMode,
+      // FIN-004: accounting-mode-aware cost surface — metered marginal spend,
+      // allocated subscription cost, and blended effective cost are reported
+      // separately rather than collapsed into one ambiguous `cost` field. This is
+      // the canonical per-run accounting block, mirroring the historical view.
+      accounting: {
+        meteredCostUsd: accounting.meteredCostUsd,
+        allocatedSubscriptionCostUsd: accounting.allocatedSubscriptionCostUsd,
+        blendedEffectiveCostUsd: accounting.blendedEffectiveCostUsd,
+        subscriptionUsage: accounting.subscriptionUsage,
+        byMode: accounting.byMode,
+        coverage: accounting.coverage,
+      },
+      // Provenance labels so the dashboard can tell a truthful story: whether the
+      // numbers are metered, allocated, or blended, and how much usage was priced.
+      provenance: {
+        billingMode,
+        isSubscription,
+        hasMeteredSpend: accounting.meteredCostUsd > 0,
+        hasAllocatedCost: accounting.coverage.hasAllocatedCost,
+        hasBlendedCost: accounting.coverage.hasBlendedCost,
+        pricingCoverage: accounting.coverage.pricingCoverage,
+        unpricedRecords: accounting.coverage.unpricedRecords,
+        profileClassifiedRecords: accounting.coverage.profileClassifiedRecords,
+        allocationModes: accounting.coverage.allocationModes,
+      },
       runSummary,
-      savings: {
+      // Savings is a metered-vs-Opus comparison; it is null for subscription-only
+      // runs so we never imply invoice-backed marginal savings where none exist.
+      savings: isSubscription ? null : {
         opusBaseline: Math.round(totalOpusBaseline * 100) / 100,
-        actual: Math.round(totalActual * 100) / 100,
+        actual: Math.round(totalMetered * 100) / 100,
         saved: Math.round(totalSaved * 100) / 100,
         percentage: Math.round(savingsPct * 10) / 10,
       },
@@ -2460,7 +2632,11 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
         stories: totalStories,
         inputTokens: perStory.reduce((sum, s) => sum + s.inputTokens, 0),
         outputTokens: perStory.reduce((sum, s) => sum + s.outputTokens, 0),
-        cost: Math.round(totalActual * 100) / 100,
+        // `cost` stays for backward compatibility, now the blended effective cost.
+        cost: Math.round(accounting.blendedEffectiveCostUsd * 100) / 100,
+        meteredCostUsd: accounting.meteredCostUsd,
+        allocatedSubscriptionCostUsd: accounting.allocatedSubscriptionCostUsd,
+        blendedEffectiveCostUsd: accounting.blendedEffectiveCostUsd,
       },
       modelDistribution,
       perStory,
@@ -2470,6 +2646,231 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
     handleRouteError(res, error, '[Analytics] FinOps run query');
   }
 });
+
+// ─── Historical FinOps accounting helpers (FIN-003) ──────────────────────────
+// The historical FinOps view must stop reporting a single ambiguous "total cost".
+// It classifies every token_usage row via the shared FIN-002 accounting engine
+// against the active FIN-001 billing profiles, then reports metered API spend,
+// allocated subscription cost, blended effective cost, subscription usage volume,
+// and coverage/provenance — separately and consistently across every aggregation.
+
+/** A raw token_usage row projected for accounting. Shared across aggregations. */
+interface HistoricalUsageRow {
+  model: string;
+  input_tokens: number | string | null;
+  output_tokens: number | string | null;
+  reasoning_tokens: number | string | null;
+  cost_usd: number | string | null;
+  run_id: number | string | null;
+  story_id: string | null;
+  recorded_at: string | null;
+  /** Joined workspace id (present in the historical aggregation query). */
+  workspace_id?: string | null;
+  /** Joined workspace label, falling back to the workspace id. */
+  workspace_label?: string | null;
+  /** Spec slug derived from the joined pipeline_runs.spec_path. */
+  spec_slug?: string | null;
+}
+
+/**
+ * Derive the billing provider for a model id, mirroring the pi-providers SQL:
+ *   pi/openai/gpt-4.1   → openai   (pi wrapper: provider is the 2nd segment)
+ *   openrouter/google/… → openrouter (other slash form: 1st segment)
+ *   openai/gpt-4o        → openai
+ *   claude-sonnet-4-5    → anthropic (un-prefixed Anthropic model)
+ *   gpt-4o               → openai    (un-prefixed OpenAI model)
+ * Falls back to the leading segment, then the whole string, lower-cased.
+ */
+function providerFromModel(model: string): string {
+  const normalized = (normalizeFinOpsModel(model) ?? '').toLowerCase();
+  if (!normalized) return 'unknown';
+
+  if (normalized.startsWith('pi/')) {
+    const seg = normalized.split('/')[1];
+    if (seg) return seg;
+  }
+  const slash = normalized.indexOf('/');
+  if (slash > 0) return normalized.slice(0, slash);
+
+  // Un-prefixed model names — infer provider family from well-known prefixes.
+  if (normalized.startsWith('claude')) return 'anthropic';
+  if (normalized.startsWith('gpt') || normalized.startsWith('o1') || normalized.startsWith('o3') || normalized.startsWith('codex')) return 'openai';
+  if (normalized.startsWith('gemini')) return 'google';
+  return normalized;
+}
+
+/** Project a raw token_usage row onto the engine's provider-agnostic UsageRecord. */
+function toUsageRecord(row: HistoricalUsageRow): UsageRecord {
+  return {
+    provider: providerFromModel(row.model),
+    model: row.model,
+    inputTokens: Number(row.input_tokens ?? 0),
+    outputTokens: Number(row.output_tokens ?? 0),
+    reasoningTokens: Number(row.reasoning_tokens ?? 0),
+    runId: row.run_id == null ? null : String(row.run_id),
+    storyId: row.story_id,
+    day: row.recorded_at,
+  };
+}
+
+/**
+ * Load the active billing profiles that apply to the requested window + workspace.
+ *
+ * Order matters for the engine (first match wins), so the most specific profiles
+ * are returned first: workspace-scoped before global, and within each scope the
+ * most recently effective profile first. Only enabled profiles whose effective
+ * window overlaps [from, to] are returned — date filtering happens in SQL so an
+ * expired or not-yet-effective subscription never silently allocates cost.
+ */
+async function loadActiveBillingProfiles(
+  from: string,
+  to: string,
+  workspaceId: string | undefined,
+): Promise<BillingProfile[]> {
+  const params: (string | null)[] = [from, to];
+  let wsClause = 'AND (workspace_id IS NULL)';
+  if (workspaceId) {
+    params.push(workspaceId);
+    wsClause = `AND (workspace_id IS NULL OR workspace_id = $${params.length})`;
+  }
+
+  const rows = await query<BillingProfileRow>(
+    `SELECT * FROM billing_profiles
+       WHERE enabled = TRUE
+         AND effective_from <= $2
+         AND (effective_to IS NULL OR effective_to >= $1)
+         ${wsClause}
+       ORDER BY (workspace_id IS NOT NULL) DESC,
+                (model_pattern IS NOT NULL) DESC,
+                effective_from DESC`,
+    params,
+  );
+  return rows.map(rowToBillingProfile);
+}
+
+/**
+ * Build the accounting context: a per-token pricing resolver (converting the
+ * per-1M model_pricing rates to per-token) plus the active billing profiles.
+ */
+function buildAccountingContext(
+  pricingMap: Map<string, { input: number; output: number }>,
+  profiles: readonly BillingProfile[],
+): AccountingContext {
+  return {
+    profiles,
+    pricingFor: (record): PricingRate | null => {
+      const per1m = resolvePricing(pricingMap, record.model);
+      if (!per1m) return null;
+      // pricingMap holds USD per 1,000,000 tokens; the engine bills per token.
+      return { input: per1m.input / 1_000_000, output: per1m.output / 1_000_000 };
+    },
+  };
+}
+
+/** Round a USD value to cents. */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/** Round a coverage fraction to 3 decimals, preserving null (no metered rows). */
+function roundCoverage(value: number | null): number | null {
+  return value == null ? null : Math.round(value * 1000) / 1000;
+}
+
+/**
+ * The accounting-mode-aware cost shape attached to every historical aggregation
+ * (overall, per provider/workspace/spec/month). This replaces the old single
+ * ambiguous `totalCost`/`total_cost` number.
+ */
+interface AccountingSummary {
+  meteredCostUsd: number;
+  allocatedSubscriptionCostUsd: number;
+  blendedEffectiveCostUsd: number;
+  /** Token volume that ran under a subscription billing mode (no marginal cost). */
+  subscriptionUsage: { inputTokens: number; outputTokens: number; reasoningTokens: number; recordCount: number };
+  /** Per-billing-mode rollup so the dashboard can show the accounting breakdown. */
+  byMode: Array<{
+    mode: BillingMode;
+    recordCount: number;
+    meteredCostUsd: number;
+    allocatedCostUsd: number;
+    blendedCostUsd: number;
+  }>;
+  coverage: {
+    totalRecords: number;
+    profileClassifiedRecords: number;
+    pricedRecords: number;
+    unpricedRecords: number;
+    pricingCoverage: number | null;
+    allocationModes: string[];
+    hasAllocatedCost: boolean;
+    hasBlendedCost: boolean;
+  };
+}
+
+/** Run the engine over a set of usage rows and serialize an AccountingSummary. */
+function summarizeUsage(rows: HistoricalUsageRow[], ctx: AccountingContext): AccountingSummary {
+  const result: AccountingResult = computeAccounting(rows.map(toUsageRecord), ctx);
+  const subscription = result.byMode.find((m) => m.mode === 'subscription');
+  return {
+    meteredCostUsd: round2(result.meteredCostUsd),
+    allocatedSubscriptionCostUsd: round2(result.allocatedSubscriptionCostUsd),
+    blendedEffectiveCostUsd: round2(result.blendedEffectiveCostUsd),
+    subscriptionUsage: {
+      inputTokens: subscription?.inputTokens ?? 0,
+      outputTokens: subscription?.outputTokens ?? 0,
+      reasoningTokens: subscription?.reasoningTokens ?? 0,
+      recordCount: subscription?.recordCount ?? 0,
+    },
+    byMode: result.byMode.map((m) => ({
+      mode: m.mode,
+      recordCount: m.recordCount,
+      meteredCostUsd: round2(m.meteredCostUsd),
+      allocatedCostUsd: round2(m.allocatedCostUsd),
+      blendedCostUsd: round2(m.blendedCostUsd),
+    })),
+    coverage: {
+      totalRecords: result.coverage.totalRecords,
+      profileClassifiedRecords: result.coverage.profileClassifiedRecords,
+      pricedRecords: result.coverage.pricedRecords,
+      unpricedRecords: result.coverage.unpricedRecords,
+      pricingCoverage: roundCoverage(result.coverage.pricingCoverage),
+      allocationModes: result.coverage.allocationModes.slice(),
+      hasAllocatedCost: result.coverage.hasAllocatedCost,
+      hasBlendedCost: result.coverage.hasBlendedCost,
+    },
+  };
+}
+
+/** Reduce a recorded_at timestamp to its UTC calendar day (`YYYY-MM-DD`). */
+function calendarDayKey(value: string | null): string {
+  if (!value) return 'unknown';
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(value);
+  if (m) return m[1];
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? 'unknown' : d.toISOString().slice(0, 10);
+}
+
+/** Pick the dominant (most rows) billing mode from an accounting summary. */
+function providerBillingMode(acct: AccountingSummary): BillingMode {
+  const dominant = acct.byMode.reduce<{ mode: BillingMode; recordCount: number } | null>(
+    (best, m) => (best == null || m.recordCount > best.recordCount ? { mode: m.mode, recordCount: m.recordCount } : best),
+    null,
+  );
+  return dominant?.mode ?? 'unknown';
+}
+
+/** Group raw usage rows by a key extractor, preserving first-seen order. */
+function groupRows<K>(rows: HistoricalUsageRow[], keyOf: (row: HistoricalUsageRow) => K): Map<K, HistoricalUsageRow[]> {
+  const out = new Map<K, HistoricalUsageRow[]>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const arr = out.get(key);
+    if (arr) arr.push(row);
+    else out.set(key, [row]);
+  }
+  return out;
+}
 
 // ─── GET /api/analytics/finops/historical — Historical FinOps data ───────────
 // Cumulative cost by workspace, spec, month; trend chart; projections.
@@ -2488,7 +2889,19 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
  *     x-rorca-tier: paid
  *     x-rorca-capability: finops
  *     x-rorca-rationale: "Historical FinOps reporting is a commercial analytics feature and should not be part of the free contract."
- *     description: Returns cumulative cost data broken down by workspace, spec, and month, along with a daily cost trend for charts, model distribution, projected monthly cost, and savings vs all-Opus baseline. Default range is 90 days. For subscription-only runs, the savings field is null.
+ *     description: >-
+ *       Returns accounting-mode-aware historical FinOps data. Instead of a single
+ *       ambiguous total cost, every aggregation separates metered API spend
+ *       (meteredCostUsd), allocated subscription cost (allocatedSubscriptionCostUsd),
+ *       blended effective cost (blendedEffectiveCostUsd), subscription token usage,
+ *       per-billing-mode rollups, and coverage/provenance (priced vs unpriced rows,
+ *       allocation modes applied, profile-classified counts). Runs are classified
+ *       via the shared FinOps accounting engine against the active billing profiles.
+ *       Daily/workspace/spec/month/provider aggregations carry billing mode and
+ *       coverage semantics consistently. Run and story counts are derived from
+ *       execution rows so they stay populated where token history is incomplete.
+ *       Default range is 90 days. The savings field compares metered marginal spend
+ *       to an all-Opus baseline and is null when the window is subscription-only.
  *     parameters:
  *       - in: query
  *         name: workspace_id
@@ -2510,14 +2923,17 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
  *             schema:
  *               type: object
  *               properties:
+ *                 accounting: { type: object, description: "Window-wide metered/allocated/blended totals, subscription usage, byMode, coverage" }
  *                 dailyTrend: { type: array, items: { type: object } }
  *                 byWorkspace: { type: array, items: { type: object } }
  *                 bySpec: { type: array, items: { type: object } }
  *                 byMonth: { type: array, items: { type: object } }
+ *                 byProvider: { type: array, items: { type: object } }
  *                 modelDistribution: { type: array, items: { type: object } }
  *                 projectedMonthlyCost: { type: number }
  *                 savings: { type: object, nullable: true }
  *                 allSubscription: { type: boolean }
+ *                 coverage: { type: object }
  *                 dateRange: { type: object }
  *       500:
  *         description: Internal server error
@@ -2530,178 +2946,255 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
     const from = (req.query.from as string) || ninetyDaysAgo.toISOString();
     const to = (req.query.to as string) || now.toISOString();
 
-    let paramIdx = 3;
-    const wsFilter = workspaceId ? `AND tu.workspace_id = $${paramIdx++}` : '';
+    const wsFilter = workspaceId ? `AND tu.workspace_id = $3` : '';
     const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
 
-    // Daily cost trend (last 30 days for chart)
-    const dailySql = `
-      SELECT
-        DATE(tu.recorded_at) AS date,
-        SUM(tu.input_tokens) AS input_tokens,
-        SUM(tu.output_tokens) AS output_tokens,
-        COALESCE(SUM(tu.reasoning_tokens), 0) AS reasoning_tokens,
-        SUM(tu.cost_usd) AS cost_usd,
-        COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
-      FROM token_usage tu
-      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
-      GROUP BY DATE(tu.recorded_at)
-      ORDER BY date ASC
-    `;
-    const dailyTrend = await query<{
-      date: string; input_tokens: number; output_tokens: number; reasoning_tokens: number; cost_usd: number; story_count: number;
-    }>(dailySql, params);
-
-    // By workspace
-    const byWorkspaceSql = `
-      SELECT
-        tu.workspace_id,
-        COALESCE(w.label, tu.workspace_id) AS workspace_label,
-        SUM(tu.cost_usd) AS total_cost,
-        SUM(tu.input_tokens) AS input_tokens,
-        SUM(tu.output_tokens) AS output_tokens,
-        COUNT(DISTINCT tu.run_id) AS run_count
-      FROM token_usage tu
-      LEFT JOIN workspaces w ON tu.workspace_id = w.id
-      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
-      GROUP BY tu.workspace_id, w.label
-      ORDER BY total_cost DESC
-    `;
-    const byWorkspace = await query<{
-      workspace_id: string; workspace_label: string; total_cost: number;
-      input_tokens: number; output_tokens: number; run_count: number;
-    }>(byWorkspaceSql, params);
-
-    // By spec
-    const bySpecSql = `
-      SELECT
-        REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
-        SUM(tu.cost_usd) AS total_cost,
-        SUM(tu.input_tokens) AS input_tokens,
-        SUM(tu.output_tokens) AS output_tokens,
-        COUNT(DISTINCT tu.run_id) AS run_count
-      FROM token_usage tu
-      JOIN pipeline_runs pr ON tu.run_id = pr.id
-      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
-      GROUP BY spec_slug
-      ORDER BY total_cost DESC
-      LIMIT 20
-    `;
-    const bySpec = await query<{
-      spec_slug: string; total_cost: number; input_tokens: number;
-      output_tokens: number; run_count: number;
-    }>(bySpecSql, params);
-
-    // By month — PostgreSQL: to_char for year-month
-    const byMonthSql = `
-      SELECT
-        to_char(tu.recorded_at, 'YYYY-MM') AS month,
-        SUM(tu.cost_usd) AS total_cost,
-        SUM(tu.input_tokens) AS input_tokens,
-        SUM(tu.output_tokens) AS output_tokens,
-        COALESCE(SUM(tu.reasoning_tokens), 0) AS reasoning_tokens,
-        COUNT(DISTINCT tu.run_id) AS run_count,
-        COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
-      FROM token_usage tu
-      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
-      GROUP BY month
-      ORDER BY month ASC
-    `;
-    const byMonth = await query<{
-      month: string; total_cost: number; input_tokens: number;
-      output_tokens: number; reasoning_tokens: number; run_count: number; story_count: number;
-    }>(byMonthSql, params);
-
-    // Model distribution across all runs
-    const modelDistSql = `
+    // FIN-003: Pull the raw usage rows for the whole window ONCE, joined to the
+    // workspace label and spec slug, then classify + account for them in JS via
+    // the shared FIN-002 engine. Doing every aggregation off the same classified
+    // row set guarantees provider/workspace/spec/month numbers agree, and lets us
+    // separate metered API spend from allocated subscription cost everywhere.
+    //
+    // Run/story COUNTS continue to be derived from execution rows (recorded_at)
+    // even when token columns are zero/incomplete, so date-range run and story
+    // counts stay populated where token history is sparse — only the cost/token
+    // provenance is gated on pricing + billing-mode classification.
+    const rowsSql = `
       SELECT
         tu.model,
-        COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count,
-        SUM(tu.cost_usd) AS total_cost
+        COALESCE(tu.input_tokens, 0) AS input_tokens,
+        COALESCE(tu.output_tokens, 0) AS output_tokens,
+        COALESCE(tu.reasoning_tokens, 0) AS reasoning_tokens,
+        COALESCE(tu.cost_usd, 0) AS cost_usd,
+        tu.run_id,
+        tu.story_id,
+        tu.recorded_at::text AS recorded_at,
+        tu.workspace_id,
+        COALESCE(w.label, tu.workspace_id) AS workspace_label,
+        REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug
       FROM token_usage tu
+      LEFT JOIN workspaces w ON tu.workspace_id = w.id
+      LEFT JOIN pipeline_runs pr ON tu.run_id = pr.id
       WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
-      GROUP BY tu.model
-      ORDER BY story_count DESC
+      ORDER BY tu.recorded_at ASC
     `;
-    const modelDist = await query<{
-      model: string; story_count: number; total_cost: number;
-    }>(modelDistSql, params);
+    const rawRows = await query<HistoricalUsageRow & {
+      workspace_id: string | null; workspace_label: string | null; spec_slug: string | null;
+    }>(rowsSql, params);
 
-    const totalStories = modelDist.reduce((sum, m) => sum + m.story_count, 0);
-    const modelDistribution = modelDist.map(m => ({
-      model: m.model,
-      tier: tierFromModel(m.model),
-      storyCount: m.story_count,
-      totalCost: Math.round(m.total_cost * 100) / 100,
-      percentage: totalStories > 0 ? Math.round((m.story_count / totalStories) * 1000) / 10 : 0,
-    }));
+    // Build the accounting context: active billing profiles + per-token pricing.
+    const pricingRows = await query<{
+      model_id: string; input_cost_per_1m: number | null; output_cost_per_1m: number | null;
+      input_cost_per_1k: number; output_cost_per_1k: number;
+    }>('SELECT model_id, input_cost_per_1m, output_cost_per_1m, input_cost_per_1k, output_cost_per_1k FROM model_pricing');
+    const pricingMap = new Map<string, { input: number; output: number }>();
+    for (const p of pricingRows) {
+      pricingMap.set(p.model_id, {
+        input: p.input_cost_per_1m ?? p.input_cost_per_1k * 1000,
+        output: p.output_cost_per_1m ?? p.output_cost_per_1k * 1000,
+      });
+    }
+    const profiles = await loadActiveBillingProfiles(from, to, workspaceId);
+    const ctx = buildAccountingContext(pricingMap, profiles);
 
-    // Projected monthly cost: avg daily cost * 30
-    const totalCostInRange = dailyTrend.reduce((sum, d) => sum + d.cost_usd, 0);
+    // Distinct run / story counts off execution rows, independent of token volume.
+    const distinctRuns = (rows: HistoricalUsageRow[]): number =>
+      new Set(rows.filter((r) => r.run_id != null).map((r) => String(r.run_id))).size;
+    const distinctStories = (rows: HistoricalUsageRow[]): number =>
+      new Set(rows.filter((r) => r.story_id != null).map((r) => `${r.story_id}-${r.run_id}`)).size;
+
+    // Overall accounting across the whole window.
+    const overall = summarizeUsage(rawRows, ctx);
+
+    // ── Daily trend (chart) ───────────────────────────────────────────────────
+    const byDay = groupRows(rawRows, (r) => calendarDayKey(r.recorded_at));
+    const dailyTrend = Array.from(byDay.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, rows]) => {
+        const acct = summarizeUsage(rows, ctx);
+        return {
+          date,
+          // `cost` stays as the headline number for existing charts, now blended.
+          cost: acct.blendedEffectiveCostUsd,
+          meteredCostUsd: acct.meteredCostUsd,
+          allocatedSubscriptionCostUsd: acct.allocatedSubscriptionCostUsd,
+          blendedEffectiveCostUsd: acct.blendedEffectiveCostUsd,
+          inputTokens: rows.reduce((s, r) => s + Number(r.input_tokens ?? 0), 0),
+          outputTokens: rows.reduce((s, r) => s + Number(r.output_tokens ?? 0), 0),
+          reasoningTokens: rows.reduce((s, r) => s + Number(r.reasoning_tokens ?? 0), 0),
+          storyCount: distinctStories(rows),
+          coverage: acct.coverage,
+        };
+      });
+
+    // ── By workspace ──────────────────────────────────────────────────────────
+    const byWorkspaceGroups = groupRows(rawRows, (r) => r.workspace_id ?? 'unknown');
+    const byWorkspace = Array.from(byWorkspaceGroups.entries())
+      .map(([wsId, rows]) => {
+        const acct = summarizeUsage(rows, ctx);
+        return {
+          workspaceId: wsId,
+          label: rows[0]?.workspace_label ?? wsId,
+          totalCost: acct.blendedEffectiveCostUsd,
+          meteredCostUsd: acct.meteredCostUsd,
+          allocatedSubscriptionCostUsd: acct.allocatedSubscriptionCostUsd,
+          blendedEffectiveCostUsd: acct.blendedEffectiveCostUsd,
+          subscriptionUsage: acct.subscriptionUsage,
+          inputTokens: rows.reduce((s, r) => s + Number(r.input_tokens ?? 0), 0),
+          outputTokens: rows.reduce((s, r) => s + Number(r.output_tokens ?? 0), 0),
+          runCount: distinctRuns(rows),
+          byMode: acct.byMode,
+          coverage: acct.coverage,
+        };
+      })
+      .sort((a, b) => b.blendedEffectiveCostUsd - a.blendedEffectiveCostUsd);
+
+    // ── By spec ───────────────────────────────────────────────────────────────
+    const bySpecGroups = groupRows(rawRows.filter((r) => r.spec_slug != null), (r) => r.spec_slug as string);
+    const bySpec = Array.from(bySpecGroups.entries())
+      .map(([specSlug, rows]) => {
+        const acct = summarizeUsage(rows, ctx);
+        return {
+          specSlug,
+          totalCost: acct.blendedEffectiveCostUsd,
+          meteredCostUsd: acct.meteredCostUsd,
+          allocatedSubscriptionCostUsd: acct.allocatedSubscriptionCostUsd,
+          blendedEffectiveCostUsd: acct.blendedEffectiveCostUsd,
+          subscriptionUsage: acct.subscriptionUsage,
+          inputTokens: rows.reduce((s, r) => s + Number(r.input_tokens ?? 0), 0),
+          outputTokens: rows.reduce((s, r) => s + Number(r.output_tokens ?? 0), 0),
+          runCount: distinctRuns(rows),
+          byMode: acct.byMode,
+          coverage: acct.coverage,
+        };
+      })
+      .sort((a, b) => b.blendedEffectiveCostUsd - a.blendedEffectiveCostUsd)
+      .slice(0, 20);
+
+    // ── By month ──────────────────────────────────────────────────────────────
+    const byMonthGroups = groupRows(rawRows, (r) => calendarDayKey(r.recorded_at).slice(0, 7));
+    const byMonth = Array.from(byMonthGroups.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, rows]) => {
+        const acct = summarizeUsage(rows, ctx);
+        return {
+          month,
+          totalCost: acct.blendedEffectiveCostUsd,
+          meteredCostUsd: acct.meteredCostUsd,
+          allocatedSubscriptionCostUsd: acct.allocatedSubscriptionCostUsd,
+          blendedEffectiveCostUsd: acct.blendedEffectiveCostUsd,
+          subscriptionUsage: acct.subscriptionUsage,
+          inputTokens: rows.reduce((s, r) => s + Number(r.input_tokens ?? 0), 0),
+          outputTokens: rows.reduce((s, r) => s + Number(r.output_tokens ?? 0), 0),
+          reasoningTokens: rows.reduce((s, r) => s + Number(r.reasoning_tokens ?? 0), 0),
+          runCount: distinctRuns(rows),
+          storyCount: distinctStories(rows),
+          byMode: acct.byMode,
+          coverage: acct.coverage,
+        };
+      });
+
+    // ── By provider (accounting-mode aware) ───────────────────────────────────
+    const byProviderGroups = groupRows(rawRows, (r) => providerFromModel(r.model));
+    const byProvider = Array.from(byProviderGroups.entries())
+      .map(([provider, rows]) => {
+        const acct = summarizeUsage(rows, ctx);
+        // A provider's headline billing mode is the one carrying the most rows,
+        // so the dashboard can label it (metered vs subscription) consistently.
+        const dominant = acct.byMode.reduce<{ mode: BillingMode; recordCount: number } | null>(
+          (best, m) => (best == null || m.recordCount > best.recordCount ? { mode: m.mode, recordCount: m.recordCount } : best),
+          null,
+        );
+        return {
+          provider,
+          billingMode: dominant?.mode ?? 'unknown',
+          meteredCostUsd: acct.meteredCostUsd,
+          allocatedSubscriptionCostUsd: acct.allocatedSubscriptionCostUsd,
+          blendedEffectiveCostUsd: acct.blendedEffectiveCostUsd,
+          subscriptionUsage: acct.subscriptionUsage,
+          inputTokens: rows.reduce((s, r) => s + Number(r.input_tokens ?? 0), 0),
+          outputTokens: rows.reduce((s, r) => s + Number(r.output_tokens ?? 0), 0),
+          runCount: distinctRuns(rows),
+          storyCount: distinctStories(rows),
+          byMode: acct.byMode,
+          coverage: acct.coverage,
+        };
+      })
+      .sort((a, b) => b.blendedEffectiveCostUsd - a.blendedEffectiveCostUsd);
+
+    // ── Model distribution ────────────────────────────────────────────────────
+    const byModelGroups = groupRows(rawRows, (r) => r.model);
+    const modelDistEntries = Array.from(byModelGroups.entries()).map(([model, rows]) => {
+      const acct = summarizeUsage(rows, ctx);
+      return {
+        model,
+        tier: tierFromModel(model),
+        billingMode: providerBillingMode(acct),
+        storyCount: distinctStories(rows),
+        meteredCostUsd: acct.meteredCostUsd,
+        allocatedSubscriptionCostUsd: acct.allocatedSubscriptionCostUsd,
+        blendedEffectiveCostUsd: acct.blendedEffectiveCostUsd,
+        // `totalCost` kept for backward compatibility — now blended effective.
+        totalCost: acct.blendedEffectiveCostUsd,
+        coverage: acct.coverage,
+      };
+    });
+    const totalStories = modelDistEntries.reduce((sum, m) => sum + m.storyCount, 0);
+    const modelDistribution = modelDistEntries
+      .sort((a, b) => b.storyCount - a.storyCount)
+      .map((m) => ({
+        ...m,
+        percentage: totalStories > 0 ? Math.round((m.storyCount / totalStories) * 1000) / 10 : 0,
+      }));
+
+    // ── Projection: avg daily blended cost * 30 ───────────────────────────────
+    const totalBlendedInRange = dailyTrend.reduce((sum, d) => sum + d.blendedEffectiveCostUsd, 0);
     const daysWithData = dailyTrend.length;
-    const avgDailyCost = daysWithData > 0 ? totalCostInRange / daysWithData : 0;
-    const projectedMonthlyCost = Math.round(avgDailyCost * 30 * 100) / 100;
+    const avgDailyCost = daysWithData > 0 ? totalBlendedInRange / daysWithData : 0;
+    const projectedMonthlyCost = round2(avgDailyCost * 30);
 
-    // Total savings vs all-opus baseline
-    const opusBaselineSql = `
-      SELECT
-        SUM((tu.input_tokens * 1.0 / 1000000) * ${OPUS_INPUT_PER_1M} + (tu.output_tokens * 1.0 / 1000000) * ${OPUS_OUTPUT_PER_1M}) AS opus_baseline,
-        SUM(tu.cost_usd) AS actual_cost
-      FROM token_usage tu
-      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
-    `;
-    const baselineResult = await queryOne<{
-      opus_baseline: number | null; actual_cost: number | null;
-    }>(opusBaselineSql, params);
+    // ── Savings vs all-Opus baseline (metered comparison only) ─────────────────
+    // Savings compares metered marginal spend to an all-Opus metered baseline, so
+    // allocated subscription cost is intentionally excluded from this comparison.
+    let opusBaseline = 0;
+    for (const r of rawRows) {
+      opusBaseline += (Number(r.input_tokens ?? 0) / 1_000_000) * OPUS_INPUT_PER_1M
+        + (Number(r.output_tokens ?? 0) / 1_000_000) * OPUS_OUTPUT_PER_1M;
+    }
+    const actualMeteredCost = overall.meteredCostUsd;
 
-    const opusBaseline = baselineResult?.opus_baseline || 0;
-    const actualCost = baselineResult?.actual_cost || 0;
-
-    // FinOps should display estimated token cost for all providers when pricing/usage exists.
-    const allSubscription = false;
+    // Whether the entire window ran under subscription billing (no metered spend).
+    const allSubscription = overall.coverage.totalRecords > 0
+      && overall.meteredCostUsd === 0
+      && overall.allocatedSubscriptionCostUsd >= 0
+      && (overall.byMode.find((m) => m.mode === 'metered_api')?.recordCount ?? 0) === 0
+      && (overall.subscriptionUsage.recordCount > 0);
 
     res.json({
-      dailyTrend: dailyTrend.map(d => ({
-        date: d.date,
-        cost: Math.round(d.cost_usd * 100) / 100,
-        inputTokens: Number(d.input_tokens),
-        outputTokens: Number(d.output_tokens),
-        reasoningTokens: Number(d.reasoning_tokens),
-        storyCount: Number(d.story_count),
-      })),
-      byWorkspace: byWorkspace.map(w => ({
-        workspaceId: w.workspace_id,
-        label: w.workspace_label,
-        totalCost: Math.round(w.total_cost * 100) / 100,
-        inputTokens: Number(w.input_tokens),
-        outputTokens: Number(w.output_tokens),
-        runCount: Number(w.run_count),
-      })),
-      bySpec: bySpec.map(s => ({
-        specSlug: s.spec_slug,
-        totalCost: Math.round(s.total_cost * 100) / 100,
-        inputTokens: Number(s.input_tokens),
-        outputTokens: Number(s.output_tokens),
-        runCount: Number(s.run_count),
-      })),
-      byMonth: byMonth.map(m => ({
-        month: m.month,
-        totalCost: Math.round(m.total_cost * 100) / 100,
-        inputTokens: Number(m.input_tokens),
-        outputTokens: Number(m.output_tokens),
-        reasoningTokens: Number(m.reasoning_tokens),
-        runCount: Number(m.run_count),
-        storyCount: Number(m.story_count),
-      })),
+      // Accounting-mode-aware top-level totals — the canonical FIN-003 surface.
+      accounting: {
+        meteredCostUsd: overall.meteredCostUsd,
+        allocatedSubscriptionCostUsd: overall.allocatedSubscriptionCostUsd,
+        blendedEffectiveCostUsd: overall.blendedEffectiveCostUsd,
+        subscriptionUsage: overall.subscriptionUsage,
+        byMode: overall.byMode,
+        coverage: overall.coverage,
+      },
+      dailyTrend,
+      byWorkspace,
+      bySpec,
+      byMonth,
+      byProvider,
       modelDistribution,
       projectedMonthlyCost,
       savings: allSubscription ? null : {
-        opusBaseline: Math.round(opusBaseline * 100) / 100,
-        actual: Math.round(actualCost * 100) / 100,
-        saved: Math.round((opusBaseline - actualCost) * 100) / 100,
-        percentage: opusBaseline > 0 ? Math.round(((opusBaseline - actualCost) / opusBaseline) * 1000) / 10 : 0,
+        opusBaseline: round2(opusBaseline),
+        actual: round2(actualMeteredCost),
+        saved: round2(opusBaseline - actualMeteredCost),
+        percentage: opusBaseline > 0 ? Math.round(((opusBaseline - actualMeteredCost) / opusBaseline) * 1000) / 10 : 0,
       },
       allSubscription,
+      coverage: overall.coverage,
       dateRange: { from, to },
     });
   } catch (error: any) {
@@ -3115,6 +3608,21 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
 
 // ─── GET /api/analytics/finops/export — CSV export of per-story cost data ────
 
+/** Raw token_usage row joined to its run, projected for the FinOps CSV export. */
+interface FinOpsExportRow {
+  run_id: number | string | null;
+  story_id: string | null;
+  model: string | null;
+  input_tokens: number | string | null;
+  output_tokens: number | string | null;
+  reasoning_tokens: number | string | null;
+  cost_usd: number | string | null;
+  recorded_at: string | null;
+  workspace_id: string | null;
+  spec_slug: string | null;
+  agent_type: string | null;
+}
+
 /**
  * @swagger
  * /api/analytics/finops/export:
@@ -3125,7 +3633,19 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
  *     x-rorca-tier: paid
  *     x-rorca-capability: finops
  *     x-rorca-rationale: "FinOps export is a commercial reporting feature and should remain behind the paid plan boundary."
- *     description: Exports per-story token usage and cost data as a CSV file. Includes computed columns for model tier, Opus baseline cost, and savings vs Opus. Can be filtered by run_id, workspace_id, and date range. The CSV includes headers for run_id, story_id, spec_slug, model, tier, agent_type, input_tokens, output_tokens, cost_usd, opus_baseline_usd, savings_usd, recorded_at, and workspace_id.
+ *     description: >-
+ *       Exports per-story token usage and accounting-mode-aware cost data as a CSV
+ *       file, preserving the same billing semantics as the FinOps dashboard and
+ *       per-run views (FIN-009). Each row is classified against the active billing
+ *       profiles, so the CSV separates metered marginal spend (metered_cost_usd)
+ *       from allocated subscription cost (allocated_subscription_cost_usd) and
+ *       blended effective cost (blended_effective_cost_usd) instead of leaking only
+ *       the ambiguous raw cost_usd. Columns: run_id, story_id, spec_slug, provider,
+ *       model, tier, agent_type, billing_mode, billing_profile_id, classified_by,
+ *       allocation_basis, input_tokens, output_tokens, reasoning_tokens, cost_usd,
+ *       metered_cost_usd, allocated_subscription_cost_usd, blended_effective_cost_usd,
+ *       priced, opus_baseline_usd, savings_usd, recorded_at, workspace_id. Can be
+ *       filtered by run_id, workspace_id, and date range.
  *     parameters:
  *       - in: query
  *         name: run_id
@@ -3185,8 +3705,9 @@ router.get('/finops/export', async (req: Request, res: Response) => {
         tu.model,
         tu.input_tokens,
         tu.output_tokens,
+        tu.reasoning_tokens,
         tu.cost_usd,
-        tu.recorded_at,
+        tu.recorded_at::text AS recorded_at,
         tu.workspace_id,
         REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
         pr.agent AS agent_type
@@ -3196,25 +3717,88 @@ router.get('/finops/export', async (req: Request, res: Response) => {
       ORDER BY tu.run_id ASC, tu.recorded_at ASC
     `;
 
-    const rows = await query<ExportRow>(sql, sqlParams);
+    const rows = await query<FinOpsExportRow>(sql, sqlParams);
 
-    // Add computed columns
-    const enrichedRows = rows.map(row => {
+    // FIN-009: classify and account for the exported rows with the SAME shared
+    // accounting engine the dashboard and per-run views use, so the CSV preserves
+    // billing mode, metered vs allocated vs blended cost, allocation basis, and
+    // coverage/provenance instead of leaking only the ambiguous raw `cost_usd`.
+    // Profiles are loaded for the export window so subscription rows allocate
+    // truthfully rather than masquerading as metered spend.
+    const pricingRows = await query<{ model_id: string; input_cost_per_1m: number | null; output_cost_per_1m: number | null; input_cost_per_1k: number; output_cost_per_1k: number }>(
+      'SELECT model_id, input_cost_per_1m, output_cost_per_1m, input_cost_per_1k, output_cost_per_1k FROM model_pricing'
+    );
+    const pricingMap = new Map<string, { input: number; output: number }>();
+    for (const p of pricingRows) {
+      pricingMap.set(p.model_id, {
+        input: p.input_cost_per_1m ?? p.input_cost_per_1k * 1000,
+        output: p.output_cost_per_1m ?? p.output_cost_per_1k * 1000,
+      });
+    }
+    const profiles = await loadActiveBillingProfiles(from, to, workspaceId);
+    const accountingCtx = buildAccountingContext(pricingMap, profiles);
+
+    const usageRecords: UsageRecord[] = rows.map((row) => toUsageRecord({
+      model: String(row.model || ''),
+      input_tokens: row.input_tokens,
+      output_tokens: row.output_tokens,
+      reasoning_tokens: row.reasoning_tokens,
+      cost_usd: row.cost_usd,
+      run_id: row.run_id,
+      story_id: row.story_id,
+      recorded_at: row.recorded_at,
+    }));
+    const { perRecord } = computeAccountingPerRecord(usageRecords, accountingCtx);
+
+    // Round a USD value to 4 decimals for CSV stability (matches per-run view).
+    const usd4 = (value: number): number => Math.round(value * 10000) / 10000;
+
+    // Build one fully-attributed row per usage record. Every accounting column is
+    // present so a downstream auditor can reconstruct exactly how each cost was
+    // derived: the provider + model + billing profile that classified it, the
+    // metered marginal cost, the allocated subscription share and its basis, the
+    // blended effective cost, and whether the row was priced/profile-classified.
+    const enrichedRows = rows.map((row, i) => {
       const model = String(row.model || '');
       const inputTokens = Number(row.input_tokens || 0);
       const outputTokens = Number(row.output_tokens || 0);
+      const acct = perRecord[i];
       const opusBaseline = (inputTokens / 1_000_000) * OPUS_INPUT_PER_1M + (outputTokens / 1_000_000) * OPUS_OUTPUT_PER_1M;
       return {
-        ...row,
+        run_id: row.run_id,
+        story_id: row.story_id,
+        spec_slug: row.spec_slug,
+        provider: providerFromModel(model),
+        model,
         tier: tierFromModel(model),
-        opus_baseline_usd: Math.round(opusBaseline * 10000) / 10000,
-        savings_usd: Math.round((opusBaseline - Number(row.cost_usd || 0)) * 10000) / 10000,
+        agent_type: row.agent_type,
+        billing_mode: acct.mode,
+        billing_profile_id: acct.profileId ?? '',
+        classified_by: acct.fromProfile ? 'profile' : 'heuristic',
+        allocation_basis: acct.allocationMethod ?? '',
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        reasoning_tokens: Number(row.reasoning_tokens || 0),
+        cost_usd: usd4(Number(row.cost_usd || 0)),
+        metered_cost_usd: usd4(acct.meteredCostUsd),
+        allocated_subscription_cost_usd: usd4(acct.allocatedSubscriptionCostUsd),
+        blended_effective_cost_usd: usd4(acct.blendedEffectiveCostUsd),
+        priced: acct.unpriced ? 'false' : 'true',
+        opus_baseline_usd: usd4(opusBaseline),
+        // Savings is a metered-vs-Opus comparison; subscription/unpriced rows have
+        // zero metered cost so their "savings" reflects only the metered baseline.
+        savings_usd: usd4(opusBaseline - acct.meteredCostUsd),
+        recorded_at: row.recorded_at,
+        workspace_id: row.workspace_id,
       };
     });
 
     const headers = [
-      'run_id', 'story_id', 'spec_slug', 'model', 'tier', 'agent_type',
-      'input_tokens', 'output_tokens', 'cost_usd', 'opus_baseline_usd', 'savings_usd',
+      'run_id', 'story_id', 'spec_slug', 'provider', 'model', 'tier', 'agent_type',
+      'billing_mode', 'billing_profile_id', 'classified_by', 'allocation_basis',
+      'input_tokens', 'output_tokens', 'reasoning_tokens',
+      'cost_usd', 'metered_cost_usd', 'allocated_subscription_cost_usd', 'blended_effective_cost_usd',
+      'priced', 'opus_baseline_usd', 'savings_usd',
       'recorded_at', 'workspace_id',
     ];
 

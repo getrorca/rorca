@@ -16,6 +16,8 @@ export type SettingsTab =
   | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context'
   // Execution group
   | 'providers' | 'direction' | 'pipeline'
+  // FinOps group
+  | 'finops'
   // System group
   | 'shortcuts' | 'system' | 'developer';
 
@@ -51,6 +53,10 @@ const ProviderSettingsTab = lazy(() =>
 
 const ShortcutsSettingsTab = lazy(() =>
   import('./settings/ShortcutsSettingsTab').then((m) => ({ default: m.ShortcutsSettingsTab })),
+);
+
+const FinOpsSettingsTab = lazy(() =>
+  import('./settings/FinOpsSettingsTab').then((m) => ({ default: m.FinOpsSettingsTab })),
 );
 
 const UnifiedActivitySection = lazy(() =>
@@ -104,6 +110,8 @@ export default function SettingsPanel() {
           {activeTab === 'providers' && <ProviderSettingsTab />}
           {activeTab === 'direction' && <DirectionSettings.WsDirectionSection />}
           {activeTab === 'pipeline' && <DirectionSettings.WsPipelineSection />}
+          {/* FinOps group */}
+          {activeTab === 'finops' && <FinOpsSettingsTab />}
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}
           {/* System group */}
           {activeTab === 'system' && (
