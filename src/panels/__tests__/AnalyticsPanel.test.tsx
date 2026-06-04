@@ -24,7 +24,7 @@ import { apiFetch } from '../../lib/apiFetch';
 const mockApiFetch = vi.mocked(apiFetch);
 
 const WORKSPACE_RESPONSE = {
-  items: [{ id: 'ws-1', label: 'Workspace', path: '/tmp/workspace', domains: [] }],
+  items: [{ id: 'ws-1', label: 'Workspace Alpha', path: '/tmp/workspace-alpha', domains: [] }],
   total: 1,
   hasMore: false,
 };
@@ -68,8 +68,8 @@ beforeEach(() => {
       return {
         groupBy: 'spec',
         breakdown: [
-          { group_key: 'workspace-imports', total_input_tokens: 15000, total_output_tokens: 4000, input_cost_usd: 0.02, output_cost_usd: 0.03, total_cost_usd: 0.05, story_count: 3 },
-          { group_key: 'workspace-ledger', total_input_tokens: 10000, total_output_tokens: 2500, input_cost_usd: 0.01, output_cost_usd: 0.02, total_cost_usd: 0.03, story_count: 2 },
+          { group_key: 'workspace-alpha-imports', total_input_tokens: 15000, total_output_tokens: 4000, input_cost_usd: 0.02, output_cost_usd: 0.03, total_cost_usd: 0.05, story_count: 3 },
+          { group_key: 'workspace-alpha-ledger', total_input_tokens: 10000, total_output_tokens: 2500, input_cost_usd: 0.01, output_cost_usd: 0.02, total_cost_usd: 0.03, story_count: 2 },
         ],
         totals: {
           total_input_tokens: 25000,
@@ -93,10 +93,10 @@ beforeEach(() => {
     if (path.includes('/api/analytics/velocity')) {
       return {
         velocity: [
-          { week: '2026-W17', week_start: '2026-04-21', passed: 2, failed: 0, skipped: 0, total: 2, specs: ['workspace-imports'], rollingAvg: 1.5 },
-          { week: '2026-W18', week_start: '2026-04-28', passed: 3, failed: 1, skipped: 0, total: 4, specs: ['workspace-ledger'], rollingAvg: 2.2 },
+          { week: '2026-W17', week_start: '2026-04-21', passed: 2, failed: 0, skipped: 0, total: 2, specs: ['workspace-alpha-imports'], rollingAvg: 1.5 },
+          { week: '2026-W18', week_start: '2026-04-28', passed: 3, failed: 1, skipped: 0, total: 4, specs: ['workspace-alpha-ledger'], rollingAvg: 2.2 },
         ],
-        availableSpecs: ['workspace-imports', 'workspace-ledger'],
+        availableSpecs: ['workspace-alpha-imports', 'workspace-alpha-ledger'],
         dateRange: { from: '2026-03-01T00:00:00.000Z', to: '2026-05-01T00:00:00.000Z' },
       };
     }
