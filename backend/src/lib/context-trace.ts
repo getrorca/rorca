@@ -277,9 +277,11 @@ export class ContextTraceArtifactWriter {
   private fd: number | null = null;
   private disabled = false;
   private closed = false;
+  private readonly cwd: string;
 
   constructor(opts: ContextTraceWriterOptions) {
     this.runId = opts.runId;
+    this.cwd = opts.cwd;
     this.artifactPath = getTraceArtifactPath(opts.cwd, opts.runId);
     this.start();
   }
@@ -303,6 +305,17 @@ export class ContextTraceArtifactWriter {
     try {
       const dir = path.dirname(this.artifactPath);
       fs.mkdirSync(dir, { recursive: true });
+
+      // Resume state from any existing artifact so per-story writer restarts in
+      // the same run keep rawRef monotonic and never reuse r{runId}:{seq}.
+      const existing = readTraceRecords(this.cwd, this.runId);
+      let maxSeq = -1;
+      for (const record of existing) {
+        this.seenRefs.add(record.rawRef);
+        if (record.seq > maxSeq) maxSeq = record.seq;
+      }
+      this.seq = maxSeq + 1;
+
       // 'a' (O_APPEND) keeps the artifact append-only across writer restarts.
       this.fd = fs.openSync(this.artifactPath, 'a');
     } catch (err) {

@@ -2441,6 +2441,58 @@ describe('GET /api/pipeline/runs/:runId/context-inspector-events — retrievalTe
     expect(memoryEvent.details).toContain(`telemetry: ${telemetryId}`);
   });
 
+  test('retroactively backfills retrievalTelemetryId onto persisted context_trace memory rows when raw artifact is gone', async () => {
+    seedSpec('approved', 'ctx-telemetry-context-trace-test');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/ctx-telemetry-context-trace-test.json', 'ws-pipe', 'done')
+       RETURNING id`
+    );
+    const runId = Number(run!.id);
+    const telemetryId = `rt-ctx-trace-${Date.now()}`;
+
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        run_id: runId,
+        story_id: 'US-001',
+        retrieval_telemetry_id: telemetryId,
+      })]
+    );
+
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('context_trace', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        traceId: `trace:${runId}:memory`,
+        runId,
+        run_id: runId,
+        storyId: 'US-001',
+        seq: 0,
+        rawRef: `r${runId}:0`,
+        phase: 'memory',
+        status: 'ok',
+        ts: new Date().toISOString(),
+        label: 'retrieval:US-001',
+      })]
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/context-inspector-events`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reconstructed).toBe(false);
+    const memoryEvent = res.body.events.find(
+      (e: any) => e.phase === 'memory' && e.label === 'retrieval:US-001',
+    );
+    expect(memoryEvent).toBeDefined();
+    expect(memoryEvent.retrievalTelemetryId).toBe(telemetryId);
+    expect(memoryEvent.details ?? []).toContain(`telemetry: ${telemetryId}`);
+  });
+
   test('does not include retrievalTelemetryId when story_started payload lacks retrieval_telemetry_id', async () => {
     seedSpec('approved', 'ctx-no-telemetry-test');
 

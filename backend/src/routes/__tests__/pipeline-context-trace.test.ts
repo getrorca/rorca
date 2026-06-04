@@ -85,11 +85,11 @@ afterEach(async () => {
 });
 
 async function insertRun(): Promise<number> {
-  const row = await queryOne<{ id: number }>(
+  const row = await queryOne<{ id: number | string }>(
     `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, 'running') RETURNING id`,
     ['forge/specs/approved/ctm.json', WS_ID],
   );
-  return row!.id;
+  return Number(row!.id);
 }
 
 describe('GET /api/pipeline/runs/:runId/context-trace/:rawRef', () => {
@@ -110,6 +110,26 @@ describe('GET /api/pipeline/runs/:runId/context-trace/:rawRef', () => {
     expect(res.body.rawRef).toBe(event!.rawRef);
     expect(res.body.runId).toBe(runId);
     expect(res.body.phase).toBe('prompt');
+    expect(res.body.payload).toEqual(heavy);
+  });
+
+  it('falls back to the run worktree path when the workspace root has no trace artifact', async () => {
+    const runId = await insertRun();
+    const worktreeDir = path.join(tmpDir, 'run-worktree');
+    fs.mkdirSync(worktreeDir, { recursive: true });
+    await execute(`UPDATE pipeline_runs SET worktree_path = $1 WHERE id = $2`, [worktreeDir, runId]);
+
+    const writer = createContextTraceWriter(worktreeDir, runId);
+    const heavy = { retrieval: 'payload', storyId: 'SMG-001' };
+    const event = writer.appendEvent('memory', heavy, { label: 'retrieval:SMG-001' });
+    await writer.close();
+
+    const res = await request(app).get(
+      `/api/pipeline/runs/${runId}/context-trace/${encodeURIComponent(event!.rawRef)}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.rawRef).toBe(event!.rawRef);
     expect(res.body.payload).toEqual(heavy);
   });
 

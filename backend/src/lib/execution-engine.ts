@@ -4535,11 +4535,14 @@ async function executeStory(
   // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
   setFallbackContext(effectiveCwd, config.runId);
 
-  // CTM-002: per-story context-trace writer. Raw payloads land in the run's
-  // append-only artifact; only metadata-only events stream over SSE. Nonfatal —
-  // a disabled writer means emitContextTrace becomes a no-op.
+  // CTM-002: per-story context-trace writer. Persist raw payloads under the
+  // stable workspace/run artifact root, not ephemeral story worktrees, so the
+  // payload remains inspectable after worktree cleanup. The writer also resumes
+  // from any existing artifact state for this run, keeping rawRef monotonic
+  // across per-story writer restarts.
   const currentSpecId = path.basename(config.jsonPath, '.json');
-  const traceWriter = createContextTraceWriter(effectiveCwd, config.runId);
+  const traceArtifactCwd = config.workspacePath ?? config.cwd;
+  const traceWriter = createContextTraceWriter(traceArtifactCwd, config.runId);
 
   // Per-story agent resolution: explicit override > story.agent field > run-level config
   let effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
