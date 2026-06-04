@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/getrorca/rorca">
-    <img src="./public/rorca-readme-banner.svg" alt="Rorca banner" />
+    <img src="./public/rorca-mark.svg" alt="Rorca logo" width="96" />
   </a>
 </p>
 
