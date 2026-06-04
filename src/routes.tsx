@@ -16,6 +16,8 @@ const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
   'general', 'env-vars', 'hooks', 'agents', 'context',
   // Execution group
   'providers', 'direction', 'pipeline',
+  // FinOps group
+  'finops',
   // System group
   'shortcuts', 'system', 'developer',
 ] as const;
