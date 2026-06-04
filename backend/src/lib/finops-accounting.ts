@@ -501,6 +501,111 @@ export function computeAccounting(
   };
 }
 
+/**
+ * Per-record accounting provenance, emitted one-per-input-record by
+ * {@link computeAccountingPerRecord}. This is what audit/export consumers need:
+ * for every usage row it states the billing mode that classified it, its real
+ * metered marginal cost, the share of subscription cost allocated to it, the
+ * blended effective cost (metered + allocated), and exactly which billing
+ * profile and allocation basis produced those numbers.
+ *
+ * The per-record `allocatedSubscriptionCostUsd` values across all records sum to
+ * the aggregate {@link AccountingResult.allocatedSubscriptionCostUsd}, and the
+ * per-record `meteredCostUsd` values sum to the aggregate metered total, so an
+ * export built from this array reconciles exactly with the dashboard totals.
+ */
+export interface PerRecordAccounting {
+  mode: BillingMode;
+  /** Billing profile id that classified this record, or null for the heuristic fallback. */
+  profileId: number | null;
+  /** True when the mode came from an explicit profile, false when heuristic. */
+  fromProfile: boolean;
+  /** Marginal metered cost for this record (0 for non-metered or unpriced rows). */
+  meteredCostUsd: number;
+  /** True when this is a metered row that had no usable pricing. */
+  unpriced: boolean;
+  /** Subscription cost allocated to this record (0 unless subscription-classified). */
+  allocatedSubscriptionCostUsd: number;
+  /** meteredCostUsd + allocatedSubscriptionCostUsd. */
+  blendedEffectiveCostUsd: number;
+  /** Allocation method applied to this record (null when not a subscription row). */
+  allocationMethod: AllocationMethod | null;
+}
+
+/**
+ * Like {@link computeAccounting}, but additionally returns a per-record breakdown
+ * aligned 1:1 with the input `records` (same order, same length). The aggregate
+ * `result` is identical to what `computeAccounting` would return for the same
+ * input, and `perRecord[i]` carries the provenance for `records[i]`.
+ *
+ * This exists so per-row exports and audit surfaces reuse the exact same
+ * classification + allocation logic as the dashboard instead of re-deriving cost
+ * semantics (which would inevitably drift). Pure: no DB, no clock, no I/O.
+ */
+export function computeAccountingPerRecord(
+  records: readonly UsageRecord[],
+  ctx: AccountingContext,
+): { result: AccountingResult; perRecord: PerRecordAccounting[] } {
+  const result = computeAccounting(records, ctx);
+
+  // Seed each record with its classification and metered cost. Subscription rows
+  // get their allocated share filled in by the second pass below, mirroring the
+  // bucketing in computeAccounting so the per-record shares reconcile exactly.
+  const perRecord: PerRecordAccounting[] = records.map((record) => {
+    const cls = classifyUsage(record, ctx);
+    let meteredCostUsd = 0;
+    let unpriced = false;
+    if (cls.mode === 'metered_api') {
+      const cost = meteredCost(record, ctx.pricingFor(record));
+      if (cost == null) unpriced = true;
+      else meteredCostUsd = cost;
+    } else if (cls.mode === 'unknown' && ctx.pricingFor(record) == null) {
+      unpriced = true;
+    }
+    return {
+      mode: cls.mode,
+      profileId: cls.profileId,
+      fromProfile: cls.fromProfile,
+      meteredCostUsd,
+      unpriced,
+      allocatedSubscriptionCostUsd: 0,
+      blendedEffectiveCostUsd: meteredCostUsd,
+      allocationMethod: null,
+    };
+  });
+
+  // Rebuild the subscription buckets exactly as computeAccounting does, but track
+  // the original record index so each allocated share lands on the right row.
+  const buckets = new Map<number, { profile: BillingProfile; method: AllocationMethod; indices: number[]; records: UsageRecord[] }>();
+  records.forEach((record, index) => {
+    const slot = perRecord[index];
+    if (slot.mode !== 'subscription' || slot.profileId == null) return;
+    const profile = ctx.profiles.find((p) => p.id === slot.profileId);
+    if (!profile) return;
+    const method = ctx.allocationOverride ?? allocationMethodFromBasis(profile.allocationBasis);
+    let bucket = buckets.get(profile.id);
+    if (!bucket) {
+      bucket = { profile, method, indices: [], records: [] };
+      buckets.set(profile.id, bucket);
+    }
+    bucket.indices.push(index);
+    bucket.records.push(record);
+    slot.allocationMethod = method;
+  });
+
+  for (const bucket of buckets.values()) {
+    const shares = allocateBucket({ profile: bucket.profile, method: bucket.method, records: bucket.records });
+    shares.forEach((share, localIdx) => {
+      const globalIdx = bucket.indices[localIdx];
+      const slot = perRecord[globalIdx];
+      slot.allocatedSubscriptionCostUsd = share;
+      slot.blendedEffectiveCostUsd = slot.meteredCostUsd + share;
+    });
+  }
+
+  return { result, perRecord };
+}
+
 function sumTokens(byMode: Map<BillingMode, ModeBreakdown>, key: keyof ModeBreakdown): number {
   let sum = 0;
   for (const b of byMode.values()) sum += b[key] as number;

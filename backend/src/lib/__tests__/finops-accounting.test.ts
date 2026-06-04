@@ -9,6 +9,7 @@ import {
   classifyUsage,
   meteredCost,
   computeAccounting,
+  computeAccountingPerRecord,
   allocationMethodFromBasis,
   isAllocationMethod,
   type AccountingContext,
@@ -344,5 +345,73 @@ describe('computeAccounting — mixed providers and blended cost', () => {
     ], ctx);
     expect(res.coverage.totalRecords).toBe(2);
     expect(res.coverage.profileClassifiedRecords).toBe(1);
+  });
+});
+
+// ─── Per-record accounting (FIN-009 export provenance) ───────────────────────
+
+describe('computeAccountingPerRecord', () => {
+  it('aligns perRecord 1:1 with input order and matches the aggregate result', () => {
+    const ctx = ctxWith([]);
+    const records = [
+      rec({ provider: 'openai', model: 'gpt-4o', inputTokens: 1_000_000, outputTokens: 0 }),
+      rec({ provider: 'anthropic', model: 'claude-opus-4-6', inputTokens: 0, outputTokens: 1_000_000 }),
+    ];
+    const { result, perRecord } = computeAccountingPerRecord(records, ctx);
+    expect(perRecord).toHaveLength(records.length);
+    // Per-record metered cost sums to the aggregate metered total.
+    const meteredSum = perRecord.reduce((s, r) => s + r.meteredCostUsd, 0);
+    expect(meteredSum).toBeCloseTo(result.meteredCostUsd, 8);
+    expect(perRecord.every((r) => r.mode === 'metered_api')).toBe(true);
+    expect(perRecord.every((r) => r.allocationMethod === null)).toBe(true);
+  });
+
+  it('flags unpriced metered rows', () => {
+    const ctx = ctxWith([profile({ id: 1, provider: 'anthropic', billingMode: 'metered_api' })]);
+    const { perRecord } = computeAccountingPerRecord([
+      rec({ provider: 'anthropic', model: 'no-price-model', inputTokens: 10, outputTokens: 10 }),
+    ], ctx);
+    expect(perRecord[0].mode).toBe('metered_api');
+    expect(perRecord[0].unpriced).toBe(true);
+    expect(perRecord[0].meteredCostUsd).toBe(0);
+  });
+
+  it('spreads a subscription bucket per record so shares reconcile to the flat cost', () => {
+    const ctx = ctxWith([
+      profile({ id: 1, provider: 'anthropic', billingMode: 'subscription', monthlyCostUsd: 200, allocationBasis: 'even' }),
+    ]);
+    const records = [
+      rec({ provider: 'anthropic', model: 'claude-opus-4-6', inputTokens: 1, outputTokens: 1, runId: 'r1', storyId: 's1' }),
+      rec({ provider: 'anthropic', model: 'claude-opus-4-6', inputTokens: 1, outputTokens: 1, runId: 'r1', storyId: 's2' }),
+    ];
+    const { result, perRecord } = computeAccountingPerRecord(records, ctx);
+    expect(perRecord.every((r) => r.mode === 'subscription')).toBe(true);
+    expect(perRecord.every((r) => r.meteredCostUsd === 0)).toBe(true);
+    expect(perRecord.every((r) => r.allocationMethod === 'even')).toBe(true);
+    expect(perRecord[0].allocatedSubscriptionCostUsd).toBeCloseTo(100, 8);
+    expect(perRecord[1].allocatedSubscriptionCostUsd).toBeCloseTo(100, 8);
+    const allocatedSum = perRecord.reduce((s, r) => s + r.allocatedSubscriptionCostUsd, 0);
+    expect(allocatedSum).toBeCloseTo(result.allocatedSubscriptionCostUsd, 8);
+    expect(allocatedSum).toBeCloseTo(200, 8);
+    // Blended == metered + allocated per record.
+    for (const r of perRecord) {
+      expect(r.blendedEffectiveCostUsd).toBeCloseTo(r.meteredCostUsd + r.allocatedSubscriptionCostUsd, 8);
+    }
+  });
+
+  it('mixes metered and subscription rows without cross-contamination', () => {
+    const ctx = ctxWith([
+      profile({ id: 1, provider: 'anthropic', billingMode: 'subscription', monthlyCostUsd: 50, allocationBasis: 'even' }),
+    ]);
+    const { perRecord } = computeAccountingPerRecord([
+      rec({ provider: 'anthropic', model: 'claude-opus-4-6', inputTokens: 1, outputTokens: 1 }),
+      rec({ provider: 'openai', model: 'gpt-4o', inputTokens: 1_000_000, outputTokens: 1_000_000 }),
+    ], ctx);
+    expect(perRecord[0].mode).toBe('subscription');
+    expect(perRecord[0].meteredCostUsd).toBe(0);
+    expect(perRecord[0].allocatedSubscriptionCostUsd).toBeCloseTo(50, 8);
+    expect(perRecord[1].mode).toBe('metered_api');
+    expect(perRecord[1].allocatedSubscriptionCostUsd).toBe(0);
+    expect(perRecord[1].meteredCostUsd).toBeGreaterThan(0);
   });
 });
