@@ -204,6 +204,9 @@ const STALE_REVIEW_RESULT_LIMIT = 12;
 const STALE_REVIEW_SCORE_THRESHOLD = 30;
 const STALE_REVIEW_DAYS = 45;
 const STALE_LOW_CONFIDENCE_DAYS = 21;
+const PROVENANCE_REVIEW_SCAN_LIMIT = 200;
+const PROVENANCE_REVIEW_RESULT_LIMIT = 12;
+const PROVENANCE_REVIEW_SCORE_THRESHOLD = 20;
 const HOTSPOT_MEMORY_WINDOW = 400;
 const HOTSPOT_RESULT_LIMIT = 6;
 const REVIEW_ACTION_HISTORY_LIMIT = 96;
@@ -299,11 +302,23 @@ function uniqueNumbers(values: number[]): number[] {
   return [...new Set(values.filter((value) => Number.isInteger(value) && value > 0))];
 }
 
-function daysSince(value: string | null | undefined): number | null {
+function parseTimestamp(value: string | Date | null | undefined): number | null {
   if (!value) return null;
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) return null;
+  const normalized = value instanceof Date ? value.toISOString() : String(value);
+  const timestamp = Date.parse(normalized);
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function daysSince(value: string | Date | null | undefined): number | null {
+  const timestamp = parseTimestamp(value);
+  if (timestamp == null) return null;
   return Math.max(0, Math.floor((Date.now() - timestamp) / 86_400_000));
+}
+
+function compareUpdatedAtDesc(left: string | Date | null | undefined, right: string | Date | null | undefined): number {
+  const leftTs = parseTimestamp(left) ?? 0;
+  const rightTs = parseTimestamp(right) ?? 0;
+  return rightTs - leftTs;
 }
 
 function parseReviewAction(value: unknown): MemoryReviewAction | null {
@@ -360,6 +375,57 @@ function buildStaleReviewReasons(row: MemoryReviewCandidateRow): { staleScore: n
   }
 
   return { staleScore, reasons };
+}
+
+function buildProvenanceCleanupReasons(row: MemoryReviewMemoryRow): { staleScore: number; reasons: MemoryReviewReason[] } {
+  const reasons: MemoryReviewReason[] = [];
+  let staleScore = 0;
+  const relatedFiles = parseStringArray(row.related_files);
+
+  if (row.source_type === 'import') {
+    staleScore += 18;
+    reasons.push({ code: 'import_requires_provenance_triage', label: 'Imported memory should be anchored to local provenance before long-term retention.' });
+  }
+
+  if (relatedFiles.length === 0) {
+    staleScore += 10;
+    reasons.push({ code: 'missing_file_provenance', label: 'No related file provenance is attached.' });
+  }
+
+  if (!row.source_spec_id) {
+    staleScore += 8;
+    reasons.push({ code: 'missing_spec_provenance', label: 'No source spec is attached.' });
+  }
+
+  if (!row.source_story_id) {
+    staleScore += 8;
+    reasons.push({ code: 'missing_story_provenance', label: 'No source story is attached.' });
+  }
+
+  if (!toRunId(row.source_run_id)) {
+    staleScore += 6;
+    reasons.push({ code: 'missing_run_provenance', label: 'No source run is attached for audit replay.' });
+  }
+
+  return { staleScore, reasons };
+}
+
+function dedupeReviewReasons(reasons: MemoryReviewReason[]): MemoryReviewReason[] {
+  const seen = new Set<string>();
+  return reasons.filter((reason) => {
+    if (seen.has(reason.code)) return false;
+    seen.add(reason.code);
+    return true;
+  });
+}
+
+function buildCombinedReviewReasons(row: MemoryReviewCandidateRow): { staleScore: number; reasons: MemoryReviewReason[] } {
+  const stale = buildStaleReviewReasons(row);
+  const provenance = buildProvenanceCleanupReasons(row);
+  return {
+    staleScore: Math.max(stale.staleScore, provenance.staleScore),
+    reasons: dedupeReviewReasons([...stale.reasons, ...provenance.reasons]),
+  };
 }
 
 function mapMemoryReviewItem(
@@ -511,6 +577,28 @@ async function loadStaleReviewCandidates(workspaceId: string): Promise<MemoryRev
        LEFT JOIN relation_stats rs ON rs.memory_id = cp.id
       ORDER BY cp.updated_at ASC, cp.id ASC`,
     [workspaceId, STALE_REVIEW_SCAN_LIMIT],
+  );
+}
+
+async function loadProvenanceCleanupCandidates(workspaceId: string): Promise<MemoryReviewMemoryRow[]> {
+  return dbQuery<MemoryReviewMemoryRow>(
+    `SELECT id, workspace_id, category, content, source_story_id, source_spec_id, source_run_id,
+            confidence, related_files, pinned, source_type, source, created_at, updated_at, deleted_at
+       FROM memories
+      WHERE workspace_id = $1
+        AND deleted_at IS NULL
+        AND COALESCE(pinned, false) = false
+        AND (
+          source_type = 'import'
+          OR source_spec_id IS NULL
+          OR source_story_id IS NULL
+          OR source_run_id IS NULL
+          OR related_files IS NULL
+          OR (jsonb_typeof(related_files) = 'array' AND jsonb_array_length(related_files) = 0)
+        )
+      ORDER BY updated_at DESC, id DESC
+      LIMIT $2`,
+    [workspaceId, PROVENANCE_REVIEW_SCAN_LIMIT],
   );
 }
 
@@ -2293,7 +2381,7 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  * /api/memory/review:
  *   get:
  *     tags: [Memory]
- *     summary: List bounded stale-memory review candidates and hotspot summaries
+ *     summary: List bounded stale-memory review, provenance cleanup, and hotspot summaries
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Workspace memory review queues are read-only operator context for local cleanup, audit, and retrieval explainability workflows."
  *     x-rorca-public-api: true
@@ -2325,7 +2413,14 @@ router.get('/review', async (req: Request, res: Response) => {
     .filter(({ review }) => review.staleScore >= STALE_REVIEW_SCORE_THRESHOLD)
     .sort((left, right) => right.review.staleScore - left.review.staleScore || left.row.updated_at.localeCompare(right.row.updated_at) || left.row.id - right.row.id);
 
-  const candidateIds = scoredCandidates.map(({ row }) => row.id);
+  const staleCandidateIds = new Set(scoredCandidates.map(({ row }) => row.id));
+  const provenanceRows = await loadProvenanceCleanupCandidates(workspaceId);
+  const scoredProvenanceCandidates = provenanceRows
+    .map((row) => ({ row, review: buildProvenanceCleanupReasons(row) }))
+    .filter(({ row, review }) => !staleCandidateIds.has(row.id) && review.staleScore >= PROVENANCE_REVIEW_SCORE_THRESHOLD)
+    .sort((left, right) => right.review.staleScore - left.review.staleScore || compareUpdatedAtDesc(left.row.updated_at, right.row.updated_at) || right.row.id - left.row.id);
+
+  const candidateIds = [...scoredCandidates.map(({ row }) => row.id), ...scoredProvenanceCandidates.map(({ row }) => row.id)];
   const historyIds = recentActions.map((action) => action.memoryId);
   const reviewRows = await loadMemoryReviewRows(workspaceId, [...candidateIds, ...historyIds]);
   const memoryById = new Map(reviewRows.map((row) => [row.id, row]));
@@ -2360,21 +2455,31 @@ router.get('/review', async (req: Request, res: Response) => {
     itemsMap.set(action.memoryId, mapMemoryReviewItem(memoryRow, null, action));
   }
 
+  const reviewSort = (left: ReturnType<typeof mapMemoryReviewItem>, right: ReturnType<typeof mapMemoryReviewItem>) => {
+    const order: Record<MemoryReviewCandidateStatus, number> = {
+      candidate: 0,
+      revisit: 1,
+      kept: 2,
+      archived: 3,
+      deleted: 4,
+    };
+    const statusOrder = order[left.status] - order[right.status];
+    if (statusOrder !== 0) return statusOrder;
+    if (left.staleScore !== right.staleScore) return right.staleScore - left.staleScore;
+    return compareUpdatedAtDesc(left.updatedAt, right.updatedAt) || right.id - left.id;
+  };
+
   const reviewItems = [...itemsMap.values()]
-    .sort((left, right) => {
-      const order: Record<MemoryReviewCandidateStatus, number> = {
-        candidate: 0,
-        revisit: 1,
-        kept: 2,
-        archived: 3,
-        deleted: 4,
-      };
-      const statusOrder = order[left.status] - order[right.status];
-      if (statusOrder !== 0) return statusOrder;
-      if (left.staleScore !== right.staleScore) return right.staleScore - left.staleScore;
-      return right.updatedAt.localeCompare(left.updatedAt) || right.id - left.id;
-    })
+    .sort(reviewSort)
     .slice(0, STALE_REVIEW_RESULT_LIMIT + 6);
+
+  const provenanceItems = scoredProvenanceCandidates
+    .map(({ row, review }) => {
+      const latestAction = latestActionByMemoryId.get(row.id);
+      return mapMemoryReviewItem(row, review, latestAction);
+    })
+    .sort(reviewSort)
+    .slice(0, PROVENANCE_REVIEW_RESULT_LIMIT);
 
   const fileHotspots = mapHotspotItems(await loadHotspotRows(workspaceId, 'file'), 'file');
   const specHotspots = mapHotspotItems(await loadHotspotRows(workspaceId, 'spec'), 'spec');
@@ -2399,6 +2504,18 @@ router.get('/review', async (req: Request, res: Response) => {
       mode: ageAvailable ? 'bounded-sql' : 'bounded-sql-fallback',
       reason: fallbackReason,
     },
+    provenanceCandidates: {
+      items: provenanceItems,
+      total: provenanceItems.length,
+      truncated: scoredProvenanceCandidates.length > PROVENANCE_REVIEW_RESULT_LIMIT,
+      heuristics: {
+        scanLimit: PROVENANCE_REVIEW_SCAN_LIMIT,
+        resultLimit: PROVENANCE_REVIEW_RESULT_LIMIT,
+        scoreThreshold: PROVENANCE_REVIEW_SCORE_THRESHOLD,
+      },
+      mode: 'bounded-sql',
+      reason: null,
+    },
     hotspots: {
       files: fileHotspots,
       specs: specHotspots,
@@ -2418,7 +2535,7 @@ router.get('/review', async (req: Request, res: Response) => {
  * /api/memory/review/{id}/action:
  *   post:
  *     tags: [Memory]
- *     summary: Audit and apply a stale-memory review action
+ *     summary: Audit and apply a memory review or provenance cleanup action
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Operators need auditable local memory curation actions that preserve provenance, soft-delete state, and restoration paths."
  *     x-rorca-public-api: true
@@ -2504,7 +2621,7 @@ router.post('/review/:id/action', async (req: Request, res: Response) => {
     throw new ValidationError('Restore this memory before applying another review action');
   }
 
-  const review = buildStaleReviewReasons(existing as MemoryReviewCandidateRow);
+  const review = buildCombinedReviewReasons(existing as MemoryReviewCandidateRow);
   const previousStatus: MemoryReviewCandidateStatus = 'candidate';
   const nextStatus = statusForReviewAction(parsedAction, parsedAction === 'archive' || parsedAction === 'delete' ? new Date().toISOString() : null);
 

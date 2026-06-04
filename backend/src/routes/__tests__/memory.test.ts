@@ -367,7 +367,7 @@ describe('GET /api/memory/graph endpoints', () => {
 });
 
 describe('GET /api/memory/review', () => {
-  test('returns bounded stale candidates, hotspots, and explicit AGE fallback metadata', async () => {
+  test('returns bounded stale candidates, provenance cleanup candidates, hotspots, and explicit AGE fallback metadata', async () => {
     const supersededMemory = await insertMemory({
       category: 'Architecture',
       content: 'Older graph rule that should be reviewed.',
@@ -396,6 +396,17 @@ describe('GET /api/memory/review', () => {
       relatedFiles: [],
       sourceSpecId: null,
       sourceStoryId: null,
+    });
+    const importedMemory = await insertMemory({
+      category: 'Decision',
+      content: 'Imported memory without local anchors yet.',
+      confidence: 'medium',
+      relatedFiles: [],
+      sourceSpecId: null,
+      sourceStoryId: null,
+      sourceRunId: null,
+      sourceType: 'import',
+      source: 'import-batch',
     });
 
     await execute(
@@ -428,6 +439,10 @@ describe('GET /api/memory/review', () => {
     ))).toBe(true);
     expect(res.body.staleCandidates.items.some((item: { id: number; reasons: Array<{ code: string }> }) => (
       item.id === lowConfidenceMemory && item.reasons.some((reason) => reason.code === 'weak_story_spec_provenance')
+    ))).toBe(true);
+    expect(res.body.provenanceCandidates.heuristics.scanLimit).toBe(200);
+    expect(res.body.provenanceCandidates.items.some((item: { id: number; reasons: Array<{ code: string }> }) => (
+      item.id === importedMemory && item.reasons.some((reason) => reason.code === 'import_requires_provenance_triage')
     ))).toBe(true);
     expect(res.body.hotspots.files[0]).toMatchObject({
       key: 'backend/src/routes/memory.ts',
