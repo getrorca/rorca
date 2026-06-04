@@ -43,15 +43,21 @@ export function useSpecRelevanceGraph(
 
     try {
       const params = new URLSearchParams({ workspaceId });
-      if (specSlug) params.set('specSlug', specSlug);
       if (runId != null) params.set('runId', String(runId));
       if (maxFiles != null) params.set('maxFiles', String(maxFiles));
       if (maxMemories != null) params.set('maxMemories', String(maxMemories));
       if (maxEdges != null) params.set('maxEdges', String(maxEdges));
 
-      const response = await apiFetch<SpecRelevanceGraphResponse>(
-        `/api/spec-relevance-graph?${params.toString()}`,
-      );
+      const queryParams = new URLSearchParams(params);
+      if (specSlug && runId != null) {
+        queryParams.set('specSlug', specSlug);
+      }
+
+      const url = specSlug && runId == null
+        ? `/api/spec-relevance-graph/by-spec/${encodeURIComponent(specSlug)}?${params.toString()}`
+        : `/api/spec-relevance-graph?${queryParams.toString()}`;
+
+      const response = await apiFetch<SpecRelevanceGraphResponse>(url);
       setData(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load relevance graph');
