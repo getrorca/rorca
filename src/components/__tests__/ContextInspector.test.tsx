@@ -234,3 +234,585 @@ describe('ContextInspector — lazy raw fetch', () => {
     expect(screen.getByText(/artifact not found/i)).toBeInTheDocument();
   });
 });
+
+describe('ContextInspector — retrieval telemetry lazy fetch', () => {
+  const telemetryDetail = {
+    telemetryId: 'rt-abc',
+    runId: 42,
+    storyId: 'US-001',
+    query: 'test query',
+    selectedCandidates: [
+      {
+        key: 'file-a.ts',
+        origin: 'codebase',
+        selected: true,
+        relevanceScore: 0.95,
+        scoreBreakdown: { semantic: 0.9, graph: 0.05 },
+        keptOrDroppedReason: 'Selected',
+      },
+    ],
+    droppedCandidates: [],
+    candidateCount: 1,
+    selectedCount: 1,
+    matchedSkills: ['code-search'],
+    retrievalTier: 'search',
+    latencyMs: 120,
+    needsMoreEvidence: false,
+    tokenBudget: 8000,
+    contradictions: [],
+    rawSummary: '1/1 candidates selected, tier: search, latency: 120ms',
+  };
+
+  it('does not fetch retrieval telemetry before the row is opened', () => {
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:US-001',
+      retrievalTelemetryId: 'rt-abc',
+    }));
+
+    // No call to the retrieval-telemetry endpoint yet.
+    expect(mockApiFetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('/retrieval-telemetry/'),
+    );
+  });
+
+  it('fetches retrieval telemetry on row open (not raw trace endpoint)', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/')) {
+        return telemetryDetail;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:US-001',
+      retrievalTelemetryId: 'rt-abc',
+    }));
+
+    // Click the event row — should open retrieval detail drawer, not raw drawer.
+    fireEvent.click(screen.getByTestId('inspector-event-r42:0'));
+
+    // Should call retrieval-telemetry endpoint.
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/retrieval-telemetry/rt-abc'),
+      );
+    });
+
+    // Should NOT call the raw context-trace endpoint.
+    const rawCalls = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/context-trace/r42'),
+    );
+    expect(rawCalls.length).toBe(0);
+  });
+
+  it('opens retrieval detail (not raw drawer) for synthetic retrieval events', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-abc')) {
+        return telemetryDetail;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:US-001',
+      synthetic: true,
+      retrievalTelemetryId: 'rt-abc',
+    }));
+
+    // Synthetic rows with retrievalTelemetryId ARE clickable — they open the retrieval drawer.
+    fireEvent.click(screen.getByTestId('inspector-event-r42:0'));
+
+    // Should NOT call the raw context-trace endpoint.
+    await waitFor(() => {
+      expect(mockApiFetch).not.toHaveBeenCalledWith(
+        expect.stringContaining('/context-trace/r42'),
+      );
+    });
+
+    // Should call the retrieval-telemetry endpoint.
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/retrieval-telemetry/rt-abc'),
+      );
+    });
+  });
+});
+
+describe('ContextInspector — retrieval detail drawer', () => {
+  const fullDetail = {
+    telemetryId: 'rt-full',
+    runId: 42,
+    storyId: 'US-001',
+    query: 'find auth middleware',
+    selectedCandidates: [
+      {
+        key: 'src/auth.ts',
+        origin: 'codebase',
+        sourceType: 'file',
+        title: 'Auth Middleware Module',
+        snippet: 'export function authRequired(req, res, next) { ... }',
+        category: 'Architecture',
+        selected: true,
+        enteredPrompt: true,
+        relevanceScore: 0.92,
+        scoreBreakdown: { semantic: 0.85, graph: 0.07 },
+        matchedSkills: ['code-search'],
+        keptOrDroppedReason: 'High relevance to query',
+      },
+    ],
+    droppedCandidates: [
+      {
+        key: 'src/old-auth.ts',
+        origin: 'codebase',
+        sourceType: 'file',
+        title: 'Legacy Auth',
+        snippet: 'Deprecated authentication helper',
+        category: 'Legacy',
+        selected: false,
+        enteredPrompt: false,
+        relevanceScore: 0.25,
+        scoreBreakdown: { semantic: 0.2, keyword: 0.05 },
+        matchedSkills: [],
+        keptOrDroppedReason: 'Below threshold',
+      },
+    ],
+    candidateCount: 2,
+    selectedCount: 1,
+    matchedSkills: ['code-search', 'graph-traversal'],
+    retrievalTier: 'search',
+    latencyMs: 85,
+    needsMoreEvidence: false,
+    tokenBudget: 8000,
+    contradictions: [],
+    rawSummary: '1/2 candidates selected, tier: search, latency: 85ms',
+  };
+
+  it('opens retrieval detail drawer with all sections when clicking a reconstructed retrieval row', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-full')) {
+        return fullDetail;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:MOG-009',
+      synthetic: true,
+      retrievalTelemetryId: 'rt-full',
+    }));
+
+    fireEvent.click(screen.getByTestId('inspector-event-r42:0'));
+
+    // Wait for the detail to load and render.
+    await waitFor(() => {
+      expect(screen.getByTestId('retrieval-detail-content')).toBeInTheDocument();
+    });
+
+    // Memory title and snippet rendered in the selected candidates section.
+    expect(screen.getByText('Auth Middleware Module')).toBeInTheDocument();
+    expect(screen.getByText(/export function authRequired/)).toBeInTheDocument();
+
+    // Score displayed.
+    expect(screen.getByText('92%')).toBeInTheDocument();
+
+    // Matched skills section.
+    expect(screen.getByTestId('retrieval-matched-skills')).toBeInTheDocument();
+    expect(screen.getByText('code-search')).toBeInTheDocument();
+    expect(screen.getByText('graph-traversal')).toBeInTheDocument();
+
+    // Prompt inclusion displayed.
+    expect(screen.getByText(/Prompt: Yes/)).toBeInTheDocument();
+
+    // Selected and dropped sections present.
+    expect(screen.getByTestId('retrieval-selected-section')).toBeInTheDocument();
+    expect(screen.getByTestId('retrieval-dropped-section')).toBeInTheDocument();
+
+    // Dropped candidate title.
+    expect(screen.getByText('Legacy Auth')).toBeInTheDocument();
+
+    // Tier and latency in summary.
+    expect(screen.getByText('search')).toBeInTheDocument();
+    expect(screen.getByText('85ms')).toBeInTheDocument();
+  });
+
+  it('shows loading state while retrieval telemetry is being fetched', async () => {
+    let resolveDetail: ((v: any) => void) | undefined;
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-loading')) {
+        return new Promise((resolve) => { resolveDetail = resolve; });
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:US-001',
+      retrievalTelemetryId: 'rt-loading',
+    }));
+
+    fireEvent.click(screen.getByTestId('inspector-event-r42:0'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('retrieval-detail-loading')).toBeInTheDocument();
+    });
+
+    // Resolve to clean up.
+    await act(async () => {
+      resolveDetail!(fullDetail);
+    });
+  });
+
+  it('shows error state when retrieval telemetry fetch fails', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-err')) {
+        throw new Error('retrieval service unavailable');
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:US-001',
+      retrievalTelemetryId: 'rt-err',
+    }));
+
+    fireEvent.click(screen.getByTestId('inspector-event-r42:0'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('retrieval-detail-error')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/retrieval service unavailable/)).toBeInTheDocument();
+  });
+
+  it('shows Unknown for prompt inclusion when enteredPrompt is not available', async () => {
+    const detailWithUnknownPrompt = {
+      ...fullDetail,
+      telemetryId: 'rt-unk',
+      selectedCandidates: [
+        {
+          ...fullDetail.selectedCandidates[0],
+          enteredPrompt: undefined,
+        },
+      ],
+    };
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-unk')) {
+        return detailWithUnknownPrompt;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:US-001',
+      retrievalTelemetryId: 'rt-unk',
+    }));
+
+    fireEvent.click(screen.getByTestId('inspector-event-r42:0'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('retrieval-detail-content')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/Prompt: Unknown/)).toBeInTheDocument();
+  });
+});
+
+describe('useContextTrace — resolveRetrievalTelemetry hook API', () => {
+  // Test the hook directly via renderHook.
+  let renderHookFn: typeof import('@testing-library/react')['renderHook'];
+  let useContextTraceHook: typeof import('../../hooks/useContextTrace')['useContextTrace'];
+
+  beforeAll(async () => {
+    const rtl = await import('@testing-library/react');
+    renderHookFn = rtl.renderHook;
+    const mod = await import('../../hooks/useContextTrace');
+    useContextTraceHook = mod.useContextTrace;
+  });
+
+  const telemetryDetail = {
+    telemetryId: 'rt-xyz',
+    runId: 99,
+    storyId: 'US-002',
+    query: 'hook test query',
+    selectedCandidates: [],
+    droppedCandidates: [],
+    candidateCount: 0,
+    selectedCount: 0,
+    matchedSkills: [],
+    retrievalTier: null,
+    latencyMs: null,
+    needsMoreEvidence: false,
+    tokenBudget: 4000,
+    contradictions: [],
+    rawSummary: '0/0 candidates selected, tier: unknown',
+  };
+
+  it('resolves retrieval telemetry lazily with cache and dedup', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-xyz')) {
+        return telemetryDetail;
+      }
+      return { events: [] };
+    });
+
+    const { result } = renderHookFn(() => useContextTraceHook('99'));
+
+    // Before calling resolve, state should be idle.
+    expect(result.current.getRetrievalTelemetryState('rt-xyz')).toEqual({
+      loading: false,
+      detail: null,
+      error: null,
+    });
+
+    // First resolve — triggers fetch.
+    let detail: any;
+    await act(async () => {
+      detail = await result.current.resolveRetrievalTelemetry('rt-xyz');
+    });
+    expect(detail.telemetryId).toBe('rt-xyz');
+
+    const telemetryCalls = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/retrieval-telemetry/rt-xyz'),
+    );
+    expect(telemetryCalls.length).toBe(1);
+
+    // Cached state should be populated.
+    expect(result.current.getRetrievalTelemetryState('rt-xyz')).toEqual({
+      loading: false,
+      detail: telemetryDetail,
+      error: null,
+    });
+
+    // Second resolve — returns cached, no extra fetch.
+    await act(async () => {
+      detail = await result.current.resolveRetrievalTelemetry('rt-xyz');
+    });
+    expect(detail.telemetryId).toBe('rt-xyz');
+
+    const telemetryCallsAfter = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/retrieval-telemetry/rt-xyz'),
+    );
+    expect(telemetryCallsAfter.length).toBe(1); // still 1 — cache reuse
+  });
+
+  it('surfaces error state when retrieval telemetry fetch fails', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-fail')) {
+        throw new Error('telemetry not found');
+      }
+      return { events: [] };
+    });
+
+    const { result } = renderHookFn(() => useContextTraceHook('99'));
+
+    await act(async () => {
+      try {
+        await result.current.resolveRetrievalTelemetry('rt-fail');
+      } catch {
+        // expected
+      }
+    });
+
+    expect(result.current.getRetrievalTelemetryState('rt-fail')).toEqual({
+      loading: false,
+      detail: null,
+      error: 'telemetry not found',
+    });
+  });
+
+  it('de-duplicates concurrent requests for the same telemetryId', async () => {
+    let resolvePromise: ((v: any) => void) | undefined;
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-dedup')) {
+        return new Promise((resolve) => { resolvePromise = resolve; });
+      }
+      return { events: [] };
+    });
+
+    const { result } = renderHookFn(() => useContextTraceHook('99'));
+
+    let p1: Promise<any>;
+    let p2: Promise<any>;
+    act(() => {
+      p1 = result.current.resolveRetrievalTelemetry('rt-dedup');
+      p2 = result.current.resolveRetrievalTelemetry('rt-dedup');
+    });
+
+    // Only one fetch call should have been made.
+    const dedupCalls = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/retrieval-telemetry/rt-dedup'),
+    );
+    expect(dedupCalls.length).toBe(1);
+
+    // Resolve the single in-flight request.
+    await act(async () => {
+      resolvePromise!(telemetryDetail);
+      await p1!;
+      await p2!;
+    });
+  });
+});
+
+describe('ContextInspector — structured retrievalTelemetryId on reconstructed events', () => {
+  const telemetryDetail = {
+    telemetryId: 'rt-structured',
+    runId: 42,
+    storyId: 'US-001',
+    query: 'structured test query',
+    selectedCandidates: [],
+    droppedCandidates: [],
+    candidateCount: 0,
+    selectedCount: 0,
+    matchedSkills: [],
+    retrievalTier: 'search',
+    latencyMs: 50,
+    needsMoreEvidence: false,
+    tokenBudget: 4000,
+    contradictions: [],
+    rawSummary: '0/0 candidates selected',
+  };
+
+  it('uses structured retrievalTelemetryId from backfill response to enable click path', async () => {
+    // Simulate backfill returning a reconstructed event WITH the structured field.
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/context-inspector-events')) {
+        return {
+          events: [{
+            traceId: 'reconstructed:42:memory',
+            runId: 42,
+            storyId: 'US-001',
+            seq: 0,
+            rawRef: 'synthetic:42:0',
+            phase: 'memory',
+            status: 'ok',
+            ts: new Date().toISOString(),
+            label: 'retrieval:US-001',
+            synthetic: true,
+            details: ['telemetry: rt-structured', 'selected: 3'],
+            retrievalTelemetryId: 'rt-structured',
+          }],
+          reconstructed: true,
+        };
+      }
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-structured')) {
+        return telemetryDetail;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+
+    // Wait for backfill to populate the event list.
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-event-synthetic:42:0')).toBeInTheDocument();
+    });
+
+    // Click should open retrieval detail drawer (not raw drawer).
+    fireEvent.click(screen.getByTestId('inspector-event-synthetic:42:0'));
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/retrieval-telemetry/rt-structured'),
+      );
+    });
+  });
+
+  it('falls back to parsing retrievalTelemetryId from details strings when structured field is absent', async () => {
+    // Simulate backfill returning an older event WITHOUT the structured field,
+    // but with telemetry ID embedded in details.
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/context-inspector-events')) {
+        return {
+          events: [{
+            traceId: 'reconstructed:42:memory',
+            runId: 42,
+            storyId: 'US-001',
+            seq: 0,
+            rawRef: 'synthetic:42:0',
+            phase: 'memory',
+            status: 'ok',
+            ts: new Date().toISOString(),
+            label: 'retrieval:US-001',
+            synthetic: true,
+            details: ['telemetry: rt-fallback', 'selected: 2'],
+            // NO retrievalTelemetryId field — should be parsed from details.
+          }],
+          reconstructed: true,
+        };
+      }
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-fallback')) {
+        return { ...telemetryDetail, telemetryId: 'rt-fallback' };
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+
+    // Wait for backfill to populate the event list.
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-event-synthetic:42:0')).toBeInTheDocument();
+    });
+
+    // Click should open retrieval detail drawer via fallback-parsed ID.
+    fireEvent.click(screen.getByTestId('inspector-event-synthetic:42:0'));
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/retrieval-telemetry/rt-fallback'),
+      );
+    });
+  });
+
+  it('does not extract retrievalTelemetryId when details contain no telemetry entry', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/context-inspector-events')) {
+        return {
+          events: [{
+            traceId: 'reconstructed:42:memory',
+            runId: 42,
+            storyId: 'US-001',
+            seq: 0,
+            rawRef: 'synthetic:42:0',
+            phase: 'memory',
+            status: 'ok',
+            ts: new Date().toISOString(),
+            label: 'retrieval:US-001',
+            synthetic: true,
+            details: ['selected: 2', 'needs more evidence'],
+            // No retrievalTelemetryId and no telemetry entry in details.
+          }],
+          reconstructed: true,
+        };
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-event-synthetic:42:0')).toBeInTheDocument();
+    });
+
+    // Synthetic row without retrieval ID should NOT be clickable (no chevron path).
+    fireEvent.click(screen.getByTestId('inspector-event-synthetic:42:0'));
+
+    // Should NOT call the retrieval-telemetry endpoint.
+    const retrievalCalls = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/retrieval-telemetry/'),
+    );
+    expect(retrievalCalls.length).toBe(0);
+  });
+});

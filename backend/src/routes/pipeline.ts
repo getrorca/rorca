@@ -3248,8 +3248,9 @@ router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Re
       ts?: string;
       metrics?: Record<string, number>;
       details?: string[];
+      retrievalTelemetryId?: string;
     } = {}) => {
-      const event = {
+      const event: Record<string, any> = {
         traceId: `reconstructed:${runId}:${phase}`,
         runId,
         storyId: opts.storyId ?? null,
@@ -3263,6 +3264,9 @@ router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Re
         synthetic: true,
         details: opts.details ?? [],
       };
+      if (opts.retrievalTelemetryId) {
+        event.retrievalTelemetryId = opts.retrievalTelemetryId;
+      }
       seq += 1;
       events.push(event);
     };
@@ -3311,6 +3315,7 @@ router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Re
             ...(needsMoreEvidence ? ['needs more evidence'] : []),
             ...(matchedSkills.length > 0 ? [`matched skills: ${matchedSkills.join(', ')}`] : []),
           ],
+          retrievalTelemetryId: telemetryId ?? undefined,
         });
       }
 
@@ -3459,6 +3464,247 @@ router.get('/runs/:runId/context-trace/:rawRef', async (req: Request, res: Respo
     throw new NotFoundError('Context-trace payload not found');
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Get context-trace raw');
+  }
+});
+
+// ─── GET /api/pipeline/runs/:runId/retrieval-telemetry/:telemetryId — Resolve retrieval details
+// Resolves retrieval_telemetry_id into full selected and dropped candidate details.
+// Run-scoped: telemetryId must belong to a story in the specified run.
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/retrieval-telemetry/{telemetryId}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Resolve retrieval telemetry details for a specific telemetry event
+ *     operationId: getRunRetrievalTelemetry
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only retrieval telemetry inspection of local run artifacts — no write or operator-only side effects, safe for CLI/MCP."
+ *     x-rorca-public-api: true
+ *     description: |
+ *       Resolves a retrieval_telemetry_id into full selected and dropped candidate details.
+ *       Validates that the telemetry event belongs to a story within the specified run.
+ *       Returns normalized candidate objects with memory/context identifier, title/source,
+ *       category/type, snippet/summary, selection status, relevance scores, and reasons.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: telemetryId
+ *         required: true
+ *         schema: { type: string }
+ *         description: "Retrieval telemetry event ID from retrieval_telemetry_events table"
+ *     responses:
+ *       200:
+ *         description: Retrieval telemetry details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 telemetryId: { type: string }
+ *                 runId: { type: integer }
+ *                 storyId: { type: string }
+ *                 query: { type: string }
+ *                 selectedCandidates: { type: array }
+ *                 droppedCandidates: { type: array }
+ *                 candidateCount: { type: integer }
+ *                 selectedCount: { type: integer }
+ *                 matchedSkills: { type: array }
+ *                 retrievalTier: { type: string }
+ *                 latencyMs: { type: integer }
+ *                 needsMoreEvidence: { type: boolean }
+ *                 tokenBudget: { type: integer }
+ *                 contradictions: { type: array, items: { type: array, items: { type: string } } }
+ *                 rawSummary: { type: string }
+ *       400: { description: "Invalid runId or telemetryId" }
+ *       404: { description: "Run not found or telemetry event not found or doesn't belong to this run" }
+ */
+router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      throw new ValidationError('Invalid runId');
+    }
+
+    const telemetryId = String(req.params.telemetryId);
+    if (!telemetryId || telemetryId.trim().length === 0) {
+      throw new ValidationError('Invalid telemetryId');
+    }
+
+    // Verify run exists
+    const run = await queryOne(
+      'SELECT id FROM pipeline_runs WHERE id = $1',
+      [runId]
+    ) as { id: number } | undefined;
+    if (!run) {
+      throw new NotFoundError('Run not found');
+    }
+
+    // Fetch telemetry event from database
+    const telemetryRow = await queryOne(
+      `SELECT
+         id,
+         workspace_id,
+         query_preview,
+         matched_skills,
+         selected_candidate_keys,
+         dropped_candidate_keys,
+         needs_more_evidence,
+         candidate_count,
+         selected_count,
+         token_budget,
+         contradiction_pairs,
+         payload,
+         latency_ms,
+         retrieval_tier,
+         created_at
+       FROM retrieval_telemetry_events
+       WHERE id = $1`,
+      [telemetryId]
+    ) as any;
+
+    if (!telemetryRow) {
+      throw new NotFoundError('Retrieval telemetry event not found');
+    }
+
+    // Verify telemetry event belongs to a story in this run by checking story_started WAL events
+    const storyWithTelemetry = await queryOne(
+      `SELECT story_id
+       FROM wal_events
+       WHERE event_type = 'story_started'
+         AND (payload->>'run_id')::bigint = $1
+         AND payload->>'retrieval_telemetry_id' = $2
+       LIMIT 1`,
+      [runId, telemetryId]
+    ) as { story_id: string } | undefined;
+
+    if (!storyWithTelemetry) {
+      throw new NotFoundError('Retrieval telemetry event does not belong to this run');
+    }
+
+    // Parse payload to extract candidates
+    const payload = telemetryRow.payload && typeof telemetryRow.payload === 'object'
+      ? telemetryRow.payload as Record<string, any>
+      : {};
+
+    const candidatesRaw = Array.isArray(payload.candidates) ? payload.candidates : [];
+
+    // Normalize candidates
+    interface NormalizedCandidate {
+      key: string;
+      origin: string;
+      sourceType?: string;
+      title?: string;
+      snippet?: string;
+      category?: string;
+      selected: boolean;
+      enteredPrompt?: boolean;
+      relevanceScore: number;
+      scoreBreakdown: {
+        semantic?: number;
+        keyword?: number;
+        graph?: number;
+        recency?: number;
+        skill?: number;
+      };
+      matchedSkills?: string[];
+      keptOrDroppedReason: string;
+    }
+
+    const selectedKeys = new Set(
+      Array.isArray(telemetryRow.selected_candidate_keys)
+        ? telemetryRow.selected_candidate_keys
+        : []
+    );
+
+    const selectedCandidates: NormalizedCandidate[] = [];
+    const droppedCandidates: NormalizedCandidate[] = [];
+
+    for (const candidate of candidatesRaw) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      if (typeof candidate.key !== 'string' || typeof candidate.origin !== 'string') continue;
+
+      const isSelected = selectedKeys.has(candidate.key) || candidate.decision === 'keep';
+
+      const normalized: NormalizedCandidate = {
+        key: candidate.key,
+        origin: candidate.origin,
+        sourceType: typeof candidate.sourceType === 'string' ? candidate.sourceType : undefined,
+        title: typeof candidate.title === 'string' ? candidate.title : undefined,
+        snippet: typeof candidate.snippet === 'string' ? candidate.snippet : undefined,
+        category: typeof candidate.category === 'string' ? candidate.category : undefined,
+        selected: isSelected,
+        enteredPrompt: isSelected,
+        relevanceScore: typeof candidate.finalScore === 'number' ? candidate.finalScore : 0,
+        scoreBreakdown: {
+          semantic: typeof candidate.semanticRankScore === 'number' ? candidate.semanticRankScore : undefined,
+          keyword: typeof candidate.scoring?.keywordScore === 'number' ? candidate.scoring.keywordScore : undefined,
+          graph: typeof candidate.graphScore === 'number' ? candidate.graphScore : undefined,
+          recency: typeof candidate.freshnessScore === 'number' ? candidate.freshnessScore : undefined,
+          skill: typeof candidate.scoring?.skillScore === 'number' ? candidate.scoring.skillScore : undefined,
+        },
+        matchedSkills: Array.isArray(candidate.matchedSkills)
+          ? candidate.matchedSkills.filter((s: any) => typeof s === 'string')
+          : undefined,
+        keptOrDroppedReason: Array.isArray(candidate.reasons) && candidate.reasons.length > 0
+          ? candidate.reasons.join('; ')
+          : (candidate.decision === 'keep' ? 'Selected' : 'Dropped'),
+      };
+
+      if (isSelected) {
+        selectedCandidates.push(normalized);
+      } else {
+        droppedCandidates.push(normalized);
+      }
+    }
+
+    // Build a concise rawSummary from the telemetry metadata
+    const selCount = Number(telemetryRow.selected_count) || 0;
+    const candCount = Number(telemetryRow.candidate_count) || 0;
+    const tier = telemetryRow.retrieval_tier || 'unknown';
+    const latMs = telemetryRow.latency_ms != null ? Number(telemetryRow.latency_ms) : null;
+    const rawSummary = [
+      `${selCount}/${candCount} candidates selected`,
+      `tier: ${tier}`,
+      ...(latMs != null ? [`latency: ${latMs}ms`] : []),
+      ...(telemetryRow.needs_more_evidence ? ['needs more evidence'] : []),
+    ].join(', ');
+
+    // Parse contradiction pairs from the DB column
+    const contradictionPairsRaw = telemetryRow.contradiction_pairs;
+    const contradictions: Array<[string, string]> = [];
+    if (Array.isArray(contradictionPairsRaw)) {
+      for (const pair of contradictionPairsRaw) {
+        if (Array.isArray(pair) && pair.length >= 2 && typeof pair[0] === 'string' && typeof pair[1] === 'string') {
+          contradictions.push([pair[0], pair[1]]);
+        }
+      }
+    }
+
+    res.json({
+      telemetryId: telemetryRow.id,
+      runId,
+      storyId: storyWithTelemetry.story_id,
+      query: telemetryRow.query_preview,
+      selectedCandidates,
+      droppedCandidates,
+      candidateCount: candCount,
+      selectedCount: selCount,
+      matchedSkills: Array.isArray(telemetryRow.matched_skills)
+        ? telemetryRow.matched_skills.filter((s: any) => typeof s === 'string')
+        : [],
+      retrievalTier: telemetryRow.retrieval_tier || null,
+      latencyMs: latMs,
+      needsMoreEvidence: Boolean(telemetryRow.needs_more_evidence),
+      tokenBudget: Number(telemetryRow.token_budget) || 0,
+      contradictions,
+      rawSummary,
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Get retrieval telemetry');
   }
 });
 

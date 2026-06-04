@@ -24,14 +24,18 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Layers, AlertTriangle, CheckCircle2, Loader2, ChevronRight, FileText } from 'lucide-react';
+import { Layers, AlertTriangle, CheckCircle2, Loader2, ChevronRight, FileText, Search } from 'lucide-react';
 import {
   useContextTrace,
   type ContextTraceEvent,
   type ContextTracePhase,
   type ContextTraceStatus,
+  type RetrievalTelemetryDetail,
+  type RetrievalCandidateDetail,
+  type RetrievalTelemetryState,
 } from '../hooks/useContextTrace';
 import ContextTraceRawDrawer from './ContextTraceRawDrawer';
+import SlideOver from './SlideOver';
 
 interface ContextInspectorProps {
   /** Numeric run id. Stringified internally for the run-scoped SSE filter. */
@@ -150,7 +154,7 @@ function buildFunnel(events: ContextTraceEvent[]): FunnelRow[] {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function ContextInspector({ runId, runSettled = true }: ContextInspectorProps) {
-  const { events, resolveRaw, getRawState } = useContextTrace(String(runId));
+  const { events, resolveRaw, getRawState, resolveRetrievalTelemetry, getRetrievalTelemetryState } = useContextTrace(String(runId));
 
   // Stable ordering by seq (then rawRef as a tiebreaker). De-dup already done in
   // the hook by rawRef, so this guarantees no reorder/flicker on live delivery.
@@ -209,6 +213,16 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
     [activeRawRef, ordered],
   );
   const activeRawState = activeRawRef ? getRawState(activeRawRef) : { loading: false, record: null, error: null };
+
+  // Retrieval telemetry detail drawer state.
+  const [activeRetrievalId, setActiveRetrievalId] = useState<string | null>(null);
+  const activeRetrievalEvent = useMemo(
+    () => (activeRetrievalId ? ordered.find((e) => e.retrievalTelemetryId === activeRetrievalId) ?? null : null),
+    [activeRetrievalId, ordered],
+  );
+  const activeRetrievalState: RetrievalTelemetryState = activeRetrievalId
+    ? getRetrievalTelemetryState(activeRetrievalId)
+    : { loading: false, detail: null, error: null };
 
   const hasErrors = summary.dropped > 0;
 
@@ -318,12 +332,22 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
         {ordered.map((e) => {
           const raw = getRawState(e.rawRef);
           const displayRef = e.synthetic ? `synthetic:${e.seq}` : e.rawRef;
+          // Rows with retrievalTelemetryId are clickable even when synthetic.
+          const hasRetrieval = !!e.retrievalTelemetryId;
+          const isClickable = hasRetrieval || !e.synthetic;
           return (
             <button
               key={e.rawRef}
               type="button"
-              onClick={() => e.synthetic ? undefined : setActiveRawRef(e.rawRef)}
-              className={`w-full grid grid-cols-[auto_7.5rem_8.5rem_minmax(0,1fr)_4.5rem_4rem_7rem_auto] items-center gap-3 px-4 py-2 text-left border-b border-border/50 transition-colors ${e.synthetic ? 'cursor-default' : 'hover:bg-panel/50'}`}
+              onClick={() => {
+                if (hasRetrieval) {
+                  setActiveRetrievalId(e.retrievalTelemetryId!);
+                  resolveRetrievalTelemetry(e.retrievalTelemetryId!).catch(() => {});
+                } else if (!e.synthetic) {
+                  setActiveRawRef(e.rawRef);
+                }
+              }}
+              className={`w-full grid grid-cols-[auto_7.5rem_8.5rem_minmax(0,1fr)_4.5rem_4rem_7rem_auto] items-center gap-3 px-4 py-2 text-left border-b border-border/50 transition-colors ${isClickable ? 'hover:bg-panel/50 cursor-pointer' : 'cursor-default'}`}
               data-testid={`inspector-event-${e.rawRef}`}
             >
               <span className={`w-2 h-2 rounded-full ${statusDot(e.status)}`} />
@@ -337,17 +361,22 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
               </span>
               <span className="font-mono text-[10px] text-muted truncate">{e.storyId ?? ''}</span>
               <span className={`text-[11px] truncate ${statusColor(e.status)}`}>{e.status}</span>
-              {e.synthetic ? (
+              {hasRetrieval ? (
+                <span className="inline-flex items-center gap-1 text-[10px] text-[var(--accent)] truncate">
+                  <Search size={10} />
+                  {e.synthetic ? 'reconstructed' : 'relevance'}
+                </span>
+              ) : e.synthetic ? (
                 <span className="text-[10px] text-muted/70 truncate">reconstructed</span>
               ) : raw.loading ? (
                 <Loader2 size={12} className="text-muted animate-spin" />
               ) : (
                 <FileText size={12} className="text-muted/60" />
               )}
-              {e.synthetic ? (
-                <span aria-hidden="true" />
-              ) : (
+              {isClickable ? (
                 <ChevronRight size={12} className="text-muted/60" />
+              ) : (
+                <span aria-hidden="true" />
               )}
             </button>
           );
@@ -368,6 +397,14 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
           resolveRaw(rawRef).catch(() => { /* state already records the error */ });
         }}
       />
+
+      {/* ─── Retrieval telemetry detail drawer ────────────────────────────── */}
+      <RetrievalDetailDrawer
+        isOpen={activeRetrievalId != null}
+        onClose={() => setActiveRetrievalId(null)}
+        event={activeRetrievalEvent}
+        state={activeRetrievalState}
+      />
     </div>
   );
 }
@@ -378,5 +415,190 @@ function SummaryStat({ label, value, valueClass }: { label: string; value: strin
       <span className="text-muted">{label}</span>
       <span className={`font-mono font-semibold ${valueClass ?? 'text-[var(--text)]'}`}>{value}</span>
     </span>
+  );
+}
+
+// ─── Retrieval detail drawer ─────────────────────────────────────────────────
+
+interface RetrievalDetailDrawerProps {
+  isOpen: boolean;
+  onClose: () => void;
+  event: ContextTraceEvent | null;
+  state: RetrievalTelemetryState;
+}
+
+function RetrievalDetailDrawer({ isOpen, onClose, event, state }: RetrievalDetailDrawerProps) {
+  const title = event
+    ? `Retrieval · ${event.label ?? event.rawRef}`
+    : 'Retrieval detail';
+
+  return (
+    <SlideOver isOpen={isOpen} onClose={onClose} title={title}>
+      <div className="flex-1 overflow-y-auto p-4 space-y-4" data-testid="retrieval-detail-drawer">
+        {state.loading && (
+          <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted" data-testid="retrieval-detail-loading">
+            <Loader2 size={14} className="animate-spin" />
+            Loading retrieval details…
+          </div>
+        )}
+
+        {state.error && !state.loading && (
+          <div className="flex items-start gap-2 p-3 rounded bg-rose-500/5 border border-rose-500/20 text-sm text-rose-400" data-testid="retrieval-detail-error">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <div>
+              <p className="font-medium">Could not load retrieval details</p>
+              <p className="text-[12px] text-rose-400/80 mt-0.5">{state.error}</p>
+            </div>
+          </div>
+        )}
+
+        {state.detail && !state.loading && !state.error && (
+          <RetrievalDetailContent detail={state.detail} />
+        )}
+
+        {!state.detail && !state.loading && !state.error && (
+          <p className="text-sm text-muted py-10 text-center">No retrieval detail available.</p>
+        )}
+      </div>
+    </SlideOver>
+  );
+}
+
+function RetrievalDetailContent({ detail }: { detail: RetrievalTelemetryDetail }) {
+  return (
+    <div className="space-y-4" data-testid="retrieval-detail-content">
+      {/* ─── Summary metrics ──────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+        <DetailField label="Tier / Method" value={detail.retrievalTier ?? 'Unknown'} testId="retrieval-tier" />
+        <DetailField label="Latency" value={detail.latencyMs != null ? `${detail.latencyMs}ms` : 'Unknown'} testId="retrieval-latency" />
+        <DetailField label="Candidates" value={`${detail.selectedCount} / ${detail.candidateCount} selected`} testId="retrieval-counts" />
+        <DetailField label="Token budget" value={detail.tokenBudget.toLocaleString()} testId="retrieval-budget" />
+      </div>
+
+      {/* ─── Matched skills ───────────────────────────────────────────── */}
+      {detail.matchedSkills.length > 0 && (
+        <div data-testid="retrieval-matched-skills">
+          <SectionLabel>Matched skills</SectionLabel>
+          <div className="flex flex-wrap gap-1.5 mt-1">
+            {detail.matchedSkills.map((skill) => (
+              <span
+                key={skill}
+                className="px-2 py-0.5 text-[10px] font-medium rounded bg-[var(--accent)]/10 text-[var(--accent)]"
+              >
+                {skill}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ─── Selected candidates ──────────────────────────────────────── */}
+      <div data-testid="retrieval-selected-section">
+        <SectionLabel>
+          Selected candidates ({detail.selectedCandidates.length})
+        </SectionLabel>
+        {detail.selectedCandidates.length === 0 ? (
+          <p className="text-xs text-muted mt-1">No candidates selected.</p>
+        ) : (
+          <div className="mt-1 space-y-1.5">
+            {detail.selectedCandidates.map((c) => (
+              <CandidateRow key={c.key} candidate={c} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Dropped candidates ───────────────────────────────────────── */}
+      <div data-testid="retrieval-dropped-section">
+        <SectionLabel>
+          Dropped candidates ({detail.droppedCandidates.length})
+        </SectionLabel>
+        {detail.droppedCandidates.length === 0 ? (
+          <p className="text-xs text-muted mt-1">No candidates dropped.</p>
+        ) : (
+          <div className="mt-1 space-y-1.5">
+            {detail.droppedCandidates.map((c) => (
+              <CandidateRow key={c.key} candidate={c} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Raw summary ──────────────────────────────────────────────── */}
+      {detail.rawSummary && (
+        <div data-testid="retrieval-raw-summary">
+          <SectionLabel>Raw summary</SectionLabel>
+          <p className="text-xs text-muted mt-1 whitespace-pre-wrap">{detail.rawSummary}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CandidateRow({ candidate }: { candidate: RetrievalCandidateDetail }) {
+  const scorePercent = Math.round(candidate.relevanceScore * 100);
+  const promptLabel = candidate.enteredPrompt == null
+    ? 'Unknown'
+    : candidate.enteredPrompt
+      ? 'Yes'
+      : 'No';
+
+  return (
+    <div
+      className="p-2.5 rounded border border-border/60 bg-[var(--surface-200)] space-y-1.5"
+      data-testid={`candidate-${candidate.key}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-[var(--text)] truncate" title={candidate.title ?? candidate.key}>
+            {candidate.title ?? candidate.key}
+          </p>
+          {candidate.category && (
+            <p className="text-[10px] text-muted truncate">{candidate.category} · {candidate.origin}</p>
+          )}
+          {!candidate.category && (
+            <p className="text-[10px] text-muted truncate">{candidate.origin}</p>
+          )}
+        </div>
+        <span className={`shrink-0 font-mono text-xs font-semibold ${scorePercent >= 70 ? 'text-emerald-500' : scorePercent >= 40 ? 'text-amber-500' : 'text-rose-400'}`}>
+          {scorePercent}%
+        </span>
+      </div>
+
+      {candidate.snippet && (
+        <p
+          className="text-[11px] text-muted leading-4 line-clamp-2"
+          title={candidate.snippet}
+        >
+          {candidate.snippet}
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
+        <span>Score: {Object.entries(candidate.scoreBreakdown).map(([k, v]) => `${k}: ${v}`).join(', ') || 'N/A'}</span>
+        <span>Prompt: {promptLabel}</span>
+        <span>Reason: {candidate.keptOrDroppedReason || 'Not recorded'}</span>
+        {candidate.matchedSkills && candidate.matchedSkills.length > 0 && (
+          <span>Skills: {candidate.matchedSkills.join(', ')}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailField({ label, value, testId }: { label: string; value: string; testId?: string }) {
+  return (
+    <div data-testid={testId}>
+      <span className="text-muted">{label}: </span>
+      <span className="font-mono text-[var(--text)]">{value}</span>
+    </div>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+      {children}
+    </p>
   );
 }
