@@ -21,6 +21,8 @@ import {
 } from '../lib/finops-types';
 import {
   computeAccounting,
+  classifyUsage,
+  meteredCost,
   type AccountingContext,
   type AccountingResult,
   type PricingRate,
@@ -2183,7 +2185,19 @@ function resolvePricing(pricingMap: Map<string, { input: number; output: number 
  *     x-rorca-tier: paid
  *     x-rorca-capability: finops
  *     x-rorca-rationale: "Per-run FinOps analytics are commercial cost visibility features and must stay outside the free CLI/MCP surface."
- *     description: Returns detailed FinOps data for a specific pipeline run, including per-story cost breakdown with model tier classification, run summary aggregated by model, savings vs all-Opus baseline, model distribution for pie charts, and escalation log from WAL events. For subscription-based agents (claude, codex), savings and cost fields are null.
+ *     description: >-
+ *       Returns accounting-mode-aware FinOps data for a specific pipeline run. Instead
+ *       of one ambiguous cost field, the response separates marginal metered API spend
+ *       (accounting.meteredCostUsd), allocated subscription cost
+ *       (accounting.allocatedSubscriptionCostUsd), and blended effective cost
+ *       (accounting.blendedEffectiveCostUsd), classified via the shared FinOps
+ *       accounting engine against the active billing profiles. Live runs surface
+ *       provider/model rows immediately and update usage as story_token_update WAL
+ *       events arrive. Subscription-only runs report truthful subscription usage volume
+ *       with isSubscription=true, no fabricated per-run spend, and a null savings field.
+ *       Mixed-provider runs aggregate across token_usage, story_results, and WAL updates.
+ *       Per-story rows carry billingMode and metered cost; provenance carries billing
+ *       mode, pricing coverage, and allocation modes.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -2201,6 +2215,9 @@ function resolvePricing(pricingMap: Map<string, { input: number; output: number 
  *                 runId: { type: integer }
  *                 agentType: { type: string }
  *                 isSubscription: { type: boolean }
+ *                 billingMode: { type: string }
+ *                 accounting: { type: object, description: "metered/allocated/blended totals, subscription usage, byMode, coverage" }
+ *                 provenance: { type: object, description: "billing mode + pricing coverage + allocation provenance labels" }
  *                 runSummary: { type: array, items: { type: object } }
  *                 savings: { type: object, nullable: true }
  *                 totals: { type: object }
@@ -2223,8 +2240,8 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
     }
 
     // Check run exists and get agent info
-    const run = await queryOne<{ id: number; agent: string | null; agent_type: string | null; agent_model: string | null; workspace_id: string; spec_path: string; status: string }>(
-      'SELECT id, agent, agent_type, agent_model, workspace_id, spec_path, status FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ id: number; agent: string | null; agent_type: string | null; agent_model: string | null; workspace_id: string; spec_path: string; status: string; started_at: string | null; finished_at: string | null }>(
+      'SELECT id, agent, agent_type, agent_model, workspace_id, spec_path, status, started_at::text AS started_at, finished_at::text AS finished_at FROM pipeline_runs WHERE id = $1',
       [runId]
     );
 
@@ -2364,20 +2381,65 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       });
     }
 
-    // Build per-story breakdown
+    // FIN-004: classify this run's usage with the shared FIN-002 accounting engine
+    // against the active FIN-001 billing profiles instead of assuming everything is
+    // metered. Profiles are loaded for the run's lifetime window (started→finished),
+    // falling back to a wide window for live runs that have not finished yet so an
+    // in-flight subscription run is still classified truthfully.
+    const profileFrom = run.started_at ?? new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+    const profileTo = run.finished_at ?? new Date().toISOString();
+    const profiles = await loadActiveBillingProfiles(profileFrom, profileTo, run.workspace_id);
+    const accountingCtx = buildAccountingContext(pricingMap, profiles);
+
+    // Project each accumulated story onto an accounting usage row. runId drives
+    // by_runs allocation; story_id drives by_stories. reasoning_tokens is unknown
+    // at this granularity, so it is zero (output already includes it upstream).
+    const usageRows: HistoricalUsageRow[] = stories.map((s) => ({
+      model: s.model,
+      input_tokens: s.input_tokens,
+      output_tokens: s.output_tokens,
+      reasoning_tokens: 0,
+      cost_usd: s.cost_usd,
+      run_id: runId,
+      story_id: s.story_id,
+      recorded_at: run.started_at ?? null,
+    }));
+    const accounting = summarizeUsage(usageRows, accountingCtx);
+
+    // The run's headline billing mode is the dominant mode across its rows. A run
+    // is subscription-backed when no row is metered_api and at least one is a
+    // subscription — these runs must NOT imply invoice-backed per-run spend.
+    const billingMode: BillingMode = providerBillingMode(accounting);
+    const meteredRecordCount = accounting.byMode.find((m) => m.mode === 'metered_api')?.recordCount ?? 0;
+    const isSubscription = accounting.subscriptionUsage.recordCount > 0 && meteredRecordCount === 0;
+
+    // Build per-story breakdown. `actualCost` is the marginal metered cost for the
+    // story (zero for subscription/unpriced rows — never a fabricated number), while
+    // `meteredCost` exposes the same value explicitly alongside the billing mode.
     const perStory = stories.map(s => {
-      const pricing = resolvePricing(pricingMap, s.model);
-      const actualCost = pricing
-        ? (s.input_tokens / 1_000_000) * pricing.input + (s.output_tokens / 1_000_000) * pricing.output
-        : s.cost_usd;
+      const record = toUsageRecord({
+        model: s.model,
+        input_tokens: s.input_tokens,
+        output_tokens: s.output_tokens,
+        reasoning_tokens: 0,
+        cost_usd: s.cost_usd,
+        run_id: runId,
+        story_id: s.story_id,
+        recorded_at: run.started_at ?? null,
+      });
+      const cls = classifyUsage(record, accountingCtx);
+      const rate = accountingCtx.pricingFor(record);
+      const metered = cls.mode === 'metered_api' ? (meteredCost(record, rate) ?? 0) : 0;
       const opusBaseline = (s.input_tokens / 1_000_000) * OPUS_INPUT_PER_1M + (s.output_tokens / 1_000_000) * OPUS_OUTPUT_PER_1M;
       return {
         storyId: s.story_id,
         model: s.model,
         tier: tierFromModel(s.model),
+        billingMode: cls.mode,
         inputTokens: s.input_tokens,
         outputTokens: s.output_tokens,
-        actualCost: Math.round(actualCost * 10000) / 10000,
+        meteredCost: Math.round(metered * 10000) / 10000,
+        actualCost: Math.round(metered * 10000) / 10000,
         opusBaseline: Math.round(opusBaseline * 10000) / 10000,
       };
     });
@@ -2389,7 +2451,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       existing.stories++;
       existing.inputTokens += s.inputTokens;
       existing.outputTokens += s.outputTokens;
-      existing.cost += s.actualCost;
+      existing.cost += s.meteredCost;
       modelSummary.set(s.model, existing);
     }
 
@@ -2402,10 +2464,12 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       cost: Math.round(data.cost * 10000) / 10000,
     }));
 
-    // Totals
-    const totalActual = perStory.reduce((sum, s) => sum + s.actualCost, 0);
+    // Totals — savings compares marginal metered spend against an all-Opus metered
+    // baseline, so subscription/unpriced rows contribute zero metered cost (and are
+    // excluded from a misleading savings number for subscription-only runs below).
+    const totalMetered = accounting.meteredCostUsd;
     const totalOpusBaseline = perStory.reduce((sum, s) => sum + s.opusBaseline, 0);
-    const totalSaved = totalOpusBaseline - totalActual;
+    const totalSaved = totalOpusBaseline - totalMetered;
     const savingsPct = totalOpusBaseline > 0 ? (totalSaved / totalOpusBaseline) * 100 : 0;
 
     // Model distribution (for pie chart)
@@ -2461,11 +2525,39 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       agentType,
       agentModel: fallbackModel,
       usageAvailable,
-      isSubscription: false,
+      isSubscription,
+      billingMode,
+      // FIN-004: accounting-mode-aware cost surface — metered marginal spend,
+      // allocated subscription cost, and blended effective cost are reported
+      // separately rather than collapsed into one ambiguous `cost` field. This is
+      // the canonical per-run accounting block, mirroring the historical view.
+      accounting: {
+        meteredCostUsd: accounting.meteredCostUsd,
+        allocatedSubscriptionCostUsd: accounting.allocatedSubscriptionCostUsd,
+        blendedEffectiveCostUsd: accounting.blendedEffectiveCostUsd,
+        subscriptionUsage: accounting.subscriptionUsage,
+        byMode: accounting.byMode,
+        coverage: accounting.coverage,
+      },
+      // Provenance labels so the dashboard can tell a truthful story: whether the
+      // numbers are metered, allocated, or blended, and how much usage was priced.
+      provenance: {
+        billingMode,
+        isSubscription,
+        hasMeteredSpend: accounting.meteredCostUsd > 0,
+        hasAllocatedCost: accounting.coverage.hasAllocatedCost,
+        hasBlendedCost: accounting.coverage.hasBlendedCost,
+        pricingCoverage: accounting.coverage.pricingCoverage,
+        unpricedRecords: accounting.coverage.unpricedRecords,
+        profileClassifiedRecords: accounting.coverage.profileClassifiedRecords,
+        allocationModes: accounting.coverage.allocationModes,
+      },
       runSummary,
-      savings: {
+      // Savings is a metered-vs-Opus comparison; it is null for subscription-only
+      // runs so we never imply invoice-backed marginal savings where none exist.
+      savings: isSubscription ? null : {
         opusBaseline: Math.round(totalOpusBaseline * 100) / 100,
-        actual: Math.round(totalActual * 100) / 100,
+        actual: Math.round(totalMetered * 100) / 100,
         saved: Math.round(totalSaved * 100) / 100,
         percentage: Math.round(savingsPct * 10) / 10,
       },
@@ -2473,7 +2565,11 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
         stories: totalStories,
         inputTokens: perStory.reduce((sum, s) => sum + s.inputTokens, 0),
         outputTokens: perStory.reduce((sum, s) => sum + s.outputTokens, 0),
-        cost: Math.round(totalActual * 100) / 100,
+        // `cost` stays for backward compatibility, now the blended effective cost.
+        cost: Math.round(accounting.blendedEffectiveCostUsd * 100) / 100,
+        meteredCostUsd: accounting.meteredCostUsd,
+        allocatedSubscriptionCostUsd: accounting.allocatedSubscriptionCostUsd,
+        blendedEffectiveCostUsd: accounting.blendedEffectiveCostUsd,
       },
       modelDistribution,
       perStory,

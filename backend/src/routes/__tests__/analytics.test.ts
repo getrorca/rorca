@@ -453,6 +453,151 @@ describe('GET /api/analytics/finops/run/:runId', () => {
     expect(res.body.totals.outputTokens).toBe(300);
     expect(res.body.perStory[0]).toMatchObject({ storyId: 'US-001', model: 'openai/gpt-4o' });
   });
+
+  // ── FIN-004: accounting-mode-aware per-run FinOps ─────────────────────────
+  test('API-only run separates metered spend from blended cost and reports savings', async () => {
+    // claude-opus-4-6 priced at $10/1M input, $40/1M output (metered API usage).
+    await seedPricing('claude-opus-4-6', 'anthropic', 10, 40);
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model, started_at, finished_at)
+       VALUES ('forge/specs/approved/fin-api-only.json', $1, 'done', 'claude', 'claude', 'claude-opus-4-6', NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day')
+       RETURNING id`,
+      [WS_ID],
+    );
+    await execute(
+      `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES ($1, 'US-001', $2, 'claude-opus-4-6', 1000000, 500000, 0, NOW() - INTERVAL '2 days')`,
+      [run!.id, WS_ID],
+    );
+
+    const res = await get(`/api/analytics/finops/run/${run!.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.billingMode).toBe('metered_api');
+    expect(res.body.isSubscription).toBe(false);
+    // Metered: 1M*$10/1M + 0.5M*$40/1M = 10 + 20 = $30.
+    expect(res.body.accounting.meteredCostUsd).toBeCloseTo(30, 2);
+    expect(res.body.accounting.allocatedSubscriptionCostUsd).toBe(0);
+    expect(res.body.accounting.blendedEffectiveCostUsd).toBeCloseTo(30, 2);
+    expect(res.body.totals.meteredCostUsd).toBeCloseTo(30, 2);
+    // Savings is present (metered run) and compares against the all-Opus baseline.
+    expect(res.body.savings).not.toBeNull();
+    expect(res.body.savings.actual).toBeCloseTo(30, 2);
+    expect(res.body.perStory[0]).toMatchObject({ billingMode: 'metered_api', meteredCost: 30 });
+    expect(res.body.provenance.hasMeteredSpend).toBe(true);
+    expect(res.body.provenance.pricingCoverage).toBe(1);
+  });
+
+  test('subscription-only run shows truthful usage and no invoice-backed per-run spend', async () => {
+    // gpt-4o is priced, but a subscription profile overrides its billing mode so
+    // it must never report marginal per-run spend.
+    await seedPricing('gpt-4o', 'openai', 5, 15);
+    await seedSubscriptionProfile({ provider: 'openai', monthlyCostUsd: 30, allocationBasis: 'by_runs' });
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model, started_at, finished_at)
+       VALUES ('forge/specs/approved/fin-sub-only.json', $1, 'done', 'opencode', 'opencode', 'gpt-4o', NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day')
+       RETURNING id`,
+      [WS_ID],
+    );
+    await execute(
+      `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES
+         ($1, 'US-001', $2, 'gpt-4o', 100000, 20000, 0, NOW() - INTERVAL '2 days'),
+         ($1, 'US-002', $2, 'gpt-4o', 200000, 40000, 0, NOW() - INTERVAL '1 day')`,
+      [run!.id, WS_ID],
+    );
+
+    const res = await get(`/api/analytics/finops/run/${run!.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.billingMode).toBe('subscription');
+    expect(res.body.isSubscription).toBe(true);
+    // No metered marginal spend — subscription cost is allocated, not invoiced per run.
+    expect(res.body.accounting.meteredCostUsd).toBe(0);
+    expect(res.body.accounting.allocatedSubscriptionCostUsd).toBeGreaterThan(0);
+    expect(res.body.accounting.subscriptionUsage.inputTokens).toBe(300000);
+    expect(res.body.accounting.subscriptionUsage.outputTokens).toBe(60000);
+    expect(res.body.accounting.subscriptionUsage.recordCount).toBe(2);
+    // Subscription-only runs never imply marginal savings.
+    expect(res.body.savings).toBeNull();
+    // Per-story rows carry zero metered cost but the subscription billing mode.
+    expect(res.body.perStory.every((s: any) => s.billingMode === 'subscription' && s.meteredCost === 0)).toBe(true);
+    expect(res.body.provenance.hasMeteredSpend).toBe(false);
+  });
+
+  test('mixed-provider run aggregates metered + subscription rows across sources', async () => {
+    await seedPricing('claude-opus-4-6', 'anthropic', 10, 40);
+    await seedPricing('gpt-4o', 'openai', 5, 15);
+    await seedSubscriptionProfile({ provider: 'openai', monthlyCostUsd: 30, allocationBasis: 'even' });
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model, started_at, finished_at)
+       VALUES ('forge/specs/approved/fin-mixed.json', $1, 'done', 'pi', 'pi', 'claude-opus-4-6', NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day')
+       RETURNING id`,
+      [WS_ID],
+    );
+    // Metered Anthropic row from token_usage.
+    await execute(
+      `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES ($1, 'US-001', $2, 'claude-opus-4-6', 1000000, 500000, 0, NOW() - INTERVAL '2 days')`,
+      [run!.id, WS_ID],
+    );
+    // Subscription OpenAI row supplied only via story_results fallback.
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, finished_at, elapsed_seconds, model_used, input_tokens, output_tokens, cost_usd)
+       VALUES ($1, 'US-002', 'pass', NOW() - INTERVAL '1 day', 30, 'gpt-4o', 200000, 50000, 0)`,
+      [run!.id],
+    );
+
+    const res = await get(`/api/analytics/finops/run/${run!.id}`);
+
+    expect(res.status).toBe(200);
+    // Metered: claude-opus row = $30. Allocated: single even subscription bucket = $30.
+    expect(res.body.accounting.meteredCostUsd).toBeCloseTo(30, 2);
+    expect(res.body.accounting.allocatedSubscriptionCostUsd).toBeCloseTo(30, 2);
+    expect(res.body.accounting.blendedEffectiveCostUsd).toBeCloseTo(60, 2);
+    expect(res.body.totals.blendedEffectiveCostUsd).toBeCloseTo(60, 2);
+    // Both rows accounted for; subscription usage is the OpenAI fallback row only.
+    expect(res.body.accounting.subscriptionUsage.recordCount).toBe(1);
+    expect(res.body.totals.stories).toBe(2);
+    const metered = res.body.accounting.byMode.find((m: any) => m.mode === 'metered_api');
+    const subscription = res.body.accounting.byMode.find((m: any) => m.mode === 'subscription');
+    expect(metered.meteredCostUsd).toBeCloseTo(30, 2);
+    expect(subscription.allocatedCostUsd).toBeCloseTo(30, 2);
+    expect(res.body.provenance.hasBlendedCost).toBe(true);
+  });
+
+  test('in-flight WAL token updates feed the accounting engine for a subscription run', async () => {
+    await seedPricing('gpt-4o', 'openai', 5, 15);
+    await seedSubscriptionProfile({ provider: 'openai', monthlyCostUsd: 30, allocationBasis: 'even' });
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)
+       VALUES ('forge/specs/approved/fin-live-sub.json', $1, 'running', 'opencode', 'opencode', 'gpt-4o')
+       RETURNING id`,
+      [WS_ID],
+    );
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_token_update', $1, 'US-001', $2::jsonb)`,
+      [WS_ID, JSON.stringify({ run_id: run!.id, model: 'gpt-4o', input_tokens: 1200, output_tokens: 300, cost_usd: 0 })],
+    );
+
+    const res = await get(`/api/analytics/finops/run/${run!.id}`);
+
+    expect(res.status).toBe(200);
+    // Live usage is visible immediately and classified as subscription (no spend).
+    expect(res.body.usageAvailable).toBe(true);
+    expect(res.body.billingMode).toBe('subscription');
+    expect(res.body.isSubscription).toBe(true);
+    expect(res.body.accounting.meteredCostUsd).toBe(0);
+    expect(res.body.accounting.subscriptionUsage.inputTokens).toBe(1200);
+    expect(res.body.accounting.subscriptionUsage.outputTokens).toBe(300);
+    expect(res.body.savings).toBeNull();
+    expect(res.body.perStory[0]).toMatchObject({ storyId: 'US-001', model: 'gpt-4o', billingMode: 'subscription' });
+  });
 });
 
 describe('GET /api/analytics/pi-providers', () => {
