@@ -226,6 +226,22 @@ export default async function globalSetup(): Promise<void> {
       ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT 'x'
     `);
 
+    // Test-compatibility shim: production auth-utils (and every RLS-aware route +
+    // test fixture) resolves workspace membership via a `workspace_members` table
+    // keyed by (workspace_id, user_auth_id, role). That table is not provisioned
+    // by the local pg-migrations set, so create it in the test DB only. Without it
+    // the shared analytics/RLS test fixtures fail in beforeEach before any
+    // assertion runs ("relation workspace_members does not exist").
+    await testPool.query(`
+      CREATE TABLE IF NOT EXISTS rorca.workspace_members (
+        workspace_id TEXT NOT NULL REFERENCES rorca.workspaces(id) ON DELETE CASCADE,
+        user_auth_id UUID NOT NULL,
+        role TEXT NOT NULL DEFAULT 'viewer',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, user_auth_id)
+      )
+    `);
+
     // Test-only grant shim so RLS tests exercise policies instead of failing on SQL GRANTs.
     await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
     await testPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, rorca, auth TO authenticated`);
