@@ -1661,7 +1661,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       case 'skills':
         return <SkillsTab runId={run.id} />;
       case 'finops':
-        return <FinOpsTab runId={run.id} />;
+        return <FinOpsTab runId={run.id} isActive={isActive} />;
       case 'compare':
         return <CompareRunsPanel onBack={() => handleTabChange('terminal')} />;
       case 'worktrees':
