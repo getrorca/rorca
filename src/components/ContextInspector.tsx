@@ -402,10 +402,11 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
           <div className="flex-1 overflow-y-auto" data-testid="inspector-events">
             {ordered.map((e) => {
               const raw = getRawState(e.rawRef);
-              const displayRef = e.synthetic ? `synthetic:${e.seq}` : e.rawRef;
+              const displayRef = e.synthetic && e.rawRef.startsWith('synthetic:') ? `synthetic:${e.seq}` : e.rawRef;
               // Rows with retrievalTelemetryId are clickable even when synthetic.
               const hasRetrieval = !!e.retrievalTelemetryId;
-              const isClickable = hasRetrieval || !e.synthetic;
+              const hasMetadataFallback = e.synthetic && ((e.details?.length ?? 0) > 0 || !!e.metrics);
+              const isClickable = hasRetrieval || hasMetadataFallback || !e.synthetic;
               return (
                 <button
                   key={e.rawRef}
@@ -414,7 +415,7 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
                     if (hasRetrieval) {
                       setActiveRetrievalId(e.retrievalTelemetryId!);
                       resolveRetrievalTelemetry(e.retrievalTelemetryId!).catch(() => {});
-                    } else if (!e.synthetic) {
+                    } else if (hasMetadataFallback || !e.synthetic) {
                       setActiveRawRef(e.rawRef);
                     }
                   }}
@@ -438,7 +439,7 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
                       {e.synthetic ? 'reconstructed' : 'relevance'}
                     </span>
                   ) : e.synthetic ? (
-                    <span className="text-[10px] text-muted/70 truncate">reconstructed</span>
+                    <span className="text-[10px] text-muted/70 truncate">metadata</span>
                   ) : raw.loading ? (
                     <Loader2 size={12} className="text-muted animate-spin" />
                   ) : (
