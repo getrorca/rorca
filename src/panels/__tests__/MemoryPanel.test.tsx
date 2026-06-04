@@ -139,6 +139,18 @@ const MEMORY_REVIEW_RESPONSE: any = {
     mode: 'bounded-sql',
     reason: null,
   },
+  provenanceCandidates: {
+    items: [],
+    total: 0,
+    truncated: false,
+    heuristics: {
+      scanLimit: 200,
+      resultLimit: 12,
+      scoreThreshold: 20,
+    },
+    mode: 'bounded-sql',
+    reason: null,
+  },
   hotspots: {
     files: [
       {
@@ -418,10 +430,74 @@ describe('MemoryPanel', () => {
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
     expect(screen.getByText(/Review queue is intentionally bounded to 120/)).toBeTruthy();
+    expect(screen.getByText(/Provenance cleanup is separately bounded to 200/)).toBeTruthy();
     expect(screen.getAllByTitle(/Apache AGE extension is unavailable/).length).toBeGreaterThan(0);
     expect(screen.getByRole('list', { name: 'Hotspot files' })).toBeTruthy();
     expect(screen.getByRole('list', { name: 'Hotspot specs' })).toBeTruthy();
     expect(screen.getByText('Archived memory for restore drills.')).toBeTruthy();
+  });
+
+  it('renders provenance cleanup separately when imported memories need anchoring', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [],
+          total: 0,
+        },
+        provenanceCandidates: {
+          items: [
+            {
+              id: 9,
+              workspaceId: 'ws-1',
+              category: 'Decision',
+              content: 'Imported memory needs source anchors.',
+              sourceStoryId: null,
+              sourceSpecId: null,
+              sourceRunId: null,
+              confidence: 'medium',
+              relatedFiles: [],
+              pinned: false,
+              sourceType: 'import',
+              source: 'import-batch',
+              createdAt: '2026-06-02T10:00:00.000Z',
+              updatedAt: '2026-06-03T10:00:00.000Z',
+              deletedAt: null,
+              staleScore: 50,
+              reasons: [
+                { code: 'import_requires_provenance_triage', label: 'Imported memory should be anchored to local provenance before long-term retention.' },
+                { code: 'missing_file_provenance', label: 'No related file provenance is attached.' },
+              ],
+              status: 'candidate',
+              lastAction: null,
+            },
+          ],
+          total: 1,
+          truncated: false,
+          heuristics: {
+            scanLimit: 200,
+            resultLimit: 12,
+            scoreThreshold: 20,
+          },
+          mode: 'bounded-sql',
+          reason: null,
+        },
+        hotspots: {
+          ...MEMORY_REVIEW_RESPONSE.hotspots,
+          files: [],
+          specs: [],
+          total: 0,
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Provenance cleanup')).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Provenance cleanup queue' })).toBeTruthy();
+    expect(screen.getByText('Imported memory needs source anchors.')).toBeTruthy();
+    expect(screen.getByText(/Imported memory should be anchored to local provenance/i)).toBeTruthy();
   });
 
   it('lets operators keep, revisit, archive, delete, and restore review candidates', async () => {

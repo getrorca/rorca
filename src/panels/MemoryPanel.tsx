@@ -102,6 +102,18 @@ interface MemoryReviewResponse {
     mode: string;
     reason?: string | null;
   };
+  provenanceCandidates?: {
+    items: MemoryReviewItem[];
+    total: number;
+    truncated: boolean;
+    heuristics: {
+      scanLimit: number;
+      resultLimit: number;
+      scoreThreshold: number;
+    };
+    mode: string;
+    reason?: string | null;
+  };
   hotspots: {
     files: MemoryHotspotItem[];
     specs: MemoryHotspotItem[];
@@ -1115,9 +1127,18 @@ function ReviewWorkflowSection({
 
   if (!data) return null;
 
+  const provenanceCandidates = data.provenanceCandidates ?? {
+    items: [],
+    total: 0,
+    truncated: false,
+    heuristics: { scanLimit: 0, resultLimit: 0, scoreThreshold: 0 },
+    mode: 'bounded-sql',
+    reason: null,
+  };
   const queueItems = data.staleCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted');
+  const provenanceItems = provenanceCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted');
   const recoverableItems = data.staleCandidates.items.filter((item) => item.status === 'archived' || item.status === 'deleted');
-  const boundedCopy = `Review queue is intentionally bounded to ${data.staleCandidates.heuristics.scanLimit} low-recency memories and ${data.hotspots.windowSize} recent active memories.`;
+  const boundedCopy = `Review queue is intentionally bounded to ${data.staleCandidates.heuristics.scanLimit} low-recency memories and ${data.hotspots.windowSize} recent active memories. Provenance cleanup is separately bounded to ${provenanceCandidates.heuristics.scanLimit} provenance-poor memories.`;
   const statusClass: Record<MemoryReviewStatus, string> = {
     candidate: 'border-amber-500/20 bg-amber-500/10 text-amber-400',
     kept: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400',
@@ -1136,8 +1157,88 @@ function ReviewWorkflowSection({
   const specsHot = data.hotspots.specs;
   const hotspotCount = filesHot.length + specsHot.length;
   const ageFallbackReason = data.staleCandidates.reason ?? data.hotspots.reason ?? null;
-  const hasActiveReviewWork = queueItems.length > 0 || recoverableItems.length > 0 || hotspotCount > 0;
+  const hasActiveReviewWork = queueItems.length > 0 || provenanceItems.length > 0 || recoverableItems.length > 0 || hotspotCount > 0;
   const showExpandedReview = hasActiveReviewWork || reviewExpanded;
+
+  const renderReviewItems = (items: MemoryReviewItem[], listAriaLabel: string) => (
+    <ul className="space-y-3" role="list" aria-label={listAriaLabel}>
+      {items.map((item) => {
+        const lastActionAt = item.lastAction?.at ? new Date(item.lastAction.at).toLocaleString() : null;
+        return (
+          <li key={item.id} className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusClass[item.status]}`}>{statusLabel[item.status]}</span>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${CATEGORY_COLORS[item.category] ?? 'bg-gray-500/10 text-gray-500'}`}>{item.category}</span>
+                  <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">score {item.staleScore}</span>
+                  {item.sourceType && <span className={`rounded px-1.5 py-0.5 text-[10px] ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>{SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}</span>}
+                </div>
+                <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/85">{item.content}</p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {item.sourceStoryId && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-500">Story {item.sourceStoryId}</span>}
+                  {item.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {item.sourceSpecId}</span>}
+                  {item.sourceRunId && <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">Run #{item.sourceRunId}</span>}
+                  {(item.relatedFiles ?? []).slice(0, 2).map((file) => (
+                    <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
+                  ))}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {item.reasons.map((reason) => (
+                    <span key={reason.code} className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{reason.label}</span>
+                  ))}
+                </div>
+                {lastActionAt && (
+                  <p className="mt-2 text-[10px] text-muted">Last review action: {item.lastAction?.action} · {lastActionAt}</p>
+                )}
+              </div>
+              <div className="flex shrink-0 flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => onFocusMemory(String(item.id))}
+                  className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface-200"
+                >
+                  Focus
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAction(item.id, 'keep')}
+                  disabled={busyKey === `review:${item.id}`}
+                  className="rounded-md bg-emerald-500 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-emerald-500/90 disabled:opacity-60"
+                >
+                  Keep
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAction(item.id, 'revisit')}
+                  disabled={busyKey === `review:${item.id}`}
+                  className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] font-medium text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:opacity-60"
+                >
+                  Revisit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAction(item.id, 'archive')}
+                  disabled={busyKey === `review:${item.id}`}
+                  className="rounded-md border border-violet-500/30 bg-violet-500/10 px-2 py-1 text-[11px] font-medium text-violet-300 transition-colors hover:bg-violet-500/20 disabled:opacity-60"
+                >
+                  Archive
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAction(item.id, 'delete')}
+                  disabled={busyKey === `review:${item.id}`}
+                  className="rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-60"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
 
   if (!showExpandedReview) {
     return (
@@ -1146,6 +1247,7 @@ function ReviewWorkflowSection({
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="text-xs font-semibold text-[var(--text)]">Stale memory review</span>
             <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{queueItems.length} stale</span>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{provenanceItems.length} provenance</span>
             <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{recoverableItems.length} recoverable</span>
             <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{hotspotCount} hotspots</span>
             {ageFallbackReason && (
@@ -1175,6 +1277,7 @@ function ReviewWorkflowSection({
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
           <span className="rounded-full border border-border bg-bg px-2 py-0.5">{queueItems.length} in queue</span>
+          <span className="rounded-full border border-border bg-bg px-2 py-0.5">{provenanceItems.length} provenance</span>
           <span className="rounded-full border border-border bg-bg px-2 py-0.5">{recoverableItems.length} recoverable</span>
           <span className="rounded-full border border-border bg-bg px-2 py-0.5">{hotspotCount} hotspots</span>
           {ageFallbackReason && (
@@ -1202,83 +1305,19 @@ function ReviewWorkflowSection({
             {queueItems.length === 0 ? (
               <p className="rounded-lg border border-dashed border-border bg-bg px-3 py-3 text-[11px] text-muted">No stale review candidates surfaced inside the current bounded heuristic window.</p>
             ) : (
-              <ul className="space-y-3" role="list" aria-label="Stale memory review queue">
-                {queueItems.map((item) => {
-                  const lastActionAt = item.lastAction?.at ? new Date(item.lastAction.at).toLocaleString() : null;
-                  return (
-                    <li key={item.id} className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusClass[item.status]}`}>{statusLabel[item.status]}</span>
-                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${CATEGORY_COLORS[item.category] ?? 'bg-gray-500/10 text-gray-500'}`}>{item.category}</span>
-                            <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">score {item.staleScore}</span>
-                            {item.sourceType && <span className={`rounded px-1.5 py-0.5 text-[10px] ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>{SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}</span>}
-                          </div>
-                          <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/85">{item.content}</p>
-                          <div className="mt-2 flex flex-wrap gap-1">
-                            {item.sourceStoryId && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-500">Story {item.sourceStoryId}</span>}
-                            {item.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {item.sourceSpecId}</span>}
-                            {item.sourceRunId && <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">Run #{item.sourceRunId}</span>}
-                            {(item.relatedFiles ?? []).slice(0, 2).map((file) => (
-                              <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
-                            ))}
-                          </div>
-                          <div className="mt-2 flex flex-wrap gap-1">
-                            {item.reasons.map((reason) => (
-                              <span key={reason.code} className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{reason.label}</span>
-                            ))}
-                          </div>
-                          {lastActionAt && (
-                            <p className="mt-2 text-[10px] text-muted">Last review action: {item.lastAction?.action} · {lastActionAt}</p>
-                          )}
-                        </div>
-                        <div className="flex shrink-0 flex-col gap-2">
-                          <button
-                            type="button"
-                            onClick={() => onFocusMemory(String(item.id))}
-                            className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface-200"
-                          >
-                            Focus
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onAction(item.id, 'keep')}
-                            disabled={busyKey === `review:${item.id}`}
-                            className="rounded-md bg-emerald-500 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-emerald-500/90 disabled:opacity-60"
-                          >
-                            Keep
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onAction(item.id, 'revisit')}
-                            disabled={busyKey === `review:${item.id}`}
-                            className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] font-medium text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:opacity-60"
-                          >
-                            Revisit
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onAction(item.id, 'archive')}
-                            disabled={busyKey === `review:${item.id}`}
-                            className="rounded-md border border-violet-500/30 bg-violet-500/10 px-2 py-1 text-[11px] font-medium text-violet-300 transition-colors hover:bg-violet-500/20 disabled:opacity-60"
-                          >
-                            Archive
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onAction(item.id, 'delete')}
-                            disabled={busyKey === `review:${item.id}`}
-                            className="rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-60"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+              renderReviewItems(queueItems, 'Stale memory review queue')
+            )}
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Provenance cleanup</p>
+              <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-[10px] text-muted">{provenanceCandidates.total} items</span>
+            </div>
+            {provenanceItems.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border bg-bg px-3 py-3 text-[11px] text-muted">No provenance cleanup candidates surfaced inside the current bounded hygiene window.</p>
+            ) : (
+              renderReviewItems(provenanceItems, 'Provenance cleanup queue')
             )}
           </div>
 
