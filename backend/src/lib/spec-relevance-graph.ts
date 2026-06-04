@@ -21,6 +21,7 @@
  *  - Apache AGE graph (optional, for graph/path evidence)
  */
 
+import path from 'path';
 import { queryOne, query } from '../db/index';
 import { checkAge } from './age-guard';
 import { logger } from './logger';
@@ -334,13 +335,19 @@ async function fetchSpecMeta(
   ) as Promise<{ id: string; specName: string } | null>;
 }
 
+function specSlugFromPath(specPath: string | null | undefined): string | undefined {
+  if (!specPath) return undefined;
+  const base = path.basename(specPath).replace(/\.json$/i, '').trim();
+  return base.length > 0 ? base : undefined;
+}
+
 async function fetchRunMeta(
   runId: number,
-): Promise<{ id: number; spec_id: string; workspace_id: string } | null> {
-  return queryOne<{ id: number; spec_id: string; workspace_id: string }>(
-    `SELECT id, spec_id, workspace_id FROM pipeline_runs WHERE id = $1`,
+): Promise<{ id: number; spec_path: string; workspace_id: string } | null> {
+  return queryOne<{ id: number; spec_path: string; workspace_id: string }>(
+    `SELECT id, spec_path, workspace_id FROM pipeline_runs WHERE id = $1`,
     [runId],
-  ) as Promise<{ id: number; spec_id: string; workspace_id: string } | null>;
+  ) as Promise<{ id: number; spec_path: string; workspace_id: string } | null>;
 }
 
 // ─── Graph Builder ──────────────────────────────────────────────────────────
@@ -398,7 +405,7 @@ export async function buildSpecRelevanceGraph(options: {
   if (!resolvedSpecSlug && resolvedRunId) {
     const runMeta = await fetchRunMeta(resolvedRunId);
     if (runMeta) {
-      resolvedSpecSlug = runMeta.spec_id;
+      resolvedSpecSlug = specSlugFromPath(runMeta.spec_path) ?? null;
       if (runMeta.workspace_id !== workspaceId) {
         return buildUnavailableResponse(['Run does not belong to this workspace']);
       }

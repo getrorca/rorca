@@ -12,6 +12,7 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import path from 'path';
 import { queryOne } from '../db/index';
 import { ValidationError, NotFoundError } from '../lib/errors';
 import { buildSpecRelevanceGraph } from '../lib/spec-relevance-graph';
@@ -33,6 +34,12 @@ async function resolveWorkspace(workspaceId: string): Promise<{ id: string; path
   );
   if (!ws) throw new NotFoundError('Workspace', workspaceId);
   return ws;
+}
+
+function specSlugFromPath(specPath: string | null | undefined): string | undefined {
+  if (!specPath) return undefined;
+  const base = path.basename(specPath).replace(/\.json$/i, '').trim();
+  return base.length > 0 ? base : undefined;
 }
 
 // ─── GET /api/spec-relevance-graph ──────────────────────────────────────────
@@ -192,11 +199,16 @@ router.get('/by-run/:runId', async (req: Request, res: Response, next: NextFunct
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
 
-    const run = await queryOne<{ id: number; spec_id: string; workspace_id: string }>(
-      'SELECT id, spec_id, workspace_id FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ id: number; spec_path: string; workspace_id: string }>(
+      'SELECT id, spec_path, workspace_id FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!run) throw new NotFoundError('Run', String(runId));
+
+    const specSlug = specSlugFromPath(run.spec_path);
+    if (!specSlug) {
+      throw new NotFoundError('Spec path', run.spec_path);
+    }
 
     const maxFiles = parseOptionalInt(req.query.maxFiles, 1, 50, 20);
     const maxMemories = parseOptionalInt(req.query.maxMemories, 1, 60, 30);
@@ -204,7 +216,7 @@ router.get('/by-run/:runId', async (req: Request, res: Response, next: NextFunct
 
     const graph = await buildSpecRelevanceGraph({
       workspaceId: run.workspace_id,
-      specSlug: run.spec_id,
+      specSlug,
       runId,
       caps: { maxFiles, maxMemories, maxEdges },
     });
@@ -270,8 +282,9 @@ router.get('/by-spec/:specSlug', async (req: Request, res: Response, next: NextF
     // Find the latest run for this spec to get telemetry
     const latestRun = await queryOne<{ id: number }>(
       `SELECT id FROM pipeline_runs
-       WHERE spec_id = $1 AND workspace_id = $2
-       ORDER BY created_at DESC LIMIT 1`,
+       WHERE REPLACE(REPLACE(spec_path, 'forge/specs/approved/', ''), '.json', '') = $1
+         AND workspace_id = $2
+       ORDER BY started_at DESC, id DESC LIMIT 1`,
       [specSlug, workspaceId],
     );
 
