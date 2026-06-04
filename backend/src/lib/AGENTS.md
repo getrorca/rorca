@@ -15,6 +15,7 @@ Core service libraries. None are Express routes — they're pure logic called by
 | `spec-writer.ts` | Write generated spec JSON to disk |
 | `diagram-generator.ts` | Generate Mermaid + ASCII dep graphs from story list |
 | `execution-engine.ts` | Universal TypeScript execution engine — spawns claude/opencode/codex per story, handles retries, writes WAL events. **Built by rorca-opencode-integration spec.** |
+| `finops-accounting.ts` | **FIN-002** shared, DB-free accounting layer. Classifies usage into `metered_api`/`subscription`/`managed`/`free_local`/`unknown`, computes metered cost (tokens × pricing), allocates flat subscription cost (`none`/`even`/`by_tokens`/`by_runs`/`by_stories`/`by_active_days`), and returns blended effective cost plus coverage/provenance. Pure functions reused by historical/per-run FinOps, provider aggregation, and CSV export. Subscription marginal cost is always 0. |
 | `context-trace.ts` | Canonical context-trace contract (CTM-001). `ContextTraceEvent` (lightweight SSE/WAL metadata) + `ContextTraceArtifactWriter` (append-only gzip NDJSON raw-payload artifacts under `.rorca/traces/<runId>.ndjson.gz`). Deterministic `rawRef` = `r{runId}:{seq}`. All writer ops are nonfatal. |
 
 ## llm-client.ts
