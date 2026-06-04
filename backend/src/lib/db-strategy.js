@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { queryOne } from '../db/index.js';
+import { queryOne } from '../db/index';
 const DEFAULT_NATIVE_PORT = 5433;
 const DOCKER_PORT = 5432;
 const DB_MODE_FILENAME = 'db-mode';
@@ -61,7 +61,10 @@ function isRemoteHost(host) {
 }
 function readDbModeFile() {
     try {
-        return fs.readFileSync(getDbModePath(), 'utf8').trim().toLowerCase();
+        const value = fs.readFileSync(getDbModePath(), 'utf8').trim().toLowerCase();
+        return value === 'docker' || value === 'native' || value === 'byop'
+            ? value
+            : null;
     }
     catch {
         return null;
@@ -148,8 +151,6 @@ export function applySelectedDbModeEnvironment(env = process.env) {
     return { mode, databaseUrl, changed };
 }
 export async function isAgeAvailable() {
-    if (detectDbMode() === 'native')
-        return false;
     const row = await queryOne(`SELECT 1 AS present
      FROM pg_extension e
      JOIN pg_proc p ON p.proname = 'cypher'

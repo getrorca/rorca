@@ -23,8 +23,8 @@
  *    reflects context-assembly health, not the run's story result.
  */
 
-import { useMemo, useState } from 'react';
-import { Layers, AlertTriangle, CheckCircle2, Loader2, ChevronRight, FileText, Search } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Layers, AlertTriangle, CheckCircle2, Loader2, ChevronRight, FileText, Search, Network } from 'lucide-react';
 import {
   useContextTrace,
   type ContextTraceEvent,
@@ -34,7 +34,10 @@ import {
   type RetrievalCandidateDetail,
   type RetrievalTelemetryState,
 } from '../hooks/useContextTrace';
+import { useRelevanceGraph } from '../hooks/useRelevanceGraph';
+import type { PositionedNode } from '../types/spec-relevance-graph';
 import ContextTraceRawDrawer from './ContextTraceRawDrawer';
+import RelevanceGraphView from './RelevanceGraphView';
 import SlideOver from './SlideOver';
 
 interface ContextInspectorProps {
@@ -153,8 +156,52 @@ function buildFunnel(events: ContextTraceEvent[]): FunnelRow[] {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+type InspectorView = 'list' | 'graph';
+
 export default function ContextInspector({ runId, runSettled = true }: ContextInspectorProps) {
   const { events, resolveRaw, getRawState, resolveRetrievalTelemetry, getRetrievalTelemetryState } = useContextTrace(String(runId));
+  const graph = useRelevanceGraph(runId);
+  const [activeView, setActiveView] = useState<InspectorView>('list');
+  const graphFetchedRef = useRef(false);
+
+  // Lazy-load graph data only when graph view is opened.
+  useEffect(() => {
+    if (activeView === 'graph' && !graphFetchedRef.current) {
+      graphFetchedRef.current = true;
+      graph.fetch();
+    }
+  }, [activeView, graph]);
+
+  // Reset graph fetch flag when runId changes.
+  const prevGraphRunRef = useRef(runId);
+  if (prevGraphRunRef.current !== runId) {
+    prevGraphRunRef.current = runId;
+    graphFetchedRef.current = false;
+  }
+
+  // Graph node click → open retrieval detail drawer for memory/context nodes.
+  const handleGraphNodeClick = useCallback((node: PositionedNode) => {
+    // Memory/context nodes may have a sourceId matching a retrievalTelemetryId
+    // or we can look up the corresponding event by entityId/sourceId.
+    if (node.type === 'memory' || node.type === 'context') {
+      // Try to find a matching retrieval event by the node's sourceId.
+      const matchingEvent = events.find(
+        (e) => e.retrievalTelemetryId && (e.retrievalTelemetryId === node.sourceId || e.retrievalTelemetryId === node.entityId),
+      );
+      if (matchingEvent?.retrievalTelemetryId) {
+        setActiveRetrievalId(matchingEvent.retrievalTelemetryId);
+        resolveRetrievalTelemetry(matchingEvent.retrievalTelemetryId).catch(() => {});
+        return;
+      }
+    }
+    // For file nodes or nodes without a matching event, open the raw drawer if possible.
+    if (node.type === 'file' && node.path) {
+      const matchingEvent = events.find((e) => !e.synthetic && e.label?.includes(node.path!));
+      if (matchingEvent) {
+        setActiveRawRef(matchingEvent.rawRef);
+      }
+    }
+  }, [events, resolveRetrievalTelemetry]);
 
   // Stable ordering by seq (then rawRef as a tiebreaker). De-dup already done in
   // the hook by rawRef, so this guarantees no reorder/flicker on live delivery.
@@ -297,91 +344,123 @@ export default function ContextInspector({ runId, runSettled = true }: ContextIn
         </div>
       </div>
 
-      {/* ─── Retrieval funnel ─────────────────────────────────────────────── */}
-      <div className="shrink-0 px-4 py-3 border-b border-border" data-testid="inspector-funnel">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">
-          Retrieval funnel
-        </p>
-        <div className="flex flex-col gap-1.5">
-          {funnel.map((row) => (
-            <div key={row.phase} className="flex items-center gap-3 text-xs" data-testid={`funnel-row-${row.phase}`}>
-              <span className="w-32 shrink-0 text-muted truncate">{PHASE_LABELS[row.phase]}</span>
-              <span className="font-mono text-[var(--text)]">
-                <span className="text-emerald-500">{row.kept}</span>
-                <span className="text-muted"> / {row.candidates}</span>
-                {row.dropped > 0 && (
-                  <span className="text-rose-400" title={`${row.dropped} dropped (errored)`}>
-                    {' '}· {row.dropped} dropped
-                  </span>
-                )}
-              </span>
-              <span className="ml-auto flex items-center gap-3 text-[11px] text-muted">
-                {row.fileCount != null && <span>{row.fileCount} files</span>}
-                {row.tokens != null && <span>{row.tokens.toLocaleString()} tok</span>}
-                {formatDuration(row.durationMs ?? undefined) && (
-                  <span>{formatDuration(row.durationMs ?? undefined)}</span>
-                )}
-              </span>
-            </div>
-          ))}
-        </div>
+      {/* ─── View toggle (List / Graph) ───────────────────────────────────── */}
+      <div className="shrink-0 flex items-center gap-1 px-4 py-1.5 border-b border-border bg-panel/50" data-testid="inspector-view-toggle">
+        <button
+          type="button"
+          onClick={() => setActiveView('list')}
+          className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors ${activeView === 'list' ? 'bg-[var(--accent)]/10 text-[var(--accent)]' : 'text-muted hover:text-[var(--text)]'}`}
+          data-testid="inspector-view-list"
+        >
+          <Layers size={11} className="inline -mt-0.5 mr-1" />
+          List
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveView('graph')}
+          className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors ${activeView === 'graph' ? 'bg-[var(--accent)]/10 text-[var(--accent)]' : 'text-muted hover:text-[var(--text)]'}`}
+          data-testid="inspector-view-graph"
+        >
+          <Network size={11} className="inline -mt-0.5 mr-1" />
+          Graph
+        </button>
       </div>
 
-      {/* ─── Event list (open → lazy raw fetch) ───────────────────────────── */}
-      <div className="flex-1 overflow-y-auto" data-testid="inspector-events">
-        {ordered.map((e) => {
-          const raw = getRawState(e.rawRef);
-          const displayRef = e.synthetic ? `synthetic:${e.seq}` : e.rawRef;
-          // Rows with retrievalTelemetryId are clickable even when synthetic.
-          const hasRetrieval = !!e.retrievalTelemetryId;
-          const isClickable = hasRetrieval || !e.synthetic;
-          return (
-            <button
-              key={e.rawRef}
-              type="button"
-              onClick={() => {
-                if (hasRetrieval) {
-                  setActiveRetrievalId(e.retrievalTelemetryId!);
-                  resolveRetrievalTelemetry(e.retrievalTelemetryId!).catch(() => {});
-                } else if (!e.synthetic) {
-                  setActiveRawRef(e.rawRef);
-                }
-              }}
-              className={`w-full grid grid-cols-[auto_7.5rem_8.5rem_minmax(0,1fr)_4.5rem_4rem_7rem_auto] items-center gap-3 px-4 py-2 text-left border-b border-border/50 transition-colors ${isClickable ? 'hover:bg-panel/50 cursor-pointer' : 'cursor-default'}`}
-              data-testid={`inspector-event-${e.rawRef}`}
-            >
-              <span className={`w-2 h-2 rounded-full ${statusDot(e.status)}`} />
-              <span className="font-mono text-[10px] text-muted truncate" title={e.rawRef}>{displayRef}</span>
-              <span className="text-[11px] text-muted truncate">{PHASE_LABELS[e.phase]}</span>
-              <span className="min-w-0 text-xs text-[var(--text)] leading-4">
-                <span className="block truncate">{e.label ?? e.phase}</span>
-                {e.synthetic && e.details && e.details.length > 0 && (
-                  <span className="block mt-0.5 text-[10px] text-muted truncate" title={e.details.join(' · ')}>{e.details.join(' · ')}</span>
-                )}
-              </span>
-              <span className="font-mono text-[10px] text-muted truncate">{e.storyId ?? ''}</span>
-              <span className={`text-[11px] truncate ${statusColor(e.status)}`}>{e.status}</span>
-              {hasRetrieval ? (
-                <span className="inline-flex items-center gap-1 text-[10px] text-[var(--accent)] truncate">
-                  <Search size={10} />
-                  {e.synthetic ? 'reconstructed' : 'relevance'}
-                </span>
-              ) : e.synthetic ? (
-                <span className="text-[10px] text-muted/70 truncate">reconstructed</span>
-              ) : raw.loading ? (
-                <Loader2 size={12} className="text-muted animate-spin" />
-              ) : (
-                <FileText size={12} className="text-muted/60" />
-              )}
-              {isClickable ? (
-                <ChevronRight size={12} className="text-muted/60" />
-              ) : (
-                <span aria-hidden="true" />
-              )}
-            </button>
-          );
-        })}
-      </div>
+      {activeView === 'list' ? (
+        <>
+          {/* ─── Retrieval funnel ─────────────────────────────────────────────── */}
+          <div className="shrink-0 px-4 py-3 border-b border-border" data-testid="inspector-funnel">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">
+              Retrieval funnel
+            </p>
+            <div className="flex flex-col gap-1.5">
+              {funnel.map((row) => (
+                <div key={row.phase} className="flex items-center gap-3 text-xs" data-testid={`funnel-row-${row.phase}`}>
+                  <span className="w-32 shrink-0 text-muted truncate">{PHASE_LABELS[row.phase]}</span>
+                  <span className="font-mono text-[var(--text)]">
+                    <span className="text-emerald-500">{row.kept}</span>
+                    <span className="text-muted"> / {row.candidates}</span>
+                    {row.dropped > 0 && (
+                      <span className="text-rose-400" title={`${row.dropped} dropped (errored)`}>
+                        {' '}· {row.dropped} dropped
+                      </span>
+                    )}
+                  </span>
+                  <span className="ml-auto flex items-center gap-3 text-[11px] text-muted">
+                    {row.fileCount != null && <span>{row.fileCount} files</span>}
+                    {row.tokens != null && <span>{row.tokens.toLocaleString()} tok</span>}
+                    {formatDuration(row.durationMs ?? undefined) && (
+                      <span>{formatDuration(row.durationMs ?? undefined)}</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ─── Event list (open → lazy raw fetch) ───────────────────────────── */}
+          <div className="flex-1 overflow-y-auto" data-testid="inspector-events">
+            {ordered.map((e) => {
+              const raw = getRawState(e.rawRef);
+              const displayRef = e.synthetic ? `synthetic:${e.seq}` : e.rawRef;
+              // Rows with retrievalTelemetryId are clickable even when synthetic.
+              const hasRetrieval = !!e.retrievalTelemetryId;
+              const isClickable = hasRetrieval || !e.synthetic;
+              return (
+                <button
+                  key={e.rawRef}
+                  type="button"
+                  onClick={() => {
+                    if (hasRetrieval) {
+                      setActiveRetrievalId(e.retrievalTelemetryId!);
+                      resolveRetrievalTelemetry(e.retrievalTelemetryId!).catch(() => {});
+                    } else if (!e.synthetic) {
+                      setActiveRawRef(e.rawRef);
+                    }
+                  }}
+                  className={`w-full grid grid-cols-[auto_7.5rem_8.5rem_minmax(0,1fr)_4.5rem_4rem_7rem_auto] items-center gap-3 px-4 py-2 text-left border-b border-border/50 transition-colors ${isClickable ? 'hover:bg-panel/50 cursor-pointer' : 'cursor-default'}`}
+                  data-testid={`inspector-event-${e.rawRef}`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${statusDot(e.status)}`} />
+                  <span className="font-mono text-[10px] text-muted truncate" title={e.rawRef}>{displayRef}</span>
+                  <span className="text-[11px] text-muted truncate">{PHASE_LABELS[e.phase]}</span>
+                  <span className="min-w-0 text-xs text-[var(--text)] leading-4">
+                    <span className="block truncate">{e.label ?? e.phase}</span>
+                    {e.synthetic && e.details && e.details.length > 0 && (
+                      <span className="block mt-0.5 text-[10px] text-muted truncate" title={e.details.join(' · ')}>{e.details.join(' · ')}</span>
+                    )}
+                  </span>
+                  <span className="font-mono text-[10px] text-muted truncate">{e.storyId ?? ''}</span>
+                  <span className={`text-[11px] truncate ${statusColor(e.status)}`}>{e.status}</span>
+                  {hasRetrieval ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-[var(--accent)] truncate">
+                      <Search size={10} />
+                      {e.synthetic ? 'reconstructed' : 'relevance'}
+                    </span>
+                  ) : e.synthetic ? (
+                    <span className="text-[10px] text-muted/70 truncate">reconstructed</span>
+                  ) : raw.loading ? (
+                    <Loader2 size={12} className="text-muted animate-spin" />
+                  ) : (
+                    <FileText size={12} className="text-muted/60" />
+                  )}
+                  {isClickable ? (
+                    <ChevronRight size={12} className="text-muted/60" />
+                  ) : (
+                    <span aria-hidden="true" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        /* ─── Graph view (lazy-loaded) ──────────────────────────────────────── */
+        <RelevanceGraphView
+          state={graph.state}
+          onNodeClick={handleGraphNodeClick}
+        />
+      )}
 
       {/* ─── Lazy raw payload drawer ──────────────────────────────────────── */}
       <ContextTraceRawDrawer

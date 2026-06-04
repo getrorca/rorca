@@ -35,6 +35,7 @@ import MermaidDiagram from './MermaidDiagram';
 import { SpecVersionHistory } from './SpecVersionHistory';
 import { TagChips } from './TagChips';
 import TriggerPopover from './TriggerPopover';
+import PreFlightGraph from './PreFlightGraph';
 import { ImagePreviewModal } from './ImagePreviewModal';
 import type { PanelId } from './Sidebar';
 import ContextSummaryCard from './ContextSummaryCard';
@@ -840,6 +841,14 @@ function SpecDetailContent({
       {/* Footer actions */}
       {detail && (
         <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
+          {/* Pre-flight context neighborhood graph */}
+          {canRun && workspaceId && summary?.id && (
+            <PreFlightGraph
+              specSlug={summary.id}
+              workspaceId={workspaceId}
+              onNavigate={onNavigate}
+            />
+          )}
           {/* Branch isolation toggle */}
           {canRun && (
             <label className="flex items-center justify-between gap-2 px-1 cursor-pointer">

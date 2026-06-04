@@ -168,13 +168,17 @@ const RAW_REF_PATTERN = /^r(\d+):(\d+)$/;
  * Scheme: `r{runId}:{seq}` — unique within a run, monotonic with seq.
  */
 export function makeRawRef(runId: number, seq: number): string {
-  if (!Number.isInteger(runId) || runId < 0) {
+  // Coerce pg-bigint strings that arrive as `string` at runtime despite the
+  // declared `number` type — the pg driver returns BIGINT columns as strings.
+  const rid = typeof runId === 'string' ? Number(runId) : runId;
+  const s = typeof seq === 'string' ? Number(seq) : seq;
+  if (!Number.isInteger(rid) || rid < 0) {
     throw new RangeError(`makeRawRef: runId must be a non-negative integer, got ${runId}`);
   }
-  if (!Number.isInteger(seq) || seq < 0) {
+  if (!Number.isInteger(s) || s < 0) {
     throw new RangeError(`makeRawRef: seq must be a non-negative integer, got ${seq}`);
   }
-  return `r${runId}:${seq}`;
+  return `r${rid}:${s}`;
 }
 
 /** Parse a rawRef back into its components, or null if malformed. */
