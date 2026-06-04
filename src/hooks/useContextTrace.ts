@@ -54,6 +54,51 @@ export interface ContextTraceEvent {
   synthetic?: boolean;
   /** Human-readable reconstruction details for synthetic events. */
   details?: string[];
+  /** When present, this event is backed by a retrieval telemetry record. */
+  retrievalTelemetryId?: string;
+}
+
+// ─── Retrieval telemetry detail types (lazy-loaded via CIR-001 API) ──────────
+
+export interface RetrievalScoreBreakdown {
+  semantic?: number;
+  keyword?: number;
+  graph?: number;
+  recency?: number;
+  skill?: number;
+}
+
+export interface RetrievalCandidateDetail {
+  key: string;
+  origin: string;
+  sourceType?: string;
+  title?: string;
+  snippet?: string;
+  category?: string;
+  selected: boolean;
+  enteredPrompt?: boolean;
+  relevanceScore: number;
+  scoreBreakdown: RetrievalScoreBreakdown;
+  matchedSkills?: string[];
+  keptOrDroppedReason: string;
+}
+
+export interface RetrievalTelemetryDetail {
+  telemetryId: string;
+  runId: number;
+  storyId: string;
+  query: string;
+  selectedCandidates: RetrievalCandidateDetail[];
+  droppedCandidates: RetrievalCandidateDetail[];
+  candidateCount: number;
+  selectedCount: number;
+  matchedSkills: string[];
+  retrievalTier: string | null;
+  latencyMs: number | null;
+  needsMoreEvidence: boolean;
+  tokenBudget: number;
+  contradictions: Array<[string, string]>;
+  rawSummary: string;
 }
 
 export interface ContextTraceRawRecord {
@@ -77,6 +122,12 @@ interface RawState {
   error: string | null;
 }
 
+export interface RetrievalTelemetryState {
+  loading: boolean;
+  detail: RetrievalTelemetryDetail | null;
+  error: string | null;
+}
+
 export interface UseContextTraceResult {
   /** Ordered metadata events for this run (oldest → newest), de-duplicated. */
   events: ContextTraceEvent[];
@@ -84,6 +135,10 @@ export interface UseContextTraceResult {
   resolveRaw: (rawRef: string) => Promise<ContextTraceRawRecord>;
   /** Current resolution state for a rawRef (for drawer loading/error UI). */
   getRawState: (rawRef: string) => RawState;
+  /** Lazily fetch retrieval telemetry detail (cached by runId+telemetryId). */
+  resolveRetrievalTelemetry: (telemetryId: string) => Promise<RetrievalTelemetryDetail>;
+  /** Current retrieval telemetry resolution state for a telemetryId. */
+  getRetrievalTelemetryState: (telemetryId: string) => RetrievalTelemetryState;
 }
 
 /**
@@ -101,6 +156,23 @@ function isContextTraceEvent(p: unknown): p is ContextTraceEvent {
     typeof e.status === 'string' &&
     typeof e.ts === 'string'
   );
+}
+
+/**
+ * For backward compatibility, parse retrievalTelemetryId from the details
+ * array when the structured field is absent. Older reconstructed events
+ * embedded the telemetry ID as `telemetry: <id>` in details strings.
+ */
+function normalizeRetrievalTelemetryId(event: ContextTraceEvent): ContextTraceEvent {
+  if (event.retrievalTelemetryId) return event;
+  if (!event.details || event.details.length === 0) return event;
+  for (const d of event.details) {
+    const match = /^telemetry:\s*(.+)$/.exec(d);
+    if (match) {
+      return { ...event, retrievalTelemetryId: match[1].trim() };
+    }
+  }
+  return event;
 }
 
 function mergeTraceEvents(prev: ContextTraceEvent[], incoming: ContextTraceEvent[], maxEvents: number): ContextTraceEvent[] {
@@ -126,6 +198,9 @@ export function useContextTrace(
   // Map rawRef → resolution state. Stored in a ref for cache lookups + a state
   // bump to trigger re-renders when a resolution starts/finishes.
   const rawCacheRef = useRef<Map<string, RawState>>(new Map());
+  // Map telemetryId → retrieval telemetry resolution state + in-flight promise.
+  const telemetryCacheRef = useRef<Map<string, RetrievalTelemetryState>>(new Map());
+  const telemetryInflightRef = useRef<Map<string, Promise<RetrievalTelemetryDetail>>>(new Map());
   const [, forceRender] = useState(0);
 
   // Reset when the runId changes — events and raw cache are run-scoped.
@@ -133,6 +208,8 @@ export function useContextTrace(
   if (prevRunIdRef.current !== runId) {
     prevRunIdRef.current = runId;
     rawCacheRef.current = new Map();
+    telemetryCacheRef.current = new Map();
+    telemetryInflightRef.current = new Map();
     setEvents([]);
   }
 
@@ -153,7 +230,7 @@ export function useContextTrace(
     if (p.run_id != null && String(p.run_id) !== runId) return;
     if (!isContextTraceEvent(parsed)) return;
 
-    const trace = parsed as ContextTraceEvent;
+    const trace = normalizeRetrievalTelemetryId(parsed as ContextTraceEvent);
 
     setEvents((prev) => mergeTraceEvents(prev, [trace], maxEvents));
   });
@@ -167,7 +244,8 @@ export function useContextTrace(
     Promise.resolve(apiFetch<{ events?: ContextTraceEvent[] }>(`/api/pipeline/runs/${runId}/context-inspector-events`))
       .then((response) => {
         if (cancelled || !response || !Array.isArray(response.events)) return;
-        setEvents((prev) => mergeTraceEvents(prev, response.events!, maxEvents));
+        const normalized = response.events!.map(normalizeRetrievalTelemetryId);
+        setEvents((prev) => mergeTraceEvents(prev, normalized, maxEvents));
       })
       .catch(() => { /* non-fatal: live SSE may still deliver traces */ });
     return () => { cancelled = true; };
@@ -204,6 +282,46 @@ export function useContextTrace(
     [runId],
   );
 
+  const getRetrievalTelemetryState = useCallback((telemetryId: string): RetrievalTelemetryState => {
+    return telemetryCacheRef.current.get(telemetryId) ?? { loading: false, detail: null, error: null };
+  }, []);
+
+  const resolveRetrievalTelemetry = useCallback(
+    async (telemetryId: string): Promise<RetrievalTelemetryDetail> => {
+      if (!runId) throw new Error('No run selected');
+
+      // Return cached result if available.
+      const cached = telemetryCacheRef.current.get(telemetryId);
+      if (cached?.detail) return cached.detail;
+
+      // De-duplicate concurrent requests for the same telemetryId.
+      const inflight = telemetryInflightRef.current.get(telemetryId);
+      if (inflight) return inflight;
+
+      telemetryCacheRef.current.set(telemetryId, { loading: true, detail: null, error: null });
+      forceRender((n) => n + 1);
+
+      const promise = apiFetch<RetrievalTelemetryDetail>(
+        `/api/pipeline/runs/${runId}/retrieval-telemetry/${encodeURIComponent(telemetryId)}`,
+      ).then((detail) => {
+        telemetryCacheRef.current.set(telemetryId, { loading: false, detail, error: null });
+        telemetryInflightRef.current.delete(telemetryId);
+        forceRender((n) => n + 1);
+        return detail;
+      }).catch((err) => {
+        const message = err instanceof Error ? err.message : 'Failed to load retrieval telemetry';
+        telemetryCacheRef.current.set(telemetryId, { loading: false, detail: null, error: message });
+        telemetryInflightRef.current.delete(telemetryId);
+        forceRender((n) => n + 1);
+        throw err;
+      });
+
+      telemetryInflightRef.current.set(telemetryId, promise);
+      return promise;
+    },
+    [runId],
+  );
+
   // Drop stale resolutions if the cap shrinks the visible event window so the
   // raw cache cannot outlive its events indefinitely.
   useEffect(() => {
@@ -218,5 +336,5 @@ export function useContextTrace(
     if (mutated) forceRender((n) => n + 1);
   }, [events, maxEvents]);
 
-  return { events, resolveRaw, getRawState };
+  return { events, resolveRaw, getRawState, resolveRetrievalTelemetry, getRetrievalTelemetryState };
 }

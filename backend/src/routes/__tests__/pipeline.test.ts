@@ -2003,3 +2003,487 @@ describe('GET /api/pipeline/runs/:runId/stories/:storyId/stream', () => {
     expect(elapsed).toBeLessThan(2_000);
   });
 });
+
+// ─── GET /api/pipeline/runs/:runId/retrieval-telemetry/:telemetryId ──────────
+
+describe('GET /api/pipeline/runs/:runId/retrieval-telemetry/:telemetryId', () => {
+  test('returns normalized candidate details for valid telemetry ID', async () => {
+    seedSpec('approved', 'retrieval-test');
+
+    // Create run
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/retrieval-test.json', 'ws-pipe', 'running')
+       RETURNING id`
+    );
+    expect(run?.id).toBeDefined();
+    const runId = Number(run!.id);
+
+    // Insert retrieval telemetry event
+    const telemetryId = `rt-${Date.now()}-test123`;
+    const candidatesPayload = [
+      {
+        key: 'memory:m-001',
+        origin: 'memory',
+        sourceType: 'decision',
+        title: 'Test Memory Entry',
+        snippet: 'This is a test memory snippet',
+        category: 'Architecture',
+        finalScore: 0.92,
+        semanticRankScore: 0.88,
+        graphScore: 0.15,
+        freshnessScore: 0.10,
+        decision: 'keep',
+        reasons: ['High semantic match', 'Recent entry'],
+        scoring: {
+          keywordScore: 0.75,
+          skillScore: 0.05,
+        },
+        matchedSkills: ['typescript', 'backend'],
+      },
+      {
+        key: 'context:c-002',
+        origin: 'context',
+        sourceType: 'convention',
+        title: 'Dropped Convention',
+        snippet: 'This convention was dropped',
+        category: 'Convention',
+        finalScore: 0.42,
+        semanticRankScore: 0.40,
+        decision: 'drop',
+        reasons: ['Low relevance', 'Contradicts higher-scored entry'],
+      },
+    ];
+
+    await execute(
+      `INSERT INTO retrieval_telemetry_events (
+         id, workspace_id, query_preview, matched_skills,
+         selected_candidate_keys, dropped_candidate_keys,
+         needs_more_evidence, candidate_count, selected_count,
+         token_budget, contradiction_count, contradiction_pairs,
+         retrieval_tier, latency_ms, payload
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        telemetryId,
+        'ws-pipe',
+        'test query for retrieval',
+        JSON.stringify(['typescript', 'backend']),
+        JSON.stringify(['memory:m-001']),
+        JSON.stringify(['context:c-002']),
+        false,
+        2,
+        1,
+        8000,
+        0,
+        JSON.stringify([]),
+        'hybrid',
+        125,
+        JSON.stringify({ candidates: candidatesPayload }),
+      ]
+    );
+
+    // Insert story_started WAL event that references this telemetry
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        run_id: runId,
+        story_id: 'US-001',
+        retrieval_telemetry_id: telemetryId,
+        retrieval_selected_count: 1,
+      })]
+    );
+
+    // Fetch telemetry details
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/retrieval-telemetry/${telemetryId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      telemetryId,
+      runId,
+      storyId: 'US-001',
+      query: 'test query for retrieval',
+      candidateCount: 2,
+      selectedCount: 1,
+      matchedSkills: ['typescript', 'backend'],
+      retrievalTier: 'hybrid',
+      latencyMs: 125,
+      needsMoreEvidence: false,
+      tokenBudget: 8000,
+      contradictions: [],
+      rawSummary: expect.stringContaining('1/2 candidates selected'),
+    });
+
+    // Verify selected candidates
+    expect(res.body.selectedCandidates).toHaveLength(1);
+    expect(res.body.selectedCandidates[0]).toMatchObject({
+      key: 'memory:m-001',
+      origin: 'memory',
+      sourceType: 'decision',
+      title: 'Test Memory Entry',
+      snippet: 'This is a test memory snippet',
+      category: 'Architecture',
+      selected: true,
+      enteredPrompt: true,
+      relevanceScore: 0.92,
+      scoreBreakdown: {
+        semantic: 0.88,
+        keyword: 0.75,
+        graph: 0.15,
+        recency: 0.10,
+        skill: 0.05,
+      },
+      matchedSkills: ['typescript', 'backend'],
+      keptOrDroppedReason: 'High semantic match; Recent entry',
+    });
+
+    // Verify dropped candidates
+    expect(res.body.droppedCandidates).toHaveLength(1);
+    expect(res.body.droppedCandidates[0]).toMatchObject({
+      key: 'context:c-002',
+      origin: 'context',
+      selected: false,
+      enteredPrompt: false,
+      relevanceScore: 0.42,
+      keptOrDroppedReason: 'Low relevance; Contradicts higher-scored entry',
+    });
+  });
+
+  test('returns 404 when run does not exist', async () => {
+    const res = await request(app)
+      .get('/api/pipeline/runs/999999/retrieval-telemetry/rt-nonexistent')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('Run not found');
+  });
+
+  test('returns 404 when telemetry event does not exist', async () => {
+    seedSpec('approved', 'retrieval-missing');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/retrieval-missing.json', 'ws-pipe', 'running')
+       RETURNING id`
+    );
+    expect(run?.id).toBeDefined();
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${run!.id}/retrieval-telemetry/rt-nonexistent`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('Retrieval telemetry event not found');
+  });
+
+  test('returns 404 when telemetry event does not belong to run', async () => {
+    seedSpec('approved', 'retrieval-wrong-run');
+
+    // Create two runs
+    const run1 = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/retrieval-wrong-run.json', 'ws-pipe', 'running')
+       RETURNING id`
+    );
+    const run2 = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/retrieval-wrong-run.json', 'ws-pipe', 'running')
+       RETURNING id`
+    );
+    expect(run1?.id).toBeDefined();
+    expect(run2?.id).toBeDefined();
+
+    // Insert telemetry event
+    const telemetryId = `rt-${Date.now()}-wrongrun`;
+    await execute(
+      `INSERT INTO retrieval_telemetry_events (
+         id, workspace_id, query_preview, matched_skills,
+         selected_candidate_keys, dropped_candidate_keys,
+         needs_more_evidence, candidate_count, selected_count,
+         token_budget, contradiction_count, contradiction_pairs,
+         payload
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        telemetryId,
+        'ws-pipe',
+        'test query',
+        JSON.stringify([]),
+        JSON.stringify([]),
+        JSON.stringify([]),
+        false,
+        0,
+        0,
+        5000,
+        0,
+        JSON.stringify([]),
+        JSON.stringify({ candidates: [] }),
+      ]
+    );
+
+    // Link telemetry to run2 via story_started
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        run_id: run2!.id,
+        story_id: 'US-001',
+        retrieval_telemetry_id: telemetryId,
+      })]
+    );
+
+    // Try to fetch telemetry with run1 (wrong run)
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${run1!.id}/retrieval-telemetry/${telemetryId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('does not belong to this run');
+  });
+
+  test('returns 400 for invalid runId', async () => {
+    const res = await request(app)
+      .get('/api/pipeline/runs/not-a-number/retrieval-telemetry/rt-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Invalid runId');
+  });
+
+  test('returns 400 for empty telemetryId', async () => {
+    seedSpec('approved', 'retrieval-empty-id');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/retrieval-empty-id.json', 'ws-pipe', 'running')
+       RETURNING id`
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${run!.id}/retrieval-telemetry/ `)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    // Express may route this differently, but we expect either 400 or 404
+    expect([400, 404]).toContain(res.status);
+  });
+
+  test('handles telemetry with no candidates gracefully', async () => {
+    seedSpec('approved', 'retrieval-no-candidates');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/retrieval-no-candidates.json', 'ws-pipe', 'running')
+       RETURNING id`
+    );
+    const runId = run!.id;
+
+    const telemetryId = `rt-${Date.now()}-nocand`;
+    await execute(
+      `INSERT INTO retrieval_telemetry_events (
+         id, workspace_id, query_preview, matched_skills,
+         selected_candidate_keys, dropped_candidate_keys,
+         needs_more_evidence, candidate_count, selected_count,
+         token_budget, contradiction_count, contradiction_pairs,
+         payload
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        telemetryId,
+        'ws-pipe',
+        'query with no candidates',
+        JSON.stringify([]),
+        JSON.stringify([]),
+        JSON.stringify([]),
+        true,
+        0,
+        0,
+        5000,
+        0,
+        JSON.stringify([]),
+        JSON.stringify({}),
+      ]
+    );
+
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        run_id: runId,
+        story_id: 'US-001',
+        retrieval_telemetry_id: telemetryId,
+      })]
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/retrieval-telemetry/${telemetryId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.selectedCandidates).toEqual([]);
+    expect(res.body.droppedCandidates).toEqual([]);
+    expect(res.body.candidateCount).toBe(0);
+    expect(res.body.selectedCount).toBe(0);
+    expect(res.body.needsMoreEvidence).toBe(true);
+    expect(res.body.tokenBudget).toBe(5000);
+    expect(res.body.contradictions).toEqual([]);
+    expect(res.body.rawSummary).toContain('0/0 candidates selected');
+    expect(res.body.rawSummary).toContain('needs more evidence');
+  });
+
+  test('returns contradiction pairs when present', async () => {
+    seedSpec('approved', 'retrieval-contradictions');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/retrieval-contradictions.json', 'ws-pipe', 'running')
+       RETURNING id`
+    );
+    const runId = run!.id;
+
+    const telemetryId = `rt-${Date.now()}-contrad`;
+    await execute(
+      `INSERT INTO retrieval_telemetry_events (
+         id, workspace_id, query_preview, matched_skills,
+         selected_candidate_keys, dropped_candidate_keys,
+         needs_more_evidence, candidate_count, selected_count,
+         token_budget, contradiction_count, contradiction_pairs,
+         retrieval_tier, latency_ms, payload
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        telemetryId,
+        'ws-pipe',
+        'query with contradictions',
+        JSON.stringify([]),
+        JSON.stringify(['memory:m-001']),
+        JSON.stringify(['memory:m-002']),
+        false,
+        2,
+        1,
+        6000,
+        1,
+        JSON.stringify([['memory:m-001', 'memory:m-002']]),
+        'search',
+        200,
+        JSON.stringify({ candidates: [] }),
+      ]
+    );
+
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        run_id: runId,
+        story_id: 'US-001',
+        retrieval_telemetry_id: telemetryId,
+      })]
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/retrieval-telemetry/${telemetryId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.contradictions).toEqual([['memory:m-001', 'memory:m-002']]);
+    expect(res.body.tokenBudget).toBe(6000);
+    expect(res.body.retrievalTier).toBe('search');
+    expect(res.body.rawSummary).toContain('1/2 candidates selected');
+    expect(res.body.rawSummary).toContain('tier: search');
+    expect(res.body.rawSummary).toContain('latency: 200ms');
+  });
+});
+
+describe('GET /api/pipeline/runs/:runId/context-inspector-events — retrievalTelemetryId', () => {
+  test('returns structured retrievalTelemetryId for story_started WAL payloads containing retrieval_telemetry_id', async () => {
+    seedSpec('approved', 'ctx-telemetry-test');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/ctx-telemetry-test.json', 'ws-pipe', 'done')
+       RETURNING id`
+    );
+    const runId = Number(run!.id);
+
+    const telemetryId = `rt-ctx-${Date.now()}`;
+
+    // Insert story_started WAL event with retrieval_telemetry_id.
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        run_id: runId,
+        story_id: 'US-001',
+        retrieval_telemetry_id: telemetryId,
+        retrieval_selected_count: 3,
+        retrieval_needs_more_evidence: false,
+        retrieval_matched_skills: ['typescript'],
+      })]
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/context-inspector-events`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reconstructed).toBe(true);
+
+    // Find the memory/retrieval event among reconstructed events.
+    const memoryEvent = res.body.events.find(
+      (e: any) => e.phase === 'memory' && e.label?.startsWith('retrieval:'),
+    );
+    expect(memoryEvent).toBeDefined();
+    expect(memoryEvent.retrievalTelemetryId).toBe(telemetryId);
+    expect(memoryEvent.synthetic).toBe(true);
+    // The details array should still contain the telemetry ID for backward compat.
+    expect(memoryEvent.details).toContain(`telemetry: ${telemetryId}`);
+  });
+
+  test('does not include retrievalTelemetryId when story_started payload lacks retrieval_telemetry_id', async () => {
+    seedSpec('approved', 'ctx-no-telemetry-test');
+
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/ctx-no-telemetry-test.json', 'ws-pipe', 'done')
+       RETURNING id`
+    );
+    const runId = Number(run!.id);
+
+    // Insert story_started WAL event WITHOUT retrieval_telemetry_id.
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({
+        run_id: runId,
+        story_id: 'US-001',
+        context_files: ['src/main.ts'],
+      })]
+    );
+
+    // Insert token row so we get at least a prompt event.
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, input_tokens, output_tokens)
+       VALUES ($1, 'US-001', 'pass', 1000, 500)`,
+      [runId]
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/context-inspector-events`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+
+    // No memory event should exist (no retrieval fields).
+    const memoryEvents = res.body.events.filter(
+      (e: any) => e.phase === 'memory',
+    );
+    expect(memoryEvents.length).toBe(0);
+
+    // Context and prompt events should exist but without retrievalTelemetryId.
+    for (const event of res.body.events) {
+      expect(event.retrievalTelemetryId).toBeUndefined();
+    }
+  });
+});
