@@ -10,6 +10,7 @@ import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, M
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import PreFlightGraph from './PreFlightGraph';
 import type { Story } from './StoryCard';
 import type { PanelId } from './Sidebar';
 import type { ContextUsed } from '../panels/SpecForgeOutput';
@@ -719,6 +720,13 @@ export default function SpecForgePreview({
                   </p>
                 </div>
               </label>
+
+              {/* Pre-flight context neighborhood */}
+              <PreFlightGraph
+                specSlug={specSlug}
+                workspaceId={triggerWorkspaceId}
+                onNavigate={onNavigate}
+              />
 
               <div className="px-3 py-2 bg-panel/50 border border-border/50 rounded text-xs text-muted">
                 {activeCount} {activeCount === 1 ? 'story' : 'stories'} will be executed sequentially
