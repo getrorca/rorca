@@ -123,7 +123,7 @@ function setupDefaultMocks() {
     // Run lookup
     if (sql.includes('FROM pipeline_runs WHERE id')) {
       return params[0] === RUN_ID
-        ? { id: RUN_ID, spec_id: SPEC_SLUG, workspace_id: WS_ID }
+        ? { id: RUN_ID, spec_path: `forge/specs/approved/${SPEC_SLUG}.json`, workspace_id: WS_ID }
         : undefined;
     }
     // WAL telemetry lookup for run
@@ -135,7 +135,7 @@ function setupDefaultMocks() {
       return params[0] === TELEMETRY_ID ? makeTelemetryRow() : undefined;
     }
     // Latest run for spec
-    if (sql.includes('FROM pipeline_runs') && sql.includes('ORDER BY created_at DESC')) {
+    if (sql.includes('FROM pipeline_runs') && sql.includes('ORDER BY started_at DESC')) {
       return { id: RUN_ID };
     }
     return undefined;
@@ -280,7 +280,7 @@ describe('spec-relevance-graph routes', () => {
         }
         if (sql.includes('FROM pipeline_runs WHERE id')) {
           return params[0] === RUN_ID
-            ? { id: RUN_ID, spec_id: SPEC_SLUG, workspace_id: WS_ID }
+            ? { id: RUN_ID, spec_path: `forge/specs/approved/${SPEC_SLUG}.json`, workspace_id: WS_ID }
             : undefined;
         }
         // No WAL event with telemetry
@@ -386,7 +386,7 @@ describe('spec-relevance-graph routes', () => {
           return params[0] === WS_ID ? { id: WS_ID, path: '/tmp/ws' } : undefined;
         }
         // No latest run
-        if (sql.includes('FROM pipeline_runs') && sql.includes('ORDER BY created_at DESC')) {
+        if (sql.includes('FROM pipeline_runs') && sql.includes('ORDER BY started_at DESC')) {
           return undefined;
         }
         return undefined;
