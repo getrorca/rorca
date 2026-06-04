@@ -97,6 +97,21 @@ describe('context-trace', () => {
       expect(getTraceDir(tmpDir)).toBe(path.join(tmpDir, '.rorca', 'traces'));
     });
 
+    it('resumes the next sequence when the writer is reopened for the same run', async () => {
+      const first = createContextTraceWriter(tmpDir, 9);
+      expect(first.append('context', { a: 1 })).toBe('r9:0');
+      expect(first.append('memory', { b: 2 })).toBe('r9:1');
+      await first.close();
+
+      const second = createContextTraceWriter(tmpDir, 9);
+      expect(second.nextSeq).toBe(2);
+      expect(second.append('prompt', { c: 3 })).toBe('r9:2');
+      await second.close();
+
+      const records = readArtifactRecords(tmpDir, 9);
+      expect(records.map((record) => record.rawRef)).toEqual(['r9:0', 'r9:1', 'r9:2']);
+    });
+
     it('appendEvent returns a lightweight event referencing the raw record', () => {
       const writer = createContextTraceWriter(tmpDir, 8);
       const event = writer.appendEvent('context', { big: 'payload' }, {

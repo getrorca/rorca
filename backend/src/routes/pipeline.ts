@@ -3197,6 +3197,26 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
   }
 });
 
+async function listContextTraceRoots(
+  runId: number,
+  workspacePath: string,
+  runWorktreePath: string | null | undefined,
+): Promise<string[]> {
+  const storyWorktreeRows = await query<{ worktree_path: string | null }>(
+    `SELECT DISTINCT worktree_path
+       FROM story_results
+      WHERE run_id = $1
+        AND worktree_path IS NOT NULL`,
+    [runId],
+  );
+
+  return Array.from(new Set([
+    workspacePath,
+    runWorktreePath ?? null,
+    ...storyWorktreeRows.map((row) => row.worktree_path),
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0)));
+}
+
 // ─── GET /api/pipeline/runs/:runId/context-inspector-events — Metadata backfill
 // Returns historical context_trace WAL metadata when present. For older or
 // continuation runs that did not emit CTM artifacts, reconstructs trace-like
@@ -3226,6 +3246,53 @@ router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Re
     }
 
     if (events.length > 0) {
+      const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+      if (workspace) {
+        const traceRoots = await listContextTraceRoots(runId, workspace.path, run.worktree_path);
+        const artifactExists = traceRoots.some((traceRoot) => fs.existsSync(getTraceArtifactPath(traceRoot, runId)));
+
+        // Retroactive fallback: older runs may still have context_trace metadata
+        // but have lost their raw artifact (for example, trace blobs written into
+        // a cleaned-up worktree before the stable workspace-root fix). In that
+        // case, enrich retrieval rows with retrievalTelemetryId from story_started
+        // so the UI can open the structured retrieval drawer instead of a dead
+        // raw-payload lookup.
+        if (!artifactExists) {
+          const storyTelemetryRows = await query<{ story_id: string | null; payload: string | Record<string, any> }>(
+            `SELECT story_id, payload FROM wal_events
+             WHERE event_type = 'story_started' AND (payload->>'run_id')::bigint = $1
+             ORDER BY id DESC`,
+            [runId],
+          );
+          const telemetryIdByStory = new Map<string, string>();
+          for (const row of storyTelemetryRows) {
+            if (!row.story_id || telemetryIdByStory.has(row.story_id)) continue;
+            try {
+              const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+              const telemetryId = payload && typeof payload === 'object' && typeof payload.retrieval_telemetry_id === 'string'
+                ? payload.retrieval_telemetry_id
+                : null;
+              if (telemetryId) telemetryIdByStory.set(row.story_id, telemetryId);
+            } catch { /* skip malformed payload */ }
+          }
+
+          for (const event of events) {
+            if (event.retrievalTelemetryId) continue;
+            if (event.phase !== 'memory') continue;
+            if (typeof event.storyId !== 'string' || event.storyId.length === 0) continue;
+            const telemetryId = telemetryIdByStory.get(event.storyId);
+            if (!telemetryId) continue;
+            event.retrievalTelemetryId = telemetryId;
+            if (!Array.isArray(event.details)) {
+              event.details = [];
+            }
+            if (!event.details.some((detail: unknown) => typeof detail === 'string' && detail.trim().toLowerCase() === `telemetry: ${telemetryId}`.toLowerCase())) {
+              event.details.unshift(`telemetry: ${telemetryId}`);
+            }
+          }
+        }
+      }
+
       res.json({ events, reconstructed: false });
       return;
     }
@@ -3435,7 +3502,7 @@ router.get('/runs/:runId/context-trace/:rawRef', async (req: Request, res: Respo
       throw new ValidationError('rawRef does not belong to this run');
     }
 
-    const runRow = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
+    const runRow = await queryOne('SELECT workspace_id, worktree_path FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string; worktree_path: string | null } | undefined;
     if (!runRow) {
       throw new NotFoundError('Run not found');
     }
@@ -3445,18 +3512,21 @@ router.get('/runs/:runId/context-trace/:rawRef', async (req: Request, res: Respo
       throw new NotFoundError('Workspace not found');
     }
 
-    const record = lookupTraceRecord(workspace.path, rawRef);
-    if (record) {
-      res.json(record);
-      return;
+    const traceRoots = await listContextTraceRoots(runId, workspace.path, runRow.worktree_path);
+
+    for (const traceRoot of traceRoots) {
+      const record = lookupTraceRecord(traceRoot, rawRef);
+      if (record) {
+        res.json(record);
+        return;
+      }
     }
 
     // No record. Distinguish a genuinely-absent trace from a corrupt artifact:
-    // if the artifact file exists but yields no record for an otherwise valid
-    // in-run rawRef, the artifact is unreadable/corrupt — return 422 with a
-    // safe placeholder body instead of a misleading 404. lookupTraceRecord is
-    // already nonfatal (a decompress failure yields no record, never throws).
-    const artifactExists = fs.existsSync(getTraceArtifactPath(workspace.path, runId));
+    // if any candidate artifact file exists but yields no record for an
+    // otherwise valid in-run rawRef, the artifact is unreadable/corrupt or was
+    // partially pruned — return 422 instead of a misleading 404.
+    const artifactExists = traceRoots.some((traceRoot) => fs.existsSync(getTraceArtifactPath(traceRoot, runId)));
     if (artifactExists) {
       throw new UnprocessableError('Context-trace artifact present but payload could not be recovered (corrupt or pruned)');
     }
