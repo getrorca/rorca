@@ -21,6 +21,7 @@ import {
 } from '../lib/finops-types';
 import {
   computeAccounting,
+  computeAccountingPerRecord,
   classifyUsage,
   meteredCost,
   type AccountingContext,
@@ -3541,6 +3542,21 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
 
 // ─── GET /api/analytics/finops/export — CSV export of per-story cost data ────
 
+/** Raw token_usage row joined to its run, projected for the FinOps CSV export. */
+interface FinOpsExportRow {
+  run_id: number | string | null;
+  story_id: string | null;
+  model: string | null;
+  input_tokens: number | string | null;
+  output_tokens: number | string | null;
+  reasoning_tokens: number | string | null;
+  cost_usd: number | string | null;
+  recorded_at: string | null;
+  workspace_id: string | null;
+  spec_slug: string | null;
+  agent_type: string | null;
+}
+
 /**
  * @swagger
  * /api/analytics/finops/export:
@@ -3551,7 +3567,19 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
  *     x-rorca-tier: paid
  *     x-rorca-capability: finops
  *     x-rorca-rationale: "FinOps export is a commercial reporting feature and should remain behind the paid plan boundary."
- *     description: Exports per-story token usage and cost data as a CSV file. Includes computed columns for model tier, Opus baseline cost, and savings vs Opus. Can be filtered by run_id, workspace_id, and date range. The CSV includes headers for run_id, story_id, spec_slug, model, tier, agent_type, input_tokens, output_tokens, cost_usd, opus_baseline_usd, savings_usd, recorded_at, and workspace_id.
+ *     description: >-
+ *       Exports per-story token usage and accounting-mode-aware cost data as a CSV
+ *       file, preserving the same billing semantics as the FinOps dashboard and
+ *       per-run views (FIN-009). Each row is classified against the active billing
+ *       profiles, so the CSV separates metered marginal spend (metered_cost_usd)
+ *       from allocated subscription cost (allocated_subscription_cost_usd) and
+ *       blended effective cost (blended_effective_cost_usd) instead of leaking only
+ *       the ambiguous raw cost_usd. Columns: run_id, story_id, spec_slug, provider,
+ *       model, tier, agent_type, billing_mode, billing_profile_id, classified_by,
+ *       allocation_basis, input_tokens, output_tokens, reasoning_tokens, cost_usd,
+ *       metered_cost_usd, allocated_subscription_cost_usd, blended_effective_cost_usd,
+ *       priced, opus_baseline_usd, savings_usd, recorded_at, workspace_id. Can be
+ *       filtered by run_id, workspace_id, and date range.
  *     parameters:
  *       - in: query
  *         name: run_id
@@ -3611,8 +3639,9 @@ router.get('/finops/export', async (req: Request, res: Response) => {
         tu.model,
         tu.input_tokens,
         tu.output_tokens,
+        tu.reasoning_tokens,
         tu.cost_usd,
-        tu.recorded_at,
+        tu.recorded_at::text AS recorded_at,
         tu.workspace_id,
         REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
         pr.agent AS agent_type
@@ -3622,25 +3651,88 @@ router.get('/finops/export', async (req: Request, res: Response) => {
       ORDER BY tu.run_id ASC, tu.recorded_at ASC
     `;
 
-    const rows = await query<ExportRow>(sql, sqlParams);
+    const rows = await query<FinOpsExportRow>(sql, sqlParams);
 
-    // Add computed columns
-    const enrichedRows = rows.map(row => {
+    // FIN-009: classify and account for the exported rows with the SAME shared
+    // accounting engine the dashboard and per-run views use, so the CSV preserves
+    // billing mode, metered vs allocated vs blended cost, allocation basis, and
+    // coverage/provenance instead of leaking only the ambiguous raw `cost_usd`.
+    // Profiles are loaded for the export window so subscription rows allocate
+    // truthfully rather than masquerading as metered spend.
+    const pricingRows = await query<{ model_id: string; input_cost_per_1m: number | null; output_cost_per_1m: number | null; input_cost_per_1k: number; output_cost_per_1k: number }>(
+      'SELECT model_id, input_cost_per_1m, output_cost_per_1m, input_cost_per_1k, output_cost_per_1k FROM model_pricing'
+    );
+    const pricingMap = new Map<string, { input: number; output: number }>();
+    for (const p of pricingRows) {
+      pricingMap.set(p.model_id, {
+        input: p.input_cost_per_1m ?? p.input_cost_per_1k * 1000,
+        output: p.output_cost_per_1m ?? p.output_cost_per_1k * 1000,
+      });
+    }
+    const profiles = await loadActiveBillingProfiles(from, to, workspaceId);
+    const accountingCtx = buildAccountingContext(pricingMap, profiles);
+
+    const usageRecords: UsageRecord[] = rows.map((row) => toUsageRecord({
+      model: String(row.model || ''),
+      input_tokens: row.input_tokens,
+      output_tokens: row.output_tokens,
+      reasoning_tokens: row.reasoning_tokens,
+      cost_usd: row.cost_usd,
+      run_id: row.run_id,
+      story_id: row.story_id,
+      recorded_at: row.recorded_at,
+    }));
+    const { perRecord } = computeAccountingPerRecord(usageRecords, accountingCtx);
+
+    // Round a USD value to 4 decimals for CSV stability (matches per-run view).
+    const usd4 = (value: number): number => Math.round(value * 10000) / 10000;
+
+    // Build one fully-attributed row per usage record. Every accounting column is
+    // present so a downstream auditor can reconstruct exactly how each cost was
+    // derived: the provider + model + billing profile that classified it, the
+    // metered marginal cost, the allocated subscription share and its basis, the
+    // blended effective cost, and whether the row was priced/profile-classified.
+    const enrichedRows = rows.map((row, i) => {
       const model = String(row.model || '');
       const inputTokens = Number(row.input_tokens || 0);
       const outputTokens = Number(row.output_tokens || 0);
+      const acct = perRecord[i];
       const opusBaseline = (inputTokens / 1_000_000) * OPUS_INPUT_PER_1M + (outputTokens / 1_000_000) * OPUS_OUTPUT_PER_1M;
       return {
-        ...row,
+        run_id: row.run_id,
+        story_id: row.story_id,
+        spec_slug: row.spec_slug,
+        provider: providerFromModel(model),
+        model,
         tier: tierFromModel(model),
-        opus_baseline_usd: Math.round(opusBaseline * 10000) / 10000,
-        savings_usd: Math.round((opusBaseline - Number(row.cost_usd || 0)) * 10000) / 10000,
+        agent_type: row.agent_type,
+        billing_mode: acct.mode,
+        billing_profile_id: acct.profileId ?? '',
+        classified_by: acct.fromProfile ? 'profile' : 'heuristic',
+        allocation_basis: acct.allocationMethod ?? '',
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        reasoning_tokens: Number(row.reasoning_tokens || 0),
+        cost_usd: usd4(Number(row.cost_usd || 0)),
+        metered_cost_usd: usd4(acct.meteredCostUsd),
+        allocated_subscription_cost_usd: usd4(acct.allocatedSubscriptionCostUsd),
+        blended_effective_cost_usd: usd4(acct.blendedEffectiveCostUsd),
+        priced: acct.unpriced ? 'false' : 'true',
+        opus_baseline_usd: usd4(opusBaseline),
+        // Savings is a metered-vs-Opus comparison; subscription/unpriced rows have
+        // zero metered cost so their "savings" reflects only the metered baseline.
+        savings_usd: usd4(opusBaseline - acct.meteredCostUsd),
+        recorded_at: row.recorded_at,
+        workspace_id: row.workspace_id,
       };
     });
 
     const headers = [
-      'run_id', 'story_id', 'spec_slug', 'model', 'tier', 'agent_type',
-      'input_tokens', 'output_tokens', 'cost_usd', 'opus_baseline_usd', 'savings_usd',
+      'run_id', 'story_id', 'spec_slug', 'provider', 'model', 'tier', 'agent_type',
+      'billing_mode', 'billing_profile_id', 'classified_by', 'allocation_basis',
+      'input_tokens', 'output_tokens', 'reasoning_tokens',
+      'cost_usd', 'metered_cost_usd', 'allocated_subscription_cost_usd', 'blended_effective_cost_usd',
+      'priced', 'opus_baseline_usd', 'savings_usd',
       'recorded_at', 'workspace_id',
     ];
 
