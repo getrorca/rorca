@@ -101,6 +101,7 @@ import { startGraphPopulator } from './lib/graph-populator';
 import { startGraphContextCacheInvalidator } from './lib/graph-context';
 import workspaceDriftRouter from './routes/workspace-drift';
 import graphRouter from './routes/graph';
+import specRelevanceGraphRouter from './routes/spec-relevance-graph';
 import workflowRouterRouter from './routes/workflow-router';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
@@ -403,6 +404,7 @@ app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
 app.use('/api/graph', graphRouter);
+app.use('/api/spec-relevance-graph', specRelevanceGraphRouter);
 app.use('/api/workflow-router', workflowRouterRouter);
 
 // V2-094: Centralized error handler (must be after all routes)

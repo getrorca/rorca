@@ -803,4 +803,156 @@ describe('MemoryPanel', () => {
       expect(screen.getByText('No memory entries yet')).toBeTruthy();
     });
   });
+
+  // ─── SMG-005: Spec-centric relevance graph in Memory Ledger split view ─────
+
+  const SPEC_RELEVANCE_GRAPH_RESPONSE = {
+    available: true,
+    hub: { id: 'hub:spec-a', type: 'hub', ring: 0, label: 'spec-a', entityId: 'spec-a' },
+    nodes: [
+      { id: 'hub:spec-a', type: 'hub', ring: 0, label: 'spec-a', entityId: 'spec-a' },
+      { id: 'memory:1', type: 'memory', ring: 2, label: 'Memory #1', entityId: '1', category: 'Architecture', relevanceScore: 0.85, selected: true },
+      { id: 'file:memory.ts', type: 'file', ring: 1, label: 'memory.ts', entityId: 'backend/src/routes/memory.ts', path: 'backend/src/routes/memory.ts' },
+    ],
+    edges: [
+      { id: 'e1', source: 'hub:spec-a', target: 'file:memory.ts', relation: 'routed_to', scoreContribution: null, evidence: null, visualHints: { thickness: 2, dashed: false, opacity: 1 } },
+      { id: 'e2', source: 'file:memory.ts', target: 'memory:1', relation: 'selected_memory', scoreContribution: 0.85, evidence: null, visualHints: { thickness: 1.5, dashed: false, opacity: 0.8 } },
+    ],
+    scoreLegend: [{ field: 'semantic', label: 'Semantic', description: 'Embedding similarity' }],
+    summary: { hubLabel: 'spec-a', nodeCount: 3, edgeCount: 2, selectedCount: 1, droppedCount: 0, avgRelevanceScore: 0.85 },
+    caps: { maxFiles: 20, maxMemories: 30, maxEdges: 80 },
+    truncation: { filesTruncated: false, memoriesTruncated: false, edgesTruncated: false, totalCandidates: 1, returnedCandidates: 1 },
+    fallback: { ageAvailable: true, telemetryAvailable: true, graphPathsAvailable: true, missingReasons: [] },
+  };
+
+  function mockPanelDataWithSpecGraph(overrides?: {
+    specRelevanceGraph?: any;
+  }) {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/review?')) return MEMORY_REVIEW_RESPONSE;
+      if (path.startsWith('/api/memory/relations?')) return MEMORY_RELATIONS_RESPONSE;
+      if (path.startsWith('/api/memory/graph/overview?')) return OVERVIEW_GRAPH_RESPONSE;
+      if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
+      if (path.startsWith('/api/spec-relevance-graph?')) return overrides?.specRelevanceGraph ?? SPEC_RELEVANCE_GRAPH_RESPONSE;
+      return {};
+    });
+  }
+
+  it('shows a spec context selector in split view when memory items have spec sources', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithSpecGraph();
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    expect(await screen.findByTestId('spec-context-selector')).toBeTruthy();
+    expect(screen.getByLabelText('Select spec context for relevance graph')).toBeTruthy();
+  });
+
+  it('renders the spec-centric relevance graph in the right pane when a spec context is selected', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithSpecGraph();
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    const selector = screen.getByLabelText('Select spec context for relevance graph');
+    await user.selectOptions(selector, 'spec-a');
+
+    expect(await screen.findByTestId('spec-context-mode-indicator')).toBeTruthy();
+    expect(screen.getByTestId('spec-relevance-graph-pane')).toBeTruthy();
+    expect(screen.getAllByText(/Spec Relevance Graph/i).length).toBeGreaterThan(0);
+  });
+
+  it('switches back to memory neighborhood when spec context is cleared', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithSpecGraph();
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    const selector = screen.getByLabelText('Select spec context for relevance graph');
+    await user.selectOptions(selector, 'spec-a');
+
+    expect(await screen.findByTestId('spec-relevance-graph-pane')).toBeTruthy();
+
+    await user.selectOptions(selector, '');
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('spec-relevance-graph-pane')).toBeNull();
+      expect(screen.queryByTestId('spec-context-mode-indicator')).toBeNull();
+    });
+
+    expect(screen.getByText('Knowledge Web')).toBeTruthy();
+  });
+
+  it('shows empty state when the spec relevance graph has no data', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithSpecGraph({
+      specRelevanceGraph: {
+        ...SPEC_RELEVANCE_GRAPH_RESPONSE,
+        available: false,
+        nodes: [],
+        edges: [],
+        summary: { ...SPEC_RELEVANCE_GRAPH_RESPONSE.summary, nodeCount: 0, edgeCount: 0 },
+        fallback: { ...SPEC_RELEVANCE_GRAPH_RESPONSE.fallback, missingReasons: ['No retrieval telemetry found'] },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    const selector = screen.getByLabelText('Select spec context for relevance graph');
+    await user.selectOptions(selector, 'spec-a');
+
+    expect(await screen.findByTestId('spec-relevance-graph-pane')).toBeTruthy();
+    await waitFor(() => {
+      const pane = screen.getByTestId('spec-relevance-graph-pane');
+      expect(pane.querySelector('[data-testid="srg-state-unavailable"], [data-testid="srg-state-empty"]')).toBeTruthy();
+    });
+  });
+
+  it('preserves existing memory curation behavior when spec context selector is present', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithSpecGraph();
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    // Memory curation still works
+    expect(screen.getByText('Centered on memory #1')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Curate' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Superseded by memory #2').length).toBeGreaterThan(0);
+  });
+
+  it('does not show spec context selector when no items have spec sources', async () => {
+    const user = userEvent.setup();
+    mockPanelData({
+      memoryList: {
+        ...MEMORY_LIST_RESPONSE,
+        items: MEMORY_LIST_RESPONSE.items.map((item) => ({ ...item, sourceSpecId: null as any, sourceStoryId: null as any })),
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Split' }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('spec-context-selector')).toBeNull();
+    });
+  });
 });

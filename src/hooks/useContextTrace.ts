@@ -201,6 +201,7 @@ export function useContextTrace(
   // Map telemetryId → retrieval telemetry resolution state + in-flight promise.
   const telemetryCacheRef = useRef<Map<string, RetrievalTelemetryState>>(new Map());
   const telemetryInflightRef = useRef<Map<string, Promise<RetrievalTelemetryDetail>>>(new Map());
+  const rawInflightRef = useRef<Map<string, Promise<ContextTraceRawRecord>>>(new Map());
   const [, forceRender] = useState(0);
 
   // Reset when the runId changes — events and raw cache are run-scoped.
@@ -208,6 +209,7 @@ export function useContextTrace(
   if (prevRunIdRef.current !== runId) {
     prevRunIdRef.current = runId;
     rawCacheRef.current = new Map();
+    rawInflightRef.current = new Map();
     telemetryCacheRef.current = new Map();
     telemetryInflightRef.current = new Map();
     setEvents([]);
@@ -262,22 +264,33 @@ export function useContextTrace(
       const cached = rawCacheRef.current.get(rawRef);
       if (cached?.record) return cached.record;
 
+      // De-duplicate concurrent and repeated requests for the same rawRef.
+      const inflight = rawInflightRef.current.get(rawRef);
+      if (inflight) return inflight;
+
       rawCacheRef.current.set(rawRef, { loading: true, record: null, error: null });
       forceRender((n) => n + 1);
 
-      try {
-        const record = await apiFetch<ContextTraceRawRecord>(
-          `/api/pipeline/runs/${runId}/context-trace/${encodeURIComponent(rawRef)}`,
-        );
-        rawCacheRef.current.set(rawRef, { loading: false, record, error: null });
-        forceRender((n) => n + 1);
-        return record;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to load raw payload';
-        rawCacheRef.current.set(rawRef, { loading: false, record: null, error: message });
-        forceRender((n) => n + 1);
-        throw err;
-      }
+      const promise = apiFetch<ContextTraceRawRecord>(
+        `/api/pipeline/runs/${runId}/context-trace/${encodeURIComponent(rawRef)}`,
+      ).then(
+        (record) => {
+          rawCacheRef.current.set(rawRef, { loading: false, record, error: null });
+          rawInflightRef.current.delete(rawRef);
+          forceRender((n) => n + 1);
+          return record;
+        },
+        (err) => {
+          const message = err instanceof Error ? err.message : 'Failed to load raw payload';
+          rawCacheRef.current.set(rawRef, { loading: false, record: null, error: message });
+          rawInflightRef.current.delete(rawRef);
+          forceRender((n) => n + 1);
+          throw err;
+        },
+      );
+
+      rawInflightRef.current.set(rawRef, promise);
+      return promise;
     },
     [runId],
   );
