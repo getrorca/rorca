@@ -835,7 +835,7 @@ describe('MemoryPanel', () => {
       if (path.startsWith('/api/memory/relations?')) return MEMORY_RELATIONS_RESPONSE;
       if (path.startsWith('/api/memory/graph/overview?')) return OVERVIEW_GRAPH_RESPONSE;
       if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
-      if (path.startsWith('/api/spec-relevance-graph?')) return overrides?.specRelevanceGraph ?? SPEC_RELEVANCE_GRAPH_RESPONSE;
+      if (path.startsWith('/api/spec-relevance-graph/by-spec/')) return overrides?.specRelevanceGraph ?? SPEC_RELEVANCE_GRAPH_RESPONSE;
       return {};
     });
   }
@@ -868,6 +868,7 @@ describe('MemoryPanel', () => {
     expect(await screen.findByTestId('spec-context-mode-indicator')).toBeTruthy();
     expect(screen.getByTestId('spec-relevance-graph-pane')).toBeTruthy();
     expect(screen.getAllByText(/Spec Relevance Graph/i).length).toBeGreaterThan(0);
+    expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('/api/spec-relevance-graph/by-spec/spec-a?workspaceId='));
   });
 
   it('switches back to memory neighborhood when spec context is cleared', async () => {
