@@ -1,0 +1,114 @@
+{
+  "storyId": "FIN-010",
+  "title": "State-of-the-Art FinOps Accounting and UX — Final Implementation Validation",
+  "status": "PASS",
+  "timestamp": "2026-06-04T19:52:00Z",
+  "role": "Frontend",
+  "plan": [
+    "Explore all FinOps surfaces (accounting engine, dashboard, per-run FinOpsTab, settings, exports)",
+    "Run repo-root + backend TypeScript typechecks",
+    "Run focused frontend (Vitest) and backend (Jest) FinOps test suites",
+    "Root-cause and fix any failures, or document pre-existing blockers with exact evidence",
+    "Verify dashboard, per-run, settings, and exports agree on accounting semantics for metered-only, subscription-only, and mixed cases",
+    "Inspect active-run behavior so provider rows/badges/coverage stay truthful while usage is still arriving",
+    "Confirm a real sequential Claude Code CLI run on Opus 4.8 with UI-visible log streaming",
+    "Capture all evidence in this verification artifact"
+  ],
+  "filesChanged": [
+    {
+      "path": "backend/src/routes/analytics.ts",
+      "reason": "Root-cause fix for cost-consistency: the legacy GET /api/analytics/usage and GET /api/analytics/costs endpoints summed raw tu.cost_usd (often 0 when only token counts are recorded) for total_cost_usd, while input_cost_usd/output_cost_usd were already derived from model_pricing. This contradicted the documented contract (analytics.ts:508 'Uses model_pricing table for actual provider rates') and disagreed with the FinOps dashboard/accounting engine. Replaced the raw sum with a pricing-derived CASE expression (input_tokens/1e6 * input_cost_per_1m + output_tokens/1e6 * output_cost_per_1m, with _1k fallbacks) via LEFT JOIN model_pricing, falling back to raw cost_usd only for unpriced models. Also fixed the /costs spec breakdown ordering to ORDER BY MAX(tu.recorded_at) DESC LIMIT 20 (bounded, recency-ordered) to match the breakdown contract. 73 insertions, 7 deletions."
+    }
+  ],
+  "validationsRun": {
+    "frontendTypeCheck": { "command": "npx tsc --noEmit", "result": "PASS", "exitCode": 0, "errors": 0 },
+    "backendTypeCheck": { "command": "cd backend && npx tsc --noEmit", "result": "PASS", "exitCode": 0, "errors": 0 },
+    "backendFinOpsTests": {
+      "command": "cd backend && node --max-old-space-size=8192 node_modules/.bin/jest \"finops-accounting.test\" \"finops-settings.test\" \"analytics-finops-export.test\" \"analytics-finops-regression.test\" \"analytics-cost-consistency.test\"",
+      "result": "PASS",
+      "suites": 5,
+      "tests": 62,
+      "passed": 62,
+      "failed": 0,
+      "note": "Includes the 3 analytics-cost-consistency tests that the analytics.ts fix resolved (usage totals derive cost from pricing when raw cost_usd is zero; /costs spec breakdown returns last 20 newest-first; workspace-scoped rorca breakdown ordering)."
+    },
+    "frontendFinOpsTests": {
+      "command": "npx vitest run src/panels/__tests__/FinOpsDashboardPanel.test.tsx src/panels/settings/__tests__/FinOpsSettingsTab.test.tsx src/panels/__tests__/AnalyticsPanel.test.tsx src/components/__tests__/RunExecutionTabs.test.tsx",
+      "result": "PASS_WITH_PREEXISTING_FAILURE",
+      "suites": 4,
+      "passedSuites": 3,
+      "tests": 20,
+      "passed": 19,
+      "failed": 1,
+      "note": "All FinOps-surface suites (FinOpsDashboardPanel, FinOpsSettingsTab, RunExecutionTabs) pass. The single failure is in AnalyticsPanel.test.tsx — see preExistingBlockers below. Earlier FinOps frontend run also confirmed 38 FinOpsTab/settings tests green."
+    }
+  },
+  "ciToolGuardNote": "The Jest pattern 'finops' MUST NOT be used: the worktree directory name contains the substring 'finops', so Jest's path-based matcher matches all ~190 test files and OOMs at the 8GB heap cap. Always pass explicit test-file basenames.",
+  "preExistingBlockers": [
+    {
+      "test": "src/panels/__tests__/AnalyticsPanel.test.tsx > renders a distinct overview instead of duplicating usage",
+      "symptom": "waitFor times out asserting screen.getByText('Recent Spec Costs') and 'Model Snapshot'.",
+      "rootCause": "Stale test from a component split. The strings 'Recent Spec Costs' and 'Model Snapshot' live in src/panels/AnalyticsOverviewPanel.tsx:220,251, but the test renders <AnalyticsPanel /> which no longer contains them. Test uses a fully mocked apiFetch, so it does not exercise any backend code.",
+      "evidenceOfPreExisting": "git: both src/panels/AnalyticsPanel.tsx and the test were last modified in commit 277d101e4 'chore: make rorca OSS-ready' (2026-05-31), which predates the entire FIN series (FIN-005 = 33542a3ac). Verified by `git stash push -- backend/src/routes/analytics.ts` then re-running the test: it failed IDENTICALLY (1 failed) without my change, confirming it is unrelated to FIN-010 work and to the only modified file.",
+      "scope": "Out of FIN-010 scope: not a FinOps accounting surface (dashboard/per-run/settings/exports) and not affected by the analytics.ts edit. No change made; documented per AC3."
+    },
+    {
+      "test": "backend analytics.test.ts (pi-providers float precision + ontology-health/AGE) — observed in earlier full-suite exploration",
+      "symptom": "pi-providers aggregation expects 9.99 but PG real/float4 returns 9.989999771118164; ontology-health tests require Apache AGE graph extension.",
+      "rootCause": "Postgres float4 round-trip precision and unavailability of the Apache AGE extension in the local test DB.",
+      "evidenceOfPreExisting": "Confirmed via `git stash` of analytics.ts: failures persisted without my change. These endpoints are unrelated to /usage, /costs, or the accounting engine.",
+      "scope": "Out of FIN-010 scope; not a FinOps accounting surface. No change made; documented per AC3."
+    }
+  ],
+  "accountingSemanticsAgreement": {
+    "sharedEngine": "All surfaces (dashboard, per-run FinOpsTab, exports) consume the DB-free pure accounting engine backend/src/lib/finops-accounting.ts via shared helpers toUsageRecord(), buildAccountingContext(), loadActiveBillingProfiles(), computeAccounting()/computeAccountingPerRecord() in analytics.ts. Per-record values reconcile exactly with aggregates.",
+    "meteredOnly": { "verifiedBy": "analytics.test.ts (metered_api provider) + finops-accounting.test.ts", "result": "Metered marginal cost from pricing; allocated=0; blended=metered. PASS." },
+    "subscriptionOnly": { "verifiedBy": "analytics.test.ts (subscription provider) + finops-accounting.test.ts", "result": "Subscription produces zero marginal cost; flat fee allocated across runs per allocation method; blended=allocated. PASS." },
+    "mixed": { "verifiedBy": "analytics.test.ts (mixed-provider case)", "result": "Metered + subscription combine: blended = metered + allocated, with coverage/provenance reported. PASS." },
+    "exportsParity": { "verifiedBy": "analytics-finops-export.test.ts + analytics-finops-regression.test.ts", "result": "CSV/export columns carry full accounting columns and match the API/UI numbers. PASS." },
+    "costConsistencyFix": { "verifiedBy": "analytics-cost-consistency.test.ts", "result": "/usage and /costs now derive total_cost_usd from model_pricing (raw fallback for unpriced), matching the dashboard and accounting engine. PASS." }
+  },
+  "activeRunBehavior": {
+    "verifiedBy": "FinOpsTab.tsx review + analytics.test.ts active-run cases",
+    "details": [
+      "FinOpsTab polls every 5000ms when isActive; loadedRef keeps provider rows/cards visible during background polls (no flip to loading/empty).",
+      "hasAnyRows keeps provider rows visible for active runs before usage arrives.",
+      "Coverage states report null/partial honestly rather than implying full coverage while usage is still arriving (analytics.test.ts coverage=null case).",
+      "Billing badges (BillingBadge) render truthfully per provider for in-flight WAL subscription usage."
+    ]
+  },
+  "liveCliRunEvidence": {
+    "satisfies": ["AC1", "AC2", "AC6"],
+    "runId": "20260316000381",
+    "specPath": "forge/specs/approved/state-of-the-art-finops-accounting-and-ux.json",
+    "agent": "claude",
+    "agentType": "claude",
+    "model": "claude-opus-4-8",
+    "parallelism": 1,
+    "forcedSequential": true,
+    "terminalMode": "ansi-html",
+    "status": "running",
+    "lastHeartbeat": "2026-06-04T19:47:42.938Z",
+    "sequentialStoryProgression": [
+      "FIN-001 pass", "FIN-002 pass", "FIN-003 pass", "FIN-004 pass", "FIN-005 pass",
+      "FIN-006 pass", "FIN-007 pass", "FIN-008 pass", "FIN-009 pass", "FIN-010 (executing — this session)"
+    ],
+    "uiLogStreamingProof": {
+      "endpoint": "GET /api/pipeline/runs/20260316000381/stories/FIN-010/stream",
+      "protocol": "Server-Sent Events (text/event-stream) — the exact path the UI Run View/RunTerminal subscribes to via src/lib/sse-hub.ts",
+      "observed": "Endpoint emitted ': connected' then live 'event: output' chunks (base64) during execution.",
+      "decodedSample": "Decoded chunks were verbatim narration of THIS FIN-010 session (e.g. 'I'll start by understanding the task and the codebase structure. This is FIN-010, a final validation task for the FinOps accounting feature...'), confirming run log streaming is visible in the UI in real time throughout execution.",
+      "note": "The run-level log file lives in the main repo's forge/logs (run-20260316000381.log) rather than this worktree; the SSE/story_output_chunks path is the UI-facing streaming channel and was confirmed actively flowing."
+    },
+    "modelResolution": "claude-opus-4-8 resolved and is the live agent_model for the run. CLAUDE_BIN env was empty; execution-engine.ts:453 resolves it via `which claude` -> /Users/dimitriteravanessian/.nvm/versions/node/v20.19.6/bin/claude. No model-resolution failure."
+  },
+  "devServers": { "backend": "http://localhost:3030 UP", "frontend": "http://localhost:5210 UP" },
+  "unresolvedIssues": [],
+  "safetyChecks": {
+    "noUnrelatedDirtyFiles": true,
+    "changedFilesCount": 1,
+    "onlyFinOpsSurfaceTouched": true,
+    "preExistingFailuresNotIntroduced": true,
+    "preExistingFailuresProvenViaStash": true
+  }
+}
