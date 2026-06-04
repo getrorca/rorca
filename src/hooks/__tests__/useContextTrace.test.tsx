@@ -127,7 +127,12 @@ describe('useContextTrace', () => {
 
   it('resolves raw payload lazily and caches it', async () => {
     const record = { rawRef: 'r42:0', runId: 42, seq: 0, phase: 'prompt', ts: '', payload: { big: 'blob' } };
-    mockApiFetch.mockResolvedValue(record as never);
+    // The hook fires a backfill fetch on mount (context-inspector-events).
+    // Only mock the raw trace endpoint for this test; let the backfill resolve harmlessly.
+    mockApiFetch.mockImplementation(async (url: unknown) => {
+      if (typeof url === 'string' && url.includes('/context-trace/')) return record;
+      return { events: [] }; // backfill response
+    });
 
     const { result } = renderHook(() => useContextTrace('42'));
     push(makeTraceWalEvent(42, 0));
@@ -138,14 +143,20 @@ describe('useContextTrace', () => {
     });
 
     expect(resolved).toEqual(record);
-    expect(mockApiFetch).toHaveBeenCalledTimes(1);
-    expect(mockApiFetch).toHaveBeenCalledWith('/api/pipeline/runs/42/context-trace/r42%3A0');
+    const rawCalls = mockApiFetch.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('/context-trace/'),
+    );
+    expect(rawCalls).toHaveLength(1);
+    expect(rawCalls[0][0]).toBe('/api/pipeline/runs/42/context-trace/r42%3A0');
 
     // Second call should hit the cache, not the network.
     await act(async () => {
       await result.current.resolveRaw('r42:0');
     });
-    expect(mockApiFetch).toHaveBeenCalledTimes(1);
+    const rawCallsAfter = mockApiFetch.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('/context-trace/'),
+    );
+    expect(rawCallsAfter).toHaveLength(1);
   });
 
   it('surfaces resolution errors through getRawState', async () => {

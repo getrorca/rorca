@@ -1,0 +1,81 @@
+{
+  "storyId": "SMG-006",
+  "title": "Spec-Centric Memory Relevance Graph — End-to-End Verification",
+  "status": "PASS",
+  "timestamp": "2026-06-04T05:30:00Z",
+  "plan": [
+    "Explore SMG feature codebase (SMG-001 through SMG-005 commits)",
+    "Run backend and frontend TypeScript type checks",
+    "Verify spec-relevance-graph endpoint returns correct shape (hub, rings, nodes, edges, scoreLegend, fallback/cap metadata)",
+    "Verify semantic-only/partial labeling when graph/path evidence is absent",
+    "Verify context-trace streaming endpoints return non-empty chunks",
+    "Run focused backend tests for spec-relevance-graph, graph, memory-ledger, memory-graph, context-trace, pipeline-context-trace endpoints",
+    "Run focused frontend tests for SpecRelevanceGraph, ContextInspector, PreFlightGraph, MemoryPanel, useContextTrace",
+    "Fix failures and rerun until passing"
+  ],
+  "filesChanged": [
+    {
+      "path": "backend/src/lib/context-trace.ts",
+      "reason": "makeRawRef: coerce pg-bigint strings to numbers — pg driver returns BIGINT as string, causing Number.isInteger() to fail for auto-increment run IDs (20260316000001+)"
+    },
+    {
+      "path": "src/hooks/useContextTrace.ts",
+      "reason": "Add in-flight promise deduplication for resolveRaw() — prevents duplicate fetch requests when React re-renders between loading and resolved states, matching the existing pattern used by resolveRetrievalTelemetry()"
+    },
+    {
+      "path": "src/hooks/__tests__/useContextTrace.test.tsx",
+      "reason": "Fix 'resolves raw payload lazily and caches it' test — the hook now fires a backfill fetch (context-inspector-events) on mount which the old test did not account for. Updated assertion to filter by URL pattern instead of total call count."
+    }
+  ],
+  "validationsRun": {
+    "frontendTypeCheck": { "command": "npx tsc --noEmit", "result": "PASS", "errors": 0 },
+    "backendTypeCheck": { "command": "cd backend && npx tsc --noEmit", "result": "PASS", "errors": 0 },
+    "backendTests": {
+      "command": "cd backend && npx jest --testPathPattern='spec-relevance-graph|pipeline-context-trace|memory-ledger|memory-graph|context-trace'",
+      "result": "PASS",
+      "suites": 6,
+      "tests": 78,
+      "passed": 78,
+      "failed": 0
+    },
+    "frontendTests": {
+      "command": "npx vitest run src/components/__tests__/SpecRelevanceGraph.test.tsx src/components/__tests__/ContextInspector.test.tsx src/components/__tests__/PreFlightGraph.test.tsx src/panels/__tests__/MemoryPanel.test.tsx src/hooks/__tests__/useContextTrace.test.tsx",
+      "result": "PASS",
+      "suites": 5,
+      "tests": 125,
+      "passed": 125,
+      "failed": 0
+    }
+  },
+  "endpointVerification": {
+    "specRelevanceGraph": {
+      "endpoint": "GET /api/spec-relevance-graph",
+      "testedWith": "supertest (18 tests)",
+      "verifiedFields": ["available", "hub", "hub.type", "hub.ring", "hub.specId", "nodes", "edges", "scoreLegend", "summary", "caps", "truncation", "fallback"],
+      "hubAndRingLayout": "Hub (ring 0), files (ring 1), memories (ring 2) — all verified",
+      "scoreLegend": "Contains semantic, graph, recency, skill, arbiter, keyword fields",
+      "fallbackMetadata": "ageAvailable, telemetryAvailable, graphPathsAvailable, missingReasons — all verified"
+    },
+    "semanticOnlyLabeling": {
+      "testCase": "returns graph/path as null with missing reason when graph proximity unavailable",
+      "evidence": "droppedMem.scoreBreakdown.graph === null, droppedEdge.evidence matches /proximity unavailable/i",
+      "testCase2": "reports AGE unavailable in fallback when checkAge returns false",
+      "evidence2": "fallback.ageAvailable === false, missingReasons contains 'Apache AGE not available'"
+    },
+    "streamingVerification": {
+      "endpoint": "GET /api/pipeline/runs/:runId/context-trace/:rawRef",
+      "testedWith": "supertest integration tests (7 tests)",
+      "evidence": "Lazy raw payload resolution returns 200 with rawRef, runId, phase, payload. Duplicate delivery is idempotent. Corrupt artifacts return 422."
+    }
+  },
+  "unresolvedIssues": [],
+  "modelResolution": {
+    "note": "No Opus 4.8 model resolution was attempted in this session. All tests ran with existing mocks (claude-sonnet-4-5-20250929). No model resolution failure to report."
+  },
+  "safetyChecks": {
+    "noUnrelatedDirtyFiles": true,
+    "noLiveDbInJest": true,
+    "noStaleWorktreeBypass": true,
+    "changedFilesCount": 3
+  }
+}
