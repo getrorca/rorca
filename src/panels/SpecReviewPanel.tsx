@@ -279,8 +279,13 @@ function StoryFilterBar({
 const STORY_MODEL_OPTIONS = [
   { value: '', label: 'Default (run-level)' },
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 — fast' },
+  { value: 'claude-sonnet-4-5-20250929', label: 'Sonnet 4.5 — balanced' },
   { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — balanced' },
+  { value: 'claude-sonnet-4-7', label: 'Sonnet 4.7 — balanced' },
+  { value: 'claude-sonnet-4-8', label: 'Sonnet 4.8 — balanced' },
   { value: 'claude-opus-4-6', label: 'Opus 4.6 — powerful' },
+  { value: 'claude-opus-4-7', label: 'Opus 4.7 — powerful' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8 — powerful' },
 ];
 
 function StoryReviewCard({
@@ -946,7 +951,7 @@ export default function SpecReviewPanel({
     } catch (err: any) {
       const status = err?.status ?? err?.statusCode;
       if (status === 422) {
-        toast.show('No skills installed. Visit the Marketplace to install skills.', 'warning');
+        toast.show('No skills installed. Visit Skills to install skills.', 'warning');
       } else {
         toast.show(`Skill matching failed: ${err?.message || 'Unknown error'}`, 'error');
       }

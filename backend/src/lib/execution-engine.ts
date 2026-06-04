@@ -477,11 +477,6 @@ interface PiCliSelection {
   model: string | null;
 }
 
-const CLAUDE_CLI_MODEL_ALIASES: Record<string, string> = {
-  'claude-opus-4.8': 'claude-opus-4-6',
-  'claude-opus-4-8': 'claude-opus-4-6',
-};
-
 export function resolveClaudeCliModelId(requestedModel: string | null): string | null {
   if (!requestedModel) return null;
 
@@ -490,7 +485,12 @@ export function resolveClaudeCliModelId(requestedModel: string | null): string |
   if (trimmed.includes('/')) return null;
   if (!/^claude-/.test(trimmed)) return null;
 
-  return CLAUDE_CLI_MODEL_ALIASES[trimmed] ?? trimmed;
+  // Normalize dotted Claude version syntax to the CLI's dash-delimited model IDs.
+  // Examples:
+  //   claude-opus-4.8 -> claude-opus-4-8
+  //   claude-sonnet-4.7 -> claude-sonnet-4-7
+  //   claude-haiku-4.5-20251001 -> claude-haiku-4-5-20251001
+  return trimmed.replace(/-(\d+)\.(\d+)(?:(-\d{8})?)$/, '-$1-$2$3');
 }
 
 function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {

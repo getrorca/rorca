@@ -60,9 +60,11 @@ describe('execution-engine meaningful change detection', () => {
     expect(getStoriesFromStart(stories).map((story) => story.id)).toEqual(['CTM-001', 'CTM-002', 'CTM-003', 'CTM-004']);
   });
 
-  test('normalizes unsupported dotted Claude Opus model aliases to the supported CLI model', () => {
-    expect(resolveClaudeCliModelId('claude-opus-4.8')).toBe('claude-opus-4-6');
-    expect(resolveClaudeCliModelId('claude-opus-4-8')).toBe('claude-opus-4-6');
+  test('normalizes dotted Claude model aliases to dash-delimited CLI model IDs', () => {
+    expect(resolveClaudeCliModelId('claude-opus-4.8')).toBe('claude-opus-4-8');
+    expect(resolveClaudeCliModelId('claude-opus-4.7')).toBe('claude-opus-4-7');
+    expect(resolveClaudeCliModelId('claude-sonnet-4.8')).toBe('claude-sonnet-4-8');
+    expect(resolveClaudeCliModelId('claude-haiku-4.5-20251001')).toBe('claude-haiku-4-5-20251001');
     expect(resolveClaudeCliModelId('claude-opus-4-6')).toBe('claude-opus-4-6');
     expect(resolveClaudeCliModelId('openrouter/anthropic/claude-opus-4.6')).toBeNull();
   });
