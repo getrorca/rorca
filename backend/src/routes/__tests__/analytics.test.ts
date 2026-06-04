@@ -64,6 +64,7 @@ process.env.AUTH_REQUIRED = 'true';
   await execute(`DELETE FROM memories WHERE workspace_id = $1`, [WS_ID]);
   await execute(`DELETE FROM token_usage WHERE workspace_id = $1`, [WS_ID]);
   await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
+  await execute(`DELETE FROM billing_profiles WHERE workspace_id = $1 OR workspace_id IS NULL`, [WS_ID]);
   await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [WS_ID]);
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WS_ID, wsDir]);
   await execute(
@@ -79,7 +80,7 @@ afterEach(async () => {
   // Use require() to get the CURRENT module instance (post-resetModules) for cleanup
   try {
     const db = require('../../db/index');
-    await db.execute('TRUNCATE token_usage, story_results, pipeline_runs, workspace_members, workspaces, users CASCADE');
+    await db.execute('TRUNCATE token_usage, story_results, pipeline_runs, billing_profiles, workspace_members, workspaces, users CASCADE');
     await db.closePool();
   } catch { /* ignore */ }
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -205,6 +206,69 @@ async function seedPiProviderData(workspaceId: string, authIdForWorkspace?: stri
        ($3, 'US-999', $2, 'claude-sonnet-4-5-20250929', 999, 999, 9.99, NOW())`,
     [piRun!.id, workspaceId, nonPiRun!.id],
   );
+}
+
+/** Upsert a model_pricing row using per-1M rates. */
+async function seedPricing(modelId: string, provider: string, inputPer1m: number, outputPer1m: number) {
+  await execute(
+    `INSERT INTO model_pricing (model_id, provider, input_cost_per_1k, output_cost_per_1k, input_cost_per_1m, output_cost_per_1m, effective_date)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (model_id) DO UPDATE SET
+       provider = EXCLUDED.provider,
+       input_cost_per_1m = EXCLUDED.input_cost_per_1m,
+       output_cost_per_1m = EXCLUDED.output_cost_per_1m`,
+    [modelId, provider, inputPer1m / 1000, outputPer1m / 1000, inputPer1m, outputPer1m],
+  );
+}
+
+/** Insert a subscription billing profile (global or workspace-scoped). */
+async function seedSubscriptionProfile(opts: {
+  provider: string;
+  modelPattern?: string | null;
+  monthlyCostUsd: number;
+  allocationBasis?: 'none' | 'even' | 'by_tokens' | 'by_runs';
+  workspaceId?: string | null;
+}) {
+  await execute(
+    `INSERT INTO billing_profiles (workspace_id, provider, model_pattern, billing_mode, monthly_cost_usd, allocation_basis, effective_from, enabled)
+     VALUES ($1, $2, $3, 'subscription', $4, $5, NOW() - INTERVAL '365 days', TRUE)`,
+    [opts.workspaceId ?? null, opts.provider, opts.modelPattern ?? null, opts.monthlyCostUsd, opts.allocationBasis ?? 'even'],
+  );
+}
+
+/**
+ * Seed a historical FinOps fixture: a run with metered Anthropic usage (priced),
+ * subscription OpenAI usage, and an unpriced model — within the date window.
+ */
+async function seedHistoricalFinOps() {
+  const run = await queryOne<{ id: number }>(
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
+     VALUES ('forge/specs/approved/fin-historical.json', $1, 'done', NOW() - INTERVAL '5 days', NOW() - INTERVAL '4 days')
+     RETURNING id`,
+    [WS_ID],
+  );
+  const runId = run!.id;
+
+  // Metered, priced Anthropic usage.
+  await execute(
+    `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+     VALUES ($1, 'US-001', $2, 'claude-opus-4-6', 1000000, 500000, 0, NOW() - INTERVAL '5 days')`,
+    [runId, WS_ID],
+  );
+  // Subscription OpenAI usage (no marginal cost — allocated from the profile).
+  await execute(
+    `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+     VALUES ($1, 'US-002', $2, 'gpt-4o', 200000, 50000, 0, NOW() - INTERVAL '4 days')`,
+    [runId, WS_ID],
+  );
+  // Unpriced, unclassified model — surfaced via coverage, not as cost.
+  await execute(
+    `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+     VALUES ($1, 'US-003', $2, 'mystery/local-model', 300000, 100000, 0, NOW() - INTERVAL '3 days')`,
+    [runId, WS_ID],
+  );
+
+  return runId;
 }
 
 // ─── GET /api/analytics/usage ────────────────────────────────────────────────
@@ -864,5 +928,177 @@ describe('PUT /api/analytics/roi/config', () => {
     expect(res.body.config.hourly_rate).toBe(100);
     expect(res.body.estimated_hours_saved).toBe(20); // 2 passed * 10 hours
     expect(res.body.savings_value).toBe(2000); // 20 hours * $100
+  });
+});
+
+// ─── GET /api/analytics/finops/historical (FIN-003) ──────────────────────────
+
+describe('GET /api/analytics/finops/historical', () => {
+  test('requires authentication', async () => {
+    const res = await request(app).get('/api/analytics/finops/historical');
+    expect(res.status).toBe(401);
+  });
+
+  test('returns empty accounting + null coverage fraction when no usage exists', async () => {
+    const res = await get(`/api/analytics/finops/historical?workspace_id=${WS_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.accounting).toBeDefined();
+    expect(res.body.accounting.meteredCostUsd).toBe(0);
+    expect(res.body.accounting.allocatedSubscriptionCostUsd).toBe(0);
+    expect(res.body.accounting.blendedEffectiveCostUsd).toBe(0);
+    expect(res.body.accounting.coverage.totalRecords).toBe(0);
+    // No metered rows → pricing coverage is null, not a misleading 1.0/0.
+    expect(res.body.accounting.coverage.pricingCoverage).toBeNull();
+    expect(res.body.dailyTrend).toEqual([]);
+    expect(res.body.byProvider).toEqual([]);
+    expect(res.body.dateRange).toBeDefined();
+  });
+
+  test('separates metered API spend, allocated subscription cost, and blended effective cost', async () => {
+    // claude-opus-4-6 priced at $10/1M input, $40/1M output (metered).
+    await seedPricing('claude-opus-4-6', 'anthropic', 10, 40);
+    // gpt-4o is priced too, but a subscription profile overrides its billing mode.
+    await seedPricing('gpt-4o', 'openai', 5, 15);
+    // OpenAI runs under a $30/mo subscription, allocated evenly.
+    await seedSubscriptionProfile({ provider: 'openai', monthlyCostUsd: 30, allocationBasis: 'even' });
+
+    await seedHistoricalFinOps();
+
+    const res = await get(`/api/analytics/finops/historical?workspace_id=${WS_ID}`);
+
+    expect(res.status).toBe(200);
+    const acct = res.body.accounting;
+
+    // Metered: claude-opus row = 1M*$10/1M + 0.5M*$40/1M = 10 + 20 = $30.
+    expect(acct.meteredCostUsd).toBeCloseTo(30, 2);
+    // Subscription cost is allocated from the $30/mo profile (single bucket → $30).
+    expect(acct.allocatedSubscriptionCostUsd).toBeCloseTo(30, 2);
+    // Blended = metered + allocated.
+    expect(acct.blendedEffectiveCostUsd).toBeCloseTo(60, 2);
+
+    // Subscription usage volume is reported separately, never as direct spend.
+    expect(acct.subscriptionUsage.inputTokens).toBe(200000);
+    expect(acct.subscriptionUsage.outputTokens).toBe(50000);
+    expect(acct.subscriptionUsage.recordCount).toBe(1);
+
+    // byMode carries metered + subscription rollups.
+    const metered = acct.byMode.find((m: any) => m.mode === 'metered_api');
+    const subscription = acct.byMode.find((m: any) => m.mode === 'subscription');
+    expect(metered.meteredCostUsd).toBeCloseTo(30, 2);
+    expect(metered.allocatedCostUsd).toBe(0);
+    expect(subscription.allocatedCostUsd).toBeCloseTo(30, 2);
+    expect(subscription.meteredCostUsd).toBe(0);
+
+    expect(acct.coverage.hasAllocatedCost).toBe(true);
+    expect(acct.coverage.hasBlendedCost).toBe(true);
+    expect(acct.coverage.allocationModes).toContain('even');
+  });
+
+  test('reports coverage/provenance for unpriced and profile-classified rows', async () => {
+    await seedPricing('claude-opus-4-6', 'anthropic', 10, 40);
+    await seedSubscriptionProfile({ provider: 'openai', monthlyCostUsd: 30, allocationBasis: 'even' });
+
+    await seedHistoricalFinOps();
+
+    const res = await get(`/api/analytics/finops/historical?workspace_id=${WS_ID}`);
+    expect(res.status).toBe(200);
+    const cov = res.body.accounting.coverage;
+
+    expect(cov.totalRecords).toBe(3);
+    // gpt-4o classified by profile (subscription); the other two via heuristic.
+    expect(cov.profileClassifiedRecords).toBe(1);
+    // claude-opus priced (metered); gpt-4o unpriced here but subscription (not
+    // counted as unpriced-metered); mystery model is unknown + unpriced.
+    expect(cov.pricedRecords).toBe(1);
+    // Only the claude-opus row is a metered row, and it is priced → coverage 1.0.
+    expect(cov.pricingCoverage).toBe(1);
+  });
+
+  test('keeps run/story counts from execution rows when token history is incomplete', async () => {
+    // No pricing and no profiles: cost stays explicit (zero metered), but the
+    // run/story counts must still come from the execution rows themselves.
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
+       VALUES ('forge/specs/approved/fin-sparse.json', $1, 'done', NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day')
+       RETURNING id`,
+      [WS_ID],
+    );
+    // Two stories with ZERO token columns — incomplete token history.
+    await execute(
+      `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES
+         ($1, 'US-001', $2, 'claude-opus-4-6', 0, 0, 0, NOW() - INTERVAL '2 days'),
+         ($1, 'US-002', $2, 'claude-opus-4-6', 0, 0, 0, NOW() - INTERVAL '1 day')`,
+      [run!.id, WS_ID],
+    );
+
+    const res = await get(`/api/analytics/finops/historical?workspace_id=${WS_ID}`);
+    expect(res.status).toBe(200);
+
+    // Cost provenance stays explicit: no priced tokens → zero metered cost.
+    expect(res.body.accounting.meteredCostUsd).toBe(0);
+    expect(res.body.accounting.blendedEffectiveCostUsd).toBe(0);
+
+    // Counts still populated from execution rows despite zero tokens.
+    const ws = res.body.byWorkspace.find((w: any) => w.workspaceId === WS_ID);
+    expect(ws).toBeDefined();
+    expect(ws.runCount).toBe(1);
+    const month = res.body.byMonth[0];
+    expect(month.storyCount).toBe(2);
+    expect(month.runCount).toBe(1);
+  });
+
+  test('provider, spec, and month aggregations carry billing mode + coverage', async () => {
+    await seedPricing('claude-opus-4-6', 'anthropic', 10, 40);
+    await seedSubscriptionProfile({ provider: 'openai', monthlyCostUsd: 30, allocationBasis: 'even' });
+
+    await seedHistoricalFinOps();
+
+    const res = await get(`/api/analytics/finops/historical?workspace_id=${WS_ID}`);
+    expect(res.status).toBe(200);
+
+    const anthropic = res.body.byProvider.find((p: any) => p.provider === 'anthropic');
+    const openai = res.body.byProvider.find((p: any) => p.provider === 'openai');
+    expect(anthropic.billingMode).toBe('metered_api');
+    expect(anthropic.meteredCostUsd).toBeCloseTo(30, 2);
+    expect(openai.billingMode).toBe('subscription');
+    expect(openai.allocatedSubscriptionCostUsd).toBeCloseTo(30, 2);
+    expect(openai.coverage).toBeDefined();
+
+    // Spec aggregation carries the blended figure and coverage.
+    const spec = res.body.bySpec.find((s: any) => s.specSlug === 'fin-historical');
+    expect(spec).toBeDefined();
+    expect(spec.blendedEffectiveCostUsd).toBeCloseTo(60, 2);
+    expect(spec.coverage.totalRecords).toBe(3);
+
+    // Month aggregation likewise separates accounting modes.
+    const month = res.body.byMonth.find((m: any) => m.blendedEffectiveCostUsd > 0);
+    expect(month.meteredCostUsd).toBeGreaterThan(0);
+    expect(month.allocatedSubscriptionCostUsd).toBeGreaterThan(0);
+    expect(Array.isArray(month.byMode)).toBe(true);
+  });
+
+  test('all-provider aggregation stays compatible and reports allSubscription only when no metered spend', async () => {
+    // Pure subscription window: OpenAI subscription usage with no metered rows.
+    await seedSubscriptionProfile({ provider: 'openai', monthlyCostUsd: 20, allocationBasis: 'even' });
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at)
+       VALUES ('forge/specs/approved/fin-sub-only.json', $1, 'done', NOW())
+       RETURNING id`,
+      [WS_ID],
+    );
+    await execute(
+      `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES ($1, 'US-001', $2, 'gpt-4o', 100000, 20000, 0, NOW() - INTERVAL '1 day')`,
+      [run!.id, WS_ID],
+    );
+
+    const res = await get(`/api/analytics/finops/historical?workspace_id=${WS_ID}`);
+    expect(res.status).toBe(200);
+    expect(res.body.allSubscription).toBe(true);
+    expect(res.body.savings).toBeNull();
+    expect(res.body.accounting.meteredCostUsd).toBe(0);
+    expect(res.body.accounting.allocatedSubscriptionCostUsd).toBeCloseTo(20, 2);
   });
 });
