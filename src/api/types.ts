@@ -232,6 +232,79 @@ export interface PricingEntry {
   output_cost_per_1m: number;
 }
 
+// ─── FinOps billing-profile types (FIN-005) ───────────────────────────────────
+//
+// Mirrors the canonical backend BillingProfile shape (backend/src/lib/finops-types.ts).
+// A billing profile declares HOW a provider/model is paid for — distinct from
+// PricingEntry, which holds per-token rates. The two compose in the accounting
+// engine: a profile classifies the billing mode and how a flat subscription cost
+// is allocated across runs over an effective date window.
+
+/** How a provider/model is billed. */
+export type BillingMode =
+  | 'metered_api'
+  | 'subscription'
+  | 'managed'
+  | 'free_local'
+  | 'unknown';
+
+export const BILLING_MODES: readonly BillingMode[] = [
+  'metered_api',
+  'subscription',
+  'managed',
+  'free_local',
+  'unknown',
+] as const;
+
+/** How a flat subscription cost is attributed to individual runs. */
+export type AllocationBasis = 'none' | 'even' | 'by_tokens' | 'by_runs';
+
+export const ALLOCATION_BASES: readonly AllocationBasis[] = [
+  'none',
+  'even',
+  'by_tokens',
+  'by_runs',
+] as const;
+
+/** Normalized billing profile returned by the API (numbers already coerced). */
+export interface BillingProfile {
+  id: number;
+  /** null = global profile applying to every workspace. */
+  workspaceId: string | null;
+  provider: string;
+  /** Optional glob-ish model match, e.g. 'claude-opus-*'. null = all models. */
+  modelPattern: string | null;
+  billingMode: BillingMode;
+  /** Only set for subscription mode. */
+  monthlyCostUsd: number | null;
+  allocationBasis: AllocationBasis;
+  effectiveFrom: string;
+  /** null = open-ended (still in effect). */
+  effectiveTo: string | null;
+  notes: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Request body for create/update. Mirrors the snake_case contract the backend
+ * route validates. Optional fields fall back to backend defaults
+ * (allocation_basis='none', enabled=true, effective_from=now()).
+ */
+export interface BillingProfileInput {
+  workspace_id?: string | null;
+  provider: string;
+  model_pattern?: string | null;
+  billing_mode: BillingMode;
+  monthly_cost_usd?: number | null;
+  allocation_basis?: AllocationBasis;
+  effective_from?: string;
+  effective_to?: string | null;
+  notes?: string | null;
+  enabled?: boolean;
+}
+
 // ─── Notification types ───────────────────────────────────────────────────────
 
 export interface Notification {
