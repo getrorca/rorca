@@ -477,6 +477,22 @@ interface PiCliSelection {
   model: string | null;
 }
 
+const CLAUDE_CLI_MODEL_ALIASES: Record<string, string> = {
+  'claude-opus-4.8': 'claude-opus-4-6',
+  'claude-opus-4-8': 'claude-opus-4-6',
+};
+
+export function resolveClaudeCliModelId(requestedModel: string | null): string | null {
+  if (!requestedModel) return null;
+
+  const trimmed = requestedModel.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes('/')) return null;
+  if (!/^claude-/.test(trimmed)) return null;
+
+  return CLAUDE_CLI_MODEL_ALIASES[trimmed] ?? trimmed;
+}
+
 function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
   if (!requestedModel) return { provider: null, model: null };
 
@@ -1941,6 +1957,7 @@ function buildPtyCommand(
           fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
         }
       }
+      const claudeCliModel = resolveClaudeCliModelId(agentModel);
       return {
         command: CLAUDE_BIN,
         args: [
@@ -1948,7 +1965,7 @@ function buildPtyCommand(
           '--print',
           '--verbose',
           '--output-format', 'stream-json',
-          ...(agentModel && /^claude-/.test(agentModel) && !agentModel.includes('/') ? ['--model', agentModel] : []),
+          ...(claudeCliModel ? ['--model', claudeCliModel] : []),
           ...(thinkingEnabled ? ['--thinking'] : []),
           ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
           ...(effortLevel ? ['--effort', effortLevel] : []),
@@ -2455,14 +2472,13 @@ function spawnClaude(
     }
 
     // Pipe prompt via stdin — positional args silently fail for large prompts (>~32KB).
+    const claudeCliModel = resolveClaudeCliModelId(agentModel);
     const args = [
       '--dangerously-skip-permissions',
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
-      // Only pass --model to Claude CLI if it's a valid claude-* ID.
-      // OpenRouter models (z-ai/glm-5, etc.) must not be forwarded here.
-      ...(agentModel && /^claude-/.test(agentModel) && !agentModel.includes('/') ? ['--model', agentModel] : []),
+      ...(claudeCliModel ? ['--model', claudeCliModel] : []),
       ...(thinkingEnabled ? ['--thinking'] : []),
       ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
       ...(effortLevel ? ['--effort', effortLevel] : []),
