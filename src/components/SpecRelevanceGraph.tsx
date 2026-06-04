@@ -47,6 +47,7 @@ interface GraphNodeProps {
   focused: boolean;
   onFocus: (id: string) => void;
   onBlur: () => void;
+  onClick?: (node: PositionedNode) => void;
 }
 
 const NODE_RADIUS: Record<string, number> = {
@@ -56,7 +57,7 @@ const NODE_RADIUS: Record<string, number> = {
   context: 14,
 };
 
-function GraphNode({ node, focused, onFocus, onBlur }: GraphNodeProps) {
+function GraphNode({ node, focused, onFocus, onBlur, onClick }: GraphNodeProps) {
   const vs = nodeVisualState(node);
   const r = NODE_RADIUS[node.type] ?? 14;
   const badge = vs.badge;
@@ -64,12 +65,13 @@ function GraphNode({ node, focused, onFocus, onBlur }: GraphNodeProps) {
 
   return (
     <g
-      className={vs.cssClass}
+      className={`${vs.cssClass}${onClick ? ' cursor-pointer' : ''}`}
       role="img"
       aria-label={vs.ariaLabel}
       tabIndex={0}
       onFocus={() => onFocus(node.id)}
       onBlur={onBlur}
+      onClick={onClick ? () => onClick(node) : undefined}
       data-testid={`srg-node-${node.id}`}
       data-node-type={node.type}
       data-node-badge={badge}
@@ -344,12 +346,14 @@ export interface SpecRelevanceGraphProps {
   data: SpecRelevanceGraphResponse | null;
   state: GraphLoadingState;
   error?: string | null;
+  onNodeClick?: (node: PositionedNode) => void;
 }
 
 export default function SpecRelevanceGraph({
   data,
   state,
   error,
+  onNodeClick,
 }: SpecRelevanceGraphProps) {
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -444,6 +448,7 @@ export default function SpecRelevanceGraph({
             focused={focusedNodeId === node.id}
             onFocus={handleNodeFocus}
             onBlur={handleNodeBlur}
+            onClick={onNodeClick}
           />
         ))}
       </svg>

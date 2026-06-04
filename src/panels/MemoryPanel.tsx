@@ -6,10 +6,12 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo, type ReactNode } from 'react';
-import { AlertTriangle, BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2 } from 'lucide-react';
+import { AlertTriangle, BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2, Network } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, type MemoryAnalyticsDrilldown } from '../lib/memoryAnalyticsDrilldown';
+import SpecRelevanceGraph from '../components/SpecRelevanceGraph';
+import { useSpecRelevanceGraph } from '../hooks/useSpecRelevanceGraph';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -117,6 +119,13 @@ interface MemoryOntologyExplanation {
   tone: 'active' | 'suppressed' | 'conflict';
   label: string;
   relatedMemoryId: string;
+}
+
+/** Context for viewing a spec/story-centric relevance graph in the split pane. */
+interface SpecContextSelection {
+  specSlug: string;
+  storyId?: string;
+  label: string;
 }
 
 type MemoryViewMode = 'list' | 'graph' | 'split';
@@ -2160,6 +2169,60 @@ function EntriesSection({
   );
 }
 
+// ─── Spec Relevance Graph Pane ──────────────────────────────────────────────
+
+function SpecRelevanceGraphPane({
+  data,
+  state,
+  error,
+  onNodeClick,
+  onOpenCuration,
+}: {
+  data: import('../types/spec-relevance-graph').SpecRelevanceGraphResponse | null;
+  state: import('../types/spec-relevance-graph').GraphLoadingState;
+  error: string | null;
+  onNodeClick: (memoryEntityId: string) => void;
+  onOpenCuration: (memoryId: string) => void;
+}) {
+  const handleNodeAction = useCallback((node: import('../types/spec-relevance-graph').PositionedNode) => {
+    if (node.type === 'memory') {
+      onNodeClick(node.entityId);
+    }
+  }, [onNodeClick]);
+
+  return (
+    <section
+      className="rounded-xl border border-border bg-surface-100/70 p-4"
+      aria-label="Spec relevance graph"
+      data-testid="spec-relevance-graph-pane"
+    >
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--text)]">Spec Relevance Graph</h2>
+            <p className="mt-0.5 text-[11px] text-muted">
+              Shows how memories attach to this spec context.
+            </p>
+          </div>
+          <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-500">
+            Spec context
+          </span>
+        </div>
+
+        <SpecRelevanceGraph data={data} state={state} error={error} onNodeClick={handleNodeAction} />
+
+        {/* Node action hints */}
+        {state === 'ready' || state === 'partial' ? (
+          <div className="flex flex-wrap gap-2 text-[10px] text-muted">
+            <span>Focus a memory node to view details.</span>
+            <span>Click a memory node to jump to its ledger entry.</span>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 // ─── Main Panel ─────────────────────────────────────────────────────────────
 
 export default function MemoryPanel() {
@@ -2184,6 +2247,7 @@ export default function MemoryPanel() {
 
   // Knowledge Web
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
+  const [selectedSpecContext, setSelectedSpecContext] = useState<SpecContextSelection | null>(null);
   const [overviewGraph, setOverviewGraph] = useState<MemoryGraphResponse | null>(null);
   const [neighborhoodGraph, setNeighborhoodGraph] = useState<MemoryGraphResponse | null>(null);
   const [overviewGraphLoading, setOverviewGraphLoading] = useState(false);
@@ -2227,6 +2291,7 @@ export default function MemoryPanel() {
     setSearchText('');
     setViewMode('list');
     setSelectedMemoryId(null);
+    setSelectedSpecContext(null);
     setOverviewGraph(null);
     setNeighborhoodGraph(null);
     setOverviewGraphError(null);
@@ -2662,6 +2727,50 @@ export default function MemoryPanel() {
   );
   const graphLoading = shouldShowGraph && (overviewGraphLoading || (!overviewGraph && !overviewGraphError));
 
+  // Spec contexts derived from memory items for the spec-centric relevance graph selector
+  const availableSpecContexts = useMemo(() => {
+    const seen = new Map<string, SpecContextSelection>();
+    for (const item of items) {
+      if (item.sourceSpecId && !seen.has(item.sourceSpecId)) {
+        seen.set(item.sourceSpecId, {
+          specSlug: item.sourceSpecId,
+          storyId: item.sourceStoryId ?? undefined,
+          label: item.sourceStoryId ? `${item.sourceSpecId} / ${item.sourceStoryId}` : item.sourceSpecId,
+        });
+      }
+    }
+    return Array.from(seen.values());
+  }, [items]);
+
+  // Spec-centric relevance graph data (fetched only when a spec context is selected)
+  const specRelevanceGraph = useSpecRelevanceGraph({
+    workspaceId: selectedSpecContext ? workspaceId : null,
+    specSlug: selectedSpecContext?.specSlug,
+  });
+
+  const handleSelectSpecContext = useCallback((value: string) => {
+    if (!value) {
+      setSelectedSpecContext(null);
+      return;
+    }
+    const ctx = availableSpecContexts.find((c) => c.specSlug === value);
+    if (ctx) {
+      setSelectedSpecContext(ctx);
+    }
+  }, [availableSpecContexts]);
+
+  const handleClearSpecContext = useCallback(() => {
+    setSelectedSpecContext(null);
+  }, []);
+
+  const handleSpecGraphNodeClick = useCallback((memoryEntityId: string) => {
+    const memoryId = memoryEntityId;
+    if (items.some((item) => String(item.id) === memoryId)) {
+      setSelectedSpecContext(null);
+      setSelectedMemoryId(memoryId);
+    }
+  }, [items]);
+
   if (!loaded) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -2888,7 +2997,63 @@ export default function MemoryPanel() {
             {viewMode === 'split' && (
               <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)] xl:items-start">
                 <div className="min-w-0">{listSection}</div>
-                <div className="min-w-0">{graphSection}</div>
+                <div className="min-w-0">
+                  {/* Spec context selector */}
+                  {availableSpecContexts.length > 0 && (
+                    <div className="mb-3 flex items-center gap-2" data-testid="spec-context-selector">
+                      <Network size={14} className={selectedSpecContext ? 'text-violet-500' : 'text-muted'} />
+                      <select
+                        value={selectedSpecContext?.specSlug ?? ''}
+                        onChange={(e) => handleSelectSpecContext(e.target.value)}
+                        aria-label="Select spec context for relevance graph"
+                        className="rounded border border-border bg-bg px-2 py-1 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+                      >
+                        <option value="">Memory neighborhood</option>
+                        {availableSpecContexts.map((ctx) => (
+                          <option key={ctx.specSlug} value={ctx.specSlug}>
+                            Spec: {ctx.label}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedSpecContext && (
+                        <button
+                          type="button"
+                          onClick={handleClearSpecContext}
+                          className="rounded px-1.5 py-0.5 text-[10px] text-violet-500 hover:bg-violet-500/10"
+                          aria-label="Clear spec context"
+                        >
+                          <X size={12} />
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Mode indicator */}
+                  {selectedSpecContext && (
+                    <div
+                      className="mb-3 flex items-center gap-2 rounded-lg border border-violet-500/20 bg-violet-500/10 px-3 py-2 text-xs text-violet-300"
+                      role="status"
+                      aria-label="Spec relevance mode active"
+                      data-testid="spec-context-mode-indicator"
+                    >
+                      <Network size={14} />
+                      <span>Spec relevance graph: <strong>{selectedSpecContext.label}</strong></span>
+                    </div>
+                  )}
+
+                  {/* Right pane: spec-centric graph OR memory neighborhood */}
+                  {selectedSpecContext ? (
+                    <SpecRelevanceGraphPane
+                      data={specRelevanceGraph.data}
+                      state={specRelevanceGraph.status}
+                      error={specRelevanceGraph.error}
+                      onNodeClick={handleSpecGraphNodeClick}
+                      onOpenCuration={handleOpenCuration}
+                    />
+                  ) : (
+                    graphSection
+                  )}
+                </div>
               </div>
             )}
           </div>
