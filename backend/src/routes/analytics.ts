@@ -337,6 +337,25 @@ router.get('/usage', async (req: Request, res: Response) => {
     const groupCol = groupColumn[groupBy];
     const needsJoin = groupBy === 'spec';
 
+    // Pricing-derived total cost so usage totals stay consistent with the FinOps
+    // dashboard and /costs endpoint, which always price from model_pricing. The
+    // recorded tu.cost_usd is only a fallback for models that have no pricing
+    // entry, so unpriced legacy rows still surface their stored cost rather than
+    // collapsing to zero. Requires a `LEFT JOIN model_pricing mp` on each query.
+    const PRICED_TOTAL_COST_SQL = `
+        SUM(
+          CASE WHEN mp.model_id IS NOT NULL THEN
+            (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+              THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+              ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+            END)
+            + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+              THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+              ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+            END)
+          ELSE COALESCE(tu.cost_usd, 0) END
+        )`;
+
     let paramIdx = 1;
     let sql = `
       SELECT
@@ -344,9 +363,10 @@ router.get('/usage', async (req: Request, res: Response) => {
         SUM(tu.input_tokens) AS total_input_tokens,
         SUM(tu.output_tokens) AS total_output_tokens,
         COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
-        SUM(tu.cost_usd) AS total_cost_usd,
+        ${PRICED_TOTAL_COST_SQL} AS total_cost_usd,
         COUNT(*)::int AS count
       FROM token_usage tu
+      LEFT JOIN model_pricing mp ON tu.model = mp.model_id
     `;
     if (needsJoin) {
       sql += ' JOIN pipeline_runs pr ON tu.run_id = pr.id';
@@ -373,8 +393,9 @@ router.get('/usage', async (req: Request, res: Response) => {
         SUM(tu.input_tokens) AS total_input_tokens,
         SUM(tu.output_tokens) AS total_output_tokens,
         COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
-        SUM(tu.cost_usd) AS total_cost_usd
+        ${PRICED_TOTAL_COST_SQL} AS total_cost_usd
       FROM token_usage tu
+      LEFT JOIN model_pricing mp ON tu.model = mp.model_id
       WHERE tu.recorded_at >= $${tsParamIdx++} AND tu.recorded_at <= $${tsParamIdx++}
     `;
     const tsParams: (string | number)[] = [from, to];
@@ -393,9 +414,10 @@ router.get('/usage', async (req: Request, res: Response) => {
         COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
         COALESCE(SUM(tu.output_tokens), 0) AS total_output_tokens,
         COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
-        COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
+        COALESCE(${PRICED_TOTAL_COST_SQL}, 0) AS total_cost_usd,
         COUNT(*)::int AS total_records
       FROM token_usage tu
+      LEFT JOIN model_pricing mp ON tu.model = mp.model_id
       WHERE tu.recorded_at >= $${totParamIdx++} AND tu.recorded_at <= $${totParamIdx++}
     `;
     const totParams: (string | number)[] = [from, to];
@@ -548,7 +570,19 @@ router.get('/costs', async (req: Request, res: Response) => {
             THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
             ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
           END) AS output_cost_usd,
-          SUM(tu.cost_usd) AS total_cost_usd,
+          -- Pricing-derived total with a raw-cost fallback for unpriced models.
+          SUM(
+            CASE WHEN mp.model_id IS NOT NULL THEN
+              (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+                THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+                ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+              END)
+              + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+                THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+                ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+              END)
+            ELSE COALESCE(tu.cost_usd, 0) END
+          ) AS total_cost_usd,
           COUNT(*)::int AS story_count
         FROM token_usage tu
         LEFT JOIN model_pricing mp ON tu.model = mp.model_id
@@ -586,7 +620,23 @@ router.get('/costs', async (req: Request, res: Response) => {
           THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
           ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
         END) AS output_cost_usd,
-        SUM(tu.cost_usd) AS total_cost_usd,
+        -- total_cost_usd is the pricing-derived cost (input + output) so it stays
+        -- consistent with the per-component cost columns and the FinOps dashboard,
+        -- which always price from model_pricing. The recorded tu.cost_usd is only a
+        -- fallback for rows whose model has no pricing entry, so unpriced legacy
+        -- rows still surface their stored cost instead of dropping to zero.
+        SUM(
+          CASE WHEN mp.model_id IS NOT NULL THEN
+            (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+              THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+              ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+            END)
+            + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+              THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+              ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+            END)
+          ELSE COALESCE(tu.cost_usd, 0) END
+        ) AS total_cost_usd,
         COUNT(*)::int AS story_count
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
@@ -594,7 +644,10 @@ router.get('/costs', async (req: Request, res: Response) => {
       WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
       ${wsFilter}
       GROUP BY group_key
-      ORDER BY total_cost_usd DESC
+      -- Newest-first by the group's most recent usage, capped at the 20 most
+      -- recent groups so the breakdown stays a bounded, recency-ordered view.
+      ORDER BY MAX(tu.recorded_at) DESC
+      LIMIT 20
     `;
 
     const rawBreakdown = await query<CostRow>(sql, wsParams);
@@ -617,7 +670,20 @@ router.get('/costs', async (req: Request, res: Response) => {
           THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
           ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
         END), 0) AS total_output_cost_usd,
-        COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
+        -- Pricing-derived total with a raw-cost fallback for unpriced models,
+        -- mirroring the per-row breakdown above so totals reconcile with rows.
+        COALESCE(SUM(
+          CASE WHEN mp.model_id IS NOT NULL THEN
+            (CASE WHEN mp.input_cost_per_1m IS NOT NULL
+              THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+              ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+            END)
+            + (CASE WHEN mp.output_cost_per_1m IS NOT NULL
+              THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+              ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+            END)
+          ELSE COALESCE(tu.cost_usd, 0) END
+        ), 0) AS total_cost_usd,
         COUNT(*)::int AS total_stories
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
