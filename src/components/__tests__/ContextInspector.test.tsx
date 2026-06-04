@@ -816,3 +816,226 @@ describe('ContextInspector — structured retrievalTelemetryId on reconstructed 
     expect(retrievalCalls.length).toBe(0);
   });
 });
+
+// ─── SMG-003: Relevance Graph view in Context Inspector ─────────────────────
+
+describe('ContextInspector — Relevance Graph view', () => {
+  const graphResponse = {
+    available: true,
+    hub: { id: 'hub-1', type: 'hub', ring: 0, label: 'Run 42', entityId: 'run:42' },
+    nodes: [
+      { id: 'hub-1', type: 'hub', ring: 0, label: 'Run 42', entityId: 'run:42' },
+      { id: 'mem-1', type: 'memory', ring: 2, label: 'Auth module', entityId: 'mem:auth', sourceId: 'rt-graph', selected: true, enteredPrompt: true, relevanceScore: 0.92, scoreBreakdown: { semantic: 0.85, graph: 0.07, recency: null, skill: null, arbiter: null, keyword: null } },
+      { id: 'file-1', type: 'file', ring: 1, label: 'src/auth.ts', entityId: 'file:auth', path: 'src/auth.ts' },
+    ],
+    edges: [
+      { id: 'e1', source: 'hub-1', target: 'file-1', relation: 'routed_to', scoreContribution: null, evidence: null, visualHints: { thickness: 2, dashed: false, opacity: 1 } },
+      { id: 'e2', source: 'hub-1', target: 'mem-1', relation: 'selected_memory', scoreContribution: 0.92, evidence: 'high relevance', visualHints: { thickness: 3, dashed: false, opacity: 1 } },
+    ],
+    scoreLegend: [{ field: 'semantic', label: 'Semantic', description: 'Embedding similarity' }],
+    summary: { hubLabel: 'Run 42', nodeCount: 3, edgeCount: 2, selectedCount: 1, droppedCount: 0, avgRelevanceScore: 0.92 },
+    caps: { maxFiles: 20, maxMemories: 30, maxEdges: 80 },
+    truncation: { filesTruncated: false, memoriesTruncated: false, edgesTruncated: false, totalCandidates: 1, returnedCandidates: 1 },
+    fallback: { ageAvailable: false, telemetryAvailable: true, graphPathsAvailable: false, missingReasons: [] },
+  };
+
+  const unavailableGraphResponse = {
+    available: false,
+    hub: null,
+    nodes: [],
+    edges: [],
+    scoreLegend: [],
+    summary: { hubLabel: '', nodeCount: 0, edgeCount: 0, selectedCount: 0, droppedCount: 0, avgRelevanceScore: null },
+    caps: { maxFiles: 20, maxMemories: 30, maxEdges: 80 },
+    truncation: { filesTruncated: false, memoriesTruncated: false, edgesTruncated: false, totalCandidates: 0, returnedCandidates: 0 },
+    fallback: { ageAvailable: false, telemetryAvailable: false, graphPathsAvailable: false, missingReasons: ['No retrieval telemetry found'] },
+  };
+
+  it('does NOT fetch graph data before the graph tab is opened', () => {
+    mockApiFetch.mockImplementation(async () => ({ events: [] }));
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, { phase: 'prompt' }));
+
+    // Graph endpoint should NOT have been called.
+    const graphCalls = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/spec-relevance-graph/'),
+    );
+    expect(graphCalls.length).toBe(0);
+  });
+
+  it('fetches graph data when the graph tab is opened', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/spec-relevance-graph/')) {
+        return graphResponse;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, { phase: 'prompt' }));
+
+    // Click the graph tab.
+    fireEvent.click(screen.getByTestId('inspector-view-graph'));
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/spec-relevance-graph/by-run/42'),
+      );
+    });
+
+    // Graph canvas should render.
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-canvas')).toBeInTheDocument();
+    });
+  });
+
+  it('reuses cached graph data when switching back and forth', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/spec-relevance-graph/')) {
+        return graphResponse;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, { phase: 'prompt' }));
+
+    // Open graph tab.
+    fireEvent.click(screen.getByTestId('inspector-view-graph'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-canvas')).toBeInTheDocument();
+    });
+
+    const graphCallsAfterFirst = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/spec-relevance-graph/'),
+    ).length;
+
+    // Switch back to list.
+    fireEvent.click(screen.getByTestId('inspector-view-list'));
+    expect(screen.getByTestId('inspector-events')).toBeInTheDocument();
+
+    // Switch to graph again — should NOT re-fetch.
+    fireEvent.click(screen.getByTestId('inspector-view-graph'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-canvas')).toBeInTheDocument();
+    });
+
+    const graphCallsAfterSecond = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/spec-relevance-graph/'),
+    ).length;
+
+    expect(graphCallsAfterSecond).toBe(graphCallsAfterFirst);
+  });
+
+  it('shows unavailable state with missing reasons when graph is unavailable', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/spec-relevance-graph/')) {
+        return unavailableGraphResponse;
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, { phase: 'prompt' }));
+
+    fireEvent.click(screen.getByTestId('inspector-view-graph'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-unavailable')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/semantic-only/i)).toBeInTheDocument();
+    expect(screen.getByText(/No retrieval telemetry found/)).toBeInTheDocument();
+  });
+
+  it('shows error state when graph fetch fails', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/spec-relevance-graph/')) {
+        throw new Error('graph service down');
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, { phase: 'prompt' }));
+
+    fireEvent.click(screen.getByTestId('inspector-view-graph'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-error')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/graph service down/)).toBeInTheDocument();
+  });
+
+  it('opens retrieval detail drawer when a memory node is clicked', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (typeof path === 'string' && path.includes('/spec-relevance-graph/')) {
+        return graphResponse;
+      }
+      if (typeof path === 'string' && path.includes('/retrieval-telemetry/rt-graph')) {
+        return {
+          telemetryId: 'rt-graph',
+          runId: 42,
+          storyId: 'US-001',
+          query: 'auth',
+          selectedCandidates: [],
+          droppedCandidates: [],
+          candidateCount: 0,
+          selectedCount: 0,
+          matchedSkills: [],
+          retrievalTier: null,
+          latencyMs: null,
+          needsMoreEvidence: false,
+          tokenBudget: 4000,
+          contradictions: [],
+          rawSummary: '',
+        };
+      }
+      return { events: [] };
+    });
+
+    render(<ContextInspector runId={42} runSettled />);
+    // Push a retrieval event whose telemetryId matches the node's sourceId.
+    push(makeTraceWalEvent(42, 0, {
+      phase: 'memory',
+      label: 'retrieval:US-001',
+      retrievalTelemetryId: 'rt-graph',
+    }));
+
+    fireEvent.click(screen.getByTestId('inspector-view-graph'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-canvas')).toBeInTheDocument();
+    });
+
+    // Click the memory node.
+    fireEvent.click(screen.getByTestId('graph-node-mem-1'));
+
+    // Should trigger retrieval telemetry fetch.
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/retrieval-telemetry/rt-graph'),
+      );
+    });
+  });
+
+  it('still shows the list view tab with event list and funnel by default', () => {
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, { phase: 'prompt' }));
+
+    // Default view is list.
+    expect(screen.getByTestId('inspector-funnel')).toBeInTheDocument();
+    expect(screen.getByTestId('inspector-events')).toBeInTheDocument();
+  });
+
+  it('renders the view toggle with both List and Graph buttons', () => {
+    render(<ContextInspector runId={42} runSettled />);
+    push(makeTraceWalEvent(42, 0, { phase: 'prompt' }));
+
+    expect(screen.getByTestId('inspector-view-toggle')).toBeInTheDocument();
+    expect(screen.getByTestId('inspector-view-list')).toBeInTheDocument();
+    expect(screen.getByTestId('inspector-view-graph')).toBeInTheDocument();
+  });
+});
