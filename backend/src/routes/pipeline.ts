@@ -3277,15 +3277,28 @@ router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Re
           }
 
           for (const event of events) {
+            event.synthetic = true;
+            event.detailSource = 'artifact-metadata-fallback';
+            if (!Array.isArray(event.details)) {
+              event.details = [];
+            }
+            if (!event.details.some((detail: unknown) => typeof detail === 'string' && detail.toLowerCase().includes('metadata only'))) {
+              event.details.unshift('Raw trace artifact missing for this historical run — showing metadata only.');
+            }
+            if (event.phase === 'prompt' && typeof event.metrics?.bytes === 'number') {
+              const promptBytesDetail = `prompt bytes: ${event.metrics.bytes}`;
+              if (!event.details.some((detail: unknown) => typeof detail === 'string' && detail.trim().toLowerCase() === promptBytesDetail.toLowerCase())) {
+                event.details.push(promptBytesDetail);
+              }
+            }
+
             if (event.retrievalTelemetryId) continue;
             if (event.phase !== 'memory') continue;
             if (typeof event.storyId !== 'string' || event.storyId.length === 0) continue;
             const telemetryId = telemetryIdByStory.get(event.storyId);
             if (!telemetryId) continue;
             event.retrievalTelemetryId = telemetryId;
-            if (!Array.isArray(event.details)) {
-              event.details = [];
-            }
+            event.detailSource = 'retrieval-telemetry-fallback';
             if (!event.details.some((detail: unknown) => typeof detail === 'string' && detail.trim().toLowerCase() === `telemetry: ${telemetryId}`.toLowerCase())) {
               event.details.unshift(`telemetry: ${telemetryId}`);
             }

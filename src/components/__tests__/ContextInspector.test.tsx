@@ -776,23 +776,23 @@ describe('ContextInspector — structured retrievalTelemetryId on reconstructed 
     });
   });
 
-  it('does not extract retrievalTelemetryId when details contain no telemetry entry', async () => {
+  it('opens metadata fallback for synthetic non-retrieval events without calling raw or retrieval endpoints', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (typeof path === 'string' && path.includes('/context-inspector-events')) {
         return {
           events: [{
-            traceId: 'reconstructed:42:memory',
+            traceId: 'reconstructed:42:prompt',
             runId: 42,
             storyId: 'US-001',
             seq: 0,
             rawRef: 'synthetic:42:0',
-            phase: 'memory',
+            phase: 'prompt',
             status: 'ok',
             ts: new Date().toISOString(),
-            label: 'retrieval:US-001',
+            label: 'prompt:US-001',
             synthetic: true,
-            details: ['selected: 2', 'needs more evidence'],
-            // No retrievalTelemetryId and no telemetry entry in details.
+            metrics: { bytes: 1234, tokens: 456 },
+            details: ['Raw trace artifact missing for this historical run — showing metadata only.', 'prompt bytes: 1234'],
           }],
           reconstructed: true,
         };
@@ -806,14 +806,21 @@ describe('ContextInspector — structured retrievalTelemetryId on reconstructed 
       expect(screen.getByTestId('inspector-event-synthetic:42:0')).toBeInTheDocument();
     });
 
-    // Synthetic row without retrieval ID should NOT be clickable (no chevron path).
     fireEvent.click(screen.getByTestId('inspector-event-synthetic:42:0'));
 
-    // Should NOT call the retrieval-telemetry endpoint.
+    expect(await screen.findByTestId('context-trace-synthetic-body')).toBeInTheDocument();
+    expect(screen.getByText(/metadata-only trace/i)).toBeInTheDocument();
+    expect(screen.getByTestId('context-trace-synthetic-details')).toHaveTextContent('prompt bytes: 1234');
+
     const retrievalCalls = mockApiFetch.mock.calls.filter(
       ([p]) => typeof p === 'string' && p.includes('/retrieval-telemetry/'),
     );
     expect(retrievalCalls.length).toBe(0);
+
+    const rawCalls = mockApiFetch.mock.calls.filter(
+      ([p]) => typeof p === 'string' && p.includes('/context-trace/'),
+    );
+    expect(rawCalls.length).toBe(0);
   });
 });
 

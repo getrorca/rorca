@@ -78,7 +78,7 @@ export default function ContextTraceRawDrawer({
   // Fetch on open (and only when nothing is loaded/loading yet). This is the
   // "fetch only when a user explicitly opens a detail view" guarantee.
   useEffect(() => {
-    if (isOpen && event && !record && !loading && !error) {
+    if (isOpen && event && !event.synthetic && !record && !loading && !error) {
       onResolve(event.rawRef);
     }
   }, [isOpen, event, record, loading, error, onResolve]);
@@ -126,6 +126,8 @@ export default function ContextTraceRawDrawer({
 
         {record && !loading && !error && <RawBody payload={record.payload} />}
 
+        {event?.synthetic && !record && !loading && !error && <SyntheticEventBody event={event} />}
+
         {!event && !loading && !error && (
           <p className="text-sm text-muted py-10 text-center">No trace event selected.</p>
         )}
@@ -148,6 +150,45 @@ function RawBody({ payload }: { payload: unknown }) {
       <pre className="text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words bg-black/20 rounded p-3 overflow-x-auto">
         {text}
       </pre>
+    </div>
+  );
+}
+
+function SyntheticEventBody({ event }: { event: ContextTraceEvent }) {
+  return (
+    <div className="space-y-3" data-testid="context-trace-synthetic-body">
+      <div className="flex items-start gap-2 p-3 rounded bg-amber-500/5 border border-amber-500/20 text-sm text-amber-400">
+        <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+        <div>
+          <p className="font-medium">Metadata-only trace</p>
+          <p className="text-[12px] text-amber-400/80 mt-0.5">
+            The raw artifact is unavailable for this run, so this drawer shows the saved trace metadata instead.
+          </p>
+        </div>
+      </div>
+
+      {event.metrics && (
+        <div className="rounded border border-border/60 bg-black/10 p-3" data-testid="context-trace-synthetic-metrics">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">Metrics</p>
+          <div className="grid grid-cols-2 gap-2 text-xs text-muted">
+            {event.metrics.tokens != null && <span>Tokens: <strong className="text-[var(--text)]">{event.metrics.tokens.toLocaleString()}</strong></span>}
+            {event.metrics.bytes != null && <span>Bytes: <strong className="text-[var(--text)]">{event.metrics.bytes.toLocaleString()}</strong></span>}
+            {event.metrics.fileCount != null && <span>Files: <strong className="text-[var(--text)]">{event.metrics.fileCount.toLocaleString()}</strong></span>}
+            {event.metrics.durationMs != null && <span>Latency: <strong className="text-[var(--text)]">{event.metrics.durationMs.toLocaleString()}ms</strong></span>}
+          </div>
+        </div>
+      )}
+
+      {event.details && event.details.length > 0 && (
+        <div className="rounded border border-border/60 bg-black/10 p-3" data-testid="context-trace-synthetic-details">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">Details</p>
+          <ul className="space-y-1 text-xs text-[var(--text)] list-disc pl-4">
+            {event.details.map((detail, index) => (
+              <li key={`${event.rawRef}-detail-${index}`}>{detail}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
