@@ -11,7 +11,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { ProBadge } from '../components/UpgradePrompt';
 import { useAuth } from '../contexts/AuthContext';
-import { formatPiProviderCostLabel } from './finops/piProviderCost';
+import type { BillingMode } from '../api/types';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, BarChart, Bar, Legend,
@@ -19,9 +19,50 @@ import {
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+/** Which cost lens the user is viewing the dashboard through. */
+type CostMode = 'metered' | 'allocated' | 'blended';
+
+interface SubscriptionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  recordCount: number;
+}
+
+interface ModeBreakdown {
+  mode: BillingMode;
+  recordCount: number;
+  meteredCostUsd: number;
+  allocatedCostUsd: number;
+  blendedCostUsd: number;
+}
+
+interface Coverage {
+  totalRecords: number;
+  profileClassifiedRecords: number;
+  pricedRecords: number;
+  unpricedRecords: number;
+  pricingCoverage: number | null;
+  allocationModes: string[];
+  hasAllocatedCost: boolean;
+  hasBlendedCost: boolean;
+}
+
+interface Accounting {
+  meteredCostUsd: number;
+  allocatedSubscriptionCostUsd: number;
+  blendedEffectiveCostUsd: number;
+  subscriptionUsage: SubscriptionUsage;
+  byMode: ModeBreakdown[];
+  coverage: Coverage;
+}
+
 interface DailyTrend {
   date: string;
   cost: number;
+  meteredCostUsd?: number;
+  allocatedSubscriptionCostUsd?: number;
+  blendedEffectiveCostUsd?: number;
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -32,6 +73,9 @@ interface ByWorkspace {
   workspaceId: string;
   label: string;
   totalCost: number;
+  meteredCostUsd?: number;
+  allocatedSubscriptionCostUsd?: number;
+  blendedEffectiveCostUsd?: number;
   inputTokens: number;
   outputTokens: number;
   runCount: number;
@@ -40,6 +84,9 @@ interface ByWorkspace {
 interface BySpec {
   specSlug: string;
   totalCost: number;
+  meteredCostUsd?: number;
+  allocatedSubscriptionCostUsd?: number;
+  blendedEffectiveCostUsd?: number;
   inputTokens: number;
   outputTokens: number;
   runCount: number;
@@ -48,6 +95,9 @@ interface BySpec {
 interface ByMonth {
   month: string;
   totalCost: number;
+  meteredCostUsd?: number;
+  allocatedSubscriptionCostUsd?: number;
+  blendedEffectiveCostUsd?: number;
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -55,11 +105,29 @@ interface ByMonth {
   storyCount: number;
 }
 
+interface ByProvider {
+  provider: string;
+  billingMode: BillingMode;
+  meteredCostUsd: number;
+  allocatedSubscriptionCostUsd: number;
+  blendedEffectiveCostUsd: number;
+  subscriptionUsage: SubscriptionUsage;
+  inputTokens: number;
+  outputTokens: number;
+  runCount: number;
+  storyCount: number;
+  coverage?: Coverage;
+}
+
 interface ModelDistEntry {
   model: string;
   tier: string;
+  billingMode?: BillingMode;
   storyCount: number;
   totalCost: number;
+  meteredCostUsd?: number;
+  allocatedSubscriptionCostUsd?: number;
+  blendedEffectiveCostUsd?: number;
   percentage: number;
 }
 
@@ -71,14 +139,17 @@ interface Savings {
 }
 
 interface HistoricalData {
+  accounting?: Accounting;
   dailyTrend: DailyTrend[];
   byWorkspace: ByWorkspace[];
   bySpec: BySpec[];
   byMonth: ByMonth[];
+  byProvider?: ByProvider[];
   modelDistribution: ModelDistEntry[];
   projectedMonthlyCost: number;
   savings: Savings | null;
   allSubscription: boolean;
+  coverage?: Coverage;
   dateRange: { from: string; to: string };
 }
 
@@ -121,6 +192,69 @@ const TIER_BG: Record<string, string> = {
 
 type DateRange = '30d' | '90d' | '180d' | '365d';
 
+// ─── Billing-mode presentation ──────────────────────────────────────────────
+
+interface BillingBadge {
+  label: string;
+  className: string;
+}
+
+const BILLING_BADGES: Record<BillingMode, BillingBadge> = {
+  metered_api: { label: 'Metered API', className: 'bg-emerald-500/15 text-emerald-400' },
+  subscription: { label: 'Subscription', className: 'bg-blue-500/15 text-blue-400' },
+  managed: { label: 'Managed', className: 'bg-purple-500/15 text-purple-400' },
+  free_local: { label: 'Free / Local', className: 'bg-zinc-500/15 text-zinc-400' },
+  unknown: { label: 'Unclassified', className: 'bg-amber-500/15 text-amber-400' },
+};
+
+function billingBadge(mode: BillingMode): BillingBadge {
+  return BILLING_BADGES[mode] ?? BILLING_BADGES.unknown;
+}
+
+const COST_MODES: { id: CostMode; label: string }[] = [
+  { id: 'metered', label: 'Metered' },
+  { id: 'allocated', label: 'Allocated' },
+  { id: 'blended', label: 'Blended' },
+];
+
+const COST_MODE_DESCRIPTION: Record<CostMode, string> = {
+  metered: 'Real pay-per-token API spend only — subscription usage shown as tokens.',
+  allocated: 'Flat subscription cost attributed to runs by your allocation method.',
+  blended: 'Metered API spend plus allocated subscription cost — true effective cost.',
+};
+
+/**
+ * Pick the cost value for an aggregation row under the active cost mode.
+ * Falls back to legacy `totalCost`/`cost` when the accounting fields are absent
+ * so the panel keeps rendering against older backend responses.
+ */
+function rowCost(
+  row: {
+    meteredCostUsd?: number;
+    allocatedSubscriptionCostUsd?: number;
+    blendedEffectiveCostUsd?: number;
+    totalCost?: number;
+    cost?: number;
+  },
+  mode: CostMode,
+): number {
+  const legacy = row.totalCost ?? row.cost ?? 0;
+  switch (mode) {
+    case 'metered':
+      return row.meteredCostUsd ?? legacy;
+    case 'allocated':
+      return row.allocatedSubscriptionCostUsd ?? 0;
+    case 'blended':
+      return row.blendedEffectiveCostUsd ?? legacy;
+  }
+}
+
+const COST_MODE_VALUE_LABEL: Record<CostMode, string> = {
+  metered: 'Metered',
+  allocated: 'Allocated',
+  blended: 'Blended',
+};
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export default function FinOpsDashboardPanel() {
@@ -132,6 +266,7 @@ export default function FinOpsDashboardPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<DateRange>('90d');
+  const [costMode, setCostMode] = useState<CostMode>('blended');
   const [piProviders, setPiProviders] = useState<PiProviderUsage[]>([]);
   const [piProvidersLoading, setPiProvidersLoading] = useState(true);
   const [piProvidersError, setPiProvidersError] = useState<string | null>(null);
@@ -177,7 +312,7 @@ export default function FinOpsDashboardPanel() {
 
   useEffect(() => { fetchPiProviders(); }, [fetchPiProviders]);
 
-  // Aggregate totals
+  // Aggregate operational volume totals (mode-independent)
   const totals = useMemo(() => {
     if (!data) return { cost: 0, inputTokens: 0, outputTokens: 0, runs: 0, stories: 0 };
     return {
@@ -188,6 +323,35 @@ export default function FinOpsDashboardPanel() {
       stories: data.byMonth.reduce((s, m) => s + m.storyCount, 0),
     };
   }, [data]);
+
+  // Accounting-mode-separated cost surface. Prefer the backend's window-wide
+  // `accounting` totals; fall back to summing monthly rows for older responses.
+  const accounting = useMemo(() => {
+    if (!data) {
+      return { metered: 0, allocated: 0, blended: 0, subTokens: 0, subRecords: 0 };
+    }
+    if (data.accounting) {
+      const a = data.accounting;
+      return {
+        metered: a.meteredCostUsd,
+        allocated: a.allocatedSubscriptionCostUsd,
+        blended: a.blendedEffectiveCostUsd,
+        subTokens: a.subscriptionUsage.inputTokens + a.subscriptionUsage.outputTokens,
+        subRecords: a.subscriptionUsage.recordCount,
+      };
+    }
+    return {
+      metered: data.byMonth.reduce((s, m) => s + (m.meteredCostUsd ?? m.totalCost), 0),
+      allocated: data.byMonth.reduce((s, m) => s + (m.allocatedSubscriptionCostUsd ?? 0), 0),
+      blended: data.byMonth.reduce((s, m) => s + (m.blendedEffectiveCostUsd ?? m.totalCost), 0),
+      subTokens: 0,
+      subRecords: 0,
+    };
+  }, [data]);
+
+  // Whether any subscription allocation exists — drives whether the toggle and
+  // the metered/allocated/blended split are meaningful vs. a single number.
+  const isMixedBilling = accounting.allocated > 0 || (data?.coverage?.hasAllocatedCost ?? false);
 
   // Pie chart data
   const pieData = useMemo(() => {
@@ -202,6 +366,43 @@ export default function FinOpsDashboardPanel() {
     }
     return Array.from(tierMap.values());
   }, [data]);
+
+  // Daily trend projected onto the active cost mode (adds `modeCost`).
+  const dailyTrendForMode = useMemo(
+    () => (data?.dailyTrend ?? []).map((d) => ({ ...d, modeCost: rowCost(d, costMode) })),
+    [data, costMode],
+  );
+
+  // Monthly rows projected onto the active cost mode (adds `modeCost`).
+  const monthlyForMode = useMemo(
+    () => (data?.byMonth ?? []).map((m) => ({ ...m, modeCost: rowCost(m, costMode) })),
+    [data, costMode],
+  );
+
+  // Provider rows with billing badges. Prefer the accounting-aware
+  // `byProvider` breakdown; fall back to the legacy pi-providers aggregate so
+  // the table still renders when the historical payload lacks providers.
+  const providerRows = useMemo<ByProvider[]>(() => {
+    if (data?.byProvider && data.byProvider.length > 0) return data.byProvider;
+    return piProviders.map((p): ByProvider => {
+      const sub = p.totalCost === 0
+        && (p.provider.toLowerCase() === 'claude' || p.provider.toLowerCase() === 'codex');
+      return {
+        provider: p.provider,
+        billingMode: sub ? 'subscription' : 'metered_api',
+        meteredCostUsd: p.totalCost,
+        allocatedSubscriptionCostUsd: 0,
+        blendedEffectiveCostUsd: p.totalCost,
+        subscriptionUsage: {
+          inputTokens: 0, outputTokens: 0, reasoningTokens: 0, recordCount: 0,
+        },
+        inputTokens: p.totalInputTokens,
+        outputTokens: p.totalOutputTokens,
+        runCount: p.totalRuns,
+        storyCount: p.totalStories,
+      };
+    });
+  }, [data, piProviders]);
 
   if (loading) {
     return (
@@ -251,6 +452,29 @@ export default function FinOpsDashboardPanel() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {/* Cost-mode toggle */}
+            <div
+              role="group"
+              aria-label="Cost mode"
+              title={COST_MODE_DESCRIPTION[costMode]}
+              className="flex items-center gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg p-0.5"
+            >
+              {COST_MODES.map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setCostMode(id)}
+                  aria-pressed={costMode === id}
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    costMode === id
+                      ? 'bg-[var(--accent)] text-white'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             {/* Date range selector */}
             <div className="flex items-center gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg p-0.5">
               {(['30d', '90d', '180d', '365d'] as DateRange[]).map(range => (
@@ -283,9 +507,33 @@ export default function FinOpsDashboardPanel() {
         {data.allSubscription && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-500/10 border border-orange-500/20 text-xs text-orange-400">
             <Info size={14} className="shrink-0" />
-            <span>All runs used subscription-based agents (Claude/Codex) — token counts shown, no dollar costs.</span>
+            <span>All runs used subscription-based agents (Claude/Codex) — token counts shown, no metered dollar costs. Configure an allocation method in FinOps settings to attribute subscription cost.</span>
           </div>
         )}
+
+        {/* Missing-pricing notice */}
+        {!data.allSubscription
+          && data.coverage
+          && data.coverage.unpricedRecords > 0 && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
+            <Info size={14} className="shrink-0" />
+            <span>
+              {data.coverage.unpricedRecords} record{data.coverage.unpricedRecords === 1 ? '' : 's'} have no pricing
+              {data.coverage.pricingCoverage != null
+                ? ` (${Math.round(data.coverage.pricingCoverage * 100)}% priced)`
+                : ''} — metered cost may be understated.
+            </span>
+          </div>
+        )}
+
+        {/* Cost-mode explainer */}
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--border)] text-xs text-[var(--text-muted)]">
+          <Info size={14} className="shrink-0" />
+          <span>
+            <span className="font-medium text-[var(--text)]">{COST_MODE_VALUE_LABEL[costMode]} view:</span>{' '}
+            {COST_MODE_DESCRIPTION[costMode]}
+          </span>
+        </div>
 
         {/* Savings banner */}
         {data.savings && (
@@ -310,20 +558,44 @@ export default function FinOpsDashboardPanel() {
           </div>
         )}
 
-        {/* Summary cards */}
-        <div className="grid grid-cols-5 gap-3">
-          <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
-            <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Cost</div>
-            <div className="text-lg font-mono font-medium">
-              {data.allSubscription ? '—' : formatCost(totals.cost)}
-            </div>
-          </div>
-          <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
-            <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Projected Monthly</div>
-            <div className="text-lg font-mono font-medium">
-              {data.allSubscription ? '—' : formatCost(data.projectedMonthlyCost)}
-            </div>
-          </div>
+        {/* Cost summary cards — clearly separated billing semantics */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <SummaryCard
+            label="Metered API Spend"
+            value={formatCost(accounting.metered)}
+            hint="Real pay-per-token cost"
+            active={costMode === 'metered'}
+          />
+          <SummaryCard
+            label="Subscription Usage"
+            value={
+              accounting.subRecords > 0 || data.allSubscription
+                ? formatTokens(accounting.subTokens)
+                : '—'
+            }
+            hint={accounting.subRecords > 0 || data.allSubscription ? 'Tokens, no metered $' : 'No subscription runs'}
+          />
+          <SummaryCard
+            label="Allocated Subscription"
+            value={isMixedBilling || accounting.allocated > 0 ? formatCost(accounting.allocated) : '—'}
+            hint="Flat cost attributed to runs"
+            active={costMode === 'allocated'}
+          />
+          <SummaryCard
+            label="Blended Effective"
+            value={formatCost(accounting.blended)}
+            hint="Metered + allocated"
+            active={costMode === 'blended'}
+          />
+          <SummaryCard
+            label="Projected Monthly"
+            value={data.allSubscription && accounting.blended === 0 ? '—' : formatCost(data.projectedMonthlyCost)}
+            hint={`Based on ${COST_MODE_VALUE_LABEL.blended.toLowerCase()} cost`}
+          />
+        </div>
+
+        {/* Operational volume cards */}
+        <div className="grid grid-cols-3 gap-3">
           <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
             <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Tokens</div>
             <div className="text-lg font-mono font-medium">{formatTokens(totals.inputTokens + totals.outputTokens)}</div>
@@ -345,17 +617,19 @@ export default function FinOpsDashboardPanel() {
             <div className="px-4 py-2.5 border-b border-[var(--border)] flex items-center gap-2">
               <Calendar size={14} className="text-[var(--text-muted)]" />
               <span className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
-                {data.allSubscription ? 'Daily Token Usage' : 'Daily Spend'}
+                {data.allSubscription
+                  ? 'Daily Token Usage'
+                  : `Daily ${COST_MODE_VALUE_LABEL[costMode]} Spend`}
               </span>
             </div>
             <div className="p-4" style={{ height: 280 }}>
-              {data.dailyTrend.length === 0 ? (
+              {dailyTrendForMode.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-xs text-[var(--text-muted)]">
                   No data in selected range
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={data.dailyTrend}>
+                  <LineChart data={dailyTrendForMode}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                     <XAxis
                       dataKey="date"
@@ -375,7 +649,7 @@ export default function FinOpsDashboardPanel() {
                       }}
                       formatter={((value: string | number | undefined, name: string | number | undefined) => {
                         const v = typeof value === 'number' ? value : Number(value ?? 0);
-                        if (name === 'cost') return [formatCost(v), 'Cost'];
+                        if (name === 'modeCost') return [formatCost(v), `${COST_MODE_VALUE_LABEL[costMode]} cost`];
                         return [formatTokens(v), name === 'inputTokens' ? 'Input' : 'Output'];
                       }) as any}
                     />
@@ -385,7 +659,7 @@ export default function FinOpsDashboardPanel() {
                         <Line type="monotone" dataKey="outputTokens" stroke="#06b6d4" strokeWidth={2} dot={false} name="outputTokens" />
                       </>
                     ) : (
-                      <Line type="monotone" dataKey="cost" stroke="var(--accent)" strokeWidth={2} dot={false} name="cost" />
+                      <Line type="monotone" dataKey="modeCost" stroke="var(--accent)" strokeWidth={2} dot={false} name="modeCost" />
                     )}
                   </LineChart>
                 </ResponsiveContainer>
@@ -450,16 +724,18 @@ export default function FinOpsDashboardPanel() {
         </div>
 
         {/* Monthly cost bar chart */}
-        {data.byMonth.length > 0 && (
+        {monthlyForMode.length > 0 && (
           <div className="rounded-lg bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
             <div className="px-4 py-2.5 border-b border-[var(--border)]">
               <span className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
-                {data.allSubscription ? 'Monthly Token Usage' : 'Monthly Cost'}
+                {data.allSubscription
+                  ? 'Monthly Token Usage'
+                  : `Monthly ${COST_MODE_VALUE_LABEL[costMode]} Cost`}
               </span>
             </div>
             <div className="p-4" style={{ height: 240 }}>
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data.byMonth}>
+                <BarChart data={monthlyForMode}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                   <XAxis
                     dataKey="month"
@@ -478,7 +754,7 @@ export default function FinOpsDashboardPanel() {
                     }}
                     formatter={((value: string | number | undefined, name: string | number | undefined) => {
                       const v = typeof value === 'number' ? value : Number(value ?? 0);
-                      if (name === 'totalCost') return [formatCost(v), 'Cost'];
+                      if (name === 'modeCost') return [formatCost(v), `${COST_MODE_VALUE_LABEL[costMode]} cost`];
                       if (name === 'inputTokens') return [formatTokens(v), 'Input Tokens'];
                       if (name === 'reasoningTokens') return [formatTokens(v), 'Thinking Tokens'];
                       return [formatTokens(v), 'Output Tokens'];
@@ -488,12 +764,12 @@ export default function FinOpsDashboardPanel() {
                     <>
                       <Bar dataKey="inputTokens" fill="#3b82f6" radius={[4, 4, 0, 0]} name="inputTokens" />
                       <Bar dataKey="outputTokens" fill="#06b6d4" radius={[4, 4, 0, 0]} name="outputTokens" />
-                      {data.byMonth.some(m => (m.reasoningTokens ?? 0) > 0) && (
+                      {monthlyForMode.some(m => (m.reasoningTokens ?? 0) > 0) && (
                         <Bar dataKey="reasoningTokens" fill="#f59e0b" radius={[4, 4, 0, 0]} name="reasoningTokens" />
                       )}
                     </>
                   ) : (
-                    <Bar dataKey="totalCost" fill="var(--accent)" radius={[4, 4, 0, 0]} name="totalCost" />
+                    <Bar dataKey="modeCost" fill="var(--accent)" radius={[4, 4, 0, 0]} name="modeCost" />
                   )}
                 </BarChart>
               </ResponsiveContainer>
@@ -518,7 +794,7 @@ export default function FinOpsDashboardPanel() {
                     <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Runs</th>
                     <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Tokens</th>
                     {!data.allSubscription && (
-                      <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Cost</th>
+                      <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">{COST_MODE_VALUE_LABEL[costMode]}</th>
                     )}
                   </tr>
                 </thead>
@@ -529,7 +805,7 @@ export default function FinOpsDashboardPanel() {
                       <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{w.runCount}</td>
                       <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{formatTokens(w.inputTokens + w.outputTokens)}</td>
                       {!data.allSubscription && (
-                        <td className="px-3 py-1.5 text-right font-mono">{formatCost(w.totalCost)}</td>
+                        <td className="px-3 py-1.5 text-right font-mono">{formatCost(rowCost(w, costMode))}</td>
                       )}
                     </tr>
                   ))}
@@ -554,7 +830,7 @@ export default function FinOpsDashboardPanel() {
                       <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Runs</th>
                       <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Tokens</th>
                       {!data.allSubscription && (
-                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Cost</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">{COST_MODE_VALUE_LABEL[costMode]}</th>
                       )}
                     </tr>
                   </thead>
@@ -565,7 +841,7 @@ export default function FinOpsDashboardPanel() {
                         <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{s.runCount}</td>
                         <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{formatTokens(s.inputTokens + s.outputTokens)}</td>
                         {!data.allSubscription && (
-                          <td className="px-3 py-1.5 text-right font-mono">{formatCost(s.totalCost)}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{formatCost(rowCost(s, costMode))}</td>
                         )}
                       </tr>
                     ))}
@@ -587,10 +863,11 @@ export default function FinOpsDashboardPanel() {
                 <tr className="border-b border-[var(--border)]">
                   <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Model</th>
                   <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Tier</th>
+                  <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Billing</th>
                   <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Stories</th>
                   <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">%</th>
                   {!data.allSubscription && (
-                    <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Cost</th>
+                    <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">{COST_MODE_VALUE_LABEL[costMode]}</th>
                   )}
                 </tr>
               </thead>
@@ -603,10 +880,13 @@ export default function FinOpsDashboardPanel() {
                         {m.tier}
                       </span>
                     </td>
+                    <td className="px-3 py-1.5">
+                      <BillingModeBadge mode={m.billingMode} hasTokens={m.storyCount > 0} />
+                    </td>
                     <td className="px-3 py-1.5 text-right font-mono">{m.storyCount}</td>
                     <td className="px-3 py-1.5 text-right font-mono text-[var(--text-muted)]">{m.percentage}%</td>
                     {!data.allSubscription && (
-                      <td className="px-3 py-1.5 text-right font-mono">{formatCost(m.totalCost)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono">{formatCost(rowCost(m, costMode))}</td>
                     )}
                   </tr>
                 ))}
@@ -615,7 +895,7 @@ export default function FinOpsDashboardPanel() {
           </div>
         )}
 
-        {(piProvidersLoading || piProvidersError || piProviders.length > 0) && (
+        {(piProvidersLoading || piProvidersError || providerRows.length > 0) && (
           <div className="rounded-lg bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
             <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between gap-3">
               <div>
@@ -623,7 +903,7 @@ export default function FinOpsDashboardPanel() {
                   Providers
                 </div>
                 <div className="text-xs text-[var(--text-muted)] mt-0.5">
-                  Provider-level usage and marginal cost across all execution providers
+                  Provider-level usage and {COST_MODE_VALUE_LABEL[costMode].toLowerCase()} cost, with billing classification
                 </div>
               </div>
               {piProvidersLoading && (
@@ -631,12 +911,12 @@ export default function FinOpsDashboardPanel() {
               )}
             </div>
 
-            {piProvidersError ? (
+            {piProvidersError && providerRows.length === 0 ? (
               <div className="px-4 py-6 flex items-center justify-between gap-3">
                 <span className="text-sm text-red-400">{piProvidersError}</span>
                 <button onClick={fetchPiProviders} className="text-xs text-[var(--accent)] hover:underline">Retry</button>
               </div>
-            ) : piProvidersLoading ? (
+            ) : piProvidersLoading && providerRows.length === 0 ? (
               <div className="px-4 py-6 text-sm text-[var(--text-muted)]">
                 Loading provider aggregates...
               </div>
@@ -647,26 +927,29 @@ export default function FinOpsDashboardPanel() {
                     <thead>
                       <tr className="border-b border-[var(--border)]">
                         <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Provider</th>
+                        <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Billing</th>
                         <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Runs</th>
                         <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Stories</th>
                         <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Input</th>
                         <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Output</th>
-                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Total Cost</th>
-                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Avg/Story</th>
-                        <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Last Used</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">{COST_MODE_VALUE_LABEL[costMode]}</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {piProviders.map((row) => (
+                      {providerRows.map((row) => (
                         <tr key={row.provider} className="border-b border-[var(--border)] last:border-0">
                           <td className="px-3 py-1.5 font-mono">{row.provider}</td>
-                          <td className="px-3 py-1.5 text-right font-mono">{row.totalRuns}</td>
-                          <td className="px-3 py-1.5 text-right font-mono">{row.totalStories}</td>
-                          <td className="px-3 py-1.5 text-right font-mono">{formatTokens(row.totalInputTokens)}</td>
-                          <td className="px-3 py-1.5 text-right font-mono">{formatTokens(row.totalOutputTokens)}</td>
-                          <td className="px-3 py-1.5 text-right"><PiProviderCostCell provider={row.provider} cost={row.totalCost} /></td>
-                          <td className="px-3 py-1.5 text-right font-mono">{formatPiProviderCostLabel(row.provider, row.avgCostPerStory)}</td>
-                          <td className="px-3 py-1.5 text-[var(--text-muted)]">{formatPiProviderLastUsed(row.lastUsed)}</td>
+                          <td className="px-3 py-1.5">
+                            <BillingModeBadge
+                              mode={row.billingMode}
+                              hasTokens={row.inputTokens + row.outputTokens > 0}
+                            />
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono">{row.runCount}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{row.storyCount}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{formatTokens(row.inputTokens)}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{formatTokens(row.outputTokens)}</td>
+                          <td className="px-3 py-1.5 text-right"><ProviderCostCell row={row} mode={costMode} /></td>
                         </tr>
                       ))}
                     </tbody>
@@ -674,19 +957,23 @@ export default function FinOpsDashboardPanel() {
                 </div>
 
                 <div className="md:hidden divide-y divide-[var(--border)]">
-                  {piProviders.map((row) => (
+                  {providerRows.map((row) => (
                     <div key={row.provider} className="p-4 space-y-3">
                       <div className="flex items-center justify-between gap-3">
                         <span className="font-mono text-sm">{row.provider}</span>
-                        <PiProviderCostCell provider={row.provider} cost={row.totalCost} />
+                        <ProviderCostCell row={row} mode={costMode} />
+                      </div>
+                      <div className="flex">
+                        <BillingModeBadge
+                          mode={row.billingMode}
+                          hasTokens={row.inputTokens + row.outputTokens > 0}
+                        />
                       </div>
                       <div className="grid grid-cols-2 gap-3">
-                        <MetricCard label="Runs" value={String(row.totalRuns)} />
-                        <MetricCard label="Stories" value={String(row.totalStories)} />
-                        <MetricCard label="Input" value={formatTokens(row.totalInputTokens)} />
-                        <MetricCard label="Output" value={formatTokens(row.totalOutputTokens)} />
-                        <MetricCard label="Avg/Story" value={formatPiProviderCostLabel(row.provider, row.avgCostPerStory)} />
-                        <MetricCard label="Last Used" value={formatPiProviderLastUsed(row.lastUsed)} />
+                        <MetricCard label="Runs" value={String(row.runCount)} />
+                        <MetricCard label="Stories" value={String(row.storyCount)} />
+                        <MetricCard label="Input" value={formatTokens(row.inputTokens)} />
+                        <MetricCard label="Output" value={formatTokens(row.outputTokens)} />
                       </div>
                     </div>
                   ))}
@@ -700,18 +987,80 @@ export default function FinOpsDashboardPanel() {
   );
 }
 
-function PiProviderCostCell({ provider, cost }: { provider: string; cost: number }) {
-  const label = formatPiProviderCostLabel(provider, cost);
+/**
+ * Render a billing-mode badge. When a subscription/managed provider has token
+ * activity but no token data was captured, surface the "No Token Data" hint.
+ */
+function BillingModeBadge({ mode, hasTokens }: { mode?: BillingMode; hasTokens: boolean }) {
+  const resolved: BillingMode = mode ?? 'unknown';
+  const badge = billingBadge(resolved);
+  const showNoTokens = !hasTokens
+    && (resolved === 'subscription' || resolved === 'managed');
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded ${badge.className}`}>
+        {badge.label}
+      </span>
+      {showNoTokens && (
+        <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-zinc-500/15 text-zinc-400">
+          No Token Data
+        </span>
+      )}
+    </span>
+  );
+}
 
-  if (label === 'Sub') {
+/**
+ * Cost cell for a provider row under the active cost mode. Subscription
+ * providers with zero metered/blended cost render a "Subscription" pill rather
+ * than a misleading $0.00, and a "Missing Pricing" hint shows when a metered
+ * provider produced tokens but no cost.
+ */
+function ProviderCostCell({ row, mode }: { row: ByProvider; mode: CostMode }) {
+  const value = rowCost(row, mode);
+  const hasTokens = row.inputTokens + row.outputTokens > 0;
+
+  if (value === 0 && (row.billingMode === 'subscription' || row.billingMode === 'managed')) {
     return (
       <span className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-400">
-        Sub
+        Subscription
       </span>
     );
   }
 
-  return <span className="font-mono">{label}</span>;
+  if (value === 0 && row.billingMode === 'metered_api' && hasTokens) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
+        Missing Pricing
+      </span>
+    );
+  }
+
+  return <span className="font-mono">{formatCost(value)}</span>;
+}
+
+function SummaryCard({
+  label,
+  value,
+  hint,
+  active = false,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  active?: boolean;
+}) {
+  return (
+    <div
+      className={`p-3 rounded-lg border bg-[var(--surface)] transition-colors ${
+        active ? 'border-[var(--accent)]' : 'border-[var(--border)]'
+      }`}
+    >
+      <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">{label}</div>
+      <div className="text-lg font-mono font-medium">{value}</div>
+      {hint && <div className="text-[10px] text-[var(--text-muted)] mt-0.5">{hint}</div>}
+    </div>
+  );
 }
 
 function MetricCard({ label, value }: { label: string; value: string }) {
@@ -721,10 +1070,4 @@ function MetricCard({ label, value }: { label: string; value: string }) {
       <div className="mt-1 font-mono text-[var(--text)]">{value}</div>
     </div>
   );
-}
-
-function formatPiProviderLastUsed(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
 }
