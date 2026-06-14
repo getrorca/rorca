@@ -1083,6 +1083,29 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+type PersistContextCaptureState = 'provided' | 'backfilled' | 'missing';
+type PersistContextCaptureReason =
+  | 'caller_supplied_context'
+  | 'context_summary_derived_from_context_used_meta'
+  | 'caller_context_not_supplied'
+  | 'context_used_missing_meta';
+
+type PersistStageStatus = 'pending' | 'skipped';
+type PersistStageReason = 'requested_by_caller' | 'disabled_by_caller';
+
+interface PersistContextCaptureStatus {
+  status: PersistContextCaptureState;
+  reason: PersistContextCaptureReason;
+  contextUsed: 'provided' | 'missing';
+  contextSummary: 'provided' | 'backfilled' | 'missing';
+}
+
+interface PersistPostSaveStageState {
+  requested: boolean;
+  status: PersistStageStatus;
+  reason: PersistStageReason;
+}
+
 function buildContextSummaryFromExplicitDraftContext(input: {
   contextUsed?: unknown;
   contextSummary?: Record<string, unknown>;
@@ -1137,9 +1160,80 @@ function buildContextSummaryFromExplicitDraftContext(input: {
   return normalized;
 }
 
+function buildPersistContextCaptureStatus(input: {
+  contextUsed?: unknown;
+  callerContextSummary?: Record<string, unknown>;
+  resolvedContextSummary?: Record<string, unknown>;
+}): PersistContextCaptureStatus {
+  const callerProvidedContextSummary = isObjectRecord(input.callerContextSummary) && Object.keys(input.callerContextSummary).length > 0;
+  if (callerProvidedContextSummary) {
+    return {
+      status: 'provided',
+      reason: 'caller_supplied_context',
+      contextUsed: input.contextUsed !== undefined ? 'provided' : 'missing',
+      contextSummary: 'provided',
+    };
+  }
+
+  if (input.resolvedContextSummary) {
+    return {
+      status: 'backfilled',
+      reason: 'context_summary_derived_from_context_used_meta',
+      contextUsed: input.contextUsed !== undefined ? 'provided' : 'missing',
+      contextSummary: 'backfilled',
+    };
+  }
+
+  if (input.contextUsed !== undefined) {
+    return {
+      status: 'missing',
+      reason: 'context_used_missing_meta',
+      contextUsed: 'provided',
+      contextSummary: 'missing',
+    };
+  }
+
+  return {
+    status: 'missing',
+    reason: 'caller_context_not_supplied',
+    contextUsed: 'missing',
+    contextSummary: 'missing',
+  };
+}
+
+function buildPersistPostSaveStages(postSave: SpecPostSaveOptions): Record<keyof SpecPostSaveOptions, PersistPostSaveStageState> {
+  const buildStage = (requested: boolean): PersistPostSaveStageState => ({
+    requested,
+    status: requested ? 'pending' : 'skipped',
+    reason: requested ? 'requested_by_caller' : 'disabled_by_caller',
+  });
+
+  return {
+    enrich: buildStage(postSave.enrich),
+    matchSkills: buildStage(postSave.matchSkills),
+    memorySynthesis: buildStage(postSave.memorySynthesis),
+  };
+}
+
+function buildPersistGenerationLogSummaryText(input: {
+  pendingEnrichment: boolean;
+  contextCaptureStatus: PersistContextCaptureStatus;
+}): string {
+  const contextText = input.contextCaptureStatus.status === 'provided'
+    ? 'caller-provided context'
+    : input.contextCaptureStatus.status === 'backfilled'
+      ? 'backfilled context summary'
+      : 'missing caller context';
+  return input.pendingEnrichment
+    ? `Explicit draft persisted with ${contextText}; pending post-save enrichment`
+    : `Explicit draft persisted with ${contextText}`;
+}
+
 async function seedPersistGenerationLog(input: {
   slug: string;
   source: string;
+  sourceMode?: string;
+  invocationSurface?: string;
   title: string;
   storyCount: number;
   model?: string;
@@ -1147,25 +1241,33 @@ async function seedPersistGenerationLog(input: {
   postSave: SpecPostSaveOptions;
   normalizationChanges: Array<{ from?: string; to: string; reason: string }>;
   contextUsed?: unknown;
-  contextSummary?: Record<string, unknown>;
+  callerContextSummary?: Record<string, unknown>;
+  resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
 }): Promise<void> {
   const pendingEnrichment = input.postSave.enrich;
   const status = pendingEnrichment ? 'pending_enrichment' : 'persisted';
-  const resolvedContextSummary = buildContextSummaryFromExplicitDraftContext({
+  const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
+  const invocationSurface = input.invocationSurface?.trim() || 'api.specs.persist';
+  const postSaveStages = buildPersistPostSaveStages(input.postSave);
+  const contextCaptureStatus = buildPersistContextCaptureStatus({
     contextUsed: input.contextUsed,
-    contextSummary: input.contextSummary,
-    model: input.model,
+    callerContextSummary: input.callerContextSummary,
+    resolvedContextSummary: input.resolvedContextSummary,
   });
   const summaryJson = {
     source: input.source,
+    sourceMode,
+    invocationSurface,
     title: input.title,
     storyCount: input.storyCount,
     overwrite: input.overwrite,
     pendingEnrichment,
     postSave: input.postSave,
+    postSaveStages,
+    contextCaptureStatus,
     normalizationChanges: input.normalizationChanges,
-    ...(resolvedContextSummary ? { contextSummary: resolvedContextSummary } : {}),
+    ...(input.resolvedContextSummary ? { contextSummary: input.resolvedContextSummary } : {}),
     ...(input.contextUsed !== undefined ? { contextUsed: input.contextUsed } : {}),
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
   };
@@ -1187,13 +1289,7 @@ async function seedPersistGenerationLog(input: {
       input.model?.trim() || 'explicit-draft',
       'api',
       0,
-      resolvedContextSummary
-        ? (pendingEnrichment
-          ? 'Explicit draft persisted with captured context summary; pending post-save enrichment'
-          : 'Explicit draft persisted with captured context summary')
-        : (pendingEnrichment
-          ? 'Explicit draft persisted; pending post-save enrichment'
-          : 'Explicit draft persisted without post-save enrichment'),
+      buildPersistGenerationLogSummaryText({ pendingEnrichment, contextCaptureStatus }),
       'none',
       JSON.stringify(summaryJson),
       status,
@@ -1278,6 +1374,7 @@ interface ForgePersistResult {
 async function persistExplicitDraftInternal(
   req: Request | undefined,
   body: z.infer<typeof PersistSpecDraftSchema>,
+  options?: { sourceMode?: string; invocationSurface?: string },
 ): Promise<ForgePersistResult> {
   const workspaceId = String(body.workspaceId);
   const workspace = await getWorkspace(workspaceId, req);
@@ -1360,6 +1457,8 @@ async function persistExplicitDraftInternal(
   await seedPersistGenerationLog({
     slug,
     source,
+    ...(options?.sourceMode ? { sourceMode: options.sourceMode } : {}),
+    ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
     title,
     storyCount: normalizedStories.length,
     model: body.model,
@@ -1367,7 +1466,8 @@ async function persistExplicitDraftInternal(
     postSave,
     normalizationChanges: changes,
     contextUsed: body.contextUsed,
-    contextSummary: resolvedContextSummary,
+    callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
+    resolvedContextSummary,
     reasoning: body.reasoning,
   });
 
@@ -1973,6 +2073,9 @@ async function executeSkillFirstForge(options: ExecuteSkillFirstForgeOptions): P
     source: 'skill-first-backend',
     ...(options.overwrite ? { overwrite: true } : {}),
     postSave: parsedBody.postSave ?? options.postSaveDefaults,
+  }, {
+    sourceMode: 'skill-first',
+    invocationSurface: 'api.specs.forge',
   });
 
   return {

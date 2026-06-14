@@ -599,9 +599,56 @@ describe('POST /api/specs/persist', () => {
     const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'explicit-draft.json'), 'utf8'));
     expect(saved.source).toBe('explicit-draft');
     expect(saved.userStories).toHaveLength(2);
+    expect(saved.contextUsed).toBeUndefined();
+    expect(saved.contextSummary).toBeUndefined();
+
+    const logRes = await request(app)
+      .get('/api/specs/explicit-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.sourceMode).toBe('explicit-draft');
+    expect(summary.invocationSurface).toBe('api.specs.persist');
+    expect(summary.contextCaptureStatus).toEqual({
+      status: 'missing',
+      reason: 'caller_context_not_supplied',
+      contextUsed: 'missing',
+      contextSummary: 'missing',
+    });
+    expect(summary.postSaveStages).toEqual({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+    expect(summary.contextSummary).toBeUndefined();
+    expect(summary.contextUsed).toBeUndefined();
   });
 
   test('seeds a generation log immediately so the Context tab is non-null before enrich completes', async () => {
+    const callerContextSummary = {
+      directionLayers: {
+        l1: true,
+        l2: { present: true, domain: 'devtools' },
+        l3: true,
+      },
+      skills: ['rorca-forge'],
+      memoryEntries: 3,
+      agentsMd: true,
+      template: null,
+      schemaSnapshot: true,
+      gitMemory: false,
+      estimatedTokens: 1234,
+      modelContextWindow: 200000,
+      retrieval: {
+        cagHits: 2,
+        ragHits: 5,
+        graphHits: 1,
+        tier: 'hybrid',
+        latencyMs: 31,
+      },
+    };
+
     const persistRes = await request(app)
       .post('/api/specs/persist')
       .set('Authorization', `Bearer ${authToken}`)
@@ -622,32 +669,15 @@ describe('POST /api/specs/persist', () => {
             scopesMatched: [],
           },
         },
-        contextSummary: {
-          directionLayers: {
-            l1: true,
-            l2: { present: true, domain: 'devtools' },
-            l3: true,
-          },
-          skills: ['rorca-forge'],
-          memoryEntries: 3,
-          agentsMd: true,
-          template: null,
-          schemaSnapshot: true,
-          gitMemory: false,
-          estimatedTokens: 1234,
-          modelContextWindow: 200000,
-          retrieval: {
-            cagHits: 2,
-            ragHits: 5,
-            graphHits: 1,
-            tier: 'hybrid',
-            latencyMs: 31,
-          },
-        },
+        contextSummary: callerContextSummary,
       });
 
     expect(persistRes.status).toBe(200);
     expect(persistRes.body.postSave).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
+
+    const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'immediate-context-draft.json'), 'utf8'));
+    expect(saved.contextSummary).toEqual(callerContextSummary);
+    expect(saved.contextUsed.text).toBe('SYNTHESIZED CONTEXT');
 
     const logRes = await request(app)
       .get('/api/specs/immediate-context-draft/generation-log')
@@ -659,13 +689,26 @@ describe('POST /api/specs/persist', () => {
     expect(logRes.body.status).toBe('pending_enrichment');
     expect(logRes.body.enriched).toBe(false);
     expect(logRes.body.retrieval_method).toBe('none');
-    expect(logRes.body.context_summary).toContain('Explicit draft persisted');
+    expect(logRes.body.context_summary).toContain('caller-provided context');
 
     const summary = parsePayload(logRes.body.context_summary_json);
     expect(summary.source).toBe('explicit-draft');
+    expect(summary.sourceMode).toBe('explicit-draft');
+    expect(summary.invocationSurface).toBe('api.specs.persist');
     expect(summary.storyCount).toBe(1);
     expect(summary.pendingEnrichment).toBe(true);
     expect(summary.postSave).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
+    expect(summary.contextCaptureStatus).toEqual({
+      status: 'provided',
+      reason: 'caller_supplied_context',
+      contextUsed: 'provided',
+      contextSummary: 'provided',
+    });
+    expect(summary.postSaveStages).toEqual({
+      enrich: { requested: true, status: 'pending', reason: 'requested_by_caller' },
+      matchSkills: { requested: true, status: 'pending', reason: 'requested_by_caller' },
+      memorySynthesis: { requested: true, status: 'pending', reason: 'requested_by_caller' },
+    });
     const contextUsed = summary.contextUsed as { text: string };
     const contextSummary = summary.contextSummary as {
       directionLayers: unknown;
@@ -683,6 +726,85 @@ describe('POST /api/specs/persist', () => {
       graphHits: 1,
       tier: 'hybrid',
       latencyMs: 31,
+    });
+  });
+
+  test('backfills a canonical context summary from contextUsed metadata when callers omit contextSummary', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Backfilled Context Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        contextUsed: {
+          text: 'SYNTHESIZED CONTEXT',
+          meta: {
+            standards: true,
+            conventions: false,
+            project: true,
+            schema: true,
+            totalTokens: 222,
+            memoryEntries: 2,
+            skills: ['rorca-forge'],
+            predictedFiles: ['backend/src/routes/specs.ts'],
+          },
+        },
+        postSave: { enrich: false, matchSkills: true, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.contextSummary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: false, domain: null },
+        l3: true,
+      },
+      memoryEntries: 2,
+      estimatedTokens: 222,
+      predictedFiles: ['backend/src/routes/specs.ts'],
+    });
+
+    const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'backfilled-context-draft.json'), 'utf8'));
+    expect(saved.contextSummary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: false, domain: null },
+        l3: true,
+      },
+      memoryEntries: 2,
+      estimatedTokens: 222,
+      predictedFiles: ['backend/src/routes/specs.ts'],
+    });
+
+    const logRes = await request(app)
+      .get('/api/specs/backfilled-context-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.contextCaptureStatus).toEqual({
+      status: 'backfilled',
+      reason: 'context_summary_derived_from_context_used_meta',
+      contextUsed: 'provided',
+      contextSummary: 'backfilled',
+    });
+    expect(summary.postSaveStages).toEqual({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      matchSkills: { requested: true, status: 'pending', reason: 'requested_by_caller' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+    expect(summary.contextSummary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: false, domain: null },
+        l3: true,
+      },
+      memoryEntries: 2,
+      estimatedTokens: 222,
+      predictedFiles: ['backend/src/routes/specs.ts'],
     });
   });
 
