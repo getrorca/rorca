@@ -50,7 +50,7 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { createJob, updateJobStatus } from '../db/spec-jobs';
+import { createJob, updateJobStatus, listJobsForSpec, listActiveJobs } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import {
   buildPersistPostSaveStages,
@@ -58,6 +58,8 @@ import {
   getEffectiveGenerationLog,
   getEffectiveGenerationLogs,
   type PersistPostSaveStageMap,
+  type PersistPostSaveStageState,
+  type PersistStageStatus,
 } from '../lib/spec-post-save';
 import {
   SPEC_ENRICH_QUEUE,
@@ -13454,6 +13456,406 @@ router.post('/:id/assign-models', async (req: Request, res: Response) => {
     });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Specs] Assign models');
+  }
+});
+
+// ─── POST /:specId/repair — Diagnose and repair post-save enrichment state ──
+
+type RepairActionStatus = 'repaired' | 'skipped' | 'blocked';
+
+interface RepairAction {
+  action: string;
+  status: RepairActionStatus;
+  reason: string;
+  jobId?: string;
+}
+
+interface RepairDiagnosis {
+  missingGenerationLog: boolean;
+  missingContextSummary: boolean;
+  enrichNeedsRepair: boolean;
+  enrichStatus?: PersistStageStatus;
+  matchSkillsNeedsRepair: boolean;
+  matchSkillsStatus?: PersistStageStatus;
+}
+
+function parseRecordLocal(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+function diagnoseSpecHealth(
+  generationLog: Record<string, unknown> | null,
+  stages?: PersistPostSaveStageMap,
+): RepairDiagnosis {
+  const missingGenerationLog = !generationLog;
+  const summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
+  const contextCaptureStatus = parseRecordLocal(summary.contextCaptureStatus);
+  const missingContextSummary = missingGenerationLog
+    || contextCaptureStatus.status === 'missing'
+    || !summary.contextCaptureStatus;
+
+  const enrichStage = stages?.enrich;
+  const matchSkillsStage = stages?.matchSkills;
+
+  const enrichNeedsRepair = !enrichStage
+    || (enrichStage.requested && (enrichStage.status === 'failed' || enrichStage.status === 'pending'));
+  const matchSkillsNeedsRepair = !matchSkillsStage
+    || (matchSkillsStage.requested && (matchSkillsStage.status === 'failed' || matchSkillsStage.status === 'pending'
+        || matchSkillsStage.reason === 'blocked_by_enrich_failure'
+        || matchSkillsStage.reason === 'blocked_by_enrich_enqueue_failure'));
+
+  return {
+    missingGenerationLog,
+    missingContextSummary,
+    enrichNeedsRepair,
+    enrichStatus: enrichStage?.status,
+    matchSkillsNeedsRepair,
+    matchSkillsStatus: matchSkillsStage?.status,
+  };
+}
+
+/**
+ * @swagger
+ * /api/specs/{specId}/repair:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Diagnose and repair post-save enrichment state for a spec
+ *     operationId: rorca_specs_by_id_repair
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Safe idempotent repair of local spec enrichment metadata — no write side effects beyond fixing broken state."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               stages:
+ *                 type: array
+ *                 items: { type: string, enum: [enrich, match-skills] }
+ *                 description: Subset of stages to repair. If omitted, all needed repairs are attempted.
+ *               dryRun:
+ *                 type: boolean
+ *                 default: false
+ *                 description: If true, only diagnose — do not apply repairs.
+ *     responses:
+ *       200:
+ *         description: Repair diagnosis and actions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specId: { type: string }
+ *                 healthy: { type: boolean }
+ *                 diagnosis:
+ *                   type: object
+ *                   properties:
+ *                     missingGenerationLog: { type: boolean }
+ *                     missingContextSummary: { type: boolean }
+ *                     enrichNeedsRepair: { type: boolean }
+ *                     matchSkillsNeedsRepair: { type: boolean }
+ *                 actions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       action: { type: string }
+ *                       status: { type: string, enum: [repaired, skipped, blocked] }
+ *                       reason: { type: string }
+ *                       jobId: { type: string }
+ *                 dryRun: { type: boolean }
+ *       404:
+ *         description: Spec or workspace not found
+ *       409:
+ *         description: Active pipeline run or active enrich job conflicts with repair
+ */
+router.post('/:specId/repair', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId, stages: requestedStages, dryRun = false } = req.body as {
+      workspaceId?: string;
+      stages?: string[];
+      dryRun?: boolean;
+    };
+
+    if (!workspaceId) {
+      throw new ValidationError('Missing required body param: workspaceId');
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    // Verify spec file exists
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFile: string;
+    if (fs.existsSync(pendingFile)) {
+      specFile = pendingFile;
+    } else if (fs.existsSync(approvedFile)) {
+      specFile = approvedFile;
+    } else {
+      throw new NotFoundError(`Spec '${specId}' not found`);
+    }
+
+    // Check for active pipeline run — ConflictError if running
+    const specPath = fs.existsSync(approvedFile)
+      ? `forge/specs/approved/${specId}.json`
+      : `forge/specs/pending/${specId}.json`;
+    const activeRun = await queryOne<{ id: number }>(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND spec_path = $2 AND status IN ('running', 'paused') LIMIT 1`,
+      [workspaceId, specPath],
+    );
+    if (activeRun) {
+      throw new ConflictError(
+        `Spec '${specId}' has an active pipeline run (run #${activeRun.id}) — repair is blocked until it finishes`,
+      );
+    }
+
+    // Check for active (pending/running) enrich/match-skills jobs
+    const activeJobs = await listActiveJobs(workspaceId, specId);
+    const activeEnrichJob = activeJobs.find((j) => j.jobType === 'enrich');
+    const activeMatchSkillsJob = activeJobs.find((j) => j.jobType === 'match-skills');
+
+    // Fetch effective generation log and diagnose health
+    const generationLog = await getEffectiveGenerationLog(specId);
+    const summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
+    const stages = summary.postSaveStages as PersistPostSaveStageMap | undefined;
+    const diagnosis = diagnoseSpecHealth(generationLog, stages);
+
+    // Determine which stages to repair
+    const wantEnrich = !requestedStages || requestedStages.includes('enrich');
+    const wantMatchSkills = !requestedStages || requestedStages.includes('match-skills');
+
+    // Build repair actions
+    const actions: RepairAction[] = [];
+
+    // ── Action 1: Seed missing generation log ──
+    if (diagnosis.missingGenerationLog) {
+      if (dryRun) {
+        actions.push({
+          action: 'seed_generation_log',
+          status: 'skipped',
+          reason: 'Dry run — would seed a generation log row for this spec',
+        });
+      } else {
+        // Parse spec to get title and story count for the seed log
+        const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8')) as {
+          title?: string;
+          userStories?: unknown[];
+          model?: string;
+          source?: string;
+        };
+        const storyCount = (specContent.userStories ?? []).length;
+        const postSaveOptions: SpecPostSaveOptions = {
+          enrich: wantEnrich,
+          matchSkills: wantMatchSkills,
+          memorySynthesis: false,
+        };
+        await seedPersistGenerationLog({
+          slug: specId,
+          workspaceId,
+          source: specContent.source ?? 'repair',
+          sourceMode: 'repair',
+          invocationSurface: 'api.specs.repair',
+          title: specContent.title ?? specId,
+          storyCount,
+          model: specContent.model,
+          overwrite: false,
+          postSave: postSaveOptions,
+          normalizationChanges: [],
+        });
+        actions.push({
+          action: 'seed_generation_log',
+          status: 'repaired',
+          reason: 'Seeded a generation log row with repair metadata',
+        });
+      }
+    } else {
+      actions.push({
+        action: 'seed_generation_log',
+        status: 'skipped',
+        reason: 'Generation log already exists',
+      });
+    }
+
+    // ── Action 2: Backfill missing context summary ──
+    if (diagnosis.missingContextSummary && !diagnosis.missingGenerationLog) {
+      // Only backfill if the generation log exists (or was just seeded above).
+      // If we seeded the log above, it already has a contextCaptureStatus.
+      if (dryRun) {
+        actions.push({
+          action: 'backfill_context_summary',
+          status: 'skipped',
+          reason: 'Dry run — would backfill minimal contextCaptureStatus',
+        });
+      } else {
+        // Patch the existing log's context_summary_json to add a missing contextCaptureStatus
+        const logRow = await queryOne<{ id: number; context_summary_json: unknown }>(
+          `SELECT id, context_summary_json
+           FROM spec_generation_logs
+           WHERE spec_slug = $1
+           ORDER BY created_at DESC, id DESC
+           LIMIT 1`,
+          [specId],
+        );
+        if (logRow) {
+          const existingSummary = parseRecordLocal(logRow.context_summary_json);
+          if (!existingSummary.contextCaptureStatus) {
+            existingSummary.contextCaptureStatus = {
+              status: 'missing',
+              reason: 'backfilled_by_repair',
+              contextUsed: 'missing',
+              contextSummary: 'missing',
+            };
+            await execute(
+              `UPDATE spec_generation_logs SET context_summary_json = $2 WHERE id = $1`,
+              [logRow.id, existingSummary],
+            );
+          }
+        }
+        actions.push({
+          action: 'backfill_context_summary',
+          status: 'repaired',
+          reason: 'Backfilled contextCaptureStatus as missing',
+        });
+      }
+    } else if (diagnosis.missingContextSummary && diagnosis.missingGenerationLog && !dryRun) {
+      // We just seeded the generation log above — it includes contextCaptureStatus
+      actions.push({
+        action: 'backfill_context_summary',
+        status: 'repaired',
+        reason: 'Seeded generation log already includes contextCaptureStatus',
+      });
+    } else {
+      actions.push({
+        action: 'backfill_context_summary',
+        status: 'skipped',
+        reason: 'Context summary already present',
+      });
+    }
+
+    // ── Action 3: Re-enqueue enrich stage ──
+    if (wantEnrich && diagnosis.enrichNeedsRepair) {
+      if (activeEnrichJob) {
+        actions.push({
+          action: 'enqueue_enrich',
+          status: 'blocked',
+          reason: `Active enrich job exists (job ${activeEnrichJob.id}, status: ${activeEnrichJob.status}) — cannot re-enqueue while in progress`,
+          jobId: activeEnrichJob.id,
+        });
+      } else if (dryRun) {
+        actions.push({
+          action: 'enqueue_enrich',
+          status: 'skipped',
+          reason: `Dry run — would enqueue enrich (current status: ${diagnosis.enrichStatus ?? 'none'})`,
+        });
+      } else {
+        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich');
+        actions.push({
+          action: 'enqueue_enrich',
+          status: 'repaired',
+          reason: `Enqueued enrich job (previous status: ${diagnosis.enrichStatus ?? 'none'})`,
+          jobId: payload.jobId,
+        });
+      }
+    } else if (wantEnrich) {
+      actions.push({
+        action: 'enqueue_enrich',
+        status: 'skipped',
+        reason: stages?.enrich
+          ? `Enrich stage is already ${stages.enrich.status}`
+          : 'Enrich was not requested in the original persist',
+      });
+    }
+
+    // ── Action 4: Re-enqueue match-skills stage ──
+    if (wantMatchSkills && diagnosis.matchSkillsNeedsRepair) {
+      if (activeMatchSkillsJob) {
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'blocked',
+          reason: `Active match-skills job exists (job ${activeMatchSkillsJob.id}, status: ${activeMatchSkillsJob.status}) — cannot re-enqueue while in progress`,
+          jobId: activeMatchSkillsJob.id,
+        });
+      } else if (activeEnrichJob) {
+        // match-skills depends on enrich; if enrich is actively running, block
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'blocked',
+          reason: 'Enrich job is currently active — match-skills depends on enrich completing first',
+        });
+      } else if (dryRun) {
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'skipped',
+          reason: `Dry run — would enqueue match-skills (current status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
+        });
+      } else {
+        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills');
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'repaired',
+          reason: `Enqueued match-skills job (previous status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
+          jobId: payload.jobId,
+        });
+      }
+    } else if (wantMatchSkills) {
+      actions.push({
+        action: 'enqueue_match_skills',
+        status: 'skipped',
+        reason: stages?.matchSkills
+          ? `Match-skills stage is already ${stages.matchSkills.status}`
+          : 'Match-skills was not requested in the original persist',
+      });
+    }
+
+    const healthy = actions.every((a) => a.status === 'skipped');
+
+    // Emit WAL event for repair
+    if (!dryRun && !healthy) {
+      const walPayload = {
+        spec_id: specId,
+        workspace_id: workspaceId,
+        actions: actions.map((a) => ({ action: a.action, status: a.status })),
+      };
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_repaired', $1, $2, $3) RETURNING *`,
+        [specId, workspaceId, JSON.stringify(walPayload)],
+      );
+      if (walEvent) broadcastAll(walEvent);
+    }
+
+    res.json({
+      specId,
+      healthy,
+      diagnosis,
+      actions,
+      dryRun,
+    });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Repair');
   }
 });
 
