@@ -35,7 +35,10 @@ export type PersistStageReason =
   | 'enqueue_failed'
   | 'job_failed'
   | 'blocked_by_enrich_failure'
-  | 'blocked_by_enrich_enqueue_failure';
+  | 'blocked_by_enrich_enqueue_failure'
+  | 'no_installed_skills';
+
+export type PersistContextSource = 'caller_supplied' | 'server_backfilled' | 'missing';
 
 export interface PersistPostSaveStageState {
   requested: boolean;
@@ -120,6 +123,10 @@ function stageStateForJob(job: SpecJob): PersistPostSaveStageState | null {
   }
 
   if (job.status === 'completed') {
+    const resultRecord = parseRecord(job.resultPayload);
+    if (resultRecord.skipped === true && resultRecord.skipReason === 'no_installed_skills') {
+      return { ...base, status: 'skipped', reason: 'no_installed_skills', error: null };
+    }
     return { ...base, status: 'completed', reason: 'job_completed', error: null };
   }
 

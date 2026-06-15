@@ -1324,6 +1324,15 @@ export type PostSaveStageMap = {
   memorySynthesis: PostSaveStageState;
 };
 
+/** PSE-004: Context capture classification surfaced from backend. */
+export type ContextCaptureState = 'provided' | 'backfilled' | 'missing';
+export interface ContextCaptureStatus {
+  status: ContextCaptureState;
+  reason: string;
+  contextUsed: 'provided' | 'missing';
+  contextSummary: 'provided' | 'backfilled' | 'missing';
+}
+
 interface GenerationLog {
   id: number;
   spec_slug: string;
@@ -1342,6 +1351,8 @@ interface GenerationLog {
   enriched?: boolean;
   /** PSE-003: Canonical per-stage status surfaced from backend. */
   postSaveStages?: PostSaveStageMap;
+  /** PSE-004: Context capture classification surfaced from backend. */
+  contextCaptureStatus?: ContextCaptureStatus;
 }
 
 export interface GenerationLogPresentation {
@@ -1614,6 +1625,34 @@ export function parsePostSaveStages(log: GenerationLog): PostSaveStageMap | null
   return stages as PostSaveStageMap;
 }
 
+/**
+ * PSE-004: Extract contextCaptureStatus from a generation log row.
+ * Priority: top-level contextCaptureStatus field (surfaced by backend route),
+ * then fallback to nested context_summary_json.contextCaptureStatus.
+ */
+export function parseContextCaptureStatus(log: GenerationLog): ContextCaptureStatus | null {
+  if (log.contextCaptureStatus) return log.contextCaptureStatus;
+
+  const jsonStr = log.context_summary_json;
+  if (!jsonStr) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  const record = parsed as Record<string, unknown>;
+  const ccs = record.contextCaptureStatus;
+  if (!ccs || typeof ccs !== 'object') return null;
+  const ccsRecord = ccs as Record<string, unknown>;
+  if (typeof ccsRecord.status !== 'string') return null;
+
+  return ccs as ContextCaptureStatus;
+}
+
 /** Rough per-1K-token cost estimates by model family (input/output). */
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number | null {
   const rates: Record<string, [number, number]> = {
@@ -1684,8 +1723,44 @@ function reasonLabel(reason: string): string {
     job_failed: 'Job failed',
     blocked_by_enrich_failure: 'Blocked — enrich failed',
     blocked_by_enrich_enqueue_failure: 'Blocked — enrich could not start',
+    no_installed_skills: 'No skills installed',
   };
   return map[reason] ?? reason;
+}
+
+/* ─── PSE-004: Context capture status display ──────────────────── */
+
+const CONTEXT_CAPTURE_CONFIG: Record<ContextCaptureState, { label: string; dotClass: string; textClass: string }> = {
+  provided:   { label: 'Caller-supplied', dotClass: 'bg-success',  textClass: 'text-success' },
+  backfilled: { label: 'Server-backfilled', dotClass: 'bg-amber-400', textClass: 'text-amber-400' },
+  missing:    { label: 'Missing',         dotClass: 'bg-muted/40', textClass: 'text-muted/60' },
+};
+
+const CONTEXT_CAPTURE_REASON_LABELS: Record<string, string> = {
+  caller_supplied_context: 'Caller provided context summary',
+  context_summary_derived_from_context_used_meta: 'Derived from contextUsed metadata',
+  context_used_missing_meta: 'Context payload lacked metadata',
+  caller_context_not_supplied: 'Caller omitted drafting context',
+};
+
+function ContextCaptureCard({ status }: { status: ContextCaptureStatus }) {
+  const config = CONTEXT_CAPTURE_CONFIG[status.status];
+  return (
+    <div className="px-4 py-3 border-t border-border/50" data-testid="context-capture-status">
+      <p className="text-[10px] text-muted uppercase tracking-wider font-semibold mb-2">Context Source</p>
+      <div className="flex items-start gap-2">
+        <span className={`mt-1 shrink-0 w-2 h-2 rounded-full ${config.dotClass}`} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-medium ${config.textClass}`}>{config.label}</span>
+          </div>
+          <p className="text-[10px] text-muted/70">
+            {CONTEXT_CAPTURE_REASON_LABELS[status.reason] ?? status.reason}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function PostSaveStagesCard({ stages }: { stages: PostSaveStageMap }) {
@@ -1796,6 +1871,7 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
         const isEnriched = !!log.enriched;
         const presentation = getGenerationLogPresentation(log);
         const postSaveStages = parsePostSaveStages(log);
+        const contextCaptureStatus = parseContextCaptureStatus(log);
 
         return (
           <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
@@ -1878,6 +1954,9 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
                 </div>
               </div>
             )}
+
+            {/* PSE-004: Context capture classification */}
+            {contextCaptureStatus && <ContextCaptureCard status={contextCaptureStatus} />}
 
             {/* PSE-003: Per-stage post-save pipeline status */}
             {postSaveStages && <PostSaveStagesCard stages={postSaveStages} />}

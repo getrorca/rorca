@@ -23,6 +23,15 @@ import { SkillRegistry } from './skill-registry';
 import { queryOne } from '../db/index';
 import { logger } from './logger';
 
+// ─── Errors ──────────────────────────────────────────────────────────────────
+
+export class NoInstalledSkillsError extends Error {
+  constructor() {
+    super('No skills installed for this workspace');
+    this.name = 'NoInstalledSkillsError';
+  }
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface SuggestedSkill {
@@ -98,7 +107,7 @@ export async function matchSkills(
   const skillNames = new Set(skillRegistry.getAll().map(s => s.metadata.name.toLowerCase()));
 
   if (skillNames.size === 0) {
-    throw new Error('No skills installed. Install skills from the Marketplace before matching.');
+    throw new NoInstalledSkillsError();
   }
 
   // ── 2. Read MEMORY.md and AGENTS.md ────────────────────────────────────

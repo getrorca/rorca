@@ -56,6 +56,8 @@ export type ProgressCallback = (progress: StoryProgress) => Promise<void> | void
 
 export interface MatchSkillsResult {
   matched: number;
+  skipped?: boolean;
+  skipReason?: 'no_installed_skills';
   stories: Array<{ storyId: string; skills: SuggestedSkillRaw[] }>;
   contextSummary?: {
     retrieval?: {
@@ -244,7 +246,13 @@ export async function runMatchSkillsJob(
 
   const catalogs = await buildCatalogContext(workspace.path, workspace.id);
   if (catalogs.skillNames.size === 0) {
-    throw new UnprocessableError('No skills installed. Install skills from the Marketplace before matching.');
+    logger.info({ workspaceId, specId }, '[match-skills] no skills installed — skipping');
+    return {
+      matched: 0,
+      skipped: true,
+      skipReason: 'no_installed_skills',
+      stories: stories.map((s) => ({ storyId: s.id, skills: [] })),
+    };
   }
 
   const totalStories = stories.length;

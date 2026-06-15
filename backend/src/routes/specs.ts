@@ -7707,6 +7707,9 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
  * PSE-003: Extract postSaveStages from context_summary_json to a top-level
  * response field so API consumers can read per-stage status (enrich,
  * matchSkills, memorySynthesis) without parsing nested JSONB.
+ * PSE-004: Also surfaces contextCaptureStatus so callers can distinguish
+ * caller-supplied context, server-backfilled context, and missing context
+ * without inspecting raw prose strings.
  * Backward-compatible: older logs without postSaveStages get undefined.
  */
 function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unknown> {
@@ -7714,8 +7717,13 @@ function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unk
   if (!summary || typeof summary !== 'object') return log;
   const record = summary as Record<string, unknown>;
   const stages = record.postSaveStages as PersistPostSaveStageMap | undefined;
-  if (!stages) return log;
-  return { ...log, postSaveStages: stages };
+  const contextCaptureStatus = record.contextCaptureStatus as Record<string, unknown> | undefined;
+  if (!stages && !contextCaptureStatus) return log;
+  return {
+    ...log,
+    ...(stages ? { postSaveStages: stages } : {}),
+    ...(contextCaptureStatus ? { contextCaptureStatus } : {}),
+  };
 }
 
 // ─── SV-001: GET /:specId/check — Structural spec validation ─────────────────
