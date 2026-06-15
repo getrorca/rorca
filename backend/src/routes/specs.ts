@@ -3686,12 +3686,25 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       multiPass,
     })]);
 
-    // 12b. Persist generation log
-    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed')`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+    // 12b. Persist generation log with post-save stage tracking (PSE-002)
+    // Seed postSaveStages into context_summary_json so updatePersistPostSaveStage
+    // can find and update stage state when enqueue failures or job failures occur.
+    const forgePostSave: SpecPostSaveOptions = { enrich: true, matchSkills: true, memorySynthesis: true };
+    const forgePostSaveStages = buildPersistPostSaveStages(forgePostSave);
+    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
       Date.now() - genStartTime,
       tokenUsage.inputTokens, tokenUsage.outputTokens,
-      JSON.stringify(precomputedContextSummary ?? {}),]);
+      JSON.stringify(precomputedContextSummary ?? {}),
+      JSON.stringify({
+        source: 'generate',
+        workspaceId: String(workspaceId),
+        postSave: forgePostSave,
+        postSaveStages: forgePostSaveStages,
+        ...(precomputedContextSummary ?? {}),
+      }),
+      'pending_enrichment',
+    ]);
 
     // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
@@ -3741,7 +3754,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       return;
     }
 
-    // 16. Return response
+    // 16. Durable post-save: enrich then match-skills through pg-boss job queue (PSE-002).
+    // Enqueued BEFORE the response is sent so all durable state is committed before
+    // the caller receives the response. enqueuePersistPostSaveJobs persists failures
+    // to stage state in spec_generation_logs, so they surface through status APIs.
+    await scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true });
+
+    // 17. Return response
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, true);
     res.set('X-Git-Hydration', 'fresh');
     res.json({
@@ -3764,7 +3783,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       } : {}),
     });
 
-    // 17. Fire-and-forget spec memory capture (PG-023)
+    // 18. Fire-and-forget spec memory capture (PG-023)
     autoSynthesizeSpecMemory(
       slug,
       workspaceId,
@@ -3772,13 +3791,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       { stories: parsed.stories as unknown[] },
       (contextSummary ?? {}) as Record<string, unknown>,
     ).catch(() => { /* non-blocking — errors logged internally */ });
-
-    // 18. Fire-and-forget: enrich stories with CAG/RAG context, then match skills.
-    // Runs after response is sent so callers (MCP, UI) get instant feedback.
-    // Enrich runs first (adds context to story descriptions), then match-skills
-    // (assigns suggestedSkills arrays). Both write back to the spec JSON on disk.
-    void scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true })
-      .catch((err) => logger.warn({ err, specId: slug, workspaceId }, '[post-save] async generate scheduling failed'));
   } catch (error: any) {
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
     // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
