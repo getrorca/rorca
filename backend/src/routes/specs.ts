@@ -53,6 +53,12 @@ import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { createJob, updateJobStatus } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import {
+  buildPersistPostSaveStages,
+  enqueuePersistPostSaveJobs,
+  getEffectiveGenerationLog,
+  getEffectiveGenerationLogs,
+} from '../lib/spec-post-save';
+import {
   SPEC_ENRICH_QUEUE,
   SPEC_MATCH_SKILLS_QUEUE,
   SPEC_SUGGEST_SKILLS_QUEUE,
@@ -1090,20 +1096,11 @@ type PersistContextCaptureReason =
   | 'caller_context_not_supplied'
   | 'context_used_missing_meta';
 
-type PersistStageStatus = 'pending' | 'skipped';
-type PersistStageReason = 'requested_by_caller' | 'disabled_by_caller';
-
 interface PersistContextCaptureStatus {
   status: PersistContextCaptureState;
   reason: PersistContextCaptureReason;
   contextUsed: 'provided' | 'missing';
   contextSummary: 'provided' | 'backfilled' | 'missing';
-}
-
-interface PersistPostSaveStageState {
-  requested: boolean;
-  status: PersistStageStatus;
-  reason: PersistStageReason;
 }
 
 function buildContextSummaryFromExplicitDraftContext(input: {
@@ -1201,22 +1198,8 @@ function buildPersistContextCaptureStatus(input: {
   };
 }
 
-function buildPersistPostSaveStages(postSave: SpecPostSaveOptions): Record<keyof SpecPostSaveOptions, PersistPostSaveStageState> {
-  const buildStage = (requested: boolean): PersistPostSaveStageState => ({
-    requested,
-    status: requested ? 'pending' : 'skipped',
-    reason: requested ? 'requested_by_caller' : 'disabled_by_caller',
-  });
-
-  return {
-    enrich: buildStage(postSave.enrich),
-    matchSkills: buildStage(postSave.matchSkills),
-    memorySynthesis: buildStage(postSave.memorySynthesis),
-  };
-}
-
 function buildPersistGenerationLogSummaryText(input: {
-  pendingEnrichment: boolean;
+  pendingPostSave: boolean;
   contextCaptureStatus: PersistContextCaptureStatus;
 }): string {
   const contextText = input.contextCaptureStatus.status === 'provided'
@@ -1224,13 +1207,14 @@ function buildPersistGenerationLogSummaryText(input: {
     : input.contextCaptureStatus.status === 'backfilled'
       ? 'backfilled context summary'
       : 'missing caller context';
-  return input.pendingEnrichment
-    ? `Explicit draft persisted with ${contextText}; pending post-save enrichment`
+  return input.pendingPostSave
+    ? `Explicit draft persisted with ${contextText}; pending durable post-save processing`
     : `Explicit draft persisted with ${contextText}`;
 }
 
 async function seedPersistGenerationLog(input: {
   slug: string;
+  workspaceId: string;
   source: string;
   sourceMode?: string;
   invocationSurface?: string;
@@ -1245,8 +1229,8 @@ async function seedPersistGenerationLog(input: {
   resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
 }): Promise<void> {
-  const pendingEnrichment = input.postSave.enrich;
-  const status = pendingEnrichment ? 'pending_enrichment' : 'persisted';
+  const pendingPostSave = input.postSave.enrich || input.postSave.matchSkills || input.postSave.memorySynthesis;
+  const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
   const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
   const invocationSurface = input.invocationSurface?.trim() || 'api.specs.persist';
   const postSaveStages = buildPersistPostSaveStages(input.postSave);
@@ -1257,12 +1241,13 @@ async function seedPersistGenerationLog(input: {
   });
   const summaryJson = {
     source: input.source,
+    workspaceId: input.workspaceId,
     sourceMode,
     invocationSurface,
     title: input.title,
     storyCount: input.storyCount,
     overwrite: input.overwrite,
-    pendingEnrichment,
+    pendingEnrichment: input.postSave.enrich,
     postSave: input.postSave,
     postSaveStages,
     contextCaptureStatus,
@@ -1289,7 +1274,7 @@ async function seedPersistGenerationLog(input: {
       input.model?.trim() || 'explicit-draft',
       'api',
       0,
-      buildPersistGenerationLogSummaryText({ pendingEnrichment, contextCaptureStatus }),
+      buildPersistGenerationLogSummaryText({ pendingPostSave, contextCaptureStatus }),
       'none',
       JSON.stringify(summaryJson),
       status,
@@ -1297,33 +1282,14 @@ async function seedPersistGenerationLog(input: {
   );
 }
 
-function scheduleSpecPostSaveJobs(specId: string, workspaceId: string, options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'>): void {
+async function scheduleSpecPostSaveJobs(
+  specId: string,
+  workspaceId: string,
+  options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'>,
+): Promise<void> {
   if (!options.enrich && !options.matchSkills) return;
 
-  setImmediate(() => {
-    const apiBase = `http://127.0.0.1:${process.env.PORT || 3030}`;
-    const headers = { 'Content-Type': 'application/json' };
-    const body = JSON.stringify({ workspaceId });
-    const runMatchSkills = () => fetch(`${apiBase}/api/specs/${specId}/match-skills`, { method: 'POST', headers, body });
-
-    const work = options.enrich
-      ? fetch(`${apiBase}/api/specs/${specId}/enrich`, { method: 'POST', headers, body })
-        .then((response) => {
-          if (!response.ok) logger.warn(`[post-save] enrich failed: ${response.status}`);
-          else logger.info(`[post-save] enrich complete for ${specId}`);
-          if (options.matchSkills) return runMatchSkills();
-          return undefined;
-        })
-      : runMatchSkills();
-
-    Promise.resolve(work)
-      .then((response) => {
-        if (!options.matchSkills || !response) return;
-        if (!response.ok) logger.warn(`[post-save] match-skills failed: ${response.status}`);
-        else logger.info(`[post-save] match-skills complete for ${specId}`);
-      })
-      .catch((err) => logger.warn({ err }, `[post-save] enrich/match-skills error for ${specId}`));
-  });
+  await enqueuePersistPostSaveJobs(specId, workspaceId, options);
 }
 
 type SkillFirstForgeAgent = 'claude' | 'opencode' | 'codex' | 'pi';
@@ -1456,6 +1422,7 @@ async function persistExplicitDraftInternal(
 
   await seedPersistGenerationLog({
     slug,
+    workspaceId,
     source,
     ...(options?.sourceMode ? { sourceMode: options.sourceMode } : {}),
     ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
@@ -1482,7 +1449,7 @@ async function persistExplicitDraftInternal(
     ).catch(() => { /* non-blocking — errors logged internally */ });
   }
 
-  scheduleSpecPostSaveJobs(slug, workspaceId, {
+  await scheduleSpecPostSaveJobs(slug, workspaceId, {
     enrich: postSave.enrich,
     matchSkills: postSave.matchSkills,
   });
@@ -3810,7 +3777,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // Runs after response is sent so callers (MCP, UI) get instant feedback.
     // Enrich runs first (adds context to story descriptions), then match-skills
     // (assigns suggestedSkills arrays). Both write back to the spec JSON on disk.
-    scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true });
+    void scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true })
+      .catch((err) => logger.warn({ err, specId: slug, workspaceId }, '[post-save] async generate scheduling failed'));
   } catch (error: any) {
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
     // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
@@ -7700,16 +7668,16 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
  */
 router.get('/:specId/generation-log', async (req: Request, res: Response) => {
   try {
-    const { specId } = req.params;
+    const specId = String(req.params.specId);
     const all = req.query.all === 'true';
 
     if (all) {
-      const logs = await query(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC`, [specId]);
+      const logs = await getEffectiveGenerationLogs(specId);
       res.json({ logs });
       return;
     }
 
-    const log = await queryOne(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
+    const log = await getEffectiveGenerationLog(specId);
 
     if (!log) {
       res.json(null);

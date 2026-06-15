@@ -37,6 +37,8 @@ Preferred universal skill-first flow:
 3. caller persists the explicit draft with `rorca_create_spec` (or compatibility alias `rorca_persist_spec`), carrying `contextUsed` + `contextSummary` when available so spec detail can show the real drafting context
 4. backend validates, normalizes, saves, and can run post-save enrichment
 
+If `rorca_specs_generation_context` is available, caller-owned forge flows should fetch it before persistence and forward the returned `contextUsed` + `contextSummary`. Any server-side context-summary backfill is recovery-grade fallback only, not a substitute for caller-observed drafting context.
+
 `rorca_generate_spec` remains available as the legacy/fallback path when the caller wants backend-side drafting.
 
 

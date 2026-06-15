@@ -317,6 +317,63 @@ export async function listActiveJobs(workspaceId: string, specId?: string): Prom
   return rows.map(mapSpecJobRow);
 }
 
+export async function listJobsForSpec(
+  workspaceId: string,
+  specId: string,
+  jobTypes?: SpecJobType[],
+): Promise<SpecJob[]> {
+  const rows = jobTypes && jobTypes.length > 0
+    ? await query<SpecJobRow>(
+      `SELECT
+        id,
+        spec_id,
+        workspace_id,
+        job_type,
+        status,
+        boss_job_id,
+        progress_current,
+        progress_total,
+        progress_message,
+        request_payload,
+        result_payload,
+        error_message,
+        started_at,
+        finished_at,
+        created_at
+      FROM spec_jobs
+      WHERE workspace_id = $1
+        AND spec_id = $2
+        AND job_type = ANY($3::text[])
+      ORDER BY created_at DESC`,
+      [workspaceId, specId, jobTypes],
+    )
+    : await query<SpecJobRow>(
+      `SELECT
+        id,
+        spec_id,
+        workspace_id,
+        job_type,
+        status,
+        boss_job_id,
+        progress_current,
+        progress_total,
+        progress_message,
+        request_payload,
+        result_payload,
+        error_message,
+        started_at,
+        finished_at,
+        created_at
+      FROM spec_jobs
+      WHERE workspace_id = $1
+        AND spec_id = $2
+      ORDER BY created_at DESC`,
+      [workspaceId, specId],
+    );
+
+  return rows.map(mapSpecJobRow);
+}
+
 export async function cleanupStaleJobs(): Promise<number> {
   const result = await execute(
     `UPDATE spec_jobs

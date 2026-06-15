@@ -147,7 +147,7 @@ async function dispatchSkillFirstCreateSpec(
     return;
   }
 
-  ctx.ui.notify("Rorca MCP bridge unavailable; falling back to the shared backend forge workflow.", "warning");
+  ctx.ui.notify("Rorca MCP forge bundle unavailable (generation-context and/or persistence tools missing); falling back to the shared backend forge workflow as a recovery path.", "warning");
   const forged = await deps.api.forgeSpec({
     workspaceId: workspace.id,
     brief,
