@@ -50,7 +50,7 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { createJob, updateJobStatus, listJobsForSpec, listActiveJobs } from '../db/spec-jobs';
+import { createJob, updateJobStatus, listJobsForSpec, listActiveJobs, listRepairCandidatesFromLogs, type RepairIssueCategory } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import {
   buildPersistPostSaveStages,
@@ -6091,6 +6091,498 @@ router.get('/search/stories', async (req: Request, res: Response) => {
     res.json(paginateArray(results, pagination));
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Story search');
+  }
+});
+
+// ─── GET /repair-candidates — List specs that need repair in a workspace ─────
+
+const VALID_REPAIR_CATEGORIES: RepairIssueCategory[] = [
+  'missing_generation_log',
+  'missing_context_summary',
+  'stuck_pending_enrichment',
+  'failed_enrichment',
+  'missing_suggested_skills',
+];
+
+/**
+ * @swagger
+ * /api/specs/repair-candidates:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List specs that are candidates for repair in a workspace
+ *     operationId: rorca_specs_repair_candidates
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only discovery of broken enrichment state — no mutations, safe for operator dashboards and CLI."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: category
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [missing_generation_log, missing_context_summary, stuck_pending_enrichment, failed_enrichment, missing_suggested_skills]
+ *         description: Filter to a single issue category. Can be repeated for multiple categories.
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+ *     responses:
+ *       200:
+ *         description: List of repair candidates with issue categories
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 candidates:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       issues: { type: array, items: { type: string } }
+ *                       logStatus: { type: string }
+ *                 total: { type: integer }
+ *                 categories: { type: array, items: { type: string } }
+ *       400:
+ *         description: Missing workspaceId or invalid category
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/repair-candidates', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = String(req.query.workspaceId ?? '');
+    if (!workspaceId) {
+      throw new ValidationError('Missing required query param: workspaceId');
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    // Parse categories filter
+    const rawCategories = req.query.category;
+    let categories: RepairIssueCategory[] | undefined;
+    if (rawCategories) {
+      const catList = Array.isArray(rawCategories)
+        ? rawCategories.map(String)
+        : [String(rawCategories)];
+      for (const cat of catList) {
+        if (!VALID_REPAIR_CATEGORIES.includes(cat as RepairIssueCategory)) {
+          throw new ValidationError(`Invalid category: ${cat}. Valid categories: ${VALID_REPAIR_CATEGORIES.join(', ')}`);
+        }
+      }
+      categories = catList as RepairIssueCategory[];
+    }
+
+    const limit = Math.min(
+      Math.max(parseInt(String(req.query.limit ?? '100'), 10) || 100, 1),
+      500,
+    );
+
+    // Phase 1: Discover candidates from generation logs
+    const logCandidates = await listRepairCandidatesFromLogs(workspaceId, {
+      categories,
+      limit,
+    });
+
+    // Phase 2: If looking for missing_generation_log, scan filesystem for specs without any log
+    const candidates: Array<{
+      specId: string;
+      issues: RepairIssueCategory[];
+      logStatus: string | null;
+    }> = [];
+
+    // Add log-based candidates
+    for (const c of logCandidates) {
+      candidates.push({
+        specId: c.spec_slug,
+        issues: c.issues,
+        logStatus: c.status,
+      });
+    }
+
+    // Filesystem scan for specs with no generation log at all
+    const wantMissingLog = !categories || categories.includes('missing_generation_log');
+    if (wantMissingLog && candidates.length < limit) {
+      const { pendingDir, approvedDir } = specsDirs(workspace.path);
+      const specFiles: string[] = [];
+      for (const dir of [pendingDir, approvedDir]) {
+        if (fs.existsSync(dir)) {
+          for (const file of fs.readdirSync(dir)) {
+            if (file.endsWith('.json')) {
+              specFiles.push(file.replace(/\.json$/, ''));
+            }
+          }
+        }
+      }
+
+      // Deduplicate and exclude specs already in candidates
+      const knownSlugs = new Set(candidates.map((c) => c.specId));
+      const unknownSlugs = [...new Set(specFiles)].filter((s) => !knownSlugs.has(s));
+
+      if (unknownSlugs.length > 0) {
+        // Batch check which slugs have generation logs
+        const existingLogs = await query<{ spec_slug: string }>(
+          `SELECT DISTINCT spec_slug FROM spec_generation_logs WHERE spec_slug = ANY($1::text[])`,
+          [unknownSlugs],
+        );
+        const loggedSlugs = new Set(existingLogs.map((r) => r.spec_slug));
+
+        for (const slug of unknownSlugs) {
+          if (!loggedSlugs.has(slug)) {
+            candidates.push({
+              specId: slug,
+              issues: ['missing_generation_log'],
+              logStatus: null,
+            });
+            if (candidates.length >= limit) break;
+          }
+        }
+      }
+    }
+
+    // Aggregate which categories were found
+    const foundCategories = [...new Set(candidates.flatMap((c) => c.issues))].sort();
+
+    res.json({
+      candidates,
+      total: candidates.length,
+      categories: foundCategories,
+    });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Repair candidates');
+  }
+});
+
+// ─── POST /repair-batch — Enqueue bounded workspace-scope repair ────────────
+
+const MAX_REPAIR_BATCH_LIMIT = 50;
+
+/**
+ * @swagger
+ * /api/specs/repair-batch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Enqueue workspace-scope repair for matching specs
+ *     operationId: rorca_specs_repair_batch
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Bounded idempotent repair of local spec enrichment — explicit filters and hard limits prevent unbounded bulk mutation."
+ *     x-rorca-public-api: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               categories:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   enum: [missing_generation_log, missing_context_summary, stuck_pending_enrichment, failed_enrichment, missing_suggested_skills]
+ *                 description: Filter to specific issue categories. Required to prevent unbounded repair.
+ *               limit:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 50
+ *                 default: 10
+ *                 description: Maximum number of specs to repair in this batch.
+ *               dryRun:
+ *                 type: boolean
+ *                 default: false
+ *                 description: If true, only report what would be repaired without applying changes.
+ *     responses:
+ *       200:
+ *         description: Batch repair results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 queued: { type: integer }
+ *                 skipped: { type: integer }
+ *                 blocked: { type: integer }
+ *                 total: { type: integer }
+ *                 dryRun: { type: boolean }
+ *                 details:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       status: { type: string, enum: [queued, skipped, blocked] }
+ *                       reason: { type: string }
+ *       400:
+ *         description: Missing workspaceId or categories
+ *       404:
+ *         description: Workspace not found
+ */
+router.post('/repair-batch', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, categories, limit: rawLimit, dryRun = false } = req.body as {
+      workspaceId?: string;
+      categories?: string[];
+      limit?: number;
+      dryRun?: boolean;
+    };
+
+    if (!workspaceId) {
+      throw new ValidationError('Missing required body param: workspaceId');
+    }
+
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+      throw new ValidationError('categories is required and must be a non-empty array — batch repair requires explicit filters');
+    }
+
+    for (const cat of categories) {
+      if (!VALID_REPAIR_CATEGORIES.includes(cat as RepairIssueCategory)) {
+        throw new ValidationError(`Invalid category: ${cat}. Valid categories: ${VALID_REPAIR_CATEGORIES.join(', ')}`);
+      }
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const limit = Math.min(
+      Math.max(rawLimit ?? 10, 1),
+      MAX_REPAIR_BATCH_LIMIT,
+    );
+
+    // Discover candidates using the same discovery logic
+    const logCandidates = await listRepairCandidatesFromLogs(workspaceId, {
+      categories: categories as RepairIssueCategory[],
+      limit,
+    });
+
+    // Also discover filesystem-only candidates if missing_generation_log is requested
+    type BatchCandidate = { specId: string; issues: RepairIssueCategory[] };
+    const allCandidates: BatchCandidate[] = logCandidates.map((c) => ({
+      specId: c.spec_slug,
+      issues: c.issues,
+    }));
+
+    if (categories.includes('missing_generation_log') && allCandidates.length < limit) {
+      const { pendingDir, approvedDir } = specsDirs(workspace.path);
+      const specFiles: string[] = [];
+      for (const dir of [pendingDir, approvedDir]) {
+        if (fs.existsSync(dir)) {
+          for (const file of fs.readdirSync(dir)) {
+            if (file.endsWith('.json')) {
+              specFiles.push(file.replace(/\.json$/, ''));
+            }
+          }
+        }
+      }
+      const knownSlugs = new Set(allCandidates.map((c) => c.specId));
+      const unknownSlugs = [...new Set(specFiles)].filter((s) => !knownSlugs.has(s));
+
+      if (unknownSlugs.length > 0) {
+        const existingLogs = await query<{ spec_slug: string }>(
+          `SELECT DISTINCT spec_slug FROM spec_generation_logs WHERE spec_slug = ANY($1::text[])`,
+          [unknownSlugs],
+        );
+        const loggedSlugs = new Set(existingLogs.map((r) => r.spec_slug));
+        for (const slug of unknownSlugs) {
+          if (!loggedSlugs.has(slug) && allCandidates.length < limit) {
+            allCandidates.push({ specId: slug, issues: ['missing_generation_log'] });
+          }
+        }
+      }
+    }
+
+    // Process each candidate through the single-spec repair flow
+    const details: Array<{
+      specId: string;
+      status: 'queued' | 'skipped' | 'blocked';
+      reason: string;
+    }> = [];
+    let queued = 0;
+    let skipped = 0;
+    let blocked = 0;
+
+    for (const candidate of allCandidates) {
+      // Check for active pipeline run
+      const specPath = fs.existsSync(path.join(workspace.path, 'forge', 'specs', 'approved', `${candidate.specId}.json`))
+        ? `forge/specs/approved/${candidate.specId}.json`
+        : `forge/specs/pending/${candidate.specId}.json`;
+      const activeRun = await queryOne<{ id: number }>(
+        `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND spec_path = $2 AND status IN ('running', 'paused') LIMIT 1`,
+        [workspaceId, specPath],
+      );
+      if (activeRun) {
+        details.push({
+          specId: candidate.specId,
+          status: 'blocked',
+          reason: `Active pipeline run (#${activeRun.id})`,
+        });
+        blocked++;
+        continue;
+      }
+
+      // Check for active enrichment jobs
+      const activeJobs = await listActiveJobs(workspaceId, candidate.specId);
+      if (activeJobs.length > 0) {
+        details.push({
+          specId: candidate.specId,
+          status: 'blocked',
+          reason: `Active enrichment job(s): ${activeJobs.map((j) => `${j.jobType}(${j.status})`).join(', ')}`,
+        });
+        blocked++;
+        continue;
+      }
+
+      if (dryRun) {
+        details.push({
+          specId: candidate.specId,
+          status: 'queued',
+          reason: `Dry run — would repair: ${candidate.issues.join(', ')}`,
+        });
+        queued++;
+        continue;
+      }
+
+      // Verify spec file exists before attempting repair
+      const pendingFile = path.join(workspace.path, 'forge', 'specs', 'pending', `${candidate.specId}.json`);
+      const approvedFile = path.join(workspace.path, 'forge', 'specs', 'approved', `${candidate.specId}.json`);
+      let specFile: string | null = null;
+      if (fs.existsSync(pendingFile)) specFile = pendingFile;
+      else if (fs.existsSync(approvedFile)) specFile = approvedFile;
+
+      if (!specFile) {
+        details.push({
+          specId: candidate.specId,
+          status: 'skipped',
+          reason: 'Spec file not found on disk',
+        });
+        skipped++;
+        continue;
+      }
+
+      // Apply repair actions based on issues
+      try {
+        const repairActions: string[] = [];
+
+        // Handle missing generation log
+        if (candidate.issues.includes('missing_generation_log')) {
+          const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8')) as {
+            title?: string;
+            userStories?: unknown[];
+            model?: string;
+            source?: string;
+          };
+          const storyCount = (specContent.userStories ?? []).length;
+          const postSaveOptions: SpecPostSaveOptions = {
+            enrich: true,
+            matchSkills: true,
+            memorySynthesis: false,
+          };
+          await seedPersistGenerationLog({
+            slug: candidate.specId,
+            workspaceId,
+            source: specContent.source ?? 'repair-batch',
+            sourceMode: 'repair',
+            invocationSurface: 'api.specs.repair-batch',
+            title: specContent.title ?? candidate.specId,
+            storyCount,
+            model: specContent.model,
+            overwrite: false,
+            postSave: postSaveOptions,
+            normalizationChanges: [],
+          });
+          repairActions.push('seeded_generation_log');
+        }
+
+        // Handle failed or stuck enrichment — re-enqueue enrich
+        if (candidate.issues.includes('failed_enrichment') || candidate.issues.includes('stuck_pending_enrichment')) {
+          try {
+            await enqueueAsyncSpecJob(candidate.specId, workspaceId, 'enrich');
+            repairActions.push('enqueued_enrich');
+          } catch {
+            repairActions.push('enrich_enqueue_failed');
+          }
+        }
+
+        // Handle missing context summary — backfill
+        if (candidate.issues.includes('missing_context_summary') && !candidate.issues.includes('missing_generation_log')) {
+          const logRow = await queryOne<{ id: number; context_summary_json: unknown }>(
+            `SELECT id, context_summary_json
+             FROM spec_generation_logs
+             WHERE spec_slug = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1`,
+            [candidate.specId],
+          );
+          if (logRow) {
+            const existingSummary = parseRecordLocal(logRow.context_summary_json);
+            if (!existingSummary.contextCaptureStatus) {
+              existingSummary.contextCaptureStatus = {
+                status: 'missing',
+                reason: 'backfilled_by_repair_batch',
+                contextUsed: 'missing',
+                contextSummary: 'missing',
+              };
+              await execute(
+                `UPDATE spec_generation_logs SET context_summary_json = $2 WHERE id = $1`,
+                [logRow.id, existingSummary],
+              );
+            }
+            repairActions.push('backfilled_context_summary');
+          }
+        }
+
+        details.push({
+          specId: candidate.specId,
+          status: 'queued',
+          reason: `Repairs applied: ${repairActions.join(', ')}`,
+        });
+        queued++;
+      } catch (error) {
+        details.push({
+          specId: candidate.specId,
+          status: 'skipped',
+          reason: `Repair failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        skipped++;
+      }
+    }
+
+    // Emit WAL event for batch repair
+    if (!dryRun && queued > 0) {
+      const walPayload = {
+        workspace_id: workspaceId,
+        categories,
+        queued,
+        skipped,
+        blocked,
+        specs: details.filter((d) => d.status === 'queued').map((d) => d.specId),
+      };
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('specs_repair_batch', $1, $2) RETURNING *`,
+        [workspaceId, JSON.stringify(walPayload)],
+      );
+      if (walEvent) broadcastAll(walEvent);
+    }
+
+    res.json({
+      queued,
+      skipped,
+      blocked,
+      total: allCandidates.length,
+      dryRun,
+      details,
+    });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Repair batch');
   }
 });
 

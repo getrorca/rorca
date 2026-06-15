@@ -374,6 +374,160 @@ export async function listJobsForSpec(
   return rows.map(mapSpecJobRow);
 }
 
+// ─── Repair candidate discovery ─────────────────────────────────────────────
+
+export type RepairIssueCategory =
+  | 'missing_generation_log'
+  | 'missing_context_summary'
+  | 'stuck_pending_enrichment'
+  | 'failed_enrichment'
+  | 'missing_suggested_skills';
+
+export interface RepairCandidateRow {
+  spec_slug: string;
+  log_id: number | null;
+  status: string | null;
+  issues: RepairIssueCategory[];
+  context_summary_json: Record<string, unknown> | null;
+}
+
+/**
+ * Find specs in a workspace that are candidates for repair.
+ *
+ * Scans spec_generation_logs (latest per slug) for the given workspace and
+ * checks each against known issue categories. Optionally filter by specific
+ * issue categories and limit results.
+ *
+ * NOTE: This only discovers specs that have generation logs with a workspaceId
+ * matching the given workspace. Specs with NO generation log at all are
+ * discovered separately via filesystem scan (handled by the route layer).
+ */
+export async function listRepairCandidatesFromLogs(
+  workspaceId: string,
+  options: {
+    categories?: RepairIssueCategory[];
+    limit?: number;
+  } = {},
+): Promise<RepairCandidateRow[]> {
+  const limit = Math.min(options.limit ?? 100, 500);
+
+  // Fetch the latest generation log per spec_slug for this workspace
+  const rows = await query<{
+    spec_slug: string;
+    id: number;
+    status: string;
+    context_summary_json: unknown;
+  }>(
+    `SELECT DISTINCT ON (sgl.spec_slug)
+       sgl.spec_slug,
+       sgl.id,
+       sgl.status,
+       sgl.context_summary_json
+     FROM spec_generation_logs sgl
+     WHERE sgl.context_summary_json IS NOT NULL
+       AND sgl.context_summary_json ->> 'workspaceId' = $1
+     ORDER BY sgl.spec_slug, sgl.created_at DESC, sgl.id DESC
+     LIMIT $2`,
+    [workspaceId, limit * 5], // over-fetch since we filter in app
+  );
+
+  const wantedCategories = options.categories
+    ? new Set(options.categories)
+    : null;
+
+  const candidates: RepairCandidateRow[] = [];
+
+  for (const row of rows) {
+    const summary = parseJsonColumn(row.context_summary_json);
+    const issues: RepairIssueCategory[] = [];
+
+    // Check for missing context summary
+    const ctxCapture = summary.contextCaptureStatus as Record<string, unknown> | undefined;
+    if (!ctxCapture || ctxCapture.status === 'missing' || !summary.contextCaptureStatus) {
+      issues.push('missing_context_summary');
+    }
+
+    // Check enrichment stage health
+    const stages = summary.postSaveStages as Record<string, Record<string, unknown>> | undefined;
+    if (stages) {
+      const enrichStage = stages.enrich;
+      const matchSkillsStage = stages.matchSkills;
+
+      // Stuck pending enrichment: a requested stage is still pending/queued/running for too long
+      const isStuckEnrich = enrichStage?.requested
+        && ['pending', 'queued', 'running'].includes(String(enrichStage.status ?? ''));
+      const isStuckMatchSkills = matchSkillsStage?.requested
+        && ['pending', 'queued', 'running'].includes(String(matchSkillsStage.status ?? ''));
+      if (isStuckEnrich || isStuckMatchSkills) {
+        issues.push('stuck_pending_enrichment');
+      }
+
+      // Failed enrichment
+      const isFailedEnrich = enrichStage?.requested && enrichStage.status === 'failed';
+      const isFailedMatchSkills = matchSkillsStage?.requested && matchSkillsStage.status === 'failed';
+      if (isFailedEnrich || isFailedMatchSkills) {
+        issues.push('failed_enrichment');
+      }
+
+      // Missing suggested skills: match-skills completed but spec has no suggestedSkills
+      // (this is a heuristic — we mark it and let the route verify against the spec file)
+      if (matchSkillsStage?.requested
+          && matchSkillsStage.status === 'skipped'
+          && matchSkillsStage.reason === 'no_installed_skills') {
+        issues.push('missing_suggested_skills');
+      }
+    } else {
+      // No postSaveStages at all — stage tracking is missing
+      if (summary.postSave && typeof summary.postSave === 'object') {
+        const postSave = summary.postSave as Record<string, unknown>;
+        if (postSave.enrich || postSave.matchSkills) {
+          issues.push('stuck_pending_enrichment');
+        }
+      }
+    }
+
+    if (issues.length === 0) continue;
+
+    // Filter by requested categories
+    if (wantedCategories) {
+      const matched = issues.filter((i) => wantedCategories.has(i));
+      if (matched.length === 0) continue;
+      candidates.push({
+        spec_slug: row.spec_slug,
+        log_id: row.id,
+        status: row.status,
+        issues: matched,
+        context_summary_json: summary,
+      });
+    } else {
+      candidates.push({
+        spec_slug: row.spec_slug,
+        log_id: row.id,
+        status: row.status,
+        issues,
+        context_summary_json: summary,
+      });
+    }
+
+    if (candidates.length >= limit) break;
+  }
+
+  return candidates;
+}
+
+function parseJsonColumn(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
 export async function cleanupStaleJobs(): Promise<number> {
   const result = await execute(
     `UPDATE spec_jobs
