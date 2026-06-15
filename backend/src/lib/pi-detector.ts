@@ -36,9 +36,18 @@ export const PI_INSTALL_METHODS = {
 
 export const MIN_PI_VERSION = '0.67.0';
 
+function getLoginShell(): string | null {
+  const shell = process.env.SHELL?.trim();
+  return shell || null;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * Resolve the pi binary path.
- * Priority: PI_BIN env var → `which pi`.
+ * Priority: PI_BIN env var → current process PATH → login shell PATH.
  */
 function resolveBinPath(): string | null {
   const envBin = process.env.PI_BIN?.trim();
@@ -47,8 +56,57 @@ function resolveBinPath(): string | null {
   try {
     return execSync('which pi', { encoding: 'utf8', timeout: 5000 }).trim();
   } catch {
+    const shell = getLoginShell();
+    if (!shell) return null;
+
+    try {
+      const result = spawnSync(shell, ['-ilc', 'command -v pi'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      if (result.status !== 0) {
+        return null;
+      }
+
+      const resolvedPath = `${result.stdout ?? ''}`.trim();
+      return resolvedPath || null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function probePiVersion(binPath: string): string | null {
+  const result = spawnSync(binPath, ['--version'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  if (result.status !== 0) {
     return null;
   }
+
+  return `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+}
+
+function probePiVersionFromLoginShell(binPath: string): string | null {
+  const shell = getLoginShell();
+  if (!shell) return null;
+
+  const result = spawnSync(shell, ['-ilc', `${shellQuote(binPath)} --version`], {
+    encoding: 'utf8',
+    timeout: 5000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  return `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
 }
 
 /**
@@ -93,15 +151,10 @@ export function detectPi(): PiStatus {
   }
 
   try {
-    const result = spawnSync(binPath, ['--version'], {
-      encoding: 'utf8',
-      timeout: 5000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (result.status !== 0) {
+    const raw = probePiVersion(binPath) ?? probePiVersionFromLoginShell(binPath);
+    if (!raw) {
       return { piInstalled: false, piVersion: null, piBinPath: null };
     }
-    const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
     const version = parseVersion(raw);
     return {
       piInstalled: true,

@@ -16,9 +16,16 @@ export const PI_INSTALL_METHODS = {
     curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
 };
 export const MIN_PI_VERSION = '0.67.0';
+function getLoginShell() {
+    const shell = process.env.SHELL?.trim();
+    return shell || null;
+}
+function shellQuote(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 /**
  * Resolve the pi binary path.
- * Priority: PI_BIN env var → `which pi`.
+ * Priority: PI_BIN env var → current process PATH → login shell PATH.
  */
 function resolveBinPath() {
     const envBin = process.env.PI_BIN?.trim();
@@ -28,7 +35,49 @@ function resolveBinPath() {
         return execSync('which pi', { encoding: 'utf8', timeout: 5000 }).trim();
     }
     catch {
-        return null;
+        const shell = getLoginShell();
+        if (!shell)
+            return null;
+        try {
+            const result = spawnSync(shell, ['-ilc', 'command -v pi'], {
+                encoding: 'utf8',
+                timeout: 5000,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            if (result.status !== 0) {
+                return null;
+    function probePiVersion(binPath) {
+        const result = spawnSync(binPath, ['--version'], {
+            encoding: 'utf8',
+            timeout: 5000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        if (result.status !== 0) {
+            return null;
+        }
+        return `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+    }
+    function probePiVersionFromLoginShell(binPath) {
+        const shell = getLoginShell();
+        if (!shell)
+            return null;
+        const result = spawnSync(shell, ['-ilc', `${shellQuote(binPath)} --version`], {
+            encoding: 'utf8',
+            timeout: 5000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        if (result.status !== 0) {
+            return null;
+        }
+        return `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+    }
+            }
+            const resolvedPath = `${result.stdout ?? ''}`.trim();
+            return resolvedPath || null;
+        }
+        catch {
+            return null;
+        }
     }
 }
 /**
@@ -68,15 +117,10 @@ export function detectPi() {
         return { piInstalled: false, piVersion: null, piBinPath: null };
     }
     try {
-        const result = spawnSync(binPath, ['--version'], {
-            encoding: 'utf8',
-            timeout: 5000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        if (result.status !== 0) {
+        const raw = probePiVersion(binPath) ?? probePiVersionFromLoginShell(binPath);
+        if (!raw) {
             return { piInstalled: false, piVersion: null, piBinPath: null };
         }
-        const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
         const version = parseVersion(raw);
         return {
             piInstalled: true,
