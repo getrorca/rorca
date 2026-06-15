@@ -61,7 +61,7 @@ Use tools/internal operations to gather context such as:
 - relevant approved spec lookup
 - graph/retrieval queries
 - curated skill-library previews if available
-- `rorca_specs_generation_context` when available, so you can fetch the canonical skill-first forge context bundle (`prompt`, `contextUsed`, `contextSummary`) before persisting
+- `rorca_specs_generation_context` when available, so you can fetch the canonical skill-first forge context bundle (`prompt`, `contextUsed`, `contextSummary`, `postSaveDefaults`) before persisting
 
 ### Mutation and persistence
 Use structured operations for:
@@ -76,6 +76,7 @@ Use structured operations for:
 - prefer MCP when running in an environment where MCP is the primary structured tool surface
 - internal backend adapters are equally acceptable when the workflow is backend-owned rather than public-MCP-owned
 - use REST fallback only if the launcher explicitly permits it and no better structured path is available
+- treat backend/server context-summary backfill as recovery-grade fallback only; it does not replace true caller-observed drafting context
 
 ### Do not use legacy backend generation by default
 Do not call `rorca_generate_spec` or a "generate spec from brief" backend endpoint/tool as the normal path.
@@ -183,14 +184,15 @@ Your responsibility is to produce the best draft possible and then hand it off c
 ## Persistence contract behavior
 
 Once you have a complete draft:
-1. if you fetched `rorca_specs_generation_context`, carry its `contextUsed` and `contextSummary` through the persist call so the saved spec and Context tab preserve what context informed the draft
-2. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
-3. prefer enrichment enabled where available
-4. read the saved spec back via `rorca_get_specs_by_specId` if possible
-5. verify that a real slug/id exists
-6. verify that the saved story set broadly matches the draft
-7. if `autoApprove` is true, approve via `rorca_approve_spec`
-8. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
+1. if `rorca_specs_generation_context` is available, fetch it before persisting; do not skip that call and rely on server backfill instead
+2. carry its `contextUsed` and `contextSummary` through the persist call so the saved spec and Context tab preserve what context informed the draft
+3. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
+4. preserve post-save defaults by either omitting `postSave` entirely or forwarding `postSaveDefaults`; never disable `enrich` or `matchSkills` unless the launcher or user explicitly asked for that opt-out
+5. read the saved spec back via `rorca_get_specs_by_specId` if possible
+6. verify that a real slug/id exists
+7. verify that the saved story set broadly matches the draft
+8. if `autoApprove` is true, approve via `rorca_approve_spec`
+9. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
 
 Do not claim the spec was saved unless a structured operation confirms it.
 

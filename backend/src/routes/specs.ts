@@ -50,8 +50,17 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { createJob, updateJobStatus } from '../db/spec-jobs';
+import { createJob, updateJobStatus, listJobsForSpec, listActiveJobs, listRepairCandidatesFromLogs, type RepairIssueCategory } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
+import {
+  buildPersistPostSaveStages,
+  enqueuePersistPostSaveJobs,
+  getEffectiveGenerationLog,
+  getEffectiveGenerationLogs,
+  type PersistPostSaveStageMap,
+  type PersistPostSaveStageState,
+  type PersistStageStatus,
+} from '../lib/spec-post-save';
 import {
   SPEC_ENRICH_QUEUE,
   SPEC_MATCH_SKILLS_QUEUE,
@@ -1083,6 +1092,20 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+type PersistContextCaptureState = 'provided' | 'backfilled' | 'missing';
+type PersistContextCaptureReason =
+  | 'caller_supplied_context'
+  | 'context_summary_derived_from_context_used_meta'
+  | 'caller_context_not_supplied'
+  | 'context_used_missing_meta';
+
+interface PersistContextCaptureStatus {
+  status: PersistContextCaptureState;
+  reason: PersistContextCaptureReason;
+  contextUsed: 'provided' | 'missing';
+  contextSummary: 'provided' | 'backfilled' | 'missing';
+}
+
 function buildContextSummaryFromExplicitDraftContext(input: {
   contextUsed?: unknown;
   contextSummary?: Record<string, unknown>;
@@ -1137,9 +1160,67 @@ function buildContextSummaryFromExplicitDraftContext(input: {
   return normalized;
 }
 
+function buildPersistContextCaptureStatus(input: {
+  contextUsed?: unknown;
+  callerContextSummary?: Record<string, unknown>;
+  resolvedContextSummary?: Record<string, unknown>;
+}): PersistContextCaptureStatus {
+  const callerProvidedContextSummary = isObjectRecord(input.callerContextSummary) && Object.keys(input.callerContextSummary).length > 0;
+  if (callerProvidedContextSummary) {
+    return {
+      status: 'provided',
+      reason: 'caller_supplied_context',
+      contextUsed: input.contextUsed !== undefined ? 'provided' : 'missing',
+      contextSummary: 'provided',
+    };
+  }
+
+  if (input.resolvedContextSummary) {
+    return {
+      status: 'backfilled',
+      reason: 'context_summary_derived_from_context_used_meta',
+      contextUsed: input.contextUsed !== undefined ? 'provided' : 'missing',
+      contextSummary: 'backfilled',
+    };
+  }
+
+  if (input.contextUsed !== undefined) {
+    return {
+      status: 'missing',
+      reason: 'context_used_missing_meta',
+      contextUsed: 'provided',
+      contextSummary: 'missing',
+    };
+  }
+
+  return {
+    status: 'missing',
+    reason: 'caller_context_not_supplied',
+    contextUsed: 'missing',
+    contextSummary: 'missing',
+  };
+}
+
+function buildPersistGenerationLogSummaryText(input: {
+  pendingPostSave: boolean;
+  contextCaptureStatus: PersistContextCaptureStatus;
+}): string {
+  const contextText = input.contextCaptureStatus.status === 'provided'
+    ? 'caller-provided context'
+    : input.contextCaptureStatus.status === 'backfilled'
+      ? 'backfilled context summary'
+      : 'missing caller context';
+  return input.pendingPostSave
+    ? `Explicit draft persisted with ${contextText}; pending durable post-save processing`
+    : `Explicit draft persisted with ${contextText}`;
+}
+
 async function seedPersistGenerationLog(input: {
   slug: string;
+  workspaceId: string;
   source: string;
+  sourceMode?: string;
+  invocationSurface?: string;
   title: string;
   storyCount: number;
   model?: string;
@@ -1147,25 +1228,34 @@ async function seedPersistGenerationLog(input: {
   postSave: SpecPostSaveOptions;
   normalizationChanges: Array<{ from?: string; to: string; reason: string }>;
   contextUsed?: unknown;
-  contextSummary?: Record<string, unknown>;
+  callerContextSummary?: Record<string, unknown>;
+  resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
 }): Promise<void> {
-  const pendingEnrichment = input.postSave.enrich;
-  const status = pendingEnrichment ? 'pending_enrichment' : 'persisted';
-  const resolvedContextSummary = buildContextSummaryFromExplicitDraftContext({
+  const pendingPostSave = input.postSave.enrich || input.postSave.matchSkills || input.postSave.memorySynthesis;
+  const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
+  const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
+  const invocationSurface = input.invocationSurface?.trim() || 'api.specs.persist';
+  const postSaveStages = buildPersistPostSaveStages(input.postSave);
+  const contextCaptureStatus = buildPersistContextCaptureStatus({
     contextUsed: input.contextUsed,
-    contextSummary: input.contextSummary,
-    model: input.model,
+    callerContextSummary: input.callerContextSummary,
+    resolvedContextSummary: input.resolvedContextSummary,
   });
   const summaryJson = {
     source: input.source,
+    workspaceId: input.workspaceId,
+    sourceMode,
+    invocationSurface,
     title: input.title,
     storyCount: input.storyCount,
     overwrite: input.overwrite,
-    pendingEnrichment,
+    pendingEnrichment: input.postSave.enrich,
     postSave: input.postSave,
+    postSaveStages,
+    contextCaptureStatus,
     normalizationChanges: input.normalizationChanges,
-    ...(resolvedContextSummary ? { contextSummary: resolvedContextSummary } : {}),
+    ...(input.resolvedContextSummary ? { contextSummary: input.resolvedContextSummary } : {}),
     ...(input.contextUsed !== undefined ? { contextUsed: input.contextUsed } : {}),
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
   };
@@ -1187,13 +1277,7 @@ async function seedPersistGenerationLog(input: {
       input.model?.trim() || 'explicit-draft',
       'api',
       0,
-      resolvedContextSummary
-        ? (pendingEnrichment
-          ? 'Explicit draft persisted with captured context summary; pending post-save enrichment'
-          : 'Explicit draft persisted with captured context summary')
-        : (pendingEnrichment
-          ? 'Explicit draft persisted; pending post-save enrichment'
-          : 'Explicit draft persisted without post-save enrichment'),
+      buildPersistGenerationLogSummaryText({ pendingPostSave, contextCaptureStatus }),
       'none',
       JSON.stringify(summaryJson),
       status,
@@ -1201,33 +1285,14 @@ async function seedPersistGenerationLog(input: {
   );
 }
 
-function scheduleSpecPostSaveJobs(specId: string, workspaceId: string, options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'>): void {
+async function scheduleSpecPostSaveJobs(
+  specId: string,
+  workspaceId: string,
+  options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'>,
+): Promise<void> {
   if (!options.enrich && !options.matchSkills) return;
 
-  setImmediate(() => {
-    const apiBase = `http://127.0.0.1:${process.env.PORT || 3030}`;
-    const headers = { 'Content-Type': 'application/json' };
-    const body = JSON.stringify({ workspaceId });
-    const runMatchSkills = () => fetch(`${apiBase}/api/specs/${specId}/match-skills`, { method: 'POST', headers, body });
-
-    const work = options.enrich
-      ? fetch(`${apiBase}/api/specs/${specId}/enrich`, { method: 'POST', headers, body })
-        .then((response) => {
-          if (!response.ok) logger.warn(`[post-save] enrich failed: ${response.status}`);
-          else logger.info(`[post-save] enrich complete for ${specId}`);
-          if (options.matchSkills) return runMatchSkills();
-          return undefined;
-        })
-      : runMatchSkills();
-
-    Promise.resolve(work)
-      .then((response) => {
-        if (!options.matchSkills || !response) return;
-        if (!response.ok) logger.warn(`[post-save] match-skills failed: ${response.status}`);
-        else logger.info(`[post-save] match-skills complete for ${specId}`);
-      })
-      .catch((err) => logger.warn({ err }, `[post-save] enrich/match-skills error for ${specId}`));
-  });
+  await enqueuePersistPostSaveJobs(specId, workspaceId, options);
 }
 
 type SkillFirstForgeAgent = 'claude' | 'opencode' | 'codex' | 'pi';
@@ -1278,6 +1343,7 @@ interface ForgePersistResult {
 async function persistExplicitDraftInternal(
   req: Request | undefined,
   body: z.infer<typeof PersistSpecDraftSchema>,
+  options?: { sourceMode?: string; invocationSurface?: string },
 ): Promise<ForgePersistResult> {
   const workspaceId = String(body.workspaceId);
   const workspace = await getWorkspace(workspaceId, req);
@@ -1359,7 +1425,10 @@ async function persistExplicitDraftInternal(
 
   await seedPersistGenerationLog({
     slug,
+    workspaceId,
     source,
+    ...(options?.sourceMode ? { sourceMode: options.sourceMode } : {}),
+    ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
     title,
     storyCount: normalizedStories.length,
     model: body.model,
@@ -1367,7 +1436,8 @@ async function persistExplicitDraftInternal(
     postSave,
     normalizationChanges: changes,
     contextUsed: body.contextUsed,
-    contextSummary: resolvedContextSummary,
+    callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
+    resolvedContextSummary,
     reasoning: body.reasoning,
   });
 
@@ -1382,7 +1452,7 @@ async function persistExplicitDraftInternal(
     ).catch(() => { /* non-blocking — errors logged internally */ });
   }
 
-  scheduleSpecPostSaveJobs(slug, workspaceId, {
+  await scheduleSpecPostSaveJobs(slug, workspaceId, {
     enrich: postSave.enrich,
     matchSkills: postSave.matchSkills,
   });
@@ -1973,6 +2043,9 @@ async function executeSkillFirstForge(options: ExecuteSkillFirstForgeOptions): P
     source: 'skill-first-backend',
     ...(options.overwrite ? { overwrite: true } : {}),
     postSave: parsedBody.postSave ?? options.postSaveDefaults,
+  }, {
+    sourceMode: 'skill-first',
+    invocationSurface: 'api.specs.forge',
   });
 
   return {
@@ -3616,12 +3689,25 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       multiPass,
     })]);
 
-    // 12b. Persist generation log
-    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed')`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+    // 12b. Persist generation log with post-save stage tracking (PSE-002)
+    // Seed postSaveStages into context_summary_json so updatePersistPostSaveStage
+    // can find and update stage state when enqueue failures or job failures occur.
+    const forgePostSave: SpecPostSaveOptions = { enrich: true, matchSkills: true, memorySynthesis: true };
+    const forgePostSaveStages = buildPersistPostSaveStages(forgePostSave);
+    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
       Date.now() - genStartTime,
       tokenUsage.inputTokens, tokenUsage.outputTokens,
-      JSON.stringify(precomputedContextSummary ?? {}),]);
+      JSON.stringify(precomputedContextSummary ?? {}),
+      JSON.stringify({
+        source: 'generate',
+        workspaceId: String(workspaceId),
+        postSave: forgePostSave,
+        postSaveStages: forgePostSaveStages,
+        ...(precomputedContextSummary ?? {}),
+      }),
+      'pending_enrichment',
+    ]);
 
     // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
@@ -3671,7 +3757,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       return;
     }
 
-    // 16. Return response
+    // 16. Durable post-save: enrich then match-skills through pg-boss job queue (PSE-002).
+    // Enqueued BEFORE the response is sent so all durable state is committed before
+    // the caller receives the response. enqueuePersistPostSaveJobs persists failures
+    // to stage state in spec_generation_logs, so they surface through status APIs.
+    await scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true });
+
+    // 17. Return response
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, true);
     res.set('X-Git-Hydration', 'fresh');
     res.json({
@@ -3694,7 +3786,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       } : {}),
     });
 
-    // 17. Fire-and-forget spec memory capture (PG-023)
+    // 18. Fire-and-forget spec memory capture (PG-023)
     autoSynthesizeSpecMemory(
       slug,
       workspaceId,
@@ -3702,12 +3794,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       { stories: parsed.stories as unknown[] },
       (contextSummary ?? {}) as Record<string, unknown>,
     ).catch(() => { /* non-blocking — errors logged internally */ });
-
-    // 18. Fire-and-forget: enrich stories with CAG/RAG context, then match skills.
-    // Runs after response is sent so callers (MCP, UI) get instant feedback.
-    // Enrich runs first (adds context to story descriptions), then match-skills
-    // (assigns suggestedSkills arrays). Both write back to the spec JSON on disk.
-    scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true });
   } catch (error: any) {
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
     // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
@@ -6008,6 +6094,498 @@ router.get('/search/stories', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /repair-candidates — List specs that need repair in a workspace ─────
+
+const VALID_REPAIR_CATEGORIES: RepairIssueCategory[] = [
+  'missing_generation_log',
+  'missing_context_summary',
+  'stuck_pending_enrichment',
+  'failed_enrichment',
+  'missing_suggested_skills',
+];
+
+/**
+ * @swagger
+ * /api/specs/repair-candidates:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List specs that are candidates for repair in a workspace
+ *     operationId: rorca_specs_repair_candidates
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only discovery of broken enrichment state — no mutations, safe for operator dashboards and CLI."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: category
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [missing_generation_log, missing_context_summary, stuck_pending_enrichment, failed_enrichment, missing_suggested_skills]
+ *         description: Filter to a single issue category. Can be repeated for multiple categories.
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+ *     responses:
+ *       200:
+ *         description: List of repair candidates with issue categories
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 candidates:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       issues: { type: array, items: { type: string } }
+ *                       logStatus: { type: string }
+ *                 total: { type: integer }
+ *                 categories: { type: array, items: { type: string } }
+ *       400:
+ *         description: Missing workspaceId or invalid category
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/repair-candidates', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = String(req.query.workspaceId ?? '');
+    if (!workspaceId) {
+      throw new ValidationError('Missing required query param: workspaceId');
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    // Parse categories filter
+    const rawCategories = req.query.category;
+    let categories: RepairIssueCategory[] | undefined;
+    if (rawCategories) {
+      const catList = Array.isArray(rawCategories)
+        ? rawCategories.map(String)
+        : [String(rawCategories)];
+      for (const cat of catList) {
+        if (!VALID_REPAIR_CATEGORIES.includes(cat as RepairIssueCategory)) {
+          throw new ValidationError(`Invalid category: ${cat}. Valid categories: ${VALID_REPAIR_CATEGORIES.join(', ')}`);
+        }
+      }
+      categories = catList as RepairIssueCategory[];
+    }
+
+    const limit = Math.min(
+      Math.max(parseInt(String(req.query.limit ?? '100'), 10) || 100, 1),
+      500,
+    );
+
+    // Phase 1: Discover candidates from generation logs
+    const logCandidates = await listRepairCandidatesFromLogs(workspaceId, {
+      categories,
+      limit,
+    });
+
+    // Phase 2: If looking for missing_generation_log, scan filesystem for specs without any log
+    const candidates: Array<{
+      specId: string;
+      issues: RepairIssueCategory[];
+      logStatus: string | null;
+    }> = [];
+
+    // Add log-based candidates
+    for (const c of logCandidates) {
+      candidates.push({
+        specId: c.spec_slug,
+        issues: c.issues,
+        logStatus: c.status,
+      });
+    }
+
+    // Filesystem scan for specs with no generation log at all
+    const wantMissingLog = !categories || categories.includes('missing_generation_log');
+    if (wantMissingLog && candidates.length < limit) {
+      const { pendingDir, approvedDir } = specsDirs(workspace.path);
+      const specFiles: string[] = [];
+      for (const dir of [pendingDir, approvedDir]) {
+        if (fs.existsSync(dir)) {
+          for (const file of fs.readdirSync(dir)) {
+            if (file.endsWith('.json')) {
+              specFiles.push(file.replace(/\.json$/, ''));
+            }
+          }
+        }
+      }
+
+      // Deduplicate and exclude specs already in candidates
+      const knownSlugs = new Set(candidates.map((c) => c.specId));
+      const unknownSlugs = [...new Set(specFiles)].filter((s) => !knownSlugs.has(s));
+
+      if (unknownSlugs.length > 0) {
+        // Batch check which slugs have generation logs
+        const existingLogs = await query<{ spec_slug: string }>(
+          `SELECT DISTINCT spec_slug FROM spec_generation_logs WHERE spec_slug = ANY($1::text[])`,
+          [unknownSlugs],
+        );
+        const loggedSlugs = new Set(existingLogs.map((r) => r.spec_slug));
+
+        for (const slug of unknownSlugs) {
+          if (!loggedSlugs.has(slug)) {
+            candidates.push({
+              specId: slug,
+              issues: ['missing_generation_log'],
+              logStatus: null,
+            });
+            if (candidates.length >= limit) break;
+          }
+        }
+      }
+    }
+
+    // Aggregate which categories were found
+    const foundCategories = [...new Set(candidates.flatMap((c) => c.issues))].sort();
+
+    res.json({
+      candidates,
+      total: candidates.length,
+      categories: foundCategories,
+    });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Repair candidates');
+  }
+});
+
+// ─── POST /repair-batch — Enqueue bounded workspace-scope repair ────────────
+
+const MAX_REPAIR_BATCH_LIMIT = 50;
+
+/**
+ * @swagger
+ * /api/specs/repair-batch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Enqueue workspace-scope repair for matching specs
+ *     operationId: rorca_specs_repair_batch
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Bounded idempotent repair of local spec enrichment — explicit filters and hard limits prevent unbounded bulk mutation."
+ *     x-rorca-public-api: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               categories:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   enum: [missing_generation_log, missing_context_summary, stuck_pending_enrichment, failed_enrichment, missing_suggested_skills]
+ *                 description: Filter to specific issue categories. Required to prevent unbounded repair.
+ *               limit:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 50
+ *                 default: 10
+ *                 description: Maximum number of specs to repair in this batch.
+ *               dryRun:
+ *                 type: boolean
+ *                 default: false
+ *                 description: If true, only report what would be repaired without applying changes.
+ *     responses:
+ *       200:
+ *         description: Batch repair results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 queued: { type: integer }
+ *                 skipped: { type: integer }
+ *                 blocked: { type: integer }
+ *                 total: { type: integer }
+ *                 dryRun: { type: boolean }
+ *                 details:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       status: { type: string, enum: [queued, skipped, blocked] }
+ *                       reason: { type: string }
+ *       400:
+ *         description: Missing workspaceId or categories
+ *       404:
+ *         description: Workspace not found
+ */
+router.post('/repair-batch', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, categories, limit: rawLimit, dryRun = false } = req.body as {
+      workspaceId?: string;
+      categories?: string[];
+      limit?: number;
+      dryRun?: boolean;
+    };
+
+    if (!workspaceId) {
+      throw new ValidationError('Missing required body param: workspaceId');
+    }
+
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+      throw new ValidationError('categories is required and must be a non-empty array — batch repair requires explicit filters');
+    }
+
+    for (const cat of categories) {
+      if (!VALID_REPAIR_CATEGORIES.includes(cat as RepairIssueCategory)) {
+        throw new ValidationError(`Invalid category: ${cat}. Valid categories: ${VALID_REPAIR_CATEGORIES.join(', ')}`);
+      }
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const limit = Math.min(
+      Math.max(rawLimit ?? 10, 1),
+      MAX_REPAIR_BATCH_LIMIT,
+    );
+
+    // Discover candidates using the same discovery logic
+    const logCandidates = await listRepairCandidatesFromLogs(workspaceId, {
+      categories: categories as RepairIssueCategory[],
+      limit,
+    });
+
+    // Also discover filesystem-only candidates if missing_generation_log is requested
+    type BatchCandidate = { specId: string; issues: RepairIssueCategory[] };
+    const allCandidates: BatchCandidate[] = logCandidates.map((c) => ({
+      specId: c.spec_slug,
+      issues: c.issues,
+    }));
+
+    if (categories.includes('missing_generation_log') && allCandidates.length < limit) {
+      const { pendingDir, approvedDir } = specsDirs(workspace.path);
+      const specFiles: string[] = [];
+      for (const dir of [pendingDir, approvedDir]) {
+        if (fs.existsSync(dir)) {
+          for (const file of fs.readdirSync(dir)) {
+            if (file.endsWith('.json')) {
+              specFiles.push(file.replace(/\.json$/, ''));
+            }
+          }
+        }
+      }
+      const knownSlugs = new Set(allCandidates.map((c) => c.specId));
+      const unknownSlugs = [...new Set(specFiles)].filter((s) => !knownSlugs.has(s));
+
+      if (unknownSlugs.length > 0) {
+        const existingLogs = await query<{ spec_slug: string }>(
+          `SELECT DISTINCT spec_slug FROM spec_generation_logs WHERE spec_slug = ANY($1::text[])`,
+          [unknownSlugs],
+        );
+        const loggedSlugs = new Set(existingLogs.map((r) => r.spec_slug));
+        for (const slug of unknownSlugs) {
+          if (!loggedSlugs.has(slug) && allCandidates.length < limit) {
+            allCandidates.push({ specId: slug, issues: ['missing_generation_log'] });
+          }
+        }
+      }
+    }
+
+    // Process each candidate through the single-spec repair flow
+    const details: Array<{
+      specId: string;
+      status: 'queued' | 'skipped' | 'blocked';
+      reason: string;
+    }> = [];
+    let queued = 0;
+    let skipped = 0;
+    let blocked = 0;
+
+    for (const candidate of allCandidates) {
+      // Check for active pipeline run
+      const specPath = fs.existsSync(path.join(workspace.path, 'forge', 'specs', 'approved', `${candidate.specId}.json`))
+        ? `forge/specs/approved/${candidate.specId}.json`
+        : `forge/specs/pending/${candidate.specId}.json`;
+      const activeRun = await queryOne<{ id: number }>(
+        `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND spec_path = $2 AND status IN ('running', 'paused') LIMIT 1`,
+        [workspaceId, specPath],
+      );
+      if (activeRun) {
+        details.push({
+          specId: candidate.specId,
+          status: 'blocked',
+          reason: `Active pipeline run (#${activeRun.id})`,
+        });
+        blocked++;
+        continue;
+      }
+
+      // Check for active enrichment jobs
+      const activeJobs = await listActiveJobs(workspaceId, candidate.specId);
+      if (activeJobs.length > 0) {
+        details.push({
+          specId: candidate.specId,
+          status: 'blocked',
+          reason: `Active enrichment job(s): ${activeJobs.map((j) => `${j.jobType}(${j.status})`).join(', ')}`,
+        });
+        blocked++;
+        continue;
+      }
+
+      if (dryRun) {
+        details.push({
+          specId: candidate.specId,
+          status: 'queued',
+          reason: `Dry run — would repair: ${candidate.issues.join(', ')}`,
+        });
+        queued++;
+        continue;
+      }
+
+      // Verify spec file exists before attempting repair
+      const pendingFile = path.join(workspace.path, 'forge', 'specs', 'pending', `${candidate.specId}.json`);
+      const approvedFile = path.join(workspace.path, 'forge', 'specs', 'approved', `${candidate.specId}.json`);
+      let specFile: string | null = null;
+      if (fs.existsSync(pendingFile)) specFile = pendingFile;
+      else if (fs.existsSync(approvedFile)) specFile = approvedFile;
+
+      if (!specFile) {
+        details.push({
+          specId: candidate.specId,
+          status: 'skipped',
+          reason: 'Spec file not found on disk',
+        });
+        skipped++;
+        continue;
+      }
+
+      // Apply repair actions based on issues
+      try {
+        const repairActions: string[] = [];
+
+        // Handle missing generation log
+        if (candidate.issues.includes('missing_generation_log')) {
+          const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8')) as {
+            title?: string;
+            userStories?: unknown[];
+            model?: string;
+            source?: string;
+          };
+          const storyCount = (specContent.userStories ?? []).length;
+          const postSaveOptions: SpecPostSaveOptions = {
+            enrich: true,
+            matchSkills: true,
+            memorySynthesis: false,
+          };
+          await seedPersistGenerationLog({
+            slug: candidate.specId,
+            workspaceId,
+            source: specContent.source ?? 'repair-batch',
+            sourceMode: 'repair',
+            invocationSurface: 'api.specs.repair-batch',
+            title: specContent.title ?? candidate.specId,
+            storyCount,
+            model: specContent.model,
+            overwrite: false,
+            postSave: postSaveOptions,
+            normalizationChanges: [],
+          });
+          repairActions.push('seeded_generation_log');
+        }
+
+        // Handle failed or stuck enrichment — re-enqueue enrich
+        if (candidate.issues.includes('failed_enrichment') || candidate.issues.includes('stuck_pending_enrichment')) {
+          try {
+            await enqueueAsyncSpecJob(candidate.specId, workspaceId, 'enrich');
+            repairActions.push('enqueued_enrich');
+          } catch {
+            repairActions.push('enrich_enqueue_failed');
+          }
+        }
+
+        // Handle missing context summary — backfill
+        if (candidate.issues.includes('missing_context_summary') && !candidate.issues.includes('missing_generation_log')) {
+          const logRow = await queryOne<{ id: number; context_summary_json: unknown }>(
+            `SELECT id, context_summary_json
+             FROM spec_generation_logs
+             WHERE spec_slug = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1`,
+            [candidate.specId],
+          );
+          if (logRow) {
+            const existingSummary = parseRecordLocal(logRow.context_summary_json);
+            if (!existingSummary.contextCaptureStatus) {
+              existingSummary.contextCaptureStatus = {
+                status: 'missing',
+                reason: 'backfilled_by_repair_batch',
+                contextUsed: 'missing',
+                contextSummary: 'missing',
+              };
+              await execute(
+                `UPDATE spec_generation_logs SET context_summary_json = $2 WHERE id = $1`,
+                [logRow.id, existingSummary],
+              );
+            }
+            repairActions.push('backfilled_context_summary');
+          }
+        }
+
+        details.push({
+          specId: candidate.specId,
+          status: 'queued',
+          reason: `Repairs applied: ${repairActions.join(', ')}`,
+        });
+        queued++;
+      } catch (error) {
+        details.push({
+          specId: candidate.specId,
+          status: 'skipped',
+          reason: `Repair failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        skipped++;
+      }
+    }
+
+    // Emit WAL event for batch repair
+    if (!dryRun && queued > 0) {
+      const walPayload = {
+        workspace_id: workspaceId,
+        categories,
+        queued,
+        skipped,
+        blocked,
+        specs: details.filter((d) => d.status === 'queued').map((d) => d.specId),
+      };
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('specs_repair_batch', $1, $2) RETURNING *`,
+        [workspaceId, JSON.stringify(walPayload)],
+      );
+      if (walEvent) broadcastAll(walEvent);
+    }
+
+    res.json({
+      queued,
+      skipped,
+      blocked,
+      total: allCandidates.length,
+      dryRun,
+      details,
+    });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Repair batch');
+  }
+});
+
 // ─── POST /:specId/add-stories — Generate more stories for an existing spec ───
 
 /**
@@ -7597,27 +8175,50 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
  */
 router.get('/:specId/generation-log', async (req: Request, res: Response) => {
   try {
-    const { specId } = req.params;
+    const specId = String(req.params.specId);
     const all = req.query.all === 'true';
 
     if (all) {
-      const logs = await query(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC`, [specId]);
-      res.json({ logs });
+      const logs = await getEffectiveGenerationLogs(specId);
+      res.json({ logs: logs.map(surfacePostSaveStages) });
       return;
     }
 
-    const log = await queryOne(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
+    const log = await getEffectiveGenerationLog(specId);
 
     if (!log) {
       res.json(null);
       return;
     }
 
-    res.json(log);
+    res.json(surfacePostSaveStages(log));
   } catch (err: any) {
     handleRouteError(res, err, '[Specs] Generation log');
   }
 });
+
+/**
+ * PSE-003: Extract postSaveStages from context_summary_json to a top-level
+ * response field so API consumers can read per-stage status (enrich,
+ * matchSkills, memorySynthesis) without parsing nested JSONB.
+ * PSE-004: Also surfaces contextCaptureStatus so callers can distinguish
+ * caller-supplied context, server-backfilled context, and missing context
+ * without inspecting raw prose strings.
+ * Backward-compatible: older logs without postSaveStages get undefined.
+ */
+function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unknown> {
+  const summary = log.context_summary_json;
+  if (!summary || typeof summary !== 'object') return log;
+  const record = summary as Record<string, unknown>;
+  const stages = record.postSaveStages as PersistPostSaveStageMap | undefined;
+  const contextCaptureStatus = record.contextCaptureStatus as Record<string, unknown> | undefined;
+  if (!stages && !contextCaptureStatus) return log;
+  return {
+    ...log,
+    ...(stages ? { postSaveStages: stages } : {}),
+    ...(contextCaptureStatus ? { contextCaptureStatus } : {}),
+  };
+}
 
 // ─── SV-001: GET /:specId/check — Structural spec validation ─────────────────
 
@@ -13347,6 +13948,406 @@ router.post('/:id/assign-models', async (req: Request, res: Response) => {
     });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Specs] Assign models');
+  }
+});
+
+// ─── POST /:specId/repair — Diagnose and repair post-save enrichment state ──
+
+type RepairActionStatus = 'repaired' | 'skipped' | 'blocked';
+
+interface RepairAction {
+  action: string;
+  status: RepairActionStatus;
+  reason: string;
+  jobId?: string;
+}
+
+interface RepairDiagnosis {
+  missingGenerationLog: boolean;
+  missingContextSummary: boolean;
+  enrichNeedsRepair: boolean;
+  enrichStatus?: PersistStageStatus;
+  matchSkillsNeedsRepair: boolean;
+  matchSkillsStatus?: PersistStageStatus;
+}
+
+function parseRecordLocal(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+function diagnoseSpecHealth(
+  generationLog: Record<string, unknown> | null,
+  stages?: PersistPostSaveStageMap,
+): RepairDiagnosis {
+  const missingGenerationLog = !generationLog;
+  const summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
+  const contextCaptureStatus = parseRecordLocal(summary.contextCaptureStatus);
+  const missingContextSummary = missingGenerationLog
+    || contextCaptureStatus.status === 'missing'
+    || !summary.contextCaptureStatus;
+
+  const enrichStage = stages?.enrich;
+  const matchSkillsStage = stages?.matchSkills;
+
+  const enrichNeedsRepair = !enrichStage
+    || (enrichStage.requested && (enrichStage.status === 'failed' || enrichStage.status === 'pending'));
+  const matchSkillsNeedsRepair = !matchSkillsStage
+    || (matchSkillsStage.requested && (matchSkillsStage.status === 'failed' || matchSkillsStage.status === 'pending'
+        || matchSkillsStage.reason === 'blocked_by_enrich_failure'
+        || matchSkillsStage.reason === 'blocked_by_enrich_enqueue_failure'));
+
+  return {
+    missingGenerationLog,
+    missingContextSummary,
+    enrichNeedsRepair,
+    enrichStatus: enrichStage?.status,
+    matchSkillsNeedsRepair,
+    matchSkillsStatus: matchSkillsStage?.status,
+  };
+}
+
+/**
+ * @swagger
+ * /api/specs/{specId}/repair:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Diagnose and repair post-save enrichment state for a spec
+ *     operationId: rorca_specs_by_id_repair
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Safe idempotent repair of local spec enrichment metadata — no write side effects beyond fixing broken state."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               stages:
+ *                 type: array
+ *                 items: { type: string, enum: [enrich, match-skills] }
+ *                 description: Subset of stages to repair. If omitted, all needed repairs are attempted.
+ *               dryRun:
+ *                 type: boolean
+ *                 default: false
+ *                 description: If true, only diagnose — do not apply repairs.
+ *     responses:
+ *       200:
+ *         description: Repair diagnosis and actions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specId: { type: string }
+ *                 healthy: { type: boolean }
+ *                 diagnosis:
+ *                   type: object
+ *                   properties:
+ *                     missingGenerationLog: { type: boolean }
+ *                     missingContextSummary: { type: boolean }
+ *                     enrichNeedsRepair: { type: boolean }
+ *                     matchSkillsNeedsRepair: { type: boolean }
+ *                 actions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       action: { type: string }
+ *                       status: { type: string, enum: [repaired, skipped, blocked] }
+ *                       reason: { type: string }
+ *                       jobId: { type: string }
+ *                 dryRun: { type: boolean }
+ *       404:
+ *         description: Spec or workspace not found
+ *       409:
+ *         description: Active pipeline run or active enrich job conflicts with repair
+ */
+router.post('/:specId/repair', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId, stages: requestedStages, dryRun = false } = req.body as {
+      workspaceId?: string;
+      stages?: string[];
+      dryRun?: boolean;
+    };
+
+    if (!workspaceId) {
+      throw new ValidationError('Missing required body param: workspaceId');
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    // Verify spec file exists
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFile: string;
+    if (fs.existsSync(pendingFile)) {
+      specFile = pendingFile;
+    } else if (fs.existsSync(approvedFile)) {
+      specFile = approvedFile;
+    } else {
+      throw new NotFoundError(`Spec '${specId}' not found`);
+    }
+
+    // Check for active pipeline run — ConflictError if running
+    const specPath = fs.existsSync(approvedFile)
+      ? `forge/specs/approved/${specId}.json`
+      : `forge/specs/pending/${specId}.json`;
+    const activeRun = await queryOne<{ id: number }>(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND spec_path = $2 AND status IN ('running', 'paused') LIMIT 1`,
+      [workspaceId, specPath],
+    );
+    if (activeRun) {
+      throw new ConflictError(
+        `Spec '${specId}' has an active pipeline run (run #${activeRun.id}) — repair is blocked until it finishes`,
+      );
+    }
+
+    // Check for active (pending/running) enrich/match-skills jobs
+    const activeJobs = await listActiveJobs(workspaceId, specId);
+    const activeEnrichJob = activeJobs.find((j) => j.jobType === 'enrich');
+    const activeMatchSkillsJob = activeJobs.find((j) => j.jobType === 'match-skills');
+
+    // Fetch effective generation log and diagnose health
+    const generationLog = await getEffectiveGenerationLog(specId);
+    const summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
+    const stages = summary.postSaveStages as PersistPostSaveStageMap | undefined;
+    const diagnosis = diagnoseSpecHealth(generationLog, stages);
+
+    // Determine which stages to repair
+    const wantEnrich = !requestedStages || requestedStages.includes('enrich');
+    const wantMatchSkills = !requestedStages || requestedStages.includes('match-skills');
+
+    // Build repair actions
+    const actions: RepairAction[] = [];
+
+    // ── Action 1: Seed missing generation log ──
+    if (diagnosis.missingGenerationLog) {
+      if (dryRun) {
+        actions.push({
+          action: 'seed_generation_log',
+          status: 'skipped',
+          reason: 'Dry run — would seed a generation log row for this spec',
+        });
+      } else {
+        // Parse spec to get title and story count for the seed log
+        const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8')) as {
+          title?: string;
+          userStories?: unknown[];
+          model?: string;
+          source?: string;
+        };
+        const storyCount = (specContent.userStories ?? []).length;
+        const postSaveOptions: SpecPostSaveOptions = {
+          enrich: wantEnrich,
+          matchSkills: wantMatchSkills,
+          memorySynthesis: false,
+        };
+        await seedPersistGenerationLog({
+          slug: specId,
+          workspaceId,
+          source: specContent.source ?? 'repair',
+          sourceMode: 'repair',
+          invocationSurface: 'api.specs.repair',
+          title: specContent.title ?? specId,
+          storyCount,
+          model: specContent.model,
+          overwrite: false,
+          postSave: postSaveOptions,
+          normalizationChanges: [],
+        });
+        actions.push({
+          action: 'seed_generation_log',
+          status: 'repaired',
+          reason: 'Seeded a generation log row with repair metadata',
+        });
+      }
+    } else {
+      actions.push({
+        action: 'seed_generation_log',
+        status: 'skipped',
+        reason: 'Generation log already exists',
+      });
+    }
+
+    // ── Action 2: Backfill missing context summary ──
+    if (diagnosis.missingContextSummary && !diagnosis.missingGenerationLog) {
+      // Only backfill if the generation log exists (or was just seeded above).
+      // If we seeded the log above, it already has a contextCaptureStatus.
+      if (dryRun) {
+        actions.push({
+          action: 'backfill_context_summary',
+          status: 'skipped',
+          reason: 'Dry run — would backfill minimal contextCaptureStatus',
+        });
+      } else {
+        // Patch the existing log's context_summary_json to add a missing contextCaptureStatus
+        const logRow = await queryOne<{ id: number; context_summary_json: unknown }>(
+          `SELECT id, context_summary_json
+           FROM spec_generation_logs
+           WHERE spec_slug = $1
+           ORDER BY created_at DESC, id DESC
+           LIMIT 1`,
+          [specId],
+        );
+        if (logRow) {
+          const existingSummary = parseRecordLocal(logRow.context_summary_json);
+          if (!existingSummary.contextCaptureStatus) {
+            existingSummary.contextCaptureStatus = {
+              status: 'missing',
+              reason: 'backfilled_by_repair',
+              contextUsed: 'missing',
+              contextSummary: 'missing',
+            };
+            await execute(
+              `UPDATE spec_generation_logs SET context_summary_json = $2 WHERE id = $1`,
+              [logRow.id, existingSummary],
+            );
+          }
+        }
+        actions.push({
+          action: 'backfill_context_summary',
+          status: 'repaired',
+          reason: 'Backfilled contextCaptureStatus as missing',
+        });
+      }
+    } else if (diagnosis.missingContextSummary && diagnosis.missingGenerationLog && !dryRun) {
+      // We just seeded the generation log above — it includes contextCaptureStatus
+      actions.push({
+        action: 'backfill_context_summary',
+        status: 'repaired',
+        reason: 'Seeded generation log already includes contextCaptureStatus',
+      });
+    } else {
+      actions.push({
+        action: 'backfill_context_summary',
+        status: 'skipped',
+        reason: 'Context summary already present',
+      });
+    }
+
+    // ── Action 3: Re-enqueue enrich stage ──
+    if (wantEnrich && diagnosis.enrichNeedsRepair) {
+      if (activeEnrichJob) {
+        actions.push({
+          action: 'enqueue_enrich',
+          status: 'blocked',
+          reason: `Active enrich job exists (job ${activeEnrichJob.id}, status: ${activeEnrichJob.status}) — cannot re-enqueue while in progress`,
+          jobId: activeEnrichJob.id,
+        });
+      } else if (dryRun) {
+        actions.push({
+          action: 'enqueue_enrich',
+          status: 'skipped',
+          reason: `Dry run — would enqueue enrich (current status: ${diagnosis.enrichStatus ?? 'none'})`,
+        });
+      } else {
+        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich');
+        actions.push({
+          action: 'enqueue_enrich',
+          status: 'repaired',
+          reason: `Enqueued enrich job (previous status: ${diagnosis.enrichStatus ?? 'none'})`,
+          jobId: payload.jobId,
+        });
+      }
+    } else if (wantEnrich) {
+      actions.push({
+        action: 'enqueue_enrich',
+        status: 'skipped',
+        reason: stages?.enrich
+          ? `Enrich stage is already ${stages.enrich.status}`
+          : 'Enrich was not requested in the original persist',
+      });
+    }
+
+    // ── Action 4: Re-enqueue match-skills stage ──
+    if (wantMatchSkills && diagnosis.matchSkillsNeedsRepair) {
+      if (activeMatchSkillsJob) {
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'blocked',
+          reason: `Active match-skills job exists (job ${activeMatchSkillsJob.id}, status: ${activeMatchSkillsJob.status}) — cannot re-enqueue while in progress`,
+          jobId: activeMatchSkillsJob.id,
+        });
+      } else if (activeEnrichJob) {
+        // match-skills depends on enrich; if enrich is actively running, block
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'blocked',
+          reason: 'Enrich job is currently active — match-skills depends on enrich completing first',
+        });
+      } else if (dryRun) {
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'skipped',
+          reason: `Dry run — would enqueue match-skills (current status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
+        });
+      } else {
+        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills');
+        actions.push({
+          action: 'enqueue_match_skills',
+          status: 'repaired',
+          reason: `Enqueued match-skills job (previous status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
+          jobId: payload.jobId,
+        });
+      }
+    } else if (wantMatchSkills) {
+      actions.push({
+        action: 'enqueue_match_skills',
+        status: 'skipped',
+        reason: stages?.matchSkills
+          ? `Match-skills stage is already ${stages.matchSkills.status}`
+          : 'Match-skills was not requested in the original persist',
+      });
+    }
+
+    const healthy = actions.every((a) => a.status === 'skipped');
+
+    // Emit WAL event for repair
+    if (!dryRun && !healthy) {
+      const walPayload = {
+        spec_id: specId,
+        workspace_id: workspaceId,
+        actions: actions.map((a) => ({ action: a.action, status: a.status })),
+      };
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_repaired', $1, $2, $3) RETURNING *`,
+        [specId, workspaceId, JSON.stringify(walPayload)],
+      );
+      if (walEvent) broadcastAll(walEvent);
+    }
+
+    res.json({
+      specId,
+      healthy,
+      diagnosis,
+      actions,
+      dryRun,
+    });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Repair');
   }
 });
 

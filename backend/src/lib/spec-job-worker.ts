@@ -14,6 +14,7 @@ import { getJob, updateJobStatus } from '../db/spec-jobs';
 import { logger } from './logger';
 import { runContextEnrichJob, runEnrichJob, runMatchSkillsJob, runSuggestSkillsJob, type ProgressCallback } from './spec-job-handlers';
 import { publishSpecJobSnapshot } from './spec-job-events';
+import { advancePersistPostSaveDependencies, syncPersistPostSaveStageFromJob } from './spec-post-save';
 
 export const SPEC_ENRICH_QUEUE = 'spec:enrich';
 export const CONTEXT_ENRICH_QUEUE = 'context:enrich';
@@ -52,6 +53,7 @@ function buildProgressUpdater(jobId: string): ProgressCallback {
         progressTotal: progress.total,
         progressMessage: progress.message,
       });
+      await syncPersistPostSaveStageFromJob(jobId);
       await publishSpecJobSnapshot(jobId, 'progress');
     });
     await pendingUpdate;
@@ -92,6 +94,7 @@ async function handleSpecJobs(
       progressTotal: 0,
       progressMessage: `Picked up ${queueName} job`,
     });
+    await syncPersistPostSaveStageFromJob(payload.jobId);
     await publishSpecJobSnapshot(payload.jobId, 'progress');
 
     try {
@@ -101,6 +104,8 @@ async function handleSpecJobs(
         resultPayload: resultPayload as never,
         finishedAt: new Date(),
       });
+      await syncPersistPostSaveStageFromJob(payload.jobId);
+      await advancePersistPostSaveDependencies(payload.jobId);
       await publishSpecJobSnapshot(payload.jobId, 'terminal');
       logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] job completed');
     } catch (error) {
@@ -110,6 +115,8 @@ async function handleSpecJobs(
           progressMessage: 'Cancelled by user',
           errorMessage: null,
         });
+        await syncPersistPostSaveStageFromJob(payload.jobId);
+        await advancePersistPostSaveDependencies(payload.jobId);
         await publishSpecJobSnapshot(payload.jobId, 'terminal');
         logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] job cancelled');
         return;
@@ -122,6 +129,8 @@ async function handleSpecJobs(
           progressMessage: 'Cancelled by user',
           errorMessage: null,
         });
+        await syncPersistPostSaveStageFromJob(payload.jobId);
+        await advancePersistPostSaveDependencies(payload.jobId);
         await publishSpecJobSnapshot(payload.jobId, 'terminal');
         logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] cancellation won race with failure');
         return;
@@ -132,6 +141,8 @@ async function handleSpecJobs(
         errorMessage: message,
         finishedAt: new Date(),
       });
+      await syncPersistPostSaveStageFromJob(payload.jobId);
+      await advancePersistPostSaveDependencies(payload.jobId);
       await publishSpecJobSnapshot(payload.jobId, 'terminal');
       logger.warn({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId, error: message }, '[spec-job-worker] job failed');
       throw error;

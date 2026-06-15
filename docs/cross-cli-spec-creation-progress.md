@@ -16,6 +16,14 @@ done:
 - Updated Pi extension README and skill docs to distinguish preferred skill-first flow from legacy backend generation
 - Added/updated coverage for the new MCP alias and Pi command behavior
 - Added regression coverage proving persist → immediate generation-log works for the Context tab path
+- Added durable post-save enrichment orchestration (`spec-post-save.ts`) with stage dependency management: enrich enqueues immediately, matchSkills deferred until enrich completes, memorySynthesis reserved for future
+- Added per-stage status tracking in `spec_generation_logs.context_summary_json.postSaveStages` with honest `PersistStageReason` values (requested_by_caller, disabled_by_caller, durable_job_enqueued, waiting_for_enrich, job_completed, job_failed, blocked_by_enrich_failure, etc.)
+- Added context capture status tracking (`contextCaptureStatus`) distinguishing caller-provided, server-backfilled, and missing context provenance
+- Added single-spec repair flow (`POST /api/specs/:specId/repair`) that diagnoses and repairs missing generation logs, missing context summaries, failed enrich, and failed match-skills
+- Added workspace-scope repair candidate discovery (`GET /api/specs/repair-candidates`) and bounded batch repair (`POST /api/specs/repair-batch`)
+- Added Context tab state matrix UI with four diagnostic classifications: `legacy_no_log`, `persisted_without_context`, `pending_post_save`, `post_save_failed`
+- Added Repair and Retry Enrichment action buttons with state-dependent visibility (hidden during pending, disabled during active runs)
+- Added focused regression test coverage (PSE-009): backend orchestration topology, stage skip reasons, frontend parseContextCaptureStatus, ContextTabEmptyState visibility/disabled rules
 next:
 - If desired, add stronger project-local routing/config for OpenCode and Codex once a stable in-repo wrapper/config surface is identified
 - Optionally add telemetry showing whether specs were created via explicit tool, skill command, shared dashboard forge, or legacy backend generation

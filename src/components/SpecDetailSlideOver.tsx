@@ -828,7 +828,7 @@ function SpecDetailContent({
                 onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields, model: fields.model ?? undefined } : prev)} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} workspaceId={workspaceId ?? ''} activeRunStatus={activeRunStatus} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <GraphTabWithSubTabs specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -1307,6 +1307,32 @@ function JsonTab({ spec, specId: _specId }: { spec: SpecDetailData; specId: stri
 
 /* ─── LST-004: Generation Log Tab ──────────────────────────────── */
 
+/** PSE-003: Per-stage status for post-save enrichment pipeline. */
+export type PostSaveStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+export interface PostSaveStageState {
+  requested: boolean;
+  status: PostSaveStageStatus;
+  reason: string;
+  jobId?: string;
+  bossJobId?: string | null;
+  error?: string | null;
+  updatedAt?: string;
+}
+export type PostSaveStageMap = {
+  enrich: PostSaveStageState;
+  matchSkills: PostSaveStageState;
+  memorySynthesis: PostSaveStageState;
+};
+
+/** PSE-004: Context capture classification surfaced from backend. */
+export type ContextCaptureState = 'provided' | 'backfilled' | 'missing';
+export interface ContextCaptureStatus {
+  status: ContextCaptureState;
+  reason: string;
+  contextUsed: 'provided' | 'missing';
+  contextSummary: 'provided' | 'backfilled' | 'missing';
+}
+
 interface GenerationLog {
   id: number;
   spec_slug: string;
@@ -1323,6 +1349,10 @@ interface GenerationLog {
   created_at: string;
   retrieval_method?: string | null;
   enriched?: boolean;
+  /** PSE-003: Canonical per-stage status surfaced from backend. */
+  postSaveStages?: PostSaveStageMap;
+  /** PSE-004: Context capture classification surfaced from backend. */
+  contextCaptureStatus?: ContextCaptureStatus;
 }
 
 export interface GenerationLogPresentation {
@@ -1565,6 +1595,64 @@ export function parseContextSummary(log: GenerationLog): ContextSummary | null {
   return normalizeContextSummaryPayload(parsed);
 }
 
+/**
+ * PSE-003: Extract postSaveStages from a generation log row.
+ * Priority: top-level postSaveStages field (surfaced by backend route),
+ * then fallback to nested context_summary_json.postSaveStages for older
+ * responses or backward compatibility.
+ */
+export function parsePostSaveStages(log: GenerationLog): PostSaveStageMap | null {
+  if (log.postSaveStages) return log.postSaveStages;
+
+  const jsonStr = log.context_summary_json;
+  if (!jsonStr) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  const record = parsed as Record<string, unknown>;
+  const stages = record.postSaveStages;
+  if (!stages || typeof stages !== 'object') return null;
+
+  const stageMap = stages as Record<string, unknown>;
+  if (!stageMap.enrich || !stageMap.matchSkills || !stageMap.memorySynthesis) return null;
+
+  return stages as PostSaveStageMap;
+}
+
+/**
+ * PSE-004: Extract contextCaptureStatus from a generation log row.
+ * Priority: top-level contextCaptureStatus field (surfaced by backend route),
+ * then fallback to nested context_summary_json.contextCaptureStatus.
+ */
+export function parseContextCaptureStatus(log: GenerationLog): ContextCaptureStatus | null {
+  if (log.contextCaptureStatus) return log.contextCaptureStatus;
+
+  const jsonStr = log.context_summary_json;
+  if (!jsonStr) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  const record = parsed as Record<string, unknown>;
+  const ccs = record.contextCaptureStatus;
+  if (!ccs || typeof ccs !== 'object') return null;
+  const ccsRecord = ccs as Record<string, unknown>;
+  if (typeof ccsRecord.status !== 'string') return null;
+
+  return ccs as ContextCaptureStatus;
+}
+
 /** Rough per-1K-token cost estimates by model family (input/output). */
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number | null {
   const rates: Record<string, [number, number]> = {
@@ -1605,7 +1693,378 @@ function StoryAnnotationPreview({ preview, hasMore, fullText }: { preview: strin
   );
 }
 
-function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; stories: Story[]; refreshKey?: number }) {
+/* ─── PSE-003: Post-save stage status display ──────────────────── */
+
+const STAGE_LABELS: Record<keyof PostSaveStageMap, string> = {
+  enrich: 'Enrich',
+  matchSkills: 'Match Skills',
+  memorySynthesis: 'Memory Synthesis',
+};
+
+const STAGE_STATUS_CONFIG: Record<PostSaveStageStatus, { label: string; dotClass: string; textClass: string }> = {
+  pending:   { label: 'Pending',   dotClass: 'bg-blue-400',   textClass: 'text-blue-400' },
+  queued:    { label: 'Queued',    dotClass: 'bg-blue-400',   textClass: 'text-blue-400' },
+  running:   { label: 'Running',   dotClass: 'bg-amber-400 animate-pulse', textClass: 'text-amber-400' },
+  completed: { label: 'Completed', dotClass: 'bg-success',    textClass: 'text-success' },
+  failed:    { label: 'Failed',    dotClass: 'bg-error',      textClass: 'text-error' },
+  skipped:   { label: 'Skipped',   dotClass: 'bg-muted/40',   textClass: 'text-muted/60' },
+};
+
+function reasonLabel(reason: string): string {
+  const map: Record<string, string> = {
+    requested_by_caller: 'Requested',
+    disabled_by_caller: 'Not requested',
+    waiting_for_enrich: 'Waiting for enrich',
+    durable_job_enqueued: 'Job enqueued',
+    durable_job_enqueued_after_enrich: 'Enqueued after enrich',
+    job_started: 'Processing',
+    job_completed: 'Done',
+    enqueue_failed: 'Enqueue failed',
+    job_failed: 'Job failed',
+    blocked_by_enrich_failure: 'Blocked — enrich failed',
+    blocked_by_enrich_enqueue_failure: 'Blocked — enrich could not start',
+    no_installed_skills: 'No skills installed',
+  };
+  return map[reason] ?? reason;
+}
+
+/* ─── PSE-004: Context capture status display ──────────────────── */
+
+const CONTEXT_CAPTURE_CONFIG: Record<ContextCaptureState, { label: string; dotClass: string; textClass: string }> = {
+  provided:   { label: 'Caller-supplied', dotClass: 'bg-success',  textClass: 'text-success' },
+  backfilled: { label: 'Server-backfilled', dotClass: 'bg-amber-400', textClass: 'text-amber-400' },
+  missing:    { label: 'Missing',         dotClass: 'bg-muted/40', textClass: 'text-muted/60' },
+};
+
+const CONTEXT_CAPTURE_REASON_LABELS: Record<string, string> = {
+  caller_supplied_context: 'Caller provided context summary',
+  context_summary_derived_from_context_used_meta: 'Derived from contextUsed metadata',
+  context_used_missing_meta: 'Context payload lacked metadata',
+  caller_context_not_supplied: 'Caller omitted drafting context',
+};
+
+function ContextCaptureCard({ status }: { status: ContextCaptureStatus }) {
+  const config = CONTEXT_CAPTURE_CONFIG[status.status];
+  return (
+    <div className="px-4 py-3 border-t border-border/50" data-testid="context-capture-status">
+      <p className="text-[10px] text-muted uppercase tracking-wider font-semibold mb-2">Context Source</p>
+      <div className="flex items-start gap-2">
+        <span className={`mt-1 shrink-0 w-2 h-2 rounded-full ${config.dotClass}`} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-medium ${config.textClass}`}>{config.label}</span>
+          </div>
+          <p className="text-[10px] text-muted/70">
+            {CONTEXT_CAPTURE_REASON_LABELS[status.reason] ?? status.reason}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface RepairResponse {
+  specId: string;
+  healthy: boolean;
+  diagnosis: {
+    missingGenerationLog: boolean;
+    missingContextSummary: boolean;
+    enrichNeedsRepair: boolean;
+    matchSkillsNeedsRepair: boolean;
+  };
+  actions: Array<{ action: string; status: string; reason: string; jobId?: string }>;
+  dryRun: boolean;
+}
+
+/** Map stage key to the backend repair stage filter value */
+const STAGE_REPAIR_FILTER: Partial<Record<keyof PostSaveStageMap, string>> = {
+  enrich: 'enrich',
+  matchSkills: 'match-skills',
+};
+
+function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, onRetried }: {
+  stages: PostSaveStageMap;
+  specId?: string;
+  workspaceId?: string;
+  activeRunStatus?: 'running' | 'queued';
+  onRetried?: () => void;
+}) {
+  const toast = useGlobalToast();
+  const [retrying, setRetrying] = useState<string | null>(null);
+  const stageNames = Object.keys(stages) as (keyof PostSaveStageMap)[];
+  const hasAnyRequested = stageNames.some(name => stages[name].requested);
+  if (!hasAnyRequested) return null;
+
+  const isRunActive = activeRunStatus === 'running' || activeRunStatus === 'queued';
+
+  const handleRetryStage = async (stageName: keyof PostSaveStageMap) => {
+    if (!specId || !workspaceId || retrying || isRunActive) return;
+    const filter = STAGE_REPAIR_FILTER[stageName];
+    if (!filter) return;
+    setRetrying(stageName);
+    try {
+      await apiFetch<RepairResponse>(
+        `/api/specs/${specId}/repair`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId, stages: [filter] }),
+        },
+      );
+      toast.show(`Retry initiated for ${STAGE_LABELS[stageName]}`, 'success');
+      onRetried?.();
+    } catch (err: unknown) {
+      toast.show(err instanceof Error ? err.message : 'Retry failed', 'error');
+    } finally {
+      setRetrying(null);
+    }
+  };
+
+  return (
+    <div className="px-4 py-3 border-t border-border/50" data-testid="post-save-stages">
+      <p className="text-[10px] text-muted uppercase tracking-wider font-semibold mb-2">Post-Save Pipeline</p>
+      <div className="space-y-1.5">
+        {stageNames.map(name => {
+          const stage = stages[name];
+          const statusConfig = STAGE_STATUS_CONFIG[stage.status];
+          const canRetry = specId && workspaceId && stage.requested && stage.status === 'failed' && STAGE_REPAIR_FILTER[name];
+          return (
+            <div key={name} className="flex items-start gap-2" data-testid={`stage-${name}`}>
+              <span className={`mt-1 shrink-0 w-2 h-2 rounded-full ${statusConfig.dotClass}`} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-text">{STAGE_LABELS[name]}</span>
+                  <span className={`text-[10px] font-semibold ${statusConfig.textClass}`}>
+                    {statusConfig.label}
+                  </span>
+                  {stage.jobId && (
+                    <span className="text-[9px] font-mono text-muted/50 truncate max-w-[120px]" title={stage.jobId}>
+                      {stage.jobId.slice(0, 8)}
+                    </span>
+                  )}
+                  {canRetry && (
+                    <button
+                      onClick={() => handleRetryStage(name)}
+                      disabled={!!retrying || isRunActive}
+                      title={isRunActive ? 'Cannot retry while a run is active' : `Retry ${STAGE_LABELS[name]}`}
+                      className={`text-[10px] font-medium text-accent hover:text-accent/80 transition-colors ${retrying || isRunActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      data-testid={`stage-retry-${name}`}
+                    >
+                      {retrying === name ? 'Retrying…' : 'Retry'}
+                    </button>
+                  )}
+                </div>
+                <p className="text-[10px] text-muted/70">{reasonLabel(stage.reason)}</p>
+                {stage.error && (
+                  <p className="text-[10px] text-error/80 mt-0.5 break-words">{stage.error}</p>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ─── PSE-007: Context tab failure classification & diagnostic empty state ── */
+
+export type ContextClassification =
+  | 'legacy_no_log'
+  | 'persisted_without_context'
+  | 'pending_post_save'
+  | 'post_save_failed';
+
+/**
+ * Classify what diagnostic state the Context tab should show.
+ * Returns null when context is fully available (no banner needed).
+ */
+export function classifyContextState(
+  context: ContextSummary | null,
+  stages: PostSaveStageMap | null,
+  capture: ContextCaptureStatus | null,
+): ContextClassification | null {
+  // If we have a context summary, the tab has real data — no diagnostic needed.
+  if (context) return null;
+
+  // Check post-save stage states for pending or failed
+  if (stages) {
+    const allStages = [stages.enrich, stages.matchSkills, stages.memorySynthesis];
+    const hasRunningOrQueued = allStages.some(
+      s => s.requested && (s.status === 'pending' || s.status === 'queued' || s.status === 'running'),
+    );
+    if (hasRunningOrQueued) return 'pending_post_save';
+
+    const hasFailed = allStages.some(
+      s => s.requested && (s.status === 'failed'),
+    );
+    if (hasFailed) return 'post_save_failed';
+  }
+
+  // Has a capture status but context is missing — persisted without context
+  if (capture && capture.status === 'missing') return 'persisted_without_context';
+
+  // Fallback: no stages, no capture — legacy spec pre-context-logging
+  return 'persisted_without_context';
+}
+
+const CONTEXT_CLASSIFICATION_CONFIG: Record<ContextClassification, {
+  icon: 'history' | 'alert' | 'loader' | 'x-circle';
+  title: string;
+  description: string;
+  iconClass: string;
+}> = {
+  legacy_no_log: {
+    icon: 'history',
+    title: 'Legacy spec — no generation log',
+    description: 'This spec was generated before context logging was introduced. Use Repair to seed a generation log and trigger enrichment.',
+    iconClass: 'text-muted/50',
+  },
+  persisted_without_context: {
+    icon: 'alert',
+    title: 'Persisted without context',
+    description: 'This spec was saved without drafting context. Use Repair to backfill context and trigger enrichment, or Retry Enrichment to enrich directly.',
+    iconClass: 'text-amber-400',
+  },
+  pending_post_save: {
+    icon: 'loader',
+    title: 'Post-save pipeline in progress',
+    description: 'Enrichment, skill matching, or memory synthesis is still running. This tab will update automatically when the pipeline completes.',
+    iconClass: 'text-blue-400',
+  },
+  post_save_failed: {
+    icon: 'x-circle',
+    title: 'Post-save pipeline failed',
+    description: 'One or more post-save stages failed. Review the pipeline status below, then use Retry or Repair to recover.',
+    iconClass: 'text-error',
+  },
+};
+
+function ContextTabEmptyState({ specId, workspaceId, classification, activeRunStatus, onRepaired }: {
+  specId: string;
+  workspaceId: string;
+  classification: ContextClassification;
+  activeRunStatus?: 'running' | 'queued';
+  onRepaired: () => void;
+}) {
+  const toast = useGlobalToast();
+  const [repairState, setRepairState] = useState<'idle' | 'repairing' | 'retrying'>('idle');
+  const config = CONTEXT_CLASSIFICATION_CONFIG[classification];
+  const isRunActive = activeRunStatus === 'running' || activeRunStatus === 'queued';
+  const isBusy = repairState !== 'idle';
+  const isPending = classification === 'pending_post_save';
+
+  const handleRepair = async () => {
+    if (!workspaceId || isBusy || isRunActive) return;
+    setRepairState('repairing');
+    try {
+      const res = await apiFetch<RepairResponse>(
+        `/api/specs/${specId}/repair`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
+      const appliedCount = res.actions.filter(a => a.status === 'repaired').length;
+      toast.show(
+        appliedCount > 0
+          ? `Repair applied ${appliedCount} action${appliedCount === 1 ? '' : 's'}`
+          : res.healthy ? 'Spec is already healthy' : 'No repairs could be applied',
+        appliedCount > 0 ? 'success' : 'info',
+      );
+      onRepaired();
+    } catch (err: unknown) {
+      toast.show(err instanceof Error ? err.message : 'Repair failed', 'error');
+    } finally {
+      setRepairState('idle');
+    }
+  };
+
+  const handleRetryEnrich = async () => {
+    if (!workspaceId || isBusy || isRunActive) return;
+    setRepairState('retrying');
+    try {
+      await apiFetch(
+        `/api/specs/${specId}/enrich/async`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
+      toast.show('Enrichment job enqueued', 'success');
+      onRepaired();
+    } catch (err: unknown) {
+      toast.show(err instanceof Error ? err.message : 'Retry failed', 'error');
+    } finally {
+      setRepairState('idle');
+    }
+  };
+
+  const IconComponent = config.icon === 'history' ? History
+    : config.icon === 'loader' ? Loader2
+    : config.icon === 'x-circle' ? XCircle
+    : AlertCircle;
+
+  return (
+    <div className="border border-border rounded-lg bg-panel overflow-hidden" data-testid="context-empty-state">
+      <div className="flex flex-col items-center justify-center gap-3 px-6 py-8 text-center">
+        <IconComponent
+          size={28}
+          className={`${config.iconClass} ${config.icon === 'loader' ? 'animate-spin' : ''}`}
+        />
+        <div>
+          <p className="text-sm font-medium text-text" data-testid="context-empty-title">{config.title}</p>
+          <p className="text-xs text-muted/60 mt-1 max-w-[320px]">{config.description}</p>
+        </div>
+        <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${
+          classification === 'legacy_no_log' ? 'bg-muted/15 text-muted border border-muted/30'
+            : classification === 'persisted_without_context' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+            : classification === 'pending_post_save' ? 'bg-blue-500/15 text-blue-400 border border-blue-500/30'
+            : 'bg-error/15 text-error border border-error/30'
+        }`} data-testid="context-empty-badge">
+          {classification === 'legacy_no_log' ? 'Legacy'
+            : classification === 'persisted_without_context' ? 'No Context'
+            : classification === 'pending_post_save' ? 'In Progress'
+            : 'Failed'}
+        </span>
+
+        {/* Action buttons — hidden for pending state, disabled during active runs */}
+        {!isPending && (
+          <div className="flex items-center gap-2 mt-2">
+            <button
+              onClick={handleRepair}
+              disabled={isBusy || isRunActive}
+              title={isRunActive ? 'Cannot repair while a run is active' : 'Diagnose and repair post-save state'}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+              data-testid="context-repair-btn"
+            >
+              {repairState === 'repairing'
+                ? <><Loader2 size={12} className="animate-spin" /> Repairing…</>
+                : <><RotateCcw size={12} /> Repair</>}
+            </button>
+            {(classification === 'persisted_without_context' || classification === 'post_save_failed') && (
+              <button
+                onClick={handleRetryEnrich}
+                disabled={isBusy || isRunActive}
+                title={isRunActive ? 'Cannot enrich while a run is active' : 'Re-enqueue enrichment job'}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+                data-testid="context-retry-enrich-btn"
+              >
+                {repairState === 'retrying'
+                  ? <><Loader2 size={12} className="animate-spin" /> Retrying…</>
+                  : <><Sparkles size={12} /> Retry Enrichment</>}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunStatus }: { specId: string; stories: Story[]; refreshKey?: number; workspaceId: string; activeRunStatus?: 'running' | 'queued' }) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -1655,15 +2114,35 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
 
   if (logs.length === 0) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-sm text-muted">No generation data available</p>
-          <p className="text-xs text-muted/60 mt-1 text-center max-w-[280px]">Context logging was introduced in a recent update. Specs generated after that point will show direction layers, token usage, and model details here.</p>
-      </div>
+      <ContextTabEmptyState
+        specId={specId}
+        workspaceId={workspaceId}
+        classification="legacy_no_log"
+        activeRunStatus={activeRunStatus}
+        onRepaired={() => setLogs([])} // triggers re-fetch via refreshKey in parent
+      />
     );
   }
 
+  // Determine if the latest log is persisted-without-context or has pending/failed post-save
+  const latestLog = logs[0];
+  const latestContext = parseContextSummary(latestLog);
+  const latestStages = parsePostSaveStages(latestLog);
+  const latestCapture = parseContextCaptureStatus(latestLog);
+
+  const emptyClassification = classifyContextState(latestContext, latestStages, latestCapture);
+
   return (
     <div className="p-4 space-y-4">
+      {emptyClassification && (
+        <ContextTabEmptyState
+          specId={specId}
+          workspaceId={workspaceId}
+          classification={emptyClassification}
+          activeRunStatus={activeRunStatus}
+          onRepaired={() => setShowAll(s => !s)} // toggle to trigger re-fetch
+        />
+      )}
       {logs.map((log, i) => {
         const cost = log.input_tokens && log.output_tokens
           ? estimateCost(log.model, log.input_tokens, log.output_tokens)
@@ -1672,6 +2151,8 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
         const contextSummary = parseContextSummary(log);
         const isEnriched = !!log.enriched;
         const presentation = getGenerationLogPresentation(log);
+        const postSaveStages = parsePostSaveStages(log);
+        const contextCaptureStatus = parseContextCaptureStatus(log);
 
         return (
           <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
@@ -1754,6 +2235,12 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
                 </div>
               </div>
             )}
+
+            {/* PSE-004: Context capture classification */}
+            {contextCaptureStatus && <ContextCaptureCard status={contextCaptureStatus} />}
+
+            {/* PSE-003: Per-stage post-save pipeline status */}
+            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} specId={specId} workspaceId={workspaceId} activeRunStatus={activeRunStatus} onRetried={() => setShowAll(s => !s)} />}
 
             {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
             {log.enriched && log.retrieval_method && (() => {

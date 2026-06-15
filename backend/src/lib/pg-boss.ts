@@ -26,6 +26,7 @@ import PgBoss from 'pg-boss';
 import { logger } from './logger';
 
 let bossInstance: PgBoss | null = null;
+let bossInitPromise: Promise<void> | null = null;
 
 /**
  * initBoss — create and start the pg-boss singleton.
@@ -38,44 +39,56 @@ export async function initBoss(): Promise<void> {
     logger.debug('[pg-boss] already initialised — skipping');
     return;
   }
-
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error('[pg-boss] DATABASE_URL is not set — cannot initialise pg-boss');
+  if (bossInitPromise) {
+    await bossInitPromise;
+    return;
   }
 
-  const boss = new PgBoss({
-    connectionString,
-    // Keep pg-boss internal tables in their own schema (pgboss.*)
-    schema: 'pgboss',
-    // Data retention and archiving settings (US-001)
-    // - Move completed jobs from pgboss.job → pgboss.archive after 1 hour
-    archiveCompletedAfterSeconds: 3600,
-    // - Keep failed jobs in pgboss.job for 7 days before archiving (longer retention for debugging)
-    archiveFailedAfterSeconds: 604800,
-    // - Delete archived jobs older than 14 days (balance between retention and table bloat)
-    deleteAfterDays: 14,
-    // - Retention period: keep archived data for 30 days before hard delete
-    retentionDays: 30,
-    // - Run maintenance cycle (archive + delete) every 2 minutes
-    maintenanceIntervalSeconds: 120,
-    // - Fire monitor-states event every 60 seconds with queue health snapshots (required for US-004)
-    monitorStateIntervalSeconds: 60,
-  });
+  bossInitPromise = (async () => {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error('[pg-boss] DATABASE_URL is not set — cannot initialise pg-boss');
+    }
 
-  boss.on('error', (err) => {
-    logger.error({ err }, '[pg-boss] internal error — pg-boss maintenance or connection issue');
-  });
+    const boss = new PgBoss({
+      connectionString,
+      // Keep pg-boss internal tables in their own schema (pgboss.*)
+      schema: 'pgboss',
+      // Data retention and archiving settings (US-001)
+      // - Move completed jobs from pgboss.job → pgboss.archive after 1 hour
+      archiveCompletedAfterSeconds: 3600,
+      // - Keep failed jobs in pgboss.job for 7 days before archiving (longer retention for debugging)
+      archiveFailedAfterSeconds: 604800,
+      // - Delete archived jobs older than 14 days (balance between retention and table bloat)
+      deleteAfterDays: 14,
+      // - Retention period: keep archived data for 30 days before hard delete
+      retentionDays: 30,
+      // - Run maintenance cycle (archive + delete) every 2 minutes
+      maintenanceIntervalSeconds: 120,
+      // - Fire monitor-states event every 60 seconds with queue health snapshots (required for US-004)
+      monitorStateIntervalSeconds: 60,
+    });
 
-  // boss.start() creates / migrates the pgboss schema automatically
-  await boss.start();
+    boss.on('error', (err) => {
+      logger.error({ err }, '[pg-boss] internal error — pg-boss maintenance or connection issue');
+    });
 
-  // pg-boss v10: queues must be explicitly created before send() or work() can use them.
-  // createQueue() is idempotent — safe to call on every startup.
-  await ensureQueues(boss);
+    // boss.start() creates / migrates the pgboss schema automatically
+    await boss.start();
 
-  bossInstance = boss;
-  logger.info('[pg-boss] started — schema ready');
+    // pg-boss v10: queues must be explicitly created before send() or work() can use them.
+    // createQueue() is idempotent — safe to call on every startup.
+    await ensureQueues(boss);
+
+    bossInstance = boss;
+    logger.info('[pg-boss] started — schema ready');
+  })();
+
+  try {
+    await bossInitPromise;
+  } finally {
+    bossInitPromise = null;
+  }
 }
 
 /**

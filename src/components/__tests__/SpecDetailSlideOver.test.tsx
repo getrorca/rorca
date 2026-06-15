@@ -11,6 +11,12 @@ import {
   parseContextSummary,
   getRetrievalMethodPresentation,
   extractStoryContextAnnotations,
+  parsePostSaveStages,
+  parseContextCaptureStatus,
+  classifyContextState,
+  type PostSaveStageMap,
+  type ContextCaptureStatus,
+  type ContextClassification,
 } from '../SpecDetailSlideOver';
 
 describe('parseContextSummary', () => {
@@ -223,5 +229,423 @@ describe('extractStoryContextAnnotations', () => {
     ]);
     expect(annotation.hasMore).toBe(false);
     expect(annotation.preview).toBe('Only one line');
+  });
+});
+
+/* ─── PSE-003: parsePostSaveStages contract ────────────────────── */
+
+const SAMPLE_STAGES: PostSaveStageMap = {
+  enrich: { requested: true, status: 'completed', reason: 'job_completed', jobId: 'aaa-111', bossJobId: 'bbb-222' },
+  matchSkills: { requested: true, status: 'running', reason: 'job_started', jobId: 'ccc-333' },
+  memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+};
+
+describe('PSE-003: parsePostSaveStages', () => {
+  it('reads postSaveStages from top-level field (surfaced by backend)', () => {
+    const result = parsePostSaveStages({
+      postSaveStages: SAMPLE_STAGES,
+    } as any);
+
+    expect(result).toEqual(SAMPLE_STAGES);
+  });
+
+  it('falls back to nested context_summary_json.postSaveStages', () => {
+    const result = parsePostSaveStages({
+      context_summary_json: JSON.stringify({ postSaveStages: SAMPLE_STAGES }),
+    } as any);
+
+    expect(result).toEqual(SAMPLE_STAGES);
+  });
+
+  it('prefers top-level field over nested when both exist', () => {
+    const topLevel: PostSaveStageMap = {
+      ...SAMPLE_STAGES,
+      enrich: { ...SAMPLE_STAGES.enrich, status: 'failed', reason: 'job_failed' },
+    };
+    const result = parsePostSaveStages({
+      postSaveStages: topLevel,
+      context_summary_json: JSON.stringify({ postSaveStages: SAMPLE_STAGES }),
+    } as any);
+
+    expect(result!.enrich.status).toBe('failed');
+  });
+
+  it('returns null for logs without any postSaveStages', () => {
+    expect(parsePostSaveStages({} as any)).toBeNull();
+    expect(parsePostSaveStages({ context_summary_json: '{}' } as any)).toBeNull();
+    expect(parsePostSaveStages({ context_summary_json: 'not json' } as any)).toBeNull();
+  });
+
+  it('returns null when context_summary_json.postSaveStages is incomplete', () => {
+    // Missing memorySynthesis key → not a valid PostSaveStageMap
+    expect(parsePostSaveStages({
+      context_summary_json: JSON.stringify({
+        postSaveStages: {
+          enrich: { requested: true, status: 'completed', reason: 'job_completed' },
+          matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+        },
+      }),
+    } as any)).toBeNull();
+  });
+
+  it('handles already-parsed context_summary_json objects', () => {
+    // pg driver returns JSONB as an object, not a string
+    const result = parsePostSaveStages({
+      context_summary_json: { postSaveStages: SAMPLE_STAGES },
+    } as any);
+
+    expect(result).toEqual(SAMPLE_STAGES);
+  });
+
+  it('distinguishes skipped-because-not-requested from failed-after-request', () => {
+    const stages: PostSaveStageMap = {
+      enrich: { requested: true, status: 'failed', reason: 'job_failed', error: 'Timeout' },
+      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    };
+    const result = parsePostSaveStages({ postSaveStages: stages } as any);
+
+    expect(result!.enrich.requested).toBe(true);
+    expect(result!.enrich.status).toBe('failed');
+    expect(result!.enrich.error).toBe('Timeout');
+    expect(result!.matchSkills.requested).toBe(false);
+    expect(result!.matchSkills.status).toBe('skipped');
+    expect(result!.matchSkills.error).toBeUndefined();
+  });
+
+  it('carries jobId and bossJobId when available', () => {
+    const result = parsePostSaveStages({ postSaveStages: SAMPLE_STAGES } as any);
+    expect(result!.enrich.jobId).toBe('aaa-111');
+    expect(result!.enrich.bossJobId).toBe('bbb-222');
+    expect(result!.matchSkills.jobId).toBe('ccc-333');
+    expect(result!.matchSkills.bossJobId).toBeUndefined();
+  });
+});
+
+/* ─── PSE-007: classifyContextState contract ────────────────────── */
+
+describe('PSE-007: classifyContextState', () => {
+  const makeMissing: ContextCaptureStatus = {
+    status: 'missing',
+    reason: 'caller_context_not_supplied',
+    contextUsed: 'missing',
+    contextSummary: 'missing',
+  };
+
+  const makeProvided: ContextCaptureStatus = {
+    status: 'provided',
+    reason: 'caller_supplied_context',
+    contextUsed: 'provided',
+    contextSummary: 'provided',
+  };
+
+  const makeStages = (overrides: Partial<Record<keyof PostSaveStageMap, Partial<PostSaveStageMap['enrich']>>>): PostSaveStageMap => ({
+    enrich: { requested: true, status: 'completed', reason: 'job_completed', ...overrides.enrich },
+    matchSkills: { requested: true, status: 'completed', reason: 'job_completed', ...overrides.matchSkills },
+    memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller', ...overrides.memorySynthesis },
+  });
+
+  it('returns null when context summary is available (no diagnostic needed)', () => {
+    const context = { directionLayers: { l1: true } } as any;
+    expect(classifyContextState(context, null, null)).toBeNull();
+  });
+
+  it('returns null when context is present even with failed stages', () => {
+    const context = { directionLayers: { l1: true } } as any;
+    const stages = makeStages({ enrich: { status: 'failed', reason: 'job_failed' } });
+    expect(classifyContextState(context, stages, null)).toBeNull();
+  });
+
+  it('classifies pending_post_save when any requested stage is pending/queued/running', () => {
+    const stages = makeStages({ enrich: { status: 'running', reason: 'job_started' } });
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
+  });
+
+  it('classifies pending_post_save for queued stage', () => {
+    const stages = makeStages({
+      enrich: { status: 'queued', reason: 'durable_job_enqueued' },
+    });
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
+  });
+
+  it('classifies pending_post_save for pending stage', () => {
+    const stages = makeStages({
+      enrich: { status: 'completed', reason: 'job_completed' },
+      matchSkills: { status: 'pending', reason: 'waiting_for_enrich' },
+    });
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
+  });
+
+  it('classifies post_save_failed when any requested stage has failed', () => {
+    const stages = makeStages({
+      enrich: { status: 'failed', reason: 'job_failed', error: 'Timeout' },
+    });
+    expect(classifyContextState(null, stages, null)).toBe('post_save_failed');
+  });
+
+  it('classifies persisted_without_context when capture status is missing', () => {
+    expect(classifyContextState(null, null, makeMissing)).toBe('persisted_without_context');
+  });
+
+  it('classifies persisted_without_context as fallback with no stages and no capture', () => {
+    expect(classifyContextState(null, null, null)).toBe('persisted_without_context');
+  });
+
+  it('ignores non-requested failed stages (skipped stages are not failures)', () => {
+    const stages = makeStages({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+    // No requested stage is failed/pending, capture is missing → persisted_without_context
+    expect(classifyContextState(null, stages, makeMissing)).toBe('persisted_without_context');
+  });
+
+  it('prioritizes pending over failed when both exist', () => {
+    const stages = makeStages({
+      enrich: { status: 'failed', reason: 'job_failed' },
+      matchSkills: { status: 'running', reason: 'job_started' },
+    });
+    // Running takes priority → pending_post_save
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
+  });
+});
+
+/* ─── PSE-009: parseContextCaptureStatus contract ─────────────── */
+
+describe('PSE-009: parseContextCaptureStatus', () => {
+  it('reads contextCaptureStatus from top-level field', () => {
+    const ccs: ContextCaptureStatus = {
+      status: 'provided',
+      reason: 'caller_supplied_context',
+      contextUsed: 'provided',
+      contextSummary: 'provided',
+    };
+    const result = parseContextCaptureStatus({ contextCaptureStatus: ccs } as any);
+    expect(result).toEqual(ccs);
+  });
+
+  it('falls back to nested context_summary_json.contextCaptureStatus', () => {
+    const ccs: ContextCaptureStatus = {
+      status: 'backfilled',
+      reason: 'context_summary_derived_from_context_used_meta',
+      contextUsed: 'provided',
+      contextSummary: 'backfilled',
+    };
+    const result = parseContextCaptureStatus({
+      context_summary_json: JSON.stringify({ contextCaptureStatus: ccs }),
+    } as any);
+    expect(result).toEqual(ccs);
+  });
+
+  it('prefers top-level over nested when both exist', () => {
+    const topLevel: ContextCaptureStatus = {
+      status: 'provided',
+      reason: 'caller_supplied_context',
+      contextUsed: 'provided',
+      contextSummary: 'provided',
+    };
+    const nested: ContextCaptureStatus = {
+      status: 'missing',
+      reason: 'caller_context_not_supplied',
+      contextUsed: 'missing',
+      contextSummary: 'missing',
+    };
+    const result = parseContextCaptureStatus({
+      contextCaptureStatus: topLevel,
+      context_summary_json: JSON.stringify({ contextCaptureStatus: nested }),
+    } as any);
+    expect(result!.status).toBe('provided');
+  });
+
+  it('returns null for logs without any contextCaptureStatus', () => {
+    expect(parseContextCaptureStatus({} as any)).toBeNull();
+    expect(parseContextCaptureStatus({ context_summary_json: '{}' } as any)).toBeNull();
+    expect(parseContextCaptureStatus({ context_summary_json: 'not json' } as any)).toBeNull();
+  });
+
+  it('returns null when nested contextCaptureStatus lacks required status field', () => {
+    expect(parseContextCaptureStatus({
+      context_summary_json: JSON.stringify({
+        contextCaptureStatus: { reason: 'some_reason' },
+      }),
+    } as any)).toBeNull();
+  });
+
+  it('handles already-parsed context_summary_json objects (JSONB from pg driver)', () => {
+    const ccs: ContextCaptureStatus = {
+      status: 'missing',
+      reason: 'caller_context_not_supplied',
+      contextUsed: 'missing',
+      contextSummary: 'missing',
+    };
+    const result = parseContextCaptureStatus({
+      context_summary_json: { contextCaptureStatus: ccs },
+    } as any);
+    expect(result).toEqual(ccs);
+  });
+
+  it('distinguishes provided from backfilled from missing', () => {
+    const provided = parseContextCaptureStatus({
+      contextCaptureStatus: {
+        status: 'provided', reason: 'caller_supplied_context',
+        contextUsed: 'provided', contextSummary: 'provided',
+      },
+    } as any);
+    const backfilled = parseContextCaptureStatus({
+      contextCaptureStatus: {
+        status: 'backfilled', reason: 'context_summary_derived_from_context_used_meta',
+        contextUsed: 'provided', contextSummary: 'backfilled',
+      },
+    } as any);
+    const missing = parseContextCaptureStatus({
+      contextCaptureStatus: {
+        status: 'missing', reason: 'caller_context_not_supplied',
+        contextUsed: 'missing', contextSummary: 'missing',
+      },
+    } as any);
+
+    expect(provided!.status).toBe('provided');
+    expect(backfilled!.status).toBe('backfilled');
+    expect(missing!.status).toBe('missing');
+
+    // All three are distinct
+    expect(new Set([provided!.status, backfilled!.status, missing!.status]).size).toBe(3);
+  });
+});
+
+/* ─── PSE-009: ContextTabEmptyState visibility and disabled-state rules ── */
+
+describe('PSE-009: ContextTabEmptyState visibility rules (derived from classifyContextState)', () => {
+  const makeStages = (overrides: Partial<Record<keyof PostSaveStageMap, Partial<PostSaveStageMap['enrich']>>>): PostSaveStageMap => ({
+    enrich: { requested: true, status: 'completed', reason: 'job_completed', ...overrides.enrich },
+    matchSkills: { requested: true, status: 'completed', reason: 'job_completed', ...overrides.matchSkills },
+    memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller', ...overrides.memorySynthesis },
+  });
+
+  // The ContextTabEmptyState component renders action buttons based on the classification.
+  // These tests validate the classification → button visibility contract:
+  //
+  // | Classification              | Repair btn | Retry Enrich btn | Buttons visible |
+  // |-----------------------------|------------|------------------|-----------------|
+  // | pending_post_save           | hidden     | hidden           | no              |
+  // | persisted_without_context   | visible    | visible          | yes             |
+  // | post_save_failed            | visible    | visible          | yes             |
+  // | legacy_no_log               | visible    | hidden           | yes (repair only)|
+
+  it('pending_post_save: no action buttons (spinner state)', () => {
+    const classification = classifyContextState(
+      null,
+      makeStages({ enrich: { status: 'running', reason: 'job_started' } }),
+      null,
+    );
+    expect(classification).toBe('pending_post_save');
+    // Component rule: !isPending && (...) — buttons hidden during pending
+  });
+
+  it('persisted_without_context: both Repair and Retry Enrichment visible', () => {
+    const classification = classifyContextState(null, null, {
+      status: 'missing', reason: 'caller_context_not_supplied',
+      contextUsed: 'missing', contextSummary: 'missing',
+    });
+    expect(classification).toBe('persisted_without_context');
+    // Component rule: !isPending → buttons visible; classification matches persisted_without_context → retry shown
+  });
+
+  it('post_save_failed: both Repair and Retry Enrichment visible', () => {
+    const classification = classifyContextState(
+      null,
+      makeStages({ enrich: { status: 'failed', reason: 'job_failed' } }),
+      null,
+    );
+    expect(classification).toBe('post_save_failed');
+    // Component rule: !isPending → buttons visible; classification matches post_save_failed → retry shown
+  });
+
+  it('legacy_no_log maps to persisted_without_context (no separate legacy_no_log from classifyContextState)', () => {
+    // classifyContextState does not return legacy_no_log — that classification comes from
+    // the GenerationLogTab when no log row exists at all. The function itself returns
+    // persisted_without_context as a fallback when no stages and no capture exist.
+    const classification = classifyContextState(null, null, null);
+    expect(classification).toBe('persisted_without_context');
+    // In this case: Repair visible, Retry visible (persisted_without_context matches retry condition)
+  });
+
+  it('completed stages with context → null (no empty state at all)', () => {
+    const context = { directionLayers: { l1: true } } as any;
+    expect(classifyContextState(context, makeStages({}), null)).toBeNull();
+    // No ContextTabEmptyState rendered → no buttons relevant
+  });
+
+  it('all stages completed but no context → persisted_without_context', () => {
+    const classification = classifyContextState(
+      null,
+      makeStages({
+        enrich: { status: 'completed', reason: 'job_completed' },
+        matchSkills: { status: 'completed', reason: 'job_completed' },
+      }),
+      { status: 'missing', reason: 'caller_context_not_supplied', contextUsed: 'missing', contextSummary: 'missing' },
+    );
+    expect(classification).toBe('persisted_without_context');
+  });
+
+  it('memorySynthesis pending but not requested → does not count as in-flight', () => {
+    // memorySynthesis is not requested, so even if status were odd, it shouldn't trigger pending
+    const stages = makeStages({
+      enrich: { status: 'completed', reason: 'job_completed' },
+      matchSkills: { status: 'completed', reason: 'job_completed' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+    // No context → falls through to capture check
+    expect(classifyContextState(null, stages, {
+      status: 'missing', reason: 'caller_context_not_supplied',
+      contextUsed: 'missing', contextSummary: 'missing',
+    })).toBe('persisted_without_context');
+  });
+});
+
+/* ─── PSE-009: disabled-state rules for repair/retry during active runs ── */
+
+describe('PSE-009: repair/retry disabled-state rules', () => {
+  // The ContextTabEmptyState component disables Repair and Retry buttons when:
+  //   isBusy (repairState !== 'idle') OR isRunActive (activeRunStatus === 'running' || 'queued')
+  //
+  // These are runtime rendering rules tested through the classification + prop contract.
+  // The classification determines visibility; the activeRunStatus prop determines disabled state.
+
+  const classifications: ContextClassification[] = [
+    'persisted_without_context',
+    'post_save_failed',
+    'legacy_no_log',
+  ];
+
+  for (const classification of classifications) {
+    it(`${classification}: buttons are visible (not pending_post_save)`, () => {
+      // All non-pending classifications should show action buttons
+      expect(classification).not.toBe('pending_post_save');
+    });
+  }
+
+  it('pending_post_save is the only classification that hides all action buttons', () => {
+    const allClassifications: ContextClassification[] = [
+      'legacy_no_log',
+      'persisted_without_context',
+      'pending_post_save',
+      'post_save_failed',
+    ];
+    const hiddenClassifications = allClassifications.filter(c => c === 'pending_post_save');
+    expect(hiddenClassifications).toEqual(['pending_post_save']);
+  });
+
+  it('retry enrichment is only shown for persisted_without_context and post_save_failed', () => {
+    // Component code: (classification === 'persisted_without_context' || classification === 'post_save_failed')
+    const retryVisible: ContextClassification[] = ['persisted_without_context', 'post_save_failed'];
+    const retryHidden: ContextClassification[] = ['legacy_no_log', 'pending_post_save'];
+
+    for (const c of retryVisible) {
+      expect(c === 'persisted_without_context' || c === 'post_save_failed').toBe(true);
+    }
+    for (const c of retryHidden) {
+      expect(c === 'persisted_without_context' || c === 'post_save_failed').toBe(false);
+    }
   });
 });

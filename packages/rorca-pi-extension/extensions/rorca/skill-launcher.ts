@@ -51,7 +51,10 @@ function formatArray(items: string[]): string {
 export function getRequiredToolGroups(input: RorcaSkillWorkflowRequest): string[][] {
   switch (input.workflow) {
     case "forge": {
-      const groups: string[][] = [["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"]];
+      const groups: string[][] = [
+        ["rorca_specs_generation_context"],
+        ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
+      ];
       if (input.autoApprove) groups.push(["rorca_approve_spec", "rorca_specs_by_specId_approve"]);
       if (input.autoRun) groups.push(["rorca_trigger_run", "rorca_pipeline_trigger"]);
       return groups;
@@ -79,7 +82,10 @@ export function formatSkillLaunchPrompt(input: RorcaSkillWorkflowRequest): strin
       `queue: ${input.queue}`,
       ...(input.modelOverride ? [`modelOverride: ${input.modelOverride}`] : []),
       "availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, rorca_create_spec, rorca_persist_spec, rorca_approve_spec, rorca_trigger_run, rorca_pipeline_trigger]",
-      "persistenceHint: when available, fetch rorca_specs_generation_context first and pass both contextUsed and contextSummary into rorca_create_spec so the saved spec Context tab reflects the real drafting context",
+      "forgeSequence: [rorca_specs_generation_context, draft_in_pi, rorca_create_spec, verify_saved_spec]",
+      "contextContract: fetch rorca_specs_generation_context before persistence, then forward its contextUsed and contextSummary into rorca_create_spec or rorca_persist_spec so the saved spec Context tab reflects the true caller-observed drafting context",
+      "postSaveContract: keep post-save enrich and matchSkills enabled by inheriting postSaveDefaults or passing postSave with enrich=true and matchSkills=true unless the launcher or user explicitly requests an opt-out",
+      "fallbackContract: backend/server contextSummary backfill is recovery-grade fallback only and must not be treated as a substitute for caller-observed drafting context",
       "brief: |",
       indentBlock(input.brief),
     ].join("\n");

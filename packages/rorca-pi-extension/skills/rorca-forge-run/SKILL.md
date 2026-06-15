@@ -33,6 +33,7 @@ Follow the same retrieval principle as `rorca-forge`:
 - fetch it using tools/internal operations
 - evaluate whether it is actually relevant
 - fetch more if needed
+- when `rorca_specs_generation_context` is available, fetch that canonical bundle before persisting and carry its `contextUsed` + `contextSummary` forward
 
 Use retrieval to improve the draft, not just to decorate it.
 
@@ -55,7 +56,8 @@ Do not claim a run was triggered unless a canonical run id or equivalent confirm
 - prefer MCP where that is the primary structured tool surface
 - internal backend adapters are acceptable when this workflow is launched from backend-owned flows
 - use REST only as explicit fallback when allowed by the launcher
-- preferred tool sequence: retrieve context -> draft -> `rorca_create_spec` -> verify saved spec -> `rorca_approve_spec` -> `rorca_trigger_run`
+- backend/server context backfill is recovery-grade fallback only, never a substitute for true caller-observed drafting context
+- preferred tool sequence: `rorca_specs_generation_context` -> draft -> `rorca_create_spec` -> verify saved spec -> `rorca_approve_spec` -> `rorca_trigger_run`
 
 ## Output contract
 

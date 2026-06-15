@@ -12,6 +12,8 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
+import { updateJobStatus } from '../../db/spec-jobs';
+import { advancePersistPostSaveDependencies, syncPersistPostSaveStageFromJob } from '../../lib/spec-post-save';
 
 /** pg returns jsonb columns as already-parsed objects; this handles both cases */
 function parsePayload(p: unknown): Record<string, unknown> {
@@ -40,11 +42,20 @@ jest.mock('../../lib/codex-spec-drafter', () => ({
   draftSpecWithCodex: jest.fn(),
 }));
 
+jest.mock('../../lib/pg-boss', () => {
+  const send = jest.fn().mockResolvedValue('11111111-1111-4111-8111-111111111111');
+  return {
+    initBoss: jest.fn().mockResolvedValue(undefined),
+    getBoss: jest.fn(() => ({ send })),
+  };
+});
+
 let app: Express;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let mockDraftSpecWithPi: jest.Mock;
 let mockDraftSpecWithCodex: jest.Mock;
+let mockBossSend: jest.Mock;
 let authToken: string;
 
 const validLlmResponse = JSON.stringify({
@@ -81,13 +92,20 @@ beforeAll(async () => {
   const llmClient = require('../../lib/llm-client');
   const piDrafter = require('../../lib/pi-spec-drafter');
   const codexDrafter = require('../../lib/codex-spec-drafter');
+  const pgBoss = require('../../lib/pg-boss');
   mockChatComplete = llmClient.chatComplete;
   mockDraftSpecWithPi = piDrafter.draftSpecWithPi;
   mockDraftSpecWithCodex = codexDrafter.draftSpecWithCodex;
+  mockBossSend = pgBoss.getBoss().send;
 });
 
 beforeEach(async () => {
   jest.clearAllMocks();
+  // PSE-002: mockReset clears the .mockResolvedValueOnce queue which clearAllMocks
+  // does not clear. Without this, unconsumed "once" values from previous tests leak
+  // into subsequent tests and cause boss_job_id mismatches.
+  mockBossSend.mockReset();
+  mockBossSend.mockResolvedValue('11111111-1111-4111-8111-111111111111');
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-test-'));
 
@@ -101,7 +119,7 @@ beforeEach(async () => {
   const tablesToClean = [
     'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
     'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
-    'workspace_context', 'direction_layers', 'batch_spec_generation',
+    'workspace_context', 'direction_layers', 'batch_spec_generation', 'spec_jobs',
   ];
   for (const t of tablesToClean) {
     await execute(`TRUNCATE ${t} CASCADE`).catch(() => {});
@@ -557,6 +575,163 @@ test('WAL event payload includes token usage', async () => {
   expect(payload.outputTokens).toBe(1000);
 });
 
+// ─── PSE-002: Generate-path durable post-save orchestration ────────────────────
+
+describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
+  test('seeds postSaveStages and enqueues durable enrich + deferred match-skills', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+    mockBossSend
+      .mockResolvedValueOnce('aaa11111-1111-4111-8111-111111111111')
+      .mockResolvedValueOnce('bbb22222-2222-4222-8222-222222222222');
+
+    const res = await request(app)
+      .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Generate Post Save',
+        brief: 'Test durable post-save from generate path',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.slug).toBe('generate-post-save');
+
+    // Verify enrich was enqueued through pg-boss
+    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({
+      specId: 'generate-post-save',
+      workspaceId: 'ws-test',
+      jobId: expect.any(String),
+    }));
+
+    // Verify spec_jobs rows were created
+    const jobs = await query(
+      `SELECT job_type, status, boss_job_id, request_payload, error_message
+       FROM spec_jobs
+       WHERE workspace_id = 'ws-test' AND spec_id = 'generate-post-save'
+       ORDER BY created_at ASC`,
+    ) as Array<{ job_type: string; status: string; boss_job_id: string | null; request_payload: unknown; error_message: string | null }>;
+
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'pending', boss_job_id: 'aaa11111-1111-4111-8111-111111111111', error_message: null });
+    expect(parsePayload(jobs[0].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'enrich' });
+    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'pending', boss_job_id: null, error_message: null });
+    expect(parsePayload(jobs[1].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'matchSkills', waitForStage: 'enrich' });
+
+    // Verify generation log has postSaveStages in context_summary_json
+    const logRes = await request(app)
+      .get('/api/specs/generate-post-save/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    expect(logRes.body.status).toBe('pending_enrichment');
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.postSaveStages).toBeDefined();
+    expect(summary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: 'aaa11111-1111-4111-8111-111111111111' }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'pending', reason: 'waiting_for_enrich', bossJobId: null }),
+      memorySynthesis: expect.objectContaining({ requested: true, status: 'pending', reason: 'requested_by_caller' }),
+    });
+    expect(summary.workspaceId).toBe('ws-test');
+    expect(summary.source).toBe('generate');
+  });
+
+  test('persists enqueue failure to stage state when boss.send returns null in generate path', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+    mockBossSend.mockResolvedValueOnce(null);
+
+    const res = await request(app)
+      .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Generate Failed Queue',
+        brief: 'Test enqueue failure persistence from generate path',
+      });
+
+    expect(res.status).toBe(200);
+
+    // Verify both jobs marked as failed in spec_jobs
+    const jobs = await query(
+      `SELECT job_type, status, boss_job_id, error_message
+       FROM spec_jobs
+       WHERE workspace_id = 'ws-test' AND spec_id = 'generate-failed-queue'
+       ORDER BY created_at ASC`,
+    ) as Array<{ job_type: string; status: string; boss_job_id: string | null; error_message: string | null }>;
+
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'failed', boss_job_id: null });
+    expect(jobs[0].error_message).toContain('boss.send() returned null for enrich');
+    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'failed', boss_job_id: null });
+    expect(jobs[1].error_message).toContain('Blocked because enrich could not be enqueued');
+
+    // Verify failure is visible through generation-log API (not just logger)
+    const logRes = await request(app)
+      .get('/api/specs/generate-failed-queue/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    expect(logRes.body.status).toBe('failed');
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'failed', reason: 'enqueue_failed', error: expect.stringContaining('boss.send() returned null for enrich') }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'failed', reason: 'blocked_by_enrich_enqueue_failure', error: 'Blocked because enrich could not be enqueued' }),
+      memorySynthesis: expect.objectContaining({ requested: true, status: 'pending', reason: 'requested_by_caller' }),
+    });
+  });
+
+  test('advances deferred match-skills after enrich completes in generate path', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+    mockBossSend
+      .mockResolvedValueOnce('ccc33333-3333-4333-8333-333333333333')
+      .mockResolvedValueOnce('ddd44444-4444-4444-8444-444444444444');
+
+    const res = await request(app)
+      .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Generate Advance Deps',
+        brief: 'Test enrich completion advances match-skills',
+      });
+
+    expect(res.status).toBe(200);
+
+    // Simulate enrich job completion
+    const enrichJob = await queryOne(
+      `SELECT id FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'generate-advance-deps' AND job_type = 'enrich'`,
+    ) as { id: string } | undefined;
+    expect(enrichJob).toBeDefined();
+
+    await updateJobStatus(enrichJob!.id, 'completed', { finishedAt: new Date() });
+    await syncPersistPostSaveStageFromJob(enrichJob!.id);
+    await advancePersistPostSaveDependencies(enrichJob!.id);
+
+    // match-skills should now be enqueued
+    expect(mockBossSend).toHaveBeenCalledTimes(2);
+    expect(mockBossSend).toHaveBeenLastCalledWith('spec:match-skills', expect.objectContaining({
+      specId: 'generate-advance-deps',
+      workspaceId: 'ws-test',
+    }));
+
+    const matchJob = await queryOne(
+      `SELECT boss_job_id, status FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'generate-advance-deps' AND job_type = 'match-skills'`,
+    ) as { boss_job_id: string | null; status: string } | undefined;
+    expect(matchJob).toEqual({ boss_job_id: 'ddd44444-4444-4444-8444-444444444444', status: 'pending' });
+
+    // Verify generation log reflects the state transition
+    const logRes = await request(app)
+      .get('/api/specs/generate-advance-deps/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'completed', reason: 'job_completed' }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued_after_enrich', bossJobId: 'ddd44444-4444-4444-8444-444444444444' }),
+      memorySynthesis: expect.objectContaining({ requested: true, status: 'pending', reason: 'requested_by_caller' }),
+    });
+  });
+});
+
 // ─── R-001: List / Approve / Reject / Get Detail ──────────────────────────────
 
 /** Seed a spec file on disk for R-001 tests */
@@ -599,9 +774,56 @@ describe('POST /api/specs/persist', () => {
     const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'explicit-draft.json'), 'utf8'));
     expect(saved.source).toBe('explicit-draft');
     expect(saved.userStories).toHaveLength(2);
+    expect(saved.contextUsed).toBeUndefined();
+    expect(saved.contextSummary).toBeUndefined();
+
+    const logRes = await request(app)
+      .get('/api/specs/explicit-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.sourceMode).toBe('explicit-draft');
+    expect(summary.invocationSurface).toBe('api.specs.persist');
+    expect(summary.contextCaptureStatus).toEqual({
+      status: 'missing',
+      reason: 'caller_context_not_supplied',
+      contextUsed: 'missing',
+      contextSummary: 'missing',
+    });
+    expect(summary.postSaveStages).toEqual({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+    expect(summary.contextSummary).toBeUndefined();
+    expect(summary.contextUsed).toBeUndefined();
   });
 
   test('seeds a generation log immediately so the Context tab is non-null before enrich completes', async () => {
+    const callerContextSummary = {
+      directionLayers: {
+        l1: true,
+        l2: { present: true, domain: 'devtools' },
+        l3: true,
+      },
+      skills: ['rorca-forge'],
+      memoryEntries: 3,
+      agentsMd: true,
+      template: null,
+      schemaSnapshot: true,
+      gitMemory: false,
+      estimatedTokens: 1234,
+      modelContextWindow: 200000,
+      retrieval: {
+        cagHits: 2,
+        ragHits: 5,
+        graphHits: 1,
+        tier: 'hybrid',
+        latencyMs: 31,
+      },
+    };
+
     const persistRes = await request(app)
       .post('/api/specs/persist')
       .set('Authorization', `Bearer ${authToken}`)
@@ -622,32 +844,15 @@ describe('POST /api/specs/persist', () => {
             scopesMatched: [],
           },
         },
-        contextSummary: {
-          directionLayers: {
-            l1: true,
-            l2: { present: true, domain: 'devtools' },
-            l3: true,
-          },
-          skills: ['rorca-forge'],
-          memoryEntries: 3,
-          agentsMd: true,
-          template: null,
-          schemaSnapshot: true,
-          gitMemory: false,
-          estimatedTokens: 1234,
-          modelContextWindow: 200000,
-          retrieval: {
-            cagHits: 2,
-            ragHits: 5,
-            graphHits: 1,
-            tier: 'hybrid',
-            latencyMs: 31,
-          },
-        },
+        contextSummary: callerContextSummary,
       });
 
     expect(persistRes.status).toBe(200);
     expect(persistRes.body.postSave).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
+
+    const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'immediate-context-draft.json'), 'utf8'));
+    expect(saved.contextSummary).toEqual(callerContextSummary);
+    expect(saved.contextUsed.text).toBe('SYNTHESIZED CONTEXT');
 
     const logRes = await request(app)
       .get('/api/specs/immediate-context-draft/generation-log')
@@ -659,13 +864,26 @@ describe('POST /api/specs/persist', () => {
     expect(logRes.body.status).toBe('pending_enrichment');
     expect(logRes.body.enriched).toBe(false);
     expect(logRes.body.retrieval_method).toBe('none');
-    expect(logRes.body.context_summary).toContain('Explicit draft persisted');
+    expect(logRes.body.context_summary).toContain('caller-provided context');
 
     const summary = parsePayload(logRes.body.context_summary_json);
     expect(summary.source).toBe('explicit-draft');
+    expect(summary.sourceMode).toBe('explicit-draft');
+    expect(summary.invocationSurface).toBe('api.specs.persist');
     expect(summary.storyCount).toBe(1);
     expect(summary.pendingEnrichment).toBe(true);
     expect(summary.postSave).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
+    expect(summary.contextCaptureStatus).toEqual({
+      status: 'provided',
+      reason: 'caller_supplied_context',
+      contextUsed: 'provided',
+      contextSummary: 'provided',
+    });
+    expect(summary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: '11111111-1111-4111-8111-111111111111' }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'pending', reason: 'waiting_for_enrich', bossJobId: null }),
+      memorySynthesis: { requested: true, status: 'pending', reason: 'requested_by_caller' },
+    });
     const contextUsed = summary.contextUsed as { text: string };
     const contextSummary = summary.contextSummary as {
       directionLayers: unknown;
@@ -683,6 +901,263 @@ describe('POST /api/specs/persist', () => {
       graphHits: 1,
       tier: 'hybrid',
       latencyMs: 31,
+    });
+  });
+
+  test('enqueues persist post-save enrich durably and defers match-skills until enrich finishes', async () => {
+    mockBossSend
+      .mockResolvedValueOnce('22222222-2222-4222-8222-222222222222')
+      .mockResolvedValueOnce('33333333-3333-4333-8333-333333333333');
+
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Queued Post Save Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        postSave: { enrich: true, matchSkills: true, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockBossSend).toHaveBeenCalledTimes(1);
+    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({
+      specId: 'queued-post-save-draft',
+      workspaceId: 'ws-test',
+      jobId: expect.any(String),
+    }));
+
+    const jobs = await query(
+      `SELECT job_type, status, boss_job_id, request_payload, error_message
+       FROM spec_jobs
+       WHERE workspace_id = 'ws-test' AND spec_id = 'queued-post-save-draft'
+       ORDER BY created_at ASC`,
+    ) as Array<{ job_type: string; status: string; boss_job_id: string | null; request_payload: unknown; error_message: string | null }>;
+
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'pending', boss_job_id: '22222222-2222-4222-8222-222222222222', error_message: null });
+    expect(parsePayload(jobs[0].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'enrich' });
+    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'pending', boss_job_id: null, error_message: null });
+    expect(parsePayload(jobs[1].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'matchSkills', waitForStage: 'enrich' });
+
+    const logRes = await request(app)
+      .get('/api/specs/queued-post-save-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(logRes.body.status).toBe('pending_enrichment');
+    expect(summary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: '22222222-2222-4222-8222-222222222222' }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'pending', reason: 'waiting_for_enrich', bossJobId: null }),
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+
+    const enrichJob = await queryOne(
+      `SELECT id FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'queued-post-save-draft' AND job_type = 'enrich'`,
+    ) as { id: string } | undefined;
+    expect(enrichJob).toBeDefined();
+
+    await updateJobStatus(enrichJob!.id, 'completed', { finishedAt: new Date() });
+    await syncPersistPostSaveStageFromJob(enrichJob!.id);
+    await advancePersistPostSaveDependencies(enrichJob!.id);
+
+    expect(mockBossSend).toHaveBeenCalledTimes(2);
+    expect(mockBossSend).toHaveBeenLastCalledWith('spec:match-skills', expect.objectContaining({
+      specId: 'queued-post-save-draft',
+      workspaceId: 'ws-test',
+      jobId: expect.any(String),
+    }));
+
+    const releasedMatchJob = await queryOne(
+      `SELECT boss_job_id, status FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'queued-post-save-draft' AND job_type = 'match-skills'`,
+    ) as { boss_job_id: string | null; status: string } | undefined;
+    expect(releasedMatchJob).toEqual({ boss_job_id: '33333333-3333-4333-8333-333333333333', status: 'pending' });
+
+    const afterReleaseLogRes = await request(app)
+      .get('/api/specs/queued-post-save-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    const releasedSummary = parsePayload(afterReleaseLogRes.body.context_summary_json);
+    expect(releasedSummary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'completed', reason: 'job_completed' }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued_after_enrich', bossJobId: '33333333-3333-4333-8333-333333333333' }),
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+  });
+
+  test('persists enqueue failures and exposes them through generation-log stage state', async () => {
+    mockBossSend.mockResolvedValueOnce(null);
+
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Failed Queue Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        postSave: { enrich: true, matchSkills: true, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+
+    const jobs = await query(
+      `SELECT job_type, status, boss_job_id, error_message
+       FROM spec_jobs
+       WHERE workspace_id = 'ws-test' AND spec_id = 'failed-queue-draft'
+       ORDER BY created_at ASC`,
+    ) as Array<{ job_type: string; status: string; boss_job_id: string | null; error_message: string | null }>;
+
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'failed', boss_job_id: null });
+    expect(jobs[0].error_message).toContain('boss.send() returned null for enrich');
+    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'failed', boss_job_id: null });
+    expect(jobs[1].error_message).toContain('Blocked because enrich could not be enqueued');
+
+    const logRes = await request(app)
+      .get('/api/specs/failed-queue-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    expect(logRes.body.status).toBe('failed');
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'failed', reason: 'enqueue_failed', error: expect.stringContaining('boss.send() returned null for enrich') }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'failed', reason: 'blocked_by_enrich_enqueue_failure', error: 'Blocked because enrich could not be enqueued' }),
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+  });
+
+  test('blocks deferred match-skills and surfaces failure when enrich fails during execution', async () => {
+    mockBossSend.mockResolvedValueOnce('44444444-4444-4444-8444-444444444444');
+
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Failed Enrich Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        postSave: { enrich: true, matchSkills: true, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+
+    const enrichJob = await queryOne(
+      `SELECT id FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'failed-enrich-draft' AND job_type = 'enrich'`,
+    ) as { id: string } | undefined;
+    expect(enrichJob).toBeDefined();
+
+    await updateJobStatus(enrichJob!.id, 'failed', {
+      errorMessage: 'LLM provider timeout',
+      finishedAt: new Date(),
+    });
+    await syncPersistPostSaveStageFromJob(enrichJob!.id);
+    await advancePersistPostSaveDependencies(enrichJob!.id);
+
+    expect(mockBossSend).toHaveBeenCalledTimes(1);
+
+    const matchJob = await queryOne(
+      `SELECT status, boss_job_id, error_message FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'failed-enrich-draft' AND job_type = 'match-skills'`,
+    ) as { status: string; boss_job_id: string | null; error_message: string | null } | undefined;
+    expect(matchJob).toEqual({ status: 'failed', boss_job_id: null, error_message: 'LLM provider timeout' });
+
+    const logRes = await request(app)
+      .get('/api/specs/failed-enrich-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    expect(logRes.body.status).toBe('failed');
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.postSaveStages).toEqual({
+      enrich: expect.objectContaining({ requested: true, status: 'failed', reason: 'job_failed', error: 'LLM provider timeout' }),
+      matchSkills: expect.objectContaining({ requested: true, status: 'failed', reason: 'blocked_by_enrich_failure', error: 'LLM provider timeout' }),
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+  });
+
+  test('backfills a canonical context summary from contextUsed metadata when callers omit contextSummary', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Backfilled Context Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        contextUsed: {
+          text: 'SYNTHESIZED CONTEXT',
+          meta: {
+            standards: true,
+            conventions: false,
+            project: true,
+            schema: true,
+            totalTokens: 222,
+            memoryEntries: 2,
+            skills: ['rorca-forge'],
+            predictedFiles: ['backend/src/routes/specs.ts'],
+          },
+        },
+        postSave: { enrich: false, matchSkills: true, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.contextSummary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: false, domain: null },
+        l3: true,
+      },
+      memoryEntries: 2,
+      estimatedTokens: 222,
+      predictedFiles: ['backend/src/routes/specs.ts'],
+    });
+
+    const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'backfilled-context-draft.json'), 'utf8'));
+    expect(saved.contextSummary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: false, domain: null },
+        l3: true,
+      },
+      memoryEntries: 2,
+      estimatedTokens: 222,
+      predictedFiles: ['backend/src/routes/specs.ts'],
+    });
+
+    const logRes = await request(app)
+      .get('/api/specs/backfilled-context-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.contextCaptureStatus).toEqual({
+      status: 'backfilled',
+      reason: 'context_summary_derived_from_context_used_meta',
+      contextUsed: 'provided',
+      contextSummary: 'backfilled',
+    });
+    expect(summary.postSaveStages).toEqual({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      matchSkills: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: '11111111-1111-4111-8111-111111111111' }),
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+    expect(summary.contextSummary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: false, domain: null },
+        l3: true,
+      },
+      memoryEntries: 2,
+      estimatedTokens: 222,
+      predictedFiles: ['backend/src/routes/specs.ts'],
     });
   });
 
