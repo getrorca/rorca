@@ -12,7 +12,9 @@ import {
   getRetrievalMethodPresentation,
   extractStoryContextAnnotations,
   parsePostSaveStages,
+  classifyContextState,
   type PostSaveStageMap,
+  type ContextCaptureStatus,
 } from '../SpecDetailSlideOver';
 
 describe('parseContextSummary', () => {
@@ -315,5 +317,93 @@ describe('PSE-003: parsePostSaveStages', () => {
     expect(result!.enrich.bossJobId).toBe('bbb-222');
     expect(result!.matchSkills.jobId).toBe('ccc-333');
     expect(result!.matchSkills.bossJobId).toBeUndefined();
+  });
+});
+
+/* ─── PSE-007: classifyContextState contract ────────────────────── */
+
+describe('PSE-007: classifyContextState', () => {
+  const makeMissing: ContextCaptureStatus = {
+    status: 'missing',
+    reason: 'caller_context_not_supplied',
+    contextUsed: 'missing',
+    contextSummary: 'missing',
+  };
+
+  const makeProvided: ContextCaptureStatus = {
+    status: 'provided',
+    reason: 'caller_supplied_context',
+    contextUsed: 'provided',
+    contextSummary: 'provided',
+  };
+
+  const makeStages = (overrides: Partial<Record<keyof PostSaveStageMap, Partial<PostSaveStageMap['enrich']>>>): PostSaveStageMap => ({
+    enrich: { requested: true, status: 'completed', reason: 'job_completed', ...overrides.enrich },
+    matchSkills: { requested: true, status: 'completed', reason: 'job_completed', ...overrides.matchSkills },
+    memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller', ...overrides.memorySynthesis },
+  });
+
+  it('returns null when context summary is available (no diagnostic needed)', () => {
+    const context = { directionLayers: { l1: true } } as any;
+    expect(classifyContextState(context, null, null)).toBeNull();
+  });
+
+  it('returns null when context is present even with failed stages', () => {
+    const context = { directionLayers: { l1: true } } as any;
+    const stages = makeStages({ enrich: { status: 'failed', reason: 'job_failed' } });
+    expect(classifyContextState(context, stages, null)).toBeNull();
+  });
+
+  it('classifies pending_post_save when any requested stage is pending/queued/running', () => {
+    const stages = makeStages({ enrich: { status: 'running', reason: 'job_started' } });
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
+  });
+
+  it('classifies pending_post_save for queued stage', () => {
+    const stages = makeStages({
+      enrich: { status: 'queued', reason: 'durable_job_enqueued' },
+    });
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
+  });
+
+  it('classifies pending_post_save for pending stage', () => {
+    const stages = makeStages({
+      enrich: { status: 'completed', reason: 'job_completed' },
+      matchSkills: { status: 'pending', reason: 'waiting_for_enrich' },
+    });
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
+  });
+
+  it('classifies post_save_failed when any requested stage has failed', () => {
+    const stages = makeStages({
+      enrich: { status: 'failed', reason: 'job_failed', error: 'Timeout' },
+    });
+    expect(classifyContextState(null, stages, null)).toBe('post_save_failed');
+  });
+
+  it('classifies persisted_without_context when capture status is missing', () => {
+    expect(classifyContextState(null, null, makeMissing)).toBe('persisted_without_context');
+  });
+
+  it('classifies persisted_without_context as fallback with no stages and no capture', () => {
+    expect(classifyContextState(null, null, null)).toBe('persisted_without_context');
+  });
+
+  it('ignores non-requested failed stages (skipped stages are not failures)', () => {
+    const stages = makeStages({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    });
+    // No requested stage is failed/pending, capture is missing → persisted_without_context
+    expect(classifyContextState(null, stages, makeMissing)).toBe('persisted_without_context');
+  });
+
+  it('prioritizes pending over failed when both exist', () => {
+    const stages = makeStages({
+      enrich: { status: 'failed', reason: 'job_failed' },
+      matchSkills: { status: 'running', reason: 'job_started' },
+    });
+    // Running takes priority → pending_post_save
+    expect(classifyContextState(null, stages, null)).toBe('pending_post_save');
   });
 });
