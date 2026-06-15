@@ -16,6 +16,7 @@ Core service libraries. None are Express routes — they're pure logic called by
 | `diagram-generator.ts` | Generate Mermaid + ASCII dep graphs from story list |
 | `execution-engine.ts` | Universal TypeScript execution engine — spawns claude/opencode/codex per story, handles retries, writes WAL events. **Built by rorca-opencode-integration spec.** |
 | `finops-accounting.ts` | **FIN-002** shared, DB-free accounting layer. Classifies usage into `metered_api`/`subscription`/`managed`/`free_local`/`unknown`, computes metered cost (tokens × pricing), allocates flat subscription cost (`none`/`even`/`by_tokens`/`by_runs`/`by_stories`/`by_active_days`), and returns blended effective cost plus coverage/provenance. Pure functions reused by historical/per-run FinOps, provider aggregation, and CSV export. Subscription marginal cost is always 0. |
+| `spec-post-save.ts` | Durable post-save orchestration for persisted specs. Manages stage lifecycle (enrich → matchSkills dependency chain), pg-boss job enqueue/advance, and generation-log stage sync. Pure-logic `buildPersistPostSaveStages()` + async `enqueuePersistPostSaveJobs()`, `advancePersistPostSaveDependencies()`, `syncPersistPostSaveStageFromJob()`, `getEffectiveGenerationLog()`. |
 | `context-trace.ts` | Canonical context-trace contract (CTM-001). `ContextTraceEvent` (lightweight SSE/WAL metadata) + `ContextTraceArtifactWriter` (append-only gzip NDJSON raw-payload artifacts under `.rorca/traces/<runId>.ndjson.gz`). Deterministic `rawRef` = `r{runId}:{seq}`. All writer ops are nonfatal. |
 
 ## llm-client.ts
@@ -157,6 +158,43 @@ const record = lookupTraceRecord(cwd, event!.rawRef);
 - Every writer op (`start`/`append`/`flush`/`close`) is **nonfatal** — failures disable the writer and log, never throw into story execution.
 - Phases reserve room for future surfaces: `context | skill | mcp | memory | prompt`.
 - Retention: `pruneExpiredTraceArtifacts(cwd)` bounds local disk; window via `RORCA_TRACE_RETENTION_DAYS` (default 14).
+
+## spec-post-save.ts
+
+Durable post-save orchestration for the explicit-draft persist contract. Manages the enrich → matchSkills dependency chain after `POST /api/specs/persist` seeds a generation log.
+
+```typescript
+import {
+  buildPersistPostSaveStages,
+  enqueuePersistPostSaveJobs,
+  advancePersistPostSaveDependencies,
+  syncPersistPostSaveStageFromJob,
+  getEffectiveGenerationLog,
+} from '../lib/spec-post-save';
+
+// Pure logic — build initial stage states from caller options:
+const stages = buildPersistPostSaveStages({ enrich: true, matchSkills: true, memorySynthesis: false });
+// → enrich: pending/requested_by_caller, matchSkills: pending/requested_by_caller, memorySynthesis: skipped/disabled_by_caller
+
+// Durable enqueue — creates spec_jobs rows + pg-boss messages:
+await enqueuePersistPostSaveJobs(specId, workspaceId, { enrich: true, matchSkills: true });
+// → enrich: queued immediately, matchSkills: deferred (waitForStage=enrich)
+
+// After enrich job completes — advance deferred dependencies:
+await advancePersistPostSaveDependencies(enrichJobId);
+// → If enrich succeeded: matchSkills enqueued via pg-boss
+// → If enrich failed: matchSkills marked failed/blocked_by_enrich_failure
+
+// Merge persisted stage map with live job statuses:
+const effectiveLog = await getEffectiveGenerationLog(specId);
+// → Returns generation log with postSaveStages reflecting latest job states
+```
+
+**Stage dependency topology**: enrich → matchSkills. matchSkills is deferred (created as a spec_jobs row without pg-boss send) when enrich is also requested. Only enqueued after `advancePersistPostSaveDependencies()` confirms enrich completed.
+
+**Stage status values**: `pending` → `queued` → `running` → `completed` | `failed` | `skipped`. Each transition carries a `PersistStageReason` explaining why (e.g., `durable_job_enqueued`, `waiting_for_enrich`, `blocked_by_enrich_failure`, `no_installed_skills`).
+
+**Repair integration**: `POST /api/specs/:specId/repair` uses `diagnoseSpecHealth()` to check stage states and re-enqueues failed/stuck stages via `enqueueAsyncSpecJob()`.
 
 ## Common Mistakes
 

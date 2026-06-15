@@ -39,8 +39,24 @@ Preferred universal skill-first flow:
 
 If `rorca_specs_generation_context` is available, caller-owned forge flows should fetch it before persistence and forward the returned `contextUsed` + `contextSummary`. Any server-side context-summary backfill is recovery-grade fallback only, not a substitute for caller-observed drafting context.
 
-`rorca_generate_spec` remains available as the legacy/fallback path when the caller wants backend-side drafting.
+**Post-save enrichment**: When `postSave` options are provided (or defaulted), the persist endpoint enqueues durable post-save jobs:
+- `enrich: true` → enqueue enrichment immediately via pg-boss
+- `matchSkills: true` → deferred until enrich completes (dependency chain)
+- `memorySynthesis: true` → reserved for future implementation
 
+Each stage tracks honest status (`pending`/`queued`/`running`/`completed`/`failed`/`skipped`) and reason in `spec_generation_logs.context_summary_json.postSaveStages`.
+
+**Context capture provenance**: The persist endpoint tracks how context was acquired via `contextCaptureStatus`:
+- `provided` — caller supplied `contextSummary` (best case)
+- `backfilled` — server derived a summary from `contextUsed.meta`
+- `missing` — caller omitted drafting context entirely
+
+**Repair**: If post-save stages fail or specs are missing generation logs:
+- `POST /api/specs/:specId/repair` — diagnose and repair a single spec
+- `GET /api/specs/repair-candidates` — discover specs needing repair in a workspace
+- `POST /api/specs/repair-batch` — apply bounded repair across multiple specs
+
+`rorca_generate_spec` remains available as the legacy/fallback path when the caller wants backend-side drafting.
 
 ```typescript
 // Tools are called by Claude via MCP protocol
