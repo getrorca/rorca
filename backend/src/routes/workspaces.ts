@@ -65,6 +65,27 @@ function parseWorkspace(row: WorkspaceRow) {
   };
 }
 
+function normalizeWorkspaceDefaultPath(candidatePath: string) {
+  const resolvedPath = fs.realpathSync.native(candidatePath);
+  if (path.basename(resolvedPath) === 'backend') {
+    const parentDir = path.dirname(resolvedPath);
+    if (fs.existsSync(path.join(parentDir, 'package.json'))) {
+      return fs.realpathSync.native(parentDir);
+    }
+  }
+
+  return resolvedPath;
+}
+
+function getWorkspaceDefaultPath() {
+  const initCwd = process.env.INIT_CWD;
+  if (initCwd && path.isAbsolute(initCwd) && fs.existsSync(initCwd)) {
+    return normalizeWorkspaceDefaultPath(initCwd);
+  }
+
+  return normalizeWorkspaceDefaultPath(process.cwd());
+}
+
 /**
  * @swagger
  * /api/workspaces:
@@ -265,6 +286,32 @@ router.get('/', authRequired, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+/**
+ * @swagger
+ * /api/workspaces/defaults:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get default workspace form values
+ *     operationId: getWorkspaceDefaults
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Default workspace creation values derive from the local server runtime and are only needed by authenticated clients creating or editing their own workspace configuration."
+ *     description: Returns runtime-derived default values for workspace creation flows.
+ *     responses:
+ *       200:
+ *         description: Default workspace values
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 cwd:
+ *                   type: string
+ *                   description: Absolute current working directory of the running backend process
+ */
+router.get('/defaults', authRequired, async (_req, res) => {
+  res.json({ cwd: getWorkspaceDefaultPath() });
 });
 
 router.use('/:id', requireWorkspaceMember());

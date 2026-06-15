@@ -23,6 +23,23 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
   const trapRef = useFocusTrap<HTMLDivElement>(true);
 
   useEffect(() => {
+    let cancelled = false;
+
+    apiFetch<{ cwd: string }>('/api/workspaces/defaults')
+      .then((res) => {
+        if (cancelled) return;
+        setPath((currentPath) => currentPath || res.cwd || '');
+      })
+      .catch(() => {
+        // Leave the field empty if the runtime default is unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };

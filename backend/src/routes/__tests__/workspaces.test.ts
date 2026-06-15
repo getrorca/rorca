@@ -88,6 +88,19 @@ test('GET /api/workspaces returns array containing created workspace', async () 
   expect(Array.isArray(res.body.items[0].domains)).toBe(true);
 });
 
+test('GET /api/workspaces/defaults returns current backend cwd', async () => {
+  const res = await request(app).get('/api/workspaces/defaults').set('Authorization', `Bearer ${authToken}`);
+  const rawPath = process.env.INIT_CWD && path.isAbsolute(process.env.INIT_CWD) && fs.existsSync(process.env.INIT_CWD)
+    ? fs.realpathSync.native(process.env.INIT_CWD)
+    : fs.realpathSync.native(process.cwd());
+  const expectedPath = path.basename(rawPath) === 'backend' && fs.existsSync(path.join(path.dirname(rawPath), 'package.json'))
+    ? fs.realpathSync.native(path.dirname(rawPath))
+    : rawPath;
+
+  expect(res.status).toBe(200);
+  expect(res.body.cwd).toBe(expectedPath);
+});
+
 test('GET /api/workspaces/:id returns workspace', async () => {
   await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
