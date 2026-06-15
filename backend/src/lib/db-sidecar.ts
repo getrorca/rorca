@@ -6,11 +6,18 @@
  */
 
 import { spawn } from 'child_process';
+import path from 'node:path';
 import * as readline from 'readline/promises';
+import { fileURLToPath } from 'node:url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, '..', '..', '..');
 const CONTAINER_NAME = 'rorca-db';
 const VOLUME_NAME = 'rorca-db-data';
-const DOCKER_IMAGE = 'apache/age:latest';
+const DOCKER_IMAGE = 'rorca-postgres:pg16-age';
+const DOCKERFILE_PATH = path.join(ROOT_DIR, 'docker', 'postgres', 'Dockerfile');
+const BUILD_CONTEXT_PATH = path.join(ROOT_DIR, 'docker', 'postgres');
 
 interface CommandResult {
   code: number | null;
@@ -21,6 +28,7 @@ interface CommandResult {
 interface ContainerStatus {
   exists: boolean;
   running: boolean;
+  image: string | null;
 }
 
 function delay(ms: number): Promise<void> {
@@ -76,10 +84,24 @@ async function inspectContainer(): Promise<ContainerStatus> {
     'inspect',
     CONTAINER_NAME,
     '--format',
-    '{{.State.Running}}',
+    '{{.State.Running}}|{{.Config.Image}}',
   ]);
-  if (result.code !== 0) return { exists: false, running: false };
-  return { exists: true, running: result.stdout === 'true' };
+  if (result.code !== 0) return { exists: false, running: false, image: null };
+  const [running, image] = result.stdout.split('|');
+  return { exists: true, running: running === 'true', image: image ?? null };
+}
+
+async function ensureDockerImage(): Promise<void> {
+  const inspect = await runDockerCommand(['image', 'inspect', DOCKER_IMAGE], { timeoutMs: 3000 });
+  if (inspect.code === 0) return;
+  await runDockerOrThrow([
+    'build',
+    '-t',
+    DOCKER_IMAGE,
+    '-f',
+    DOCKERFILE_PATH,
+    BUILD_CONTEXT_PATH,
+  ], { stdio: 'inherit' });
 }
 
 async function waitForReady(): Promise<void> {
@@ -124,7 +146,12 @@ async function ageExtensionEnabled(): Promise<boolean> {
 
 export async function dbStart(): Promise<void> {
   await requireDocker();
-  const status = await inspectContainer();
+  await ensureDockerImage();
+  let status = await inspectContainer();
+  if (status.exists && status.image !== DOCKER_IMAGE) {
+    await runDockerOrThrow(['rm', '-f', CONTAINER_NAME]);
+    status = { exists: false, running: false, image: null };
+  }
   if (!status.exists) {
     await runDockerOrThrow([
       'run', '-d', '--name', CONTAINER_NAME, '-p', '5432:5432',

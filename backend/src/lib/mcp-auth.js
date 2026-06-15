@@ -7,8 +7,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { paramsHash, recordMcpCall } from './mcp-audit';
-import { logger } from './logger';
+import { paramsHash, recordMcpCall } from './mcp-audit.js';
+import { logger } from './logger.js';
 let cachedPublicToken = null;
 let cachedAdminToken = null;
 export const MCP_ALLOWED_ORIGINS = [

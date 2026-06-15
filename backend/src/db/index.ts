@@ -26,8 +26,8 @@
 
 import * as fs from 'fs';
 import { Pool, PoolClient, PoolConfig } from 'pg';
-import { logger } from '../lib/logger';
-import { runPgMigrations } from './pg-index';
+import { logger } from '../lib/logger.js';
+import { runPgMigrations } from './pg-index.js';
 
 // ── Configuration ────────────────────────────────────────────────────────
 

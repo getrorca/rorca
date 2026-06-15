@@ -17,12 +17,12 @@ import {
   getMcpPublicToken,
   getMcpPublicTokenPath,
   rotateMcpToken,
-} from '../backend/src/lib/mcp-auth';
-import { detectDbMode, getDbConnectionString, isAgeAvailable, setDbMode, type DbMode } from '../backend/src/lib/db-strategy';
-import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar';
-import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
-import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
-import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
+} from '../backend/src/lib/mcp-auth.js';
+import { detectDbMode, getDbConnectionString, isAgeAvailable, setDbMode, type DbMode } from '../backend/src/lib/db-strategy.js';
+import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar.js';
+import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector.js';
+import { checkDuplicatePrefixes } from '../backend/src/db/pg-index.js';
+import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,7 +32,9 @@ const DIST_DIR = path.join(ROOT_DIR, 'dist');
 const API_BASE = (process.env.RORCA_API_URL || 'http://127.0.0.1:3030').replace(/\/$/, '');
 const DB_CONTAINER = 'rorca-db';
 const DB_VOLUME = 'rorca-db-data';
-const DB_IMAGE = 'apache/age:latest';
+const DB_IMAGE = 'rorca-postgres:pg16-age';
+const DB_DOCKERFILE = path.join(ROOT_DIR, 'docker', 'postgres', 'Dockerfile');
+const DB_BUILD_CONTEXT = path.join(ROOT_DIR, 'docker', 'postgres');
 
 const pkg = JSON.parse(readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8')) as {
   name: string;
@@ -397,6 +399,16 @@ async function docker(args: string[], stdio: 'inherit' | 'pipe' = 'pipe') {
   return runCommand('docker', args, { stdio });
 }
 
+async function ensureDbImage(): Promise<void> {
+  const inspect = await docker(['image', 'inspect', DB_IMAGE]);
+  if (inspect.code === 0) return;
+  console.log('Building Rorca database image (PostgreSQL 16 + AGE + pgvector)...');
+  const result = await docker(['build', '-t', DB_IMAGE, '-f', DB_DOCKERFILE, DB_BUILD_CONTEXT], 'inherit');
+  if (result.code !== 0) {
+    throw new Error('Failed to build Rorca database image.');
+  }
+}
+
 async function requireDocker(): Promise<void> {
   const result = await docker(['info']);
   if (result.code !== 0) {
@@ -404,12 +416,13 @@ async function requireDocker(): Promise<void> {
   }
 }
 
-async function inspectDbContainer(): Promise<{ exists: boolean; running: boolean }> {
-  const result = await docker(['inspect', DB_CONTAINER, '--format', '{{.State.Running}}']);
+async function inspectDbContainer(): Promise<{ exists: boolean; running: boolean; image: string | null }> {
+  const result = await docker(['inspect', DB_CONTAINER, '--format', '{{.State.Running}}|{{.Config.Image}}']);
   if (result.code !== 0) {
-    return { exists: false, running: false };
+    return { exists: false, running: false, image: null };
   }
-  return { exists: true, running: result.stdout === 'true' };
+  const [running, image] = result.stdout.split('|');
+  return { exists: true, running: running === 'true', image: image ?? null };
 }
 
 async function waitForDatabaseReady(): Promise<void> {
@@ -446,7 +459,13 @@ async function handleDbCommand(
 ): Promise<void> {
   if (action === 'start') {
     await requireDocker();
-    const state = await inspectDbContainer();
+    await ensureDbImage();
+    let state = await inspectDbContainer();
+    if (state.exists && state.image !== DB_IMAGE) {
+      if (!options.quiet) console.log('Recreating database container with the pinned PostgreSQL 16 image...');
+      await docker(['rm', '-f', DB_CONTAINER], 'pipe');
+      state = { exists: false, running: false, image: null };
+    }
     if (!state.exists) {
       if (!options.quiet) console.log('Starting Docker Postgres sidecar...');
       const result = await docker([
@@ -1842,10 +1861,10 @@ function printInitDockerInstallInstructions(): void {
 }
 
 async function pullInitDatabaseImage(): Promise<void> {
-  console.log('Pulling Rorca database image (~200MB, first run only)...');
-  const result = await docker(['pull', DB_IMAGE], 'inherit');
+  console.log('Building Rorca database image (~200MB base layers on first run)...');
+  const result = await docker(['build', '-t', DB_IMAGE, '-f', DB_DOCKERFILE, DB_BUILD_CONTEXT], 'inherit');
   if (result.code !== 0) {
-    throw new Error('Failed to pull the Rorca database image.');
+    throw new Error('Failed to build the Rorca database image.');
   }
 }
 

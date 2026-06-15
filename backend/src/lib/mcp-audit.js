@@ -5,8 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 import { createHash } from 'node:crypto';
-import { execute, query } from '../db/index';
-import { logger } from './logger';
+import { execute, query } from '../db/index.js';
+import { logger } from './logger.js';
 const SENSITIVE_KEY_PATTERN = /password|token|key|secret|apiKey/i;
 const MCP_AUDIT_WINDOW_MS = 60_000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;

@@ -9,8 +9,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { NextFunction, Request, Response } from 'express';
-import { paramsHash, recordMcpCall } from './mcp-audit';
-import { logger } from './logger';
+import { paramsHash, recordMcpCall } from './mcp-audit.js';
+import { logger } from './logger.js';
 
 export type McpTier = 'public' | 'admin';
 

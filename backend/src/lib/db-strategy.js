@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { queryOne } from '../db/index';
+import { queryOne } from '../db/index.js';
 const DEFAULT_NATIVE_PORT = 5433;
 const DOCKER_PORT = 5432;
 const DB_MODE_FILENAME = 'db-mode';

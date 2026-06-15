@@ -8,7 +8,7 @@
 // Detect whether the Pi CLI binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 import { execSync, spawnSync } from 'child_process';
-import { logger } from './logger';
+import { logger } from './logger.js';
 export const PI_INSTALL_METHODS = {
     npm: 'npm install -g @mariozechner/pi-coding-agent',
     pnpm: 'pnpm add -g @mariozechner/pi-coding-agent',

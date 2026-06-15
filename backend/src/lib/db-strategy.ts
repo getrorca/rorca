@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { queryOne } from '../db/index';
+import { queryOne } from '../db/index.js';
 
 export type DbMode = 'native' | 'docker' | 'byop';
 

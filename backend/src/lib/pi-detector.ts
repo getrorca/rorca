@@ -10,7 +10,7 @@
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
 import { execSync, spawnSync } from 'child_process';
-import { logger } from './logger';
+import { logger } from './logger.js';
 
 export interface PiStatus {
   piInstalled: boolean;

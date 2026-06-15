@@ -6,9 +6,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { execute, query } from '../db/index';
+import { execute, query } from '../db/index.js';
 import type { McpTier } from './mcp-auth';
-import { logger } from './logger';
+import { logger } from './logger.js';
 
 export interface McpAuditEntry {
   toolName: string;
