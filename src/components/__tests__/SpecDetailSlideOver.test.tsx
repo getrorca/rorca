@@ -11,6 +11,8 @@ import {
   parseContextSummary,
   getRetrievalMethodPresentation,
   extractStoryContextAnnotations,
+  parsePostSaveStages,
+  type PostSaveStageMap,
 } from '../SpecDetailSlideOver';
 
 describe('parseContextSummary', () => {
@@ -223,5 +225,95 @@ describe('extractStoryContextAnnotations', () => {
     ]);
     expect(annotation.hasMore).toBe(false);
     expect(annotation.preview).toBe('Only one line');
+  });
+});
+
+/* ─── PSE-003: parsePostSaveStages contract ────────────────────── */
+
+const SAMPLE_STAGES: PostSaveStageMap = {
+  enrich: { requested: true, status: 'completed', reason: 'job_completed', jobId: 'aaa-111', bossJobId: 'bbb-222' },
+  matchSkills: { requested: true, status: 'running', reason: 'job_started', jobId: 'ccc-333' },
+  memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+};
+
+describe('PSE-003: parsePostSaveStages', () => {
+  it('reads postSaveStages from top-level field (surfaced by backend)', () => {
+    const result = parsePostSaveStages({
+      postSaveStages: SAMPLE_STAGES,
+    } as any);
+
+    expect(result).toEqual(SAMPLE_STAGES);
+  });
+
+  it('falls back to nested context_summary_json.postSaveStages', () => {
+    const result = parsePostSaveStages({
+      context_summary_json: JSON.stringify({ postSaveStages: SAMPLE_STAGES }),
+    } as any);
+
+    expect(result).toEqual(SAMPLE_STAGES);
+  });
+
+  it('prefers top-level field over nested when both exist', () => {
+    const topLevel: PostSaveStageMap = {
+      ...SAMPLE_STAGES,
+      enrich: { ...SAMPLE_STAGES.enrich, status: 'failed', reason: 'job_failed' },
+    };
+    const result = parsePostSaveStages({
+      postSaveStages: topLevel,
+      context_summary_json: JSON.stringify({ postSaveStages: SAMPLE_STAGES }),
+    } as any);
+
+    expect(result!.enrich.status).toBe('failed');
+  });
+
+  it('returns null for logs without any postSaveStages', () => {
+    expect(parsePostSaveStages({} as any)).toBeNull();
+    expect(parsePostSaveStages({ context_summary_json: '{}' } as any)).toBeNull();
+    expect(parsePostSaveStages({ context_summary_json: 'not json' } as any)).toBeNull();
+  });
+
+  it('returns null when context_summary_json.postSaveStages is incomplete', () => {
+    // Missing memorySynthesis key → not a valid PostSaveStageMap
+    expect(parsePostSaveStages({
+      context_summary_json: JSON.stringify({
+        postSaveStages: {
+          enrich: { requested: true, status: 'completed', reason: 'job_completed' },
+          matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+        },
+      }),
+    } as any)).toBeNull();
+  });
+
+  it('handles already-parsed context_summary_json objects', () => {
+    // pg driver returns JSONB as an object, not a string
+    const result = parsePostSaveStages({
+      context_summary_json: { postSaveStages: SAMPLE_STAGES },
+    } as any);
+
+    expect(result).toEqual(SAMPLE_STAGES);
+  });
+
+  it('distinguishes skipped-because-not-requested from failed-after-request', () => {
+    const stages: PostSaveStageMap = {
+      enrich: { requested: true, status: 'failed', reason: 'job_failed', error: 'Timeout' },
+      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    };
+    const result = parsePostSaveStages({ postSaveStages: stages } as any);
+
+    expect(result!.enrich.requested).toBe(true);
+    expect(result!.enrich.status).toBe('failed');
+    expect(result!.enrich.error).toBe('Timeout');
+    expect(result!.matchSkills.requested).toBe(false);
+    expect(result!.matchSkills.status).toBe('skipped');
+    expect(result!.matchSkills.error).toBeUndefined();
+  });
+
+  it('carries jobId and bossJobId when available', () => {
+    const result = parsePostSaveStages({ postSaveStages: SAMPLE_STAGES } as any);
+    expect(result!.enrich.jobId).toBe('aaa-111');
+    expect(result!.enrich.bossJobId).toBe('bbb-222');
+    expect(result!.matchSkills.jobId).toBe('ccc-333');
+    expect(result!.matchSkills.bossJobId).toBeUndefined();
   });
 });

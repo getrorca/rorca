@@ -57,6 +57,7 @@ import {
   enqueuePersistPostSaveJobs,
   getEffectiveGenerationLog,
   getEffectiveGenerationLogs,
+  type PersistPostSaveStageMap,
 } from '../lib/spec-post-save';
 import {
   SPEC_ENRICH_QUEUE,
@@ -7685,7 +7686,7 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
 
     if (all) {
       const logs = await getEffectiveGenerationLogs(specId);
-      res.json({ logs });
+      res.json({ logs: logs.map(surfacePostSaveStages) });
       return;
     }
 
@@ -7696,11 +7697,26 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
       return;
     }
 
-    res.json(log);
+    res.json(surfacePostSaveStages(log));
   } catch (err: any) {
     handleRouteError(res, err, '[Specs] Generation log');
   }
 });
+
+/**
+ * PSE-003: Extract postSaveStages from context_summary_json to a top-level
+ * response field so API consumers can read per-stage status (enrich,
+ * matchSkills, memorySynthesis) without parsing nested JSONB.
+ * Backward-compatible: older logs without postSaveStages get undefined.
+ */
+function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unknown> {
+  const summary = log.context_summary_json;
+  if (!summary || typeof summary !== 'object') return log;
+  const record = summary as Record<string, unknown>;
+  const stages = record.postSaveStages as PersistPostSaveStageMap | undefined;
+  if (!stages) return log;
+  return { ...log, postSaveStages: stages };
+}
 
 // ─── SV-001: GET /:specId/check — Structural spec validation ─────────────────
 

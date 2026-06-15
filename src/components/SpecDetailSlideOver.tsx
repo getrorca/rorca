@@ -1307,6 +1307,23 @@ function JsonTab({ spec, specId: _specId }: { spec: SpecDetailData; specId: stri
 
 /* ─── LST-004: Generation Log Tab ──────────────────────────────── */
 
+/** PSE-003: Per-stage status for post-save enrichment pipeline. */
+export type PostSaveStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+export interface PostSaveStageState {
+  requested: boolean;
+  status: PostSaveStageStatus;
+  reason: string;
+  jobId?: string;
+  bossJobId?: string | null;
+  error?: string | null;
+  updatedAt?: string;
+}
+export type PostSaveStageMap = {
+  enrich: PostSaveStageState;
+  matchSkills: PostSaveStageState;
+  memorySynthesis: PostSaveStageState;
+};
+
 interface GenerationLog {
   id: number;
   spec_slug: string;
@@ -1323,6 +1340,8 @@ interface GenerationLog {
   created_at: string;
   retrieval_method?: string | null;
   enriched?: boolean;
+  /** PSE-003: Canonical per-stage status surfaced from backend. */
+  postSaveStages?: PostSaveStageMap;
 }
 
 export interface GenerationLogPresentation {
@@ -1565,6 +1584,36 @@ export function parseContextSummary(log: GenerationLog): ContextSummary | null {
   return normalizeContextSummaryPayload(parsed);
 }
 
+/**
+ * PSE-003: Extract postSaveStages from a generation log row.
+ * Priority: top-level postSaveStages field (surfaced by backend route),
+ * then fallback to nested context_summary_json.postSaveStages for older
+ * responses or backward compatibility.
+ */
+export function parsePostSaveStages(log: GenerationLog): PostSaveStageMap | null {
+  if (log.postSaveStages) return log.postSaveStages;
+
+  const jsonStr = log.context_summary_json;
+  if (!jsonStr) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  const record = parsed as Record<string, unknown>;
+  const stages = record.postSaveStages;
+  if (!stages || typeof stages !== 'object') return null;
+
+  const stageMap = stages as Record<string, unknown>;
+  if (!stageMap.enrich || !stageMap.matchSkills || !stageMap.memorySynthesis) return null;
+
+  return stages as PostSaveStageMap;
+}
+
 /** Rough per-1K-token cost estimates by model family (input/output). */
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number | null {
   const rates: Record<string, [number, number]> = {
@@ -1601,6 +1650,80 @@ function StoryAnnotationPreview({ preview, hasMore, fullText }: { preview: strin
           {expanded ? 'Show less' : 'Show more'}
         </button>
       )}
+    </div>
+  );
+}
+
+/* ─── PSE-003: Post-save stage status display ──────────────────── */
+
+const STAGE_LABELS: Record<keyof PostSaveStageMap, string> = {
+  enrich: 'Enrich',
+  matchSkills: 'Match Skills',
+  memorySynthesis: 'Memory Synthesis',
+};
+
+const STAGE_STATUS_CONFIG: Record<PostSaveStageStatus, { label: string; dotClass: string; textClass: string }> = {
+  pending:   { label: 'Pending',   dotClass: 'bg-blue-400',   textClass: 'text-blue-400' },
+  queued:    { label: 'Queued',    dotClass: 'bg-blue-400',   textClass: 'text-blue-400' },
+  running:   { label: 'Running',   dotClass: 'bg-amber-400 animate-pulse', textClass: 'text-amber-400' },
+  completed: { label: 'Completed', dotClass: 'bg-success',    textClass: 'text-success' },
+  failed:    { label: 'Failed',    dotClass: 'bg-error',      textClass: 'text-error' },
+  skipped:   { label: 'Skipped',   dotClass: 'bg-muted/40',   textClass: 'text-muted/60' },
+};
+
+function reasonLabel(reason: string): string {
+  const map: Record<string, string> = {
+    requested_by_caller: 'Requested',
+    disabled_by_caller: 'Not requested',
+    waiting_for_enrich: 'Waiting for enrich',
+    durable_job_enqueued: 'Job enqueued',
+    durable_job_enqueued_after_enrich: 'Enqueued after enrich',
+    job_started: 'Processing',
+    job_completed: 'Done',
+    enqueue_failed: 'Enqueue failed',
+    job_failed: 'Job failed',
+    blocked_by_enrich_failure: 'Blocked — enrich failed',
+    blocked_by_enrich_enqueue_failure: 'Blocked — enrich could not start',
+  };
+  return map[reason] ?? reason;
+}
+
+function PostSaveStagesCard({ stages }: { stages: PostSaveStageMap }) {
+  const stageNames = Object.keys(stages) as (keyof PostSaveStageMap)[];
+  const hasAnyRequested = stageNames.some(name => stages[name].requested);
+  if (!hasAnyRequested) return null;
+
+  return (
+    <div className="px-4 py-3 border-t border-border/50" data-testid="post-save-stages">
+      <p className="text-[10px] text-muted uppercase tracking-wider font-semibold mb-2">Post-Save Pipeline</p>
+      <div className="space-y-1.5">
+        {stageNames.map(name => {
+          const stage = stages[name];
+          const statusConfig = STAGE_STATUS_CONFIG[stage.status];
+          return (
+            <div key={name} className="flex items-start gap-2" data-testid={`stage-${name}`}>
+              <span className={`mt-1 shrink-0 w-2 h-2 rounded-full ${statusConfig.dotClass}`} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-text">{STAGE_LABELS[name]}</span>
+                  <span className={`text-[10px] font-semibold ${statusConfig.textClass}`}>
+                    {statusConfig.label}
+                  </span>
+                  {stage.jobId && (
+                    <span className="text-[9px] font-mono text-muted/50 truncate max-w-[120px]" title={stage.jobId}>
+                      {stage.jobId.slice(0, 8)}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-muted/70">{reasonLabel(stage.reason)}</p>
+                {stage.error && (
+                  <p className="text-[10px] text-error/80 mt-0.5 break-words">{stage.error}</p>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1672,6 +1795,7 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
         const contextSummary = parseContextSummary(log);
         const isEnriched = !!log.enriched;
         const presentation = getGenerationLogPresentation(log);
+        const postSaveStages = parsePostSaveStages(log);
 
         return (
           <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
@@ -1754,6 +1878,9 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
                 </div>
               </div>
             )}
+
+            {/* PSE-003: Per-stage post-save pipeline status */}
+            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} />}
 
             {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
             {log.enriched && log.retrieval_method && (() => {
