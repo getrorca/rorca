@@ -172,63 +172,142 @@ export interface WsSectionProps {
   showToast: (message: string, type?: 'success' | 'error' | 'warning' | 'info') => void;
 }
 
-// ─── Context Section (sub-tabs: Routing | Files) ────────────────────────────
+// ─── Context Section (Library | Files | Routing | Skills) ───────────────────
+
+type ContextSubTab = 'library' | 'files' | 'routing' | 'skills';
 
 export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
-  const [subTab, setSubTab] = useState<'routing' | 'files' | 'skills'>('skills');
+  const [subTab, setSubTab] = useState<ContextSubTab>('library');
+
+  const tabClass = (id: ContextSubTab) => `flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
+    subTab === id
+      ? 'text-accent border-accent'
+      : 'text-muted hover:text-[var(--text)] border-transparent'
+  }`;
 
   return (
     <div className="space-y-4">
-      {/* Sub-tab bar */}
+      <div className="rounded-xl border border-accent/20 bg-gradient-to-br from-accent/10 via-panel to-panel p-4 sm:p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="inline-flex items-center gap-2 rounded-full border border-accent/25 bg-accent/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-accent">
+              <Route size={12} />
+              Runtime context library
+            </div>
+            <h2 className="mt-3 text-lg font-semibold text-[var(--text)]">
+              Markdown files Rorca injects during spec execution
+            </h2>
+            <p className="mt-1 text-sm leading-6 text-muted">
+              Add product docs, architecture notes, conventions, or decision records as context files,
+              then route them globally, by path, or by tag. Rorca includes the matched files at runtime
+              when drafting specs and running stories, and shows what was used in preview and inspector views.
+            </p>
+          </div>
+          <div className="grid min-w-[260px] gap-2 text-xs text-muted sm:grid-cols-3 lg:grid-cols-1">
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-50 px-3 py-2">
+              <FileText size={14} className="text-accent" />
+              1. Add files
+            </div>
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-50 px-3 py-2">
+              <Route size={14} className="text-accent" />
+              2. Route context
+            </div>
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-50 px-3 py-2">
+              <Play size={14} className="text-accent" />
+              3. Used at runtime
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div
         role="tablist"
         aria-label="Workspace context sections"
-        className="flex gap-1 border-b border-border -mt-2 mb-4"
+        className="flex gap-1 overflow-x-auto border-b border-border -mt-1"
       >
-        <button
-          role="tab"
-          aria-selected={subTab === 'skills'}
-          onClick={() => setSubTab('skills')}
-          className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
-            subTab === 'skills'
-              ? 'text-accent border-accent'
-              : 'text-muted hover:text-[var(--text)] border-transparent'
-          }`}
-        >
-          <Wrench size={14} />
-          Skills
+        <button role="tab" aria-selected={subTab === 'library'} onClick={() => setSubTab('library')} className={tabClass('library')}>
+          <Layers size={14} />
+          Library
         </button>
-        <button
-          role="tab"
-          aria-selected={subTab === 'routing'}
-          onClick={() => setSubTab('routing')}
-          className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
-            subTab === 'routing'
-              ? 'text-accent border-accent'
-              : 'text-muted hover:text-[var(--text)] border-transparent'
-          }`}
-        >
-          <Route size={14} />
-          Routing
-        </button>
-        <button
-          role="tab"
-          aria-selected={subTab === 'files'}
-          onClick={() => setSubTab('files')}
-          className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
-            subTab === 'files'
-              ? 'text-accent border-accent'
-              : 'text-muted hover:text-[var(--text)] border-transparent'
-          }`}
-        >
+        <button role="tab" aria-selected={subTab === 'files'} onClick={() => setSubTab('files')} className={tabClass('files')}>
           <FileText size={14} />
           Files
         </button>
+        <button role="tab" aria-selected={subTab === 'routing'} onClick={() => setSubTab('routing')} className={tabClass('routing')}>
+          <Route size={14} />
+          Routing
+        </button>
+        <button role="tab" aria-selected={subTab === 'skills'} onClick={() => setSubTab('skills')} className={tabClass('skills')}>
+          <Wrench size={14} />
+          Skills
+        </button>
       </div>
 
-      {subTab === 'skills' && <SkillsManager workspaceId={workspaceId} showToast={showToast} />}
-      {subTab === 'routing' && <ContextRoutingSettings workspaceId={workspaceId} showToast={showToast} />}
+      {subTab === 'library' && (
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <div className="rounded-xl border border-border bg-panel p-4">
+            <h3 className="text-sm font-semibold text-[var(--text)]">How runtime context works</h3>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <button
+                type="button"
+                onClick={() => setSubTab('files')}
+                className="rounded-lg border border-border bg-surface-50 p-4 text-left transition-colors hover:border-accent/40 hover:bg-surface-100"
+              >
+                <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-accent/10 text-accent">
+                  <FileText size={17} />
+                </div>
+                <div className="text-sm font-medium text-[var(--text)]">Add Markdown files</div>
+                <p className="mt-1 text-xs leading-5 text-muted">
+                  Manage human-authored docs like product principles, architecture notes, and team conventions.
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubTab('routing')}
+                className="rounded-lg border border-border bg-surface-50 p-4 text-left transition-colors hover:border-accent/40 hover:bg-surface-100"
+              >
+                <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-accent/10 text-accent">
+                  <Route size={17} />
+                </div>
+                <div className="text-sm font-medium text-[var(--text)]">Choose when they apply</div>
+                <p className="mt-1 text-xs leading-5 text-muted">
+                  Route files globally, for matching code paths, or for stories with specific tags.
+                </p>
+              </button>
+              <div className="rounded-lg border border-border bg-surface-50 p-4">
+                <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-accent/10 text-accent">
+                  <Play size={17} />
+                </div>
+                <div className="text-sm font-medium text-[var(--text)]">Injected during execution</div>
+                <p className="mt-1 text-xs leading-5 text-muted">
+                  Rorca assembles the matched files into each spec/run context packet and records what was used.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <aside className="rounded-xl border border-border bg-panel p-4">
+            <h3 className="text-sm font-semibold text-[var(--text)]">Context channels</h3>
+            <div className="mt-3 space-y-2 text-xs text-muted">
+              <div className="flex items-start gap-2 rounded-lg bg-surface-50 p-3">
+                <Check size={14} className="mt-0.5 text-emerald-400" />
+                <span><strong className="text-[var(--text)]">Context files</strong> are source docs selected for runtime prompts.</span>
+              </div>
+              <div className="flex items-start gap-2 rounded-lg bg-surface-50 p-3">
+                <Check size={14} className="mt-0.5 text-emerald-400" />
+                <span><strong className="text-[var(--text)]">Skills</strong> remain reusable implementation guidance files.</span>
+              </div>
+              <div className="flex items-start gap-2 rounded-lg bg-surface-50 p-3">
+                <Check size={14} className="mt-0.5 text-emerald-400" />
+                <span><strong className="text-[var(--text)]">Memory</strong> is learned and reviewed; docs are not auto-memorized by default.</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
       {subTab === 'files' && <ContextFilesEditor workspaceId={workspaceId} showToast={showToast} />}
+      {subTab === 'routing' && <ContextRoutingSettings workspaceId={workspaceId} showToast={showToast} />}
+      {subTab === 'skills' && <SkillsManager workspaceId={workspaceId} showToast={showToast} />}
     </div>
   );
 }

@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../test/helpers';
-import WorkspaceSettingsPanel from '../WorkspaceSettingsPanel';
+import WorkspaceSettingsPanel, { WsContextSection } from '../WorkspaceSettingsPanel';
 
 vi.mock('../../lib/apiFetch', () => ({
   apiFetch: vi.fn(),
@@ -144,5 +144,14 @@ describe('WorkspaceSettingsPanel', () => {
       },
       { timeout: 3000 },
     );
+  });
+
+  it('explains context files as runtime spec execution context', () => {
+    renderWithProviders(<WsContextSection workspaceId="ws-1" showToast={vi.fn()} />);
+
+    expect(document.body.textContent).toContain('Runtime context library');
+    expect(document.body.textContent).toContain('Markdown files Rorca injects during spec execution');
+    expect(document.body.textContent).toContain('Rorca assembles the matched files into each spec/run context packet');
+    expect(document.body.textContent).toContain('docs are not auto-memorized by default');
   });
 });
