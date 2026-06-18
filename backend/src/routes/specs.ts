@@ -4716,7 +4716,8 @@ interface KanbanSpec {
   model?: string;
   attachmentCount: number;
   source?: string;
-  postSaveStatus?: 'queued' | 'waiting' | 'running';
+  postSaveStatus?: 'queued' | 'waiting-for-worker' | 'running';
+  postSaveBlockingStatus?: 'blocked-by-active-job';
   postSaveStage?: 'enrich' | 'match-skills';
   postSaveJobId?: string;
   postSaveQueuePosition?: number;
@@ -4770,7 +4771,8 @@ function buildPostSaveKanbanState(activeJobs: SpecJob[]): Map<string, Partial<Ka
   for (const [specId, job] of bySpec.entries()) {
     const queue = queuePositionByJobId.get(job.id) ?? { position: job.status === 'running' ? 0 : 1, activeJobsAhead: 0 };
     stateBySpec.set(specId, {
-      postSaveStatus: job.status === 'running' ? 'running' : queue.activeJobsAhead > 0 ? 'waiting' : 'queued',
+      postSaveStatus: job.status === 'running' ? 'running' : queue.activeJobsAhead > 0 ? 'waiting-for-worker' : 'queued',
+      postSaveBlockingStatus: 'blocked-by-active-job',
       postSaveStage: job.jobType as 'enrich' | 'match-skills',
       postSaveJobId: job.id,
       postSaveQueuePosition: queue.position,
@@ -4840,7 +4842,8 @@ function buildPostSaveKanbanState(activeJobs: SpecJob[]): Map<string, Partial<Ka
  *                       activeRunId: { type: integer, nullable: true }
  *                       activeRunStatus: { type: string, enum: [running, queued], nullable: true }
  *                       queuePosition: { type: integer, nullable: true }
- *                       postSaveStatus: { type: string, enum: [queued, waiting, running], nullable: true }
+ *                       postSaveStatus: { type: string, enum: [queued, waiting-for-worker, running], nullable: true }
+ *                       postSaveBlockingStatus: { type: string, enum: [blocked-by-active-job], nullable: true }
  *                       postSaveStage: { type: string, enum: [enrich, match-skills], nullable: true }
  *                       postSaveQueuePosition: { type: integer, nullable: true }
  *                       model: { type: string, nullable: true }
@@ -8362,6 +8365,9 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Get generation log for a spec
  *     operationId: getSpecGenerationLog
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only spec status and context metadata for local automation; exposes no operator-only side effects."
+ *     x-rorca-public-api: true
  *     description: Returns the most recent generation log for this spec slug, or all logs if ?all=true.
  *     parameters:
  *       - in: path
@@ -8411,6 +8417,58 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
  * without inspecting raw prose strings.
  * Backward-compatible: older logs without postSaveStages get undefined.
  */
+type CanonicalPostSaveStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting-for-worker'
+  | 'superseded'
+  | 'skipped-unchanged'
+  | 'blocked-by-active-job'
+  | 'completed'
+  | 'failed';
+
+type CanonicalPostSaveStage = 'enrich' | 'matchSkills' | 'memorySynthesis';
+
+interface CanonicalPostSaveStageState {
+  stage: CanonicalPostSaveStage;
+  status: CanonicalPostSaveStatus;
+  reason: string;
+  requested: boolean;
+  jobId?: string;
+  queuePosition?: number;
+  activeJobsAhead?: number;
+}
+
+function canonicalPostSaveStatusForStage(stage: PersistPostSaveStageMap[keyof PersistPostSaveStageMap]): CanonicalPostSaveStatus {
+  if (stage.status === 'running') return 'running';
+  if (stage.status === 'queued') return stage.queueStatus === 'waiting' || (stage.activeJobsAhead ?? 0) > 0 ? 'waiting-for-worker' : 'queued';
+  if (stage.status === 'pending') return 'waiting-for-worker';
+  if (stage.status === 'superseded') return 'superseded';
+  if (stage.status === 'skipped') return stage.reason === 'fingerprint_unchanged' ? 'skipped-unchanged' : 'completed';
+  if (stage.status === 'completed') return 'completed';
+  if (stage.reason === 'blocked_by_enrich_failure' || stage.reason === 'blocked_by_enrich_enqueue_failure') return 'blocked-by-active-job';
+  return 'failed';
+}
+
+function buildCanonicalPostSaveStates(stages: PersistPostSaveStageMap): CanonicalPostSaveStageState[] {
+  return (['enrich', 'matchSkills', 'memorySynthesis'] as CanonicalPostSaveStage[]).map((stageName) => {
+    const stage = stages[stageName];
+    return {
+      stage: stageName,
+      status: canonicalPostSaveStatusForStage(stage),
+      reason: stage.reason,
+      requested: stage.requested,
+      ...(stage.jobId ? { jobId: stage.jobId } : {}),
+      ...(stage.queuePosition !== undefined ? { queuePosition: stage.queuePosition } : {}),
+      ...(stage.activeJobsAhead !== undefined ? { activeJobsAhead: stage.activeJobsAhead } : {}),
+    };
+  });
+}
+
+function pickCurrentPostSaveState(states: CanonicalPostSaveStageState[]): CanonicalPostSaveStageState | undefined {
+  return states.find((state) => state.requested && (state.status === 'running' || state.status === 'queued' || state.status === 'waiting-for-worker'));
+}
+
 function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unknown> {
   const summary = log.context_summary_json;
   if (!summary || typeof summary !== 'object') return log;
@@ -8418,9 +8476,20 @@ function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unk
   const stages = record.postSaveStages as PersistPostSaveStageMap | undefined;
   const contextCaptureStatus = record.contextCaptureStatus as Record<string, unknown> | undefined;
   if (!stages && !contextCaptureStatus) return log;
+  const canonicalStages = stages ? buildCanonicalPostSaveStates(stages) : undefined;
+  const currentPostSave = canonicalStages ? pickCurrentPostSaveState(canonicalStages) : undefined;
   return {
     ...log,
     ...(stages ? { postSaveStages: stages } : {}),
+    ...(canonicalStages ? { postSaveStageStates: canonicalStages } : {}),
+    ...(currentPostSave ? {
+      postSaveStatus: currentPostSave.status,
+      postSaveStage: currentPostSave.stage,
+      postSaveJobId: currentPostSave.jobId,
+      postSaveQueuePosition: currentPostSave.queuePosition,
+      postSaveActiveJobsAhead: currentPostSave.activeJobsAhead,
+      postSaveBlockingStatus: 'blocked-by-active-job' as const,
+    } : {}),
     ...(contextCaptureStatus ? { contextCaptureStatus } : {}),
   };
 }

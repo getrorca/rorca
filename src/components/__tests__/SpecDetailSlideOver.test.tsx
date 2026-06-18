@@ -14,6 +14,10 @@ import {
   parsePostSaveStages,
   parseContextCaptureStatus,
   classifyContextState,
+  getCanonicalPostSaveStatus,
+  getCanonicalPostSaveStageStates,
+  getCurrentPostSaveState,
+  postSaveActiveJobCopy,
   type PostSaveStageMap,
   type ContextCaptureStatus,
   type ContextClassification,
@@ -153,6 +157,30 @@ describe('getGenerationLogPresentation', () => {
       tone: 'success',
       title: 'Draft Persisted · Enrichment Pending',
       badgeLabel: 'Persisted',
+    });
+  });
+
+  it('does not label superseded post-save stages as pending current work', () => {
+    const supersededStages: PostSaveStageMap = {
+      enrich: { requested: true, status: 'superseded', reason: 'superseded_by_newer_save' },
+      matchSkills: { requested: true, status: 'superseded', reason: 'superseded_by_newer_save' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    };
+    expect(getGenerationLogPresentation({ status: 'pending_enrichment', enriched: false, postSaveStages: supersededStages })).toMatchObject({
+      title: 'Draft Persisted · Superseded by Newer Edit',
+      badgeLabel: 'Superseded',
+    });
+  });
+
+  it('distinguishes skipped unchanged from still processing copy', () => {
+    const skippedStages: PostSaveStageMap = {
+      enrich: { requested: true, status: 'skipped', reason: 'fingerprint_unchanged' },
+      matchSkills: { requested: true, status: 'skipped', reason: 'fingerprint_unchanged' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    };
+    expect(getGenerationLogPresentation({ status: 'pending_enrichment', enriched: false, postSaveStages: skippedStages })).toMatchObject({
+      title: 'Draft Persisted · Inputs Unchanged',
+      badgeLabel: 'Skipped',
     });
   });
 
@@ -319,6 +347,46 @@ describe('PSE-003: parsePostSaveStages', () => {
     expect(result!.enrich.bossJobId).toBe('bbb-222');
     expect(result!.matchSkills.jobId).toBe('ccc-333');
     expect(result!.matchSkills.bossJobId).toBeUndefined();
+  });
+});
+
+/* ─── RER-006: canonical post-save states ──────────────────────── */
+
+describe('RER-006: canonical post-save state mapping', () => {
+  it('distinguishes queued, waiting-for-worker, running, skipped-unchanged, superseded, blocked, and completed', () => {
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'queued', reason: 'durable_job_enqueued' })).toBe('queued');
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'queued', reason: 'durable_job_enqueued', queueStatus: 'waiting', activeJobsAhead: 2 })).toBe('waiting-for-worker');
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'running', reason: 'job_started' })).toBe('running');
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'skipped', reason: 'fingerprint_unchanged' })).toBe('skipped-unchanged');
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'superseded', reason: 'superseded_by_newer_save' })).toBe('superseded');
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'failed', reason: 'blocked_by_enrich_failure' })).toBe('blocked-by-active-job');
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'failed', reason: 'job_failed' })).toBe('failed');
+    expect(getCanonicalPostSaveStatus({ requested: true, status: 'completed', reason: 'job_completed' })).toBe('completed');
+  });
+
+  it('chooses only live queued/running/waiting stages as the current active post-save job', () => {
+    const log = {
+      postSaveStages: {
+        enrich: { requested: true, status: 'superseded', reason: 'superseded_by_newer_save', jobId: 'old-job' },
+        matchSkills: { requested: true, status: 'queued', reason: 'durable_job_enqueued', jobId: 'new-job', queuePosition: 1 },
+        memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+      },
+    } as any;
+
+    expect(getCanonicalPostSaveStageStates(log).map(s => s.status)).toEqual(['superseded', 'queued', 'completed']);
+    expect(getCurrentPostSaveState(log)).toMatchObject({ stage: 'matchSkills', status: 'queued', jobId: 'new-job' });
+    expect(postSaveActiveJobCopy(getCurrentPostSaveState(log)!)).toContain('Match Skills is queued');
+  });
+
+  it('prefers backend-surfaced blocking status over older raw stage history', () => {
+    const current = getCurrentPostSaveState({
+      postSaveBlockingStatus: 'blocked-by-active-job',
+      postSaveStatus: 'running',
+      postSaveStage: 'enrich',
+      postSaveJobId: 'active-job',
+    } as any);
+
+    expect(current).toMatchObject({ stage: 'enrich', status: 'running', jobId: 'active-job' });
   });
 });
 

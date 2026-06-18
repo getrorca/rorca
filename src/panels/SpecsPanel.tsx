@@ -88,6 +88,7 @@ interface ArchiveSpec {
   forkedFrom?: string;
   reviewStatus?: ReviewStatus;
   source?: string;
+  activeRunStatus?: 'running' | 'queued';
   runTelemetry?: RunTelemetry | null;
 }
 
@@ -113,6 +114,11 @@ interface KanbanSpec {
   activeRunId?: number;
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
+  postSaveStatus?: 'queued' | 'waiting-for-worker' | 'running';
+  postSaveBlockingStatus?: 'blocked-by-active-job';
+  postSaveStage?: 'enrich' | 'match-skills';
+  postSaveQueuePosition?: number;
+  postSaveActiveJobsAhead?: number;
   triggeredVia?: 'queue' | 'run_now';
   isParallelRun?: boolean;
   model?: string;
@@ -430,6 +436,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         onClose={handleDetailClose}
         onNavigate={onNavigate}
         onNavigateToRun={onNavigateToRun}
+        activeRunStatus={detailSpecSummary?.activeRunStatus}
         onDeleted={(id) => { handleDetailClose(); }}
       />
 
@@ -1184,6 +1191,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
         approvedAt: spec.approvedAt,
         tags: spec.tags || [],
         storyTitles: spec.storyTitles || [],
+        activeRunStatus: spec.activeRunStatus,
         reviewStatus: spec.reviewStatus as ArchiveSpec['reviewStatus'],
       }, initialTab);
     } else {
@@ -1376,6 +1384,15 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     const isQueued = runStatus === 'queued';
     const isParallelRun = spec.isParallelRun === true;
     const modelName = modelShortName(spec.model);
+    const postSaveStatus = spec.postSaveStatus;
+    const hasPostSaveJob = postSaveStatus === 'queued' || postSaveStatus === 'waiting-for-worker' || postSaveStatus === 'running';
+    const postSaveLabel = postSaveStatus === 'running'
+      ? 'Enriching'
+      : postSaveStatus === 'waiting-for-worker'
+        ? `Waiting${spec.postSaveActiveJobsAhead ? ` (${spec.postSaveActiveJobsAhead} ahead)` : ''}`
+        : postSaveStatus === 'queued'
+          ? `Queued${spec.postSaveQueuePosition ? ` #${spec.postSaveQueuePosition}` : ''}`
+          : null;
     const tags = spec.tags || [];
     const visibleTags = tags.slice(0, 2);
     const overflowCount = tags.length - 2;
@@ -1485,6 +1502,12 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
                       ? <><Play size={8} className="fill-current" /> Running (parallel)</>
                       : <><Play size={8} className="fill-current" /> Running</>
                   }
+                </span>
+              )}
+              {hasPostSaveJob && postSaveLabel && (
+                <span className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-blue-400/15 text-blue-300 border-blue-400/30" title="Post-save enrichment state">
+                  {postSaveStatus === 'running' ? <Loader2 size={8} className="animate-spin" /> : <Clock size={8} />}
+                  {postSaveLabel}
                 </span>
               )}
             </div>
