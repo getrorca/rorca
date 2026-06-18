@@ -15,6 +15,8 @@ import type {
 
 // ─── Trigger ──────────────────────────────────────────────────────────────────
 
+export type TerminalMode = NonNullable<PipelineRun['terminal_mode']>;
+
 export interface TriggerParams extends ApiOptions {
   specPath: string;
   workspaceId: string;
@@ -24,6 +26,7 @@ export interface TriggerParams extends ApiOptions {
   dryRun?: boolean;
   storyId?: string;
   forceSequential?: boolean;
+  terminal_mode?: TerminalMode;
 }
 
 export interface CapabilityWarning {
@@ -34,11 +37,16 @@ export interface CapabilityWarning {
   warnings: string[];
 }
 
+type TriggerTerminalFields = {
+  terminalMode?: TerminalMode;
+  terminal_mode?: TerminalMode;
+};
+
 export type TriggerResponse =
-  | { ok: true; runId: number; worktreePath?: string; branchName?: string; capabilityWarnings?: CapabilityWarning[]; capabilityMismatchMode?: string }
+  | ({ ok: true; runId: number; worktreePath?: string; branchName?: string; capabilityWarnings?: CapabilityWarning[]; capabilityMismatchMode?: string } & TriggerTerminalFields)
   | { dryRun: true; estimate: unknown }
   | { conflict: true; activeRunId: number }
-  | { queued: true; runId: number; position: number };
+  | ({ queued: true; runId: number; position: number; queuePosition?: number } & TriggerTerminalFields);
 
 export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
   return apiFetch('/api/pipeline/trigger', {
@@ -53,6 +61,7 @@ export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
       dryRun: p.dryRun,
       storyId: p.storyId,
       forceSequential: p.forceSequential,
+      terminal_mode: p.terminal_mode,
     }),
     signal: p.signal,
   });

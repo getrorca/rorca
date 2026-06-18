@@ -127,11 +127,15 @@ interface SpecGenerationJobResponse {
   error?: string | null;
 }
 
+type TerminalMode = 'ansi-html' | 'pty';
+
 interface TriggerResponse {
   ok?: boolean;
   queued?: boolean;
   runId?: number;
   queuePosition?: number;
+  terminalMode?: TerminalMode;
+  terminal_mode?: TerminalMode;
   error?: string;
 }
 
@@ -144,7 +148,10 @@ interface RunDetailsResponse {
     finished_at?: string | null;
     queue_position?: number | null;
     parallelism?: number | null;
+    terminal_mode?: TerminalMode | null;
   };
+  terminalMode?: TerminalMode;
+  terminal_mode?: TerminalMode;
   stories: Array<{ story_id: string; status: string }>;
   specStories?: Array<{ id: string; title: string }>;
   tokenSummary?: {
@@ -181,6 +188,7 @@ interface ForegroundRunState {
   exitPromptOpen: boolean;
   cancelRequested: boolean;
   confirmCancel: boolean;
+  terminalMode: TerminalMode;
 }
 
 interface BoardLine {
@@ -433,7 +441,11 @@ function formatStoryTableLine(story: StoryEditorStory): string {
 
 function getUserFriendlyError(error: unknown): string {
   const message = error instanceof Error ? error.message : 'Unknown error';
-  return message.replace(/\s+/g, ' ').trim();
+  const normalized = message.replace(/\s+/g, ' ').trim();
+  if (error instanceof TuiApiError && error.status === 503 && /pty/i.test(normalized)) {
+    return `PTY terminal mode rejected by backend: ${normalized}`;
+  }
+  return normalized;
 }
 
 function summarizeDirection(payload: WalPayload): string | null {
@@ -1022,6 +1034,7 @@ export function Forge(): JSX.Element {
           cumulativeCost: details.tokenSummary?.totalCostUsd ?? current.cumulativeCost,
           stories: nextStories,
           selectedStreamKey,
+          terminalMode: details.terminal_mode ?? details.terminalMode ?? details.run.terminal_mode ?? current.terminalMode,
         };
       });
     } catch {
@@ -1378,6 +1391,7 @@ export function Forge(): JSX.Element {
       directionSummary: null,
       stories: seedForegroundStories(details),
       selectedStreamKey: 'run',
+      terminalMode: details.terminal_mode ?? details.terminalMode ?? details.run.terminal_mode ?? 'ansi-html',
       exitPromptOpen: false,
       cancelRequested: false,
       confirmCancel: false,
@@ -1418,6 +1432,7 @@ export function Forge(): JSX.Element {
         body: {
           workspaceId: workspace.id,
           specPath: specPathFromSlug(normalizedSlug),
+          terminal_mode: 'pty',
         },
       });
 
@@ -1450,6 +1465,7 @@ export function Forge(): JSX.Element {
           directionSummary: null,
           stories: [],
           selectedStreamKey: 'run',
+          terminalMode: trigger.terminal_mode ?? trigger.terminalMode ?? 'pty',
           exitPromptOpen: false,
           cancelRequested: false,
           confirmCancel: false,
@@ -1462,7 +1478,7 @@ export function Forge(): JSX.Element {
       }
 
       appendOutput({
-        text: `⟳ Queued run #${trigger.runId}${trigger.queuePosition ? ` (position ${trigger.queuePosition})` : ''}`,
+        text: `⟳ Queued run #${trigger.runId}${trigger.queuePosition ? ` (position ${trigger.queuePosition})` : ''} · terminal ${trigger.terminal_mode ?? trigger.terminalMode ?? 'pty'}`,
         color: 'yellow',
       });
       if (boardOpen) {
@@ -1473,7 +1489,7 @@ export function Forge(): JSX.Element {
       setForegroundRun(null);
       setPhaseOverride('FAILED');
       appendOutput({
-        text: `[${formatClock(new Date())}] run failed to start: ${(error as Error).message}`,
+        text: `[${formatClock(new Date())}] run failed to start: ${getUserFriendlyError(error)}`,
         color: 'red',
       });
     }
@@ -1790,7 +1806,7 @@ export function Forge(): JSX.Element {
       setBoardOpen(false);
 
       appendOutput({
-        text: `⟳ Attached to run #${runId}`,
+        text: `⟳ Attached to run #${runId} · terminal ${details.terminal_mode ?? details.terminalMode ?? details.run.terminal_mode ?? 'ansi-html'}`,
         color: 'yellow',
       });
     } catch (error) {
@@ -2948,6 +2964,7 @@ export function Forge(): JSX.Element {
           <Text>cost usd: ${(foregroundRun?.cumulativeCost ?? orchestrationState.cumulativeTokens.cost).toFixed(2)}</Text>
           <Text>direction: {foregroundRun?.directionSummary ?? orchestrationState.directionSummary ?? 'none'}</Text>
           <Text>view: {selectedForegroundStory ? selectedForegroundStory.storyId : foregroundRun ? 'combined' : 'none'}</Text>
+          <Text>terminal: {foregroundRun?.terminalMode ?? 'ansi-html'}</Text>
           <Text>parallelism: {foregroundRun?.parallelism ?? 1}</Text>
           <Text>background: {effectiveBackgroundRunsCount}</Text>
         </Box>
