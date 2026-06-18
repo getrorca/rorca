@@ -64,6 +64,8 @@ async function enqueueContextEnrichmentJob(input: z.infer<typeof ContextEnrichBo
     storyText: input.storyText,
     maxTokens: input.maxTokens,
     includeGraph: input.includeGraph ?? true,
+  }, {
+    priority: 1,
   });
 
   if (!bossJobId) {

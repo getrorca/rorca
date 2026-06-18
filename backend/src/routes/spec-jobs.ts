@@ -53,7 +53,7 @@ function writeSseEvent(res: Response, event: string, payload: unknown): void {
  *                 specId: { type: string }
  *                 workspaceId: { type: string }
  *                 jobType: { type: string, enum: [enrich, context-enrich, match-skills, suggest-skills, suggest-models, detect-dependencies, knowledge-graph, add-stories, validate, score] }
- *                 status: { type: string, enum: [pending, running, completed, failed, cancelled] }
+ *                 status: { type: string, enum: [pending, running, completed, failed, cancelled, superseded] }
  *                 progress:
  *                   type: object
  *                   properties:

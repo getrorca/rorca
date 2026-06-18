@@ -50,22 +50,34 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { createJob, updateJobStatus, listJobsForSpec, listActiveJobs, listRepairCandidatesFromLogs, type RepairIssueCategory } from '../db/spec-jobs';
+import { createJob, updateJobStatus, listActiveJobs, listJobsForSpec, listRepairCandidatesFromLogs, type JsonValue, type RepairIssueCategory, type SpecJob } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import {
   buildPersistPostSaveStages,
   enqueuePersistPostSaveJobs,
   getEffectiveGenerationLog,
   getEffectiveGenerationLogs,
+  updatePersistPostSaveStage,
   type PersistPostSaveStageMap,
-  type PersistPostSaveStageState,
+  type PersistStageReason,
   type PersistStageStatus,
 } from '../lib/spec-post-save';
+import {
+  computeSpecStageFingerprints,
+  readStageFingerprintsFromSummary,
+  type SpecStageFingerprints,
+  type StageFingerprintStoryInput,
+} from '../lib/spec-stage-fingerprints';
 import {
   SPEC_ENRICH_QUEUE,
   SPEC_MATCH_SKILLS_QUEUE,
   SPEC_SUGGEST_SKILLS_QUEUE,
 } from '../lib/spec-job-worker';
+import {
+  resolveSpecEditPostSaveDecision,
+  type SpecEditInput,
+  type SpecEditPostSaveDecision,
+} from '../lib/spec-edit-change-class';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -311,12 +323,15 @@ async function enqueueAsyncSpecJob(
   specId: string,
   workspaceId: string,
   jobType: keyof typeof ASYNC_SPEC_JOB_QUEUE,
+  options: { priority?: number } = {},
 ): Promise<{ jobId: string; status: 'pending'; pollUrl: string; streamUrl: string }> {
   const job = await createJob(workspaceId, specId, jobType, null);
   const bossJobId = await getBoss().send(ASYNC_SPEC_JOB_QUEUE[jobType], {
     jobId: job.id,
     specId,
     workspaceId,
+  }, {
+    priority: options.priority ?? 1,
   });
 
   if (!bossJobId) {
@@ -1088,6 +1103,31 @@ function resolveSpecPostSaveOptions(input?: Partial<SpecPostSaveOptions>): SpecP
   };
 }
 
+function postSaveStageReasonsForDecision(
+  decision?: SpecEditPostSaveDecision,
+): Partial<Record<keyof SpecPostSaveOptions, PersistStageReason>> {
+  if (!decision) return {};
+
+  if (decision.changeClass === 'metadata-only') {
+    return {
+      enrich: 'metadata_only_skip',
+      matchSkills: 'metadata_only_skip',
+    };
+  }
+
+  if (decision.changeClass === 'story-content-only') {
+    return {
+      enrich: 'story_content_only',
+      ...(decision.effectivePostSave.matchSkills ? { matchSkills: 'story_content_only' as const } : {}),
+    };
+  }
+
+  return {
+    ...(decision.effectivePostSave.enrich ? { enrich: 'context_bearing_change' as const } : {}),
+    ...(decision.effectivePostSave.matchSkills ? { matchSkills: 'context_bearing_change' as const } : {}),
+  };
+}
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1223,20 +1263,28 @@ async function seedPersistGenerationLog(input: {
   invocationSurface?: string;
   title: string;
   storyCount: number;
+  stories: StageFingerprintStoryInput[];
   model?: string;
   overwrite: boolean;
   postSave: SpecPostSaveOptions;
+  requestedPostSave?: SpecPostSaveOptions;
+  postSaveStageReasons?: Partial<Record<keyof SpecPostSaveOptions, PersistStageReason>>;
+  postSaveDecision?: SpecEditPostSaveDecision;
   normalizationChanges: Array<{ from?: string; to: string; reason: string }>;
   contextUsed?: unknown;
   callerContextSummary?: Record<string, unknown>;
   resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
-}): Promise<void> {
+}): Promise<{ stageFingerprints: SpecStageFingerprints; saveGeneration: number }> {
   const pendingPostSave = input.postSave.enrich || input.postSave.matchSkills || input.postSave.memorySynthesis;
   const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
   const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
   const invocationSurface = input.invocationSurface?.trim() || 'api.specs.persist';
-  const postSaveStages = buildPersistPostSaveStages(input.postSave);
+  const postSaveStages = buildPersistPostSaveStages(input.postSave, input.postSaveStageReasons);
+  const stageFingerprints = computeSpecStageFingerprints({
+    title: input.title,
+    userStories: input.stories,
+  });
   const contextCaptureStatus = buildPersistContextCaptureStatus({
     contextUsed: input.contextUsed,
     callerContextSummary: input.callerContextSummary,
@@ -1252,15 +1300,19 @@ async function seedPersistGenerationLog(input: {
     overwrite: input.overwrite,
     pendingEnrichment: input.postSave.enrich,
     postSave: input.postSave,
+    ...(input.requestedPostSave ? { requestedPostSave: input.requestedPostSave } : {}),
     postSaveStages,
+    ...(input.postSaveDecision ? { postSaveDecision: input.postSaveDecision } : {}),
     contextCaptureStatus,
     normalizationChanges: input.normalizationChanges,
+    enrichFingerprint: stageFingerprints.enrichFingerprint,
+    matchSkillsFingerprint: stageFingerprints.matchSkillsFingerprint,
     ...(input.resolvedContextSummary ? { contextSummary: input.resolvedContextSummary } : {}),
     ...(input.contextUsed !== undefined ? { contextUsed: input.contextUsed } : {}),
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
   };
 
-  await execute(
+  const insertedLog = await queryOne<{ id: number }>(
     `INSERT INTO spec_generation_logs (
       spec_slug,
       model,
@@ -1270,8 +1322,11 @@ async function seedPersistGenerationLog(input: {
       enriched,
       retrieval_method,
       context_summary_json,
-      status
-    ) VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8)`,
+      status,
+      enrich_fingerprint,
+      match_skills_fingerprint
+    ) VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10)
+    RETURNING id`,
     [
       input.slug,
       input.model?.trim() || 'explicit-draft',
@@ -1281,14 +1336,38 @@ async function seedPersistGenerationLog(input: {
       'none',
       JSON.stringify(summaryJson),
       status,
+      stageFingerprints.enrichFingerprint,
+      stageFingerprints.matchSkillsFingerprint,
     ],
   );
+
+  const saveGeneration = insertedLog?.id ?? Date.now();
+  await execute(
+    `UPDATE spec_generation_logs
+     SET save_generation = $2,
+         context_summary_json = $3
+     WHERE id = $1`,
+    [
+      saveGeneration,
+      saveGeneration,
+      {
+        ...summaryJson,
+        saveGeneration,
+      },
+    ],
+  );
+
+  return { stageFingerprints, saveGeneration };
 }
 
 async function scheduleSpecPostSaveJobs(
   specId: string,
   workspaceId: string,
-  options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'>,
+  options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'> & {
+    currentFingerprints?: SpecStageFingerprints;
+    priorFingerprints?: Partial<SpecStageFingerprints>;
+    saveGeneration?: number;
+  },
 ): Promise<void> {
   if (!options.enrich && !options.matchSkills) return;
 
@@ -1359,7 +1438,9 @@ async function persistExplicitDraftInternal(
   const slug = rawSlug || briefToSlug(title);
   const source = body.source?.trim() || 'explicit-draft';
   const overwrite = body.overwrite === true;
-  const postSave = resolveSpecPostSaveOptions(body.postSave);
+  const requestedPostSave = resolveSpecPostSaveOptions(body.postSave);
+  let postSave = requestedPostSave;
+  let postSaveDecision: SpecEditPostSaveDecision | undefined;
   const draftStories = body.stories ?? body.userStories ?? [];
   const resolvedContextSummary = buildContextSummaryFromExplicitDraftContext({
     contextUsed: body.contextUsed,
@@ -1381,17 +1462,36 @@ async function persistExplicitDraftInternal(
   const { pendingDir, approvedDir } = specsDirs(workspace.path);
   const existingPending = path.join(pendingDir, `${slug}.json`);
   const existingApproved = path.join(approvedDir, `${slug}.json`);
-  const hadExistingSpec = fs.existsSync(existingPending) || fs.existsSync(existingApproved);
+  const existingSpecPath = fs.existsSync(existingPending)
+    ? existingPending
+    : fs.existsSync(existingApproved)
+      ? existingApproved
+      : null;
+  const hadExistingSpec = existingSpecPath !== null;
+  const previousSpecRaw = existingSpecPath ? fs.readFileSync(existingSpecPath, 'utf8') : null;
+  const previousSpecContent = previousSpecRaw ? JSON.parse(previousSpecRaw) as SpecEditInput : null;
 
   if (hadExistingSpec && !overwrite) {
     throw new ConflictError(`Spec '${slug}' already exists. Re-submit with overwrite=true to replace it.`);
   }
 
+  if (previousSpecContent) {
+    postSaveDecision = resolveSpecEditPostSaveDecision({
+      before: previousSpecContent,
+      after: {
+        title,
+        userStories: normalizedStories as unknown as SpecEditInput['userStories'],
+      },
+      requestedPostSave,
+    });
+    postSave = postSaveDecision.effectivePostSave;
+  }
+
   if (fs.existsSync(existingPending)) {
-    await snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
+    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
     fs.unlinkSync(existingPending);
   } else if (fs.existsSync(existingApproved)) {
-    await snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
+    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
     fs.unlinkSync(existingApproved);
   }
 
@@ -1408,6 +1508,9 @@ async function persistExplicitDraftInternal(
     source,
   });
 
+  const priorGenerationLog = await getEffectiveGenerationLog(slug);
+  const priorFingerprints = readStageFingerprintsFromSummary(priorGenerationLog?.context_summary_json);
+
   const walEvent = await queryOne<WalEvent>(
     `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ('spec_generated', $1, $2, 'api', $3) RETURNING *`,
     [workspaceId, slug, JSON.stringify({
@@ -1417,13 +1520,14 @@ async function persistExplicitDraftInternal(
       storyCount: normalizedStories.length,
       normalizationChanges: changes,
       postSave,
+      ...(postSaveDecision ? { postSaveDecision } : {}),
     })],
   );
   if (walEvent) {
     broadcastAll(walEvent);
   }
 
-  await seedPersistGenerationLog({
+  const { stageFingerprints: currentFingerprints, saveGeneration } = await seedPersistGenerationLog({
     slug,
     workspaceId,
     source,
@@ -1431,9 +1535,11 @@ async function persistExplicitDraftInternal(
     ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
     title,
     storyCount: normalizedStories.length,
+    stories: normalizedStories,
     model: body.model,
     overwrite,
     postSave,
+    ...(postSaveDecision ? { requestedPostSave, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
     normalizationChanges: changes,
     contextUsed: body.contextUsed,
     callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
@@ -1455,6 +1561,9 @@ async function persistExplicitDraftInternal(
   await scheduleSpecPostSaveJobs(slug, workspaceId, {
     enrich: postSave.enrich,
     matchSkills: postSave.matchSkills,
+    currentFingerprints,
+    priorFingerprints,
+    saveGeneration,
   });
 
   return {
@@ -3694,8 +3803,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // can find and update stage state when enqueue failures or job failures occur.
     const forgePostSave: SpecPostSaveOptions = { enrich: true, matchSkills: true, memorySynthesis: true };
     const forgePostSaveStages = buildPersistPostSaveStages(forgePostSave);
-    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+    const forgeStageFingerprints = computeSpecStageFingerprints({
+      title: effectiveTitle,
+      userStories: parsed.stories as StageFingerprintStoryInput[],
+    });
+    const forgeGenerationLog = await queryOne<{ id: number }>(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status, enrich_fingerprint, match_skills_fingerprint)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
       Date.now() - genStartTime,
       tokenUsage.inputTokens, tokenUsage.outputTokens,
       JSON.stringify(precomputedContextSummary ?? {}),
@@ -3704,10 +3818,22 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         workspaceId: String(workspaceId),
         postSave: forgePostSave,
         postSaveStages: forgePostSaveStages,
+        enrichFingerprint: forgeStageFingerprints.enrichFingerprint,
+        matchSkillsFingerprint: forgeStageFingerprints.matchSkillsFingerprint,
         ...(precomputedContextSummary ?? {}),
       }),
       'pending_enrichment',
+      forgeStageFingerprints.enrichFingerprint,
+      forgeStageFingerprints.matchSkillsFingerprint,
     ]);
+    const forgeSaveGeneration = forgeGenerationLog?.id ?? Date.now();
+    await execute(
+      `UPDATE spec_generation_logs
+       SET save_generation = $2,
+           context_summary_json = context_summary_json || $3::jsonb
+       WHERE id = $1`,
+      [forgeSaveGeneration, forgeSaveGeneration, JSON.stringify({ saveGeneration: forgeSaveGeneration })],
+    );
 
     // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
@@ -3761,7 +3887,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // Enqueued BEFORE the response is sent so all durable state is committed before
     // the caller receives the response. enqueuePersistPostSaveJobs persists failures
     // to stage state in spec_generation_logs, so they surface through status APIs.
-    await scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true });
+    await scheduleSpecPostSaveJobs(slug, workspaceId, {
+      enrich: true,
+      matchSkills: true,
+      currentFingerprints: forgeStageFingerprints,
+      saveGeneration: forgeSaveGeneration,
+    });
 
     // 17. Return response
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, true);
@@ -4586,6 +4717,71 @@ interface KanbanSpec {
   model?: string;
   attachmentCount: number;
   source?: string;
+  postSaveStatus?: 'queued' | 'waiting-for-worker' | 'running';
+  postSaveBlockingStatus?: 'blocked-by-active-job';
+  postSaveStage?: 'enrich' | 'match-skills';
+  postSaveJobId?: string;
+  postSaveQueuePosition?: number;
+  postSaveActiveJobsAhead?: number;
+}
+
+function postSavePriorityForKanban(job: SpecJob): number {
+  const metadata = parseRecordLocal(job.requestPayload);
+  return typeof metadata.priority === 'number' ? metadata.priority : 0;
+}
+
+function buildPostSaveKanbanState(activeJobs: SpecJob[]): Map<string, Partial<KanbanSpec>> {
+  const postSaveJobs = activeJobs.filter((job) => {
+    if (job.jobType !== 'enrich' && job.jobType !== 'match-skills') return false;
+    const metadata = parseRecordLocal(job.requestPayload);
+    if (metadata.origin !== 'persist-post-save') return false;
+    return !(metadata.waitForStage && !job.bossJobId);
+  });
+
+  const queuePositionByJobId = new Map<string, { position: number; activeJobsAhead: number }>();
+  for (const jobType of ['enrich', 'match-skills'] as const) {
+    const queueJobs = postSaveJobs
+      .filter((job) => job.jobType === jobType)
+      .sort((a, b) => {
+        if (a.status === 'running' && b.status !== 'running') return -1;
+        if (a.status !== 'running' && b.status === 'running') return 1;
+        const priorityDiff = postSavePriorityForKanban(b) - postSavePriorityForKanban(a);
+        if (priorityDiff !== 0) return priorityDiff;
+        return a.createdAt.getTime() - b.createdAt.getTime();
+      });
+
+    queueJobs.forEach((job, index) => {
+      queuePositionByJobId.set(job.id, {
+        position: job.status === 'running' ? 0 : index + 1,
+        activeJobsAhead: job.status === 'running' ? 0 : index,
+      });
+    });
+  }
+
+  const bySpec = new Map<string, SpecJob>();
+  for (const job of postSaveJobs) {
+    const existing = bySpec.get(job.specId);
+    const jobGeneration = job.saveGeneration ?? 0;
+    const existingGeneration = existing?.saveGeneration ?? 0;
+    if (!existing || jobGeneration > existingGeneration || (jobGeneration === existingGeneration && existing.createdAt <= job.createdAt)) {
+      bySpec.set(job.specId, job);
+    }
+  }
+
+  const stateBySpec = new Map<string, Partial<KanbanSpec>>();
+  for (const [specId, job] of bySpec.entries()) {
+    const queue = queuePositionByJobId.get(job.id) ?? { position: job.status === 'running' ? 0 : 1, activeJobsAhead: 0 };
+    stateBySpec.set(specId, {
+      postSaveStatus: job.status === 'running' ? 'running' : queue.activeJobsAhead > 0 ? 'waiting-for-worker' : 'queued',
+      postSaveBlockingStatus: 'blocked-by-active-job',
+      postSaveStage: job.jobType as 'enrich' | 'match-skills',
+      postSaveJobId: job.id,
+      postSaveQueuePosition: queue.position,
+      postSaveActiveJobsAhead: queue.activeJobsAhead,
+    });
+  }
+
+  return stateBySpec;
 }
 
 /**
@@ -4647,6 +4843,10 @@ interface KanbanSpec {
  *                       activeRunId: { type: integer, nullable: true }
  *                       activeRunStatus: { type: string, enum: [running, queued], nullable: true }
  *                       queuePosition: { type: integer, nullable: true }
+ *                       postSaveStatus: { type: string, enum: [queued, waiting-for-worker, running], nullable: true }
+ *                       postSaveBlockingStatus: { type: string, enum: [blocked-by-active-job], nullable: true }
+ *                       postSaveStage: { type: string, enum: [enrich, match-skills], nullable: true }
+ *                       postSaveQueuePosition: { type: integer, nullable: true }
  *                       model: { type: string, nullable: true }
  *                       tags: { type: array, items: { type: string } }
  *                       attachmentCount: { type: integer }
@@ -4867,11 +5067,19 @@ router.get('/kanban', async (req: Request, res: Response) => {
       storyFailed.set(slug, parseInt(row.fail_count, 10));
     }
 
+    // Post-save enrichment jobs live outside pipeline_runs; expose their wait state
+    // so fresh saves do not look idle while they are behind other spec jobs.
+    const postSaveStateBySpec = buildPostSaveKanbanState(await listActiveJobs(workspaceId));
+    const withPostSaveState = (spec: KanbanSpec): KanbanSpec => ({
+      ...spec,
+      ...(postSaveStateBySpec.get(spec.id) ?? {}),
+    });
+
     // Bucket into columns:
     // - draft: pending specs (no active run)
     // - inProgress: approved specs with active run OR approved but not yet completed
     // - done: approved specs where latest run is done/completed
-    const draft: KanbanSpec[] = pendingSpecs.sort(
+    const draft: KanbanSpec[] = pendingSpecs.map(withPostSaveState).sort(
       (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
     );
 
@@ -4889,10 +5097,10 @@ router.get('/kanban', async (req: Request, res: Response) => {
       // 2. User manually dragged it to Done (kanban_manual_done) — user's explicit choice
       const allPassed = (allStoriesPassedBySlug.get(spec.id) ?? false) || manualDoneSlugs.has(spec.id);
       if (isCompleted && !activeRun && allPassed) {
-        done.push({ ...spec, passedStories: passed, failedStories: failed });
+        done.push({ ...withPostSaveState(spec), passedStories: passed, failedStories: failed });
       } else {
         inProgress.push({
-          ...spec,
+          ...withPostSaveState(spec),
           passedStories: passed,
           failedStories: failed,
           ...(activeRun ? {
@@ -6271,9 +6479,8 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  *     tags: [Specs]
  *     summary: Enqueue workspace-scope repair for matching specs
  *     operationId: rorca_specs_repair_batch
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Bounded idempotent repair of local spec enrichment — explicit filters and hard limits prevent unbounded bulk mutation."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Operator-level batch mutation that can enqueue repair work across specs; unsafe for public/MCP automation."
  *     requestBody:
  *       required: true
  *       content:
@@ -6494,6 +6701,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
             invocationSurface: 'api.specs.repair-batch',
             title: specContent.title ?? candidate.specId,
             storyCount,
+            stories: (specContent.userStories ?? []) as StageFingerprintStoryInput[],
             model: specContent.model,
             overwrite: false,
             postSave: postSaveOptions,
@@ -6505,7 +6713,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
         // Handle failed or stuck enrichment — re-enqueue enrich
         if (candidate.issues.includes('failed_enrichment') || candidate.issues.includes('stuck_pending_enrichment')) {
           try {
-            await enqueueAsyncSpecJob(candidate.specId, workspaceId, 'enrich');
+            await enqueueAsyncSpecJob(candidate.specId, workspaceId, 'enrich', { priority: 0 });
             repairActions.push('enqueued_enrich');
           } catch {
             repairActions.push('enrich_enqueue_failed');
@@ -8157,6 +8365,9 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Get generation log for a spec
  *     operationId: getSpecGenerationLog
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only spec status and context metadata for local automation; exposes no operator-only side effects."
+ *     x-rorca-public-api: true
  *     description: Returns the most recent generation log for this spec slug, or all logs if ?all=true.
  *     parameters:
  *       - in: path
@@ -8206,6 +8417,58 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
  * without inspecting raw prose strings.
  * Backward-compatible: older logs without postSaveStages get undefined.
  */
+type CanonicalPostSaveStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting-for-worker'
+  | 'superseded'
+  | 'skipped-unchanged'
+  | 'blocked-by-active-job'
+  | 'completed'
+  | 'failed';
+
+type CanonicalPostSaveStage = 'enrich' | 'matchSkills' | 'memorySynthesis';
+
+interface CanonicalPostSaveStageState {
+  stage: CanonicalPostSaveStage;
+  status: CanonicalPostSaveStatus;
+  reason: string;
+  requested: boolean;
+  jobId?: string;
+  queuePosition?: number;
+  activeJobsAhead?: number;
+}
+
+function canonicalPostSaveStatusForStage(stage: PersistPostSaveStageMap[keyof PersistPostSaveStageMap]): CanonicalPostSaveStatus {
+  if (stage.status === 'running') return 'running';
+  if (stage.status === 'queued') return stage.queueStatus === 'waiting' || (stage.activeJobsAhead ?? 0) > 0 ? 'waiting-for-worker' : 'queued';
+  if (stage.status === 'pending') return 'waiting-for-worker';
+  if (stage.status === 'superseded') return 'superseded';
+  if (stage.status === 'skipped') return stage.reason === 'fingerprint_unchanged' ? 'skipped-unchanged' : 'completed';
+  if (stage.status === 'completed') return 'completed';
+  if (stage.reason === 'blocked_by_enrich_failure' || stage.reason === 'blocked_by_enrich_enqueue_failure') return 'blocked-by-active-job';
+  return 'failed';
+}
+
+function buildCanonicalPostSaveStates(stages: PersistPostSaveStageMap): CanonicalPostSaveStageState[] {
+  return (['enrich', 'matchSkills', 'memorySynthesis'] as CanonicalPostSaveStage[]).map((stageName) => {
+    const stage = stages[stageName];
+    return {
+      stage: stageName,
+      status: canonicalPostSaveStatusForStage(stage),
+      reason: stage.reason,
+      requested: stage.requested,
+      ...(stage.jobId ? { jobId: stage.jobId } : {}),
+      ...(stage.queuePosition !== undefined ? { queuePosition: stage.queuePosition } : {}),
+      ...(stage.activeJobsAhead !== undefined ? { activeJobsAhead: stage.activeJobsAhead } : {}),
+    };
+  });
+}
+
+function pickCurrentPostSaveState(states: CanonicalPostSaveStageState[]): CanonicalPostSaveStageState | undefined {
+  return states.find((state) => state.requested && (state.status === 'running' || state.status === 'queued' || state.status === 'waiting-for-worker'));
+}
+
 function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unknown> {
   const summary = log.context_summary_json;
   if (!summary || typeof summary !== 'object') return log;
@@ -8213,9 +8476,20 @@ function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unk
   const stages = record.postSaveStages as PersistPostSaveStageMap | undefined;
   const contextCaptureStatus = record.contextCaptureStatus as Record<string, unknown> | undefined;
   if (!stages && !contextCaptureStatus) return log;
+  const canonicalStages = stages ? buildCanonicalPostSaveStates(stages) : undefined;
+  const currentPostSave = canonicalStages ? pickCurrentPostSaveState(canonicalStages) : undefined;
   return {
     ...log,
     ...(stages ? { postSaveStages: stages } : {}),
+    ...(canonicalStages ? { postSaveStageStates: canonicalStages } : {}),
+    ...(currentPostSave ? {
+      postSaveStatus: currentPostSave.status,
+      postSaveStage: currentPostSave.stage,
+      postSaveJobId: currentPostSave.jobId,
+      postSaveQueuePosition: currentPostSave.queuePosition,
+      postSaveActiveJobsAhead: currentPostSave.activeJobsAhead,
+      postSaveBlockingStatus: 'blocked-by-active-job' as const,
+    } : {}),
     ...(contextCaptureStatus ? { contextCaptureStatus } : {}),
   };
 }
@@ -13984,6 +14258,387 @@ function parseRecordLocal(value: unknown): Record<string, unknown> {
   return typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
+const REPAIR_STALE_RUNNING_MINUTES = Math.max(Number(process.env.RORCA_REPAIR_STALE_RUNNING_MINUTES ?? 15), 1);
+const REPAIR_STALE_QUEUED_MINUTES = Math.max(Number(process.env.RORCA_REPAIR_STALE_QUEUED_MINUTES ?? 30), 1);
+const REPAIR_SINGLETON_WINDOW_SECONDS = 1;
+
+type RepairStageRequest = 'enrich' | 'match-skills';
+type RepairPostSaveStage = 'enrich' | 'matchSkills';
+
+type RepairPostSaveJobMetadata = {
+  origin?: unknown;
+  stage?: unknown;
+  saveGeneration?: unknown;
+  fingerprint?: unknown;
+  previousFingerprint?: unknown;
+  priority?: unknown;
+  singletonKey?: unknown;
+  waitForStage?: unknown;
+  blockedBy?: unknown;
+};
+
+interface RepairPgBossJob {
+  id: string;
+  name: string;
+  state: string;
+  createdOn: Date | null;
+  startedOn: Date | null;
+  data: Record<string, unknown> | null;
+}
+
+interface RepairStageAssessment {
+  stage: RepairStageRequest;
+  postSaveStage: RepairPostSaveStage;
+  action: 'enqueue_enrich' | 'enqueue_match_skills';
+  needsRepair: boolean;
+  reason: string;
+  currentStatus?: PersistStageStatus;
+  latestJob?: SpecJob;
+  stalePgBossJob?: RepairPgBossJob;
+  superseded: boolean;
+  conflictReason?: string;
+}
+
+function readRepairPostSaveMetadata(job?: SpecJob): RepairPostSaveJobMetadata | null {
+  if (!job?.requestPayload || typeof job.requestPayload !== 'object' || Array.isArray(job.requestPayload)) return null;
+  const metadata = job.requestPayload as Record<string, unknown>;
+  if (metadata.origin !== 'persist-post-save') return null;
+  if (metadata.stage !== 'enrich' && metadata.stage !== 'matchSkills') return null;
+  return metadata as RepairPostSaveJobMetadata;
+}
+
+function repairPostSaveStageForJob(job: SpecJob): RepairPostSaveStage | null {
+  const metadata = readRepairPostSaveMetadata(job);
+  if (metadata?.stage === 'enrich' || metadata?.stage === 'matchSkills') return metadata.stage;
+  if (job.jobType === 'enrich') return 'enrich';
+  if (job.jobType === 'match-skills') return 'matchSkills';
+  return null;
+}
+
+function repairJobGeneration(job: SpecJob): number | null {
+  const metadata = readRepairPostSaveMetadata(job);
+  const value = job.saveGeneration ?? metadata?.saveGeneration ?? null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function repairStageToJobType(stage: RepairPostSaveStage): RepairStageRequest {
+  return stage === 'enrich' ? 'enrich' : 'match-skills';
+}
+
+function repairStageToQueue(stage: RepairPostSaveStage): string {
+  return stage === 'enrich' ? SPEC_ENRICH_QUEUE : SPEC_MATCH_SKILLS_QUEUE;
+}
+
+function minutesOld(date: Date | null | undefined): number | null {
+  if (!date) return null;
+  return (Date.now() - date.getTime()) / 60_000;
+}
+
+function parseOptionalDate(value: Date | string | null): Date | null {
+  if (!value) return null;
+  return value instanceof Date ? value : new Date(value);
+}
+
+function latestRelevantStageJob(jobs: SpecJob[], stage: RepairPostSaveStage, saveGeneration: number | null): SpecJob | undefined {
+  return jobs
+    .filter((job) => repairPostSaveStageForJob(job) === stage)
+    .filter((job) => {
+      if (saveGeneration === null) return true;
+      const jobGeneration = repairJobGeneration(job);
+      return jobGeneration === null || jobGeneration === saveGeneration;
+    })
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+}
+
+async function listLivePgBossRepairJobs(workspaceId: string, specId: string, queueName: string): Promise<RepairPgBossJob[]> {
+  type Row = {
+    id: string;
+    name: string;
+    state: string;
+    created_on: Date | string | null;
+    started_on: Date | string | null;
+    data: Record<string, unknown> | null;
+  };
+
+  let rows: Row[];
+  try {
+    rows = await query<Row>(
+      `SELECT id::text, name, state, created_on, started_on, data
+       FROM pgboss.job
+       WHERE name = $1
+         AND state IN ('created', 'active', 'retry')
+         AND data->>'specId' = $2
+         AND data->>'workspaceId' = $3
+       ORDER BY created_on DESC`,
+      [queueName, specId, workspaceId],
+    );
+  } catch (error) {
+    throw new ConflictError(`Unable to verify pg-boss liveness for ${queueName} repair: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    state: row.state,
+    createdOn: parseOptionalDate(row.created_on),
+    startedOn: parseOptionalDate(row.started_on),
+    data: row.data,
+  }));
+}
+
+function livePgBossConflictReason(stage: RepairStageRequest, jobs: RepairPgBossJob[]): string | undefined {
+  const active = jobs.find((job) => job.state === 'active' || job.state === 'retry');
+  if (active) {
+    const age = minutesOld(active.startedOn ?? active.createdOn);
+    const stuckSuffix = age !== null && age >= REPAIR_STALE_RUNNING_MINUTES
+      ? `; it appears stuck (${Math.floor(age)}m old) but is still live, so duplicate repair would be unsafe`
+      : '';
+    return `Live ${active.state} pg-boss ${stage} job ${active.id} is still running${stuckSuffix}`;
+  }
+
+  const recentCreated = jobs.find((job) => {
+    if (job.state !== 'created') return false;
+    const age = minutesOld(job.createdOn);
+    return age === null || age < REPAIR_STALE_QUEUED_MINUTES;
+  });
+  if (recentCreated) {
+    const age = minutesOld(recentCreated.createdOn);
+    return `Live queued pg-boss ${stage} job ${recentCreated.id} is only ${age === null ? 'recently' : `${Math.floor(age)}m`} old; repair is blocked until it is stale or finishes`;
+  }
+
+  return undefined;
+}
+
+function staleCreatedPgBossJob(jobs: RepairPgBossJob[]): RepairPgBossJob | undefined {
+  return jobs.find((job) => job.state === 'created' && (minutesOld(job.createdOn) ?? 0) >= REPAIR_STALE_QUEUED_MINUTES);
+}
+
+function stageStatusAgeMinutes(stageState: PersistPostSaveStageMap[keyof PersistPostSaveStageMap] | undefined, latestJob?: SpecJob): number | null {
+  const updatedAt = typeof stageState?.updatedAt === 'string' ? new Date(stageState.updatedAt) : null;
+  return minutesOld(updatedAt ?? latestJob?.startedAt ?? latestJob?.createdAt);
+}
+
+function currentRepairSaveGeneration(generationLog: Record<string, unknown> | null, summary: Record<string, unknown>): number | null {
+  const summaryGeneration = summary.saveGeneration;
+  if (typeof summaryGeneration === 'number' && Number.isFinite(summaryGeneration)) return summaryGeneration;
+  if (typeof summaryGeneration === 'string' && /^\d+$/.test(summaryGeneration)) return Number(summaryGeneration);
+  const logGeneration = generationLog?.save_generation;
+  if (typeof logGeneration === 'number' && Number.isFinite(logGeneration)) return logGeneration;
+  if (typeof logGeneration === 'string' && /^\d+$/.test(logGeneration)) return Number(logGeneration);
+  return null;
+}
+
+function assessRepairStage(
+  stage: RepairPostSaveStage,
+  stageState: PersistPostSaveStageMap[keyof PersistPostSaveStageMap] | undefined,
+  latestJob: SpecJob | undefined,
+  livePgBossJobs: RepairPgBossJob[],
+): RepairStageAssessment {
+  const requestStage = repairStageToJobType(stage);
+  const action = stage === 'enrich' ? 'enqueue_enrich' : 'enqueue_match_skills';
+  const currentStatus = stageState?.status;
+
+  if (currentStatus === 'superseded' || latestJob?.status === 'superseded') {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: false,
+      reason: `${requestStage} stage is superseded by a newer save; repair will not resurrect it`,
+      currentStatus,
+      latestJob,
+      superseded: true,
+    };
+  }
+
+  const conflictReason = livePgBossConflictReason(requestStage, livePgBossJobs);
+  const staleCreated = staleCreatedPgBossJob(livePgBossJobs);
+
+  if (!stageState) {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: true,
+      reason: `${requestStage} stage state is missing`,
+      latestJob,
+      stalePgBossJob: staleCreated,
+      superseded: false,
+      conflictReason,
+    };
+  }
+
+  if (!stageState.requested) {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: false,
+      reason: `${requestStage} was not requested in the original persist`,
+      currentStatus,
+      latestJob,
+      superseded: false,
+    };
+  }
+
+  if (currentStatus === 'failed') {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: true,
+      reason: `${requestStage} stage failed and is recoverable`,
+      currentStatus,
+      latestJob,
+      stalePgBossJob: staleCreated,
+      superseded: false,
+      conflictReason,
+    };
+  }
+
+  if (currentStatus === 'pending' || currentStatus === 'queued' || currentStatus === 'running') {
+    const staleMinutes = currentStatus === 'running' ? REPAIR_STALE_RUNNING_MINUTES : REPAIR_STALE_QUEUED_MINUTES;
+    const age = stageStatusAgeMinutes(stageState, latestJob);
+    const statusLooksStale = age !== null && age >= staleMinutes;
+    const noLiveBossJob = livePgBossJobs.length === 0;
+    const recoverable = Boolean(staleCreated) || (statusLooksStale && noLiveBossJob);
+
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: recoverable,
+      reason: recoverable
+        ? `${requestStage} stage is ${currentStatus} and stale (${Math.floor(age ?? minutesOld(staleCreated?.createdOn) ?? staleMinutes)}m old)`
+        : `${requestStage} stage is ${currentStatus}; waiting for active work rather than re-enqueueing`,
+      currentStatus,
+      latestJob,
+      stalePgBossJob: staleCreated,
+      superseded: false,
+      conflictReason: conflictReason ?? (statusLooksStale && livePgBossJobs.some((job) => job.state === 'active')
+        ? `${requestStage} appears stuck but has an active pg-boss job; duplicate repair is unsafe`
+        : undefined),
+    };
+  }
+
+  return {
+    stage: requestStage,
+    postSaveStage: stage,
+    action,
+    needsRepair: false,
+    reason: `${requestStage} stage is already ${currentStatus ?? 'healthy'}`,
+    currentStatus,
+    latestJob,
+    superseded: false,
+  };
+}
+
+async function emitRepairAuditEvent(
+  specId: string,
+  workspaceId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const walEvent = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_repair_action', $1, $2, $3) RETURNING *`,
+    [specId, workspaceId, JSON.stringify(payload)],
+  );
+  if (walEvent) broadcastAll(walEvent);
+}
+
+async function markStaleQueuedJobRecovering(assessment: RepairStageAssessment): Promise<void> {
+  if (!assessment.latestJob) return;
+  if (assessment.stalePgBossJob) {
+    const queueName = repairStageToQueue(assessment.postSaveStage);
+    try {
+      await getBoss().cancel(queueName, assessment.stalePgBossJob.id);
+    } catch (error) {
+      throw new ConflictError(`Stale queued ${assessment.stage} pg-boss job ${assessment.stalePgBossJob.id} could not be cancelled safely: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (assessment.latestJob.status === 'pending' || assessment.latestJob.status === 'running') {
+    await updateJobStatus(assessment.latestJob.id, 'failed', {
+      finishedAt: new Date(),
+      progressMessage: 'Marked stale stage job as failed before repair re-enqueue',
+      errorMessage: assessment.stalePgBossJob
+        ? `Stale queued pg-boss job ${assessment.stalePgBossJob.id} recovered by repair`
+        : 'Stale stage job without a live pg-boss job recovered by repair',
+    });
+  }
+}
+
+async function enqueueRepairPostSaveStageJob(
+  specId: string,
+  workspaceId: string,
+  assessment: RepairStageAssessment,
+  summary: Record<string, unknown>,
+  saveGeneration: number | null,
+): Promise<{ jobId: string; bossJobId: string }> {
+  if (assessment.latestJob) {
+    const refreshed = (await listJobsForSpec(workspaceId, specId, [assessment.stage]))
+      .find((job) => job.id === assessment.latestJob?.id);
+    if (refreshed?.status === 'superseded') {
+      throw new ConflictError(`${assessment.stage} job ${refreshed.id} became superseded before repair enqueue`);
+    }
+  }
+
+  const queueName = repairStageToQueue(assessment.postSaveStage);
+  const fingerprintKey = assessment.postSaveStage === 'enrich' ? 'enrichFingerprint' : 'matchSkillsFingerprint';
+  const stageState = (summary.postSaveStages as PersistPostSaveStageMap | undefined)?.[assessment.postSaveStage];
+  const metadata = {
+    origin: 'persist-post-save',
+    stage: assessment.postSaveStage,
+    priority: 0,
+    singletonKey: `persist-post-save:${workspaceId}:${specId}:repair:${assessment.stage}`,
+    ...(saveGeneration !== null ? { saveGeneration } : {}),
+    ...(typeof summary[fingerprintKey] === 'string' ? { fingerprint: summary[fingerprintKey] } : {}),
+    ...(typeof stageState?.previousFingerprint === 'string' ? { previousFingerprint: stageState.previousFingerprint } : {}),
+  } as JsonValue;
+
+  const job = await createJob(workspaceId, specId, assessment.stage, metadata);
+  await getBoss().createQueue(queueName);
+  const bossJobId = await getBoss().send(queueName, {
+    jobId: job.id,
+    specId,
+    workspaceId,
+  }, {
+    priority: 0,
+    singletonKey: `persist-post-save:${workspaceId}:${specId}:repair:${assessment.stage}`,
+    singletonSeconds: REPAIR_SINGLETON_WINDOW_SECONDS,
+  });
+
+  if (!bossJobId) {
+    await updateJobStatus(job.id, 'failed', {
+      errorMessage: `boss.send() returned null for repair ${assessment.stage}`,
+      finishedAt: new Date(),
+    });
+    throw new UnprocessableError(`Failed to enqueue repair ${assessment.stage} job`);
+  }
+
+  await updateJobStatus(job.id, 'pending', {
+    bossJobId,
+    progressMessage: `Queued repair ${assessment.stage} job`,
+  });
+  await updatePersistPostSaveStage(specId, assessment.postSaveStage, {
+    requested: true,
+    status: 'queued',
+    reason: assessment.postSaveStage === 'matchSkills' ? 'durable_job_enqueued_after_enrich' : 'durable_job_enqueued',
+    jobId: job.id,
+    bossJobId,
+    error: null,
+    queueName,
+    queueStatus: 'queued',
+    queuePosition: 1,
+    activeJobsAhead: 0,
+    queuePriority: 0,
+    singletonKey: `persist-post-save:${workspaceId}:${specId}:repair:${assessment.stage}`,
+    ...(typeof summary[fingerprintKey] === 'string' ? { fingerprint: String(summary[fingerprintKey]) } : {}),
+    ...(typeof stageState?.previousFingerprint === 'string' ? { previousFingerprint: stageState.previousFingerprint } : {}),
+  }, saveGeneration);
+
+  return { jobId: job.id, bossJobId };
+}
+
 function diagnoseSpecHealth(
   generationLog: Record<string, unknown> | null,
   stages?: PersistPostSaveStageMap,
@@ -13999,9 +14654,9 @@ function diagnoseSpecHealth(
   const matchSkillsStage = stages?.matchSkills;
 
   const enrichNeedsRepair = !enrichStage
-    || (enrichStage.requested && (enrichStage.status === 'failed' || enrichStage.status === 'pending'));
+    || (enrichStage.requested && enrichStage.status === 'failed');
   const matchSkillsNeedsRepair = !matchSkillsStage
-    || (matchSkillsStage.requested && (matchSkillsStage.status === 'failed' || matchSkillsStage.status === 'pending'
+    || (matchSkillsStage.requested && (matchSkillsStage.status === 'failed'
         || matchSkillsStage.reason === 'blocked_by_enrich_failure'
         || matchSkillsStage.reason === 'blocked_by_enrich_enqueue_failure'));
 
@@ -14022,9 +14677,8 @@ function diagnoseSpecHealth(
  *     tags: [Specs]
  *     summary: Diagnose and repair post-save enrichment state for a spec
  *     operationId: rorca_specs_by_id_repair
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Safe idempotent repair of local spec enrichment metadata — no write side effects beyond fixing broken state."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Operator-level mutation that can enqueue repair work and resolve stale post-save jobs; unsafe for public/MCP automation."
  *     parameters:
  *       - in: path
  *         name: specId
@@ -14125,20 +14779,35 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
       );
     }
 
-    // Check for active (pending/running) enrich/match-skills jobs
-    const activeJobs = await listActiveJobs(workspaceId, specId);
-    const activeEnrichJob = activeJobs.find((j) => j.jobType === 'enrich');
-    const activeMatchSkillsJob = activeJobs.find((j) => j.jobType === 'match-skills');
-
     // Fetch effective generation log and diagnose health
     const generationLog = await getEffectiveGenerationLog(specId);
     const summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
     const stages = summary.postSaveStages as PersistPostSaveStageMap | undefined;
     const diagnosis = diagnoseSpecHealth(generationLog, stages);
+    const saveGeneration = currentRepairSaveGeneration(generationLog, summary);
 
     // Determine which stages to repair
     const wantEnrich = !requestedStages || requestedStages.includes('enrich');
     const wantMatchSkills = !requestedStages || requestedStages.includes('match-skills');
+    const stageJobs = await listJobsForSpec(workspaceId, specId, ['enrich', 'match-skills']);
+    const [enrichPgBossJobs, matchSkillsPgBossJobs] = await Promise.all([
+      wantEnrich ? listLivePgBossRepairJobs(workspaceId, specId, SPEC_ENRICH_QUEUE) : Promise.resolve([]),
+      wantMatchSkills ? listLivePgBossRepairJobs(workspaceId, specId, SPEC_MATCH_SKILLS_QUEUE) : Promise.resolve([]),
+    ]);
+    const enrichAssessment = assessRepairStage(
+      'enrich',
+      stages?.enrich,
+      latestRelevantStageJob(stageJobs, 'enrich', saveGeneration),
+      enrichPgBossJobs,
+    );
+    const matchSkillsAssessment = assessRepairStage(
+      'matchSkills',
+      stages?.matchSkills,
+      latestRelevantStageJob(stageJobs, 'matchSkills', saveGeneration),
+      matchSkillsPgBossJobs,
+    );
+    diagnosis.enrichNeedsRepair = enrichAssessment.needsRepair;
+    diagnosis.matchSkillsNeedsRepair = matchSkillsAssessment.needsRepair;
 
     // Build repair actions
     const actions: RepairAction[] = [];
@@ -14173,6 +14842,7 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
           invocationSurface: 'api.specs.repair',
           title: specContent.title ?? specId,
           storyCount,
+          stories: (specContent.userStories ?? []) as StageFingerprintStoryInput[],
           model: specContent.model,
           overwrite: false,
           postSave: postSaveOptions,
@@ -14248,79 +14918,103 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
       });
     }
 
-    // ── Action 3: Re-enqueue enrich stage ──
-    if (wantEnrich && diagnosis.enrichNeedsRepair) {
-      if (activeEnrichJob) {
+    const applyStageRepair = async (assessment: RepairStageAssessment): Promise<void> => {
+      if (assessment.superseded) {
         actions.push({
-          action: 'enqueue_enrich',
-          status: 'blocked',
-          reason: `Active enrich job exists (job ${activeEnrichJob.id}, status: ${activeEnrichJob.status}) — cannot re-enqueue while in progress`,
-          jobId: activeEnrichJob.id,
-        });
-      } else if (dryRun) {
-        actions.push({
-          action: 'enqueue_enrich',
+          action: assessment.action,
           status: 'skipped',
-          reason: `Dry run — would enqueue enrich (current status: ${diagnosis.enrichStatus ?? 'none'})`,
+          reason: assessment.reason,
+          jobId: assessment.latestJob?.id,
         });
-      } else {
-        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich');
-        actions.push({
-          action: 'enqueue_enrich',
-          status: 'repaired',
-          reason: `Enqueued enrich job (previous status: ${diagnosis.enrichStatus ?? 'none'})`,
-          jobId: payload.jobId,
-        });
+        if (!dryRun) {
+          await emitRepairAuditEvent(specId, workspaceId, {
+            action: assessment.action,
+            stage: assessment.stage,
+            outcome: 'skipped_superseded',
+            reason: assessment.reason,
+            jobId: assessment.latestJob?.id,
+          });
+        }
+        return;
       }
-    } else if (wantEnrich) {
+
+      if (assessment.conflictReason) {
+        actions.push({
+          action: assessment.action,
+          status: 'blocked',
+          reason: assessment.conflictReason,
+          jobId: assessment.latestJob?.id,
+        });
+        if (!dryRun) {
+          await emitRepairAuditEvent(specId, workspaceId, {
+            action: assessment.action,
+            stage: assessment.stage,
+            outcome: 'skipped_conflict',
+            reason: assessment.conflictReason,
+            jobId: assessment.latestJob?.id,
+          });
+          throw new ConflictError(assessment.conflictReason);
+        }
+        return;
+      }
+
+      if (!assessment.needsRepair) {
+        actions.push({
+          action: assessment.action,
+          status: 'skipped',
+          reason: assessment.reason,
+          jobId: assessment.latestJob?.id,
+        });
+        return;
+      }
+
+      if (dryRun) {
+        actions.push({
+          action: assessment.action,
+          status: 'skipped',
+          reason: `Dry run — would enqueue ${assessment.stage} repair: ${assessment.reason}`,
+          jobId: assessment.latestJob?.id,
+        });
+        return;
+      }
+
+      await markStaleQueuedJobRecovering(assessment);
+      const remainingLiveJobs = await listLivePgBossRepairJobs(workspaceId, specId, repairStageToQueue(assessment.postSaveStage));
+      const remainingConflict = livePgBossConflictReason(assessment.stage, remainingLiveJobs);
+      if (remainingConflict) {
+        await emitRepairAuditEvent(specId, workspaceId, {
+          action: assessment.action,
+          stage: assessment.stage,
+          outcome: 'skipped_conflict',
+          reason: remainingConflict,
+          jobId: assessment.latestJob?.id,
+        });
+        throw new ConflictError(remainingConflict);
+      }
+
+      const payload = await enqueueRepairPostSaveStageJob(specId, workspaceId, assessment, summary, saveGeneration);
       actions.push({
-        action: 'enqueue_enrich',
-        status: 'skipped',
-        reason: stages?.enrich
-          ? `Enrich stage is already ${stages.enrich.status}`
-          : 'Enrich was not requested in the original persist',
+        action: assessment.action,
+        status: 'repaired',
+        reason: `Re-enqueued ${assessment.stage} repair: ${assessment.reason}`,
+        jobId: payload.jobId,
       });
+      await emitRepairAuditEvent(specId, workspaceId, {
+        action: assessment.action,
+        stage: assessment.stage,
+        outcome: 're_enqueued',
+        reason: assessment.reason,
+        jobId: payload.jobId,
+        bossJobId: payload.bossJobId,
+      });
+    };
+
+    if (wantEnrich) {
+      await applyStageRepair(enrichAssessment);
     }
 
-    // ── Action 4: Re-enqueue match-skills stage ──
-    if (wantMatchSkills && diagnosis.matchSkillsNeedsRepair) {
-      if (activeMatchSkillsJob) {
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'blocked',
-          reason: `Active match-skills job exists (job ${activeMatchSkillsJob.id}, status: ${activeMatchSkillsJob.status}) — cannot re-enqueue while in progress`,
-          jobId: activeMatchSkillsJob.id,
-        });
-      } else if (activeEnrichJob) {
-        // match-skills depends on enrich; if enrich is actively running, block
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'blocked',
-          reason: 'Enrich job is currently active — match-skills depends on enrich completing first',
-        });
-      } else if (dryRun) {
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'skipped',
-          reason: `Dry run — would enqueue match-skills (current status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
-        });
-      } else {
-        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills');
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'repaired',
-          reason: `Enqueued match-skills job (previous status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
-          jobId: payload.jobId,
-        });
-      }
-    } else if (wantMatchSkills) {
-      actions.push({
-        action: 'enqueue_match_skills',
-        status: 'skipped',
-        reason: stages?.matchSkills
-          ? `Match-skills stage is already ${stages.matchSkills.status}`
-          : 'Match-skills was not requested in the original persist',
-      });
+    if (wantMatchSkills) {
+      await applyStageRepair(matchSkillsAssessment);
     }
 
     const healthy = actions.every((a) => a.status === 'skipped');

@@ -1509,14 +1509,6 @@ async function deleteFileIfExists(filePath?: string): Promise<void> {
   }
 }
 
-function readWorkspaceFile(cwd: string, ...segments: string[]): string {
-  try {
-    return fs.readFileSync(path.join(cwd, ...segments), 'utf8');
-  } catch {
-    return '';
-  }
-}
-
 // ─── SK-003: Skill Loading & Injection ──────────────────────────────────────
 
 interface ResolvedSkill {
@@ -2468,7 +2460,7 @@ function spawnClaude(
       const mcpConfig: Record<string, unknown> = { mcpServers: {} };
       let hasStdioServers = false;
 
-      for (const [name, url] of Object.entries(mcpServers)) {
+      for (const [name] of Object.entries(mcpServers)) {
         if (name === 'chrome-devtools' && _chromeMcpCmd) {
           // chrome-devtools-mcp: use resolved binary path for stdio transport
           (mcpConfig.mcpServers as Record<string, unknown>)[name] = {
@@ -4986,6 +4978,7 @@ async function executeStory(
       fs.writeFileSync(promptLogFile, attemptPrompt);
 
       logger.info(`[agent] Launching ${effectiveAgent} for ${story.id}`);
+      const agentAttemptStartedAt = Date.now();
       const ptyOptions = config.terminalMode === 'pty' && workspaceId
         ? {
             enabled: true,
@@ -5015,6 +5008,15 @@ async function executeStory(
         piSessionOptions,
         ptyOptions,
       );
+      logger.info({
+        component: 'execution-engine',
+        event: 'story_agent_stage_completed',
+        runId: config.runId,
+        storyId: story.id,
+        agentType: effectiveAgent,
+        exitCode: result.exitCode,
+        stageDurationMs: Math.max(0, Date.now() - agentAttemptStartedAt),
+      }, '[engine] telemetry');
 
     // Extract token usage from log file after agent exits
     const tokenUsage = extractTokenUsage(
@@ -5195,13 +5197,10 @@ async function executeStory(
 
       // Gate passed — verify agent produced meaningful code changes (not just runtime metadata)
       // Journey mode stories browse the live app and may intentionally produce no file edits.
-      let meaningfulChanges: string[] = [];
       try {
         const { meaningfulFiles } = mode === 'journey'
           ? { meaningfulFiles: [] }
           : getStoryWorkingTreeChanges(effectiveCwd);
-
-        meaningfulChanges = meaningfulFiles;
 
         if (mode !== 'journey' && meaningfulFiles.length === 0) {
           if (storyAllowsNoCodeChanges(story, mode)) {

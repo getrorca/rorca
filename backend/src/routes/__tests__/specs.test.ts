@@ -597,11 +597,15 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
     expect(res.body.slug).toBe('generate-post-save');
 
     // Verify enrich was enqueued through pg-boss
-    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({
-      specId: 'generate-post-save',
-      workspaceId: 'ws-test',
-      jobId: expect.any(String),
-    }));
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:enrich',
+      expect.objectContaining({
+        specId: 'generate-post-save',
+        workspaceId: 'ws-test',
+        jobId: expect.any(String),
+      }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-test:generate-post-save' }),
+    );
 
     // Verify spec_jobs rows were created
     const jobs = await query(
@@ -708,10 +712,14 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
 
     // match-skills should now be enqueued
     expect(mockBossSend).toHaveBeenCalledTimes(2);
-    expect(mockBossSend).toHaveBeenLastCalledWith('spec:match-skills', expect.objectContaining({
-      specId: 'generate-advance-deps',
-      workspaceId: 'ws-test',
-    }));
+    expect(mockBossSend).toHaveBeenLastCalledWith(
+      'spec:match-skills',
+      expect.objectContaining({
+        specId: 'generate-advance-deps',
+        workspaceId: 'ws-test',
+      }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-test:generate-advance-deps' }),
+    );
 
     const matchJob = await queryOne(
       `SELECT boss_job_id, status FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'generate-advance-deps' AND job_type = 'match-skills'`,
@@ -923,11 +931,15 @@ describe('POST /api/specs/persist', () => {
 
     expect(res.status).toBe(200);
     expect(mockBossSend).toHaveBeenCalledTimes(1);
-    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({
-      specId: 'queued-post-save-draft',
-      workspaceId: 'ws-test',
-      jobId: expect.any(String),
-    }));
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:enrich',
+      expect.objectContaining({
+        specId: 'queued-post-save-draft',
+        workspaceId: 'ws-test',
+        jobId: expect.any(String),
+      }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-test:queued-post-save-draft' }),
+    );
 
     const jobs = await query(
       `SELECT job_type, status, boss_job_id, request_payload, error_message
@@ -965,11 +977,15 @@ describe('POST /api/specs/persist', () => {
     await advancePersistPostSaveDependencies(enrichJob!.id);
 
     expect(mockBossSend).toHaveBeenCalledTimes(2);
-    expect(mockBossSend).toHaveBeenLastCalledWith('spec:match-skills', expect.objectContaining({
-      specId: 'queued-post-save-draft',
-      workspaceId: 'ws-test',
-      jobId: expect.any(String),
-    }));
+    expect(mockBossSend).toHaveBeenLastCalledWith(
+      'spec:match-skills',
+      expect.objectContaining({
+        specId: 'queued-post-save-draft',
+        workspaceId: 'ws-test',
+        jobId: expect.any(String),
+      }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-test:queued-post-save-draft' }),
+    );
 
     const releasedMatchJob = await queryOne(
       `SELECT boss_job_id, status FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'queued-post-save-draft' AND job_type = 'match-skills'`,

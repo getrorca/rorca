@@ -48,7 +48,7 @@ export async function pollSpecJob(
     const state = body as SpecJobState;
     onProgress?.(state);
 
-    if (state.status === 'completed' || state.status === 'failed' || state.status === 'cancelled') {
+    if (state.status === 'completed' || state.status === 'failed' || state.status === 'cancelled' || state.status === 'superseded') {
       return state;
     }
 

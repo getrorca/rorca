@@ -43,6 +43,7 @@ import type { ContextSummary } from '../panels/SpecForgeOutput';
 import { SpecModelControlBar } from './SpecModelControlBar';
 import type { SpecModelFields } from './SpecModelControlBar';
 import type { EngineValue } from './EngineSelector';
+import { isRunStatusBlocking } from '../lib/kanbanRunStatus';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -137,7 +138,7 @@ export interface SpecDetailSlideOverProps {
   onApproved?: (specId: string) => void;
   /** Called when spec is rejected so parent can update */
   onRejected?: (specId: string) => void;
-  /** Active run status — disables Enrich button when running or queued */
+  /** Active run status — disables Enrich/repair controls when running or queued */
   activeRunStatus?: 'running' | 'queued';
 }
 
@@ -428,6 +429,7 @@ function SpecDetailContent({
   // context usage is visible without opening the Context tab. Null when no
   // persisted context exists yet (older specs predate context logging).
   const [headlineContext, setHeadlineContext] = useState<ContextSummary | null>(null);
+  const [activePostSaveJob, setActivePostSaveJob] = useState<CanonicalPostSaveStageState | null>(null);
 
   // Approve/Reject
   const [actionLoading, setActionLoading] = useState(false);
@@ -493,8 +495,9 @@ function SpecDetailContent({
         if (cancelled) return;
         const latest = 'logs' in res ? res.logs[0] : res;
         setHeadlineContext(latest ? parseContextSummary(latest) : null);
+        setActivePostSaveJob(latest ? getCurrentPostSaveState(latest) : null);
       })
-      .catch(() => { if (!cancelled) setHeadlineContext(null); });
+      .catch(() => { if (!cancelled) { setHeadlineContext(null); setActivePostSaveJob(null); } });
     return () => { cancelled = true; };
   }, [specId, enrichRefreshKey]);
 
@@ -667,6 +670,8 @@ function SpecDetailContent({
   const cfg = summary ? STATUS_CONFIG[summary.status] : null;
   const isDraft = summary?.status === 'pending';
   const canRun = summary?.status === 'approved' || summary?.status === 'completed';
+  const hasBlockingPostSaveJob = activePostSaveJob !== null;
+  const postSaveBlockCopy = activePostSaveJob ? postSaveActiveJobCopy(activePostSaveJob) : null;
 
   const specSkillCount = useMemo(() => {
     const seen = new Set<string>();
@@ -828,7 +833,7 @@ function SpecDetailContent({
                 onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields, model: fields.model ?? undefined } : prev)} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} workspaceId={workspaceId ?? ''} activeRunStatus={activeRunStatus} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} workspaceId={workspaceId ?? ''} activeRunStatus={activeRunStatus} blockingPostSaveJob={activePostSaveJob} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <GraphTabWithSubTabs specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -841,6 +846,15 @@ function SpecDetailContent({
       {/* Footer actions */}
       {detail && (
         <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
+          {postSaveBlockCopy && (
+            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 flex items-start gap-2" data-testid="post-save-blocking-banner">
+              <AlertCircle size={13} className="text-amber-300 mt-0.5 shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-amber-300">Post-save job active — controls gated</p>
+                <p className="text-[10px] text-amber-200/80">{postSaveBlockCopy}</p>
+              </div>
+            </div>
+          )}
           {/* Pre-flight context neighborhood graph */}
           {canRun && workspaceId && summary?.id && (
             <PreFlightGraph
@@ -919,7 +933,8 @@ function SpecDetailContent({
                   {allPassed && (
                     <button
                       onClick={() => handleRun(isolateInBranch, { forceRerun: true })}
-                      disabled={runState === 'triggering'}
+                      disabled={runState === 'triggering' || hasBlockingPostSaveJob}
+                      title={hasBlockingPostSaveJob ? 'Re-run is gated while a post-save job is queued or running for this spec' : 'Re-run this spec from scratch'}
                       className="w-full flex items-center justify-center gap-1.5 py-2 mt-1 rounded text-sm font-medium bg-[var(--surface-2)] text-[var(--text-muted)] border border-[var(--border)] hover:text-[var(--text)] hover:border-[var(--border-hover)] disabled:opacity-60 transition-colors"
                     >
                       <RotateCcw size={13} /> Re-run from scratch
@@ -995,12 +1010,12 @@ function SpecDetailContent({
 
           {/* Enrich with Context */}
           {(() => {
-            const enrichDisabled = activeRunStatus === 'running' || activeRunStatus === 'queued' || enrichState === 'enriching';
+            const enrichDisabled = isRunStatusBlocking(activeRunStatus) || enrichState === 'enriching' || hasBlockingPostSaveJob;
             return (
               <button
                 onClick={handleEnrich}
                 disabled={enrichDisabled}
-                title={activeRunStatus === 'running' || activeRunStatus === 'queued' ? 'Cannot enrich while a run is active' : 'Enrich stories with contextual annotations'}
+                title={hasBlockingPostSaveJob ? 'Cannot enrich while another post-save job is active for this spec' : isRunStatusBlocking(activeRunStatus) ? 'Cannot enrich while a run is active' : 'Enrich stories with contextual annotations'}
                 className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${enrichDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 {enrichState === 'enriching'
@@ -1308,7 +1323,26 @@ function JsonTab({ spec, specId: _specId }: { spec: SpecDetailData; specId: stri
 /* ─── LST-004: Generation Log Tab ──────────────────────────────── */
 
 /** PSE-003: Per-stage status for post-save enrichment pipeline. */
-export type PostSaveStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+export type PostSaveStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'superseded';
+export type CanonicalPostSaveStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting-for-worker'
+  | 'superseded'
+  | 'skipped-unchanged'
+  | 'blocked-by-active-job'
+  | 'completed'
+  | 'failed';
+export type CanonicalPostSaveStage = 'enrich' | 'matchSkills' | 'memorySynthesis';
+export interface CanonicalPostSaveStageState {
+  stage: CanonicalPostSaveStage;
+  status: CanonicalPostSaveStatus;
+  reason: string;
+  requested: boolean;
+  jobId?: string;
+  queuePosition?: number;
+  activeJobsAhead?: number;
+}
 export interface PostSaveStageState {
   requested: boolean;
   status: PostSaveStageStatus;
@@ -1317,6 +1351,11 @@ export interface PostSaveStageState {
   bossJobId?: string | null;
   error?: string | null;
   updatedAt?: string;
+  queueName?: string;
+  queueStatus?: 'waiting' | 'queued' | 'running';
+  queuePosition?: number;
+  activeJobsAhead?: number;
+  canonicalStatus?: CanonicalPostSaveStatus;
 }
 export type PostSaveStageMap = {
   enrich: PostSaveStageState;
@@ -1353,6 +1392,14 @@ interface GenerationLog {
   postSaveStages?: PostSaveStageMap;
   /** PSE-004: Context capture classification surfaced from backend. */
   contextCaptureStatus?: ContextCaptureStatus;
+  /** RER-006: Canonical post-save status surfaced from backend. */
+  postSaveStatus?: CanonicalPostSaveStatus;
+  postSaveStage?: CanonicalPostSaveStage;
+  postSaveJobId?: string;
+  postSaveQueuePosition?: number;
+  postSaveActiveJobsAhead?: number;
+  postSaveBlockingStatus?: 'blocked-by-active-job';
+  postSaveStageStates?: CanonicalPostSaveStageState[];
 }
 
 export interface GenerationLogPresentation {
@@ -1362,8 +1409,40 @@ export interface GenerationLogPresentation {
   badgeClassName: string;
 }
 
-export function getGenerationLogPresentation(log: Pick<GenerationLog, 'status' | 'enriched'>): GenerationLogPresentation {
+export function getGenerationLogPresentation(log: Pick<GenerationLog, 'status' | 'enriched' | 'postSaveStages'>): GenerationLogPresentation {
   const isEnriched = !!log.enriched;
+  const stages = log.postSaveStages;
+  const requestedStages = stages ? Object.values(stages).filter(stage => stage.requested) : [];
+  const hasActiveStage = requestedStages.some(stage => stage.status === 'pending' || stage.status === 'queued' || stage.status === 'running');
+  const allSuperseded = requestedStages.length > 0 && requestedStages.every(stage => stage.status === 'superseded' || !stage.requested);
+  const allSkippedUnchanged = requestedStages.length > 0 && requestedStages.every(stage => stage.status === 'skipped' && stage.reason === 'fingerprint_unchanged');
+
+  if (log.status === 'pending_enrichment' && allSuperseded) {
+    return {
+      tone: 'success',
+      title: 'Draft Persisted · Superseded by Newer Edit',
+      badgeLabel: 'Superseded',
+      badgeClassName: 'bg-muted/15 text-muted border border-muted/30',
+    };
+  }
+
+  if (log.status === 'pending_enrichment' && allSkippedUnchanged) {
+    return {
+      tone: 'success',
+      title: 'Draft Persisted · Inputs Unchanged',
+      badgeLabel: 'Skipped',
+      badgeClassName: 'bg-muted/15 text-muted border border-muted/30',
+    };
+  }
+
+  if (log.status === 'pending_enrichment' && requestedStages.length > 0 && !hasActiveStage) {
+    return {
+      tone: 'success',
+      title: 'Draft Persisted · Post-save Complete',
+      badgeLabel: 'Persisted',
+      badgeClassName: 'bg-blue-500/15 text-blue-400 border border-blue-500/30',
+    };
+  }
 
   if (isEnriched) {
     return log.status === 'completed'
@@ -1630,6 +1709,60 @@ export function parsePostSaveStages(log: GenerationLog): PostSaveStageMap | null
  * Priority: top-level contextCaptureStatus field (surfaced by backend route),
  * then fallback to nested context_summary_json.contextCaptureStatus.
  */
+export function getCanonicalPostSaveStatus(stage: PostSaveStageState): CanonicalPostSaveStatus {
+  if (stage.canonicalStatus) return stage.canonicalStatus;
+  if (stage.status === 'running') return 'running';
+  if (stage.status === 'queued') return stage.queueStatus === 'waiting' || (stage.activeJobsAhead ?? 0) > 0 ? 'waiting-for-worker' : 'queued';
+  if (stage.status === 'pending') return 'waiting-for-worker';
+  if (stage.status === 'superseded') return 'superseded';
+  if (stage.status === 'skipped') return stage.reason === 'fingerprint_unchanged' ? 'skipped-unchanged' : 'completed';
+  if (stage.status === 'completed') return 'completed';
+  if (stage.reason === 'blocked_by_enrich_failure' || stage.reason === 'blocked_by_enrich_enqueue_failure') return 'blocked-by-active-job';
+  return 'failed';
+}
+
+export function getCanonicalPostSaveStageStates(log: GenerationLog): CanonicalPostSaveStageState[] {
+  if (Array.isArray(log.postSaveStageStates) && log.postSaveStageStates.length > 0) return log.postSaveStageStates;
+  const stages = parsePostSaveStages(log);
+  if (!stages) return [];
+  return (['enrich', 'matchSkills', 'memorySynthesis'] as CanonicalPostSaveStage[]).map((stageName) => {
+    const stage = stages[stageName];
+    return {
+      stage: stageName,
+      status: getCanonicalPostSaveStatus(stage),
+      reason: stage.reason,
+      requested: stage.requested,
+      ...(stage.jobId ? { jobId: stage.jobId } : {}),
+      ...(stage.queuePosition !== undefined ? { queuePosition: stage.queuePosition } : {}),
+      ...(stage.activeJobsAhead !== undefined ? { activeJobsAhead: stage.activeJobsAhead } : {}),
+    };
+  });
+}
+
+export function getCurrentPostSaveState(log: GenerationLog): CanonicalPostSaveStageState | null {
+  if (log.postSaveBlockingStatus === 'blocked-by-active-job' && log.postSaveStatus && log.postSaveStage) {
+    return {
+      stage: log.postSaveStage,
+      status: log.postSaveStatus,
+      reason: 'blocked-by-active-job',
+      requested: true,
+      ...(log.postSaveJobId ? { jobId: log.postSaveJobId } : {}),
+      ...(log.postSaveQueuePosition !== undefined ? { queuePosition: log.postSaveQueuePosition } : {}),
+      ...(log.postSaveActiveJobsAhead !== undefined ? { activeJobsAhead: log.postSaveActiveJobsAhead } : {}),
+    };
+  }
+  return getCanonicalPostSaveStageStates(log).find(
+    (state) => state.requested && (state.status === 'running' || state.status === 'queued' || state.status === 'waiting-for-worker'),
+  ) ?? null;
+}
+
+export function postSaveActiveJobCopy(state: CanonicalPostSaveStageState): string {
+  const stageLabel = STAGE_LABELS[state.stage];
+  if (state.status === 'running') return `${stageLabel} is running. Wait for it to finish before retrying, repairing, or rerunning.`;
+  if (state.status === 'waiting-for-worker') return `${stageLabel} is waiting for a worker${state.activeJobsAhead ? ` (${state.activeJobsAhead} job${state.activeJobsAhead === 1 ? '' : 's'} ahead)` : ''}.`;
+  return `${stageLabel} is queued${state.queuePosition ? ` at position ${state.queuePosition}` : ''}.`;
+}
+
 export function parseContextCaptureStatus(log: GenerationLog): ContextCaptureStatus | null {
   if (log.contextCaptureStatus) return log.contextCaptureStatus;
 
@@ -1701,13 +1834,15 @@ const STAGE_LABELS: Record<keyof PostSaveStageMap, string> = {
   memorySynthesis: 'Memory Synthesis',
 };
 
-const STAGE_STATUS_CONFIG: Record<PostSaveStageStatus, { label: string; dotClass: string; textClass: string }> = {
-  pending:   { label: 'Pending',   dotClass: 'bg-blue-400',   textClass: 'text-blue-400' },
-  queued:    { label: 'Queued',    dotClass: 'bg-blue-400',   textClass: 'text-blue-400' },
-  running:   { label: 'Running',   dotClass: 'bg-amber-400 animate-pulse', textClass: 'text-amber-400' },
-  completed: { label: 'Completed', dotClass: 'bg-success',    textClass: 'text-success' },
-  failed:    { label: 'Failed',    dotClass: 'bg-error',      textClass: 'text-error' },
-  skipped:   { label: 'Skipped',   dotClass: 'bg-muted/40',   textClass: 'text-muted/60' },
+const STAGE_STATUS_CONFIG: Record<CanonicalPostSaveStatus, { label: string; dotClass: string; textClass: string }> = {
+  queued: { label: 'Queued', dotClass: 'bg-blue-400', textClass: 'text-blue-400' },
+  running: { label: 'Running', dotClass: 'bg-amber-400 animate-pulse', textClass: 'text-amber-400' },
+  'waiting-for-worker': { label: 'Waiting for worker', dotClass: 'bg-blue-400/70 animate-pulse', textClass: 'text-blue-300' },
+  superseded: { label: 'Superseded', dotClass: 'bg-muted/50', textClass: 'text-muted/70' },
+  'skipped-unchanged': { label: 'Skipped — unchanged', dotClass: 'bg-muted/40', textClass: 'text-muted/60' },
+  'blocked-by-active-job': { label: 'Blocked', dotClass: 'bg-error', textClass: 'text-error' },
+  completed: { label: 'Completed', dotClass: 'bg-success', textClass: 'text-success' },
+  failed: { label: 'Failed', dotClass: 'bg-error', textClass: 'text-error' },
 };
 
 function reasonLabel(reason: string): string {
@@ -1721,9 +1856,12 @@ function reasonLabel(reason: string): string {
     job_completed: 'Done',
     enqueue_failed: 'Enqueue failed',
     job_failed: 'Job failed',
-    blocked_by_enrich_failure: 'Blocked — enrich failed',
-    blocked_by_enrich_enqueue_failure: 'Blocked — enrich could not start',
-    no_installed_skills: 'No skills installed',
+    superseded_by_newer_save: 'Superseded by a newer spec edit; this older revision is not the current active enrichment.',
+    blocked_by_enrich_failure: 'Blocked because the enrich stage failed',
+    blocked_by_enrich_enqueue_failure: 'Blocked because enrich could not start',
+    fingerprint_unchanged: 'Skipped because the stage inputs did not change',
+    metadata_only_skip: 'Skipped because only metadata changed',
+    no_installed_skills: 'Skipped because no matching installed skills were available',
   };
   return map[reason] ?? reason;
 }
@@ -1782,11 +1920,12 @@ const STAGE_REPAIR_FILTER: Partial<Record<keyof PostSaveStageMap, string>> = {
   matchSkills: 'match-skills',
 };
 
-function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, onRetried }: {
+function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, blockingPostSaveJob, onRetried }: {
   stages: PostSaveStageMap;
   specId?: string;
   workspaceId?: string;
   activeRunStatus?: 'running' | 'queued';
+  blockingPostSaveJob?: CanonicalPostSaveStageState | null;
   onRetried?: () => void;
 }) {
   const toast = useGlobalToast();
@@ -1795,10 +1934,11 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, onRe
   const hasAnyRequested = stageNames.some(name => stages[name].requested);
   if (!hasAnyRequested) return null;
 
-  const isRunActive = activeRunStatus === 'running' || activeRunStatus === 'queued';
+  const isRunActive = isRunStatusBlocking(activeRunStatus);
+  const isBlockedByActivePostSave = blockingPostSaveJob !== null && blockingPostSaveJob !== undefined;
 
   const handleRetryStage = async (stageName: keyof PostSaveStageMap) => {
-    if (!specId || !workspaceId || retrying || isRunActive) return;
+    if (!specId || !workspaceId || retrying || isRunActive || isBlockedByActivePostSave) return;
     const filter = STAGE_REPAIR_FILTER[stageName];
     if (!filter) return;
     setRetrying(stageName);
@@ -1826,8 +1966,9 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, onRe
       <div className="space-y-1.5">
         {stageNames.map(name => {
           const stage = stages[name];
-          const statusConfig = STAGE_STATUS_CONFIG[stage.status];
-          const canRetry = specId && workspaceId && stage.requested && stage.status === 'failed' && STAGE_REPAIR_FILTER[name];
+          const canonicalStatus = getCanonicalPostSaveStatus(stage);
+          const statusConfig = STAGE_STATUS_CONFIG[canonicalStatus];
+          const canRetry = specId && workspaceId && stage.requested && stage.status === 'failed' && !isBlockedByActivePostSave && STAGE_REPAIR_FILTER[name];
           return (
             <div key={name} className="flex items-start gap-2" data-testid={`stage-${name}`}>
               <span className={`mt-1 shrink-0 w-2 h-2 rounded-full ${statusConfig.dotClass}`} />
@@ -1845,9 +1986,9 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, onRe
                   {canRetry && (
                     <button
                       onClick={() => handleRetryStage(name)}
-                      disabled={!!retrying || isRunActive}
-                      title={isRunActive ? 'Cannot retry while a run is active' : `Retry ${STAGE_LABELS[name]}`}
-                      className={`text-[10px] font-medium text-accent hover:text-accent/80 transition-colors ${retrying || isRunActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      disabled={!!retrying || isRunActive || isBlockedByActivePostSave}
+                      title={isBlockedByActivePostSave ? 'Cannot retry while another post-save job is active for this spec' : isRunActive ? 'Cannot retry while a run is active' : `Retry ${STAGE_LABELS[name]}`}
+                      className={`text-[10px] font-medium text-accent hover:text-accent/80 transition-colors ${retrying || isRunActive || isBlockedByActivePostSave ? 'opacity-50 cursor-not-allowed' : ''}`}
                       data-testid={`stage-retry-${name}`}
                     >
                       {retrying === name ? 'Retrying…' : 'Retry'}
@@ -1940,22 +2081,24 @@ const CONTEXT_CLASSIFICATION_CONFIG: Record<ContextClassification, {
   },
 };
 
-function ContextTabEmptyState({ specId, workspaceId, classification, activeRunStatus, onRepaired }: {
+function ContextTabEmptyState({ specId, workspaceId, classification, activeRunStatus, blockingPostSaveJob, onRepaired }: {
   specId: string;
   workspaceId: string;
   classification: ContextClassification;
   activeRunStatus?: 'running' | 'queued';
+  blockingPostSaveJob?: CanonicalPostSaveStageState | null;
   onRepaired: () => void;
 }) {
   const toast = useGlobalToast();
   const [repairState, setRepairState] = useState<'idle' | 'repairing' | 'retrying'>('idle');
   const config = CONTEXT_CLASSIFICATION_CONFIG[classification];
-  const isRunActive = activeRunStatus === 'running' || activeRunStatus === 'queued';
+  const isRunActive = isRunStatusBlocking(activeRunStatus);
+  const isBlockedByActivePostSave = blockingPostSaveJob !== null && blockingPostSaveJob !== undefined;
   const isBusy = repairState !== 'idle';
   const isPending = classification === 'pending_post_save';
 
   const handleRepair = async () => {
-    if (!workspaceId || isBusy || isRunActive) return;
+    if (!workspaceId || isBusy || isRunActive || isBlockedByActivePostSave) return;
     setRepairState('repairing');
     try {
       const res = await apiFetch<RepairResponse>(
@@ -1982,7 +2125,7 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
   };
 
   const handleRetryEnrich = async () => {
-    if (!workspaceId || isBusy || isRunActive) return;
+    if (!workspaceId || isBusy || isRunActive || isBlockedByActivePostSave) return;
     setRepairState('retrying');
     try {
       await apiFetch(
@@ -2035,9 +2178,9 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
           <div className="flex items-center gap-2 mt-2">
             <button
               onClick={handleRepair}
-              disabled={isBusy || isRunActive}
-              title={isRunActive ? 'Cannot repair while a run is active' : 'Diagnose and repair post-save state'}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+              disabled={isBusy || isRunActive || isBlockedByActivePostSave}
+              title={isBlockedByActivePostSave ? 'Cannot repair while another post-save job is active for this spec' : isRunActive ? 'Cannot repair while a run is active' : 'Diagnose and repair post-save state'}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive || isBlockedByActivePostSave ? 'opacity-50 cursor-not-allowed' : ''}`}
               data-testid="context-repair-btn"
             >
               {repairState === 'repairing'
@@ -2047,9 +2190,9 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
             {(classification === 'persisted_without_context' || classification === 'post_save_failed') && (
               <button
                 onClick={handleRetryEnrich}
-                disabled={isBusy || isRunActive}
-                title={isRunActive ? 'Cannot enrich while a run is active' : 'Re-enqueue enrichment job'}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+                disabled={isBusy || isRunActive || isBlockedByActivePostSave}
+                title={isBlockedByActivePostSave ? 'Cannot retry while another post-save job is active for this spec' : isRunActive ? 'Cannot enrich while a run is active' : 'Re-enqueue enrichment job'}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive || isBlockedByActivePostSave ? 'opacity-50 cursor-not-allowed' : ''}`}
                 data-testid="context-retry-enrich-btn"
               >
                 {repairState === 'retrying'
@@ -2064,7 +2207,7 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
   );
 }
 
-function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunStatus }: { specId: string; stories: Story[]; refreshKey?: number; workspaceId: string; activeRunStatus?: 'running' | 'queued' }) {
+function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunStatus, blockingPostSaveJob }: { specId: string; stories: Story[]; refreshKey?: number; workspaceId: string; activeRunStatus?: 'running' | 'queued'; blockingPostSaveJob?: CanonicalPostSaveStageState | null }) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -2119,6 +2262,7 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
         workspaceId={workspaceId}
         classification="legacy_no_log"
         activeRunStatus={activeRunStatus}
+        blockingPostSaveJob={blockingPostSaveJob}
         onRepaired={() => setLogs([])} // triggers re-fetch via refreshKey in parent
       />
     );
@@ -2140,6 +2284,7 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
           workspaceId={workspaceId}
           classification={emptyClassification}
           activeRunStatus={activeRunStatus}
+          blockingPostSaveJob={blockingPostSaveJob}
           onRepaired={() => setShowAll(s => !s)} // toggle to trigger re-fetch
         />
       )}
@@ -2240,7 +2385,7 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
             {contextCaptureStatus && <ContextCaptureCard status={contextCaptureStatus} />}
 
             {/* PSE-003: Per-stage post-save pipeline status */}
-            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} specId={specId} workspaceId={workspaceId} activeRunStatus={activeRunStatus} onRetried={() => setShowAll(s => !s)} />}
+            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} specId={specId} workspaceId={workspaceId} activeRunStatus={activeRunStatus} blockingPostSaveJob={blockingPostSaveJob} onRetried={() => setShowAll(s => !s)} />}
 
             {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
             {log.enriched && log.retrieval_method && (() => {

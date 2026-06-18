@@ -760,11 +760,12 @@ function mapTerminalSpecJobState(job: SpecJobState): { status: number; body: unk
   }
 
   const message = job.error || `Spec job ${job.id} ${job.status}`;
+  const isNonFailureTerminal = job.status === 'cancelled' || job.status === 'superseded';
   return {
-    status: job.status === 'cancelled' ? 409 : 500,
+    status: isNonFailureTerminal ? 409 : 500,
     body: {
       error: message,
-      code: job.status === 'cancelled' ? 'SPEC_JOB_CANCELLED' : 'SPEC_JOB_FAILED',
+      code: job.status === 'superseded' ? 'SPEC_JOB_SUPERSEDED' : job.status === 'cancelled' ? 'SPEC_JOB_CANCELLED' : 'SPEC_JOB_FAILED',
       jobId: job.id,
       status: job.status,
     },
