@@ -1355,6 +1355,43 @@ describe('GET /api/pipeline/runs/:runId/output', () => {
     expect(body).toContain('event: done');
   });
 
+  test('demotes requested PTY output to ANSI replay metadata when no PTY session exists', async () => {
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode, agent, agent_type)
+       VALUES ('forge/specs/approved/output-pty-fallback.json', 'ws-pipe', 'done', 'pty', 'claude', 'claude')
+       RETURNING id`,
+    );
+    const runId = inserted!.id;
+    const chunk = Buffer.from('fallback ansi transcript\n', 'utf8');
+
+    await execute(
+      `INSERT INTO run_output_chunks (run_id, chunk, sequence)
+       VALUES ($1, $2, 0)`,
+      [runId, chunk],
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((stream, cb) => {
+        let data = '';
+        stream.on('data', (part: Buffer) => { data += part.toString(); });
+        stream.on('end', () => cb(null, data));
+      });
+
+    const body = String(res.body);
+    expect(res.status).toBe(200);
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminal_mode":"ansi-html"');
+    expect(body).toContain('"requestedTerminalMode":"pty"');
+    expect(body).toContain('"isPty":false');
+    expect(body).toContain('"ptyFallbackActive":true');
+    expect(body).toContain('"ptyUnavailableHint":"Run: cd backend && npm rebuild node-pty"');
+    expect(body).toContain(`event: chunk\ndata: ${chunk.toString('base64')}`);
+    expect(body).toContain('event: done');
+  });
+
   test('replays gzip-compressed PTY chunks from the dedicated capture store from byte 0', async () => {
     const inserted = await queryOne<{ id: number }>(
       `INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode, agent, agent_type)

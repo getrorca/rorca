@@ -4877,7 +4877,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const requestedTerminalMode = normalizeTerminalMode(runRow?.terminal_mode);
   const terminalStatuses = ['done', 'failed', 'cancelled'];
   const ptyStatusAtOpen = requestedTerminalMode === 'pty'
-    ? await waitForRunPtySessionStatus(runId)
+    ? await waitForRunPtySessionStatus(runId, runRow && terminalStatuses.includes(runRow.status) ? 0 : 5_000)
     : null;
   // A run may be marked PTY before/without a PTY session if the child spawn fails
   // early. In that case the engine still mirrors logs to run_output_chunks. Late
@@ -4887,10 +4887,31 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const usePtyCapture = requestedTerminalMode === 'pty' && ptyStatusAtOpen !== null;
   const terminalMode = usePtyCapture ? 'pty' : 'ansi-html';
   const isPty = usePtyCapture;
+  const ptyFallbackActive = requestedTerminalMode === 'pty' && !isPty;
+  const ptyFallbackReason = ptyFallbackActive
+    ? PTY_AVAILABLE
+      ? 'pty-session-unavailable'
+      : 'node-pty-unavailable'
+    : null;
   if (streamClosed) return;
 
-  // Emit run metadata so frontend knows which renderer to use
-  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null, terminalMode, terminal_mode: terminalMode, requestedTerminalMode: requestedTerminalMode, isPty })}\n\n`);
+  // Emit run metadata so frontend knows which renderer to use. When a requested
+  // PTY stream has no PTY session, this is the canonical demotion signal for the
+  // TUI: keep the ANSI replay stream open and label it as degraded/replay-only.
+  res.write(`event: run_meta\ndata: ${JSON.stringify({
+    agentType: agent,
+    agentModel: runRow?.agent_model ?? null,
+    terminalMode,
+    terminal_mode: terminalMode,
+    requestedTerminalMode,
+    requested_terminal_mode: requestedTerminalMode,
+    isPty,
+    ptyAvailable: PTY_AVAILABLE,
+    ptyFallbackActive,
+    ptyFallbackReason,
+    ptyUnavailableHint: ptyFallbackActive ? PTY_UNAVAILABLE_HINT : null,
+    pty_unavailable_hint: ptyFallbackActive ? PTY_UNAVAILABLE_HINT : null,
+  })}\n\n`);
 
   // ── Replay all existing chunks (late-join support) ────────────────────────
   interface ChunkRow { sequence: number; chunk: Buffer }

@@ -39,6 +39,17 @@ interface RunTerminalProps {
 
 type TerminalMode = 'ansi-html' | 'pty';
 
+interface RunTerminalMetaState {
+  requestedTerminalMode: TerminalMode;
+  isPty: boolean;
+  ptyAvailable?: boolean;
+  ptyUnavailableHint?: string | null;
+}
+
+function coerceTerminalMode(value: unknown): TerminalMode | null {
+  return value === 'pty' || value === 'ansi-html' ? value : null;
+}
+
 // ─── Semantic step type (mirrors backend SemanticStep) ────────────────────────
 
 interface SemanticStep {
@@ -452,6 +463,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const [agentType, setAgentType] = useState<string>('claude');
   const [terminalMode, setTerminalMode] = useState<TerminalMode>(rendererMode);
   const terminalModeRef = useRef<TerminalMode>(rendererMode);
+  const [terminalMeta, setTerminalMeta] = useState<RunTerminalMetaState>(() => ({
+    requestedTerminalMode: rendererMode,
+    isPty: rendererMode === 'pty',
+  }));
   const [ptyReady, setPtyReady] = useState(rendererMode !== 'pty');
   const [ptyFocused, setPtyFocused] = useState(false);
   const [ptyInputHealthy, setPtyInputHealthy] = useState(true);
@@ -478,6 +493,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   useEffect(() => {
     terminalModeRef.current = rendererMode;
     setTerminalMode(rendererMode);
+    setTerminalMeta({
+      requestedTerminalMode: rendererMode,
+      isPty: rendererMode === 'pty',
+      ptyAvailable: undefined,
+      ptyUnavailableHint: null,
+    });
     setPtyReady(rendererMode !== 'pty');
   }, [rendererMode]);
 
@@ -487,11 +508,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
-  useEffect(() => {
-    if (terminalMode === 'pty' && mode !== 'raw') {
-      handleSetMode('raw');
-    }
-  }, [handleSetMode, mode, terminalMode]);
+  const resolvedMode = terminalMode === 'pty' ? 'raw' : mode;
 
   // Recreate ansi-to-html converters when theme changes.
   // ansiConverter: escapeXML=true for raw terminal lines (ANSI codes, plain text).
@@ -728,6 +745,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setStreamDone(false);
     setPtyInputHealthy(true);
     setTerminalMode(rendererMode);
+    setTerminalMeta({
+      requestedTerminalMode: rendererMode,
+      isPty: rendererMode === 'pty',
+      ptyAvailable: undefined,
+      ptyUnavailableHint: null,
+    });
     if (rendererMode === 'pty' && !ptyReady) return;
     xtermRef.current?.clear();
     if (flushTimerRef.current !== null) {
@@ -743,13 +766,48 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const es = new EventSource(outputUrl);
     esRef.current = es;
 
-    // Listen for run metadata (agent type detection)
+    // Listen for run metadata (agent type + authoritative renderer/fallback state)
     es.addEventListener('run_meta', (e: MessageEvent) => {
       try {
-        const meta = JSON.parse(e.data) as { agentType?: string };
+        const meta = JSON.parse(e.data) as {
+          agentType?: string;
+          terminalMode?: string;
+          terminal_mode?: string;
+          requestedTerminalMode?: string;
+          requested_terminal_mode?: string;
+          isPty?: boolean;
+          ptyAvailable?: boolean;
+          ptyUnavailableHint?: string | null;
+          pty_unavailable_hint?: string | null;
+        };
         if (typeof meta.agentType === 'string' && meta.agentType.trim()) {
           setAgentType(meta.agentType);
         }
+
+        const nextTerminalMode = coerceTerminalMode(meta.terminalMode ?? meta.terminal_mode);
+        if (nextTerminalMode) {
+          terminalModeRef.current = nextTerminalMode;
+          setTerminalMode(nextTerminalMode);
+          if (nextTerminalMode !== 'pty') {
+            setPtyReady(true);
+          }
+        }
+
+        const requestedTerminalMode = coerceTerminalMode(meta.requestedTerminalMode ?? meta.requested_terminal_mode)
+          ?? nextTerminalMode
+          ?? rendererMode;
+        const isPty = typeof meta.isPty === 'boolean'
+          ? meta.isPty
+          : (nextTerminalMode ?? terminalModeRef.current) === 'pty';
+        const ptyUnavailableHint = typeof (meta.ptyUnavailableHint ?? meta.pty_unavailable_hint) === 'string'
+          ? (meta.ptyUnavailableHint ?? meta.pty_unavailable_hint) as string
+          : null;
+        setTerminalMeta({
+          requestedTerminalMode,
+          isPty,
+          ptyAvailable: typeof meta.ptyAvailable === 'boolean' ? meta.ptyAvailable : undefined,
+          ptyUnavailableHint,
+        });
       } catch { /* ignore */ }
     });
 
@@ -895,18 +953,28 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const normalizedAgentType = normalizeAgentType(agentType);
   const isOpenCode = normalizedAgentType === 'opencode' || normalizedAgentType === 'codex';
   const showAgentBadge = normalizedAgentType !== 'claude' && normalizedAgentType !== 'unknown';
+  const ptyFallbackActive = terminalMeta.requestedTerminalMode === 'pty' && (!terminalMeta.isPty || terminalMode !== 'pty');
+  const ptyFallbackReason = terminalMeta.ptyAvailable === false
+    ? 'node-pty is unavailable on this server.'
+    : 'The PTY session did not start or is no longer attachable.';
+  const ptyFallbackHint = terminalMeta.ptyUnavailableHint?.trim();
   const surfaceLabel = terminalMode === 'pty'
     ? streamDone
       ? 'PTY Replay'
       : ptyFocused
         ? 'PTY Live • attached'
         : 'PTY Live • click to attach'
-    : mode === 'semantic'
-      ? 'Summary View'
-      : 'Log View';
+    : ptyFallbackActive
+      ? 'Degraded • replay-only'
+      : resolvedMode === 'semantic'
+        ? 'Summary View'
+        : 'Log View';
   const surfaceTone = terminalMode === 'pty'
     ? ptyInputHealthy ? 'var(--success)' : 'var(--warning)'
-    : mode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)';
+    : ptyFallbackActive ? 'var(--warning)' : resolvedMode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)';
+  const surfaceTitle = ptyFallbackActive
+    ? 'PTY attachment fell back to ANSI replay-only output.'
+    : terminalMode === 'pty' && !ptyInputHealthy ? 'PTY input delivery failed; output may be replay-only.' : undefined;
 
   return (
     <div className="h-full w-full flex flex-col">
@@ -915,7 +983,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         <button
           onClick={() => handleSetMode('raw')}
           className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-            mode === 'raw'
+            resolvedMode === 'raw'
               ? 'bg-accent/15 text-accent'
               : 'text-muted hover:text-[var(--text)]'
           }`}
@@ -929,7 +997,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           <button
             onClick={() => handleSetMode('semantic')}
             className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-              mode === 'semantic'
+              resolvedMode === 'semantic'
                 ? 'bg-accent/15 text-accent'
                 : 'text-muted hover:text-[var(--text)]'
             }`}
@@ -954,13 +1022,13 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
             borderColor: surfaceTone,
             background: 'color-mix(in srgb, currentColor 12%, transparent)',
           }}
-          title={terminalMode === 'pty' && !ptyInputHealthy ? 'PTY input delivery failed; output may be replay-only.' : undefined}
+          title={surfaceTitle}
         >
           {surfaceLabel}
         </span>
 
         {/* Copy button (raw mode only) */}
-        {terminalMode !== 'pty' && mode === 'raw' && (
+        {terminalMode !== 'pty' && resolvedMode === 'raw' && (
           <button
             onClick={handleCopy}
             className="ml-auto p-1.5 rounded-md text-muted hover:text-[var(--text)] transition-colors"
@@ -971,6 +1039,21 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           </button>
         )}
       </div>
+
+      {ptyFallbackActive && (
+        <div className="shrink-0 border-b border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+          <div className="flex items-start gap-2">
+            <AlertCircle size={14} className="mt-0.5 shrink-0" />
+            <div className="space-y-0.5">
+              <div className="font-semibold">PTY unavailable — degraded replay-only mode</div>
+              <div className="text-[var(--text)]">
+                {ptyFallbackReason} Showing the existing ANSI log and summary views instead of a full PTY attachment.
+                {ptyFallbackHint ? ` PTY prerequisite: ${ptyFallbackHint}` : ''}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ─── Content area ────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 relative">
@@ -993,7 +1076,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
               color: 'var(--terminal-fg)',
               padding: '8px 12px',
               margin: 0,
-              display: mode === 'raw' ? 'block' : 'none',
+              display: resolvedMode === 'raw' ? 'block' : 'none',
               fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
               fontSize: window.innerWidth < 768 ? '10px' : '12px',
             }}
@@ -1001,7 +1084,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         )}
 
         {/* Semantic step list */}
-        {terminalMode !== 'pty' && mode === 'semantic' && (
+        {terminalMode !== 'pty' && resolvedMode === 'semantic' && (
           <div className="h-full flex flex-col">
             {steps.length === 0 ? (
               <div className="flex-1 flex items-center justify-center text-muted text-sm">
