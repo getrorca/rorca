@@ -50,13 +50,14 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { createJob, updateJobStatus, listActiveJobs, listRepairCandidatesFromLogs, type RepairIssueCategory, type SpecJob } from '../db/spec-jobs';
+import { createJob, updateJobStatus, listActiveJobs, listJobsForSpec, listRepairCandidatesFromLogs, type JsonValue, type RepairIssueCategory, type SpecJob } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import {
   buildPersistPostSaveStages,
   enqueuePersistPostSaveJobs,
   getEffectiveGenerationLog,
   getEffectiveGenerationLogs,
+  updatePersistPostSaveStage,
   type PersistPostSaveStageMap,
   type PersistStageReason,
   type PersistStageStatus,
@@ -6478,9 +6479,8 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  *     tags: [Specs]
  *     summary: Enqueue workspace-scope repair for matching specs
  *     operationId: rorca_specs_repair_batch
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Bounded idempotent repair of local spec enrichment — explicit filters and hard limits prevent unbounded bulk mutation."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Operator-level batch mutation that can enqueue repair work across specs; unsafe for public/MCP automation."
  *     requestBody:
  *       required: true
  *       content:
@@ -14258,6 +14258,387 @@ function parseRecordLocal(value: unknown): Record<string, unknown> {
   return typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
+const REPAIR_STALE_RUNNING_MINUTES = Math.max(Number(process.env.RORCA_REPAIR_STALE_RUNNING_MINUTES ?? 15), 1);
+const REPAIR_STALE_QUEUED_MINUTES = Math.max(Number(process.env.RORCA_REPAIR_STALE_QUEUED_MINUTES ?? 30), 1);
+const REPAIR_SINGLETON_WINDOW_SECONDS = 1;
+
+type RepairStageRequest = 'enrich' | 'match-skills';
+type RepairPostSaveStage = 'enrich' | 'matchSkills';
+
+type RepairPostSaveJobMetadata = {
+  origin?: unknown;
+  stage?: unknown;
+  saveGeneration?: unknown;
+  fingerprint?: unknown;
+  previousFingerprint?: unknown;
+  priority?: unknown;
+  singletonKey?: unknown;
+  waitForStage?: unknown;
+  blockedBy?: unknown;
+};
+
+interface RepairPgBossJob {
+  id: string;
+  name: string;
+  state: string;
+  createdOn: Date | null;
+  startedOn: Date | null;
+  data: Record<string, unknown> | null;
+}
+
+interface RepairStageAssessment {
+  stage: RepairStageRequest;
+  postSaveStage: RepairPostSaveStage;
+  action: 'enqueue_enrich' | 'enqueue_match_skills';
+  needsRepair: boolean;
+  reason: string;
+  currentStatus?: PersistStageStatus;
+  latestJob?: SpecJob;
+  stalePgBossJob?: RepairPgBossJob;
+  superseded: boolean;
+  conflictReason?: string;
+}
+
+function readRepairPostSaveMetadata(job?: SpecJob): RepairPostSaveJobMetadata | null {
+  if (!job?.requestPayload || typeof job.requestPayload !== 'object' || Array.isArray(job.requestPayload)) return null;
+  const metadata = job.requestPayload as Record<string, unknown>;
+  if (metadata.origin !== 'persist-post-save') return null;
+  if (metadata.stage !== 'enrich' && metadata.stage !== 'matchSkills') return null;
+  return metadata as RepairPostSaveJobMetadata;
+}
+
+function repairPostSaveStageForJob(job: SpecJob): RepairPostSaveStage | null {
+  const metadata = readRepairPostSaveMetadata(job);
+  if (metadata?.stage === 'enrich' || metadata?.stage === 'matchSkills') return metadata.stage;
+  if (job.jobType === 'enrich') return 'enrich';
+  if (job.jobType === 'match-skills') return 'matchSkills';
+  return null;
+}
+
+function repairJobGeneration(job: SpecJob): number | null {
+  const metadata = readRepairPostSaveMetadata(job);
+  const value = job.saveGeneration ?? metadata?.saveGeneration ?? null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function repairStageToJobType(stage: RepairPostSaveStage): RepairStageRequest {
+  return stage === 'enrich' ? 'enrich' : 'match-skills';
+}
+
+function repairStageToQueue(stage: RepairPostSaveStage): string {
+  return stage === 'enrich' ? SPEC_ENRICH_QUEUE : SPEC_MATCH_SKILLS_QUEUE;
+}
+
+function minutesOld(date: Date | null | undefined): number | null {
+  if (!date) return null;
+  return (Date.now() - date.getTime()) / 60_000;
+}
+
+function parseOptionalDate(value: Date | string | null): Date | null {
+  if (!value) return null;
+  return value instanceof Date ? value : new Date(value);
+}
+
+function latestRelevantStageJob(jobs: SpecJob[], stage: RepairPostSaveStage, saveGeneration: number | null): SpecJob | undefined {
+  return jobs
+    .filter((job) => repairPostSaveStageForJob(job) === stage)
+    .filter((job) => {
+      if (saveGeneration === null) return true;
+      const jobGeneration = repairJobGeneration(job);
+      return jobGeneration === null || jobGeneration === saveGeneration;
+    })
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+}
+
+async function listLivePgBossRepairJobs(workspaceId: string, specId: string, queueName: string): Promise<RepairPgBossJob[]> {
+  type Row = {
+    id: string;
+    name: string;
+    state: string;
+    created_on: Date | string | null;
+    started_on: Date | string | null;
+    data: Record<string, unknown> | null;
+  };
+
+  let rows: Row[];
+  try {
+    rows = await query<Row>(
+      `SELECT id::text, name, state, created_on, started_on, data
+       FROM pgboss.job
+       WHERE name = $1
+         AND state IN ('created', 'active', 'retry')
+         AND data->>'specId' = $2
+         AND data->>'workspaceId' = $3
+       ORDER BY created_on DESC`,
+      [queueName, specId, workspaceId],
+    );
+  } catch (error) {
+    throw new ConflictError(`Unable to verify pg-boss liveness for ${queueName} repair: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    state: row.state,
+    createdOn: parseOptionalDate(row.created_on),
+    startedOn: parseOptionalDate(row.started_on),
+    data: row.data,
+  }));
+}
+
+function livePgBossConflictReason(stage: RepairStageRequest, jobs: RepairPgBossJob[]): string | undefined {
+  const active = jobs.find((job) => job.state === 'active' || job.state === 'retry');
+  if (active) {
+    const age = minutesOld(active.startedOn ?? active.createdOn);
+    const stuckSuffix = age !== null && age >= REPAIR_STALE_RUNNING_MINUTES
+      ? `; it appears stuck (${Math.floor(age)}m old) but is still live, so duplicate repair would be unsafe`
+      : '';
+    return `Live ${active.state} pg-boss ${stage} job ${active.id} is still running${stuckSuffix}`;
+  }
+
+  const recentCreated = jobs.find((job) => {
+    if (job.state !== 'created') return false;
+    const age = minutesOld(job.createdOn);
+    return age === null || age < REPAIR_STALE_QUEUED_MINUTES;
+  });
+  if (recentCreated) {
+    const age = minutesOld(recentCreated.createdOn);
+    return `Live queued pg-boss ${stage} job ${recentCreated.id} is only ${age === null ? 'recently' : `${Math.floor(age)}m`} old; repair is blocked until it is stale or finishes`;
+  }
+
+  return undefined;
+}
+
+function staleCreatedPgBossJob(jobs: RepairPgBossJob[]): RepairPgBossJob | undefined {
+  return jobs.find((job) => job.state === 'created' && (minutesOld(job.createdOn) ?? 0) >= REPAIR_STALE_QUEUED_MINUTES);
+}
+
+function stageStatusAgeMinutes(stageState: PersistPostSaveStageMap[keyof PersistPostSaveStageMap] | undefined, latestJob?: SpecJob): number | null {
+  const updatedAt = typeof stageState?.updatedAt === 'string' ? new Date(stageState.updatedAt) : null;
+  return minutesOld(updatedAt ?? latestJob?.startedAt ?? latestJob?.createdAt);
+}
+
+function currentRepairSaveGeneration(generationLog: Record<string, unknown> | null, summary: Record<string, unknown>): number | null {
+  const summaryGeneration = summary.saveGeneration;
+  if (typeof summaryGeneration === 'number' && Number.isFinite(summaryGeneration)) return summaryGeneration;
+  if (typeof summaryGeneration === 'string' && /^\d+$/.test(summaryGeneration)) return Number(summaryGeneration);
+  const logGeneration = generationLog?.save_generation;
+  if (typeof logGeneration === 'number' && Number.isFinite(logGeneration)) return logGeneration;
+  if (typeof logGeneration === 'string' && /^\d+$/.test(logGeneration)) return Number(logGeneration);
+  return null;
+}
+
+function assessRepairStage(
+  stage: RepairPostSaveStage,
+  stageState: PersistPostSaveStageMap[keyof PersistPostSaveStageMap] | undefined,
+  latestJob: SpecJob | undefined,
+  livePgBossJobs: RepairPgBossJob[],
+): RepairStageAssessment {
+  const requestStage = repairStageToJobType(stage);
+  const action = stage === 'enrich' ? 'enqueue_enrich' : 'enqueue_match_skills';
+  const currentStatus = stageState?.status;
+
+  if (currentStatus === 'superseded' || latestJob?.status === 'superseded') {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: false,
+      reason: `${requestStage} stage is superseded by a newer save; repair will not resurrect it`,
+      currentStatus,
+      latestJob,
+      superseded: true,
+    };
+  }
+
+  const conflictReason = livePgBossConflictReason(requestStage, livePgBossJobs);
+  const staleCreated = staleCreatedPgBossJob(livePgBossJobs);
+
+  if (!stageState) {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: true,
+      reason: `${requestStage} stage state is missing`,
+      latestJob,
+      stalePgBossJob: staleCreated,
+      superseded: false,
+      conflictReason,
+    };
+  }
+
+  if (!stageState.requested) {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: false,
+      reason: `${requestStage} was not requested in the original persist`,
+      currentStatus,
+      latestJob,
+      superseded: false,
+    };
+  }
+
+  if (currentStatus === 'failed') {
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: true,
+      reason: `${requestStage} stage failed and is recoverable`,
+      currentStatus,
+      latestJob,
+      stalePgBossJob: staleCreated,
+      superseded: false,
+      conflictReason,
+    };
+  }
+
+  if (currentStatus === 'pending' || currentStatus === 'queued' || currentStatus === 'running') {
+    const staleMinutes = currentStatus === 'running' ? REPAIR_STALE_RUNNING_MINUTES : REPAIR_STALE_QUEUED_MINUTES;
+    const age = stageStatusAgeMinutes(stageState, latestJob);
+    const statusLooksStale = age !== null && age >= staleMinutes;
+    const noLiveBossJob = livePgBossJobs.length === 0;
+    const recoverable = Boolean(staleCreated) || (statusLooksStale && noLiveBossJob);
+
+    return {
+      stage: requestStage,
+      postSaveStage: stage,
+      action,
+      needsRepair: recoverable,
+      reason: recoverable
+        ? `${requestStage} stage is ${currentStatus} and stale (${Math.floor(age ?? minutesOld(staleCreated?.createdOn) ?? staleMinutes)}m old)`
+        : `${requestStage} stage is ${currentStatus}; waiting for active work rather than re-enqueueing`,
+      currentStatus,
+      latestJob,
+      stalePgBossJob: staleCreated,
+      superseded: false,
+      conflictReason: conflictReason ?? (statusLooksStale && livePgBossJobs.some((job) => job.state === 'active')
+        ? `${requestStage} appears stuck but has an active pg-boss job; duplicate repair is unsafe`
+        : undefined),
+    };
+  }
+
+  return {
+    stage: requestStage,
+    postSaveStage: stage,
+    action,
+    needsRepair: false,
+    reason: `${requestStage} stage is already ${currentStatus ?? 'healthy'}`,
+    currentStatus,
+    latestJob,
+    superseded: false,
+  };
+}
+
+async function emitRepairAuditEvent(
+  specId: string,
+  workspaceId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const walEvent = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_repair_action', $1, $2, $3) RETURNING *`,
+    [specId, workspaceId, JSON.stringify(payload)],
+  );
+  if (walEvent) broadcastAll(walEvent);
+}
+
+async function markStaleQueuedJobRecovering(assessment: RepairStageAssessment): Promise<void> {
+  if (!assessment.latestJob) return;
+  if (assessment.stalePgBossJob) {
+    const queueName = repairStageToQueue(assessment.postSaveStage);
+    try {
+      await getBoss().cancel(queueName, assessment.stalePgBossJob.id);
+    } catch (error) {
+      throw new ConflictError(`Stale queued ${assessment.stage} pg-boss job ${assessment.stalePgBossJob.id} could not be cancelled safely: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (assessment.latestJob.status === 'pending' || assessment.latestJob.status === 'running') {
+    await updateJobStatus(assessment.latestJob.id, 'failed', {
+      finishedAt: new Date(),
+      progressMessage: 'Marked stale stage job as failed before repair re-enqueue',
+      errorMessage: assessment.stalePgBossJob
+        ? `Stale queued pg-boss job ${assessment.stalePgBossJob.id} recovered by repair`
+        : 'Stale stage job without a live pg-boss job recovered by repair',
+    });
+  }
+}
+
+async function enqueueRepairPostSaveStageJob(
+  specId: string,
+  workspaceId: string,
+  assessment: RepairStageAssessment,
+  summary: Record<string, unknown>,
+  saveGeneration: number | null,
+): Promise<{ jobId: string; bossJobId: string }> {
+  if (assessment.latestJob) {
+    const refreshed = (await listJobsForSpec(workspaceId, specId, [assessment.stage]))
+      .find((job) => job.id === assessment.latestJob?.id);
+    if (refreshed?.status === 'superseded') {
+      throw new ConflictError(`${assessment.stage} job ${refreshed.id} became superseded before repair enqueue`);
+    }
+  }
+
+  const queueName = repairStageToQueue(assessment.postSaveStage);
+  const fingerprintKey = assessment.postSaveStage === 'enrich' ? 'enrichFingerprint' : 'matchSkillsFingerprint';
+  const stageState = (summary.postSaveStages as PersistPostSaveStageMap | undefined)?.[assessment.postSaveStage];
+  const metadata = {
+    origin: 'persist-post-save',
+    stage: assessment.postSaveStage,
+    priority: 0,
+    singletonKey: `persist-post-save:${workspaceId}:${specId}:repair:${assessment.stage}`,
+    ...(saveGeneration !== null ? { saveGeneration } : {}),
+    ...(typeof summary[fingerprintKey] === 'string' ? { fingerprint: summary[fingerprintKey] } : {}),
+    ...(typeof stageState?.previousFingerprint === 'string' ? { previousFingerprint: stageState.previousFingerprint } : {}),
+  } as JsonValue;
+
+  const job = await createJob(workspaceId, specId, assessment.stage, metadata);
+  await getBoss().createQueue(queueName);
+  const bossJobId = await getBoss().send(queueName, {
+    jobId: job.id,
+    specId,
+    workspaceId,
+  }, {
+    priority: 0,
+    singletonKey: `persist-post-save:${workspaceId}:${specId}:repair:${assessment.stage}`,
+    singletonSeconds: REPAIR_SINGLETON_WINDOW_SECONDS,
+  });
+
+  if (!bossJobId) {
+    await updateJobStatus(job.id, 'failed', {
+      errorMessage: `boss.send() returned null for repair ${assessment.stage}`,
+      finishedAt: new Date(),
+    });
+    throw new UnprocessableError(`Failed to enqueue repair ${assessment.stage} job`);
+  }
+
+  await updateJobStatus(job.id, 'pending', {
+    bossJobId,
+    progressMessage: `Queued repair ${assessment.stage} job`,
+  });
+  await updatePersistPostSaveStage(specId, assessment.postSaveStage, {
+    requested: true,
+    status: 'queued',
+    reason: assessment.postSaveStage === 'matchSkills' ? 'durable_job_enqueued_after_enrich' : 'durable_job_enqueued',
+    jobId: job.id,
+    bossJobId,
+    error: null,
+    queueName,
+    queueStatus: 'queued',
+    queuePosition: 1,
+    activeJobsAhead: 0,
+    queuePriority: 0,
+    singletonKey: `persist-post-save:${workspaceId}:${specId}:repair:${assessment.stage}`,
+    ...(typeof summary[fingerprintKey] === 'string' ? { fingerprint: String(summary[fingerprintKey]) } : {}),
+    ...(typeof stageState?.previousFingerprint === 'string' ? { previousFingerprint: stageState.previousFingerprint } : {}),
+  }, saveGeneration);
+
+  return { jobId: job.id, bossJobId };
+}
+
 function diagnoseSpecHealth(
   generationLog: Record<string, unknown> | null,
   stages?: PersistPostSaveStageMap,
@@ -14273,9 +14654,9 @@ function diagnoseSpecHealth(
   const matchSkillsStage = stages?.matchSkills;
 
   const enrichNeedsRepair = !enrichStage
-    || (enrichStage.requested && (enrichStage.status === 'failed' || enrichStage.status === 'pending'));
+    || (enrichStage.requested && enrichStage.status === 'failed');
   const matchSkillsNeedsRepair = !matchSkillsStage
-    || (matchSkillsStage.requested && (matchSkillsStage.status === 'failed' || matchSkillsStage.status === 'pending'
+    || (matchSkillsStage.requested && (matchSkillsStage.status === 'failed'
         || matchSkillsStage.reason === 'blocked_by_enrich_failure'
         || matchSkillsStage.reason === 'blocked_by_enrich_enqueue_failure'));
 
@@ -14296,9 +14677,8 @@ function diagnoseSpecHealth(
  *     tags: [Specs]
  *     summary: Diagnose and repair post-save enrichment state for a spec
  *     operationId: rorca_specs_by_id_repair
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Safe idempotent repair of local spec enrichment metadata — no write side effects beyond fixing broken state."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Operator-level mutation that can enqueue repair work and resolve stale post-save jobs; unsafe for public/MCP automation."
  *     parameters:
  *       - in: path
  *         name: specId
@@ -14399,20 +14779,35 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
       );
     }
 
-    // Check for active (pending/running) enrich/match-skills jobs
-    const activeJobs = await listActiveJobs(workspaceId, specId);
-    const activeEnrichJob = activeJobs.find((j) => j.jobType === 'enrich');
-    const activeMatchSkillsJob = activeJobs.find((j) => j.jobType === 'match-skills');
-
     // Fetch effective generation log and diagnose health
     const generationLog = await getEffectiveGenerationLog(specId);
     const summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
     const stages = summary.postSaveStages as PersistPostSaveStageMap | undefined;
     const diagnosis = diagnoseSpecHealth(generationLog, stages);
+    const saveGeneration = currentRepairSaveGeneration(generationLog, summary);
 
     // Determine which stages to repair
     const wantEnrich = !requestedStages || requestedStages.includes('enrich');
     const wantMatchSkills = !requestedStages || requestedStages.includes('match-skills');
+    const stageJobs = await listJobsForSpec(workspaceId, specId, ['enrich', 'match-skills']);
+    const [enrichPgBossJobs, matchSkillsPgBossJobs] = await Promise.all([
+      wantEnrich ? listLivePgBossRepairJobs(workspaceId, specId, SPEC_ENRICH_QUEUE) : Promise.resolve([]),
+      wantMatchSkills ? listLivePgBossRepairJobs(workspaceId, specId, SPEC_MATCH_SKILLS_QUEUE) : Promise.resolve([]),
+    ]);
+    const enrichAssessment = assessRepairStage(
+      'enrich',
+      stages?.enrich,
+      latestRelevantStageJob(stageJobs, 'enrich', saveGeneration),
+      enrichPgBossJobs,
+    );
+    const matchSkillsAssessment = assessRepairStage(
+      'matchSkills',
+      stages?.matchSkills,
+      latestRelevantStageJob(stageJobs, 'matchSkills', saveGeneration),
+      matchSkillsPgBossJobs,
+    );
+    diagnosis.enrichNeedsRepair = enrichAssessment.needsRepair;
+    diagnosis.matchSkillsNeedsRepair = matchSkillsAssessment.needsRepair;
 
     // Build repair actions
     const actions: RepairAction[] = [];
@@ -14523,79 +14918,103 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
       });
     }
 
-    // ── Action 3: Re-enqueue enrich stage ──
-    if (wantEnrich && diagnosis.enrichNeedsRepair) {
-      if (activeEnrichJob) {
+    const applyStageRepair = async (assessment: RepairStageAssessment): Promise<void> => {
+      if (assessment.superseded) {
         actions.push({
-          action: 'enqueue_enrich',
-          status: 'blocked',
-          reason: `Active enrich job exists (job ${activeEnrichJob.id}, status: ${activeEnrichJob.status}) — cannot re-enqueue while in progress`,
-          jobId: activeEnrichJob.id,
-        });
-      } else if (dryRun) {
-        actions.push({
-          action: 'enqueue_enrich',
+          action: assessment.action,
           status: 'skipped',
-          reason: `Dry run — would enqueue enrich (current status: ${diagnosis.enrichStatus ?? 'none'})`,
+          reason: assessment.reason,
+          jobId: assessment.latestJob?.id,
         });
-      } else {
-        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich', { priority: 0 });
-        actions.push({
-          action: 'enqueue_enrich',
-          status: 'repaired',
-          reason: `Enqueued enrich job (previous status: ${diagnosis.enrichStatus ?? 'none'})`,
-          jobId: payload.jobId,
-        });
+        if (!dryRun) {
+          await emitRepairAuditEvent(specId, workspaceId, {
+            action: assessment.action,
+            stage: assessment.stage,
+            outcome: 'skipped_superseded',
+            reason: assessment.reason,
+            jobId: assessment.latestJob?.id,
+          });
+        }
+        return;
       }
-    } else if (wantEnrich) {
+
+      if (assessment.conflictReason) {
+        actions.push({
+          action: assessment.action,
+          status: 'blocked',
+          reason: assessment.conflictReason,
+          jobId: assessment.latestJob?.id,
+        });
+        if (!dryRun) {
+          await emitRepairAuditEvent(specId, workspaceId, {
+            action: assessment.action,
+            stage: assessment.stage,
+            outcome: 'skipped_conflict',
+            reason: assessment.conflictReason,
+            jobId: assessment.latestJob?.id,
+          });
+          throw new ConflictError(assessment.conflictReason);
+        }
+        return;
+      }
+
+      if (!assessment.needsRepair) {
+        actions.push({
+          action: assessment.action,
+          status: 'skipped',
+          reason: assessment.reason,
+          jobId: assessment.latestJob?.id,
+        });
+        return;
+      }
+
+      if (dryRun) {
+        actions.push({
+          action: assessment.action,
+          status: 'skipped',
+          reason: `Dry run — would enqueue ${assessment.stage} repair: ${assessment.reason}`,
+          jobId: assessment.latestJob?.id,
+        });
+        return;
+      }
+
+      await markStaleQueuedJobRecovering(assessment);
+      const remainingLiveJobs = await listLivePgBossRepairJobs(workspaceId, specId, repairStageToQueue(assessment.postSaveStage));
+      const remainingConflict = livePgBossConflictReason(assessment.stage, remainingLiveJobs);
+      if (remainingConflict) {
+        await emitRepairAuditEvent(specId, workspaceId, {
+          action: assessment.action,
+          stage: assessment.stage,
+          outcome: 'skipped_conflict',
+          reason: remainingConflict,
+          jobId: assessment.latestJob?.id,
+        });
+        throw new ConflictError(remainingConflict);
+      }
+
+      const payload = await enqueueRepairPostSaveStageJob(specId, workspaceId, assessment, summary, saveGeneration);
       actions.push({
-        action: 'enqueue_enrich',
-        status: 'skipped',
-        reason: stages?.enrich
-          ? `Enrich stage is already ${stages.enrich.status}`
-          : 'Enrich was not requested in the original persist',
+        action: assessment.action,
+        status: 'repaired',
+        reason: `Re-enqueued ${assessment.stage} repair: ${assessment.reason}`,
+        jobId: payload.jobId,
       });
+      await emitRepairAuditEvent(specId, workspaceId, {
+        action: assessment.action,
+        stage: assessment.stage,
+        outcome: 're_enqueued',
+        reason: assessment.reason,
+        jobId: payload.jobId,
+        bossJobId: payload.bossJobId,
+      });
+    };
+
+    if (wantEnrich) {
+      await applyStageRepair(enrichAssessment);
     }
 
-    // ── Action 4: Re-enqueue match-skills stage ──
-    if (wantMatchSkills && diagnosis.matchSkillsNeedsRepair) {
-      if (activeMatchSkillsJob) {
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'blocked',
-          reason: `Active match-skills job exists (job ${activeMatchSkillsJob.id}, status: ${activeMatchSkillsJob.status}) — cannot re-enqueue while in progress`,
-          jobId: activeMatchSkillsJob.id,
-        });
-      } else if (activeEnrichJob) {
-        // match-skills depends on enrich; if enrich is actively running, block
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'blocked',
-          reason: 'Enrich job is currently active — match-skills depends on enrich completing first',
-        });
-      } else if (dryRun) {
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'skipped',
-          reason: `Dry run — would enqueue match-skills (current status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
-        });
-      } else {
-        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills', { priority: 0 });
-        actions.push({
-          action: 'enqueue_match_skills',
-          status: 'repaired',
-          reason: `Enqueued match-skills job (previous status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
-          jobId: payload.jobId,
-        });
-      }
-    } else if (wantMatchSkills) {
-      actions.push({
-        action: 'enqueue_match_skills',
-        status: 'skipped',
-        reason: stages?.matchSkills
-          ? `Match-skills stage is already ${stages.matchSkills.status}`
-          : 'Match-skills was not requested in the original persist',
-      });
+    if (wantMatchSkills) {
+      await applyStageRepair(matchSkillsAssessment);
     }
 
     const healthy = actions.every((a) => a.status === 'skipped');
