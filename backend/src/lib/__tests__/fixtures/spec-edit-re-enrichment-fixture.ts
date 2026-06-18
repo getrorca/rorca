@@ -301,21 +301,19 @@ function stagesWith(overrides: Partial<PostSaveStageFixtureMap>): PostSaveStageF
 
 const storyOnlyStages = stagesWith({
   enrich: {
-    requested: true,
-    status: 'queued',
-    reason: 'durable_job_enqueued',
-    jobId: 'job-story-v2-enrich',
-    bossJobId: '00000000-0000-4000-8000-000000000201',
+    requested: false,
+    status: 'skipped',
+    reason: 'story_content_only',
     editRevision: 2,
-    fingerprint: 'story-v2',
+    fingerprint: 'ctx-v1',
     error: null,
   },
   matchSkills: {
     requested: true,
-    status: 'pending',
-    reason: 'waiting_for_enrich',
+    status: 'queued',
+    reason: 'durable_job_enqueued',
     jobId: 'job-story-v2-match',
-    bossJobId: null,
+    bossJobId: '00000000-0000-4000-8000-000000000202',
     editRevision: 2,
     fingerprint: 'story-v2',
     error: null,
@@ -371,7 +369,6 @@ const rapidStages = stagesWith({
 function withStoryChange(): SpecJsonFixture {
   const next = clone(baseSpecJson);
   next.stories[0].title = 'Render honest post-save state after story edits';
-  next.stories[0].acceptanceCriteria = ['Shows queued enrichment for story-only edits.'];
   return next;
 }
 
@@ -405,16 +402,13 @@ const metadataAfter = state({
 
 const storyAfterJobs = [
   ...clone(beforeState.specJobs),
-  job('job-story-v2-enrich', 'enrich', 'pending', 2, '2026-03-16T00:01:01.000Z', 'enrich', {
+  job('job-story-v2-match', 'match-skills', 'pending', 2, '2026-03-16T00:01:02.000Z', 'matchSkills', {
     request_payload: {
       origin: 'persist-post-save',
-      stage: 'enrich',
+      stage: 'matchSkills',
       editRevision: 2,
       queuePosition: 2,
     },
-  }),
-  job('job-story-v2-match', 'match-skills', 'pending', 2, '2026-03-16T00:01:02.000Z', 'matchSkills', {
-    boss_job_id: null,
   }),
 ];
 
@@ -590,7 +584,7 @@ export const specEditReEnrichmentCases: EditRegressionCase[] = [
     },
   },
   {
-    name: 'story-content-only edit queues enrichment without resynthesizing L4/L5 context',
+    name: 'story-content-only edit queues match-skills without resynthesizing L4/L5 context',
     editClass: 'story-content-only',
     workspaceId,
     specId,
@@ -607,7 +601,7 @@ export const specEditReEnrichmentCases: EditRegressionCase[] = [
       afterKanbanActiveState: {
         activeRunStatus: 'queued',
         queuePosition: 2,
-        sourceJobId: 'job-story-v2-enrich',
+        sourceJobId: 'job-story-v2-match',
         editRevision: 2,
       },
     },

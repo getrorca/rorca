@@ -59,6 +59,7 @@ import {
   getEffectiveGenerationLogs,
   type PersistPostSaveStageMap,
   type PersistPostSaveStageState,
+  type PersistStageReason,
   type PersistStageStatus,
 } from '../lib/spec-post-save';
 import {
@@ -72,6 +73,11 @@ import {
   SPEC_MATCH_SKILLS_QUEUE,
   SPEC_SUGGEST_SKILLS_QUEUE,
 } from '../lib/spec-job-worker';
+import {
+  resolveSpecEditPostSaveDecision,
+  type SpecEditInput,
+  type SpecEditPostSaveDecision,
+} from '../lib/spec-edit-change-class';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -1094,6 +1100,31 @@ function resolveSpecPostSaveOptions(input?: Partial<SpecPostSaveOptions>): SpecP
   };
 }
 
+function postSaveStageReasonsForDecision(
+  decision?: SpecEditPostSaveDecision,
+): Partial<Record<keyof SpecPostSaveOptions, PersistStageReason>> {
+  if (!decision) return {};
+
+  if (decision.changeClass === 'metadata-only') {
+    return {
+      enrich: 'metadata_only_skip',
+      matchSkills: 'metadata_only_skip',
+    };
+  }
+
+  if (decision.changeClass === 'story-content-only') {
+    return {
+      enrich: 'story_content_only',
+      ...(decision.effectivePostSave.matchSkills ? { matchSkills: 'story_content_only' as const } : {}),
+    };
+  }
+
+  return {
+    ...(decision.effectivePostSave.enrich ? { enrich: 'context_bearing_change' as const } : {}),
+    ...(decision.effectivePostSave.matchSkills ? { matchSkills: 'context_bearing_change' as const } : {}),
+  };
+}
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1233,6 +1264,9 @@ async function seedPersistGenerationLog(input: {
   model?: string;
   overwrite: boolean;
   postSave: SpecPostSaveOptions;
+  requestedPostSave?: SpecPostSaveOptions;
+  postSaveStageReasons?: Partial<Record<keyof SpecPostSaveOptions, PersistStageReason>>;
+  postSaveDecision?: SpecEditPostSaveDecision;
   normalizationChanges: Array<{ from?: string; to: string; reason: string }>;
   contextUsed?: unknown;
   callerContextSummary?: Record<string, unknown>;
@@ -1243,7 +1277,7 @@ async function seedPersistGenerationLog(input: {
   const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
   const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
   const invocationSurface = input.invocationSurface?.trim() || 'api.specs.persist';
-  const postSaveStages = buildPersistPostSaveStages(input.postSave);
+  const postSaveStages = buildPersistPostSaveStages(input.postSave, input.postSaveStageReasons);
   const stageFingerprints = computeSpecStageFingerprints({
     title: input.title,
     userStories: input.stories,
@@ -1263,7 +1297,9 @@ async function seedPersistGenerationLog(input: {
     overwrite: input.overwrite,
     pendingEnrichment: input.postSave.enrich,
     postSave: input.postSave,
+    ...(input.requestedPostSave ? { requestedPostSave: input.requestedPostSave } : {}),
     postSaveStages,
+    ...(input.postSaveDecision ? { postSaveDecision: input.postSaveDecision } : {}),
     contextCaptureStatus,
     normalizationChanges: input.normalizationChanges,
     enrichFingerprint: stageFingerprints.enrichFingerprint,
@@ -1399,7 +1435,9 @@ async function persistExplicitDraftInternal(
   const slug = rawSlug || briefToSlug(title);
   const source = body.source?.trim() || 'explicit-draft';
   const overwrite = body.overwrite === true;
-  const postSave = resolveSpecPostSaveOptions(body.postSave);
+  const requestedPostSave = resolveSpecPostSaveOptions(body.postSave);
+  let postSave = requestedPostSave;
+  let postSaveDecision: SpecEditPostSaveDecision | undefined;
   const draftStories = body.stories ?? body.userStories ?? [];
   const resolvedContextSummary = buildContextSummaryFromExplicitDraftContext({
     contextUsed: body.contextUsed,
@@ -1421,17 +1459,36 @@ async function persistExplicitDraftInternal(
   const { pendingDir, approvedDir } = specsDirs(workspace.path);
   const existingPending = path.join(pendingDir, `${slug}.json`);
   const existingApproved = path.join(approvedDir, `${slug}.json`);
-  const hadExistingSpec = fs.existsSync(existingPending) || fs.existsSync(existingApproved);
+  const existingSpecPath = fs.existsSync(existingPending)
+    ? existingPending
+    : fs.existsSync(existingApproved)
+      ? existingApproved
+      : null;
+  const hadExistingSpec = existingSpecPath !== null;
+  const previousSpecRaw = existingSpecPath ? fs.readFileSync(existingSpecPath, 'utf8') : null;
+  const previousSpecContent = previousSpecRaw ? JSON.parse(previousSpecRaw) as SpecEditInput : null;
 
   if (hadExistingSpec && !overwrite) {
     throw new ConflictError(`Spec '${slug}' already exists. Re-submit with overwrite=true to replace it.`);
   }
 
+  if (previousSpecContent) {
+    postSaveDecision = resolveSpecEditPostSaveDecision({
+      before: previousSpecContent,
+      after: {
+        title,
+        userStories: normalizedStories as unknown as SpecEditInput['userStories'],
+      },
+      requestedPostSave,
+    });
+    postSave = postSaveDecision.effectivePostSave;
+  }
+
   if (fs.existsSync(existingPending)) {
-    await snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
+    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
     fs.unlinkSync(existingPending);
   } else if (fs.existsSync(existingApproved)) {
-    await snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
+    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
     fs.unlinkSync(existingApproved);
   }
 
@@ -1460,6 +1517,7 @@ async function persistExplicitDraftInternal(
       storyCount: normalizedStories.length,
       normalizationChanges: changes,
       postSave,
+      ...(postSaveDecision ? { postSaveDecision } : {}),
     })],
   );
   if (walEvent) {
@@ -1478,6 +1536,7 @@ async function persistExplicitDraftInternal(
     model: body.model,
     overwrite,
     postSave,
+    ...(postSaveDecision ? { requestedPostSave, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
     normalizationChanges: changes,
     contextUsed: body.contextUsed,
     callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,

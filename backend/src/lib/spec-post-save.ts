@@ -39,6 +39,9 @@ export type PersistStageReason =
   | 'blocked_by_enrich_failure'
   | 'blocked_by_enrich_enqueue_failure'
   | 'fingerprint_unchanged'
+  | 'metadata_only_skip'
+  | 'story_content_only'
+  | 'context_bearing_change'
   | 'no_installed_skills';
 
 export type PersistContextSource = 'caller_supplied' | 'server_backfilled' | 'missing';
@@ -223,17 +226,20 @@ function deriveOverallStatus(currentStatus: string, stages: PersistPostSaveStage
   return currentStatus;
 }
 
-export function buildPersistPostSaveStages(postSave: PersistPostSaveOptionsShape): PersistPostSaveStageMap {
-  const buildStage = (requested: boolean): PersistPostSaveStageState => ({
+export function buildPersistPostSaveStages(
+  postSave: PersistPostSaveOptionsShape,
+  stageReasons: Partial<Record<keyof PersistPostSaveOptionsShape, PersistStageReason>> = {},
+): PersistPostSaveStageMap {
+  const buildStage = (stageName: keyof PersistPostSaveOptionsShape, requested: boolean): PersistPostSaveStageState => ({
     requested,
     status: requested ? 'pending' : 'skipped',
-    reason: requested ? 'requested_by_caller' : 'disabled_by_caller',
+    reason: stageReasons[stageName] ?? (requested ? 'requested_by_caller' : 'disabled_by_caller'),
   });
 
   return {
-    enrich: buildStage(postSave.enrich),
-    matchSkills: buildStage(postSave.matchSkills),
-    memorySynthesis: buildStage(postSave.memorySynthesis),
+    enrich: buildStage('enrich', postSave.enrich),
+    matchSkills: buildStage('matchSkills', postSave.matchSkills),
+    memorySynthesis: buildStage('memorySynthesis', postSave.memorySynthesis),
   };
 }
 

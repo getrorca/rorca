@@ -7,6 +7,9 @@
 
 import { createHash } from 'crypto';
 
+export const ENRICH_CONTEXT_BEARING_STORY_FIELDS = ['description', 'acceptanceCriteria'] as const;
+export const MATCH_SKILLS_STORY_FIELDS = ['title', 'description', 'acceptanceCriteria', 'dependsOn'] as const;
+
 export interface StageFingerprintStoryInput {
   id?: unknown;
   title?: unknown;
@@ -77,12 +80,10 @@ export function computeSpecStageFingerprints(input: StageFingerprintSpecInput): 
   const stories = orderStories(storiesFromSpec(input));
 
   const enrichPayload = {
-    specTitle: asString(input.title),
     stories: stories.map((story) => ({
       id: asString(story.id),
       description: stripAppendedContextBlock(story.description),
       acceptanceCriteria: asStringArray(story.acceptanceCriteria),
-      dependsOn: sortedStrings(story.dependsOn),
     })),
   };
 
@@ -92,6 +93,7 @@ export function computeSpecStageFingerprints(input: StageFingerprintSpecInput): 
       title: asString(story.title),
       description: asString(story.description),
       acceptanceCriteria: asStringArray(story.acceptanceCriteria),
+      dependsOn: sortedStrings(story.dependsOn),
     })),
   };
 
