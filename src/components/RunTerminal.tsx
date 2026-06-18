@@ -35,9 +35,11 @@ interface RunTerminalProps {
   runId: number;
   workspaceId?: string | null;
   terminalMode?: TerminalMode;
+  runStatus?: RunLifecycleStatus | null;
 }
 
 type TerminalMode = 'ansi-html' | 'pty';
+type RunLifecycleStatus = string;
 
 interface RunTerminalMetaState {
   requestedTerminalMode: TerminalMode;
@@ -48,6 +50,10 @@ interface RunTerminalMetaState {
 
 function coerceTerminalMode(value: unknown): TerminalMode | null {
   return value === 'pty' || value === 'ansi-html' ? value : null;
+}
+
+function isTerminalRunStatus(status: RunLifecycleStatus | null | undefined): boolean {
+  return status === 'done' || status === 'failed' || status === 'cancelled' || status === 'partial_failure';
 }
 
 // ─── Semantic step type (mirrors backend SemanticStep) ────────────────────────
@@ -432,7 +438,7 @@ function trimOldestLines(html: string): string {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId, terminalMode: rendererMode = 'ansi-html' }, ref) {
+const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId, terminalMode: rendererMode = 'ansi-html', runStatus = null }, ref) {
   const preRef = useRef<HTMLPreElement>(null);
   const ptyContainerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
@@ -467,6 +473,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     requestedTerminalMode: rendererMode,
     isPty: rendererMode === 'pty',
   }));
+  const [runMetaResolved, setRunMetaResolved] = useState(false);
   const [ptyReady, setPtyReady] = useState(rendererMode !== 'pty');
   const [ptyFocused, setPtyFocused] = useState(false);
   const [ptyInputHealthy, setPtyInputHealthy] = useState(true);
@@ -499,6 +506,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       ptyAvailable: undefined,
       ptyUnavailableHint: null,
     });
+    setRunMetaResolved(false);
     setPtyReady(rendererMode !== 'pty');
   }, [rendererMode]);
 
@@ -751,6 +759,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       ptyAvailable: undefined,
       ptyUnavailableHint: null,
     });
+    setRunMetaResolved(false);
     if (rendererMode === 'pty' && !ptyReady) return;
     xtermRef.current?.clear();
     if (flushTimerRef.current !== null) {
@@ -780,6 +789,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           ptyUnavailableHint?: string | null;
           pty_unavailable_hint?: string | null;
         };
+        setRunMetaResolved(true);
         if (typeof meta.agentType === 'string' && meta.agentType.trim()) {
           setAgentType(meta.agentType);
         }
@@ -958,55 +968,82 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     ? 'node-pty is unavailable on this server.'
     : 'The PTY session did not start or is no longer attachable.';
   const ptyFallbackHint = terminalMeta.ptyUnavailableHint?.trim();
-  const surfaceLabel = terminalMode === 'pty'
-    ? streamDone
-      ? 'PTY Replay'
-      : ptyFocused
-        ? 'PTY Live • attached'
-        : 'PTY Live • click to attach'
-    : ptyFallbackActive
-      ? 'Degraded • replay-only'
-      : resolvedMode === 'semantic'
-        ? 'Summary View'
-        : 'Log View';
-  const surfaceTone = terminalMode === 'pty'
-    ? ptyInputHealthy ? 'var(--success)' : 'var(--warning)'
-    : ptyFallbackActive ? 'var(--warning)' : resolvedMode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)';
-  const surfaceTitle = ptyFallbackActive
-    ? 'PTY attachment fell back to ANSI replay-only output.'
-    : terminalMode === 'pty' && !ptyInputHealthy ? 'PTY input delivery failed; output may be replay-only.' : undefined;
+  const streamEnded = streamDone || isTerminalRunStatus(runStatus);
+  const resolvingEffectiveMode = terminalMeta.requestedTerminalMode === 'pty' && !runMetaResolved;
+  const ansiSurfaceKind = resolvedMode === 'semantic' ? 'ANSI summary' : 'ANSI log';
+  const fallbackAnsiState = streamEnded ? 'ANSI replay' : 'ANSI live';
+  const surfaceLabel = resolvingEffectiveMode
+    ? 'Checking PTY support'
+    : terminalMode === 'pty'
+      ? streamEnded
+        ? 'PTY replay • detached'
+        : !ptyInputHealthy
+          ? 'Full PTY • input issue'
+          : ptyFocused
+            ? 'Full PTY • focused'
+            : 'Full PTY • click to focus'
+      : ptyFallbackActive
+        ? `PTY fallback • ${fallbackAnsiState}`
+        : `${ansiSurfaceKind} • ${streamEnded ? 'replay' : 'live'}`;
+  const surfaceTone = resolvingEffectiveMode
+    ? 'var(--text-muted)'
+    : terminalMode === 'pty'
+      ? streamEnded ? 'var(--text-muted)' : ptyInputHealthy ? 'var(--success)' : 'var(--warning)'
+      : ptyFallbackActive ? 'var(--warning)' : resolvedMode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)';
+  const surfaceTitle = resolvingEffectiveMode
+    ? 'Waiting for backend metadata before choosing full PTY attachment or ANSI fallback.'
+    : terminalMode === 'pty'
+      ? streamEnded
+        ? 'The PTY session has ended; this xterm.js pane is replaying captured PTY output and keyboard input is disabled.'
+        : ptyInputHealthy
+          ? 'Real xterm.js PTY attachment. Focus the pane to send keyboard input.'
+          : 'PTY output is visible, but input delivery failed; this may be output-only until the connection recovers.'
+      : ptyFallbackActive
+        ? `Requested full PTY, but ${ptyFallbackReason} Showing ${streamEnded ? 'ANSI replay' : 'a live ANSI log stream'} without terminal input.`
+        : `${ansiSurfaceKind} ${streamEnded ? 'replay from saved chunks' : 'live stream'}; this is not a PTY attachment.`;
+  const modeHelpText = resolvingEffectiveMode
+    ? 'Checking whether a real xterm.js PTY is available. Rorca will attach to the PTY when supported, or degrade to ANSI output when it is not.'
+    : terminalMode === 'pty'
+      ? streamEnded
+        ? 'This run used a real xterm.js PTY while active. The session is now detached or exited, so this view is replay-only.'
+        : 'Full PTY attachment: Rorca is using a real xterm.js terminal with stdin/stdout when supported. If the PTY cannot start, this view degrades to ANSI output.'
+      : ptyFallbackActive
+        ? `Requested full PTY, but Rorca degraded to ${streamEnded ? 'ANSI replay' : 'a live ANSI log stream'} because ${ptyFallbackReason.toLowerCase()} Keyboard input is not attached.${ptyFallbackHint ? ` PTY prerequisite: ${ptyFallbackHint}` : ''}`
+        : `${ansiSurfaceKind} ${streamEnded ? 'replay' : 'stream'}: captured output only, not a live PTY. Raw/Semantic controls are available only in ANSI mode; PTY-capable runs use xterm.js when supported and degrade here when not.`;
 
   return (
     <div className="h-full w-full flex flex-col">
       {/* ─── Toolbar ─────────────────────────────────────────────────────── */}
       <div className="shrink-0 px-3 py-1.5 border-b border-border bg-panel flex items-center gap-1">
-        <button
-          onClick={() => handleSetMode('raw')}
-          className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-            resolvedMode === 'raw'
-              ? 'bg-accent/15 text-accent'
-              : 'text-muted hover:text-[var(--text)]'
-          }`}
-        >
-          <span className="flex items-center gap-1">
-            <TerminalIcon size={11} />
-            Raw
-          </span>
-        </button>
         {terminalMode !== 'pty' && (
-          <button
-            onClick={() => handleSetMode('semantic')}
-            className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-              resolvedMode === 'semantic'
-                ? 'bg-accent/15 text-accent'
-                : 'text-muted hover:text-[var(--text)]'
-            }`}
-          >
-            <span className="flex items-center gap-1">
-              <Layers size={11} />
-              Semantic
-            </span>
-          </button>
+          <>
+            <button
+              onClick={() => handleSetMode('raw')}
+              className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+                resolvedMode === 'raw'
+                  ? 'bg-accent/15 text-accent'
+                  : 'text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              <span className="flex items-center gap-1">
+                <TerminalIcon size={11} />
+                Raw
+              </span>
+            </button>
+            <button
+              onClick={() => handleSetMode('semantic')}
+              className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+                resolvedMode === 'semantic'
+                  ? 'bg-accent/15 text-accent'
+                  : 'text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              <span className="flex items-center gap-1">
+                <Layers size={11} />
+                Semantic
+              </span>
+            </button>
+          </>
         )}
 
         {/* Agent type badge (shown when not claude) */}
@@ -1040,14 +1077,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         )}
       </div>
 
+      <div className="shrink-0 border-b border-border/70 bg-panel/70 px-3 py-1.5 text-[11px] leading-snug text-muted">
+        {modeHelpText}
+      </div>
+
       {ptyFallbackActive && (
         <div className="shrink-0 border-b border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
           <div className="flex items-start gap-2">
             <AlertCircle size={14} className="mt-0.5 shrink-0" />
             <div className="space-y-0.5">
-              <div className="font-semibold">PTY unavailable — degraded replay-only mode</div>
+              <div className="font-semibold">PTY unavailable — degraded ANSI mode</div>
               <div className="text-[var(--text)]">
-                {ptyFallbackReason} Showing the existing ANSI log and summary views instead of a full PTY attachment.
+                {ptyFallbackReason} Showing {streamEnded ? 'ANSI replay' : 'the live ANSI log stream'} instead of a full PTY attachment; keyboard input is not attached.
                 {ptyFallbackHint ? ` PTY prerequisite: ${ptyFallbackHint}` : ''}
               </div>
             </div>

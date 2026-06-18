@@ -1577,6 +1577,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                         runId={run.id}
                         workspaceId={workspaceId}
                         terminalMode={run.terminal_mode ?? 'ansi-html'}
+                        runStatus={effectiveStatus}
                       />}
                 </div>
               </div>

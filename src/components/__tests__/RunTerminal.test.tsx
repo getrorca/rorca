@@ -94,7 +94,7 @@ describe('RunTerminal PTY fallback UI', () => {
     vi.stubGlobal('EventSource', TestEventSource);
   });
 
-  it('labels requested PTY demotion as degraded replay-only and keeps ANSI output usable', async () => {
+  it('labels requested PTY demotion as ANSI fallback and keeps ANSI output usable', async () => {
     renderTerminal('pty');
 
     await waitFor(() => expect(lastEventSource).not.toBeNull());
@@ -110,9 +110,10 @@ describe('RunTerminal PTY fallback UI', () => {
       }));
     });
 
-    expect(await screen.findByText('Degraded • replay-only')).toBeInTheDocument();
-    expect(screen.getByText('PTY unavailable — degraded replay-only mode')).toBeInTheDocument();
-    expect(screen.getByText(/Run: cd backend && npm rebuild node-pty/)).toBeInTheDocument();
+    expect(await screen.findByText('PTY fallback • ANSI live')).toBeInTheDocument();
+    expect(screen.getByText('PTY unavailable — degraded ANSI mode')).toBeInTheDocument();
+    expect(screen.getAllByText(/live ANSI log stream/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Run: cd backend && npm rebuild node-pty/).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: /Semantic/i })).toBeInTheDocument();
 
     act(() => {
@@ -140,5 +141,29 @@ describe('RunTerminal PTY fallback UI', () => {
 
     expect(await screen.findByRole('button', { name: /Semantic/i })).toBeInTheDocument();
     expect(screen.getByText('Waiting for semantic events…')).toBeInTheDocument();
+  });
+
+  it('uses neutral copy while resolving PTY support and hides ANSI toggles in real PTY mode', async () => {
+    renderTerminal('pty');
+
+    expect(screen.getByText('Checking PTY support')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
+
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty',
+        requestedTerminalMode: 'pty',
+        isPty: true,
+        ptyAvailable: true,
+      }));
+    });
+
+    expect(await screen.findByText('Full PTY • click to focus')).toBeInTheDocument();
+    expect(screen.getByText(/real xterm\.js terminal with stdin\/stdout/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
   });
 });
