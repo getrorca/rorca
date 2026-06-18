@@ -103,6 +103,12 @@ const STAGE_TO_QUEUE: Record<DurableStageJobType, string> = {
 const USER_TRIGGERED_POST_SAVE_PRIORITY = 1;
 const POST_SAVE_SINGLETON_WINDOW_SECONDS = 1;
 
+type PostSaveTelemetryPayload = Record<string, string | number | boolean | null | string[] | number[] | undefined>;
+
+function logPostSaveTelemetry(event: string, payload: PostSaveTelemetryPayload): void {
+  logger.info({ component: 'post-save', event, ...payload }, '[post-save] telemetry');
+}
+
 type PostSaveQueueSnapshot = {
   queueName: string;
   queueStatus: 'waiting' | 'queued' | 'running';
@@ -514,6 +520,7 @@ export async function supersedeOlderPersistPostSaveJobs(specId: string, workspac
     return jobGeneration !== null && jobGeneration < saveGeneration;
   });
 
+  const supersededJobIds: string[] = [];
   for (const job of supersededJobs) {
     const metadata = getPostSaveJobMetadata(job);
     if (!metadata) continue;
@@ -523,6 +530,7 @@ export async function supersedeOlderPersistPostSaveJobs(specId: string, workspac
       progressMessage: 'Superseded by newer spec save',
       errorMessage: null,
     });
+    supersededJobIds.push(job.id);
     await updatePersistPostSaveStage(job.specId, metadata.stage, {
       requested: true,
       status: 'superseded',
@@ -532,6 +540,14 @@ export async function supersedeOlderPersistPostSaveJobs(specId: string, workspac
       error: null,
     }, generationForJob(job, metadata));
   }
+
+  logPostSaveTelemetry('jobs_superseded', {
+    specId,
+    workspaceId,
+    saveGeneration,
+    supersededCount: supersededJobIds.length,
+    supersededJobIds,
+  });
 
   return supersededJobs.length;
 }
@@ -566,6 +582,14 @@ export async function markPersistPostSaveJobSupersededIfStale(jobId: string): Pr
     finishedAt: new Date(),
     progressMessage: 'Superseded by newer spec save',
     errorMessage: null,
+  });
+  logPostSaveTelemetry('stale_job_superseded', {
+    specId: job.specId,
+    workspaceId: job.workspaceId,
+    jobId: job.id,
+    stage: metadata.stage,
+    saveGeneration: generationForJob(job, metadata),
+    skipReason: 'superseded_by_newer_save',
   });
   return true;
 }
@@ -610,6 +634,18 @@ async function enqueueExistingJob(job: SpecJob, jobType: DurableStageJobType, st
       queuePriority: priority,
       singletonKey,
     }, job.saveGeneration);
+    logPostSaveTelemetry('stage_queued', {
+      specId: job.specId,
+      workspaceId: job.workspaceId,
+      jobId: job.id,
+      bossJobId,
+      stage: stageName,
+      queueName: STAGE_TO_QUEUE[jobType],
+      queuePriority: priority,
+      singletonKey,
+      reason,
+      saveGeneration: job.saveGeneration ?? undefined,
+    });
     return true;
   } catch (error) {
     const message = errorMessageFor(error);
@@ -710,6 +746,16 @@ async function markExistingJobSkippedByFingerprint(
     ...(metadata.fingerprint ? { fingerprint: metadata.fingerprint } : {}),
     ...(metadata.previousFingerprint ? { previousFingerprint: metadata.previousFingerprint } : {}),
   }, job.saveGeneration);
+  logPostSaveTelemetry('stage_skipped', {
+    specId: job.specId,
+    workspaceId: job.workspaceId,
+    jobId: job.id,
+    stage: stageName,
+    skipReason: 'fingerprint_unchanged',
+    fingerprint: metadata.fingerprint,
+    previousFingerprint: metadata.previousFingerprint,
+    saveGeneration: job.saveGeneration ?? undefined,
+  });
 }
 
 async function createSkippedStageJob(

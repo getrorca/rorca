@@ -70,6 +70,10 @@ function errorMessageFor(error: unknown): string {
   return String(error);
 }
 
+function logSpecJobTelemetry(event: string, payload: Record<string, string | number | boolean | null | undefined>): void {
+  logger.info({ component: 'spec-job-worker', event, ...payload }, '[spec-job-worker] telemetry');
+}
+
 async function handleSpecJobs(
   jobs: PgBoss.Job<unknown>[],
   queueName: string,
@@ -109,6 +113,13 @@ async function handleSpecJobs(
     }
     await syncPersistPostSaveStageFromJob(payload.jobId);
     await publishSpecJobSnapshot(payload.jobId, 'progress');
+    logSpecJobTelemetry('stage_started', {
+      queueName,
+      jobId: payload.jobId,
+      specId: payload.specId,
+      workspaceId: payload.workspaceId,
+      queueWaitMs: Math.max(0, startedAt.getTime() - (existing?.createdAt?.getTime() ?? startedAt.getTime())),
+    });
 
     try {
       const resultPayload = await runner(payload, onProgress);
@@ -125,6 +136,13 @@ async function handleSpecJobs(
       await syncPersistPostSaveStageFromJob(payload.jobId);
       await advancePersistPostSaveDependencies(payload.jobId);
       await publishSpecJobSnapshot(payload.jobId, 'terminal');
+      logSpecJobTelemetry('stage_completed', {
+        queueName,
+        jobId: payload.jobId,
+        specId: payload.specId,
+        workspaceId: payload.workspaceId,
+        stageDurationMs: Math.max(0, Date.now() - startedAt.getTime()),
+      });
       logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] job completed');
     } catch (error) {
       if (error instanceof SpecJobCancelledError) {
@@ -138,6 +156,15 @@ async function handleSpecJobs(
         await syncPersistPostSaveStageFromJob(payload.jobId);
         await advancePersistPostSaveDependencies(payload.jobId);
         await publishSpecJobSnapshot(payload.jobId, 'terminal');
+        logSpecJobTelemetry('stage_stopped', {
+          queueName,
+          jobId: payload.jobId,
+          specId: payload.specId,
+          workspaceId: payload.workspaceId,
+          status: terminalStatus,
+          stageDurationMs: Math.max(0, Date.now() - startedAt.getTime()),
+          skipReason: terminalStatus === 'superseded' ? 'superseded_by_newer_save' : 'cancelled_by_user',
+        });
         logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId, status: terminalStatus }, '[spec-job-worker] job stopped');
         return;
       }
@@ -170,6 +197,13 @@ async function handleSpecJobs(
       await syncPersistPostSaveStageFromJob(payload.jobId);
       await advancePersistPostSaveDependencies(payload.jobId);
       await publishSpecJobSnapshot(payload.jobId, 'terminal');
+      logSpecJobTelemetry('stage_failed', {
+        queueName,
+        jobId: payload.jobId,
+        specId: payload.specId,
+        workspaceId: payload.workspaceId,
+        stageDurationMs: Math.max(0, Date.now() - startedAt.getTime()),
+      });
       logger.warn({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId, error: message }, '[spec-job-worker] job failed');
       throw error;
     }

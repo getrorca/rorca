@@ -43,6 +43,7 @@ import type { ContextSummary } from '../panels/SpecForgeOutput';
 import { SpecModelControlBar } from './SpecModelControlBar';
 import type { SpecModelFields } from './SpecModelControlBar';
 import type { EngineValue } from './EngineSelector';
+import { isRunStatusBlocking } from '../lib/kanbanRunStatus';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -1009,12 +1010,12 @@ function SpecDetailContent({
 
           {/* Enrich with Context */}
           {(() => {
-            const enrichDisabled = activeRunStatus === 'running' || activeRunStatus === 'queued' || enrichState === 'enriching' || hasBlockingPostSaveJob;
+            const enrichDisabled = isRunStatusBlocking(activeRunStatus) || enrichState === 'enriching' || hasBlockingPostSaveJob;
             return (
               <button
                 onClick={handleEnrich}
                 disabled={enrichDisabled}
-                title={hasBlockingPostSaveJob ? 'Cannot enrich while another post-save job is active for this spec' : activeRunStatus === 'running' || activeRunStatus === 'queued' ? 'Cannot enrich while a run is active' : 'Enrich stories with contextual annotations'}
+                title={hasBlockingPostSaveJob ? 'Cannot enrich while another post-save job is active for this spec' : isRunStatusBlocking(activeRunStatus) ? 'Cannot enrich while a run is active' : 'Enrich stories with contextual annotations'}
                 className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${enrichDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 {enrichState === 'enriching'
@@ -1933,7 +1934,7 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, bloc
   const hasAnyRequested = stageNames.some(name => stages[name].requested);
   if (!hasAnyRequested) return null;
 
-  const isRunActive = activeRunStatus === 'running' || activeRunStatus === 'queued';
+  const isRunActive = isRunStatusBlocking(activeRunStatus);
   const isBlockedByActivePostSave = blockingPostSaveJob !== null && blockingPostSaveJob !== undefined;
 
   const handleRetryStage = async (stageName: keyof PostSaveStageMap) => {
@@ -2091,7 +2092,7 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
   const toast = useGlobalToast();
   const [repairState, setRepairState] = useState<'idle' | 'repairing' | 'retrying'>('idle');
   const config = CONTEXT_CLASSIFICATION_CONFIG[classification];
-  const isRunActive = activeRunStatus === 'running' || activeRunStatus === 'queued';
+  const isRunActive = isRunStatusBlocking(activeRunStatus);
   const isBlockedByActivePostSave = blockingPostSaveJob !== null && blockingPostSaveJob !== undefined;
   const isBusy = repairState !== 'idle';
   const isPending = classification === 'pending_post_save';

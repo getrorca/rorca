@@ -44,6 +44,7 @@ import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 import ContextSummaryCard from '../components/ContextSummaryCard';
+import { getKanbanRunPresentation } from '../lib/kanbanRunStatus';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -603,7 +604,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const [retrying, setRetrying] = useState(false);
   const hasLoadedOnce = useRef(false);
   const [actionLoadingMap, setActionLoadingMap] = useState<Record<string, 'approve' | 'deny' | null>>({});
-  const [activeRunSpecs, setActiveRunSpecs] = useState<Map<string, 'running' | 'queued'>>(new Map());
   const sseFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Drag state — refs for performance (no re-renders during drag)
@@ -663,12 +663,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     try {
       const res = await apiFetch<KanbanResponse>(`/api/specs/kanban?workspaceId=${workspaceId}`);
       setKanban(res);
-      // Sync active run statuses from kanban response
-      const runStatuses = new Map<string, 'running' | 'queued'>();
-      for (const spec of res.inProgress) {
-        if (spec.activeRunId) runStatuses.set(spec.id, spec.activeRunStatus ?? 'running');
-      }
-      setActiveRunSpecs(runStatuses);
       setError(null);
       hasLoadedOnce.current = true;
     } catch (err: any) {
@@ -699,12 +693,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     if (workspaceId && event.workspace_id && event.workspace_id !== String(workspaceId)) return;
     const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'run_queued_promoted', 'spec_rejected', 'story_passed', 'story_failed', 'spec_discovered', 'spec_updated'];
     if (!KANBAN_EVENTS.includes(event.event_type)) return;
-    if (event.event_type === 'run_started' && event.spec_id) {
-      setActiveRunSpecs((prev) => new Map(prev).set(event.spec_id!, 'running'));
-    }
-    if (event.event_type === 'run_finished' && event.spec_id) {
-      setActiveRunSpecs((prev) => { const next = new Map(prev); next.delete(event.spec_id!); return next; });
-    }
     debouncedFetchKanban();
   });
 
@@ -1379,10 +1367,10 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     const hasProgress = storyProgress[spec.id] !== undefined && colKey !== 'draft';
     const actionLoading = actionLoadingMap[spec.id] ?? null;
     const isActioning = actionLoading !== null;
-    const runStatus = activeRunSpecs.get(spec.id);
-    const hasActiveRun = runStatus !== undefined;
-    const isQueued = runStatus === 'queued';
-    const isParallelRun = spec.isParallelRun === true;
+    const runPresentation = getKanbanRunPresentation(spec);
+    const hasActiveRun = runPresentation.hasActiveRun;
+    const isQueued = runPresentation.isQueued;
+    const isParallelRun = runPresentation.isParallelRun;
     const modelName = modelShortName(spec.model);
     const postSaveStatus = spec.postSaveStatus;
     const hasPostSaveJob = postSaveStatus === 'queued' || postSaveStatus === 'waiting-for-worker' || postSaveStatus === 'running';
@@ -1497,10 +1485,10 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
                       : 'bg-accent/15 text-accent border-accent/30 animate-pulse'
                 }`}>
                   {isQueued
-                    ? <><Clock size={8} /> Queued{spec.queuePosition ? ` #${spec.queuePosition}` : ''}</>
+                    ? <><Clock size={8} /> {runPresentation.badgeText}</>
                     : isParallelRun
-                      ? <><Play size={8} className="fill-current" /> Running (parallel)</>
-                      : <><Play size={8} className="fill-current" /> Running</>
+                      ? <><Play size={8} className="fill-current" /> {runPresentation.badgeText}</>
+                      : <><Play size={8} className="fill-current" /> {runPresentation.badgeText}</>
                   }
                 </span>
               )}

@@ -59,8 +59,11 @@ jest.mock('../pg-boss', () => ({
   getBoss: jest.fn(() => ({ send: mockBossSend, cancel: mockBossCancel })),
 }));
 
+const mockLoggerInfo = jest.fn();
+const mockLoggerWarn = jest.fn();
+
 jest.mock('../logger', () => ({
-  logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn() },
+  logger: { warn: (...args: unknown[]) => mockLoggerWarn(...args), info: (...args: unknown[]) => mockLoggerInfo(...args), error: jest.fn(), debug: jest.fn() },
 }));
 
 beforeEach(() => {
@@ -123,9 +126,12 @@ describe('PSE-009: stage skip reason tracking', () => {
       'blocked_by_enrich_failure',
       'blocked_by_enrich_enqueue_failure',
       'fingerprint_unchanged',
+      'metadata_only_skip',
+      'story_content_only',
+      'context_bearing_change',
       'no_installed_skills',
     ];
-    expect(allReasons).toHaveLength(14);
+    expect(allReasons).toHaveLength(17);
     for (const reason of allReasons) {
       expect(typeof reason).toBe('string');
       expect(reason.length).toBeGreaterThan(0);
@@ -139,11 +145,15 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
   // Import the function under test (requires mocks above)
   let enqueuePersistPostSaveJobs: typeof import('../spec-post-save').enqueuePersistPostSaveJobs;
   let advancePersistPostSaveDependencies: typeof import('../spec-post-save').advancePersistPostSaveDependencies;
+  let syncPersistPostSaveStageFromJob: typeof import('../spec-post-save').syncPersistPostSaveStageFromJob;
+  let markPersistPostSaveJobSupersededIfStale: typeof import('../spec-post-save').markPersistPostSaveJobSupersededIfStale;
 
   beforeAll(async () => {
     const mod = await import('../spec-post-save');
     enqueuePersistPostSaveJobs = mod.enqueuePersistPostSaveJobs;
     advancePersistPostSaveDependencies = mod.advancePersistPostSaveDependencies;
+    syncPersistPostSaveStageFromJob = mod.syncPersistPostSaveStageFromJob;
+    markPersistPostSaveJobSupersededIfStale = mod.markPersistPostSaveJobSupersededIfStale;
   });
 
   it('no-ops when both enrich and matchSkills are false', async () => {
@@ -277,6 +287,91 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
       'spec:enrich',
       expect.objectContaining({ specId: 'spec-coalesce', jobId: 'job-enrich-latest' }),
       expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-1:spec-coalesce' }),
+    );
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: 'post-save',
+        event: 'jobs_superseded',
+        specId: 'spec-coalesce',
+        workspaceId: 'ws-1',
+        saveGeneration: 2,
+        supersededCount: 1,
+        supersededJobIds: ['job-enrich-old'],
+      }),
+      '[post-save] telemetry',
+    );
+  });
+
+  it('stale post-save sync cannot mutate the newer generation log', async () => {
+    const staleJob = {
+      id: 'job-stale-completion',
+      specId: 'spec-stale',
+      workspaceId: 'ws-1',
+      jobType: 'enrich',
+      bossJobId: '88888888-8888-4888-8888-888888888888',
+      status: 'completed',
+      progressCurrent: 1,
+      progressTotal: 1,
+      progressMessage: null,
+      requestPayload: { origin: 'persist-post-save', stage: 'enrich', saveGeneration: 1 },
+      resultPayload: { ok: true },
+      errorMessage: null,
+      startedAt: new Date('2026-01-01T00:00:00.000Z'),
+      finishedAt: new Date('2026-01-01T00:00:05.000Z'),
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      saveGeneration: 1,
+    };
+    mockGetJob.mockResolvedValue(staleJob);
+    mockQueryOne.mockResolvedValueOnce({ save_generation: 2 });
+
+    await syncPersistPostSaveStageFromJob('job-stale-completion');
+
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockUpdateJobStatus).not.toHaveBeenCalledWith(
+      'job-stale-completion',
+      'completed',
+      expect.anything(),
+    );
+  });
+
+  it('marks stale jobs superseded without deleting audit-visible job rows', async () => {
+    const staleJob = {
+      id: 'job-stale-audit',
+      specId: 'spec-stale-audit',
+      workspaceId: 'ws-1',
+      jobType: 'match-skills',
+      bossJobId: '77777777-7777-4777-8777-777777777777',
+      status: 'running',
+      progressCurrent: 0,
+      progressTotal: 1,
+      progressMessage: null,
+      requestPayload: { origin: 'persist-post-save', stage: 'matchSkills', saveGeneration: 1 },
+      resultPayload: null,
+      errorMessage: null,
+      startedAt: new Date('2026-01-01T00:00:00.000Z'),
+      finishedAt: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      saveGeneration: 1,
+    };
+    mockGetJob.mockResolvedValue(staleJob);
+    mockQueryOne.mockResolvedValueOnce({ save_generation: 3 });
+
+    await expect(markPersistPostSaveJobSupersededIfStale('job-stale-audit')).resolves.toBe(true);
+
+    expect(mockUpdateJobStatus).toHaveBeenCalledWith(
+      'job-stale-audit',
+      'superseded',
+      expect.objectContaining({ progressMessage: 'Superseded by newer spec save' }),
+    );
+    expect(mockCreateJob).not.toHaveBeenCalledWith(expect.anything(), 'spec-stale-audit', expect.anything(), expect.anything());
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: 'post-save',
+        event: 'stale_job_superseded',
+        jobId: 'job-stale-audit',
+        skipReason: 'superseded_by_newer_save',
+      }),
+      '[post-save] telemetry',
     );
   });
 
