@@ -1,0 +1,307 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import * as fs from 'fs';
+import * as http from 'http';
+import * as os from 'os';
+import * as path from 'path';
+import { execSync } from 'child_process';
+import type { AddressInfo } from 'net';
+import type { Express } from 'express';
+import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
+import * as db from '../../db/index';
+import { claimLatestRunPtyResize } from '../../lib/run-pty-store';
+
+jest.setTimeout(90_000);
+
+jest.mock('../../lib/llm-client', () => ({
+  chatComplete: jest.fn(),
+  getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+  isValidModel: jest.fn().mockReturnValue(true),
+  DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
+  SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+}));
+
+jest.mock('../../lib/pg-boss', () => ({
+  initBoss: jest.fn().mockResolvedValue(undefined),
+  getBoss: jest.fn().mockReturnValue({
+    send: jest.fn().mockResolvedValue('mock-job-id'),
+    work: jest.fn(),
+    stop: jest.fn().mockResolvedValue(undefined),
+  }),
+}));
+
+jest.mock('../../lib/pty-manager', () => ({
+  PTY_AVAILABLE: true,
+  PTY_UNAVAILABLE_HINT: 'Run: cd backend && npm rebuild node-pty',
+}));
+
+interface PipelineRunModeRow {
+  terminal_mode: string | null;
+}
+
+interface CountRow {
+  count: string;
+}
+
+interface ResizeAppliedRow {
+  cols: number;
+  rows: number;
+  applied_at: Date | null;
+}
+
+let app: Express;
+let authToken: string;
+let tmpDir = '';
+let wsDir = '';
+
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  const serverMod = require('../../server');
+  app = serverMod.default;
+  authToken = await getAuthToken(app);
+});
+
+beforeEach(async () => {
+  jest.clearAllMocks();
+
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pipeline-pty-attachment-'));
+  wsDir = path.join(tmpDir, 'workspace');
+  fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
+
+  execSync('git init -b main', { cwd: wsDir, stdio: 'pipe' });
+  execSync('git config user.email "test@example.com"', { cwd: wsDir, stdio: 'pipe' });
+  execSync('git config user.name "Test User"', { cwd: wsDir, stdio: 'pipe' });
+  fs.writeFileSync(path.join(wsDir, 'README.md'), '# test workspace\n', 'utf8');
+  execSync('git add README.md', { cwd: wsDir, stdio: 'pipe' });
+  execSync('git commit -m "init"', { cwd: wsDir, stdio: 'pipe' });
+
+  await db.execute(`DELETE FROM run_pty_resize_requests WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pty-attach')`);
+  await db.execute(`DELETE FROM run_pty_output_chunks WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pty-attach')`);
+  await db.execute(`DELETE FROM run_pty_sessions WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pty-attach')`);
+  await db.execute(`DELETE FROM run_output_chunks WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pty-attach')`);
+  await db.execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-pty-attach'`);
+  await db.execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-pty-attach', 'PTY Attach WS', $1)
+    ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [wsDir]);
+});
+
+afterEach(async () => {
+  await new Promise((resolve) => setImmediate(resolve));
+  jest.restoreAllMocks();
+  if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(() => {
+  delete process.env.NODE_ENV;
+});
+
+function seedSpec(slug: string): void {
+  fs.writeFileSync(
+    path.join(wsDir, 'forge', 'specs', 'approved', `${slug}.json`),
+    JSON.stringify({
+      title: slug,
+      userStories: [
+        { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
+      ],
+    }),
+    'utf8',
+  );
+}
+
+async function seedRun(status: string, terminalMode: 'ansi-html' | 'pty'): Promise<number> {
+  const row = await db.queryOne<{ id: number }>(
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode, agent, agent_type)
+     VALUES ('forge/specs/approved/pty-attach.json', 'ws-pty-attach', $1, $2, 'claude', 'claude')
+     RETURNING id`,
+    [status, terminalMode],
+  );
+  return Number(row!.id);
+}
+
+async function streamOutput(runId: number): Promise<string> {
+  const response = await request(app)
+    .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`)
+    .set('Authorization', `Bearer ${authToken}`)
+    .buffer(true)
+    .parse((res, callback) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => callback(null, body));
+    });
+
+  expect(response.status).toBe(200);
+  return response.body as string;
+}
+
+describe('PTY attachment trigger and fallback discrimination', () => {
+  test('trigger accepts camelCase terminalMode=pty, persists the run mode, and forwards the pg-boss payload', async () => {
+    seedSpec('trigger-pty-payload');
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/trigger-pty-payload.json',
+        workspaceId: 'ws-pty-attach',
+        terminalMode: 'pty',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.terminalMode).toBe('pty');
+    expect(res.body.terminal_mode).toBe('pty');
+
+    const run = await db.queryOne<PipelineRunModeRow>('SELECT terminal_mode FROM pipeline_runs WHERE id = $1', [res.body.runId]);
+    expect(run?.terminal_mode).toBe('pty');
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({ runId: res.body.runId, terminalMode: 'pty' }),
+      expect.any(Object),
+    );
+  });
+
+  test('PTY-backed replay emits isPty=true and reads only the dedicated PTY chunk table', async () => {
+    const runId = await seedRun('done', 'pty');
+    const ansiFallbackChunk = Buffer.from('ansi table should not render\n', 'utf8');
+    const ptyChunk = Buffer.from('\u001b[32mreal pty bytes\u001b[0m\r\n', 'utf8');
+
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes, total_stored_bytes)
+       VALUES ($1, 'ws-pty-attach', $2, 'claude', 'exited', $3, $3)`,
+      [runId, wsDir, ptyChunk.length],
+    );
+    await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ptyChunk]);
+    await db.execute('INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ansiFallbackChunk]);
+
+    const [ptyCount, ansiCount] = await Promise.all([
+      db.queryOne<CountRow>('SELECT COUNT(*)::text AS count FROM run_pty_output_chunks WHERE run_id = $1', [runId]),
+      db.queryOne<CountRow>('SELECT COUNT(*)::text AS count FROM run_output_chunks WHERE run_id = $1', [runId]),
+    ]);
+    expect(ptyCount?.count).toBe('1');
+    expect(ansiCount?.count).toBe('1');
+
+    const body = await streamOutput(runId);
+
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminalMode":"pty"');
+    expect(body).toContain('"isPty":true');
+    expect(body).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
+    expect(body).not.toContain(ansiFallbackChunk.toString('base64'));
+    expect(body).not.toContain('event: semantic_step');
+  });
+
+  test('requested PTY without a PTY session demotes explicitly to ANSI fallback metadata', async () => {
+    const runId = await seedRun('done', 'pty');
+    const ansiChunk = Buffer.from('fallback transcript bytes\n', 'utf8');
+    await db.execute('INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ansiChunk]);
+
+    const body = await streamOutput(runId);
+
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminalMode":"ansi-html"');
+    expect(body).toContain('"requestedTerminalMode":"pty"');
+    expect(body).toContain('"isPty":false');
+    expect(body).toContain('"ptyFallbackActive":true');
+    expect(body).toContain(`event: chunk\ndata: ${ansiChunk.toString('base64')}`);
+  });
+});
+
+describe('PTY resize forwarding and SSE attach/disconnect', () => {
+  test('resize requests are consumed by the PTY polling contract and marked applied', async () => {
+    const runId = await seedRun('running', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
+      [runId, wsDir],
+    );
+
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${runId}/pty/resize`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ cols: 132, rows: 43 });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, runId, cols: 132, rows: 43 });
+
+    await new Promise((resolve) => setTimeout(resolve, 275));
+    const claimed = await claimLatestRunPtyResize(runId);
+    expect(claimed).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
+
+    const resizeRow = await db.queryOne<ResizeAppliedRow>(
+      'SELECT cols, rows, applied_at FROM run_pty_resize_requests WHERE run_id = $1 ORDER BY id DESC LIMIT 1',
+      [runId],
+    );
+    expect(resizeRow).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
+    expect(resizeRow?.applied_at).not.toBeNull();
+  });
+
+  test('closing the SSE output attachment clears polling and stops further DB reads', async () => {
+    const runId = await seedRun('running', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
+      [runId, wsDir],
+    );
+
+    const querySpy = jest.spyOn(db, 'query');
+    const queryOneSpy = jest.spyOn(db, 'queryOne');
+    const server = app.listen(0);
+
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const body = await new Promise<string>((resolve, reject) => {
+        let received = '';
+        let closed = false;
+        const clientReq = http.get({
+          port,
+          path: `/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`,
+          headers: { Authorization: `Bearer ${authToken}` },
+        }, (clientRes) => {
+          clientRes.setEncoding('utf8');
+          clientRes.on('data', (chunk: string) => {
+            received += chunk;
+            if (!closed && received.includes('event: run_meta')) {
+              closed = true;
+              clientReq.destroy();
+              setTimeout(() => {
+                const callsAfterClose = querySpy.mock.calls.length + queryOneSpy.mock.calls.length;
+                setTimeout(() => {
+                  const callsAfterWait = querySpy.mock.calls.length + queryOneSpy.mock.calls.length;
+                  try {
+                    expect(callsAfterWait).toBe(callsAfterClose);
+                    resolve(received);
+                  } catch (err) {
+                    reject(err);
+                  }
+                }, 450);
+              }, 75);
+            }
+          });
+        });
+        clientReq.on('error', (err) => {
+          if (closed) return;
+          reject(err);
+        });
+        clientReq.setTimeout(5_000, () => {
+          clientReq.destroy();
+          reject(new Error('Timed out waiting for run_meta SSE event'));
+        });
+      });
+
+      expect(body).toContain('event: run_meta');
+      expect(body).toContain('"isPty":true');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

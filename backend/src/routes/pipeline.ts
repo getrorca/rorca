@@ -4866,10 +4866,16 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
   let streamClosed = false;
-  req.on('close', () => {
+  let pollInterval: NodeJS.Timeout | null = null;
+  const cleanupOutputStream = () => {
     streamClosed = true;
     clearInterval(hb);
-  });
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  };
+  req.on('close', cleanupOutputStream);
 
   // Resolve agent type for semantic parsing (defaults to 'claude')
   const runRow = await queryOne('SELECT agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
@@ -4893,7 +4899,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       ? 'pty-session-unavailable'
       : 'node-pty-unavailable'
     : null;
-  if (streamClosed) return;
+  if (streamClosed || req.destroyed || res.destroyed) {
+    cleanupOutputStream();
+    return;
+  }
 
   // Emit run metadata so frontend knows which renderer to use. When a requested
   // PTY stream has no PTY session, this is the canonical demotion signal for the
@@ -4938,6 +4947,12 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     }
   }
 
+  // ── If the client disconnected during metadata/replay, do not arm polling. ──
+  if (streamClosed || req.destroyed || res.destroyed) {
+    cleanupOutputStream();
+    return;
+  }
+
   // ── If the run is already terminal, close immediately ────────────────────
   if (runRow && terminalStatuses.includes(runRow.status)) {
     clearInterval(hb);
@@ -4948,7 +4963,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
   // ── Poll for new chunks while run is active ───────────────────────────────
   // Checks every 200 ms; uses lastSequence to fetch only new rows efficiently.
-  const pollInterval = setInterval(async () => {
+  pollInterval = setInterval(async () => {
     try {
       if (usePtyCapture) {
         const newChunks = await listRunPtyChunks(runId, lastSequence);
@@ -4977,23 +4992,20 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       ]);
       const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
       if (!statusRow || terminalStatuses.includes(statusRow.status) || ptyTerminal) {
-        clearInterval(pollInterval);
-        clearInterval(hb);
+        cleanupOutputStream();
         res.write('event: done\ndata: \n\n');
         res.end();
       }
     } catch {
-      clearInterval(pollInterval);
-      clearInterval(hb);
+      cleanupOutputStream();
       res.write('event: done\ndata: \n\n');
       res.end();
     }
   }, 200);
 
-  req.on('close', () => {
-    clearInterval(pollInterval);
-    clearInterval(hb);
-  });
+  if (streamClosed || req.destroyed || res.destroyed) {
+    cleanupOutputStream();
+  }
 });
 
 // ─── Token usage recording helper ─────────────────────────────────────────────

@@ -5,10 +5,28 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ThemeProvider } from '../../contexts/ThemeContext';
+import { apiFetch } from '../../lib/apiFetch';
 import RunTerminal from '../RunTerminal';
+
+const xtermMockState = vi.hoisted(() => ({
+  instances: [] as Array<{
+    cols: number;
+    rows: number;
+    options: Record<string, unknown>;
+    loadAddon: ReturnType<typeof vi.fn>;
+    open: ReturnType<typeof vi.fn>;
+    write: ReturnType<typeof vi.fn>;
+    writeln: ReturnType<typeof vi.fn>;
+    clear: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
+    dispose: ReturnType<typeof vi.fn>;
+    onData: ReturnType<typeof vi.fn>;
+    emitData: (data: string) => void;
+  }>,
+}));
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class MockTerminal {
@@ -22,7 +40,17 @@ vi.mock('@xterm/xterm', () => ({
     clear = vi.fn();
     focus = vi.fn();
     dispose = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
+    private dataListener: ((data: string) => void) | null = null;
+    onData = vi.fn((listener: (data: string) => void) => {
+      this.dataListener = listener;
+      return { dispose: vi.fn() };
+    });
+    constructor() {
+      xtermMockState.instances.push(this);
+    }
+    emitData(data: string) {
+      this.dataListener?.(data);
+    }
   },
 }));
 
@@ -80,6 +108,23 @@ class TestEventSource {
 
 let lastEventSource: TestEventSource | null = null;
 
+type ResizeObserverCallbackForTest = ConstructorParameters<typeof ResizeObserver>[0];
+
+class TestResizeObserver {
+  static instances: TestResizeObserver[] = [];
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+
+  constructor(private readonly callback: ResizeObserverCallbackForTest) {
+    TestResizeObserver.instances.push(this);
+  }
+
+  trigger(): void {
+    this.callback([] as unknown as ResizeObserverEntry[], this as unknown as ResizeObserver);
+  }
+}
+
 function renderTerminal(terminalMode: 'ansi-html' | 'pty' = 'pty') {
   return render(
     <ThemeProvider>
@@ -91,7 +136,13 @@ function renderTerminal(terminalMode: 'ansi-html' | 'pty' = 'pty') {
 describe('RunTerminal PTY fallback UI', () => {
   beforeEach(() => {
     lastEventSource = null;
+    xtermMockState.instances.length = 0;
+    TestResizeObserver.instances.length = 0;
+    vi.useRealTimers();
     vi.stubGlobal('EventSource', TestEventSource);
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response('{}') as never);
   });
 
   it('labels requested PTY demotion as ANSI fallback and keeps ANSI output usable', async () => {
@@ -165,5 +216,82 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(screen.getByText(/real xterm\.js terminal with stdin\/stdout/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
+  });
+
+  it('focuses the xterm pane and sends keyboard input only while in authoritative PTY mode', async () => {
+    renderTerminal('pty');
+
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    await waitFor(() => expect(xtermMockState.instances.length).toBe(1));
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty',
+        requestedTerminalMode: 'pty',
+        isPty: true,
+        ptyAvailable: true,
+      }));
+    });
+
+    const terminal = xtermMockState.instances[0];
+    const pane = document.querySelector('[data-terminal-input="true"]') as HTMLElement;
+    expect(pane).toBeTruthy();
+
+    fireEvent.mouseDown(pane);
+    expect(terminal.focus).toHaveBeenCalledTimes(1);
+
+    fireEvent.focusIn(pane);
+    expect(await screen.findByText('Full PTY • focused')).toBeInTheDocument();
+    fireEvent.focusOut(pane);
+    expect(await screen.findByText('Full PTY • click to focus')).toBeInTheDocument();
+
+    vi.mocked(apiFetch).mockClear();
+    act(() => {
+      terminal.emitData('ls -la\n');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      '/api/pipeline/runs/77/input',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ dataBase64: Buffer.from('ls -la\n', 'utf8').toString('base64') }),
+        silent: true,
+      }),
+    ));
+  });
+
+  it('forwards initial and debounced PTY resize payloads to the backend', async () => {
+    renderTerminal('pty');
+
+    await waitFor(() => expect(xtermMockState.instances.length).toBe(1));
+    const terminal = xtermMockState.instances[0];
+
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      '/api/pipeline/runs/77/pty/resize',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ cols: 80, rows: 24 }),
+        silent: true,
+      }),
+    ));
+
+    vi.mocked(apiFetch).mockClear();
+    terminal.cols = 132;
+    terminal.rows = 43;
+
+    act(() => {
+      TestResizeObserver.instances[0].trigger();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 170));
+
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      '/api/pipeline/runs/77/pty/resize',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ cols: 132, rows: 43 }),
+        silent: true,
+      }),
+    ));
   });
 });
