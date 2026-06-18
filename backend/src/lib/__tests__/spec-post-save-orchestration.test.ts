@@ -35,12 +35,14 @@ jest.mock('../../db/index', () => ({
 
 const mockCreateJob = jest.fn();
 const mockGetJob = jest.fn();
+const mockListActiveJobs = jest.fn();
 const mockListJobsForSpec = jest.fn();
 const mockUpdateJobStatus = jest.fn();
 
 jest.mock('../../db/spec-jobs', () => ({
   createJob: (...args: unknown[]) => mockCreateJob(...args),
   getJob: (...args: unknown[]) => mockGetJob(...args),
+  listActiveJobs: (...args: unknown[]) => mockListActiveJobs(...args),
   listJobsForSpec: (...args: unknown[]) => mockListJobsForSpec(...args),
   updateJobStatus: (...args: unknown[]) => mockUpdateJobStatus(...args),
 }));
@@ -50,10 +52,11 @@ const mockBossSend = jest.fn().mockImplementation(() => {
   bossCallCount++;
   return Promise.resolve(`aaaaaaaa-aaaa-4aaa-8aaa-${String(bossCallCount).padStart(12, '0')}`);
 });
+const mockBossCancel = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
-  getBoss: jest.fn(() => ({ send: mockBossSend })),
+  getBoss: jest.fn(() => ({ send: mockBossSend, cancel: mockBossCancel })),
 }));
 
 jest.mock('../logger', () => ({
@@ -64,6 +67,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockQueryOne.mockResolvedValue(undefined);
   mockExecute.mockResolvedValue(undefined);
+  mockListActiveJobs.mockResolvedValue([]);
   bossCallCount = 0;
 });
 
@@ -176,7 +180,11 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
       expect.objectContaining({ origin: 'persist-post-save', stage: 'enrich' }),
     );
     expect(mockBossSend).toHaveBeenCalledTimes(1);
-    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({ specId: 'spec-1' }));
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:enrich',
+      expect.objectContaining({ specId: 'spec-1' }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-1:spec-1' }),
+    );
   });
 
   it('matchSkills-only (no enrich): enqueues matchSkills immediately', async () => {
@@ -203,7 +211,73 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
       expect.objectContaining({ origin: 'persist-post-save', stage: 'matchSkills' }),
     );
     expect(mockBossSend).toHaveBeenCalledTimes(1);
-    expect(mockBossSend).toHaveBeenCalledWith('spec:match-skills', expect.objectContaining({ specId: 'spec-2' }));
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:match-skills',
+      expect.objectContaining({ specId: 'spec-2' }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-1:spec-2' }),
+    );
+  });
+
+  it('coalesces rapid saves by superseding older post-save jobs before enqueueing the latest generation', async () => {
+    const olderJob = {
+      id: 'job-enrich-old',
+      specId: 'spec-coalesce',
+      workspaceId: 'ws-1',
+      jobType: 'enrich',
+      bossJobId: '99999999-9999-4999-8999-999999999999',
+      status: 'pending',
+      progressCurrent: 0,
+      progressTotal: 0,
+      progressMessage: null,
+      requestPayload: {
+        origin: 'persist-post-save',
+        stage: 'enrich',
+        saveGeneration: 1,
+        priority: 1,
+        singletonKey: 'persist-post-save:ws-1:spec-coalesce',
+      },
+      resultPayload: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      saveGeneration: 1,
+    };
+    const latestJob = {
+      ...olderJob,
+      id: 'job-enrich-latest',
+      bossJobId: null,
+      requestPayload: {
+        origin: 'persist-post-save',
+        stage: 'enrich',
+        saveGeneration: 2,
+        priority: 1,
+        singletonKey: 'persist-post-save:ws-1:spec-coalesce',
+      },
+      createdAt: new Date('2026-01-01T00:00:01.000Z'),
+      saveGeneration: 2,
+    };
+    mockListJobsForSpec.mockResolvedValueOnce([olderJob]);
+    mockCreateJob.mockResolvedValueOnce(latestJob);
+    mockUpdateJobStatus.mockResolvedValue(undefined);
+
+    await enqueuePersistPostSaveJobs('spec-coalesce', 'ws-1', {
+      enrich: true,
+      matchSkills: false,
+      saveGeneration: 2,
+    });
+
+    expect(mockBossCancel).toHaveBeenCalledWith('spec:enrich', '99999999-9999-4999-8999-999999999999');
+    expect(mockUpdateJobStatus).toHaveBeenCalledWith(
+      'job-enrich-old',
+      'superseded',
+      expect.objectContaining({ progressMessage: 'Superseded by newer spec save' }),
+    );
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:enrich',
+      expect.objectContaining({ specId: 'spec-coalesce', jobId: 'job-enrich-latest' }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-1:spec-coalesce' }),
+    );
   });
 
   it('both enrich + matchSkills: enrich is immediate, matchSkills is deferred', async () => {
@@ -240,7 +314,11 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
 
     // Only enrich goes through pg-boss send
     expect(mockBossSend).toHaveBeenCalledTimes(1);
-    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({ specId: 'spec-3' }));
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:enrich',
+      expect.objectContaining({ specId: 'spec-3' }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-1:spec-3' }),
+    );
 
     // matchSkills metadata includes waitForStage
     expect(mockCreateJob).toHaveBeenNthCalledWith(
@@ -346,7 +424,11 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
 
     expect(mockCreateJob).toHaveBeenCalledTimes(2);
     expect(mockBossSend).toHaveBeenCalledTimes(1);
-    expect(mockBossSend).toHaveBeenCalledWith('spec:match-skills', expect.objectContaining({ specId: 'spec-story-only' }));
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:match-skills',
+      expect.objectContaining({ specId: 'spec-story-only' }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-1:spec-story-only' }),
+    );
     expect(mockCreateJob).toHaveBeenNthCalledWith(
       2,
       'ws-1', 'spec-story-only', 'match-skills',
@@ -388,7 +470,11 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
 
     expect(mockCreateJob).toHaveBeenCalledTimes(2);
     expect(mockBossSend).toHaveBeenCalledTimes(1);
-    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({ specId: 'spec-context' }));
+    expect(mockBossSend).toHaveBeenCalledWith(
+      'spec:enrich',
+      expect.objectContaining({ specId: 'spec-context' }),
+      expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-1:spec-context' }),
+    );
     expect(mockCreateJob).toHaveBeenNthCalledWith(
       2,
       'ws-1', 'spec-context', 'match-skills',

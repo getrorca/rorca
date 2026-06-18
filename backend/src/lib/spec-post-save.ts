@@ -9,6 +9,7 @@ import { query, queryOne, execute } from '../db/index';
 import {
   createJob,
   getJob,
+  listActiveJobs,
   listJobsForSpec,
   updateJobStatus,
   type JsonValue,
@@ -56,6 +57,12 @@ export interface PersistPostSaveStageState {
   updatedAt?: string;
   fingerprint?: string;
   previousFingerprint?: string;
+  queueName?: string;
+  queueStatus?: 'waiting' | 'queued' | 'running';
+  queuePosition?: number;
+  activeJobsAhead?: number;
+  queuePriority?: number;
+  singletonKey?: string;
 }
 
 export type PersistPostSaveStageMap = Record<keyof PersistPostSaveOptionsShape, PersistPostSaveStageState>;
@@ -73,6 +80,8 @@ type PostSaveJobMetadata = {
   invalidatedByStage?: DurableStageName;
   skipReason?: PersistStageReason;
   saveGeneration?: number;
+  priority?: number;
+  singletonKey?: string;
 };
 
 export interface PersistPostSaveFingerprintOptions {
@@ -89,6 +98,18 @@ const STAGE_TO_JOB_TYPE: Record<DurableStageName, DurableStageJobType> = {
 const STAGE_TO_QUEUE: Record<DurableStageJobType, string> = {
   enrich: 'spec:enrich',
   'match-skills': 'spec:match-skills',
+};
+
+const USER_TRIGGERED_POST_SAVE_PRIORITY = 1;
+const POST_SAVE_SINGLETON_WINDOW_SECONDS = 1;
+
+type PostSaveQueueSnapshot = {
+  queueName: string;
+  queueStatus: 'waiting' | 'queued' | 'running';
+  queuePosition: number;
+  activeJobsAhead: number;
+  queuePriority: number;
+  singletonKey?: string;
 };
 
 function nowIso(): string {
@@ -125,7 +146,80 @@ function getPostSaveJobMetadata(job: Pick<SpecJob, 'requestPayload'>): PostSaveJ
   return isPostSaveJobMetadata(parsed) ? parsed : null;
 }
 
-function stageStateForJob(job: SpecJob): PersistPostSaveStageState | null {
+function postSaveSingletonKey(workspaceId: string, specId: string): string {
+  return `persist-post-save:${workspaceId}:${specId}`;
+}
+
+function queueSnapshotForJob(job: SpecJob, metadata: PostSaveJobMetadata | null): PostSaveQueueSnapshot {
+  const jobType = metadata ? STAGE_TO_JOB_TYPE[metadata.stage] : job.jobType as DurableStageJobType;
+  const queueName = STAGE_TO_QUEUE[jobType];
+  const priority = typeof metadata?.priority === 'number' ? metadata.priority : USER_TRIGGERED_POST_SAVE_PRIORITY;
+  return {
+    queueName,
+    queueStatus: job.status === 'running' ? 'running' : 'queued',
+    queuePosition: job.status === 'running' ? 0 : 1,
+    activeJobsAhead: 0,
+    queuePriority: priority,
+    ...(metadata?.singletonKey ? { singletonKey: metadata.singletonKey } : {}),
+  };
+}
+
+function applyQueueSnapshot(stageState: PersistPostSaveStageState, snapshot?: PostSaveQueueSnapshot): PersistPostSaveStageState {
+  if (!snapshot) return stageState;
+  return {
+    ...stageState,
+    queueName: snapshot.queueName,
+    queueStatus: snapshot.queueStatus,
+    queuePosition: snapshot.queuePosition,
+    activeJobsAhead: snapshot.activeJobsAhead,
+    queuePriority: snapshot.queuePriority,
+    ...(snapshot.singletonKey ? { singletonKey: snapshot.singletonKey } : {}),
+  };
+}
+
+async function buildPostSaveQueueSnapshots(workspaceId: string): Promise<Map<string, PostSaveQueueSnapshot>> {
+  const activeJobs = await listActiveJobs(workspaceId);
+  const postSaveJobs = activeJobs.filter((job) => {
+    const metadata = getPostSaveJobMetadata(job);
+    if (!metadata || (job.jobType !== 'enrich' && job.jobType !== 'match-skills')) return false;
+    return !(metadata.waitForStage && !job.bossJobId);
+  });
+
+  const grouped = new Map<string, Array<{ job: SpecJob; metadata: PostSaveJobMetadata; snapshot: PostSaveQueueSnapshot }>>();
+  for (const job of postSaveJobs) {
+    const metadata = getPostSaveJobMetadata(job);
+    if (!metadata) continue;
+    const snapshot = queueSnapshotForJob(job, metadata);
+    const group = grouped.get(snapshot.queueName) ?? [];
+    group.push({ job, metadata, snapshot });
+    grouped.set(snapshot.queueName, group);
+  }
+
+  const byJobId = new Map<string, PostSaveQueueSnapshot>();
+  for (const group of grouped.values()) {
+    group.sort((a, b) => {
+      if (a.job.status === 'running' && b.job.status !== 'running') return -1;
+      if (a.job.status !== 'running' && b.job.status === 'running') return 1;
+      const priorityDiff = b.snapshot.queuePriority - a.snapshot.queuePriority;
+      if (priorityDiff !== 0) return priorityDiff;
+      return a.job.createdAt.getTime() - b.job.createdAt.getTime();
+    });
+
+    group.forEach((entry, index) => {
+      const activeJobsAhead = entry.job.status === 'running' ? 0 : index;
+      byJobId.set(entry.job.id, {
+        ...entry.snapshot,
+        queueStatus: entry.job.status === 'running' ? 'running' : activeJobsAhead > 0 ? 'waiting' : 'queued',
+        queuePosition: entry.job.status === 'running' ? 0 : index + 1,
+        activeJobsAhead,
+      });
+    });
+  }
+
+  return byJobId;
+}
+
+function stageStateForJob(job: SpecJob, queueSnapshot?: PostSaveQueueSnapshot): PersistPostSaveStageState | null {
   const metadata = getPostSaveJobMetadata(job);
   if (!metadata) return null;
 
@@ -140,7 +234,7 @@ function stageStateForJob(job: SpecJob): PersistPostSaveStageState | null {
   };
 
   if (job.status === 'running') {
-    return { ...base, status: 'running', reason: 'job_started' };
+    return applyQueueSnapshot({ ...base, status: 'running', reason: 'job_started' }, queueSnapshot ?? queueSnapshotForJob(job, metadata));
   }
 
   if (job.status === 'completed') {
@@ -192,11 +286,11 @@ function stageStateForJob(job: SpecJob): PersistPostSaveStageState | null {
     return { ...base, status: 'pending', reason: 'waiting_for_enrich' };
   }
 
-  return {
+  return applyQueueSnapshot({
     ...base,
     status: 'queued',
     reason: metadata.waitForStage === 'enrich' ? 'durable_job_enqueued_after_enrich' : 'durable_job_enqueued',
-  };
+  }, queueSnapshot ?? queueSnapshotForJob(job, metadata));
 }
 
 function shouldUsePendingStatus(stages: PersistPostSaveStageMap): boolean {
@@ -250,9 +344,10 @@ async function readGenerationLogs(specId: string): Promise<Array<Record<string, 
   );
 }
 
-function mergeStageStateMaps(baseStages: PersistPostSaveStageMap, jobs: SpecJob[], saveGeneration?: number | null): PersistPostSaveStageMap {
+async function mergeStageStateMaps(baseStages: PersistPostSaveStageMap, jobs: SpecJob[], saveGeneration?: number | null, workspaceId?: string): Promise<PersistPostSaveStageMap> {
   const effectiveStages: PersistPostSaveStageMap = JSON.parse(JSON.stringify(baseStages)) as PersistPostSaveStageMap;
   const latestByStage = new Map<DurableStageName, SpecJob>();
+  const queueSnapshots = workspaceId ? await buildPostSaveQueueSnapshots(workspaceId) : new Map<string, PostSaveQueueSnapshot>();
 
   for (const job of jobs) {
     const metadata = getPostSaveJobMetadata(job);
@@ -266,7 +361,7 @@ function mergeStageStateMaps(baseStages: PersistPostSaveStageMap, jobs: SpecJob[
   }
 
   for (const [stageName, job] of latestByStage.entries()) {
-    const stageState = stageStateForJob(job);
+    const stageState = stageStateForJob(job, queueSnapshots.get(job.id));
     if (!stageState) continue;
     effectiveStages[stageName] = stageState;
   }
@@ -308,7 +403,7 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
     : typeof persistSummary.saveGeneration === 'string'
       ? Number(persistSummary.saveGeneration)
       : null;
-  const effectiveStages = mergeStageStateMaps(baseStages, jobs, summarySaveGeneration);
+  const effectiveStages = await mergeStageStateMaps(baseStages, jobs, summarySaveGeneration, workspaceId);
   const latestSummary = parseRecord(latest.context_summary_json);
   const mergedSummary = {
     ...persistSummary,
@@ -478,10 +573,17 @@ export async function markPersistPostSaveJobSupersededIfStale(jobId: string): Pr
 async function enqueueExistingJob(job: SpecJob, jobType: DurableStageJobType, stageName: DurableStageName, reason: PersistStageReason): Promise<boolean> {
   try {
     await ensureBossReady();
+    const metadata = getPostSaveJobMetadata(job);
+    const singletonKey = metadata?.singletonKey ?? postSaveSingletonKey(job.workspaceId, job.specId);
+    const priority = typeof metadata?.priority === 'number' ? metadata.priority : USER_TRIGGERED_POST_SAVE_PRIORITY;
     const bossJobId = await getBoss().send(STAGE_TO_QUEUE[jobType], {
       jobId: job.id,
       specId: job.specId,
       workspaceId: job.workspaceId,
+    }, {
+      priority,
+      singletonKey,
+      singletonSeconds: POST_SAVE_SINGLETON_WINDOW_SECONDS,
     });
 
     if (!bossJobId) {
@@ -501,6 +603,12 @@ async function enqueueExistingJob(job: SpecJob, jobType: DurableStageJobType, st
       jobId: job.id,
       bossJobId,
       error: null,
+      queueName: STAGE_TO_QUEUE[jobType],
+      queueStatus: 'queued',
+      queuePosition: 1,
+      activeJobsAhead: 0,
+      queuePriority: priority,
+      singletonKey,
     }, job.saveGeneration);
     return true;
   } catch (error) {
@@ -683,9 +791,12 @@ export async function enqueuePersistPostSaveJobs(
     || !prior.matchSkillsFingerprint
     || current.matchSkillsFingerprint !== prior.matchSkillsFingerprint;
 
+  const singletonKey = postSaveSingletonKey(workspaceId, specId);
   const enrichMetadata = (): PostSaveJobMetadata => ({
     origin: 'persist-post-save',
     stage: 'enrich',
+    priority: USER_TRIGGERED_POST_SAVE_PRIORITY,
+    singletonKey,
     ...(saveGeneration !== undefined ? { saveGeneration } : {}),
     ...(current.enrichFingerprint ? { fingerprint: current.enrichFingerprint } : {}),
     ...(prior.enrichFingerprint ? { previousFingerprint: prior.enrichFingerprint } : {}),
@@ -693,6 +804,8 @@ export async function enqueuePersistPostSaveJobs(
   const matchMetadata = (extra: Partial<PostSaveJobMetadata> = {}): PostSaveJobMetadata => ({
     origin: 'persist-post-save',
     stage: 'matchSkills',
+    priority: USER_TRIGGERED_POST_SAVE_PRIORITY,
+    singletonKey,
     ...(saveGeneration !== undefined ? { saveGeneration } : {}),
     ...(current.matchSkillsFingerprint ? { fingerprint: current.matchSkillsFingerprint } : {}),
     ...(prior.matchSkillsFingerprint ? { previousFingerprint: prior.matchSkillsFingerprint } : {}),

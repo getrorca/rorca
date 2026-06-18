@@ -50,7 +50,7 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { createJob, updateJobStatus, listJobsForSpec, listActiveJobs, listRepairCandidatesFromLogs, type RepairIssueCategory } from '../db/spec-jobs';
+import { createJob, updateJobStatus, listActiveJobs, listRepairCandidatesFromLogs, type RepairIssueCategory, type SpecJob } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import {
   buildPersistPostSaveStages,
@@ -58,7 +58,6 @@ import {
   getEffectiveGenerationLog,
   getEffectiveGenerationLogs,
   type PersistPostSaveStageMap,
-  type PersistPostSaveStageState,
   type PersistStageReason,
   type PersistStageStatus,
 } from '../lib/spec-post-save';
@@ -323,12 +322,15 @@ async function enqueueAsyncSpecJob(
   specId: string,
   workspaceId: string,
   jobType: keyof typeof ASYNC_SPEC_JOB_QUEUE,
+  options: { priority?: number } = {},
 ): Promise<{ jobId: string; status: 'pending'; pollUrl: string; streamUrl: string }> {
   const job = await createJob(workspaceId, specId, jobType, null);
   const bossJobId = await getBoss().send(ASYNC_SPEC_JOB_QUEUE[jobType], {
     jobId: job.id,
     specId,
     workspaceId,
+  }, {
+    priority: options.priority ?? 1,
   });
 
   if (!bossJobId) {
@@ -4714,6 +4716,69 @@ interface KanbanSpec {
   model?: string;
   attachmentCount: number;
   source?: string;
+  postSaveStatus?: 'queued' | 'waiting' | 'running';
+  postSaveStage?: 'enrich' | 'match-skills';
+  postSaveJobId?: string;
+  postSaveQueuePosition?: number;
+  postSaveActiveJobsAhead?: number;
+}
+
+function postSavePriorityForKanban(job: SpecJob): number {
+  const metadata = parseRecordLocal(job.requestPayload);
+  return typeof metadata.priority === 'number' ? metadata.priority : 0;
+}
+
+function buildPostSaveKanbanState(activeJobs: SpecJob[]): Map<string, Partial<KanbanSpec>> {
+  const postSaveJobs = activeJobs.filter((job) => {
+    if (job.jobType !== 'enrich' && job.jobType !== 'match-skills') return false;
+    const metadata = parseRecordLocal(job.requestPayload);
+    if (metadata.origin !== 'persist-post-save') return false;
+    return !(metadata.waitForStage && !job.bossJobId);
+  });
+
+  const queuePositionByJobId = new Map<string, { position: number; activeJobsAhead: number }>();
+  for (const jobType of ['enrich', 'match-skills'] as const) {
+    const queueJobs = postSaveJobs
+      .filter((job) => job.jobType === jobType)
+      .sort((a, b) => {
+        if (a.status === 'running' && b.status !== 'running') return -1;
+        if (a.status !== 'running' && b.status === 'running') return 1;
+        const priorityDiff = postSavePriorityForKanban(b) - postSavePriorityForKanban(a);
+        if (priorityDiff !== 0) return priorityDiff;
+        return a.createdAt.getTime() - b.createdAt.getTime();
+      });
+
+    queueJobs.forEach((job, index) => {
+      queuePositionByJobId.set(job.id, {
+        position: job.status === 'running' ? 0 : index + 1,
+        activeJobsAhead: job.status === 'running' ? 0 : index,
+      });
+    });
+  }
+
+  const bySpec = new Map<string, SpecJob>();
+  for (const job of postSaveJobs) {
+    const existing = bySpec.get(job.specId);
+    const jobGeneration = job.saveGeneration ?? 0;
+    const existingGeneration = existing?.saveGeneration ?? 0;
+    if (!existing || jobGeneration > existingGeneration || (jobGeneration === existingGeneration && existing.createdAt <= job.createdAt)) {
+      bySpec.set(job.specId, job);
+    }
+  }
+
+  const stateBySpec = new Map<string, Partial<KanbanSpec>>();
+  for (const [specId, job] of bySpec.entries()) {
+    const queue = queuePositionByJobId.get(job.id) ?? { position: job.status === 'running' ? 0 : 1, activeJobsAhead: 0 };
+    stateBySpec.set(specId, {
+      postSaveStatus: job.status === 'running' ? 'running' : queue.activeJobsAhead > 0 ? 'waiting' : 'queued',
+      postSaveStage: job.jobType as 'enrich' | 'match-skills',
+      postSaveJobId: job.id,
+      postSaveQueuePosition: queue.position,
+      postSaveActiveJobsAhead: queue.activeJobsAhead,
+    });
+  }
+
+  return stateBySpec;
 }
 
 /**
@@ -4775,6 +4840,9 @@ interface KanbanSpec {
  *                       activeRunId: { type: integer, nullable: true }
  *                       activeRunStatus: { type: string, enum: [running, queued], nullable: true }
  *                       queuePosition: { type: integer, nullable: true }
+ *                       postSaveStatus: { type: string, enum: [queued, waiting, running], nullable: true }
+ *                       postSaveStage: { type: string, enum: [enrich, match-skills], nullable: true }
+ *                       postSaveQueuePosition: { type: integer, nullable: true }
  *                       model: { type: string, nullable: true }
  *                       tags: { type: array, items: { type: string } }
  *                       attachmentCount: { type: integer }
@@ -4995,11 +5063,19 @@ router.get('/kanban', async (req: Request, res: Response) => {
       storyFailed.set(slug, parseInt(row.fail_count, 10));
     }
 
+    // Post-save enrichment jobs live outside pipeline_runs; expose their wait state
+    // so fresh saves do not look idle while they are behind other spec jobs.
+    const postSaveStateBySpec = buildPostSaveKanbanState(await listActiveJobs(workspaceId));
+    const withPostSaveState = (spec: KanbanSpec): KanbanSpec => ({
+      ...spec,
+      ...(postSaveStateBySpec.get(spec.id) ?? {}),
+    });
+
     // Bucket into columns:
     // - draft: pending specs (no active run)
     // - inProgress: approved specs with active run OR approved but not yet completed
     // - done: approved specs where latest run is done/completed
-    const draft: KanbanSpec[] = pendingSpecs.sort(
+    const draft: KanbanSpec[] = pendingSpecs.map(withPostSaveState).sort(
       (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
     );
 
@@ -5017,10 +5093,10 @@ router.get('/kanban', async (req: Request, res: Response) => {
       // 2. User manually dragged it to Done (kanban_manual_done) — user's explicit choice
       const allPassed = (allStoriesPassedBySlug.get(spec.id) ?? false) || manualDoneSlugs.has(spec.id);
       if (isCompleted && !activeRun && allPassed) {
-        done.push({ ...spec, passedStories: passed, failedStories: failed });
+        done.push({ ...withPostSaveState(spec), passedStories: passed, failedStories: failed });
       } else {
         inProgress.push({
-          ...spec,
+          ...withPostSaveState(spec),
           passedStories: passed,
           failedStories: failed,
           ...(activeRun ? {
@@ -6634,7 +6710,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
         // Handle failed or stuck enrichment — re-enqueue enrich
         if (candidate.issues.includes('failed_enrichment') || candidate.issues.includes('stuck_pending_enrichment')) {
           try {
-            await enqueueAsyncSpecJob(candidate.specId, workspaceId, 'enrich');
+            await enqueueAsyncSpecJob(candidate.specId, workspaceId, 'enrich', { priority: 0 });
             repairActions.push('enqueued_enrich');
           } catch {
             repairActions.push('enrich_enqueue_failed');
@@ -14394,7 +14470,7 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
           reason: `Dry run — would enqueue enrich (current status: ${diagnosis.enrichStatus ?? 'none'})`,
         });
       } else {
-        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich');
+        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich', { priority: 0 });
         actions.push({
           action: 'enqueue_enrich',
           status: 'repaired',
@@ -14435,7 +14511,7 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
           reason: `Dry run — would enqueue match-skills (current status: ${diagnosis.matchSkillsStatus ?? 'none'})`,
         });
       } else {
-        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills');
+        const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills', { priority: 0 });
         actions.push({
           action: 'enqueue_match_skills',
           status: 'repaired',
