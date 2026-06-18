@@ -75,9 +75,14 @@ export function useHotkeys(bindings: HotkeyBinding[]) {
     // Disable all hotkeys on mobile — no hardware keyboard assumed
     if (window.innerWidth < MOBILE_BREAKPOINT) return;
 
-    // Skip if target is an input/textarea/contenteditable (unless modifier key is held)
+    // Skip if target is an input/textarea/contenteditable/terminal (unless modifier key is held).
+    // The terminal marker keeps plain keystrokes flowing to xterm while still allowing
+    // documented modifier navigation shortcuts to be caught above xterm's key handlers.
     const target = e.target as HTMLElement;
-    const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+    const isInput = target.tagName === 'INPUT'
+      || target.tagName === 'TEXTAREA'
+      || target.isContentEditable
+      || !!target.closest('[data-terminal-input="true"]');
 
     for (const binding of bindingsRef.current) {
       const parsed = parseHotkey(binding.key);
@@ -96,8 +101,8 @@ export function useHotkeys(bindings: HotkeyBinding[]) {
   }, []);
 
   useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [handleKeyDown]);
 }
 

@@ -208,6 +208,13 @@ function formatDuration(ms: number): string {
   return `${min}m${remSec}s`;
 }
 
+function encodeUtf8Base64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 // ─── OpenCode Semantic Step Renderer ──────────────────────────────────────────
 
 function OpenCodeStepRow({
@@ -420,9 +427,13 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const pendingPtyChunksRef = useRef<Uint8Array[]>([]);
+  const pendingPtyInputRef = useRef('');
+  const ptyInputFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ptyInputQueueRef = useRef(Promise.resolve());
   const resizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
+  const resolvedRef = useRef(resolved);
   const [copied, setCopied] = useState(false);
   const autoScrollRef = useRef(true);
 
@@ -442,6 +453,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const [terminalMode, setTerminalMode] = useState<TerminalMode>(rendererMode);
   const terminalModeRef = useRef<TerminalMode>(rendererMode);
   const [ptyReady, setPtyReady] = useState(rendererMode !== 'pty');
+  const [ptyFocused, setPtyFocused] = useState(false);
+  const [ptyInputHealthy, setPtyInputHealthy] = useState(true);
 
   // Toggle state — persisted per run in localStorage
   const [mode, setMode] = useState<'raw' | 'semantic'>(() => loadMode(runId));
@@ -453,6 +466,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const stepListRef = useRef<HTMLDivElement>(null);
   const stepBottomRef = useRef<HTMLDivElement>(null);
   const [streamDone, setStreamDone] = useState(false);
+
+  useEffect(() => {
+    resolvedRef.current = resolved;
+  }, [resolved]);
 
   useEffect(() => {
     terminalModeRef.current = terminalMode;
@@ -495,6 +512,35 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     }
   }, [runId]);
 
+  const flushPtyInput = useCallback(() => {
+    ptyInputFlushRef.current = null;
+    const data = pendingPtyInputRef.current;
+    if (!data) return;
+    pendingPtyInputRef.current = '';
+    const dataBase64 = encodeUtf8Base64(data);
+    ptyInputQueueRef.current = ptyInputQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await apiFetch(`/api/pipeline/runs/${runId}/input`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dataBase64 }),
+          silent: true,
+        });
+        setPtyInputHealthy(true);
+      })
+      .catch(() => {
+        setPtyInputHealthy(false);
+      });
+  }, [runId]);
+
+  const queuePtyInput = useCallback((data: string) => {
+    pendingPtyInputRef.current += data;
+    if (ptyInputFlushRef.current === null) {
+      ptyInputFlushRef.current = setTimeout(flushPtyInput, 20);
+    }
+  }, [flushPtyInput]);
+
   const writePtyChunk = useCallback((chunk: Uint8Array) => {
     if (xtermRef.current) {
       xtermRef.current.write(chunk as Parameters<Terminal['write']>[0]);
@@ -514,12 +560,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       cursorBlink: true,
       scrollback: 10_000,
       allowProposedApi: false,
-      theme: getPtyTheme(resolved),
+      theme: getPtyTheme(resolvedRef.current),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(ptyContainerRef.current);
+    const container = ptyContainerRef.current;
+    terminal.open(container);
     fitAddon.fit();
+    const inputDisposable = terminal.onData(queuePtyInput);
+    const handleFocusIn = () => setPtyFocused(true);
+    const handleFocusOut = () => setPtyFocused(false);
+    container.addEventListener('focusin', handleFocusIn);
+    container.addEventListener('focusout', handleFocusOut);
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
     for (const chunk of pendingPtyChunksRef.current) {
@@ -551,11 +603,19 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         clearTimeout(resizeDebounceRef.current);
         resizeDebounceRef.current = null;
       }
+      if (ptyInputFlushRef.current) {
+        clearTimeout(ptyInputFlushRef.current);
+        flushPtyInput();
+      }
+      inputDisposable.dispose();
+      container.removeEventListener('focusin', handleFocusIn);
+      container.removeEventListener('focusout', handleFocusOut);
       fitAddonRef.current = null;
       xtermRef.current = null;
+      setPtyFocused(false);
       terminal.dispose();
     };
-  }, [postPtyResize, terminalMode]);
+  }, [flushPtyInput, postPtyResize, queuePtyInput, terminalMode]);
 
   useEffect(() => {
     if (terminalMode === 'pty' && xtermRef.current) {
@@ -666,6 +726,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setSteps([]);
     setExpandedSet(new Set());
     setStreamDone(false);
+    setPtyInputHealthy(true);
     setTerminalMode(rendererMode);
     if (rendererMode === 'pty' && !ptyReady) return;
     xtermRef.current?.clear();
@@ -834,6 +895,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const normalizedAgentType = normalizeAgentType(agentType);
   const isOpenCode = normalizedAgentType === 'opencode' || normalizedAgentType === 'codex';
   const showAgentBadge = normalizedAgentType !== 'claude' && normalizedAgentType !== 'unknown';
+  const surfaceLabel = terminalMode === 'pty'
+    ? streamDone
+      ? 'PTY Replay'
+      : ptyFocused
+        ? 'PTY Live • attached'
+        : 'PTY Live • click to attach'
+    : mode === 'semantic'
+      ? 'Summary View'
+      : 'Log View';
+  const surfaceTone = terminalMode === 'pty'
+    ? ptyInputHealthy ? 'var(--success)' : 'var(--warning)'
+    : mode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)';
 
   return (
     <div className="h-full w-full flex flex-col">
@@ -874,11 +947,17 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
             {getAgentBadgeLabel(agentType, null, { showOpenCodeModel: false })}
           </span>
         )}
-        {terminalMode === 'pty' && (
-          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-medium">
-            Native PTY
-          </span>
-        )}
+        <span
+          className="ml-1 text-[10px] px-1.5 py-0.5 rounded border font-medium"
+          style={{
+            color: surfaceTone,
+            borderColor: surfaceTone,
+            background: 'color-mix(in srgb, currentColor 12%, transparent)',
+          }}
+          title={terminalMode === 'pty' && !ptyInputHealthy ? 'PTY input delivery failed; output may be replay-only.' : undefined}
+        >
+          {surfaceLabel}
+        </span>
 
         {/* Copy button (raw mode only) */}
         {terminalMode !== 'pty' && mode === 'raw' && (
@@ -899,8 +978,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         {terminalMode === 'pty' ? (
           <div
             ref={ptyContainerRef}
-            className="h-full w-full overflow-hidden"
-            style={{ background: resolved === 'dark' ? '#0d1117' : '#ffffff' }}
+            className="h-full w-full overflow-hidden outline-none"
+            data-terminal-input="true"
+            onMouseDown={() => xtermRef.current?.focus()}
+            style={{ background: 'var(--terminal-bg)' }}
           />
         ) : (
           <pre

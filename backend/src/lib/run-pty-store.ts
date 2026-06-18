@@ -31,6 +31,11 @@ export interface RunPtyResizeRequest {
   rows: number;
 }
 
+export interface RunPtyInputRequest {
+  id: number;
+  input: Buffer;
+}
+
 export interface StartRunPtySessionParams {
   runId: number;
   workspaceId: string;
@@ -176,6 +181,39 @@ export async function claimLatestRunPtyResize(runId: number): Promise<RunPtyResi
   );
 
   return latest;
+}
+
+export async function requestRunPtyInput(runId: number, input: Buffer): Promise<void> {
+  await execute(
+    `INSERT INTO run_pty_input_requests (run_id, input, byte_length)
+     VALUES ($1, $2, $3)`,
+    [runId, input, input.length],
+  );
+}
+
+export async function claimPendingRunPtyInput(runId: number, limit = 100): Promise<RunPtyInputRequest[]> {
+  const rows = await query<RunPtyInputRequest>(
+    `SELECT id, input
+     FROM run_pty_input_requests
+     WHERE run_id = $1 AND applied_at IS NULL
+     ORDER BY id ASC
+     LIMIT $2`,
+    [runId, limit],
+  );
+
+  if (rows.length === 0) return [];
+
+  await execute(
+    `UPDATE run_pty_input_requests
+     SET applied_at = NOW()
+     WHERE run_id = $1 AND id = ANY($2::bigint[])`,
+    [runId, rows.map((row) => row.id)],
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    input: Buffer.isBuffer(row.input) ? row.input : Buffer.from(row.input),
+  }));
 }
 
 export async function listRunPtyChunks(runId: number, afterSequence = 0): Promise<RunPtyChunkRow[]> {

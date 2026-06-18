@@ -57,6 +57,7 @@ import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import {
   getRunPtySessionStatus,
   listRunPtyChunks,
+  requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
@@ -208,6 +209,20 @@ function emitSemanticSteps(text: string, agent: string, res: Response): void {
 
 function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): void {
   res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForRunPtySessionStatus(runId: number, timeoutMs = 5_000): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  let status = await getRunPtySessionStatus(runId);
+  while (status === null && Date.now() < deadline) {
+    await sleepMs(100);
+    status = await getRunPtySessionStatus(runId);
+  }
+  return status;
 }
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
@@ -4704,6 +4719,94 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/pipeline/runs/:runId/input — Forward stdin to active PTY ───────
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/input:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Send keyboard input to the live PTY for a running pipeline run
+ *     operationId: sendPipelineRunInput
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "PTY stdin is local interactive run control for an already-running user-owned pipeline in single-user mode."
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               dataBase64:
+ *                 type: string
+ *                 description: "Base64-encoded UTF-8 terminal input bytes from xterm.onData."
+ *             required: [dataBase64]
+ *     responses:
+ *       200: { description: PTY input request recorded }
+ */
+router.post('/runs/:runId/input', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      throw new ValidationError('Invalid runId');
+    }
+    if (!PTY_AVAILABLE) {
+      throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
+    }
+
+    const dataBase64 = typeof req.body?.dataBase64 === 'string' ? req.body.dataBase64 : '';
+    if (!dataBase64) {
+      throw new ValidationError('dataBase64 is required');
+    }
+    if (dataBase64.length > 87_384) {
+      throw new ValidationError('PTY input chunk is too large');
+    }
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(dataBase64) || dataBase64.length % 4 !== 0) {
+      throw new ValidationError('dataBase64 must be valid base64');
+    }
+
+    let input: Buffer;
+    try {
+      input = Buffer.from(dataBase64, 'base64');
+    } catch {
+      throw new ValidationError('dataBase64 must be valid base64');
+    }
+    if (input.length === 0) {
+      throw new ValidationError('PTY input chunk cannot be empty');
+    }
+    if (input.length > 65_536) {
+      throw new ValidationError('PTY input chunk is too large');
+    }
+
+    const run = await queryOne<{ terminal_mode: string | null; status: string }>(
+      'SELECT terminal_mode, status FROM pipeline_runs WHERE id = $1',
+      [runId],
+    );
+    if (!run) throw new NotFoundError('Run not found');
+    if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
+      throw new ConflictError('Run is not using PTY terminal mode');
+    }
+    if (['done', 'failed', 'cancelled'].includes(run.status)) {
+      throw new ConflictError('Run is no longer active');
+    }
+
+    const ptyStatus = await getRunPtySessionStatus(runId);
+    if (ptyStatus !== 'active') {
+      throw new ConflictError('Run PTY session is not active');
+    }
+
+    await requestRunPtyInput(runId, input);
+    res.json({ ok: true, runId, bytes: input.length });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] PTY input');
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
 // Streams raw stdout/stderr (with ANSI codes) to the active terminal renderer.
 // ANSI/HTML runs replay from run_output_chunks; PTY runs replay from run_pty_output_chunks.
@@ -4716,6 +4819,8 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Stream raw terminal output (SSE)
  *     operationId: streamPipelineOutput
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
  *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store so late joiners can rebuild the terminal from byte 0.
  *     parameters:
  *       - in: path
@@ -4755,25 +4860,35 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   res.write(': connected\n\n');
 
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
+  let streamClosed = false;
+  req.on('close', () => {
+    streamClosed = true;
+    clearInterval(hb);
+  });
 
   // Resolve agent type for semantic parsing (defaults to 'claude')
   const runRow = await queryOne('SELECT agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
   const requestedTerminalMode = normalizeTerminalMode(runRow?.terminal_mode);
-  const ptyStatusAtOpen = requestedTerminalMode === 'pty' ? await getRunPtySessionStatus(runId) : null;
+  const terminalStatuses = ['done', 'failed', 'cancelled'];
+  const ptyStatusAtOpen = requestedTerminalMode === 'pty'
+    ? await waitForRunPtySessionStatus(runId)
+    : null;
   // A run may be marked PTY before/without a PTY session if the child spawn fails
   // early. In that case the engine still mirrors logs to run_output_chunks. Late
-  // joiners must see those chunks instead of a blank native terminal.
+  // joiners must see those chunks instead of a blank native terminal. The short
+  // wait above covers the normal startup race where the UI subscribes just before
+  // execution-engine has inserted run_pty_sessions.
   const usePtyCapture = requestedTerminalMode === 'pty' && ptyStatusAtOpen !== null;
   const terminalMode = usePtyCapture ? 'pty' : 'ansi-html';
   const isPty = usePtyCapture;
+  if (streamClosed) return;
 
   // Emit run metadata so frontend knows which renderer to use
   res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null, terminalMode, terminal_mode: terminalMode, requestedTerminalMode: requestedTerminalMode, isPty })}\n\n`);
 
   // ── Replay all existing chunks (late-join support) ────────────────────────
   interface ChunkRow { sequence: number; chunk: Buffer }
-  const terminalStatuses = ['done', 'failed', 'cancelled'];
   let lastSequence = 0;
 
   if (usePtyCapture) {

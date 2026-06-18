@@ -53,6 +53,7 @@ import {
 import {
   appendRunPtyOutput,
   claimLatestRunPtyResize,
+  claimPendingRunPtyInput,
   completeRunPtySession,
   initializeRunPtySequence,
   logRunPtyStoreError,
@@ -2098,6 +2099,7 @@ async function spawnAgentViaPty(
     let watchdogFired = false;
     let finishedWrites = Promise.resolve();
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
+    let inputTimer: ReturnType<typeof setInterval> | null = null;
     let runTimer: ReturnType<typeof setTimeout> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2105,6 +2107,7 @@ async function spawnAgentViaPty(
     let ptyCommand: PtyCommand | null = null;
     let finalizePromise: Promise<void> | null = null;
     let unregisterPtyCleanupTask: (() => void) | null = null;
+    let inputPollInFlight = false;
     let resolveExitObserved: (() => void) | null = null;
     const exitObserved = new Promise<void>((resolve) => {
       resolveExitObserved = resolve;
@@ -2115,6 +2118,7 @@ async function spawnAgentViaPty(
       unregisterPtyCleanupTask?.();
       unregisterPtyCleanupTask = null;
       if (resizeTimer) clearInterval(resizeTimer);
+      if (inputTimer) clearInterval(inputTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
@@ -2252,6 +2256,25 @@ async function spawnAgentViaPty(
         })();
       }, 250);
       resizeTimer.unref?.();
+
+      inputTimer = setInterval(() => {
+        void (async () => {
+          if (!pty || inputPollInFlight) return;
+          inputPollInFlight = true;
+          try {
+            const requests = await claimPendingRunPtyInput(ptyOptions.runId);
+            for (const request of requests) {
+              pty.write(request.input.toString('utf8'));
+              resetInactivity();
+            }
+          } catch (err: unknown) {
+            logRunPtyStoreError('Failed to apply PTY input request', ptyOptions.runId, err);
+          } finally {
+            inputPollInFlight = false;
+          }
+        })();
+      }, 50);
+      inputTimer.unref?.();
 
       pty.onData((chunk) => {
         const buf = toBuffer(chunk);
