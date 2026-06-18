@@ -19,17 +19,18 @@
 
 import {
   buildPersistPostSaveStages,
-  type PersistPostSaveStageMap,
   type PersistStageStatus,
   type PersistStageReason,
-  type PersistPostSaveStageState,
 } from '../spec-post-save';
 
 // Mock DB and pg-boss — buildPersistPostSaveStages is pure logic, no I/O needed
+const mockQueryOne = jest.fn();
+const mockExecute = jest.fn();
+
 jest.mock('../../db/index', () => ({
   query: jest.fn(),
-  queryOne: jest.fn(),
-  execute: jest.fn(),
+  queryOne: (...args: unknown[]) => mockQueryOne(...args),
+  execute: (...args: unknown[]) => mockExecute(...args),
 }));
 
 const mockCreateJob = jest.fn();
@@ -61,6 +62,8 @@ jest.mock('../logger', () => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockQueryOne.mockResolvedValue(undefined);
+  mockExecute.mockResolvedValue(undefined);
   bossCallCount = 0;
 });
 
@@ -114,9 +117,10 @@ describe('PSE-009: stage skip reason tracking', () => {
       'job_failed',
       'blocked_by_enrich_failure',
       'blocked_by_enrich_enqueue_failure',
+      'fingerprint_unchanged',
       'no_installed_skills',
     ];
-    expect(allReasons).toHaveLength(12);
+    expect(allReasons).toHaveLength(13);
     for (const reason of allReasons) {
       expect(typeof reason).toBe('string');
       expect(reason.length).toBeGreaterThan(0);
@@ -129,10 +133,12 @@ describe('PSE-009: stage skip reason tracking', () => {
 describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
   // Import the function under test (requires mocks above)
   let enqueuePersistPostSaveJobs: typeof import('../spec-post-save').enqueuePersistPostSaveJobs;
+  let advancePersistPostSaveDependencies: typeof import('../spec-post-save').advancePersistPostSaveDependencies;
 
   beforeAll(async () => {
     const mod = await import('../spec-post-save');
     enqueuePersistPostSaveJobs = mod.enqueuePersistPostSaveJobs;
+    advancePersistPostSaveDependencies = mod.advancePersistPostSaveDependencies;
   });
 
   it('no-ops when both enrich and matchSkills are false', async () => {
@@ -243,6 +249,210 @@ describe('PSE-009: enqueuePersistPostSaveJobs dependency topology', () => {
         origin: 'persist-post-save',
         stage: 'matchSkills',
         waitForStage: 'enrich',
+      }),
+    );
+  });
+
+  it('metadata-only save skips both stages when both fingerprints are unchanged', async () => {
+    const enrichSkippedJob = {
+      id: 'job-enrich-skip',
+      specId: 'spec-skip',
+      workspaceId: 'ws-1',
+      bossJobId: null,
+      status: 'pending',
+      errorMessage: null,
+      createdAt: new Date(),
+    };
+    const matchSkippedJob = {
+      id: 'job-match-skip',
+      specId: 'spec-skip',
+      workspaceId: 'ws-1',
+      bossJobId: null,
+      status: 'pending',
+      errorMessage: null,
+      createdAt: new Date(),
+    };
+    mockCreateJob
+      .mockResolvedValueOnce(enrichSkippedJob)
+      .mockResolvedValueOnce(matchSkippedJob);
+    mockUpdateJobStatus.mockResolvedValue(undefined);
+
+    await enqueuePersistPostSaveJobs('spec-skip', 'ws-1', {
+      enrich: true,
+      matchSkills: true,
+      currentFingerprints: { enrichFingerprint: 'enrich-v1', matchSkillsFingerprint: 'match-v1' },
+      priorFingerprints: { enrichFingerprint: 'enrich-v1', matchSkillsFingerprint: 'match-v1' },
+    });
+
+    expect(mockCreateJob).toHaveBeenCalledTimes(2);
+    expect(mockBossSend).not.toHaveBeenCalled();
+    expect(mockCreateJob).toHaveBeenNthCalledWith(
+      1,
+      'ws-1', 'spec-skip', 'enrich',
+      expect.objectContaining({ stage: 'enrich', fingerprint: 'enrich-v1', previousFingerprint: 'enrich-v1', skipReason: 'fingerprint_unchanged' }),
+    );
+    expect(mockCreateJob).toHaveBeenNthCalledWith(
+      2,
+      'ws-1', 'spec-skip', 'match-skills',
+      expect.objectContaining({ stage: 'matchSkills', fingerprint: 'match-v1', previousFingerprint: 'match-v1', skipReason: 'fingerprint_unchanged' }),
+    );
+    expect(mockUpdateJobStatus).toHaveBeenCalledWith(
+      'job-enrich-skip',
+      'completed',
+      expect.objectContaining({
+        resultPayload: expect.objectContaining({ skipped: true, skipReason: 'fingerprint_unchanged', fingerprint: 'enrich-v1' }),
+      }),
+    );
+    expect(mockUpdateJobStatus).toHaveBeenCalledWith(
+      'job-match-skip',
+      'completed',
+      expect.objectContaining({
+        resultPayload: expect.objectContaining({ skipped: true, skipReason: 'fingerprint_unchanged', fingerprint: 'match-v1' }),
+      }),
+    );
+  });
+
+  it('story-only save skips enrich but enqueues match-skills immediately when only match fingerprint changed', async () => {
+    const enrichSkippedJob = {
+      id: 'job-enrich-story-skip',
+      specId: 'spec-story-only',
+      workspaceId: 'ws-1',
+      bossJobId: null,
+      status: 'pending',
+      errorMessage: null,
+      createdAt: new Date(),
+    };
+    const matchJob = {
+      id: 'job-match-story-only',
+      specId: 'spec-story-only',
+      workspaceId: 'ws-1',
+      bossJobId: null,
+      status: 'pending',
+      errorMessage: null,
+      createdAt: new Date(),
+    };
+    mockCreateJob
+      .mockResolvedValueOnce(enrichSkippedJob)
+      .mockResolvedValueOnce(matchJob);
+    mockUpdateJobStatus.mockResolvedValue(undefined);
+
+    await enqueuePersistPostSaveJobs('spec-story-only', 'ws-1', {
+      enrich: true,
+      matchSkills: true,
+      currentFingerprints: { enrichFingerprint: 'enrich-v1', matchSkillsFingerprint: 'match-v2' },
+      priorFingerprints: { enrichFingerprint: 'enrich-v1', matchSkillsFingerprint: 'match-v1' },
+    });
+
+    expect(mockCreateJob).toHaveBeenCalledTimes(2);
+    expect(mockBossSend).toHaveBeenCalledTimes(1);
+    expect(mockBossSend).toHaveBeenCalledWith('spec:match-skills', expect.objectContaining({ specId: 'spec-story-only' }));
+    expect(mockCreateJob).toHaveBeenNthCalledWith(
+      2,
+      'ws-1', 'spec-story-only', 'match-skills',
+      expect.objectContaining({ stage: 'matchSkills', fingerprint: 'match-v2', previousFingerprint: 'match-v1' }),
+    );
+    expect(mockCreateJob.mock.calls[1][3]).not.toHaveProperty('waitForStage');
+  });
+
+  it('context-affecting save enqueues enrich and defers match-skills even when match fingerprint is unchanged', async () => {
+    const enrichJob = {
+      id: 'job-enrich-context',
+      specId: 'spec-context',
+      workspaceId: 'ws-1',
+      bossJobId: null,
+      status: 'pending',
+      errorMessage: null,
+      createdAt: new Date(),
+    };
+    const matchJob = {
+      id: 'job-match-context',
+      specId: 'spec-context',
+      workspaceId: 'ws-1',
+      bossJobId: null,
+      status: 'pending',
+      errorMessage: null,
+      createdAt: new Date(),
+    };
+    mockCreateJob
+      .mockResolvedValueOnce(enrichJob)
+      .mockResolvedValueOnce(matchJob);
+    mockUpdateJobStatus.mockResolvedValue(undefined);
+
+    await enqueuePersistPostSaveJobs('spec-context', 'ws-1', {
+      enrich: true,
+      matchSkills: true,
+      currentFingerprints: { enrichFingerprint: 'enrich-v2', matchSkillsFingerprint: 'match-v1' },
+      priorFingerprints: { enrichFingerprint: 'enrich-v1', matchSkillsFingerprint: 'match-v1' },
+    });
+
+    expect(mockCreateJob).toHaveBeenCalledTimes(2);
+    expect(mockBossSend).toHaveBeenCalledTimes(1);
+    expect(mockBossSend).toHaveBeenCalledWith('spec:enrich', expect.objectContaining({ specId: 'spec-context' }));
+    expect(mockCreateJob).toHaveBeenNthCalledWith(
+      2,
+      'ws-1', 'spec-context', 'match-skills',
+      expect.objectContaining({
+        stage: 'matchSkills',
+        waitForStage: 'enrich',
+        invalidatedByStage: 'enrich',
+        fingerprint: 'match-v1',
+      }),
+    );
+  });
+
+  it('advance dependencies skips deferred match-skills when enrich was skipped and match fingerprint is unchanged', async () => {
+    const enrichJob = {
+      id: 'job-enrich-skipped-advance',
+      specId: 'spec-advance-skip',
+      workspaceId: 'ws-1',
+      jobType: 'enrich',
+      bossJobId: null,
+      status: 'completed',
+      progressCurrent: 0,
+      progressTotal: 0,
+      progressMessage: null,
+      requestPayload: { origin: 'persist-post-save', stage: 'enrich', fingerprint: 'enrich-v1', previousFingerprint: 'enrich-v1' },
+      resultPayload: { skipped: true, skipReason: 'fingerprint_unchanged', fingerprint: 'enrich-v1', previousFingerprint: 'enrich-v1' },
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: new Date(),
+      createdAt: new Date(),
+    };
+    const deferredMatchJob = {
+      id: 'job-match-deferred-skip',
+      specId: 'spec-advance-skip',
+      workspaceId: 'ws-1',
+      jobType: 'match-skills',
+      bossJobId: null,
+      status: 'pending',
+      progressCurrent: 0,
+      progressTotal: 0,
+      progressMessage: null,
+      requestPayload: {
+        origin: 'persist-post-save',
+        stage: 'matchSkills',
+        waitForStage: 'enrich',
+        fingerprint: 'match-v1',
+        previousFingerprint: 'match-v1',
+      },
+      resultPayload: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(),
+    };
+    mockGetJob.mockResolvedValue(enrichJob);
+    mockListJobsForSpec.mockResolvedValue([deferredMatchJob]);
+    mockUpdateJobStatus.mockResolvedValue(undefined);
+
+    await advancePersistPostSaveDependencies('job-enrich-skipped-advance');
+
+    expect(mockBossSend).not.toHaveBeenCalled();
+    expect(mockUpdateJobStatus).toHaveBeenCalledWith(
+      'job-match-deferred-skip',
+      'completed',
+      expect.objectContaining({
+        resultPayload: expect.objectContaining({ skipped: true, skipReason: 'fingerprint_unchanged', fingerprint: 'match-v1' }),
       }),
     );
   });

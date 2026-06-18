@@ -62,6 +62,12 @@ import {
   type PersistStageStatus,
 } from '../lib/spec-post-save';
 import {
+  computeSpecStageFingerprints,
+  readStageFingerprintsFromSummary,
+  type SpecStageFingerprints,
+  type StageFingerprintStoryInput,
+} from '../lib/spec-stage-fingerprints';
+import {
   SPEC_ENRICH_QUEUE,
   SPEC_MATCH_SKILLS_QUEUE,
   SPEC_SUGGEST_SKILLS_QUEUE,
@@ -1223,6 +1229,7 @@ async function seedPersistGenerationLog(input: {
   invocationSurface?: string;
   title: string;
   storyCount: number;
+  stories: StageFingerprintStoryInput[];
   model?: string;
   overwrite: boolean;
   postSave: SpecPostSaveOptions;
@@ -1231,12 +1238,16 @@ async function seedPersistGenerationLog(input: {
   callerContextSummary?: Record<string, unknown>;
   resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
-}): Promise<void> {
+}): Promise<SpecStageFingerprints> {
   const pendingPostSave = input.postSave.enrich || input.postSave.matchSkills || input.postSave.memorySynthesis;
   const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
   const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
   const invocationSurface = input.invocationSurface?.trim() || 'api.specs.persist';
   const postSaveStages = buildPersistPostSaveStages(input.postSave);
+  const stageFingerprints = computeSpecStageFingerprints({
+    title: input.title,
+    userStories: input.stories,
+  });
   const contextCaptureStatus = buildPersistContextCaptureStatus({
     contextUsed: input.contextUsed,
     callerContextSummary: input.callerContextSummary,
@@ -1255,6 +1266,8 @@ async function seedPersistGenerationLog(input: {
     postSaveStages,
     contextCaptureStatus,
     normalizationChanges: input.normalizationChanges,
+    enrichFingerprint: stageFingerprints.enrichFingerprint,
+    matchSkillsFingerprint: stageFingerprints.matchSkillsFingerprint,
     ...(input.resolvedContextSummary ? { contextSummary: input.resolvedContextSummary } : {}),
     ...(input.contextUsed !== undefined ? { contextUsed: input.contextUsed } : {}),
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
@@ -1270,8 +1283,10 @@ async function seedPersistGenerationLog(input: {
       enriched,
       retrieval_method,
       context_summary_json,
-      status
-    ) VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8)`,
+      status,
+      enrich_fingerprint,
+      match_skills_fingerprint
+    ) VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10)`,
     [
       input.slug,
       input.model?.trim() || 'explicit-draft',
@@ -1281,14 +1296,21 @@ async function seedPersistGenerationLog(input: {
       'none',
       JSON.stringify(summaryJson),
       status,
+      stageFingerprints.enrichFingerprint,
+      stageFingerprints.matchSkillsFingerprint,
     ],
   );
+
+  return stageFingerprints;
 }
 
 async function scheduleSpecPostSaveJobs(
   specId: string,
   workspaceId: string,
-  options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'>,
+  options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'> & {
+    currentFingerprints?: SpecStageFingerprints;
+    priorFingerprints?: Partial<SpecStageFingerprints>;
+  },
 ): Promise<void> {
   if (!options.enrich && !options.matchSkills) return;
 
@@ -1408,6 +1430,9 @@ async function persistExplicitDraftInternal(
     source,
   });
 
+  const priorGenerationLog = await getEffectiveGenerationLog(slug);
+  const priorFingerprints = readStageFingerprintsFromSummary(priorGenerationLog?.context_summary_json);
+
   const walEvent = await queryOne<WalEvent>(
     `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ('spec_generated', $1, $2, 'api', $3) RETURNING *`,
     [workspaceId, slug, JSON.stringify({
@@ -1423,7 +1448,7 @@ async function persistExplicitDraftInternal(
     broadcastAll(walEvent);
   }
 
-  await seedPersistGenerationLog({
+  const currentFingerprints = await seedPersistGenerationLog({
     slug,
     workspaceId,
     source,
@@ -1431,6 +1456,7 @@ async function persistExplicitDraftInternal(
     ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
     title,
     storyCount: normalizedStories.length,
+    stories: normalizedStories,
     model: body.model,
     overwrite,
     postSave,
@@ -1455,6 +1481,8 @@ async function persistExplicitDraftInternal(
   await scheduleSpecPostSaveJobs(slug, workspaceId, {
     enrich: postSave.enrich,
     matchSkills: postSave.matchSkills,
+    currentFingerprints,
+    priorFingerprints,
   });
 
   return {
@@ -3694,8 +3722,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // can find and update stage state when enqueue failures or job failures occur.
     const forgePostSave: SpecPostSaveOptions = { enrich: true, matchSkills: true, memorySynthesis: true };
     const forgePostSaveStages = buildPersistPostSaveStages(forgePostSave);
-    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+    const forgeStageFingerprints = computeSpecStageFingerprints({
+      title: effectiveTitle,
+      userStories: parsed.stories as StageFingerprintStoryInput[],
+    });
+    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status, enrich_fingerprint, match_skills_fingerprint)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
       Date.now() - genStartTime,
       tokenUsage.inputTokens, tokenUsage.outputTokens,
       JSON.stringify(precomputedContextSummary ?? {}),
@@ -3704,9 +3736,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         workspaceId: String(workspaceId),
         postSave: forgePostSave,
         postSaveStages: forgePostSaveStages,
+        enrichFingerprint: forgeStageFingerprints.enrichFingerprint,
+        matchSkillsFingerprint: forgeStageFingerprints.matchSkillsFingerprint,
         ...(precomputedContextSummary ?? {}),
       }),
       'pending_enrichment',
+      forgeStageFingerprints.enrichFingerprint,
+      forgeStageFingerprints.matchSkillsFingerprint,
     ]);
 
     // 13. Snapshot existing spec as a version if regenerating same slug
@@ -3761,7 +3797,11 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // Enqueued BEFORE the response is sent so all durable state is committed before
     // the caller receives the response. enqueuePersistPostSaveJobs persists failures
     // to stage state in spec_generation_logs, so they surface through status APIs.
-    await scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true });
+    await scheduleSpecPostSaveJobs(slug, workspaceId, {
+      enrich: true,
+      matchSkills: true,
+      currentFingerprints: forgeStageFingerprints,
+    });
 
     // 17. Return response
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, true);
@@ -6494,6 +6534,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
             invocationSurface: 'api.specs.repair-batch',
             title: specContent.title ?? candidate.specId,
             storyCount,
+            stories: (specContent.userStories ?? []) as StageFingerprintStoryInput[],
             model: specContent.model,
             overwrite: false,
             postSave: postSaveOptions,
@@ -14173,6 +14214,7 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
           invocationSurface: 'api.specs.repair',
           title: specContent.title ?? specId,
           storyCount,
+          stories: (specContent.userStories ?? []) as StageFingerprintStoryInput[],
           model: specContent.model,
           overwrite: false,
           postSave: postSaveOptions,
