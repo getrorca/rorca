@@ -163,10 +163,11 @@ export async function requestRunPtyResize(runId: number, cols: number, rows: num
 
 export async function claimLatestRunPtyResize(runId: number): Promise<RunPtyResizeRequest | null> {
   const latest = await queryOne<RunPtyResizeRequest>(
-    `SELECT id, cols, rows
-     FROM run_pty_resize_requests
-     WHERE run_id = $1 AND applied_at IS NULL
-     ORDER BY id DESC
+    `SELECT r.id, r.cols, r.rows
+     FROM run_pty_resize_requests r
+     JOIN run_pty_sessions s ON s.run_id = r.run_id
+     WHERE r.run_id = $1 AND r.applied_at IS NULL AND s.status = 'active'
+     ORDER BY r.id DESC
      LIMIT 1`,
     [runId],
   );

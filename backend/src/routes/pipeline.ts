@@ -4712,6 +4712,11 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
+    const ptyStatus = await getRunPtySessionStatus(runId);
+    if (ptyStatus !== 'active') {
+      throw new ConflictError('Run PTY session is not active');
+    }
+
     await requestRunPtyResize(runId, cols, rows);
     res.json({ ok: true, runId, cols, rows });
   } catch (error: any) {

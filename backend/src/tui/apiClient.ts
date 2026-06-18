@@ -7,7 +7,7 @@
 
 import http from 'node:http';
 
-const API_BASE = process.env.RORCA_API_URL?.trim() || 'http://localhost:3030';
+export const API_BASE = process.env.RORCA_API_URL?.trim() || 'http://localhost:3030';
 
 export class TuiApiError extends Error {
   constructor(
@@ -31,6 +31,10 @@ function resolveUrl(pathOrUrl: string): URL {
   }
 
   return new URL(pathOrUrl, API_BASE);
+}
+
+export function apiUrl(pathOrUrl: string): string {
+  return resolveUrl(pathOrUrl).toString();
 }
 
 function parseError(status: number, body: string): TuiApiError {

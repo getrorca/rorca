@@ -25,7 +25,7 @@ import {
   type PipelineWalEvent,
   type WalPayload,
 } from './runFormatting';
-import { apiJson, TuiApiError } from './apiClient';
+import { apiJson, apiUrl, TuiApiError } from './apiClient';
 import {
   buildBoardColumns,
   formatBoardMeta,
@@ -87,6 +87,8 @@ const GENERATE_SPINNER_MS = 80;
 const GENERATE_TIMEOUT_MS = 10 * 60 * 1000;
 const GENERATE_POLL_INTERVAL_MS = 2_000;
 const STORY_TITLE_WIDTH = 46;
+const OUTPUT_RECONNECT_BASE_MS = 500;
+const OUTPUT_RECONNECT_MAX_MS = 5_000;
 
 interface OutputEntry extends FormattedLine {
   key: string;
@@ -128,6 +130,16 @@ interface SpecGenerationJobResponse {
 }
 
 type TerminalMode = 'ansi-html' | 'pty';
+type ForegroundStreamState = 'connecting' | 'live' | 'reconnecting' | 'done' | 'disconnected';
+
+interface OutputRunMeta {
+  agentType?: string;
+  agentModel?: string | null;
+  terminalMode?: TerminalMode;
+  terminal_mode?: TerminalMode;
+  requestedTerminalMode?: TerminalMode;
+  isPty?: boolean;
+}
 
 interface TriggerResponse {
   ok?: boolean;
@@ -189,6 +201,7 @@ interface ForegroundRunState {
   cancelRequested: boolean;
   confirmCancel: boolean;
   terminalMode: TerminalMode;
+  streamState: ForegroundStreamState;
 }
 
 interface BoardLine {
@@ -296,7 +309,7 @@ interface StoryEditorState {
   error: string | null;
 }
 
-const WAL_STREAM_URL = 'http://localhost:3030/api/pipeline/stream';
+const WAL_STREAM_URL = apiUrl('/api/pipeline/stream');
 
 function safeBranchName(): string {
   try {
@@ -602,7 +615,12 @@ export function Forge(): JSX.Element {
   const outputPartialRef = useRef('');
   const storyOutputPartialRef = useRef('');
   const cancelPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const outputReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const outputReconnectAttemptsRef = useRef(0);
+  const outputStreamCompletedRef = useRef(false);
+  const lastPtyResizeRef = useRef<{ runId: number; cols: number; rows: number } | null>(null);
   const exitAfterCancelRef = useRef(false);
+  const exitCancellationInFlightRef = useRef(false);
   const activeRunIdRef = useRef<number | null>(null);
   const streamDetachedRunIdRef = useRef<number | null>(null);
   const isUnmountedRef = useRef(false);
@@ -961,16 +979,28 @@ export function Forge(): JSX.Element {
     storyOutputPartialRef.current = '';
   };
 
-  const closeRunStreams = (): void => {
-    walRequestRef.current?.destroy();
-    walResponseRef.current?.destroy();
+  const clearOutputReconnectTimer = (): void => {
+    if (outputReconnectTimerRef.current) {
+      clearTimeout(outputReconnectTimerRef.current);
+      outputReconnectTimerRef.current = null;
+    }
+  };
+
+  const closeOutputStream = (): void => {
     outputRequestRef.current?.destroy();
     outputResponseRef.current?.destroy();
+    outputRequestRef.current = null;
+    outputResponseRef.current = null;
+  };
+
+  const closeRunStreams = (): void => {
+    clearOutputReconnectTimer();
+    walRequestRef.current?.destroy();
+    walResponseRef.current?.destroy();
+    closeOutputStream();
     closeStoryStream();
     walRequestRef.current = null;
     walResponseRef.current = null;
-    outputRequestRef.current = null;
-    outputResponseRef.current = null;
     outputPartialRef.current = '';
   };
 
@@ -999,6 +1029,35 @@ export function Forge(): JSX.Element {
     } catch {
       // Best-effort only; live orchestration state remains the fallback signal.
     }
+  };
+
+  const requestForegroundRunCancel = async (runId: number, reason: string): Promise<void> => {
+    try {
+      await apiJson(`/api/pipeline/runs/${runId}/cancel`, { method: 'POST', timeoutMs: 2_000 });
+      appendOutput({ text: `[${formatClock(new Date())}] cancel requested for run #${runId} (${reason})`, color: 'yellow' });
+    } catch (error) {
+      appendOutput({ text: `[${formatClock(new Date())}] cancel request failed for run #${runId}: ${(error as Error).message}`, color: 'red' });
+      throw error;
+    }
+  };
+
+  const requestForegroundRunCancelAndExit = (reason: string, exitCode = 0): void => {
+    const runId = activeRunIdRef.current;
+    if (!runId) {
+      process.exit(exitCode);
+      return;
+    }
+    if (exitCancellationInFlightRef.current) {
+      return;
+    }
+    exitCancellationInFlightRef.current = true;
+    exitAfterCancelRef.current = true;
+    setForegroundRun((current) => current && current.runId === runId
+      ? { ...current, cancelRequested: true, exitPromptOpen: false, confirmCancel: false }
+      : current);
+    void requestForegroundRunCancel(runId, reason).finally(() => {
+      setTimeout(() => process.exit(exitCode), 1_500).unref?.();
+    });
   };
 
   const syncRunMetadata = async (runId: number): Promise<void> => {
@@ -1074,6 +1133,7 @@ export function Forge(): JSX.Element {
     clearCancelPromptTimer();
     activeRunIdRef.current = null;
     streamDetachedRunIdRef.current = null;
+    lastPtyResizeRef.current = null;
     closeRunStreams();
     setForegroundRun(null);
     setPhaseOverride(status === 'done' ? 'COMPLETE' : 'FAILED');
@@ -1160,7 +1220,70 @@ export function Forge(): JSX.Element {
     }
   };
 
+  const handleOutputStreamDone = async (runId: number): Promise<void> => {
+    if (isUnmountedRef.current || activeRunIdRef.current !== runId) {
+      return;
+    }
+
+    outputStreamCompletedRef.current = true;
+    clearOutputReconnectTimer();
+    closeOutputStream();
+
+    if (outputPartialRef.current.trim()) {
+      appendOutput(formatRawOutputLine(outputPartialRef.current.trim()));
+      outputPartialRef.current = '';
+    }
+
+    try {
+      const details = await apiJson<RunDetailsResponse>(`/api/pipeline/runs/${runId}`);
+      if (details.run.status === 'done' || details.run.status === 'failed' || details.run.status === 'cancelled') {
+        await finishForegroundRun(runId, details.run.status);
+        return;
+      }
+    } catch {
+      // If details are unavailable, still mark the PTY/output channel as terminal and keep WAL attached.
+    }
+
+    setForegroundRun((current) => current && current.runId === runId
+      ? { ...current, streamState: 'done' }
+      : current);
+    appendOutput({ text: `[${formatClock(new Date())}] output stream completed for run #${runId}; waiting for final run status`, color: 'yellow' });
+  };
+
+  const scheduleOutputReconnect = (runId: number, reason: string): void => {
+    if (isUnmountedRef.current || activeRunIdRef.current !== runId || outputStreamCompletedRef.current) {
+      return;
+    }
+
+    closeOutputStream();
+    clearOutputReconnectTimer();
+    outputPartialRef.current = '';
+    outputReconnectAttemptsRef.current += 1;
+    const delayMs = Math.min(OUTPUT_RECONNECT_MAX_MS, OUTPUT_RECONNECT_BASE_MS * outputReconnectAttemptsRef.current);
+
+    setForegroundRun((current) => current && current.runId === runId
+      ? { ...current, streamState: 'reconnecting' }
+      : current);
+
+    outputReconnectTimerRef.current = setTimeout(() => {
+      outputReconnectTimerRef.current = null;
+      if (isUnmountedRef.current || activeRunIdRef.current !== runId || outputStreamCompletedRef.current) {
+        return;
+      }
+      setOutputLines([]);
+      outputPartialRef.current = '';
+      appendOutput({ text: `[${formatClock(new Date())}] reconnecting output stream for run #${runId} (${reason}); replaying capture`, color: 'yellow' });
+      connectOutputStream(runId);
+    }, delayMs);
+    outputReconnectTimerRef.current.unref?.();
+  };
+
   const handleForegroundStreamDisconnect = (runId: number, streamName: 'wal' | 'output'): void => {
+    if (streamName === 'output') {
+      scheduleOutputReconnect(runId, 'stream disconnected');
+      return;
+    }
+
     if (isUnmountedRef.current || activeRunIdRef.current !== runId || streamDetachedRunIdRef.current === runId) {
       return;
     }
@@ -1213,9 +1336,23 @@ export function Forge(): JSX.Element {
   };
 
   const connectOutputStream = (runId: number): void => {
-    const req = http.get(`http://localhost:3030/api/pipeline/runs/${runId}/output`, (res) => {
+    outputStreamCompletedRef.current = false;
+    setForegroundRun((current) => current && current.runId === runId
+      ? { ...current, streamState: outputReconnectAttemptsRef.current > 0 ? 'reconnecting' : 'connecting' }
+      : current);
+
+    const req = http.get(apiUrl(`/api/pipeline/runs/${runId}/output`), (res) => {
       outputResponseRef.current = res;
       let buffer = '';
+      let settled = false;
+      let sawDone = false;
+
+      const settleDisconnect = (reason: string): void => {
+        if (settled) return;
+        settled = true;
+        if (sawDone) return;
+        scheduleOutputReconnect(runId, reason);
+      };
 
       const flushRawChunk = (chunkText: string): void => {
         outputPartialRef.current += chunkText;
@@ -1241,7 +1378,20 @@ export function Forge(): JSX.Element {
           buffer = buffer.slice(boundary + 2);
           const parsed = parseSseEvent(rawEvent);
 
-          if (parsed?.event === 'chunk' && parsed.data) {
+          if (parsed?.event === 'run_meta' && parsed.data) {
+            try {
+              const meta = JSON.parse(parsed.data) as OutputRunMeta;
+              const nextMode: TerminalMode = meta.isPty === false
+                ? 'ansi-html'
+                : meta.terminalMode ?? meta.terminal_mode ?? 'ansi-html';
+              outputReconnectAttemptsRef.current = 0;
+              setForegroundRun((current) => current && current.runId === runId
+                ? { ...current, terminalMode: nextMode, streamState: 'live' }
+                : current);
+            } catch {
+              // Ignore malformed metadata; chunks still drive the display.
+            }
+          } else if (parsed?.event === 'chunk' && parsed.data) {
             flushRawChunk(Buffer.from(parsed.data, 'base64').toString('utf8'));
           } else if (parsed?.event === 'semantic_step' && parsed.data) {
             try {
@@ -1249,22 +1399,28 @@ export function Forge(): JSX.Element {
             } catch {
               // Ignore malformed semantic steps.
             }
-          } else if (parsed?.event === 'done' && outputPartialRef.current.trim()) {
-            appendOutput(formatRawOutputLine(outputPartialRef.current.trim()));
-            outputPartialRef.current = '';
+          } else if (parsed?.event === 'done') {
+            sawDone = true;
+            settled = true;
+            void handleOutputStreamDone(runId);
           }
 
           boundary = buffer.indexOf('\n\n');
         }
       });
 
-      res.on('end', () => handleForegroundStreamDisconnect(runId, 'output'));
-      res.on('close', () => handleForegroundStreamDisconnect(runId, 'output'));
-      res.on('error', () => handleForegroundStreamDisconnect(runId, 'output'));
+      res.on('end', () => settleDisconnect('stream ended'));
+      res.on('close', () => settleDisconnect('stream closed'));
+      res.on('error', () => settleDisconnect('stream error'));
     });
 
     outputRequestRef.current = req;
-    req.on('error', () => handleForegroundStreamDisconnect(runId, 'output'));
+    req.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ECONNRESET' || error.code === 'ERR_STREAM_DESTROYED') {
+        return;
+      }
+      scheduleOutputReconnect(runId, error.code ?? 'request error');
+    });
   };
 
   const connectStoryOutputStream = (runId: number, storyId: string): void => {
@@ -1272,7 +1428,7 @@ export function Forge(): JSX.Element {
     storyOutputPartialRef.current = '';
     setStoryOutputLines([]);
 
-    const req = http.get(`http://localhost:3030/api/pipeline/runs/${runId}/stories/${encodeURIComponent(storyId)}/stream`, (res) => {
+    const req = http.get(apiUrl(`/api/pipeline/runs/${runId}/stories/${encodeURIComponent(storyId)}/stream`), (res) => {
       storyOutputResponseRef.current = res;
       let buffer = '';
 
@@ -1392,11 +1548,15 @@ export function Forge(): JSX.Element {
       stories: seedForegroundStories(details),
       selectedStreamKey: 'run',
       terminalMode: details.terminal_mode ?? details.terminalMode ?? details.run.terminal_mode ?? 'ansi-html',
+      streamState: 'connecting',
       exitPromptOpen: false,
       cancelRequested: false,
       confirmCancel: false,
     });
 
+    outputReconnectAttemptsRef.current = 0;
+    outputStreamCompletedRef.current = false;
+    lastPtyResizeRef.current = null;
     closeRunStreams();
     connectWalStream(runId);
     connectOutputStream(runId);
@@ -1466,10 +1626,14 @@ export function Forge(): JSX.Element {
           stories: [],
           selectedStreamKey: 'run',
           terminalMode: trigger.terminal_mode ?? trigger.terminalMode ?? 'pty',
+          streamState: 'connecting',
           exitPromptOpen: false,
           cancelRequested: false,
           confirmCancel: false,
         });
+        outputReconnectAttemptsRef.current = 0;
+        outputStreamCompletedRef.current = false;
+        lastPtyResizeRef.current = null;
         closeRunStreams();
         connectWalStream(trigger.runId);
         connectOutputStream(trigger.runId);
@@ -1860,11 +2024,7 @@ export function Forge(): JSX.Element {
 
     void (async () => {
       try {
-        await apiJson(`/api/pipeline/runs/${foregroundRun.runId}/cancel`, { method: 'POST' });
-        appendOutput({
-          text: `[${formatClock(new Date())}] cancel requested for run #${foregroundRun.runId}`,
-          color: 'yellow',
-        });
+        await requestForegroundRunCancel(foregroundRun.runId, 'user confirmed');
       } catch (error) {
         exitAfterCancelRef.current = false;
         setForegroundRun((current) => (
@@ -2161,13 +2321,13 @@ export function Forge(): JSX.Element {
         id: 'quit',
         label: 'quit',
         description: 'Exit forge',
-        handler: () => process.exit(0),
+        handler: () => requestForegroundRunCancelAndExit('quit command', 0),
       },
       {
         id: 'q',
         label: 'q',
         description: 'Exit forge',
-        handler: () => process.exit(0),
+        handler: () => requestForegroundRunCancelAndExit('q command', 0),
       },
     ],
     [
@@ -2191,7 +2351,23 @@ export function Forge(): JSX.Element {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    const handleSigint = (): void => requestForegroundRunCancelAndExit('SIGINT', 130);
+    const handleSigterm = (): void => requestForegroundRunCancelAndExit('SIGTERM', 143);
+    process.once('SIGINT', handleSigint);
+    process.once('SIGTERM', handleSigterm);
+
+    return () => {
+      process.off('SIGINT', handleSigint);
+      process.off('SIGTERM', handleSigterm);
+    };
+  }, []);
+
   useEffect(() => () => {
+    const runId = activeRunIdRef.current;
+    if (runId) {
+      void apiJson(`/api/pipeline/runs/${runId}/cancel`, { method: 'POST', timeoutMs: 2_000 }).catch(() => undefined);
+    }
     isUnmountedRef.current = true;
     closeRunStreams();
   }, []);
@@ -2240,6 +2416,35 @@ export function Forge(): JSX.Element {
 
     return () => clearInterval(timer);
   }, [foregroundRun]);
+
+  useEffect(() => {
+    if (!foregroundRun || foregroundRun.terminalMode !== 'pty') {
+      return;
+    }
+    if (foregroundRun.streamState === 'done' || foregroundRun.streamState === 'disconnected' || foregroundRun.cancelRequested) {
+      return;
+    }
+
+    const cols = Math.max(1, leftColumnWidth - 2);
+    const rows = Math.max(1, mainHeight - (!boardOpen ? 3 : 0));
+    const previous = lastPtyResizeRef.current;
+    if (previous && previous.runId === foregroundRun.runId && previous.cols === cols && previous.rows === rows) {
+      return;
+    }
+
+    lastPtyResizeRef.current = { runId: foregroundRun.runId, cols, rows };
+    const timer = setTimeout(() => {
+      void apiJson(`/api/pipeline/runs/${foregroundRun.runId}/pty/resize`, {
+        method: 'POST',
+        body: { cols, rows },
+        timeoutMs: 2_000,
+      }).catch(() => {
+        // Best-effort: terminal metadata/done events will disable future PTY-only behavior.
+      });
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [boardOpen, foregroundRun?.cancelRequested, foregroundRun?.runId, foregroundRun?.streamState, foregroundRun?.terminalMode, leftColumnWidth, mainHeight]);
 
   useInput((input, key) => {
     if (foregroundRun && key.ctrl && (input === 'c' || input === 'C')) {
@@ -2964,7 +3169,7 @@ export function Forge(): JSX.Element {
           <Text>cost usd: ${(foregroundRun?.cumulativeCost ?? orchestrationState.cumulativeTokens.cost).toFixed(2)}</Text>
           <Text>direction: {foregroundRun?.directionSummary ?? orchestrationState.directionSummary ?? 'none'}</Text>
           <Text>view: {selectedForegroundStory ? selectedForegroundStory.storyId : foregroundRun ? 'combined' : 'none'}</Text>
-          <Text>terminal: {foregroundRun?.terminalMode ?? 'ansi-html'}</Text>
+          <Text>terminal: {foregroundRun ? `${foregroundRun.terminalMode}/${foregroundRun.streamState}` : 'ansi-html'}</Text>
           <Text>parallelism: {foregroundRun?.parallelism ?? 1}</Text>
           <Text>background: {effectiveBackgroundRunsCount}</Text>
         </Box>
