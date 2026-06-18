@@ -24,7 +24,7 @@ export interface PersistPostSaveOptionsShape {
   memorySynthesis: boolean;
 }
 
-export type PersistStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+export type PersistStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'superseded';
 export type PersistStageReason =
   | 'requested_by_caller'
   | 'disabled_by_caller'
@@ -35,6 +35,7 @@ export type PersistStageReason =
   | 'job_completed'
   | 'enqueue_failed'
   | 'job_failed'
+  | 'superseded_by_newer_save'
   | 'blocked_by_enrich_failure'
   | 'blocked_by_enrich_enqueue_failure'
   | 'fingerprint_unchanged'
@@ -68,11 +69,13 @@ type PostSaveJobMetadata = {
   previousFingerprint?: string;
   invalidatedByStage?: DurableStageName;
   skipReason?: PersistStageReason;
+  saveGeneration?: number;
 };
 
 export interface PersistPostSaveFingerprintOptions {
   currentFingerprints?: Partial<SpecStageFingerprints>;
   priorFingerprints?: Partial<SpecStageFingerprints>;
+  saveGeneration?: number;
 }
 
 const STAGE_TO_JOB_TYPE: Record<DurableStageName, DurableStageJobType> = {
@@ -178,6 +181,10 @@ function stageStateForJob(job: SpecJob): PersistPostSaveStageState | null {
     return { ...base, status: 'failed', reason: 'job_failed', error: job.errorMessage ?? 'Cancelled' };
   }
 
+  if (job.status === 'superseded') {
+    return { ...base, status: 'superseded', reason: 'superseded_by_newer_save', error: null };
+  }
+
   if (metadata.waitForStage === 'enrich' && !job.bossJobId) {
     return { ...base, status: 'pending', reason: 'waiting_for_enrich' };
   }
@@ -237,13 +244,15 @@ async function readGenerationLogs(specId: string): Promise<Array<Record<string, 
   );
 }
 
-function mergeStageStateMaps(baseStages: PersistPostSaveStageMap, jobs: SpecJob[]): PersistPostSaveStageMap {
+function mergeStageStateMaps(baseStages: PersistPostSaveStageMap, jobs: SpecJob[], saveGeneration?: number | null): PersistPostSaveStageMap {
   const effectiveStages: PersistPostSaveStageMap = JSON.parse(JSON.stringify(baseStages)) as PersistPostSaveStageMap;
   const latestByStage = new Map<DurableStageName, SpecJob>();
 
   for (const job of jobs) {
     const metadata = getPostSaveJobMetadata(job);
     if (!metadata) continue;
+    const jobGeneration = generationForJob(job, metadata);
+    if (saveGeneration !== undefined && saveGeneration !== null && jobGeneration !== saveGeneration) continue;
     const current = latestByStage.get(metadata.stage);
     if (!current || current.createdAt.getTime() <= job.createdAt.getTime()) {
       latestByStage.set(metadata.stage, job);
@@ -288,7 +297,12 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
     ? await listJobsForSpec(workspaceId, specId, ['enrich', 'match-skills'])
     : [];
 
-  const effectiveStages = mergeStageStateMaps(baseStages, jobs);
+  const summarySaveGeneration = typeof persistSummary.saveGeneration === 'number'
+    ? persistSummary.saveGeneration
+    : typeof persistSummary.saveGeneration === 'string'
+      ? Number(persistSummary.saveGeneration)
+      : null;
+  const effectiveStages = mergeStageStateMaps(baseStages, jobs, summarySaveGeneration);
   const latestSummary = parseRecord(latest.context_summary_json);
   const mergedSummary = {
     ...persistSummary,
@@ -321,15 +335,17 @@ export async function updatePersistPostSaveStage(
   specId: string,
   stageName: DurableStageName,
   stageState: PersistPostSaveStageState,
+  saveGeneration?: number | null,
 ): Promise<void> {
   const log = await queryOne<{ id: number; status: string; context_summary_json: unknown }>(
     `SELECT id, status, context_summary_json
      FROM spec_generation_logs
      WHERE spec_slug = $1
        AND context_summary_json ? 'postSaveStages'
+       AND ($2::bigint IS NULL OR COALESCE(save_generation, id::bigint) = $2::bigint)
      ORDER BY created_at DESC, id DESC
      LIMIT 1`,
-    [specId],
+    [specId, saveGeneration ?? null],
   );
 
   if (!log) return;
@@ -371,6 +387,88 @@ async function ensureBossReady(): Promise<void> {
   }
 }
 
+function generationForJob(job: SpecJob, metadata: PostSaveJobMetadata | null = getPostSaveJobMetadata(job)): number | null {
+  return job.saveGeneration ?? metadata?.saveGeneration ?? null;
+}
+
+async function cancelBossJobForSupersededWork(job: SpecJob): Promise<void> {
+  const metadata = getPostSaveJobMetadata(job);
+  if (!metadata || !job.bossJobId) return;
+  const jobType = STAGE_TO_JOB_TYPE[metadata.stage];
+  try {
+    await ensureBossReady();
+    await getBoss().cancel(STAGE_TO_QUEUE[jobType], job.bossJobId);
+  } catch (error) {
+    logger.warn({ err: error, specId: job.specId, workspaceId: job.workspaceId, jobId: job.id, bossJobId: job.bossJobId }, '[post-save] failed to cancel superseded pg-boss job');
+  }
+}
+
+export async function supersedeOlderPersistPostSaveJobs(specId: string, workspaceId: string, saveGeneration: number): Promise<number> {
+  const jobs = await listJobsForSpec(workspaceId, specId, ['enrich', 'match-skills']);
+  const supersededJobs = jobs.filter((job) => {
+    if (!['pending', 'running'].includes(job.status)) return false;
+    const metadata = getPostSaveJobMetadata(job);
+    if (!metadata) return false;
+    const jobGeneration = generationForJob(job, metadata);
+    return jobGeneration !== null && jobGeneration < saveGeneration;
+  });
+
+  for (const job of supersededJobs) {
+    const metadata = getPostSaveJobMetadata(job);
+    if (!metadata) continue;
+    await cancelBossJobForSupersededWork(job);
+    await updateJobStatus(job.id, 'superseded', {
+      finishedAt: new Date(),
+      progressMessage: 'Superseded by newer spec save',
+      errorMessage: null,
+    });
+    await updatePersistPostSaveStage(job.specId, metadata.stage, {
+      requested: true,
+      status: 'superseded',
+      reason: 'superseded_by_newer_save',
+      jobId: job.id,
+      bossJobId: job.bossJobId,
+      error: null,
+    }, generationForJob(job, metadata));
+  }
+
+  return supersededJobs.length;
+}
+
+export async function isPersistPostSaveJobStale(jobId: string): Promise<boolean> {
+  const job = await getJob(jobId);
+  if (!job) return false;
+  const metadata = getPostSaveJobMetadata(job);
+  const jobGeneration = generationForJob(job, metadata);
+  if (!metadata || jobGeneration === null) return false;
+
+  const current = await queryOne<{ save_generation: number | string }>(
+    `SELECT COALESCE(save_generation, id::bigint) AS save_generation
+     FROM spec_generation_logs
+     WHERE spec_slug = $1
+       AND context_summary_json ? 'postSaveStages'
+     ORDER BY COALESCE(save_generation, id::bigint) DESC, created_at DESC, id DESC
+     LIMIT 1`,
+    [job.specId],
+  );
+  return current ? jobGeneration < Number(current.save_generation) : false;
+}
+
+export async function markPersistPostSaveJobSupersededIfStale(jobId: string): Promise<boolean> {
+  const stale = await isPersistPostSaveJobStale(jobId);
+  if (!stale) return false;
+  const job = await getJob(jobId);
+  if (!job || job.status === 'superseded') return true;
+  const metadata = getPostSaveJobMetadata(job);
+  if (!metadata) return false;
+  await updateJobStatus(job.id, 'superseded', {
+    finishedAt: new Date(),
+    progressMessage: 'Superseded by newer spec save',
+    errorMessage: null,
+  });
+  return true;
+}
+
 async function enqueueExistingJob(job: SpecJob, jobType: DurableStageJobType, stageName: DurableStageName, reason: PersistStageReason): Promise<boolean> {
   try {
     await ensureBossReady();
@@ -397,7 +495,7 @@ async function enqueueExistingJob(job: SpecJob, jobType: DurableStageJobType, st
       jobId: job.id,
       bossJobId,
       error: null,
-    });
+    }, job.saveGeneration);
     return true;
   } catch (error) {
     const message = errorMessageFor(error);
@@ -412,7 +510,7 @@ async function enqueueExistingJob(job: SpecJob, jobType: DurableStageJobType, st
       reason: 'enqueue_failed',
       jobId: job.id,
       error: message,
-    });
+    }, job.saveGeneration);
     logger.warn({ err: error, specId: job.specId, workspaceId: job.workspaceId, jobId: job.id, jobType }, '[post-save] durable enqueue failed');
     return false;
   }
@@ -431,7 +529,7 @@ async function createAndEnqueueStageJob(specId: string, workspaceId: string, sta
       status: 'failed',
       reason: 'enqueue_failed',
       error: message,
-    });
+    }, metadata.saveGeneration);
     logger.warn({ err: error, specId, workspaceId, jobType }, '[post-save] failed to create spec job row');
     return null;
   }
@@ -456,7 +554,7 @@ async function createDeferredStageJob(specId: string, workspaceId: string, stage
       error: null,
       ...(metadata.fingerprint ? { fingerprint: metadata.fingerprint } : {}),
       ...(metadata.previousFingerprint ? { previousFingerprint: metadata.previousFingerprint } : {}),
-    });
+    }, job.saveGeneration);
     return job;
   } catch (error) {
     const message = errorMessageFor(error);
@@ -465,7 +563,7 @@ async function createDeferredStageJob(specId: string, workspaceId: string, stage
       status: 'failed',
       reason: 'enqueue_failed',
       error: message,
-    });
+    }, metadata.saveGeneration);
     logger.warn({ err: error, specId, workspaceId, jobType }, '[post-save] failed to create deferred spec job row');
     return null;
   }
@@ -497,7 +595,7 @@ async function markExistingJobSkippedByFingerprint(
     error: null,
     ...(metadata.fingerprint ? { fingerprint: metadata.fingerprint } : {}),
     ...(metadata.previousFingerprint ? { previousFingerprint: metadata.previousFingerprint } : {}),
-  });
+  }, job.saveGeneration);
 }
 
 async function createSkippedStageJob(
@@ -518,7 +616,7 @@ async function createSkippedStageJob(
       status: 'failed',
       reason: 'enqueue_failed',
       error: message,
-    });
+    }, metadata.saveGeneration);
     logger.warn({ err: error, specId, workspaceId, jobType }, '[post-save] failed to persist skipped spec job row');
     return null;
   }
@@ -547,7 +645,7 @@ async function createFailedStageJob(
       jobId: job.id,
       bossJobId: null,
       error: errorMessage,
-    });
+    }, job.saveGeneration);
   } catch (error) {
     logger.warn({ err: error, specId, workspaceId, jobType }, '[post-save] failed to persist blocked stage job');
     await updatePersistPostSaveStage(specId, stageName, {
@@ -555,7 +653,7 @@ async function createFailedStageJob(
       status: 'failed',
       reason,
       error: errorMessage,
-    });
+    }, metadata.saveGeneration);
   }
 }
 
@@ -568,6 +666,10 @@ export async function enqueuePersistPostSaveJobs(
 
   const current = options.currentFingerprints ?? {};
   const prior = options.priorFingerprints ?? {};
+  const saveGeneration = options.saveGeneration;
+  if (saveGeneration !== undefined) {
+    await supersedeOlderPersistPostSaveJobs(specId, workspaceId, saveGeneration);
+  }
   const enrichFingerprintChanged = !current.enrichFingerprint
     || !prior.enrichFingerprint
     || current.enrichFingerprint !== prior.enrichFingerprint;
@@ -578,12 +680,14 @@ export async function enqueuePersistPostSaveJobs(
   const enrichMetadata = (): PostSaveJobMetadata => ({
     origin: 'persist-post-save',
     stage: 'enrich',
+    ...(saveGeneration !== undefined ? { saveGeneration } : {}),
     ...(current.enrichFingerprint ? { fingerprint: current.enrichFingerprint } : {}),
     ...(prior.enrichFingerprint ? { previousFingerprint: prior.enrichFingerprint } : {}),
   });
   const matchMetadata = (extra: Partial<PostSaveJobMetadata> = {}): PostSaveJobMetadata => ({
     origin: 'persist-post-save',
     stage: 'matchSkills',
+    ...(saveGeneration !== undefined ? { saveGeneration } : {}),
     ...(current.matchSkillsFingerprint ? { fingerprint: current.matchSkillsFingerprint } : {}),
     ...(prior.matchSkillsFingerprint ? { previousFingerprint: prior.matchSkillsFingerprint } : {}),
     ...extra,
@@ -673,9 +777,11 @@ export async function syncPersistPostSaveStageFromJob(jobId: string): Promise<vo
   const metadata = getPostSaveJobMetadata(job);
   if (!metadata) return;
 
+  if (await isPersistPostSaveJobStale(jobId)) return;
+
   const stageState = stageStateForJob(job);
   if (!stageState) return;
-  await updatePersistPostSaveStage(job.specId, metadata.stage, stageState);
+  await updatePersistPostSaveStage(job.specId, metadata.stage, stageState, generationForJob(job, metadata));
 }
 
 export async function advancePersistPostSaveDependencies(jobId: string): Promise<void> {
@@ -686,14 +792,18 @@ export async function advancePersistPostSaveDependencies(jobId: string): Promise
   if (!metadata || metadata.stage !== 'enrich' || !['completed', 'failed', 'cancelled'].includes(job.status)) {
     return;
   }
+  if (await isPersistPostSaveJobStale(jobId)) return;
+  const enrichGeneration = generationForJob(job, metadata);
 
   const jobs = await listJobsForSpec(job.workspaceId, job.specId, ['match-skills']);
   const deferredJobs = jobs.filter((candidate) => {
     const candidateMetadata = getPostSaveJobMetadata(candidate);
+    const candidateGeneration = generationForJob(candidate, candidateMetadata);
     return candidate.status === 'pending'
       && !candidate.bossJobId
       && candidateMetadata?.stage === 'matchSkills'
-      && candidateMetadata.waitForStage === 'enrich';
+      && candidateMetadata.waitForStage === 'enrich'
+      && (enrichGeneration === null || candidateGeneration === enrichGeneration);
   });
 
   if (deferredJobs.length === 0) return;
@@ -733,6 +843,6 @@ export async function advancePersistPostSaveDependencies(jobId: string): Promise
       jobId: deferredJob.id,
       bossJobId: null,
       error,
-    });
+    }, generationForJob(deferredJob, getPostSaveJobMetadata(deferredJob)));
   }
 }

@@ -24,7 +24,8 @@ export type SpecJobStatus =
   | 'running'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'superseded';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -36,6 +37,7 @@ export interface SpecJob {
   jobType: SpecJobType;
   status: SpecJobStatus;
   bossJobId: string | null;
+  saveGeneration: number | null;
   progressCurrent: number;
   progressTotal: number;
   progressMessage: string | null;
@@ -54,6 +56,7 @@ interface SpecJobRow {
   job_type: SpecJobType;
   status: SpecJobStatus;
   boss_job_id: string | null;
+  save_generation: number | string | null;
   progress_current: number | null;
   progress_total: number | null;
   progress_message: string | null;
@@ -90,6 +93,7 @@ function mapSpecJobRow(row: SpecJobRow): SpecJob {
     jobType: row.job_type,
     status: row.status,
     bossJobId: row.boss_job_id,
+    saveGeneration: row.save_generation === null ? null : Number(row.save_generation),
     progressCurrent: row.progress_current ?? 0,
     progressTotal: row.progress_total ?? 0,
     progressMessage: row.progress_message,
@@ -108,6 +112,7 @@ export interface SpecJobState {
   workspaceId: string;
   jobType: SpecJobType;
   status: SpecJobStatus;
+  saveGeneration: number | null;
   progress: {
     current: number;
     total: number;
@@ -127,6 +132,7 @@ export function toSpecJobState(job: SpecJob): SpecJobState {
     workspaceId: job.workspaceId,
     jobType: job.jobType,
     status: job.status,
+    saveGeneration: job.saveGeneration,
     progress: {
       current: job.progressCurrent,
       total: job.progressTotal,
@@ -141,7 +147,13 @@ export function toSpecJobState(job: SpecJob): SpecJobState {
 }
 
 export function isTerminalStatus(status: SpecJobStatus): boolean {
-  return status === 'completed' || status === 'failed' || status === 'cancelled';
+  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'superseded';
+}
+
+function extractSaveGeneration(requestPayload: JsonValue | null): number | null {
+  if (!requestPayload || typeof requestPayload !== 'object' || Array.isArray(requestPayload)) return null;
+  const value = (requestPayload as { [key: string]: JsonValue }).saveGeneration;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 export async function createJob(
@@ -156,8 +168,9 @@ export async function createJob(
       spec_id,
       job_type,
       status,
-      request_payload
-    ) VALUES ($1, $2, $3, 'pending', $4)
+      request_payload,
+      save_generation
+    ) VALUES ($1, $2, $3, 'pending', $4, $5)
     RETURNING
       id,
       spec_id,
@@ -165,6 +178,7 @@ export async function createJob(
       job_type,
       status,
       boss_job_id,
+      save_generation,
       progress_current,
       progress_total,
       progress_message,
@@ -174,7 +188,7 @@ export async function createJob(
       started_at,
       finished_at,
       created_at`,
-    [workspaceId, specId, jobType, requestPayload],
+    [workspaceId, specId, jobType, requestPayload, extractSaveGeneration(requestPayload)],
   );
 
   if (!row) {
@@ -193,6 +207,7 @@ export async function getJob(jobId: string): Promise<SpecJob | null> {
       job_type,
       status,
       boss_job_id,
+      save_generation,
       progress_current,
       progress_total,
       progress_message,
@@ -274,6 +289,7 @@ export async function listActiveJobs(workspaceId: string, specId?: string): Prom
         job_type,
         status,
         boss_job_id,
+        save_generation,
         progress_current,
         progress_total,
         progress_message,
@@ -298,6 +314,7 @@ export async function listActiveJobs(workspaceId: string, specId?: string): Prom
         job_type,
         status,
         boss_job_id,
+        save_generation,
         progress_current,
         progress_total,
         progress_message,
@@ -331,6 +348,7 @@ export async function listJobsForSpec(
         job_type,
         status,
         boss_job_id,
+        save_generation,
         progress_current,
         progress_total,
         progress_message,
@@ -355,6 +373,7 @@ export async function listJobsForSpec(
         job_type,
         status,
         boss_job_id,
+        save_generation,
         progress_current,
         progress_total,
         progress_message,

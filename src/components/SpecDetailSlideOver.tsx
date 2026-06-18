@@ -1308,7 +1308,7 @@ function JsonTab({ spec, specId: _specId }: { spec: SpecDetailData; specId: stri
 /* ─── LST-004: Generation Log Tab ──────────────────────────────── */
 
 /** PSE-003: Per-stage status for post-save enrichment pipeline. */
-export type PostSaveStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+export type PostSaveStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'superseded';
 export interface PostSaveStageState {
   requested: boolean;
   status: PostSaveStageStatus;
@@ -1708,6 +1708,7 @@ const STAGE_STATUS_CONFIG: Record<PostSaveStageStatus, { label: string; dotClass
   completed: { label: 'Completed', dotClass: 'bg-success',    textClass: 'text-success' },
   failed:    { label: 'Failed',    dotClass: 'bg-error',      textClass: 'text-error' },
   skipped:   { label: 'Skipped',   dotClass: 'bg-muted/40',   textClass: 'text-muted/60' },
+  superseded:{ label: 'Superseded', dotClass: 'bg-muted/50',   textClass: 'text-muted/70' },
 };
 
 function reasonLabel(reason: string): string {
@@ -1721,6 +1722,7 @@ function reasonLabel(reason: string): string {
     job_completed: 'Done',
     enqueue_failed: 'Enqueue failed',
     job_failed: 'Job failed',
+    superseded_by_newer_save: 'Superseded by newer save',
     blocked_by_enrich_failure: 'Blocked — enrich failed',
     blocked_by_enrich_enqueue_failure: 'Blocked — enrich could not start',
     no_installed_skills: 'No skills installed',

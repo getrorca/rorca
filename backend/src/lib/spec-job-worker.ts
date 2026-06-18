@@ -14,7 +14,7 @@ import { getJob, updateJobStatus } from '../db/spec-jobs';
 import { logger } from './logger';
 import { runContextEnrichJob, runEnrichJob, runMatchSkillsJob, runSuggestSkillsJob, type ProgressCallback } from './spec-job-handlers';
 import { publishSpecJobSnapshot } from './spec-job-events';
-import { advancePersistPostSaveDependencies, syncPersistPostSaveStageFromJob } from './spec-post-save';
+import { advancePersistPostSaveDependencies, markPersistPostSaveJobSupersededIfStale, syncPersistPostSaveStageFromJob } from './spec-post-save';
 
 export const SPEC_ENRICH_QUEUE = 'spec:enrich';
 export const CONTEXT_ENRICH_QUEUE = 'context:enrich';
@@ -23,8 +23,8 @@ export const SPEC_SUGGEST_SKILLS_QUEUE = 'spec:suggest-skills';
 const PROGRESS_THROTTLE_MS = 500;
 
 class SpecJobCancelledError extends Error {
-  constructor() {
-    super('Spec job cancelled');
+  constructor(message = 'Spec job cancelled') {
+    super(message);
     this.name = 'SpecJobCancelledError';
   }
 }
@@ -32,7 +32,10 @@ class SpecJobCancelledError extends Error {
 async function throwIfCancelled(jobId: string): Promise<void> {
   const job = await getJob(jobId);
   if (job?.status === 'cancelled') {
-    throw new SpecJobCancelledError();
+    throw new SpecJobCancelledError('Spec job cancelled');
+  }
+  if (job?.status === 'superseded') {
+    throw new SpecJobCancelledError('Spec job superseded by newer save');
   }
 }
 
@@ -80,9 +83,14 @@ async function handleSpecJobs(
 
     const payload = parsed.data;
     const existing = await getJob(payload.jobId);
-    if (existing?.status === 'cancelled') {
+    if (existing?.status === 'cancelled' || existing?.status === 'superseded') {
       await publishSpecJobSnapshot(payload.jobId, 'terminal');
-      logger.info({ queueName, jobId: payload.jobId }, '[spec-job-worker] skipped cancelled job before start');
+      logger.info({ queueName, jobId: payload.jobId, status: existing.status }, '[spec-job-worker] skipped inactive job before start');
+      return;
+    }
+    if (await markPersistPostSaveJobSupersededIfStale(payload.jobId)) {
+      await publishSpecJobSnapshot(payload.jobId, 'terminal');
+      logger.info({ queueName, jobId: payload.jobId }, '[spec-job-worker] skipped stale post-save job before start');
       return;
     }
 
@@ -94,12 +102,22 @@ async function handleSpecJobs(
       progressTotal: 0,
       progressMessage: `Picked up ${queueName} job`,
     });
+    if (await markPersistPostSaveJobSupersededIfStale(payload.jobId)) {
+      await publishSpecJobSnapshot(payload.jobId, 'terminal');
+      logger.info({ queueName, jobId: payload.jobId }, '[spec-job-worker] stale post-save job superseded after pickup');
+      return;
+    }
     await syncPersistPostSaveStageFromJob(payload.jobId);
     await publishSpecJobSnapshot(payload.jobId, 'progress');
 
     try {
       const resultPayload = await runner(payload, onProgress);
       await throwIfCancelled(payload.jobId);
+      if (await markPersistPostSaveJobSupersededIfStale(payload.jobId)) {
+        await publishSpecJobSnapshot(payload.jobId, 'terminal');
+        logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] stale post-save completion superseded');
+        return;
+      }
       await updateJobStatus(payload.jobId, 'completed', {
         resultPayload: resultPayload as never,
         finishedAt: new Date(),
@@ -110,23 +128,31 @@ async function handleSpecJobs(
       logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] job completed');
     } catch (error) {
       if (error instanceof SpecJobCancelledError) {
-        await updateJobStatus(payload.jobId, 'cancelled', {
+        const latest = await getJob(payload.jobId);
+        const terminalStatus = latest?.status === 'superseded' ? 'superseded' : 'cancelled';
+        await updateJobStatus(payload.jobId, terminalStatus, {
           finishedAt: new Date(),
-          progressMessage: 'Cancelled by user',
+          progressMessage: terminalStatus === 'superseded' ? 'Superseded by newer spec save' : 'Cancelled by user',
           errorMessage: null,
         });
         await syncPersistPostSaveStageFromJob(payload.jobId);
         await advancePersistPostSaveDependencies(payload.jobId);
         await publishSpecJobSnapshot(payload.jobId, 'terminal');
-        logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] job cancelled');
+        logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId, status: terminalStatus }, '[spec-job-worker] job stopped');
+        return;
+      }
+
+      if (await markPersistPostSaveJobSupersededIfStale(payload.jobId)) {
+        await publishSpecJobSnapshot(payload.jobId, 'terminal');
+        logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] stale post-save failure superseded');
         return;
       }
 
       const latest = await getJob(payload.jobId);
-      if (latest?.status === 'cancelled') {
-        await updateJobStatus(payload.jobId, 'cancelled', {
+      if (latest?.status === 'cancelled' || latest?.status === 'superseded') {
+        await updateJobStatus(payload.jobId, latest.status, {
           finishedAt: new Date(),
-          progressMessage: 'Cancelled by user',
+          progressMessage: latest.status === 'superseded' ? 'Superseded by newer spec save' : 'Cancelled by user',
           errorMessage: null,
         });
         await syncPersistPostSaveStageFromJob(payload.jobId);

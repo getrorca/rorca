@@ -115,12 +115,13 @@ describe('PSE-009: stage skip reason tracking', () => {
       'job_completed',
       'enqueue_failed',
       'job_failed',
+      'superseded_by_newer_save',
       'blocked_by_enrich_failure',
       'blocked_by_enrich_enqueue_failure',
       'fingerprint_unchanged',
       'no_installed_skills',
     ];
-    expect(allReasons).toHaveLength(13);
+    expect(allReasons).toHaveLength(14);
     for (const reason of allReasons) {
       expect(typeof reason).toBe('string');
       expect(reason.length).toBeGreaterThan(0);
@@ -530,8 +531,8 @@ describe('PSE-009: buildPersistPostSaveStages edge cases', () => {
 /* ─── PersistStageStatus contract ──────────────────────────────── */
 
 describe('PSE-009: PersistStageStatus terminal vs in-flight classification', () => {
-  it('terminal statuses are completed, failed, and skipped', () => {
-    const terminal: PersistStageStatus[] = ['completed', 'failed', 'skipped'];
+  it('terminal statuses are completed, failed, skipped, and superseded', () => {
+    const terminal: PersistStageStatus[] = ['completed', 'failed', 'skipped', 'superseded'];
     const inFlight: PersistStageStatus[] = ['pending', 'queued', 'running'];
 
     // Ensure no overlap
@@ -544,7 +545,7 @@ describe('PSE-009: PersistStageStatus terminal vs in-flight classification', () 
 
     // Ensure all 6 covered
     expect([...terminal, ...inFlight].sort()).toEqual(
-      ['completed', 'failed', 'pending', 'queued', 'running', 'skipped'],
+      ['completed', 'failed', 'pending', 'queued', 'running', 'skipped', 'superseded'],
     );
   });
 });

@@ -1238,7 +1238,7 @@ async function seedPersistGenerationLog(input: {
   callerContextSummary?: Record<string, unknown>;
   resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
-}): Promise<SpecStageFingerprints> {
+}): Promise<{ stageFingerprints: SpecStageFingerprints; saveGeneration: number }> {
   const pendingPostSave = input.postSave.enrich || input.postSave.matchSkills || input.postSave.memorySynthesis;
   const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
   const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
@@ -1273,7 +1273,7 @@ async function seedPersistGenerationLog(input: {
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
   };
 
-  await execute(
+  const insertedLog = await queryOne<{ id: number }>(
     `INSERT INTO spec_generation_logs (
       spec_slug,
       model,
@@ -1286,7 +1286,8 @@ async function seedPersistGenerationLog(input: {
       status,
       enrich_fingerprint,
       match_skills_fingerprint
-    ) VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10)`,
+    ) VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10)
+    RETURNING id`,
     [
       input.slug,
       input.model?.trim() || 'explicit-draft',
@@ -1301,7 +1302,23 @@ async function seedPersistGenerationLog(input: {
     ],
   );
 
-  return stageFingerprints;
+  const saveGeneration = insertedLog?.id ?? Date.now();
+  await execute(
+    `UPDATE spec_generation_logs
+     SET save_generation = $2,
+         context_summary_json = $3
+     WHERE id = $1`,
+    [
+      saveGeneration,
+      saveGeneration,
+      {
+        ...summaryJson,
+        saveGeneration,
+      },
+    ],
+  );
+
+  return { stageFingerprints, saveGeneration };
 }
 
 async function scheduleSpecPostSaveJobs(
@@ -1310,6 +1327,7 @@ async function scheduleSpecPostSaveJobs(
   options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'> & {
     currentFingerprints?: SpecStageFingerprints;
     priorFingerprints?: Partial<SpecStageFingerprints>;
+    saveGeneration?: number;
   },
 ): Promise<void> {
   if (!options.enrich && !options.matchSkills) return;
@@ -1448,7 +1466,7 @@ async function persistExplicitDraftInternal(
     broadcastAll(walEvent);
   }
 
-  const currentFingerprints = await seedPersistGenerationLog({
+  const { stageFingerprints: currentFingerprints, saveGeneration } = await seedPersistGenerationLog({
     slug,
     workspaceId,
     source,
@@ -1483,6 +1501,7 @@ async function persistExplicitDraftInternal(
     matchSkills: postSave.matchSkills,
     currentFingerprints,
     priorFingerprints,
+    saveGeneration,
   });
 
   return {
@@ -3726,8 +3745,9 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       title: effectiveTitle,
       userStories: parsed.stories as StageFingerprintStoryInput[],
     });
-    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status, enrich_fingerprint, match_skills_fingerprint)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+    const forgeGenerationLog = await queryOne<{ id: number }>(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, context_summary_json, status, enrich_fingerprint, match_skills_fingerprint)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
       Date.now() - genStartTime,
       tokenUsage.inputTokens, tokenUsage.outputTokens,
       JSON.stringify(precomputedContextSummary ?? {}),
@@ -3744,6 +3764,14 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       forgeStageFingerprints.enrichFingerprint,
       forgeStageFingerprints.matchSkillsFingerprint,
     ]);
+    const forgeSaveGeneration = forgeGenerationLog?.id ?? Date.now();
+    await execute(
+      `UPDATE spec_generation_logs
+       SET save_generation = $2,
+           context_summary_json = context_summary_json || $3::jsonb
+       WHERE id = $1`,
+      [forgeSaveGeneration, forgeSaveGeneration, JSON.stringify({ saveGeneration: forgeSaveGeneration })],
+    );
 
     // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
@@ -3801,6 +3829,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       enrich: true,
       matchSkills: true,
       currentFingerprints: forgeStageFingerprints,
+      saveGeneration: forgeSaveGeneration,
     });
 
     // 17. Return response
