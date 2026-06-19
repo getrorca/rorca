@@ -1,0 +1,25 @@
+services:
+  # ─── Production overrides — use Supabase free tier instead of local PostgreSQL ───
+  # Copy this file to docker-compose.override.yml and set SUPABASE_DB_URL
+  
+  rorca:
+    environment:
+      # Supabase connection string — get this from your Supabase project dashboard:
+      #   Project Settings → Database → Connection string → URI
+      # Format: postgresql://postgres.[ref]:[password]@aws-0-us-west-1.pooler.supabase.com:6543/postgres
+      DATABASE_URL: ${SUPABASE_DB_URL}
+      # Disable built-in PostgreSQL when using Supabase
+      RORCA_DB_MODE: byop
+    # Remove dependency on local db service
+    depends_on: {}
+
+  worker:
+    environment:
+      DATABASE_URL: ${SUPABASE_DB_URL}
+      RORCA_DB_MODE: byop
+    depends_on: {}
+
+  # Disable local db when using Supabase
+  db:
+    profiles:
+      - disabled
