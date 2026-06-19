@@ -1,0 +1,120 @@
+# ─── Rorca Helm Chart — Default Values ─────────────────────────────────────
+
+# Number of replicas (1 for single-user; increase for HA with external PG)
+replicaCount: 1
+
+image:
+  repository: ghcr.io/getrorca/rorca
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# ─── Service ─────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  frontendPort: 5210
+  backendPort: 3030
+
+# ─── Ingress ─────────────────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: rorca.local
+      paths:
+        - path: /
+          pathType: Prefix
+          port: 5210
+  tls: []
+
+# ─── Resources ───────────────────────────────────────────────────────────────
+resources:
+  limits:
+    memory: 2Gi
+    cpu: "2"
+  requests:
+    memory: 512Mi
+    cpu: 500m
+
+# ─── Rorca Configuration ────────────────────────────────────────────────────
+rorca:
+  # Execution agent: claude | opencode | codex | pi
+  agent: claude
+  model: ""
+
+  # API keys (use Kubernetes secrets in production)
+  anthropicApiKey: ""
+  openaiApiKey: ""
+  openrouterApiKey: ""
+
+  # Embedding provider: openai | anthropic | openrouter
+  embeddingProvider: openai
+
+  # Node environment
+  nodeEnv: production
+
+  # Serve static frontend from the backend
+  serveStatic: "1"
+
+  # Disable background runtime (set "true" for contract-only mode)
+  disableBackgroundRuntime: "false"
+
+  # MCP server
+  serveMcp: "true"
+
+  # Auth required (set "true" for multi-user mode)
+  authRequired: "false"
+
+  # JWT secret (auto-generated if empty; set explicitly for HA)
+  jwtSecret: ""
+
+  # CORS origin (comma-separated for multiple origins)
+  corsOrigin: ""
+
+# ─── PostgreSQL ──────────────────────────────────────────────────────────────
+# Uses Bitnami PostgreSQL subchart. Set enabled: false to use an external DB.
+postgresql:
+  enabled: true
+  auth:
+    username: rorca
+    password: rorca
+    database: rorca
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      limits:
+        memory: 1Gi
+        cpu: "1"
+      requests:
+        memory: 256Mi
+        cpu: 250m
+
+# Only used when postgresql.enabled is false
+externalDatabase:
+  host: ""
+  port: 5432
+  user: rorca
+  password: ""
+  database: rorca
+  sslmode: require
+
+# ─── Persistence ─────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  size: 5Gi
+  accessMode: ReadWriteOnce
+
+# ─── Node selection ──────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ─── Pod security ────────────────────────────────────────────────────────────
+podSecurityContext: {}
+securityContext: {}

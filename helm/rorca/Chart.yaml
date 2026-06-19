@@ -1,0 +1,26 @@
+apiVersion: v2
+name: rorca
+description: Rorca — AI spec orchestration platform for autonomous software development
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+icon: https://raw.githubusercontent.com/getrorca/rorca/main/public/rorca-mark.svg
+home: https://github.com/getrorca/rorca
+sources:
+  - https://github.com/getrorca/rorca
+keywords:
+  - ai
+  - spec
+  - orchestration
+  - agent
+  - pipeline
+  - llm
+  - development
+maintainers:
+  - name: Rorca
+    email: admin@rorca.app
+dependencies:
+  - name: postgresql
+    version: ">=15.0.0"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

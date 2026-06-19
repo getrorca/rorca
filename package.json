@@ -63,6 +63,9 @@
     "packages/rorca-pi-extension/",
     "forge/run-loop.sh",
     "forge/self-register.ts",
+    "install.sh",
+    "QUICKSTART.md",
+    "helm/rorca/",
     "package.json",
     "README.md",
     "LICENSE"

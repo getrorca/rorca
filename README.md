@@ -24,6 +24,28 @@ It is designed to feel good across the full Rorca product surface:
 
 ---
 
+## 🚀 Install
+
+```bash
+npm install -g rorca
+rorca start
+```
+
+Opens the dashboard at http://localhost:5210. That's it.
+
+| Method | Command | Best for |
+|--------|---------|----------|
+| **npm** | `npm install -g rorca` | Developers with Node.js 20+ |
+| **curl** | `curl -fsSL https://raw.githubusercontent.com/getrorca/rorca/main/install.sh \| sh` | Quick one-liner, CI/CD |
+| **Docker** | `docker run -d --name rorca -p 5210:5210 -p 3030:3030 getrorca/rorca` | Isolated, reproducible |
+| **Docker Compose** | `docker compose up -d` | Local dev with PostgreSQL |
+| **Helm** | `helm install rorca oci://ghcr.io/getrorca/helm/rorca` | Kubernetes |
+| **Source** | `git clone && npm install && npm run dev` | Contributors |
+
+See [QUICKSTART.md](QUICKSTART.md) for detailed install instructions across all methods.
+
+---
+
 ## Start here by surface
 
 If you are new to Rorca, pick the surface that matches how you want to work:

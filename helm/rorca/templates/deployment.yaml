@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rorca.fullname" . }}
+  labels:
+    {{- include "rorca.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "rorca.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rorca.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: rorca
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: frontend
+              containerPort: 5210
+              protocol: TCP
+            - name: backend
+              containerPort: 3030
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "3030"
+            - name: NODE_ENV
+              value: {{ .Values.rorca.nodeEnv | quote }}
+            - name: RORCA_AGENT
+              value: {{ .Values.rorca.agent | quote }}
+            - name: RORCA_MODEL
+              value: {{ .Values.rorca.model | quote }}
+            - name: RORCA_SERVE_STATIC
+              value: {{ .Values.rorca.serveStatic | quote }}
+            - name: RORCA_DISABLE_BACKGROUND_RUNTIME
+              value: {{ .Values.rorca.disableBackgroundRuntime | quote }}
+            - name: RORCA_SERVE_MCP
+              value: {{ .Values.rorca.serveMcp | quote }}
+            - name: AUTH_REQUIRED
+              value: {{ .Values.rorca.authRequired | quote }}
+            - name: RORCA_STATIC_DIR
+              value: /app/dist
+            {{- if .Values.rorca.corsOrigin }}
+            - name: CORS_ORIGIN
+              value: {{ .Values.rorca.corsOrigin | quote }}
+            {{- end }}
+            {{- if .Values.rorca.jwtSecret }}
+            - name: JWT_SECRET
+              value: {{ .Values.rorca.jwtSecret | quote }}
+            {{- end }}
+            {{- if .Values.rorca.anthropicApiKey }}
+            - name: ANTHROPIC_API_KEY
+              value: {{ .Values.rorca.anthropicApiKey | quote }}
+            {{- end }}
+            {{- if .Values.rorca.openaiApiKey }}
+            - name: OPENAI_API_KEY
+              value: {{ .Values.rorca.openaiApiKey | quote }}
+            {{- end }}
+            {{- if .Values.rorca.openrouterApiKey }}
+            - name: OPENROUTER_API_KEY
+              value: {{ .Values.rorca.openrouterApiKey | quote }}
+            {{- end }}
+            - name: EMBEDDING_PROVIDER
+              value: {{ .Values.rorca.embeddingProvider | quote }}
+            {{- if .Values.postgresql.enabled }}
+            - name: DATABASE_URL
+              value: postgres://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ include "rorca.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}
+            {{- else }}
+            - name: DATABASE_URL
+              value: postgres://{{ .Values.externalDatabase.user }}:{{ .Values.externalDatabase.password }}@{{ .Values.externalDatabase.host }}:{{ .Values.externalDatabase.port }}/{{ .Values.externalDatabase.database }}{{ if .Values.externalDatabase.sslmode }}?sslmode={{ .Values.externalDatabase.sslmode }}{{ end }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: backend
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: backend
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "rorca.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
