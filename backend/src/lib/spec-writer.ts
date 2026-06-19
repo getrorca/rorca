@@ -64,6 +64,7 @@ export interface GeneratedSpec {
   contextSummary?: Record<string, unknown>;
   reasoning?: SpecReasoning;
   source?: string;
+  postSavePolicy?: Record<string, unknown>;
 }
 
 export interface WriteResult {
@@ -107,6 +108,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
     ...(spec.contextUsed ? { contextUsed: spec.contextUsed } : {}),
     ...(spec.contextSummary ? { contextSummary: spec.contextSummary } : {}),
     ...(spec.source ? { source: spec.source } : {}),
+    ...(spec.postSavePolicy ? { postSavePolicy: spec.postSavePolicy } : {}),
   };
   fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');
 

@@ -174,6 +174,33 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
   expect(res.body.specPath).toContain('auth-system.json');
   expect(res.body.diagramsPath).toBeDefined();
   expect(res.body.diagramsPath).toContain('auth-system-diagrams.md');
+  expect(res.body.postSavePolicy).toMatchObject({
+    callerPolicy: null,
+    effectivePolicy: { version: 'v1', presetId: 'best_effort' },
+    legacyOptions: { enrich: true, matchSkills: true, memorySynthesis: true },
+  });
+});
+
+test('POST /api/specs/generate rejects invalid postSave enum values with ValidationError details', async () => {
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      workspaceId: 'ws-test',
+      domain: 'backend',
+      title: 'Bad Generate Policy',
+      brief: 'Build invalid policy validation',
+      postSave: { skills: 'sometimes' },
+    });
+
+  expect(res.status).toBe(400);
+  expect(res.body.code).toBe('VALIDATION_ERROR');
+  expect(res.body.details).toMatchObject({
+    field: 'postSave.skills',
+    value: 'sometimes',
+    allowedValues: 'match,skip',
+  });
+  expect(mockChatComplete).not.toHaveBeenCalled();
 });
 
 test('POST /api/specs/generate surfaces gitRehydration state in contextSummary (CTM-005)', async () => {
@@ -784,6 +811,11 @@ describe('POST /api/specs/persist', () => {
     expect(saved.userStories).toHaveLength(2);
     expect(saved.contextUsed).toBeUndefined();
     expect(saved.contextSummary).toBeUndefined();
+    expect(saved.postSavePolicy).toMatchObject({
+      callerPolicy: { enrich: false, matchSkills: false, memorySynthesis: false },
+      effectivePolicy: { version: 'v1', enrich: 'skip', skills: 'skip', memory: 'skip' },
+      legacyOptions: { enrich: false, matchSkills: false, memorySynthesis: false },
+    });
 
     const logRes = await request(app)
       .get('/api/specs/explicit-draft/generation-log')
@@ -799,6 +831,11 @@ describe('POST /api/specs/persist', () => {
       contextUsed: 'missing',
       contextSummary: 'missing',
     });
+    expect(summary.postSavePolicy).toMatchObject({
+      callerPolicy: { enrich: false, matchSkills: false, memorySynthesis: false },
+      effectivePolicy: { version: 'v1', enrich: 'skip', skills: 'skip', memory: 'skip' },
+      legacyOptions: { enrich: false, matchSkills: false, memorySynthesis: false },
+    });
     expect(summary.postSaveStages).toEqual({
       enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
       matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
@@ -806,6 +843,28 @@ describe('POST /api/specs/persist', () => {
     });
     expect(summary.contextSummary).toBeUndefined();
     expect(summary.contextUsed).toBeUndefined();
+  });
+
+  test('rejects invalid postSave preset ids with ValidationError details', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Invalid Policy Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        postSave: 'unknown_preset',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('VALIDATION_ERROR');
+    expect(res.body.details).toMatchObject({
+      field: 'postSave',
+      value: 'unknown_preset',
+      allowedValues: 'fast_import,best_effort,skill_first_strict,enterprise_governed,repair_only',
+    });
   });
 
   test('seeds a generation log immediately so the Context tab is non-null before enrich completes', async () => {

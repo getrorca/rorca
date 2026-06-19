@@ -80,6 +80,11 @@ import {
   type SpecEditInput,
   type SpecEditPostSaveDecision,
 } from '../lib/spec-edit-change-class';
+import {
+  resolvePostSavePolicy,
+  type PostSaveLegacyOptions as SpecPostSaveOptions,
+  type ResolvedPostSavePolicy,
+} from '../lib/post-save-policy';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -970,11 +975,7 @@ const PersistSpecDraftSchema = z.object({
   reasoning: ExplicitDraftReasoningSchema.optional(),
   overwrite: z.boolean().optional(),
   source: z.string().optional(),
-  postSave: z.object({
-    enrich: z.boolean().optional(),
-    matchSkills: z.boolean().optional(),
-    memorySynthesis: z.boolean().optional(),
-  }).optional(),
+  postSave: z.unknown().optional(),
 }).refine(data => Array.isArray(data.stories) || Array.isArray(data.userStories), {
   message: 'stories (or userStories) is required',
   path: ['stories'],
@@ -1091,20 +1092,6 @@ function normalizeExplicitDraftStories(
   }
 
   return { stories: resultStories, changes };
-}
-
-interface SpecPostSaveOptions {
-  enrich: boolean;
-  matchSkills: boolean;
-  memorySynthesis: boolean;
-}
-
-function resolveSpecPostSaveOptions(input?: Partial<SpecPostSaveOptions>): SpecPostSaveOptions {
-  return {
-    enrich: input?.enrich !== false,
-    matchSkills: input?.matchSkills !== false,
-    memorySynthesis: input?.memorySynthesis !== false,
-  };
 }
 
 function postSaveStageReasonsForDecision(
@@ -1245,6 +1232,14 @@ function buildPersistContextCaptureStatus(input: {
   };
 }
 
+function postSavePolicyMetadata(resolution: ResolvedPostSavePolicy): Record<string, unknown> {
+  return {
+    callerPolicy: resolution.callerPolicy ?? null,
+    effectivePolicy: resolution.effectivePolicy,
+    legacyOptions: resolution.legacyOptions,
+  };
+}
+
 function buildPersistGenerationLogSummaryText(input: {
   pendingPostSave: boolean;
   contextCaptureStatus: PersistContextCaptureStatus;
@@ -1271,7 +1266,9 @@ async function seedPersistGenerationLog(input: {
   model?: string;
   overwrite: boolean;
   postSave: SpecPostSaveOptions;
+  postSavePolicy: ResolvedPostSavePolicy;
   requestedPostSave?: SpecPostSaveOptions;
+  requestedPostSavePolicy?: ResolvedPostSavePolicy;
   postSaveStageReasons?: Partial<Record<keyof SpecPostSaveOptions, PersistStageReason>>;
   postSaveDecision?: SpecEditPostSaveDecision;
   normalizationChanges: Array<{ from?: string; to: string; reason: string }>;
@@ -1304,7 +1301,9 @@ async function seedPersistGenerationLog(input: {
     overwrite: input.overwrite,
     pendingEnrichment: input.postSave.enrich,
     postSave: input.postSave,
+    postSavePolicy: postSavePolicyMetadata(input.postSavePolicy),
     ...(input.requestedPostSave ? { requestedPostSave: input.requestedPostSave } : {}),
+    ...(input.requestedPostSavePolicy ? { requestedPostSavePolicy: postSavePolicyMetadata(input.requestedPostSavePolicy) } : {}),
     postSaveStages,
     ...(input.postSaveDecision ? { postSaveDecision: input.postSaveDecision } : {}),
     contextCaptureStatus,
@@ -1420,6 +1419,7 @@ interface ForgePersistResult {
   normalization: { changes: PersistSpecDraftNormalizationChange[] };
   overwrote: boolean;
   postSave: SpecPostSaveOptions;
+  postSavePolicy: Record<string, unknown>;
   contextSummary?: Record<string, unknown>;
 }
 
@@ -1442,7 +1442,9 @@ async function persistExplicitDraftInternal(
   const slug = rawSlug || briefToSlug(title);
   const source = body.source?.trim() || 'explicit-draft';
   const overwrite = body.overwrite === true;
-  const requestedPostSave = resolveSpecPostSaveOptions(body.postSave);
+  const requestedPostSavePolicy = resolvePostSavePolicy(body.postSave);
+  const requestedPostSave = requestedPostSavePolicy.legacyOptions;
+  let postSavePolicy = requestedPostSavePolicy;
   let postSave = requestedPostSave;
   let postSaveDecision: SpecEditPostSaveDecision | undefined;
   const draftStories = body.stories ?? body.userStories ?? [];
@@ -1489,6 +1491,16 @@ async function persistExplicitDraftInternal(
       requestedPostSave,
     });
     postSave = postSaveDecision.effectivePostSave;
+    postSavePolicy = {
+      callerPolicy: requestedPostSavePolicy.callerPolicy,
+      effectivePolicy: {
+        ...requestedPostSavePolicy.effectivePolicy,
+        enrich: postSave.enrich ? 'enqueue' : 'skip',
+        skills: postSave.matchSkills ? 'match' : 'skip',
+        memory: postSave.memorySynthesis ? 'synthesize' : 'skip',
+      },
+      legacyOptions: postSave,
+    };
   }
 
   if (fs.existsSync(existingPending)) {
@@ -1510,6 +1522,7 @@ async function persistExplicitDraftInternal(
     contextSummary: resolvedContextSummary,
     reasoning: body.reasoning,
     source,
+    postSavePolicy: postSavePolicyMetadata(postSavePolicy),
   });
 
   const priorGenerationLog = await getEffectiveGenerationLog(slug);
@@ -1524,6 +1537,7 @@ async function persistExplicitDraftInternal(
       storyCount: normalizedStories.length,
       normalizationChanges: changes,
       postSave,
+      postSavePolicy: postSavePolicyMetadata(postSavePolicy),
       ...(postSaveDecision ? { postSaveDecision } : {}),
     })],
   );
@@ -1543,7 +1557,8 @@ async function persistExplicitDraftInternal(
     model: body.model,
     overwrite,
     postSave,
-    ...(postSaveDecision ? { requestedPostSave, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
+    postSavePolicy,
+    ...(postSaveDecision ? { requestedPostSave, requestedPostSavePolicy, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
     normalizationChanges: changes,
     contextUsed: body.contextUsed,
     callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
@@ -1583,6 +1598,7 @@ async function persistExplicitDraftInternal(
     normalization: { changes },
     overwrote: hadExistingSpec,
     postSave,
+    postSavePolicy: postSavePolicyMetadata(postSavePolicy),
     ...(resolvedContextSummary ? { contextSummary: resolvedContextSummary } : {}),
   };
 }
@@ -1970,6 +1986,7 @@ const GenerateSpecSchema = z.object({
     enabled: z.boolean(),
     effort: z.string().optional(),
   }).optional(),
+  postSave: z.unknown().optional(),
 }).refine(data => !!(data.brief || data.specBrief), {
   message: 'brief (or specBrief) is required',
   path: ['brief'],
@@ -1995,11 +2012,7 @@ const SkillFirstForgeSchema = z.object({
     enabled: z.boolean(),
     effort: z.string().optional(),
   }).optional(),
-  postSave: z.object({
-    enrich: z.boolean().optional(),
-    matchSkills: z.boolean().optional(),
-    memorySynthesis: z.boolean().optional(),
-  }).optional(),
+  postSave: z.unknown().optional(),
 }).refine(data => !!(data.brief || data.specBrief), {
   message: 'brief (or specBrief) is required',
   path: ['brief'],
@@ -2238,7 +2251,7 @@ router.post('/generation-context', validateBody(SkillFirstForgeSchema), async (r
       prompt: bundle.fullPrompt,
       contextUsed: bundle.contextUsed,
       contextSummary: bundle.contextSummary,
-      postSaveDefaults: resolveSpecPostSaveOptions(),
+      postSaveDefaults: resolvePostSavePolicy().legacyOptions,
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Forge generation-context');
@@ -2368,6 +2381,14 @@ router.post('/forge', validateBody(SkillFirstForgeSchema), async (req: Request, 
  *                 type: string
  *                 description: Prefix for story IDs (default US)
  *                 example: FEAT
+ *               postSave:
+ *                 oneOf:
+ *                   - type: boolean
+ *                   - type: string
+ *                     enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *                   - type: object
+ *                     additionalProperties: true
+ *                 description: Canonical post-save policy input; omitted defaults to best_effort.
  *     responses:
  *       200:
  *         description: Spec generated successfully
@@ -2419,6 +2440,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const thinkingEnabled: boolean = reasoningBody?.enabled === true || req.body.thinkingEnabled === true;
     const thinkingBudget: number | undefined = req.body.thinkingBudget;
     const reasoningEffort: string | undefined = reasoningBody?.effort;
+    const postSavePolicy = resolvePostSavePolicy(req.body.postSave);
+    const forgePostSave = postSavePolicy.legacyOptions;
 
     const effectiveTitle = title || brief;
 
@@ -3805,7 +3828,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // 12b. Persist generation log with post-save stage tracking (PSE-002)
     // Seed postSaveStages into context_summary_json so updatePersistPostSaveStage
     // can find and update stage state when enqueue failures or job failures occur.
-    const forgePostSave: SpecPostSaveOptions = { enrich: true, matchSkills: true, memorySynthesis: true };
     const forgePostSaveStages = buildPersistPostSaveStages(forgePostSave);
     const forgeStageFingerprints = computeSpecStageFingerprints({
       title: effectiveTitle,
@@ -3821,12 +3843,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         source: 'generate',
         workspaceId: String(workspaceId),
         postSave: forgePostSave,
+        postSavePolicy: postSavePolicyMetadata(postSavePolicy),
         postSaveStages: forgePostSaveStages,
         enrichFingerprint: forgeStageFingerprints.enrichFingerprint,
         matchSkillsFingerprint: forgeStageFingerprints.matchSkillsFingerprint,
         ...(precomputedContextSummary ?? {}),
       }),
-      'pending_enrichment',
+      forgePostSave.enrich || forgePostSave.matchSkills || forgePostSave.memorySynthesis ? 'pending_enrichment' : 'persisted',
       forgeStageFingerprints.enrichFingerprint,
       forgeStageFingerprints.matchSkillsFingerprint,
     ]);
@@ -3879,6 +3902,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         model: resolvedModel,
         contextUsed,
         ...(thinkingEnabled ? { reasoning: { enabled: true, ...(reasoningEffort ? { effort: reasoningEffort } : {}) } } : {}),
+        postSavePolicy: postSavePolicyMetadata(postSavePolicy),
       });
       specPath = writeResult.specPath;
       diagramsPath = writeResult.diagramsPath;
@@ -3892,8 +3916,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // the caller receives the response. enqueuePersistPostSaveJobs persists failures
     // to stage state in spec_generation_logs, so they surface through status APIs.
     await scheduleSpecPostSaveJobs(slug, workspaceId, {
-      enrich: true,
-      matchSkills: true,
+      enrich: forgePostSave.enrich,
+      matchSkills: forgePostSave.matchSkills,
       currentFingerprints: forgeStageFingerprints,
       saveGeneration: forgeSaveGeneration,
     });
@@ -3914,6 +3938,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       diagramsPath,
       contextUsed,
       contextSummary,
+      postSave: forgePostSave,
+      postSavePolicy: postSavePolicyMetadata(postSavePolicy),
       ...(multiPass ? {
         multiPass: true,
         passCount: 6,
@@ -3922,13 +3948,15 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     });
 
     // 18. Fire-and-forget spec memory capture (PG-023)
-    autoSynthesizeSpecMemory(
-      slug,
-      workspaceId,
-      brief,
-      { stories: parsed.stories as unknown[] },
-      (contextSummary ?? {}) as Record<string, unknown>,
-    ).catch(() => { /* non-blocking — errors logged internally */ });
+    if (forgePostSave.memorySynthesis) {
+      autoSynthesizeSpecMemory(
+        slug,
+        workspaceId,
+        brief,
+        { stories: parsed.stories as unknown[] },
+        (contextSummary ?? {}) as Record<string, unknown>,
+      ).catch(() => { /* non-blocking — errors logged internally */ });
+    }
   } catch (error: any) {
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
     // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
@@ -4035,11 +4063,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *                 description: Optional canonical context summary used by the Spec Detail Context tab (direction layers, retrieval metrics, token estimates, etc.).
  *                 additionalProperties: true
  *               postSave:
- *                 type: object
- *                 properties:
- *                   enrich: { type: boolean }
- *                   matchSkills: { type: boolean }
- *                   memorySynthesis: { type: boolean }
+ *                 oneOf:
+ *                   - type: boolean
+ *                   - type: string
+ *                     enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *                   - type: object
+ *                     additionalProperties: true
+ *                 description: Canonical post-save policy input; legacy enrich/matchSkills/memorySynthesis booleans are still accepted.
  *     responses:
  *       200:
  *         description: Spec persisted successfully
@@ -6697,6 +6727,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
             matchSkills: true,
             memorySynthesis: false,
           };
+          const postSavePolicy = resolvePostSavePolicy(postSaveOptions);
           await seedPersistGenerationLog({
             slug: candidate.specId,
             workspaceId,
@@ -6709,6 +6740,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
             model: specContent.model,
             overwrite: false,
             postSave: postSaveOptions,
+            postSavePolicy,
             normalizationChanges: [],
           });
           repairActions.push('seeded_generation_log');
@@ -14836,6 +14868,7 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
           matchSkills: wantMatchSkills,
           memorySynthesis: false,
         };
+        const postSavePolicy = resolvePostSavePolicy(postSaveOptions);
         await seedPersistGenerationLog({
           slug: specId,
           workspaceId,
@@ -14848,6 +14881,7 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
           model: specContent.model,
           overwrite: false,
           postSave: postSaveOptions,
+          postSavePolicy,
           normalizationChanges: [],
         });
         actions.push({
