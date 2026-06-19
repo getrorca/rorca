@@ -75,7 +75,7 @@ fi
 
 if grep -Eq '^package/packages/' "$TMPDIR/contents.txt"; then
   # packages/rorca-pi-extension/ is intentionally shipped in the tarball
-  UNEXPECTED=$(grep -E '^package/packages/' "$TMPDIR/contents.txt" | grep -v '^package/packages/rorca-pi-extension/')
+  UNEXPECTED=$(grep -E '^package/packages/' "$TMPDIR/contents.txt" | grep -v '^package/packages/rorca-pi-extension/' || true)
   if [[ -n "$UNEXPECTED" ]]; then
     echo "✗ Unexpected workspace package content leaked into tarball:"
     echo "$UNEXPECTED"
