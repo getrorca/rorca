@@ -6,6 +6,7 @@
  */
 
 import { execute, query, queryOne } from './index';
+import { SpecReadinessReasonCode } from '../reason-codes';
 
 export type SpecJobType =
   | 'enrich'
@@ -493,7 +494,7 @@ export async function listRepairCandidatesFromLogs(
       // (this is a heuristic — we mark it and let the route verify against the spec file)
       if (matchSkillsStage?.requested
           && matchSkillsStage.status === 'skipped'
-          && matchSkillsStage.reason === 'no_installed_skills') {
+          && matchSkillsStage.reason === SpecReadinessReasonCode.NoInstalledSkills) {
         issues.push('missing_suggested_skills');
       }
     } else {

@@ -62,6 +62,11 @@ import {
 } from '../lib/run-pty-store';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
 import { validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
+import {
+  assertSpecReadinessAllowsMutation,
+  getSpecReadiness,
+  recordSpecReadinessOverride,
+} from '../lib/spec-readiness';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -1220,6 +1225,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               thinkingBudget: { type: integer, description: "Budget for extended reasoning" }
  *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh], description: "Reasoning effort level hint for supported agents" }
  *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists" }
+ *               readinessOverride: { type: boolean, description: "Explicitly run despite readiness blockers; usage is logged to WAL for auditability." }
  *               terminal_mode:
  *                 type: string
  *                 enum: [ansi-html, pty]
@@ -1266,13 +1272,17 @@ const PipelineTriggerSchema = z.object({
   effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
   forceRerun: z.boolean().optional(),
+  readinessOverride: z.boolean().optional(),
+  runAnywayOverride: z.boolean().optional(),
+  overrideReadinessGate: z.boolean().optional(),
   terminal_mode: z.string().nullable().optional(),
   terminalMode: z.string().nullable().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun, terminal_mode, terminalMode } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
+    const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1311,6 +1321,19 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       res.json({ dryRun: true, estimate });
       return;
     }
+
+    const specIdForReadiness = path.basename(specPath, '.json');
+    const specReadiness = await getSpecReadiness({
+      workspaceId,
+      workspacePath: workspace.path,
+      specId: specIdForReadiness,
+      specPath,
+    });
+    assertSpecReadinessAllowsMutation(specReadiness, readinessOverrideRequested);
+    if (specReadiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
+      await recordSpecReadinessOverride({ workspaceId, specId: specIdForReadiness, action: 'run', readiness: specReadiness });
+    }
+    (req as any)._specReadiness = specReadiness;
 
     // 2. Budget cap guard — block if hard cap exceeded for this period
     const budgetStatus = await checkBudgetThresholds(workspaceId);
@@ -1608,6 +1631,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
+        const canonicalReadiness = (req as any)._specReadiness;
         res.status(202).json({
           queued: true,
           runId: queuedId,
@@ -1616,6 +1640,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           terminal_mode: resolvedTerminalMode,
           ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
           ...(executionReadiness ? { executionReadiness } : {}),
+          ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
         });
         return;
       }
@@ -1685,6 +1710,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         terminalMode: resolvedTerminalMode,
         terminal_mode: resolvedTerminalMode,
         expectsExternalOrchestration: true,
+        specReadiness: (req as any)._specReadiness,
       });
       return;
     }
@@ -2009,6 +2035,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const capWarnings = (req as any)._capabilityWarnings;
     const capMode = (req as any)._capabilityMismatchMode;
     const executionReadiness = (req as any)._executionReadiness;
+    const canonicalReadiness = (req as any)._specReadiness;
     res.status(201).json({
       ok: true,
       runId,
@@ -2023,6 +2050,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       terminal_mode: resolvedTerminalMode,
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
+      ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),
     });
   } catch (error: any) {

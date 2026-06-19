@@ -30,6 +30,7 @@ import {
 } from '../db/spec-jobs';
 import { initBoss, getBoss } from './pg-boss';
 import { logger } from './logger';
+import { SpecReadinessReasonCode } from '../reason-codes';
 import type { SpecStageFingerprints } from './spec-stage-fingerprints';
 
 export interface PersistPostSaveOptionsShape {
@@ -56,7 +57,7 @@ export type PersistStageReason =
   | 'metadata_only_skip'
   | 'story_content_only'
   | 'context_bearing_change'
-  | 'no_installed_skills'
+  | typeof SpecReadinessReasonCode.NoInstalledSkills
   | 'context_captured'
   | 'requested_by_policy'
   | 'disabled_by_policy'
@@ -264,8 +265,8 @@ function stageStateForJob(job: SpecJob, queueSnapshot?: PostSaveQueueSnapshot): 
 
   if (job.status === 'completed') {
     const resultRecord = parseRecord(job.resultPayload);
-    if (resultRecord.skipped === true && resultRecord.skipReason === 'no_installed_skills') {
-      return { ...base, status: 'skipped', reason: 'no_installed_skills', error: null };
+    if (resultRecord.skipped === true && resultRecord.skipReason === SpecReadinessReasonCode.NoInstalledSkills) {
+      return { ...base, status: 'skipped', reason: SpecReadinessReasonCode.NoInstalledSkills, error: null };
     }
     if (resultRecord.skipped === true && resultRecord.skipReason === 'fingerprint_unchanged') {
       return {

@@ -44,6 +44,7 @@ import { SpecModelControlBar } from './SpecModelControlBar';
 import type { SpecModelFields } from './SpecModelControlBar';
 import type { EngineValue } from './EngineSelector';
 import { isRunStatusBlocking } from '../lib/kanbanRunStatus';
+import { SpecReadinessReasonCode } from '../lib/readinessReasonCodes';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -1861,7 +1862,7 @@ function reasonLabel(reason: string): string {
     blocked_by_enrich_enqueue_failure: 'Blocked because enrich could not start',
     fingerprint_unchanged: 'Skipped because the stage inputs did not change',
     metadata_only_skip: 'Skipped because only metadata changed',
-    no_installed_skills: 'Skipped because no matching installed skills were available',
+    [SpecReadinessReasonCode.NoInstalledSkills]: 'Skipped because no matching installed skills were available',
   };
   return map[reason] ?? reason;
 }

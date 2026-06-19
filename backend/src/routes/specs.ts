@@ -85,6 +85,11 @@ import {
   type PostSaveLegacyOptions as SpecPostSaveOptions,
   type ResolvedPostSavePolicy,
 } from '../lib/post-save-policy';
+import {
+  assertSpecReadinessAllowsMutation,
+  getSpecReadiness,
+  recordSpecReadinessOverride,
+} from '../lib/spec-readiness';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -8257,6 +8262,9 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
  *             required: [workspaceId]
  *             properties:
  *               workspaceId: { type: string }
+ *               readinessOverride:
+ *                 type: boolean
+ *                 description: Explicitly approve despite readiness blockers; usage is logged to WAL for auditability.
  *     responses:
  *       200:
  *         description: Spec approved
@@ -8271,8 +8279,9 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
  */
 router.post('/:specId/approve', async (req: Request, res: Response) => {
   try {
-    const { specId } = req.params;
-    const { workspaceId } = req.body;
+    const specId = String(req.params.specId);
+    const { workspaceId, readinessOverride, runAnywayOverride, overrideReadinessGate } = req.body;
+    const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     if (!workspaceId) {
       throw new ValidationError('Missing required field: workspaceId');
@@ -8293,6 +8302,17 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
       return;
     }
 
+    const readiness = await getSpecReadiness({
+      workspaceId,
+      workspacePath: workspace.path,
+      specId,
+      specPath: `forge/specs/pending/${specId}.json`,
+    });
+    assertSpecReadinessAllowsMutation(readiness, readinessOverrideRequested);
+    if (readiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
+      await recordSpecReadinessOverride({ workspaceId, specId, action: 'approve', readiness });
+    }
+
     // Create approved/ if needed and move the file
     fs.mkdirSync(approvedDir, { recursive: true });
     const approvedFile = path.join(approvedDir, `${specId}.json`);
@@ -8305,7 +8325,7 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
     );
     if (walEvent) broadcastAll(walEvent);
 
-    res.json({ ok: true, approvedPath: approvedFile });
+    res.json({ ok: true, approvedPath: approvedFile, readiness });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Approve');
   }

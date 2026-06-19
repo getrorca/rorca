@@ -11,6 +11,7 @@ import { execute, query, queryOne } from '../db/index';
 import { getJob } from '../db/spec-jobs';
 import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 import { logger } from './logger';
+import { SpecReadinessReasonCode } from '../reason-codes';
 import { chatComplete, DEFAULT_MODEL, isValidModel } from './llm-client';
 import { completeMatchSkillsPrompt } from './match-skills-llm';
 import { retrieveContext, type RetrievedContext } from './memory-router';
@@ -61,7 +62,7 @@ export type ProgressCallback = (progress: StoryProgress) => Promise<void> | void
 export interface MatchSkillsResult {
   matched: number;
   skipped?: boolean;
-  skipReason?: 'no_installed_skills';
+  skipReason?: typeof SpecReadinessReasonCode.NoInstalledSkills;
   stories: Array<{ storyId: string; skills: SuggestedSkillRaw[] }>;
   contextSummary?: {
     retrieval?: {
@@ -265,7 +266,7 @@ export async function runMatchSkillsJob(
     return {
       matched: 0,
       skipped: true,
-      skipReason: 'no_installed_skills',
+      skipReason: SpecReadinessReasonCode.NoInstalledSkills,
       stories: stories.map((s) => ({ storyId: s.id, skills: [] })),
     };
   }

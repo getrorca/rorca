@@ -12,6 +12,7 @@ import {
 } from './pg-boss-schemas';
 import { getJob, updateJobStatus } from '../db/spec-jobs';
 import { logger } from './logger';
+import { SpecReadinessReasonCode } from '../reason-codes';
 import { runContextEnrichJob, runEnrichJob, runMatchSkillsJob, runMemorySynthesisJob, runSuggestSkillsJob, type ProgressCallback } from './spec-job-handlers';
 import { publishSpecJobSnapshot } from './spec-job-events';
 import {
@@ -202,7 +203,7 @@ async function handleSpecJobs(
       await syncPersistPostSaveStageFromJob(payload.jobId);
       await advancePersistPostSaveDependencies(payload.jobId);
       await publishSpecJobSnapshot(payload.jobId, 'terminal');
-      logSpecJobTelemetry('stage_failed', {
+      logSpecJobTelemetry(SpecReadinessReasonCode.StageFailed, {
         queueName,
         jobId: payload.jobId,
         specId: payload.specId,
