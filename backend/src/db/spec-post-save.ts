@@ -12,7 +12,7 @@ import type { JsonValue } from './spec-jobs';
 
 export type PostSaveWorkflowStageKey = 'context' | 'enrich' | 'matchSkills' | 'memorySynthesis';
 export type PostSaveWorkflowRunStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'superseded';
-export type PostSaveWorkflowStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'superseded';
+export type PostSaveWorkflowStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
 export type PostSaveWorkflowQueueStatus = 'waiting' | 'queued' | 'running';
 
 export interface PostSaveWorkflowRun {
@@ -142,6 +142,7 @@ export interface UpdateStageStatusInput {
   stageKey: PostSaveWorkflowStageKey;
   status: PostSaveWorkflowStageStatus;
   reason?: string;
+  allowedCurrentStatuses?: PostSaveWorkflowStageStatus[];
   jobId?: string | null;
   bossJobId?: string | null;
   queueName?: string | null;
@@ -356,7 +357,6 @@ async function recomputeRunStatus(client: PoolClient, runId: number): Promise<vo
          COUNT(*) FILTER (WHERE status = 'failed' AND requested) AS failed_count,
          COUNT(*) FILTER (WHERE status = 'running' AND requested) AS running_count,
          COUNT(*) FILTER (WHERE status IN ('pending', 'queued') AND requested) AS waiting_count,
-         COUNT(*) FILTER (WHERE status = 'superseded') AS superseded_count,
          COUNT(*) AS total_count
        FROM spec_post_save_workflow_stages
        WHERE run_id = $1
@@ -366,7 +366,6 @@ async function recomputeRunStatus(client: PoolClient, runId: number): Promise<vo
          WHEN failed_count > 0 THEN 'failed'
          WHEN running_count > 0 THEN 'running'
          WHEN waiting_count > 0 THEN 'queued'
-         WHEN superseded_count = total_count THEN 'superseded'
          ELSE 'completed'
        END AS status
        FROM stage_counts
@@ -505,15 +504,21 @@ export async function updateStageStatus(input: UpdateStageStatusInput): Promise<
     if (input.status === 'running' && input.startedAt === undefined) {
       updates.push('started_at = COALESCE(started_at, NOW())');
     }
-    if (['completed', 'failed', 'skipped', 'superseded'].includes(input.status) && input.finishedAt === undefined) {
+    if (['completed', 'failed', 'skipped'].includes(input.status) && input.finishedAt === undefined) {
       updates.push('finished_at = COALESCE(finished_at, NOW())');
+    }
+
+    let statusGuard = '';
+    if (input.allowedCurrentStatuses !== undefined) {
+      statusGuard = `\n         AND status = ANY($${paramIndex++}::text[])`;
+      values.push(input.allowedCurrentStatuses);
     }
 
     const result = await client.query<PostSaveWorkflowStageRow>(
       `UPDATE spec_post_save_workflow_stages
        SET ${updates.join(', ')}
        WHERE run_id = $1
-         AND stage_key = $2
+         AND stage_key = $2${statusGuard}
        RETURNING ${STAGE_SELECT}`,
       values,
     );

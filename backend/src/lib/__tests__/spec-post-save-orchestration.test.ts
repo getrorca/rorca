@@ -158,8 +158,14 @@ describe('PSE-009: stage skip reason tracking', () => {
       'story_content_only',
       'context_bearing_change',
       'no_installed_skills',
+      'context_captured',
+      'requested_by_policy',
+      'disabled_by_policy',
+      'durable_job_enqueueing',
+      'durable_job_enqueued_after_dependency',
+      'blocked_by_required_stage_failed',
     ];
-    expect(allReasons).toHaveLength(17);
+    expect(allReasons).toHaveLength(24);
     for (const reason of allReasons) {
       expect(typeof reason).toBe('string');
       expect(reason.length).toBeGreaterThan(0);
@@ -740,8 +746,8 @@ describe('PSE-009: buildPersistPostSaveStages edge cases', () => {
 /* ─── PersistStageStatus contract ──────────────────────────────── */
 
 describe('PSE-009: PersistStageStatus terminal vs in-flight classification', () => {
-  it('terminal statuses are completed, failed, skipped, and superseded', () => {
-    const terminal: PersistStageStatus[] = ['completed', 'failed', 'skipped', 'superseded'];
+  it('terminal statuses are completed, failed, and skipped', () => {
+    const terminal: PersistStageStatus[] = ['completed', 'failed', 'skipped'];
     const inFlight: PersistStageStatus[] = ['pending', 'queued', 'running'];
 
     // Ensure no overlap
@@ -752,9 +758,9 @@ describe('PSE-009: PersistStageStatus terminal vs in-flight classification', () 
       expect(terminal).not.toContain(i);
     }
 
-    // Ensure all 6 covered
+    // Ensure all v1 stage transition statuses are covered.
     expect([...terminal, ...inFlight].sort()).toEqual(
-      ['completed', 'failed', 'pending', 'queued', 'running', 'skipped', 'superseded'],
+      ['completed', 'failed', 'pending', 'queued', 'running', 'skipped'],
     );
   });
 });

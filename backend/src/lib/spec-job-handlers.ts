@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execute, query, queryOne } from '../db/index';
+import { getJob } from '../db/spec-jobs';
 import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 import { logger } from './logger';
 import { chatComplete, DEFAULT_MODEL, isValidModel } from './llm-client';
@@ -25,6 +26,7 @@ import { PersonaRegistry } from './agent-personas';
 import { matchSkills, type MatchSkillsResult as SkillMatcherResult, type SuggestedSkill } from './skill-matcher';
 import { heuristicMatchSkills } from './match-skills-heuristic';
 import { broadcastAll, type WalEvent } from './sse-hub';
+import { autoSynthesizeSpecMemory } from './auto-memory';
 
 export interface WorkspaceRow {
   id: string;
@@ -107,6 +109,11 @@ export interface EnrichResult {
 export interface ContextEnrichResult {
   success: true;
   context: Awaited<ReturnType<typeof buildContextForStory>>;
+}
+
+export interface MemorySynthesisResult {
+  success: true;
+  synthesized: true;
 }
 
 function safeReadFile(filePath: string): string {
@@ -208,6 +215,10 @@ async function resolveSpecFile(workspacePath: string, specId: string): Promise<{
   }
 
   throw new NotFoundError('Spec not found in approved or pending directories');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function parseJsonFile<T>(filePath: string): T {
@@ -584,6 +595,25 @@ export async function runSuggestSkillsJob(
     storiesAffected: result.storiesAffected,
     stories: result.stories,
   };
+}
+
+export async function runMemorySynthesisJob(
+  payload: { jobId: string; specId: string; workspaceId: string },
+  onProgress?: ProgressCallback,
+): Promise<MemorySynthesisResult> {
+  await onProgress?.({ current: 0, total: 1, message: 'Preparing spec memory synthesis' });
+  const job = await getJob(payload.jobId);
+  const metadata = isRecord(job?.requestPayload) ? job?.requestPayload : {};
+  const memory = isRecord(metadata.memory) ? metadata.memory : {};
+  const brief = typeof memory.brief === 'string' && memory.brief.trim().length > 0
+    ? memory.brief
+    : payload.specId;
+  const stories = Array.isArray(memory.stories) ? memory.stories : [];
+  const contextSummary = isRecord(memory.contextSummary) ? memory.contextSummary : {};
+
+  await autoSynthesizeSpecMemory(payload.specId, payload.workspaceId, brief, { stories }, contextSummary);
+  await onProgress?.({ current: 1, total: 1, message: 'Spec memory synthesis completed' });
+  return { success: true, synthesized: true };
 }
 
 export async function runEnrichJob(

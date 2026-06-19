@@ -11,6 +11,7 @@ export type SpecJobType =
   | 'enrich'
   | 'context-enrich'
   | 'match-skills'
+  | 'memory-synthesis'
   | 'suggest-skills'
   | 'suggest-models'
   | 'detect-dependencies'

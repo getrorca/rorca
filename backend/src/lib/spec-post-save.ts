@@ -38,7 +38,7 @@ export interface PersistPostSaveOptionsShape {
   memorySynthesis: boolean;
 }
 
-export type PersistStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'superseded';
+export type PersistStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
 export type PersistStageReason =
   | 'requested_by_caller'
   | 'disabled_by_caller'
@@ -56,7 +56,13 @@ export type PersistStageReason =
   | 'metadata_only_skip'
   | 'story_content_only'
   | 'context_bearing_change'
-  | 'no_installed_skills';
+  | 'no_installed_skills'
+  | 'context_captured'
+  | 'requested_by_policy'
+  | 'disabled_by_policy'
+  | 'durable_job_enqueueing'
+  | 'durable_job_enqueued_after_dependency'
+  | 'blocked_by_required_stage_failed';
 
 export type PersistContextSource = 'caller_supplied' | 'server_backfilled' | 'missing';
 
@@ -298,7 +304,7 @@ function stageStateForJob(job: SpecJob, queueSnapshot?: PostSaveQueueSnapshot): 
   }
 
   if (job.status === 'superseded') {
-    return { ...base, status: 'superseded', reason: 'superseded_by_newer_save', error: null };
+    return { ...base, status: 'skipped', reason: 'superseded_by_newer_save', error: null };
   }
 
   if (metadata.waitForStage === 'enrich' && !job.bossJobId) {
@@ -701,7 +707,7 @@ export async function supersedeOlderPersistPostSaveJobs(specId: string, workspac
     supersededJobIds.push(job.id);
     await updatePersistPostSaveStage(job.specId, metadata.stage, {
       requested: true,
-      status: 'superseded',
+      status: 'skipped',
       reason: 'superseded_by_newer_save',
       jobId: job.id,
       bossJobId: job.bossJobId,

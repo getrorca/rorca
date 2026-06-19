@@ -38,7 +38,7 @@ import { retrieveContext } from '../lib/memory-router';
 import { recordRetrievedContextOutcome } from '../lib/retrieval-outcome';
 import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, graphStats, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { requireAge } from '../lib/age-guard';
-import { autoSynthesizeSpecMemory, maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
+import { maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
@@ -56,7 +56,6 @@ import { createJob, updateJobStatus, listActiveJobs, listJobsForSpec, listRepair
 import { getBoss } from '../lib/pg-boss';
 import {
   buildPersistPostSaveStages,
-  enqueuePersistPostSaveJobs,
   getEffectiveGenerationLog,
   getEffectiveGenerationLogs,
   updatePersistPostSaveStage,
@@ -64,6 +63,7 @@ import {
   type PersistStageReason,
   type PersistStageStatus,
 } from '../lib/spec-post-save';
+import { startSpecPostSaveWorkflow, type SpecPostSaveWorkflowMemoryPayload } from '../lib/spec-post-save-workflow';
 import {
   computeSpecStageFingerprints,
   readStageFingerprintsFromSummary,
@@ -1366,15 +1366,23 @@ async function seedPersistGenerationLog(input: {
 async function scheduleSpecPostSaveJobs(
   specId: string,
   workspaceId: string,
-  options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'> & {
+  options: SpecPostSaveOptions & {
+    effectivePolicy: ResolvedPostSavePolicy['effectivePolicy'];
     currentFingerprints?: SpecStageFingerprints;
     priorFingerprints?: Partial<SpecStageFingerprints>;
     saveGeneration?: number;
+    memory?: SpecPostSaveWorkflowMemoryPayload;
   },
 ): Promise<void> {
-  if (!options.enrich && !options.matchSkills) return;
-
-  await enqueuePersistPostSaveJobs(specId, workspaceId, options);
+  await startSpecPostSaveWorkflow({
+    specId,
+    workspaceId,
+    effectivePolicy: options.effectivePolicy,
+    ...(options.saveGeneration !== undefined ? { saveGeneration: options.saveGeneration, generationLogId: options.saveGeneration } : {}),
+    currentFingerprints: options.currentFingerprints,
+    priorFingerprints: options.priorFingerprints,
+    memory: options.memory,
+  });
 }
 
 type SkillFirstForgeAgent = 'claude' | 'opencode' | 'codex' | 'pi';
@@ -1566,23 +1574,17 @@ async function persistExplicitDraftInternal(
     reasoning: body.reasoning,
   });
 
-  if (postSave.memorySynthesis) {
-    const memoryBrief = body.brief || body.specBrief || title;
-    autoSynthesizeSpecMemory(
-      slug,
-      workspaceId,
-      memoryBrief,
-      { stories: normalizedStories as unknown[] },
-      { source, explicitDraft: true },
-    ).catch(() => { /* non-blocking — errors logged internally */ });
-  }
-
   await scheduleSpecPostSaveJobs(slug, workspaceId, {
-    enrich: postSave.enrich,
-    matchSkills: postSave.matchSkills,
+    ...postSave,
+    effectivePolicy: postSavePolicy.effectivePolicy,
     currentFingerprints,
     priorFingerprints,
     saveGeneration,
+    memory: {
+      brief: body.brief || body.specBrief || title,
+      stories: normalizedStories as unknown[],
+      contextSummary: { source, explicitDraft: true },
+    },
   });
 
   return {
@@ -3916,10 +3918,15 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // the caller receives the response. enqueuePersistPostSaveJobs persists failures
     // to stage state in spec_generation_logs, so they surface through status APIs.
     await scheduleSpecPostSaveJobs(slug, workspaceId, {
-      enrich: forgePostSave.enrich,
-      matchSkills: forgePostSave.matchSkills,
+      ...forgePostSave,
+      effectivePolicy: postSavePolicy.effectivePolicy,
       currentFingerprints: forgeStageFingerprints,
       saveGeneration: forgeSaveGeneration,
+      memory: {
+        brief,
+        stories: parsed.stories as unknown[],
+        contextSummary: (contextSummary ?? {}) as Record<string, unknown>,
+      },
     });
 
     // 17. Return response
@@ -3947,16 +3954,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       } : {}),
     });
 
-    // 18. Fire-and-forget spec memory capture (PG-023)
-    if (forgePostSave.memorySynthesis) {
-      autoSynthesizeSpecMemory(
-        slug,
-        workspaceId,
-        brief,
-        { stories: parsed.stories as unknown[] },
-        (contextSummary ?? {}) as Record<string, unknown>,
-      ).catch(() => { /* non-blocking — errors logged internally */ });
-    }
   } catch (error: any) {
     await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
     // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
@@ -8479,8 +8476,7 @@ function canonicalPostSaveStatusForStage(stage: PersistPostSaveStageMap[keyof Pe
   if (stage.status === 'running') return 'running';
   if (stage.status === 'queued') return stage.queueStatus === 'waiting' || (stage.activeJobsAhead ?? 0) > 0 ? 'waiting-for-worker' : 'queued';
   if (stage.status === 'pending') return 'waiting-for-worker';
-  if (stage.status === 'superseded') return 'superseded';
-  if (stage.status === 'skipped') return stage.reason === 'fingerprint_unchanged' ? 'skipped-unchanged' : 'completed';
+  if (stage.status === 'skipped') return stage.reason === 'superseded_by_newer_save' ? 'superseded' : stage.reason === 'fingerprint_unchanged' ? 'skipped-unchanged' : 'completed';
   if (stage.status === 'completed') return 'completed';
   if (stage.reason === 'blocked_by_enrich_failure' || stage.reason === 'blocked_by_enrich_enqueue_failure') return 'blocked-by-active-job';
   return 'failed';
@@ -14472,7 +14468,7 @@ function assessRepairStage(
   const action = stage === 'enrich' ? 'enqueue_enrich' : 'enqueue_match_skills';
   const currentStatus = stageState?.status;
 
-  if (currentStatus === 'superseded' || latestJob?.status === 'superseded') {
+  if (latestJob?.status === 'superseded') {
     return {
       stage: requestStage,
       postSaveStage: stage,
