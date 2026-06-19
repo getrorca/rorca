@@ -33,6 +33,26 @@ jest.mock('../../db/index', () => ({
   execute: (...args: unknown[]) => mockExecute(...args),
 }));
 
+const mockCreateWorkflowRun = jest.fn();
+const mockGetLatestWorkflowRunForSpec = jest.fn();
+const mockInsertWorkflowStages = jest.fn();
+const mockListWorkflowStagesByRun = jest.fn();
+const mockListActiveWorkflowConflicts = jest.fn();
+const mockProjectPostSaveStages = jest.fn();
+const mockSupersedeActiveWorkflowRuns = jest.fn();
+const mockUpdateWorkflowStageStatus = jest.fn();
+
+jest.mock('../../db/spec-post-save', () => ({
+  createRun: (...args: unknown[]) => mockCreateWorkflowRun(...args),
+  getLatestRunForSpec: (...args: unknown[]) => mockGetLatestWorkflowRunForSpec(...args),
+  insertStages: (...args: unknown[]) => mockInsertWorkflowStages(...args),
+  listStagesByRun: (...args: unknown[]) => mockListWorkflowStagesByRun(...args),
+  listActiveWorkflowConflicts: (...args: unknown[]) => mockListActiveWorkflowConflicts(...args),
+  projectPostSaveStages: (...args: unknown[]) => mockProjectPostSaveStages(...args),
+  supersedeActiveWorkflowRuns: (...args: unknown[]) => mockSupersedeActiveWorkflowRuns(...args),
+  updateStageStatus: (...args: unknown[]) => mockUpdateWorkflowStageStatus(...args),
+}));
+
 const mockCreateJob = jest.fn();
 const mockGetJob = jest.fn();
 const mockListActiveJobs = jest.fn();
@@ -70,6 +90,14 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockQueryOne.mockResolvedValue(undefined);
   mockExecute.mockResolvedValue(undefined);
+  mockCreateWorkflowRun.mockResolvedValue({ id: 1, effectivePolicyHash: 'policy-hash' });
+  mockGetLatestWorkflowRunForSpec.mockResolvedValue({ id: 1 });
+  mockInsertWorkflowStages.mockResolvedValue([]);
+  mockListWorkflowStagesByRun.mockResolvedValue([]);
+  mockListActiveWorkflowConflicts.mockResolvedValue([]);
+  mockProjectPostSaveStages.mockReturnValue({});
+  mockSupersedeActiveWorkflowRuns.mockResolvedValue(0);
+  mockUpdateWorkflowStageStatus.mockResolvedValue(undefined);
   mockListActiveJobs.mockResolvedValue([]);
   bossCallCount = 0;
 });

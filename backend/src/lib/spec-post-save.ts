@@ -7,6 +7,19 @@
 
 import { query, queryOne, execute } from '../db/index';
 import {
+  createRun,
+  getLatestRunForSpec,
+  insertStages,
+  listActiveWorkflowConflicts,
+  listStagesByRun,
+  projectPostSaveStages,
+  supersedeActiveWorkflowRuns,
+  updateStageStatus as updateWorkflowStageStatus,
+  type PostSaveWorkflowRun,
+  type PostSaveWorkflowStageKey,
+  type ProjectedPostSaveStageMap,
+} from '../db/spec-post-save';
+import {
   createJob,
   getJob,
   listActiveJobs,
@@ -343,6 +356,131 @@ export function buildPersistPostSaveStages(
   };
 }
 
+function coerceProjectedStages(projected: ProjectedPostSaveStageMap): PersistPostSaveStageMap | null {
+  const enrich = projected.enrich;
+  const matchSkills = projected.matchSkills;
+  const memorySynthesis = projected.memorySynthesis;
+  if (!enrich && !matchSkills && !memorySynthesis) return null;
+
+  const fallback = buildPersistPostSaveStages({
+    enrich: false,
+    matchSkills: false,
+    memorySynthesis: false,
+  });
+
+  return {
+    enrich: { ...fallback.enrich, ...(enrich ?? {}), reason: (enrich?.reason ?? fallback.enrich.reason) as PersistStageReason },
+    matchSkills: { ...fallback.matchSkills, ...(matchSkills ?? {}), reason: (matchSkills?.reason ?? fallback.matchSkills.reason) as PersistStageReason },
+    memorySynthesis: { ...fallback.memorySynthesis, ...(memorySynthesis ?? {}), reason: (memorySynthesis?.reason ?? fallback.memorySynthesis.reason) as PersistStageReason },
+  };
+}
+
+async function projectedDurableStagesForSpec(
+  specId: string,
+  options: { workspaceId?: string; saveGeneration?: number | null } = {},
+): Promise<PersistPostSaveStageMap | null> {
+  const run = await getLatestRunForSpec(specId, options);
+  if (!run) return null;
+  const stages = await listStagesByRun(run.id);
+  return coerceProjectedStages(projectPostSaveStages(stages));
+}
+
+async function seedDurableWorkflowRun(input: {
+  specId: string;
+  workspaceId: string;
+  postSave: PersistPostSaveOptionsShape;
+  saveGeneration?: number;
+  generationLogId?: number;
+  currentFingerprints?: Partial<SpecStageFingerprints>;
+}): Promise<PostSaveWorkflowRun | null> {
+  const effectivePolicy = {
+    postSave: input.postSave,
+    version: 1,
+  } as unknown as JsonValue;
+  const conflicts = await projectedActiveWorkflowConflicts(input.workspaceId, input.specId, effectivePolicy);
+  if (conflicts.length > 0) {
+    await supersedeActiveWorkflowRuns(input.workspaceId, input.specId, conflicts[0].effectivePolicyHash);
+  }
+
+  const run = await createRun({
+    workspaceId: input.workspaceId,
+    specId: input.specId,
+    generationLogId: input.generationLogId ?? null,
+    saveGeneration: input.saveGeneration ?? null,
+    effectivePolicy,
+    idempotencyKey: `persist-post-save:${input.workspaceId}:${input.specId}:${input.saveGeneration ?? 'latest'}`,
+    status: 'pending',
+  });
+
+  const initialStages = buildPersistPostSaveStages(input.postSave);
+  await insertStages(run.id, [
+    {
+      stageKey: 'context',
+      requested: true,
+      status: 'completed',
+      reason: 'context_captured',
+      finishedAt: new Date(),
+    },
+    {
+      stageKey: 'enrich',
+      requested: initialStages.enrich.requested,
+      status: initialStages.enrich.status,
+      reason: initialStages.enrich.reason,
+      fingerprint: input.currentFingerprints?.enrichFingerprint ?? null,
+    },
+    {
+      stageKey: 'matchSkills',
+      requested: initialStages.matchSkills.requested,
+      status: initialStages.matchSkills.status,
+      reason: initialStages.matchSkills.reason,
+      fingerprint: input.currentFingerprints?.matchSkillsFingerprint ?? null,
+    },
+    {
+      stageKey: 'memorySynthesis',
+      requested: initialStages.memorySynthesis.requested,
+      status: initialStages.memorySynthesis.status,
+      reason: initialStages.memorySynthesis.reason,
+    },
+  ], [
+    { stageKey: 'enrich', dependsOnStageKey: 'context' },
+    { stageKey: 'matchSkills', dependsOnStageKey: input.postSave.enrich ? 'enrich' : 'context' },
+    { stageKey: 'memorySynthesis', dependsOnStageKey: input.postSave.matchSkills ? 'matchSkills' : 'context' },
+  ]);
+
+  return run;
+}
+
+async function projectedActiveWorkflowConflicts(workspaceId: string, specId: string, effectivePolicy: JsonValue): Promise<PostSaveWorkflowRun[]> {
+  return listActiveWorkflowConflicts({ workspaceId, specId, effectivePolicy });
+}
+
+async function updateDurablePostSaveStage(
+  specId: string,
+  stageName: DurableStageName,
+  stageState: PersistPostSaveStageState,
+  saveGeneration?: number | null,
+): Promise<void> {
+  const run = await getLatestRunForSpec(specId, { saveGeneration: saveGeneration ?? null });
+  if (!run) return;
+  await updateWorkflowStageStatus({
+    runId: run.id,
+    stageKey: stageName as PostSaveWorkflowStageKey,
+    status: stageState.status,
+    reason: stageState.reason,
+    ...(stageState.jobId ? { jobId: stageState.jobId } : {}),
+    ...(stageState.bossJobId !== undefined ? { bossJobId: stageState.bossJobId } : {}),
+    ...(stageState.error !== undefined ? { errorMessage: stageState.error } : {}),
+    ...(stageState.fingerprint !== undefined ? { fingerprint: stageState.fingerprint } : {}),
+    ...(stageState.previousFingerprint !== undefined ? { previousFingerprint: stageState.previousFingerprint } : {}),
+    ...(stageState.queueName !== undefined ? { queueName: stageState.queueName } : {}),
+    ...(stageState.queueStatus !== undefined ? { queueStatus: stageState.queueStatus } : {}),
+    ...(stageState.queuePosition !== undefined ? { queuePosition: stageState.queuePosition } : {}),
+    ...(stageState.activeJobsAhead !== undefined ? { activeJobsAhead: stageState.activeJobsAhead } : {}),
+    ...(stageState.queuePriority !== undefined ? { queuePriority: stageState.queuePriority } : {}),
+    ...(stageState.singletonKey !== undefined ? { singletonKey: stageState.singletonKey } : {}),
+  });
+}
+
 async function readGenerationLogs(specId: string): Promise<Array<Record<string, unknown>>> {
   return query<Record<string, unknown>>(
     'SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC, id DESC',
@@ -382,13 +520,37 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
   }
 
   const latest = { ...logs[0] };
+  const latestSummary = parseRecord(latest.context_summary_json);
+  const latestWorkspaceId = typeof latestSummary.workspaceId === 'string'
+    ? latestSummary.workspaceId
+    : undefined;
+  const latestSaveGeneration = typeof latestSummary.saveGeneration === 'number'
+    ? latestSummary.saveGeneration
+    : typeof latestSummary.saveGeneration === 'string'
+      ? Number(latestSummary.saveGeneration)
+      : null;
+
   const persistLog = logs.find((log) => {
     const summary = parseRecord(log.context_summary_json);
     return summary.postSaveStages && typeof summary.postSaveStages === 'object';
   });
 
   if (!persistLog) {
-    return latest;
+    const durableStages = await projectedDurableStagesForSpec(specId, {
+      workspaceId: latestWorkspaceId,
+      saveGeneration: latestSaveGeneration,
+    });
+    if (!durableStages) {
+      return latest;
+    }
+    return {
+      ...latest,
+      status: deriveOverallStatus(String(latest.status ?? ''), durableStages),
+      context_summary_json: {
+        ...latestSummary,
+        postSaveStages: durableStages,
+      },
+    };
   }
 
   const persistSummary = parseRecord(persistLog.context_summary_json);
@@ -399,7 +561,7 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
 
   const workspaceId = typeof persistSummary.workspaceId === 'string'
     ? persistSummary.workspaceId
-    : undefined;
+    : latestWorkspaceId;
   const jobs = workspaceId
     ? await listJobsForSpec(workspaceId, specId, ['enrich', 'match-skills'])
     : [];
@@ -408,9 +570,13 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
     ? persistSummary.saveGeneration
     : typeof persistSummary.saveGeneration === 'string'
       ? Number(persistSummary.saveGeneration)
-      : null;
-  const effectiveStages = await mergeStageStateMaps(baseStages, jobs, summarySaveGeneration, workspaceId);
-  const latestSummary = parseRecord(latest.context_summary_json);
+      : latestSaveGeneration;
+  const jobMergedStages = await mergeStageStateMaps(baseStages, jobs, summarySaveGeneration, workspaceId);
+  const durableStages = await projectedDurableStagesForSpec(specId, {
+    workspaceId,
+    saveGeneration: summarySaveGeneration,
+  });
+  const effectiveStages = durableStages ?? jobMergedStages;
   const mergedSummary = {
     ...persistSummary,
     ...latestSummary,
@@ -444,6 +610,8 @@ export async function updatePersistPostSaveStage(
   stageState: PersistPostSaveStageState,
   saveGeneration?: number | null,
 ): Promise<void> {
+  await updateDurablePostSaveStage(specId, stageName, stageState, saveGeneration);
+
   const log = await queryOne<{ id: number; status: string; context_summary_json: unknown }>(
     `SELECT id, status, context_summary_json
      FROM spec_generation_logs
@@ -830,6 +998,19 @@ export async function enqueuePersistPostSaveJobs(
   if (saveGeneration !== undefined) {
     await supersedeOlderPersistPostSaveJobs(specId, workspaceId, saveGeneration);
   }
+
+  await seedDurableWorkflowRun({
+    specId,
+    workspaceId,
+    postSave: {
+      enrich: options.enrich,
+      matchSkills: options.matchSkills,
+      memorySynthesis: false,
+    },
+    ...(saveGeneration !== undefined ? { saveGeneration, generationLogId: saveGeneration } : {}),
+    currentFingerprints: current,
+  });
+
   const enrichFingerprintChanged = !current.enrichFingerprint
     || !prior.enrichFingerprint
     || current.enrichFingerprint !== prior.enrichFingerprint;
