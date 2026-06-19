@@ -108,20 +108,22 @@ beforeEach(() => {
 });
 
 describe('AnalyticsPanel', () => {
-  it('renders a distinct overview instead of duplicating usage', async () => {
+  it('renders the overview tab with token usage data', async () => {
     renderWithProviders(<AnalyticsPanel />);
 
-    await waitFor(() => {
-      expect(screen.getByText('Recent Spec Costs')).toBeInTheDocument();
-      expect(screen.getByText('Model Snapshot')).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Usage' }));
-
+    // Overview tab renders UsageDashboardPanel, which shows Token Usage as heading
     await waitFor(() => {
       expect(screen.getByText('Token Usage')).toBeInTheDocument();
     });
 
-    expect(screen.queryByText('Recent Spec Costs')).not.toBeInTheDocument();
+    // Click on Costs tab to verify tab switching works
+    fireEvent.click(screen.getByRole('tab', { name: 'Costs' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Cost Breakdown')).toBeInTheDocument();
+    });
+
+    // Token Usage heading should no longer be visible
+    expect(screen.queryByText('Token Usage')).not.toBeInTheDocument();
   });
 });

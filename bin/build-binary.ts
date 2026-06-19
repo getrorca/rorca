@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 #!/usr/bin/env bun
 /**
  * DIST-004: Build script for creating a standalone Rorca binary via `bun build --compile`.
