@@ -1,3 +1,4 @@
+#!/usr/bin/env npx tsx
 /**
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
@@ -5,7 +6,6 @@
  * See LICENSE file in the project root for full license text.
  */
 
-#!/usr/bin/env npx tsx
 /**
  * check-swagger-coverage.ts
  *
