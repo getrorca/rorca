@@ -67,7 +67,8 @@ function deriveSelectedBaseUrl(): string {
 
   const mode = readDbModeFile();
   if (mode === 'docker') return `postgres://rorca:rorca@localhost:${DOCKER_PORT}/rorca`;
-  if (mode === 'native' || mode === null) return `postgres://rorca:rorca@localhost:${resolveNativePort()}/rorca`;
+  if (mode === 'native') return `postgres://rorca:rorca@localhost:${resolveNativePort()}/rorca`;
+  // No persisted mode file: trust the explicit DATABASE_URL env var
   return current;
 }
 
