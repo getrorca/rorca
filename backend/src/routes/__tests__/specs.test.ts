@@ -119,7 +119,9 @@ beforeEach(async () => {
   const tablesToClean = [
     'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
     'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
-    'workspace_context', 'direction_layers', 'batch_spec_generation', 'spec_jobs',
+    'workspace_context', 'direction_layers', 'batch_spec_generation',
+    'spec_post_save_stage_dependencies', 'spec_post_save_workflow_stages', 'spec_post_save_workflow_runs',
+    'spec_jobs',
   ];
   for (const t of tablesToClean) {
     await execute(`TRUNCATE ${t} CASCADE`).catch(() => {});
@@ -179,6 +181,16 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
     effectivePolicy: { version: 'v1', presetId: 'best_effort' },
     legacyOptions: { enrich: true, matchSkills: true, memorySynthesis: true },
   });
+  expect(res.body.workflow).toMatchObject({
+    engine: 'spec-post-save-v1',
+    runId: expect.any(Number),
+    saveGeneration: expect.any(Number),
+  });
+  const workflowStages = await query(
+    `SELECT stage_key FROM spec_post_save_workflow_stages WHERE run_id = $1 ORDER BY stage_key`,
+    [res.body.workflow.runId],
+  ) as Array<{ stage_key: string }>;
+  expect(workflowStages.map((stage) => stage.stage_key).sort()).toEqual(['context', 'enrich', 'matchSkills', 'memorySynthesis']);
 });
 
 test('POST /api/specs/generate rejects invalid postSave enum values with ValidationError details', async () => {
@@ -805,6 +817,11 @@ describe('POST /api/specs/persist', () => {
     expect(res.body.source).toBe('explicit-draft');
     expect(res.body.stories).toHaveLength(2);
     expect(res.body.postSave).toEqual({ enrich: false, matchSkills: false, memorySynthesis: false });
+    expect(res.body.workflow).toMatchObject({
+      engine: 'spec-post-save-v1',
+      runId: expect.any(Number),
+      saveGeneration: expect.any(Number),
+    });
 
     const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'explicit-draft.json'), 'utf8'));
     expect(saved.source).toBe('explicit-draft');
@@ -1312,6 +1329,83 @@ describe('POST /api/specs/persist', () => {
     const payload = parsePayload(event!.payload);
     expect(payload.source).toBe('skill-first');
     expect(payload.overwrite).toBe(true);
+  });
+
+  test('repair dry-run diagnoses memory synthesis retry through workflow stage names', async () => {
+    seedSpecFile(path.join(os.tmpdir(), 'forge', 'specs', 'pending'), 'repair-memory', {
+      title: 'Repair Memory',
+      userStories: [
+        { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [] },
+      ],
+    });
+    await execute(
+      `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, context_summary_json, status, save_generation)
+       VALUES ($1, 'explicit-draft', 'api', 0, 'legacy', $2, 'failed', 9001)`,
+      ['repair-memory', JSON.stringify({
+        source: 'explicit-draft',
+        workspaceId: 'ws-test',
+        saveGeneration: 9001,
+        contextCaptureStatus: { status: 'provided', reason: 'caller_supplied_context', contextUsed: 'provided', contextSummary: 'provided' },
+        postSaveStages: {
+          enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+          matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+          memorySynthesis: { requested: true, status: 'failed', reason: 'job_failed', error: 'prior failure' },
+        },
+      })],
+    );
+
+    const res = await request(app)
+      .post('/api/specs/repair-memory/repair')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', stages: ['memorySynthesis'], dryRun: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.diagnosis).toMatchObject({
+      missingWorkflowRun: true,
+      memorySynthesisNeedsRepair: true,
+    });
+    expect(res.body.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'enqueue_memory_synthesis', status: 'skipped', reason: expect.stringContaining('Dry run') }),
+    ]));
+  });
+
+  test('repair backfills a legacy generation log by starting a durable workflow run', async () => {
+    mockBossSend.mockResolvedValueOnce('55555555-5555-4555-8555-555555555555');
+    seedSpecFile(path.join(os.tmpdir(), 'forge', 'specs', 'pending'), 'repair-legacy', {
+      title: 'Repair Legacy',
+      userStories: [
+        { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [] },
+      ],
+    });
+    await execute(
+      `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, context_summary_json, status, save_generation)
+       VALUES ($1, 'explicit-draft', 'api', 0, 'legacy', $2, 'failed', 9002)`,
+      ['repair-legacy', JSON.stringify({
+        source: 'explicit-draft',
+        workspaceId: 'ws-test',
+        saveGeneration: 9002,
+        contextCaptureStatus: { status: 'provided', reason: 'caller_supplied_context', contextUsed: 'provided', contextSummary: 'provided' },
+        postSaveStages: {
+          enrich: { requested: true, status: 'failed', reason: 'job_failed', error: 'prior failure' },
+          matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+          memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+        },
+      })],
+    );
+
+    const res = await request(app)
+      .post('/api/specs/repair-legacy/repair')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', stages: ['enrich'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'enqueue_enrich', status: 'repaired' }),
+    ]));
+    const run = await queryOne(
+      `SELECT id FROM spec_post_save_workflow_runs WHERE workspace_id = 'ws-test' AND spec_id = 'repair-legacy' AND save_generation = 9002`,
+    ) as { id: number } | undefined;
+    expect(run).toBeDefined();
   });
 });
 
