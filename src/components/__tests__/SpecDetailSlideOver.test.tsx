@@ -21,6 +21,9 @@ import {
   postSaveActiveJobCopy,
   readinessInspectionToContextCaptureStatus,
   workflowInspectionToPostSaveStages,
+  workflowTopLevelActionAllowed,
+  workflowStageActionAllowed,
+  shouldRefreshSpecDetailFromWalEvent,
   type PostSaveStageMap,
   type ContextCaptureStatus,
   type ContextClassification,
@@ -815,5 +818,87 @@ describe('PSE-009: repair/retry disabled-state rules', () => {
     for (const c of retryHidden) {
       expect(c === 'persisted_without_context' || c === 'post_save_failed').toBe(false);
     }
+  });
+});
+
+describe('PSP-007: workflow action gating helpers', () => {
+  const workflow = {
+    safeActionHints: [
+      { action: 'repair_spec', allowed: true },
+      { action: 'run_anyway', allowed: true },
+      { action: 'wait_for_post_save', allowed: true },
+    ],
+    stages: [
+      { key: 'context', safeActionHints: [] },
+      { key: 'enrich', safeActionHints: [{ action: 'retry_stage', allowed: true }] },
+      { key: 'matchSkills', safeActionHints: [] },
+      { key: 'memorySynthesis', safeActionHints: [] },
+    ],
+  } as any;
+
+  const readiness = {
+    availableActions: ['repair_post_save', 'run_anyway', 'install_skills'],
+  } as any;
+
+  it('only exposes top-level actions when workflow/readiness surfaces allow them', () => {
+    expect(workflowTopLevelActionAllowed(workflow, readiness, 'repair_spec')).toBe(true);
+    expect(workflowTopLevelActionAllowed(workflow, readiness, 'run_anyway')).toBe(true);
+    expect(workflowTopLevelActionAllowed(workflow, readiness, 'install_skills')).toBe(true);
+    expect(workflowTopLevelActionAllowed(workflow, readiness, 'run')).toBe(false);
+  });
+
+  it('only exposes stage retry when the backend hint marks it allowed', () => {
+    expect(workflowStageActionAllowed(workflow, 'enrich', 'retry_stage')).toBe(true);
+    expect(workflowStageActionAllowed(workflow, 'matchSkills', 'retry_stage')).toBe(false);
+  });
+});
+
+describe('PSP-007: SSE refresh filter', () => {
+  it('refreshes only for relevant workflow/spec WAL events', () => {
+    expect(shouldRefreshSpecDetailFromWalEvent({
+      id: 1,
+      ts: new Date().toISOString(),
+      event_type: 'spec_job_progress',
+      workspace_id: 'ws-1',
+      spec_id: 'spec-1',
+      story_id: null,
+      actor: 'system',
+      payload: null,
+    } as any, 'spec-1', 'ws-1')).toBe(true);
+
+    expect(shouldRefreshSpecDetailFromWalEvent({
+      id: 2,
+      ts: new Date().toISOString(),
+      event_type: 'story_passed',
+      workspace_id: 'ws-1',
+      spec_id: 'spec-1',
+      story_id: 'US-001',
+      actor: 'system',
+      payload: null,
+    } as any, 'spec-1', 'ws-1')).toBe(false);
+
+    expect(shouldRefreshSpecDetailFromWalEvent({
+      id: 3,
+      ts: new Date().toISOString(),
+      event_type: 'spec_repaired',
+      workspace_id: 'ws-2',
+      spec_id: 'spec-1',
+      story_id: null,
+      actor: 'system',
+      payload: null,
+    } as any, 'spec-1', 'ws-1')).toBe(false);
+  });
+
+  it('falls back to payload spec identifiers when the WAL row spec_id is absent', () => {
+    expect(shouldRefreshSpecDetailFromWalEvent({
+      id: 4,
+      ts: new Date().toISOString(),
+      event_type: 'run_started',
+      workspace_id: 'ws-1',
+      spec_id: null,
+      story_id: null,
+      actor: 'system',
+      payload: JSON.stringify({ spec_id: 'spec-1' }),
+    } as any, 'spec-1', 'ws-1')).toBe(true);
   });
 });

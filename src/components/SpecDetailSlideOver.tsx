@@ -50,7 +50,15 @@ import type { SpecModelFields } from './SpecModelControlBar';
 import type { EngineValue } from './EngineSelector';
 import { isRunStatusBlocking } from '../lib/kanbanRunStatus';
 import { SpecReadinessReasonCode } from '../lib/readinessReasonCodes';
-import type { SpecReadinessInspectionPayload, SpecWorkflowInspectionPayload } from '../lib/specWorkflow';
+import type {
+  SpecReadinessInspectionPayload,
+  SpecWorkflowInspectionPayload,
+  SpecWorkflowStageSnapshot,
+  WorkflowActionHint,
+  WorkflowActionKey,
+  WorkflowStageKey,
+} from '../lib/specWorkflow';
+import { useWalSSE, type WalEvent } from '../hooks/useWalSSE';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -110,6 +118,22 @@ const STATUS_CONFIG: Record<SpecStatus, { label: string; className: string }> = 
 function formatDate(iso: string): string {
   try { return new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); }
   catch { return iso; }
+}
+
+function formatDateTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function humanizeCode(code: string): string {
+  return code
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function extractDiagramText(spec: SpecDetailData): { text: string; type: 'mermaid' | 'ascii' } | null {
@@ -445,6 +469,7 @@ function SpecDetailContent({
 
   // Focus trap ref
   const firstFocusRef = useRef<HTMLButtonElement>(null);
+  const liveRefreshTimerRef = useRef<number | null>(null);
 
   // Auto-focus on mount
   useEffect(() => {
@@ -471,7 +496,7 @@ function SpecDetailContent({
     }
 
     return () => { cancelled = true; };
-  }, [specId, workspaceId, initialSummary]);
+  }, [specId, workspaceId, initialSummary, enrichRefreshKey]);
 
   // Sync stories from detail — only on initial load, not on spec-level field updates
   // (spec model/engine changes update `detail` but should not clobber story model overrides)
@@ -522,13 +547,30 @@ function SpecDetailContent({
     return () => { cancelled = true; };
   }, [specId, workspaceId, enrichRefreshKey]);
 
+  useEffect(() => () => {
+    if (liveRefreshTimerRef.current !== null) {
+      window.clearTimeout(liveRefreshTimerRef.current);
+    }
+  }, []);
+
+  useWalSSE((event) => {
+    if (!workspaceId || !specId) return;
+    if (!shouldRefreshSpecDetailFromWalEvent(event, specId, workspaceId)) return;
+    if (liveRefreshTimerRef.current !== null) {
+      window.clearTimeout(liveRefreshTimerRef.current);
+    }
+    liveRefreshTimerRef.current = window.setTimeout(() => {
+      setEnrichRefreshKey((value) => value + 1);
+    }, 200);
+  });
+
   // Check if workspace has an active run (so we can show Queue button upfront)
   useEffect(() => {
     if (!workspaceId) return;
     apiFetch<{ items: Array<{ status: string }> }>(`/api/pipeline/runs?workspaceId=${workspaceId}&limit=5`)
       .then(res => setHasActiveRun(res.items?.some(r => r.status === 'running' || r.status === 'paused') ?? false))
       .catch(() => { /* ignore */ });
-  }, [workspaceId]);
+  }, [workspaceId, enrichRefreshKey]);
 
   /* ─── Actions ─────────────────────────────────────────────────────── */
 
@@ -567,7 +609,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean; readinessOverride?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -587,6 +629,7 @@ function SpecDetailContent({
           ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
           ...(options?.reasoningOverride !== undefined ? { reasoning: options.reasoningOverride } : {}),
           ...(options?.forceRerun ? { forceRerun: true } : {}),
+          ...(options?.readinessOverride ? { readinessOverride: true } : {}),
         }) },
       );
       if (res.conflict) setRunState('conflict');
@@ -691,6 +734,8 @@ function SpecDetailContent({
   const cfg = summary ? STATUS_CONFIG[summary.status] : null;
   const isDraft = summary?.status === 'pending';
   const canRun = summary?.status === 'approved' || summary?.status === 'completed';
+  const runAllowed = canRun && (readinessInspection ? workflowTopLevelActionAllowed(workflowInspection, readinessInspection, 'run') : true);
+  const runAnywayAllowed = canRun && workflowTopLevelActionAllowed(workflowInspection, readinessInspection, 'run_anyway');
   const hasBlockingPostSaveJob = activePostSaveJob !== null;
   const postSaveBlockCopy = activePostSaveJob ? postSaveActiveJobCopy(activePostSaveJob) : null;
 
@@ -854,7 +899,7 @@ function SpecDetailContent({
                 onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields, model: fields.model ?? undefined } : prev)} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} workspaceId={workspaceId ?? ''} activeRunStatus={activeRunStatus} blockingPostSaveJob={activePostSaveJob} workflowInspection={workflowInspection} readinessInspection={readinessInspection} onWorkflowRefresh={() => setEnrichRefreshKey((value) => value + 1)} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} workspaceId={workspaceId ?? ''} activeRunStatus={activeRunStatus} blockingPostSaveJob={activePostSaveJob} workflowInspection={workflowInspection} readinessInspection={readinessInspection} onWorkflowRefresh={() => setEnrichRefreshKey((value) => value + 1)} onOpenSkillsTab={() => setActiveTab('skills')} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <GraphTabWithSubTabs specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -871,7 +916,7 @@ function SpecDetailContent({
             <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 flex items-start gap-2" data-testid="post-save-blocking-banner">
               <AlertCircle size={13} className="text-amber-300 mt-0.5 shrink-0" />
               <div className="min-w-0">
-                <p className="text-xs font-medium text-amber-300">Post-save job active — controls gated</p>
+                <p className="text-xs font-medium text-amber-300">Post-save job active — standard controls gated</p>
                 <p className="text-[10px] text-amber-200/80">{postSaveBlockCopy}</p>
               </div>
             </div>
@@ -909,7 +954,7 @@ function SpecDetailContent({
           )}
 
           {/* Run in Pipeline */}
-          {canRun && (
+          {canRun && (runAllowed || runAnywayAllowed) && (
             <div className="relative">
               {runState === 'queued' ? (
                 <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
@@ -921,7 +966,7 @@ function SpecDetailContent({
                 </div>
               ) : (
                 <>
-                  {showTriggerPopover && (
+                  {showTriggerPopover && runAllowed && (
                     <TriggerPopover loading={runState === 'triggering'} onTrigger={handleRun} onClose={() => setShowTriggerPopover(false)}
                       specPath={`forge/specs/approved/${summary!.id}.json`} workspaceId={workspaceId ?? undefined}
                       initialEffortLevel={detail?.effortLevel}
@@ -930,28 +975,45 @@ function SpecDetailContent({
                       initialReasoning={detail?.reasoning}
                       specModel={detail?.model ?? summary?.model ?? undefined} />
                   )}
-                  {hasActiveRun && runState !== 'triggering' && (
+                  {hasActiveRun && runState !== 'triggering' && runAllowed && (
                     <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 mb-2 flex items-center gap-2">
                       <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
                       <span className="text-xs text-amber-300 flex-1">A run is active in this workspace</span>
                     </div>
                   )}
-                  <div className={hasActiveRun ? 'flex gap-2' : ''}>
-                    <button onClick={() => setShowTriggerPopover(true)} disabled={runState === 'triggering'}
-                      className={`flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity ${hasActiveRun ? 'flex-1' : 'w-full'}`}>
-                      {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> {hasActiveRun ? 'Run Now' : 'Run in Pipeline'}{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-[var(--kbd-bg)]">{deferredCount} deferred</span>}</>}
-                    </button>
-                    {hasActiveRun && (
-                      <button
-                        onClick={() => handleRun(isolateInBranch, { queue: true })}
-                        disabled={runState === 'triggering'}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-60 transition-colors"
-                      >
-                        <Clock size={14} /> Queue Next
+                  {runAnywayAllowed && !runAllowed && (
+                    <div className="rounded border border-error/30 bg-error/10 px-3 py-2 mb-2">
+                      <p className="text-xs font-medium text-error">Execution gate is blocked</p>
+                      <p className="text-[10px] text-error/80">The backend exposed a run-anyway override for this spec. Normal run controls stay hidden until readiness clears.</p>
+                    </div>
+                  )}
+                  {runAllowed ? (
+                    <div className={hasActiveRun ? 'flex gap-2' : ''}>
+                      <button onClick={() => setShowTriggerPopover(true)} disabled={runState === 'triggering'}
+                        className={`flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity ${hasActiveRun ? 'flex-1' : 'w-full'}`}>
+                        {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> {hasActiveRun ? 'Run Now' : 'Run in Pipeline'}{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-[var(--kbd-bg)]">{deferredCount} deferred</span>}</>}
                       </button>
-                    )}
-                  </div>
-                  {allPassed && (
+                      {hasActiveRun && (
+                        <button
+                          onClick={() => handleRun(isolateInBranch, { queue: true })}
+                          disabled={runState === 'triggering'}
+                          className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-60 transition-colors"
+                        >
+                          <Clock size={14} /> Queue Next
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => handleRun(isolateInBranch, { readinessOverride: true })}
+                      disabled={runState === 'triggering'}
+                      className="w-full flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-error text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
+                      data-testid="run-anyway-button"
+                    >
+                      {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> Run Anyway</>}
+                    </button>
+                  )}
+                  {allPassed && runAllowed && (
                     <button
                       onClick={() => handleRun(isolateInBranch, { forceRerun: true })}
                       disabled={runState === 'triggering' || hasBlockingPostSaveJob}
@@ -1850,6 +1912,134 @@ export function getCurrentPostSaveStateFromWorkflow(workflow: SpecWorkflowInspec
   return getCurrentPostSaveState({ postSaveStages: stages } as GenerationLog);
 }
 
+const WORKFLOW_CHECKLIST_STAGE_ORDER = ['context', 'enrich', 'matchSkills', 'memorySynthesis'] as const;
+const WORKFLOW_CHECKLIST_STAGE_LABELS: Record<WorkflowStageKey, string> = {
+  context: 'Context',
+  enrich: 'Enrich',
+  matchSkills: 'Match Skills',
+  memorySynthesis: 'Memory Synthesis',
+};
+
+const LIVE_WORKFLOW_EVENT_TYPES = new Set([
+  'spec_job_progress',
+  'spec_enriched',
+  'skill_matched',
+  'spec_repair_action',
+  'spec_repaired',
+  'spec_readiness_override_used',
+  'spec_updated',
+  'spec_approved',
+  'spec_rejected',
+  'run_started',
+  'run_finished',
+  'run_queued_trigger',
+  'run_queued_promoted',
+]);
+
+function parseWalPayload(payload: string | null): Record<string, unknown> | null {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload);
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+export function shouldRefreshSpecDetailFromWalEvent(event: WalEvent, specId: string, workspaceId?: string | null): boolean {
+  if (!LIVE_WORKFLOW_EVENT_TYPES.has(event.event_type)) return false;
+  if (workspaceId && event.workspace_id && String(event.workspace_id) !== String(workspaceId)) return false;
+  if (event.spec_id && event.spec_id === specId) return true;
+  const payload = parseWalPayload(event.payload);
+  return payload?.spec_id === specId || payload?.specId === specId;
+}
+
+export function workflowTopLevelActionAllowed(
+  workflow: SpecWorkflowInspectionPayload | null,
+  readiness: SpecReadinessInspectionPayload | null,
+  action: 'repair_spec' | 'run_anyway' | 'run' | 'approve' | 'wait_for_post_save' | 'install_skills',
+): boolean {
+  if (action === 'install_skills') {
+    return readiness?.availableActions.includes('install_skills') ?? false;
+  }
+
+  const hintMatch = workflow?.safeActionHints.some((hint) => hint.action === action && hint.allowed) ?? false;
+  if (hintMatch) return true;
+
+  if (!readiness) return false;
+  if (action === 'repair_spec') return readiness.availableActions.includes('repair_post_save') || readiness.availableActions.includes('backfill_context');
+  if (action === 'run_anyway') return readiness.availableActions.includes('run_anyway');
+  if (action === 'run') return readiness.availableActions.includes('run');
+  if (action === 'approve') return readiness.availableActions.includes('approve');
+  return readiness.availableActions.includes('wait_for_post_save');
+}
+
+export function workflowStageActionAllowed(
+  workflow: SpecWorkflowInspectionPayload | null,
+  stageKey: WorkflowStageKey,
+  action: WorkflowActionKey,
+): boolean {
+  return workflow?.stages.find((stage) => stage.key === stageKey)?.safeActionHints.some((hint) => hint.action === action && hint.allowed) ?? false;
+}
+
+function workflowPolicyLabel(workflow: SpecWorkflowInspectionPayload | null): string {
+  const effectivePolicy = workflow?.workflow.effectivePolicy;
+  if (!effectivePolicy || typeof effectivePolicy !== 'object') return 'default';
+  const record = effectivePolicy as Record<string, unknown>;
+  return typeof record.presetId === 'string'
+    ? record.presetId
+    : typeof record.version === 'string'
+      ? record.version
+      : 'custom';
+}
+
+function stageReasonCode(stage: SpecWorkflowStageSnapshot): string {
+  return stage.reasonCode ?? stage.reason ?? 'stage_state_missing';
+}
+
+function stageReasonLabel(stage: SpecWorkflowStageSnapshot): string {
+  return reasonLabel(stageReasonCode(stage));
+}
+
+function stageStatusView(stage: SpecWorkflowStageSnapshot): { label: string; dotClass: string; textClass: string } {
+  const code = stageReasonCode(stage);
+  if (stage.status === 'missing') return { label: 'Not started', dotClass: 'bg-muted/40', textClass: 'text-muted/70' };
+  if (stage.status === 'pending') return { label: 'Pending', dotClass: 'bg-amber-400 animate-pulse', textClass: 'text-amber-300' };
+  if (stage.status === 'queued') return { label: 'Queued', dotClass: 'bg-blue-400 animate-pulse', textClass: 'text-blue-300' };
+  if (stage.status === 'running') return { label: 'Running', dotClass: 'bg-amber-400 animate-pulse', textClass: 'text-amber-300' };
+  if (stage.status === 'completed') return { label: 'Completed', dotClass: 'bg-success', textClass: 'text-success' };
+  if (stage.status === 'superseded') return { label: 'Superseded', dotClass: 'bg-muted/40', textClass: 'text-muted/70' };
+  if (stage.status === 'skipped' && code === SpecReadinessReasonCode.NoInstalledSkills) {
+    return { label: 'No installed skills', dotClass: 'bg-purple-400', textClass: 'text-purple-300' };
+  }
+  if (stage.status === 'skipped' && ['disabled_by_policy', 'fingerprint_unchanged', 'metadata_only_skip'].includes(code)) {
+    return { label: 'Skipped by policy', dotClass: 'bg-muted/40', textClass: 'text-muted/70' };
+  }
+  if (stage.status === 'failed' && [SpecReadinessReasonCode.BlockedByDependency, 'blocked_by_required_stage_failed', 'blocked_by_enrich_failure', 'blocked_by_enrich_enqueue_failure'].includes(code)) {
+    return { label: 'Blocked by dependency', dotClass: 'bg-error', textClass: 'text-error' };
+  }
+  if (stage.status === 'failed') return { label: 'Failed', dotClass: 'bg-error', textClass: 'text-error' };
+  return { label: humanizeCode(stage.status), dotClass: 'bg-muted/40', textClass: 'text-muted/70' };
+}
+
+function stageTimestampLabel(stage: SpecWorkflowStageSnapshot): string {
+  if (stage.status === 'running') return stage.startedAt ? `Started ${formatDateTime(stage.startedAt)}` : 'In flight';
+  if (stage.status === 'queued') {
+    if (stage.queueStatus === 'waiting') {
+      return stage.activeJobsAhead != null
+        ? `Waiting for worker · ${stage.activeJobsAhead} ahead`
+        : 'Waiting for worker';
+    }
+    return stage.queuePosition != null ? `Queued · position ${stage.queuePosition}` : 'Queued';
+  }
+  if (stage.status === 'pending') return stage.updatedAt ? `Pending since ${formatDateTime(stage.updatedAt)}` : 'Pending';
+  if (stage.status === 'completed') return stage.finishedAt ? `Finished ${formatDateTime(stage.finishedAt)}` : stage.updatedAt ? `Updated ${formatDateTime(stage.updatedAt)}` : 'Completed';
+  if (stage.status === 'failed') return stage.finishedAt ? `Failed ${formatDateTime(stage.finishedAt)}` : stage.updatedAt ? `Failed ${formatDateTime(stage.updatedAt)}` : 'Failed';
+  if (stage.status === 'skipped') return stage.updatedAt ? `Skipped ${formatDateTime(stage.updatedAt)}` : 'No worker started';
+  if (stage.status === 'superseded') return stage.updatedAt ? `Superseded ${formatDateTime(stage.updatedAt)}` : 'Superseded by a newer save';
+  return 'Not started';
+}
+
 /** Rough per-1K-token cost estimates by model family (input/output). */
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number | null {
   const rates: Record<string, [number, number]> = {
@@ -1912,22 +2102,37 @@ const STAGE_STATUS_CONFIG: Record<CanonicalPostSaveStatus, { label: string; dotC
 function reasonLabel(reason: string): string {
   const map: Record<string, string> = {
     requested_by_caller: 'Requested',
+    requested_by_policy: 'Requested by policy',
     disabled_by_caller: 'Not requested',
+    disabled_by_policy: 'Skipped by policy',
     waiting_for_enrich: 'Waiting for enrich',
     durable_job_enqueued: 'Job enqueued',
     durable_job_enqueued_after_enrich: 'Enqueued after enrich',
+    durable_job_enqueued_after_dependency: 'Enqueued after dependency',
     job_started: 'Processing',
     job_completed: 'Done',
+    context_captured: 'Context captured',
+    stage_state_missing: 'Not started yet',
     enqueue_failed: 'Enqueue failed',
     job_failed: 'Job failed',
     superseded_by_newer_save: 'Superseded by a newer spec edit; this older revision is not the current active enrichment.',
+    blocked_by_required_stage_failed: 'Blocked because a required stage failed',
     blocked_by_enrich_failure: 'Blocked because the enrich stage failed',
     blocked_by_enrich_enqueue_failure: 'Blocked because enrich could not start',
     fingerprint_unchanged: 'Skipped because the stage inputs did not change',
     metadata_only_skip: 'Skipped because only metadata changed',
     [SpecReadinessReasonCode.NoInstalledSkills]: 'Skipped because no matching installed skills were available',
+    [SpecReadinessReasonCode.MissingContext]: 'Missing context metadata',
+    [SpecReadinessReasonCode.PostSavePending]: 'Post-save work is still in flight',
+    [SpecReadinessReasonCode.BlockedByDependency]: 'Blocked by a failed dependency',
+    [SpecReadinessReasonCode.StageFailed]: 'A workflow stage failed',
+    [SpecReadinessReasonCode.ActiveWorkflowConflict]: 'Another workflow run is already active',
+    [SpecReadinessReasonCode.ActivePipelineConflict]: 'A pipeline run is already active',
+    [SpecReadinessReasonCode.PolicySkipped]: 'Skipped by policy',
+    [SpecReadinessReasonCode.ContextBackfilled]: 'Context was server-backfilled',
+    [SpecReadinessReasonCode.RunAnywayOverrideUsed]: 'Run anyway override is available',
   };
-  return map[reason] ?? reason;
+  return map[reason] ?? humanizeCode(reason);
 }
 
 /* ─── PSE-004: Context capture status display ──────────────────── */
@@ -1965,6 +2170,196 @@ function ContextCaptureCard({ status }: { status: ContextCaptureStatus }) {
   );
 }
 
+function WorkflowChecklistCard({
+  specId,
+  workspaceId,
+  workflow,
+  readiness,
+  activeRunStatus,
+  onRetried,
+  onOpenSkillsTab,
+}: {
+  specId: string;
+  workspaceId: string;
+  workflow: SpecWorkflowInspectionPayload | null;
+  readiness: SpecReadinessInspectionPayload | null;
+  activeRunStatus?: 'running' | 'queued';
+  onRetried?: () => void;
+  onOpenSkillsTab?: () => void;
+}) {
+  const toast = useGlobalToast();
+  const [retryingStage, setRetryingStage] = useState<WorkflowStageKey | null>(null);
+  const isRunActive = isRunStatusBlocking(activeRunStatus);
+  const stagesByKey = new Map((workflow?.stages ?? readiness?.stages ?? []).map((stage) => [stage.key, stage]));
+  const stages = WORKFLOW_CHECKLIST_STAGE_ORDER.map((key) => stagesByKey.get(key) ?? {
+    key,
+    requested: false,
+    status: 'missing',
+    reasonCode: 'stage_state_missing',
+    reason: 'stage_state_missing',
+    workflowRunId: workflow?.workflow.runId ?? readiness?.workflow.runId ?? null,
+    jobId: null,
+    bossJobId: null,
+    queueName: null,
+    queueStatus: null,
+    queuePosition: null,
+    activeJobsAhead: null,
+    queuePriority: null,
+    singletonKey: null,
+    error: null,
+    updatedAt: null,
+    startedAt: null,
+    finishedAt: null,
+    safeActionHints: [],
+  } satisfies SpecWorkflowStageSnapshot);
+  const persistence = workflow?.persistence ?? readiness?.persistence;
+  const summaryReason = readiness?.blockingReasons[0] ?? readiness?.warnings[0] ?? null;
+  const installSkillsAllowed = workflowTopLevelActionAllowed(workflow, readiness, 'install_skills');
+
+  const handleRetryStage = async (stageKey: WorkflowStageKey) => {
+    if (!workspaceId || retryingStage || isRunActive || !workflowStageActionAllowed(workflow, stageKey, 'retry_stage')) return;
+    setRetryingStage(stageKey);
+    try {
+      await retrySpecWorkflowStage(specId, stageKey, { workspaceId });
+      toast.show(`Retry initiated for ${WORKFLOW_CHECKLIST_STAGE_LABELS[stageKey]}`, 'success');
+      onRetried?.();
+    } catch (err: unknown) {
+      toast.show(err instanceof Error ? err.message : 'Retry failed', 'error');
+    } finally {
+      setRetryingStage(null);
+    }
+  };
+
+  return (
+    <div className="border border-border rounded-lg bg-panel overflow-hidden" data-testid="workflow-checklist">
+      <div className="px-4 py-3 border-b border-border/50">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-text">Workflow checklist</span>
+          <span className="inline-flex px-2 py-0.5 text-[10px] font-semibold rounded border border-accent/30 bg-accent/10 text-accent" data-testid="workflow-policy-label">
+            Policy · {workflowPolicyLabel(workflow)}
+          </span>
+          {workflow?.workflow.runId != null && (
+            <span className="inline-flex px-2 py-0.5 text-[10px] font-medium rounded border border-border text-muted">
+              Workflow #{workflow.workflow.runId}
+            </span>
+          )}
+          {persistence?.saveGeneration != null && (
+            <span className="inline-flex px-2 py-0.5 text-[10px] font-medium rounded border border-border text-muted">
+              Save #{persistence.saveGeneration}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="divide-y divide-border/50">
+        <div className="px-4 py-3" data-testid="workflow-summary-saved">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-muted">Saved</span>
+            <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${persistence?.exists ? 'bg-success/15 text-success border border-success/30' : 'bg-error/15 text-error border border-error/30'}`}>
+              {!persistence?.exists ? 'Missing'
+                : persistence.location === 'approved' ? 'Approved'
+                  : persistence.location === 'pending' ? 'Pending'
+                    : 'Saved'}
+            </span>
+          </div>
+          <p className="text-xs text-muted/80">
+            {persistence?.exists
+              ? `${persistence.specPath ?? 'Spec file'} is stored in ${persistence.location}.`
+              : 'Spec file is missing from pending/approved storage.'}
+          </p>
+        </div>
+
+        <div className="px-4 py-3" data-testid="workflow-summary-readiness">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-muted">Readiness</span>
+            {readiness && (
+              <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${readiness.readinessState.status === 'ready' ? 'bg-success/15 text-success border border-success/30' : readiness.readinessState.status === 'degraded' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'bg-error/15 text-error border border-error/30'}`}>
+                {humanizeCode(readiness.readinessState.status)}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-muted/80">
+            {summaryReason ? `${humanizeCode(summaryReason.code)} · ${summaryReason.message}` : 'No readiness blockers reported.'}
+          </p>
+        </div>
+
+        <div className="px-4 py-3" data-testid="workflow-summary-gate">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-muted">Execution gate</span>
+            {readiness && (
+              <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${readiness.executionGate.status === 'allowed' ? 'bg-success/15 text-success border border-success/30' : 'bg-error/15 text-error border border-error/30'}`}>
+                {readiness.executionGate.status === 'allowed' ? 'Allowed' : 'Blocked'}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-muted/80">
+            {readiness?.executionGate.status === 'blocked'
+              ? readiness.executionGate.overrideAllowed
+                ? `Blocked, but ${humanizeCode(readiness.executionGate.overrideReasonCode)} is available.`
+                : 'Blocked until readiness issues are resolved.'
+              : 'Ready for normal execution.'}
+          </p>
+        </div>
+
+        <div className="px-4 py-3 space-y-2" data-testid="workflow-stage-checklist">
+          {stages.map((stage) => {
+            const status = stageStatusView(stage);
+            const retryAllowed = workflowStageActionAllowed(workflow, stage.key, 'retry_stage');
+            return (
+              <div key={stage.key} className="rounded border border-border/50 bg-bg/40 px-3 py-2" data-testid={`workflow-stage-${stage.key}`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${status.dotClass}`} />
+                  <span className="text-xs font-medium text-text">{WORKFLOW_CHECKLIST_STAGE_LABELS[stage.key]}</span>
+                  <span className="inline-flex px-2 py-0.5 text-[10px] font-semibold rounded border border-border text-muted">
+                    {stage.requested ? 'Requested' : 'Not requested'}
+                  </span>
+                  <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${status.textClass} bg-bg border border-current/20`}>
+                    {status.label}
+                  </span>
+                  {retryAllowed && (
+                    <button
+                      onClick={() => handleRetryStage(stage.key)}
+                      disabled={retryingStage !== null || isRunActive}
+                      className={`ml-auto text-[10px] font-medium text-accent hover:text-accent/80 ${retryingStage !== null || isRunActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      data-testid={`workflow-stage-retry-${stage.key}`}
+                    >
+                      {retryingStage === stage.key ? 'Retrying…' : 'Retry stage'}
+                    </button>
+                  )}
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted/80">
+                  <span className="inline-flex px-1.5 py-0.5 rounded bg-panel border border-border/60 font-mono" data-testid={`workflow-stage-reason-code-${stage.key}`}>
+                    {stageReasonCode(stage)}
+                  </span>
+                  <span>{stageReasonLabel(stage)}</span>
+                </div>
+                <p className="mt-1 text-[10px] text-muted/70">{stageTimestampLabel(stage)}</p>
+                {stage.error && <p className="mt-1 text-[10px] text-error/80 break-words">{stage.error}</p>}
+              </div>
+            );
+          })}
+        </div>
+
+        {installSkillsAllowed && (
+          <div className="px-4 py-3 flex items-center justify-between gap-3" data-testid="workflow-install-skills-help">
+            <div>
+              <p className="text-xs font-medium text-text">Install skills help available</p>
+              <p className="text-[10px] text-muted/70">Skill matching reported no installed skills for this spec.</p>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenSkillsTab}
+              className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors"
+            >
+              Review skills
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface RepairResponse {
   specId: string;
   healthy: boolean;
@@ -1978,12 +2373,13 @@ interface RepairResponse {
   dryRun: boolean;
 }
 
-function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, blockingPostSaveJob, onRetried }: {
+function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, blockingPostSaveJob, stageActionHints, onRetried }: {
   stages: PostSaveStageMap;
   specId?: string;
   workspaceId?: string;
   activeRunStatus?: 'running' | 'queued';
   blockingPostSaveJob?: CanonicalPostSaveStageState | null;
+  stageActionHints?: Partial<Record<keyof PostSaveStageMap, WorkflowActionHint[]>>;
   onRetried?: () => void;
 }) {
   const toast = useGlobalToast();
@@ -2017,7 +2413,12 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, bloc
           const stage = stages[name];
           const canonicalStatus = getCanonicalPostSaveStatus(stage);
           const statusConfig = STAGE_STATUS_CONFIG[canonicalStatus];
-          const canRetry = specId && workspaceId && stage.requested && stage.status === 'failed' && !isBlockedByActivePostSave;
+          const canRetry = specId
+            && workspaceId
+            && stage.requested
+            && stage.status === 'failed'
+            && !isBlockedByActivePostSave
+            && (stageActionHints?.[name]?.some((hint) => hint.action === 'retry_stage' && hint.allowed) ?? false);
           return (
             <div key={name} className="flex items-start gap-2" data-testid={`stage-${name}`}>
               <span className={`mt-1 shrink-0 w-2 h-2 rounded-full ${statusConfig.dotClass}`} />
@@ -2113,7 +2514,7 @@ const CONTEXT_CLASSIFICATION_CONFIG: Record<ContextClassification, {
   persisted_without_context: {
     icon: 'alert',
     title: 'Persisted without context',
-    description: 'This spec was saved without drafting context. Use Repair to backfill context and trigger enrichment, or Retry Enrichment to enrich directly.',
+    description: 'This spec was saved without drafting context. Use any allowed recovery action below to backfill context or requeue post-save work.',
     iconClass: 'text-amber-400',
   },
   pending_post_save: {
@@ -2125,17 +2526,19 @@ const CONTEXT_CLASSIFICATION_CONFIG: Record<ContextClassification, {
   post_save_failed: {
     icon: 'x-circle',
     title: 'Post-save pipeline failed',
-    description: 'One or more post-save stages failed. Review the pipeline status below, then use Retry or Repair to recover.',
+    description: 'One or more post-save stages failed. Review the workflow checklist and use any allowed recovery action below to recover.',
     iconClass: 'text-error',
   },
 };
 
-function ContextTabEmptyState({ specId, workspaceId, classification, activeRunStatus, blockingPostSaveJob, onRepaired }: {
+function ContextTabEmptyState({ specId, workspaceId, classification, activeRunStatus, blockingPostSaveJob, repairAllowed, retryEnrichAllowed, onRepaired }: {
   specId: string;
   workspaceId: string;
   classification: ContextClassification;
   activeRunStatus?: 'running' | 'queued';
   blockingPostSaveJob?: CanonicalPostSaveStageState | null;
+  repairAllowed: boolean;
+  retryEnrichAllowed: boolean;
   onRepaired: () => void;
 }) {
   const toast = useGlobalToast();
@@ -2177,15 +2580,8 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
     if (!workspaceId || isBusy || isRunActive || isBlockedByActivePostSave) return;
     setRepairState('retrying');
     try {
-      await apiFetch(
-        `/api/specs/${specId}/enrich/async`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspaceId }),
-        },
-      );
-      toast.show('Enrichment job enqueued', 'success');
+      await retrySpecWorkflowStage(specId, 'enrich', { workspaceId });
+      toast.show('Retry initiated for Enrich', 'success');
       onRepaired();
     } catch (err: unknown) {
       toast.show(err instanceof Error ? err.message : 'Retry failed', 'error');
@@ -2223,20 +2619,22 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
         </span>
 
         {/* Action buttons — hidden for pending state, disabled during active runs */}
-        {!isPending && (
+        {!isPending && (repairAllowed || retryEnrichAllowed) && (
           <div className="flex items-center gap-2 mt-2">
-            <button
-              onClick={handleRepair}
-              disabled={isBusy || isRunActive || isBlockedByActivePostSave}
-              title={isBlockedByActivePostSave ? 'Cannot repair while another post-save job is active for this spec' : isRunActive ? 'Cannot repair while a run is active' : 'Diagnose and repair post-save state'}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive || isBlockedByActivePostSave ? 'opacity-50 cursor-not-allowed' : ''}`}
-              data-testid="context-repair-btn"
-            >
-              {repairState === 'repairing'
-                ? <><Loader2 size={12} className="animate-spin" /> Repairing…</>
-                : <><RotateCcw size={12} /> Repair</>}
-            </button>
-            {(classification === 'persisted_without_context' || classification === 'post_save_failed') && (
+            {repairAllowed && (
+              <button
+                onClick={handleRepair}
+                disabled={isBusy || isRunActive || isBlockedByActivePostSave}
+                title={isBlockedByActivePostSave ? 'Cannot repair while another post-save job is active for this spec' : isRunActive ? 'Cannot repair while a run is active' : 'Diagnose and repair post-save state'}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${isBusy || isRunActive || isBlockedByActivePostSave ? 'opacity-50 cursor-not-allowed' : ''}`}
+                data-testid="context-repair-btn"
+              >
+                {repairState === 'repairing'
+                  ? <><Loader2 size={12} className="animate-spin" /> Repairing…</>
+                  : <><RotateCcw size={12} /> Repair Spec</>}
+              </button>
+            )}
+            {retryEnrichAllowed && (
               <button
                 onClick={handleRetryEnrich}
                 disabled={isBusy || isRunActive || isBlockedByActivePostSave}
@@ -2246,7 +2644,7 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
               >
                 {repairState === 'retrying'
                   ? <><Loader2 size={12} className="animate-spin" /> Retrying…</>
-                  : <><Sparkles size={12} /> Retry Enrichment</>}
+                  : <><Sparkles size={12} /> Retry Enrich</>}
               </button>
             )}
           </div>
@@ -2256,7 +2654,7 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
   );
 }
 
-function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunStatus, blockingPostSaveJob, workflowInspection, readinessInspection, onWorkflowRefresh }: { specId: string; stories: Story[]; refreshKey?: number; workspaceId: string; activeRunStatus?: 'running' | 'queued'; blockingPostSaveJob?: CanonicalPostSaveStageState | null; workflowInspection?: SpecWorkflowInspectionPayload | null; readinessInspection?: SpecReadinessInspectionPayload | null; onWorkflowRefresh?: () => void }) {
+function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunStatus, blockingPostSaveJob, workflowInspection, readinessInspection, onWorkflowRefresh, onOpenSkillsTab }: { specId: string; stories: Story[]; refreshKey?: number; workspaceId: string; activeRunStatus?: 'running' | 'queued'; blockingPostSaveJob?: CanonicalPostSaveStageState | null; workflowInspection?: SpecWorkflowInspectionPayload | null; readinessInspection?: SpecReadinessInspectionPayload | null; onWorkflowRefresh?: () => void; onOpenSkillsTab?: () => void }) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -2307,6 +2705,14 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
     return () => { cancelled = true; };
   }, [specId, workspaceId, showAll, refreshKey]);
 
+  const repairAllowed = workflowTopLevelActionAllowed(workflowState, readinessState, 'repair_spec');
+  const retryEnrichAllowed = workflowStageActionAllowed(workflowState, 'enrich', 'retry_stage');
+  const stageActionHints = workflowState ? {
+    enrich: workflowState.stages.find((stage) => stage.key === 'enrich')?.safeActionHints ?? [],
+    matchSkills: workflowState.stages.find((stage) => stage.key === 'matchSkills')?.safeActionHints ?? [],
+    memorySynthesis: workflowState.stages.find((stage) => stage.key === 'memorySynthesis')?.safeActionHints ?? [],
+  } : undefined;
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12 text-muted text-sm">
@@ -2317,14 +2723,27 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
 
   if (logs.length === 0) {
     return (
-      <ContextTabEmptyState
-        specId={specId}
-        workspaceId={workspaceId}
-        classification="legacy_no_log"
-        activeRunStatus={activeRunStatus}
-        blockingPostSaveJob={blockingPostSaveJob}
-        onRepaired={() => { setLogs([]); onWorkflowRefresh?.(); }}
-      />
+      <div className="p-4 space-y-4">
+        <WorkflowChecklistCard
+          specId={specId}
+          workspaceId={workspaceId}
+          workflow={workflowState}
+          readiness={readinessState}
+          activeRunStatus={activeRunStatus}
+          onRetried={onWorkflowRefresh}
+          onOpenSkillsTab={onOpenSkillsTab}
+        />
+        <ContextTabEmptyState
+          specId={specId}
+          workspaceId={workspaceId}
+          classification="legacy_no_log"
+          activeRunStatus={activeRunStatus}
+          blockingPostSaveJob={blockingPostSaveJob}
+          repairAllowed={repairAllowed}
+          retryEnrichAllowed={retryEnrichAllowed}
+          onRepaired={() => { setLogs([]); onWorkflowRefresh?.(); }}
+        />
+      </div>
     );
   }
 
@@ -2338,6 +2757,15 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
 
   return (
     <div className="p-4 space-y-4">
+      <WorkflowChecklistCard
+        specId={specId}
+        workspaceId={workspaceId}
+        workflow={workflowState}
+        readiness={readinessState}
+        activeRunStatus={activeRunStatus}
+        onRetried={onWorkflowRefresh}
+        onOpenSkillsTab={onOpenSkillsTab}
+      />
       {emptyClassification && (
         <ContextTabEmptyState
           specId={specId}
@@ -2345,6 +2773,8 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
           classification={emptyClassification}
           activeRunStatus={activeRunStatus}
           blockingPostSaveJob={blockingPostSaveJob}
+          repairAllowed={repairAllowed}
+          retryEnrichAllowed={retryEnrichAllowed}
           onRepaired={() => { setShowAll(s => !s); onWorkflowRefresh?.(); }}
         />
       )}
@@ -2452,7 +2882,7 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
             {contextCaptureStatus && <ContextCaptureCard status={contextCaptureStatus} />}
 
             {/* PSE-003: Per-stage post-save pipeline status */}
-            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} specId={specId} workspaceId={workspaceId} activeRunStatus={activeRunStatus} blockingPostSaveJob={blockingPostSaveJob} onRetried={() => { setShowAll(s => !s); onWorkflowRefresh?.(); }} />}
+            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} specId={specId} workspaceId={workspaceId} activeRunStatus={activeRunStatus} blockingPostSaveJob={blockingPostSaveJob} stageActionHints={i === 0 ? stageActionHints : undefined} onRetried={() => { setShowAll(s => !s); onWorkflowRefresh?.(); }} />}
 
             {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
             {log.enriched && log.retrieval_method && (() => {
