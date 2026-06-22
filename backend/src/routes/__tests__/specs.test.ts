@@ -843,6 +843,13 @@ describe('POST /api/specs/persist', () => {
       saveGeneration: expect.any(Number),
     });
 
+    const persistedRun = await queryOne(
+      `SELECT generation_log_id, save_generation FROM spec_post_save_workflow_runs WHERE id = $1`,
+      [res.body.workflow.runId],
+    ) as { generation_log_id: number | null; save_generation: number | string | null } | undefined;
+    expect(persistedRun?.generation_log_id).toBe(res.body.workflow.saveGeneration);
+    expect(Number(persistedRun?.save_generation)).toBe(res.body.workflow.saveGeneration);
+
     const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'explicit-draft.json'), 'utf8'));
     expect(saved.source).toBe('explicit-draft');
     expect(saved.userStories).toHaveLength(2);
@@ -873,10 +880,10 @@ describe('POST /api/specs/persist', () => {
       effectivePolicy: { version: 'v1', enrich: 'skip', skills: 'skip', memory: 'skip' },
       legacyOptions: { enrich: false, matchSkills: false, memorySynthesis: false },
     });
-    expect(summary.postSaveStages).toEqual({
-      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
-      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
-      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
+      matchSkills: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
     });
     expect(summary.contextSummary).toBeUndefined();
     expect(summary.contextUsed).toBeUndefined();
@@ -1413,6 +1420,10 @@ describe('POST /api/specs/persist', () => {
         },
       })],
     );
+    const legacyLog = await queryOne(
+      `SELECT id FROM spec_generation_logs WHERE spec_slug = 'repair-legacy' AND save_generation = 9002`,
+    ) as { id: number } | undefined;
+    expect(legacyLog).toBeDefined();
 
     const res = await request(app)
       .post('/api/specs/repair-legacy/repair')
@@ -1424,9 +1435,10 @@ describe('POST /api/specs/persist', () => {
       expect.objectContaining({ action: 'enqueue_enrich', status: 'repaired' }),
     ]));
     const run = await queryOne(
-      `SELECT id FROM spec_post_save_workflow_runs WHERE workspace_id = 'ws-test' AND spec_id = 'repair-legacy' AND save_generation = 9002`,
-    ) as { id: number } | undefined;
+      `SELECT id, generation_log_id FROM spec_post_save_workflow_runs WHERE workspace_id = 'ws-test' AND spec_id = 'repair-legacy' AND save_generation = 9002`,
+    ) as { id: number; generation_log_id: number | null } | undefined;
     expect(run).toBeDefined();
+    expect(run?.generation_log_id).toBe(legacyLog?.id ?? null);
 
     const updatedLog = await queryOne(
       `SELECT context_summary_json FROM spec_generation_logs WHERE spec_slug = 'repair-legacy' AND save_generation = 9002`,

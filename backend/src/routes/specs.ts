@@ -1301,7 +1301,7 @@ async function seedPersistGenerationLog(input: {
   callerContextSummary?: Record<string, unknown>;
   resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
-}): Promise<{ stageFingerprints: SpecStageFingerprints; saveGeneration: number }> {
+}): Promise<{ stageFingerprints: SpecStageFingerprints; saveGeneration: number; generationLogId: number | null }> {
   const pendingPostSave = input.postSave.enrich || input.postSave.matchSkills || input.postSave.memorySynthesis;
   const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
   const sourceMode = input.sourceMode?.trim() || 'explicit-draft';
@@ -1369,7 +1369,8 @@ async function seedPersistGenerationLog(input: {
     ],
   );
 
-  const saveGeneration = insertedLog?.id ?? Date.now();
+  const generationLogId = insertedLog?.id ?? null;
+  const saveGeneration = generationLogId ?? Date.now();
   await execute(
     `UPDATE spec_generation_logs
      SET save_generation = $2,
@@ -1385,7 +1386,13 @@ async function seedPersistGenerationLog(input: {
     ],
   );
 
-  return { stageFingerprints, saveGeneration };
+  return { stageFingerprints, saveGeneration, generationLogId };
+}
+
+function readOptionalInteger(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value);
+  return null;
 }
 
 async function scheduleSpecPostSaveJobs(
@@ -1397,6 +1404,7 @@ async function scheduleSpecPostSaveJobs(
     currentFingerprints?: SpecStageFingerprints;
     priorFingerprints?: Partial<SpecStageFingerprints>;
     saveGeneration?: number;
+    generationLogId?: number | null;
     memory?: SpecPostSaveWorkflowMemoryPayload;
   },
 ): Promise<PostSaveWorkflowRun> {
@@ -1404,7 +1412,8 @@ async function scheduleSpecPostSaveJobs(
     specId,
     workspaceId,
     effectivePolicy: options.effectivePolicy,
-    ...(options.saveGeneration !== undefined ? { saveGeneration: options.saveGeneration, generationLogId: options.saveGeneration } : {}),
+    ...(options.saveGeneration !== undefined ? { saveGeneration: options.saveGeneration } : {}),
+    ...(options.generationLogId != null ? { generationLogId: options.generationLogId } : {}),
     currentFingerprints: options.currentFingerprints,
     priorFingerprints: options.priorFingerprints,
     memory: options.memory,
@@ -1726,7 +1735,7 @@ async function persistExplicitDraftInternal(
     broadcastAll(walEvent);
   }
 
-  const { stageFingerprints: currentFingerprints, saveGeneration } = await seedPersistGenerationLog({
+  const { stageFingerprints: currentFingerprints, saveGeneration, generationLogId } = await seedPersistGenerationLog({
     slug,
     workspaceId,
     source,
@@ -1754,6 +1763,7 @@ async function persistExplicitDraftInternal(
     currentFingerprints,
     priorFingerprints,
     saveGeneration,
+    generationLogId,
     memory: {
       brief: body.brief || body.specBrief || title,
       stories: normalizedStories as unknown[],
@@ -14861,6 +14871,11 @@ function latestRelevantStageJob(jobs: SpecJob[], stage: RepairPostSaveStage, sav
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
 }
 
+function isPgBossMetadataUnavailable(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
+  return code === '42P01' || code === '3F000';
+}
+
 async function listLivePgBossRepairJobs(workspaceId: string, specId: string, queueName: string): Promise<RepairPgBossJob[]> {
   type Row = {
     id: string;
@@ -14884,6 +14899,10 @@ async function listLivePgBossRepairJobs(workspaceId: string, specId: string, que
       [queueName, specId, workspaceId],
     );
   } catch (error) {
+    if (isPgBossMetadataUnavailable(error)) {
+      logger.warn({ err: error, queueName, specId, workspaceId }, '[Specs] pg-boss metadata unavailable during repair liveness check — assuming no live jobs');
+      return [];
+    }
     throw new ConflictError(`Unable to verify pg-boss liveness for ${queueName} repair: ${error instanceof Error ? error.message : String(error)}`);
   }
 
@@ -15170,6 +15189,7 @@ async function startRepairPostSaveWorkflowForStage(input: {
   assessment: RepairStageAssessment;
   summary: Record<string, unknown>;
   saveGeneration: number | null;
+  generationLogId?: number | null;
   repairPolicy: ResolvedPostSavePolicy;
   memory?: SpecPostSaveWorkflowMemoryPayload;
   source?: string;
@@ -15178,7 +15198,8 @@ async function startRepairPostSaveWorkflowForStage(input: {
     specId: input.specId,
     workspaceId: input.workspaceId,
     effectivePolicy: input.repairPolicy.effectivePolicy,
-    ...(input.saveGeneration !== null ? { saveGeneration: input.saveGeneration, generationLogId: input.saveGeneration } : {}),
+    ...(input.saveGeneration !== null ? { saveGeneration: input.saveGeneration } : {}),
+    ...(input.generationLogId != null ? { generationLogId: input.generationLogId } : {}),
     source: input.source ?? 'repair',
     currentFingerprints: {
       ...(typeof input.summary.enrichFingerprint === 'string' ? { enrichFingerprint: input.summary.enrichFingerprint } : {}),
@@ -15339,6 +15360,7 @@ async function executeSpecRepair(input: {
   let summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
   let stages = summary.postSaveStages as PersistPostSaveStageMap | undefined;
   let saveGeneration = currentRepairSaveGeneration(generationLog, summary);
+  let generationLogId = readOptionalInteger(generationLog?.id);
   let latestWorkflowRun = await getLatestPostSaveWorkflowRunForRepair(workspaceId, specId, saveGeneration);
   let diagnosis = diagnoseSpecHealth(generationLog, stages, latestWorkflowRun);
 
@@ -15481,9 +15503,11 @@ async function executeSpecRepair(input: {
         normalizationChanges: [],
       });
       saveGeneration = seeded.saveGeneration;
+      generationLogId = seeded.generationLogId;
       generationLog = await getEffectiveGenerationLog(specId);
       summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
       stages = summary.postSaveStages as PersistPostSaveStageMap | undefined;
+      generationLogId = readOptionalInteger(generationLog?.id) ?? generationLogId;
       latestWorkflowRun = await getLatestPostSaveWorkflowRunForRepair(workspaceId, specId, saveGeneration);
       diagnosis = diagnoseSpecHealth(generationLog, stages, latestWorkflowRun);
       actions.push({
@@ -15695,6 +15719,7 @@ async function executeSpecRepair(input: {
       assessment,
       summary,
       saveGeneration,
+      generationLogId,
       memory: {
         brief: specContent.brief || specContent.specBrief || specContent.title || specId,
         stories: specContent.userStories ?? [],
