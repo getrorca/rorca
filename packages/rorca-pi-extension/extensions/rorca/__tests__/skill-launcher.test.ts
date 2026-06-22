@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { formatSkillLaunchPrompt, getRequiredToolGroups } from "../skill-launcher.js";
 
 describe("rorca skill launcher", () => {
-  it("requires the canonical generation-context bundle before forge persistence", () => {
+  it("requires the canonical generation-context, persistence, and post-persist verification tools for forge flows", () => {
     expect(getRequiredToolGroups({
       workflow: "forge",
       skillName: "rorca-forge",
@@ -15,10 +15,12 @@ describe("rorca skill launcher", () => {
     })).toEqual([
       ["rorca_specs_generation_context"],
       ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
+      ["getSpec", "rorca_get_specs_by_specId"],
+      ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
     ]);
   });
 
-  it("pins the forge prompt to context forwarding, post-save defaults, and recovery-only fallback semantics", () => {
+  it("pins the forge prompt to context forwarding, explicit policy passing, workflow/readiness verification, and repair-only fallback semantics", () => {
     const prompt = formatSkillLaunchPrompt({
       workflow: "forge",
       skillName: "rorca-forge-run",
@@ -31,16 +33,23 @@ describe("rorca skill launcher", () => {
       modelOverride: "openai-codex/gpt-5.4",
     });
 
-    expect(prompt).toContain("forgeSequence: [rorca_specs_generation_context, draft_in_pi, rorca_create_spec, verify_saved_spec]");
+    expect(prompt).toContain("forgeSequence: [rorca_specs_generation_context, draft_in_pi, rorca_create_spec, get_saved_spec, inspect_workflow_or_readiness, verify_saved_spec]");
     expect(prompt).toContain("contextContract: fetch rorca_specs_generation_context before persistence, then forward its contextUsed and contextSummary into rorca_create_spec or rorca_persist_spec");
-    expect(prompt).toContain("postSaveContract: keep post-save enrich and matchSkills enabled by inheriting postSaveDefaults or passing postSave with enrich=true and matchSkills=true unless the launcher or user explicitly requests an opt-out");
-    expect(prompt).toContain("fallbackContract: backend/server contextSummary backfill is recovery-grade fallback only and must not be treated as a substitute for caller-observed drafting context");
+    expect(prompt).toContain("policyContract: persist with explicit policy metadata by passing either policyPresetId or postSavePolicy derived from the effective post-save policy/postSaveDefaults bundle, and report which preset or effective policy was used");
+    expect(prompt).toContain("postSaveContract: keep post-save enrich and matchSkills enabled by forwarding the bundle defaults as explicit policy intent unless the launcher or user explicitly requests an opt-out");
+    expect(prompt).toContain("verificationContract: after persistence, read the saved spec plus rorca_spec_workflow or rorca_spec_readiness and classify each story skill state as present, pending, skipped:no_installed_skills, or failed:<retryable_reason>; never treat slug creation alone as proof that skill enrichment succeeded");
+    expect(prompt).toContain("fallbackContract: backend/server contextSummary backfill is a repair-only fallback and must not be treated as the normal creation contract or as a substitute for caller-observed drafting context");
+    expect(prompt).toContain("availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, getSpec, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness");
 
     const forgeSequenceIndex = prompt.indexOf("forgeSequence:");
     const contextContractIndex = prompt.indexOf("contextContract:");
+    const policyContractIndex = prompt.indexOf("policyContract:");
+    const verificationContractIndex = prompt.indexOf("verificationContract:");
     const briefIndex = prompt.indexOf("brief: |");
     expect(forgeSequenceIndex).toBeGreaterThan(-1);
     expect(contextContractIndex).toBeGreaterThan(forgeSequenceIndex);
-    expect(briefIndex).toBeGreaterThan(contextContractIndex);
+    expect(policyContractIndex).toBeGreaterThan(contextContractIndex);
+    expect(verificationContractIndex).toBeGreaterThan(policyContractIndex);
+    expect(briefIndex).toBeGreaterThan(verificationContractIndex);
   });
 });

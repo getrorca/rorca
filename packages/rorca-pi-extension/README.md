@@ -143,10 +143,11 @@ Usage:
 
 Behavior:
 - prefers dispatching `/skill:rorca-forge` (or `/skill:rorca-forge-run` when both `--approve` and `--run` are requested)
-- the skill-first forge path is only used when the MCP surface exposes both `rorca_specs_generation_context` and canonical persistence tools
-- Pi/skill performs the drafting, fetches the canonical generation-context bundle first, and forwards `contextUsed` + `contextSummary` into Rorca persistence while leaving post-save enrich / skill matching enabled unless explicitly opted out
+- the skill-first forge path is only used when the MCP surface exposes generation-context retrieval, canonical persistence, saved-spec reads, and workflow/readiness verification tools
+- Pi/skill performs the drafting, fetches the canonical generation-context bundle first, forwards `contextUsed` + `contextSummary`, and persists with explicit policy intent via `policyPresetId` or effective `postSavePolicy`
+- post-persist verification is expected to read the saved spec plus workflow/readiness surfaces and classify story skill state as `present`, `pending`, `skipped:no_installed_skills`, or `failed:<retryable_reason>` rather than assuming persist success implies enrichment success
 - if that MCP forge bundle is unavailable, the extension falls back to the shared backend `/api/specs/forge` workflow as a recovery path only
-- backend/server context backfill is not a substitute for true caller-observed drafting context
+- backend/server context backfill is a repair-only fallback, not the normal creation contract and not a substitute for true caller-observed drafting context
 - this is the preferred explicit and reliable create-spec command in Pi
 
 Examples:

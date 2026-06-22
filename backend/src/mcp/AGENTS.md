@@ -13,9 +13,11 @@ The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (defaul
 | Tool | Inputs | Output |
 |------|--------|--------|
 | `rorca_get_context` | `workspaceId`, `specBrief`, `storyAnnotations?` | Synthesized Direction Stack (all 5 layers merged) |
-| `rorca_create_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?`, `contextUsed?`, `contextSummary?`, `postSave?` | Canonical explicit cross-client spec-creation path |
+| `rorca_create_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?`, `contextUsed?`, `contextSummary?`, `postSave?`, `policyPresetId?`, `postSavePolicy?` | Canonical explicit cross-client spec-creation path |
 | `rorca_generate_spec` | `workspaceId`, `specBrief`, `title`, `storyCount?` | Legacy/fallback brief→spec generation when you want Rorca to draft |
-| `rorca_persist_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?`, `contextUsed?`, `contextSummary?`, `postSave?` | Compatibility alias for explicit-draft persistence |
+| `rorca_persist_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?`, `contextUsed?`, `contextSummary?`, `postSave?`, `policyPresetId?`, `postSavePolicy?` | Compatibility alias for explicit-draft persistence |
+| `rorca_spec_workflow` | `workspaceId`, `specId` | Durable post-save workflow state for one spec |
+| `rorca_spec_readiness` | `workspaceId`, `specId` | Readiness, reason codes, and safe action hints for one spec |
 | `rorca_approve_spec` | `workspaceId`, `specSlug` | Approval confirmation, new version number |
 | `rorca_list_specs` | `workspaceId`, `status?` (pending/approved) | Array of spec summaries |
 | `rorca_list_workspaces` | (none) | All registered workspaces |
@@ -34,10 +36,11 @@ The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (defaul
 Preferred universal skill-first flow:
 1. caller/skill retrieves context via MCP tools
 2. caller drafts the spec content locally
-3. caller persists the explicit draft with `rorca_create_spec` (or compatibility alias `rorca_persist_spec`), carrying `contextUsed` + `contextSummary` when available so spec detail can show the real drafting context
-4. backend validates, normalizes, saves, and can run post-save enrichment
+3. caller persists the explicit draft with `rorca_create_spec` (or compatibility alias `rorca_persist_spec`), carrying `contextUsed` + `contextSummary` and explicitly passing either `policyPresetId` or `postSavePolicy` so the save contract is policy-aware
+4. caller reads back the saved spec plus `rorca_spec_workflow` or `rorca_spec_readiness` and classifies story-level skill outcome as `present`, `pending`, `skipped:no_installed_skills`, or `failed:<retryable_reason>` instead of assuming persist success implies enrichment success
+5. backend validates, normalizes, saves, and can run post-save enrichment
 
-If `rorca_specs_generation_context` is available, caller-owned forge flows should fetch it before persistence and forward the returned `contextUsed` + `contextSummary`. Any server-side context-summary backfill is recovery-grade fallback only, not a substitute for caller-observed drafting context.
+If `rorca_specs_generation_context` is available, caller-owned forge flows should fetch it before persistence and forward the returned `contextUsed` + `contextSummary`. Any server-side context-summary backfill is repair-only fallback, not a substitute for caller-observed drafting context and not the normal creation contract.
 
 **Post-save enrichment**: When `postSave` options are provided (or defaulted), the persist endpoint enqueues durable post-save jobs:
 - `enrich: true` → enqueue enrichment immediately via pg-boss

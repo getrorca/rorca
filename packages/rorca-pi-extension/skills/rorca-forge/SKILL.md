@@ -67,7 +67,9 @@ Use tools/internal operations to gather context such as:
 Use structured operations for:
 - `rorca_create_spec` as the canonical explicit create-spec path when available
 - `rorca_persist_spec` as a compatibility alias for the same persistence contract
-- `rorca_get_specs_by_specId` or `rorca_list_specs` to verify what was saved
+- `getSpec` / `rorca_get_specs_by_specId` to verify the saved stories and inspect story-level `suggestedSkills`
+- `rorca_spec_workflow` / `rorca_specs_by_specId_workflow` and `rorca_spec_readiness` / `rorca_specs_by_specId_readiness` to verify durable post-save state after persistence
+- `rorca_retry_spec_stage` or `rorca_repair_spec` when verification shows a retryable post-save failure
 - `rorca_approve_spec` / `rorca_specs_by_specId_approve` if approval was requested
 - `rorca_trigger_run` / `rorca_pipeline_trigger` only when the launcher explicitly requested auto-run
 - patch stories if needed before approval
@@ -186,15 +188,21 @@ Your responsibility is to produce the best draft possible and then hand it off c
 Once you have a complete draft:
 1. if `rorca_specs_generation_context` is available, fetch it before persisting; do not skip that call and rely on server backfill instead
 2. carry its `contextUsed` and `contextSummary` through the persist call so the saved spec and Context tab preserve what context informed the draft
-3. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
-4. preserve post-save defaults by either omitting `postSave` entirely or forwarding `postSaveDefaults`; never disable `enrich` or `matchSkills` unless the launcher or user explicitly asked for that opt-out
-5. read the saved spec back via `rorca_get_specs_by_specId` if possible
-6. verify that a real slug/id exists
-7. verify that the saved story set broadly matches the draft
-8. if `autoApprove` is true, approve via `rorca_approve_spec`
-9. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
+3. make the persist payload explicitly policy-aware: pass either `policyPresetId` when a preset is known or an effective `postSavePolicy` object derived from the bundle/defaults; do not hide policy choice behind vague success copy
+4. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
+5. keep post-save enrich and matchSkills enabled unless the launcher or user explicitly asked for an opt-out; server-side context backfill is repair-only fallback, not the normal creation contract
+6. read the saved spec back via `getSpec` / `rorca_get_specs_by_specId`
+7. verify that a real slug/id exists and that the saved story set broadly matches the draft
+8. inspect `rorca_spec_workflow` or `rorca_spec_readiness` after save and classify each story's skill-injection state honestly:
+   - `present` — the saved story already has the expected `suggestedSkills` outcome
+   - `pending` — the match-skills stage is still pending/queued/running
+   - `skipped:no_installed_skills` — the stage was skipped because no installed skills were available
+   - `failed:<retryable_reason>` — the workflow/readiness surface shows a retryable failure or dependency block
+9. if verification shows `failed:<retryable_reason>`, explain the retryable reason and point to `rorca_retry_spec_stage` / `rorca_repair_spec` rather than pretending persistence fully succeeded
+10. if `autoApprove` is true, approve via `rorca_approve_spec`
+11. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
 
-Do not claim the spec was saved unless a structured operation confirms it.
+Do not claim the spec was saved or enriched unless structured reads confirm both persistence and the relevant workflow/readiness state.
 
 ## Output contract
 
@@ -203,6 +211,8 @@ At the end, provide:
 - workspace id
 - short summary of the spec
 - short story list summary
+- policy used (`policyPresetId` or the effective `postSavePolicy` you sent)
+- story-level skill verification summary using `present`, `pending`, `skipped:no_installed_skills`, or `failed:<retryable_reason>`
 - assumptions or caveats that materially matter
 - whether approval/run should happen next
 
