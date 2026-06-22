@@ -1406,6 +1406,35 @@ describe('POST /api/specs/persist', () => {
       `SELECT id FROM spec_post_save_workflow_runs WHERE workspace_id = 'ws-test' AND spec_id = 'repair-legacy' AND save_generation = 9002`,
     ) as { id: number } | undefined;
     expect(run).toBeDefined();
+
+    const updatedLog = await queryOne(
+      `SELECT context_summary_json FROM spec_generation_logs WHERE spec_slug = 'repair-legacy' AND save_generation = 9002`,
+    ) as { context_summary_json: unknown } | undefined;
+    const updatedSummary = parsePayload(updatedLog?.context_summary_json);
+    expect(updatedSummary.workflow).toMatchObject({
+      engine: 'spec-post-save-v1',
+      source: 'repair',
+      postSave: { enrich: true, matchSkills: false, memorySynthesis: false },
+      postSavePolicy: {
+        callerPolicy: {
+          version: 'v1',
+          presetId: 'repair_only',
+          enrich: 'enqueue',
+          skills: 'skip',
+          memory: 'skip',
+          onFailure: 'continue',
+        },
+        effectivePolicy: {
+          version: 'v1',
+          presetId: 'repair_only',
+          enrich: 'enqueue',
+          skills: 'skip',
+          memory: 'skip',
+          onFailure: 'continue',
+        },
+        legacyOptions: { enrich: true, matchSkills: false, memorySynthesis: false },
+      },
+    });
   });
 });
 

@@ -83,7 +83,9 @@ import {
 } from '../lib/spec-edit-change-class';
 import {
   resolvePostSavePolicy,
+  type PersistedPostSavePolicyMetadata,
   type PostSaveLegacyOptions as SpecPostSaveOptions,
+  type PostSavePolicyInput,
   type ResolvedPostSavePolicy,
 } from '../lib/post-save-policy';
 import {
@@ -382,7 +384,7 @@ interface BatchBriefItem {
   domain?: string;
   agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
   reasoning?: { enabled: boolean; effort?: string };
-  postSave?: Partial<SpecPostSaveOptions>;
+  postSave?: PostSavePolicyInput;
   userId?: string;
   status: BatchBriefStatus;
   error?: string;
@@ -1238,7 +1240,7 @@ function buildPersistContextCaptureStatus(input: {
   };
 }
 
-function postSavePolicyMetadata(resolution: ResolvedPostSavePolicy): Record<string, unknown> {
+function postSavePolicyMetadata(resolution: ResolvedPostSavePolicy): PersistedPostSavePolicyMetadata {
   return {
     callerPolicy: resolution.callerPolicy ?? null,
     effectivePolicy: resolution.effectivePolicy,
@@ -1374,6 +1376,7 @@ async function scheduleSpecPostSaveJobs(
   workspaceId: string,
   options: SpecPostSaveOptions & {
     effectivePolicy: ResolvedPostSavePolicy['effectivePolicy'];
+    postSavePolicy?: PersistedPostSavePolicyMetadata;
     currentFingerprints?: SpecStageFingerprints;
     priorFingerprints?: Partial<SpecStageFingerprints>;
     saveGeneration?: number;
@@ -1391,7 +1394,14 @@ async function scheduleSpecPostSaveJobs(
   });
 
   if (options.saveGeneration !== undefined) {
-    await recordPostSaveWorkflowMetadata(specId, options.saveGeneration, workflowRun);
+    await recordPostSaveWorkflowMetadata(specId, options.saveGeneration, workflowRun, {
+      ...(options.postSavePolicy ? { postSavePolicy: options.postSavePolicy } : {}),
+      postSave: {
+        enrich: options.enrich,
+        matchSkills: options.matchSkills,
+        memorySynthesis: options.memorySynthesis,
+      },
+    });
   }
 
   return workflowRun;
@@ -1401,6 +1411,10 @@ async function recordPostSaveWorkflowMetadata(
   specId: string,
   saveGeneration: number,
   workflowRun: PostSaveWorkflowRun,
+  options?: {
+    postSave?: SpecPostSaveOptions;
+    postSavePolicy?: PersistedPostSavePolicyMetadata;
+  },
 ): Promise<void> {
   await execute(
     `UPDATE spec_generation_logs
@@ -1415,6 +1429,8 @@ async function recordPostSaveWorkflowMetadata(
         idempotencyKey: workflowRun.idempotencyKey,
         source: workflowRun.source,
         saveGeneration: workflowRun.saveGeneration,
+        ...(options?.postSave ? { postSave: options.postSave } : {}),
+        ...(options?.postSavePolicy ? { postSavePolicy: options.postSavePolicy } : {}),
       },
       workflowRunId: workflowRun.id,
     })],
@@ -1463,7 +1479,7 @@ interface ForgePersistResult {
   normalization: { changes: PersistSpecDraftNormalizationChange[] };
   overwrote: boolean;
   postSave: SpecPostSaveOptions;
-  postSavePolicy: Record<string, unknown>;
+  postSavePolicy: PersistedPostSavePolicyMetadata;
   workflow: {
     engine: 'spec-post-save-v1';
     runId: number;
@@ -1620,6 +1636,7 @@ async function persistExplicitDraftInternal(
   const workflowRun = await scheduleSpecPostSaveJobs(slug, workspaceId, {
     ...postSave,
     effectivePolicy: postSavePolicy.effectivePolicy,
+    postSavePolicy: postSavePolicyMetadata(postSavePolicy),
     currentFingerprints,
     priorFingerprints,
     saveGeneration,
@@ -3983,6 +4000,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const workflowRun = await scheduleSpecPostSaveJobs(slug, workspaceId, {
       ...forgePostSave,
       effectivePolicy: postSavePolicy.effectivePolicy,
+      postSavePolicy: postSavePolicyMetadata(postSavePolicy),
       currentFingerprints: forgeStageFingerprints,
       saveGeneration: forgeSaveGeneration,
       memory: {
@@ -4271,7 +4289,7 @@ interface BatchRequestItem {
   domain?: string;
   agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
   reasoning?: { enabled: boolean; effort?: string };
-  postSave?: Partial<SpecPostSaveOptions>;
+  postSave?: PostSavePolicyInput;
 }
 
 /**
@@ -6824,6 +6842,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
           await scheduleSpecPostSaveJobs(candidate.specId, workspaceId, {
             ...postSaveOptions,
             effectivePolicy: postSavePolicy.effectivePolicy,
+            postSavePolicy: postSavePolicyMetadata(postSavePolicy),
             currentFingerprints: stageFingerprints,
             saveGeneration,
             memory: {
@@ -6844,10 +6863,11 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
             const generationLog = await getEffectiveGenerationLog(candidate.specId);
             const summary = generationLog ? parseRecordLocal(generationLog.context_summary_json) : {};
             const saveGeneration = currentRepairSaveGeneration(generationLog, summary);
+            const repairPolicy = resolveRepairPostSavePolicyForStage('enrich');
             const workflowRun = await startSpecPostSaveWorkflow({
               specId: candidate.specId,
               workspaceId,
-              effectivePolicy: repairPolicyForStage('enrich'),
+              effectivePolicy: repairPolicy.effectivePolicy,
               ...(saveGeneration !== null ? { saveGeneration, generationLogId: saveGeneration } : {}),
               source: 'repair-batch',
               currentFingerprints: {
@@ -6856,7 +6876,10 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
               },
             });
             if (saveGeneration !== null) {
-              await recordPostSaveWorkflowMetadata(candidate.specId, saveGeneration, workflowRun);
+              await recordPostSaveWorkflowMetadata(candidate.specId, saveGeneration, workflowRun, {
+                postSave: repairPolicy.legacyOptions,
+                postSavePolicy: postSavePolicyMetadata(repairPolicy),
+              });
             }
             repairActions.push(`started_workflow:${workflowRun.id}`);
           }
@@ -14812,15 +14835,16 @@ async function markStaleQueuedJobRecovering(assessment: RepairStageAssessment): 
   }
 }
 
-function repairPolicyForStage(stage: RepairPostSaveStage): ResolvedPostSavePolicy['effectivePolicy'] {
-  return {
+function resolveRepairPostSavePolicyForStage(stage: RepairPostSaveStage): ResolvedPostSavePolicy {
+  return resolvePostSavePolicy({
     version: 'v1',
+    presetId: 'repair_only',
     context: 'capture',
     enrich: stage === 'enrich' ? 'enqueue' : 'skip',
     skills: stage === 'matchSkills' ? 'match' : 'skip',
     memory: stage === 'memorySynthesis' ? 'synthesize' : 'skip',
     onFailure: 'continue',
-  };
+  });
 }
 
 async function startRepairPostSaveWorkflowForStage(input: {
@@ -14831,10 +14855,11 @@ async function startRepairPostSaveWorkflowForStage(input: {
   saveGeneration: number | null;
   memory?: SpecPostSaveWorkflowMemoryPayload;
 }): Promise<{ workflowRun: PostSaveWorkflowRun; jobId?: string; bossJobId?: string | null; status?: string; reason?: string }> {
+  const repairPolicy = resolveRepairPostSavePolicyForStage(input.assessment.postSaveStage);
   const workflowRun = await startSpecPostSaveWorkflow({
     specId: input.specId,
     workspaceId: input.workspaceId,
-    effectivePolicy: repairPolicyForStage(input.assessment.postSaveStage),
+    effectivePolicy: repairPolicy.effectivePolicy,
     ...(input.saveGeneration !== null ? { saveGeneration: input.saveGeneration, generationLogId: input.saveGeneration } : {}),
     source: 'repair',
     currentFingerprints: {
@@ -14845,7 +14870,10 @@ async function startRepairPostSaveWorkflowForStage(input: {
   });
 
   if (input.saveGeneration !== null) {
-    await recordPostSaveWorkflowMetadata(input.specId, input.saveGeneration, workflowRun);
+    await recordPostSaveWorkflowMetadata(input.specId, input.saveGeneration, workflowRun, {
+      postSave: repairPolicy.legacyOptions,
+      postSavePolicy: postSavePolicyMetadata(repairPolicy),
+    });
   }
 
   const stageRow = await queryOne<{

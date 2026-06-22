@@ -7,6 +7,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import type { PersistedPostSavePolicyMetadata } from './post-save-policy';
 
 export interface DiagramOutput {
   mermaid: string;
@@ -64,7 +65,7 @@ export interface GeneratedSpec {
   contextSummary?: Record<string, unknown>;
   reasoning?: SpecReasoning;
   source?: string;
-  postSavePolicy?: Record<string, unknown>;
+  postSavePolicy?: PersistedPostSavePolicyMetadata;
 }
 
 export interface WriteResult {

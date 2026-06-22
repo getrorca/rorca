@@ -47,15 +47,33 @@ export interface PostSaveLegacyOptions {
   memorySynthesis: boolean;
 }
 
+export interface PostSavePolicyObjectInput {
+  version?: PostSavePolicyVersion;
+  presetId?: PostSavePolicyPresetId;
+  preset?: PostSavePolicyPresetId;
+  context?: PostSaveContextField;
+  enrich?: PostSaveEnrichField | boolean;
+  skills?: PostSaveSkillsField;
+  memory?: PostSaveMemoryField;
+  onFailure?: PostSaveFailureField;
+  matchSkills?: boolean;
+  memorySynthesis?: boolean;
+}
+
 export type PostSavePolicyInput =
   | boolean
   | PostSavePolicyPresetId
-  | Partial<PostSavePolicy>
-  | Partial<PostSaveLegacyOptions>
+  | PostSavePolicyObjectInput
+  | null
   | undefined;
 
-export interface ResolvedPostSavePolicy {
-  callerPolicy: unknown;
+export interface PersistedPostSavePolicyMetadata {
+  callerPolicy: PostSavePolicyInput;
+  effectivePolicy: PostSavePolicy;
+  legacyOptions: PostSaveLegacyOptions;
+}
+
+export interface ResolvedPostSavePolicy extends PersistedPostSavePolicyMetadata {
   effectivePolicy: PostSavePolicy;
   legacyOptions: PostSaveLegacyOptions;
 }
@@ -203,15 +221,16 @@ export function resolvePostSavePolicy(input?: unknown): ResolvedPostSavePolicy {
 
   if (typeof input === 'string') {
     const effectivePolicy = clonePolicy(POST_SAVE_POLICY_PRESETS[resolvePreset(input)]);
-    return { callerPolicy: input, effectivePolicy, legacyOptions: legacyOptionsFromPolicy(effectivePolicy) };
+    return { callerPolicy: input as PostSavePolicyPresetId, effectivePolicy, legacyOptions: legacyOptionsFromPolicy(effectivePolicy) };
   }
 
   if (!isRecord(input)) {
     throw validationError('postSave', input, ['boolean', ...POST_SAVE_POLICY_PRESET_IDS, 'policy object']);
   }
 
-  const presetId = input.presetId ?? input.preset;
-  let effectivePolicy = clonePolicy(POST_SAVE_POLICY_PRESETS[presetId === undefined ? 'best_effort' : resolvePreset(presetId, 'postSave.presetId')]);
+  const presetField = input.presetId !== undefined ? 'presetId' : input.preset !== undefined ? 'preset' : undefined;
+  const presetId = presetField ? input[presetField] : undefined;
+  let effectivePolicy = clonePolicy(POST_SAVE_POLICY_PRESETS[presetId === undefined ? 'best_effort' : resolvePreset(presetId, `postSave.${presetField}`)]);
 
   // Legacy boolean objects are accepted for backwards compatibility. If a field
   // is a string, it is treated as canonical and validated by applyCanonicalOverrides.
@@ -224,7 +243,7 @@ export function resolvePostSavePolicy(input?: unknown): ResolvedPostSavePolicy {
   effectivePolicy = { ...effectivePolicy, version: POST_SAVE_POLICY_VERSION };
 
   return {
-    callerPolicy: input,
+    callerPolicy: input as PostSavePolicyObjectInput,
     effectivePolicy,
     legacyOptions: legacyOptionsFromPolicy(effectivePolicy),
   };
