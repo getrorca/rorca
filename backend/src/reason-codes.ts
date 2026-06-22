@@ -24,7 +24,16 @@ export const SpecReadinessReasonCode = {
   RunAnywayOverrideUsed: 'run_anyway_override_used',
 } as const;
 
+export const SpecWorkflowReasonCode = {
+  InspectionAvailable: 'inspection_available',
+  ReadyForApproval: 'ready_for_approval',
+  ReadyForRun: 'ready_for_run',
+  StageStateMissing: 'stage_state_missing',
+} as const;
+
 export type SpecReadinessReasonCode = typeof SpecReadinessReasonCode[keyof typeof SpecReadinessReasonCode];
+export type SpecWorkflowReasonCode = typeof SpecWorkflowReasonCode[keyof typeof SpecWorkflowReasonCode];
+export type SpecOperationalReasonCode = SpecReadinessReasonCode | SpecWorkflowReasonCode;
 
 export type SpecReadinessReasonSeverity = 'blocking' | 'warning' | 'audit';
 
@@ -38,4 +47,13 @@ export interface SpecReadinessReason {
 export function isSpecReadinessReasonCode(value: unknown): value is SpecReadinessReasonCode {
   return typeof value === 'string'
     && (Object.values(SpecReadinessReasonCode) as string[]).includes(value);
+}
+
+export function isSpecWorkflowReasonCode(value: unknown): value is SpecWorkflowReasonCode {
+  return typeof value === 'string'
+    && (Object.values(SpecWorkflowReasonCode) as string[]).includes(value);
+}
+
+export function isSpecOperationalReasonCode(value: unknown): value is SpecOperationalReasonCode {
+  return isSpecReadinessReasonCode(value) || isSpecWorkflowReasonCode(value);
 }

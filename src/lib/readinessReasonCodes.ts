@@ -8,8 +8,12 @@
 // Frontend UI rendering consumes the same canonical map as backend readiness,
 // repair, workflow, and MCP/API code. Keep this file as a thin browser-safe
 // re-export so callers under src/ do not reach into backend paths directly.
-export { SpecReadinessReasonCode } from '../../backend/src/reason-codes';
+export {
+  SpecReadinessReasonCode,
+  SpecWorkflowReasonCode,
+} from '../../backend/src/reason-codes';
 export type {
+  SpecOperationalReasonCode,
   SpecReadinessReason,
   SpecReadinessReasonSeverity,
 } from '../../backend/src/reason-codes';

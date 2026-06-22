@@ -36,6 +36,7 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
+import { SpecReadinessReasonCode } from '../../reason-codes';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -181,6 +182,19 @@ beforeEach(async () => {
     [WORKSPACE_ID, os.tmpdir()],
   );
 
+  await execute('CREATE SCHEMA IF NOT EXISTS pgboss').catch(() => {});
+  await execute(`
+    CREATE TABLE IF NOT EXISTS pgboss.job (
+      id uuid PRIMARY KEY,
+      name text NOT NULL,
+      state text NOT NULL,
+      created_on timestamptz,
+      started_on timestamptz,
+      data jsonb
+    )
+  `).catch(() => {});
+  await execute('TRUNCATE pgboss.job').catch(() => {});
+
   // Clean up spec files from prior tests
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
@@ -244,7 +258,7 @@ describe('PSE-006: GET /api/specs/repair-candidates', () => {
     expect(res.status).toBe(200);
     expect(res.body.total).toBeGreaterThanOrEqual(2);
     const noLogCandidates = res.body.candidates.filter(
-      (c: { issues: string[] }) => c.issues.includes('missing_generation_log'),
+      (c: { issues: string[] }) => c.issues.includes(SpecReadinessReasonCode.MissingContext),
     );
     expect(noLogCandidates.length).toBeGreaterThanOrEqual(2);
   });
@@ -265,7 +279,7 @@ describe('PSE-006: GET /api/specs/repair-candidates', () => {
       (c: { specId: string }) => c.specId === 'failed-enrich-spec',
     );
     expect(failedCandidate).toBeDefined();
-    expect(failedCandidate.issues).toContain('failed_enrichment');
+    expect(failedCandidate.issues).toContain(SpecReadinessReasonCode.StageFailed);
   });
 
   test('discovers specs with stuck pending enrichment', async () => {
@@ -286,7 +300,7 @@ describe('PSE-006: GET /api/specs/repair-candidates', () => {
       (c: { specId: string }) => c.specId === 'stuck-spec',
     );
     expect(stuckCandidate).toBeDefined();
-    expect(stuckCandidate.issues).toContain('stuck_pending_enrichment');
+    expect(stuckCandidate.issues).toContain(SpecReadinessReasonCode.PostSavePending);
   });
 
   test('discovers specs with missing context summary', async () => {
@@ -306,7 +320,7 @@ describe('PSE-006: GET /api/specs/repair-candidates', () => {
       (c: { specId: string }) => c.specId === 'no-ctx-spec',
     );
     expect(noCtxCandidate).toBeDefined();
-    expect(noCtxCandidate.issues).toContain('missing_context_summary');
+    expect(noCtxCandidate.issues).toContain(SpecReadinessReasonCode.MissingContext);
   });
 
   test('filters by category parameter', async () => {
@@ -323,9 +337,9 @@ describe('PSE-006: GET /api/specs/repair-candidates', () => {
       matchSkillsStatus: 'completed',
     });
 
-    // Only request failed_enrichment category
+    // Only request stage_failed category
     const res = await request(app)
-      .get(`/api/specs/repair-candidates?workspaceId=${WORKSPACE_ID}&category=failed_enrichment`)
+      .get(`/api/specs/repair-candidates?workspaceId=${WORKSPACE_ID}&category=${SpecReadinessReasonCode.StageFailed}`)
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
@@ -356,7 +370,7 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
     const res = await request(app)
       .post('/api/specs/repair-batch')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ categories: ['failed_enrichment'] });
+      .send({ categories: [SpecReadinessReasonCode.StageFailed] });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/workspaceId/i);
@@ -394,15 +408,15 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: WORKSPACE_ID,
-        categories: ['failed_enrichment'],
+        categories: [SpecReadinessReasonCode.StageFailed],
         dryRun: true,
       });
 
     expect(res.status).toBe(200);
     expect(res.body.dryRun).toBe(true);
-    expect(res.body.queued).toBeGreaterThanOrEqual(1);
+    expect(res.body.skipped).toBeGreaterThanOrEqual(1);
     expect(res.body.details.some(
-      (d: { specId: string; status: string }) => d.specId === 'dry-batch-spec' && d.status === 'queued',
+      (d: { specId: string; status: string; repairStatus: string }) => d.specId === 'dry-batch-spec' && d.status === 'skipped' && d.repairStatus === 'dry_run',
     )).toBe(true);
 
     // Verify no actual repair was done — no new spec_jobs created
@@ -422,11 +436,11 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: WORKSPACE_ID,
-        categories: ['missing_generation_log'],
+        categories: [SpecReadinessReasonCode.MissingContext],
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.queued).toBeGreaterThanOrEqual(1);
+    expect(res.body.total).toBeGreaterThanOrEqual(1);
 
     // Verify generation log was created
     const log = await queryOne<{ spec_slug: string; context_summary_json: unknown }>(
@@ -449,7 +463,7 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: WORKSPACE_ID,
-        categories: ['failed_enrichment'],
+        categories: [SpecReadinessReasonCode.StageFailed],
       });
 
     expect(res.status).toBe(200);
@@ -460,7 +474,7 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
     );
     expect(detail).toBeDefined();
     expect(detail.status).toBe('queued');
-    expect(detail.reason).toMatch(/enqueued_enrich/);
+    expect(detail.reason).toMatch(/Re-enqueued enrich repair/);
   });
 
   test('blocked specs with active pipeline runs are reported', async () => {
@@ -480,7 +494,7 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: WORKSPACE_ID,
-        categories: ['failed_enrichment'],
+        categories: [SpecReadinessReasonCode.StageFailed],
       });
 
     expect(res.status).toBe(200);
@@ -509,7 +523,7 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: WORKSPACE_ID,
-        categories: ['failed_enrichment'],
+        categories: [SpecReadinessReasonCode.StageFailed],
         limit: 2,
       });
 
@@ -531,7 +545,7 @@ describe('PSE-006: POST /api/specs/repair-batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: WORKSPACE_ID,
-        categories: ['failed_enrichment'],
+        categories: [SpecReadinessReasonCode.StageFailed],
       });
 
     expect(res.status).toBe(200);

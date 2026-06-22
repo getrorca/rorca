@@ -397,19 +397,40 @@ export async function listJobsForSpec(
 
 // ─── Repair candidate discovery ─────────────────────────────────────────────
 
-export type RepairIssueCategory =
+export type RepairDiscoveryKind =
   | 'missing_generation_log'
   | 'missing_context_summary'
   | 'stuck_pending_enrichment'
   | 'failed_enrichment'
   | 'missing_suggested_skills';
 
+export type RepairIssueCategory =
+  | typeof SpecReadinessReasonCode.MissingContext
+  | typeof SpecReadinessReasonCode.PostSavePending
+  | typeof SpecReadinessReasonCode.StageFailed
+  | typeof SpecReadinessReasonCode.NoInstalledSkills;
+
 export interface RepairCandidateRow {
   spec_slug: string;
   log_id: number | null;
   status: string | null;
   issues: RepairIssueCategory[];
+  findings: RepairDiscoveryKind[];
   context_summary_json: Record<string, unknown> | null;
+}
+
+function reasonCodeForRepairFinding(finding: RepairDiscoveryKind): RepairIssueCategory {
+  switch (finding) {
+    case 'missing_generation_log':
+    case 'missing_context_summary':
+      return SpecReadinessReasonCode.MissingContext;
+    case 'stuck_pending_enrichment':
+      return SpecReadinessReasonCode.PostSavePending;
+    case 'failed_enrichment':
+      return SpecReadinessReasonCode.StageFailed;
+    case 'missing_suggested_skills':
+      return SpecReadinessReasonCode.NoInstalledSkills;
+  }
 }
 
 /**
@@ -460,12 +481,12 @@ export async function listRepairCandidatesFromLogs(
 
   for (const row of rows) {
     const summary = parseJsonColumn(row.context_summary_json);
-    const issues: RepairIssueCategory[] = [];
+    const findings: RepairDiscoveryKind[] = [];
 
     // Check for missing context summary
     const ctxCapture = summary.contextCaptureStatus as Record<string, unknown> | undefined;
     if (!ctxCapture || ctxCapture.status === 'missing' || !summary.contextCaptureStatus) {
-      issues.push('missing_context_summary');
+      findings.push('missing_context_summary');
     }
 
     // Check enrichment stage health
@@ -480,14 +501,14 @@ export async function listRepairCandidatesFromLogs(
       const isStuckMatchSkills = matchSkillsStage?.requested
         && ['pending', 'queued', 'running'].includes(String(matchSkillsStage.status ?? ''));
       if (isStuckEnrich || isStuckMatchSkills) {
-        issues.push('stuck_pending_enrichment');
+        findings.push('stuck_pending_enrichment');
       }
 
       // Failed enrichment
       const isFailedEnrich = enrichStage?.requested && enrichStage.status === 'failed';
       const isFailedMatchSkills = matchSkillsStage?.requested && matchSkillsStage.status === 'failed';
       if (isFailedEnrich || isFailedMatchSkills) {
-        issues.push('failed_enrichment');
+        findings.push('failed_enrichment');
       }
 
       // Missing suggested skills: match-skills completed but spec has no suggestedSkills
@@ -495,29 +516,33 @@ export async function listRepairCandidatesFromLogs(
       if (matchSkillsStage?.requested
           && matchSkillsStage.status === 'skipped'
           && matchSkillsStage.reason === SpecReadinessReasonCode.NoInstalledSkills) {
-        issues.push('missing_suggested_skills');
+        findings.push('missing_suggested_skills');
       }
     } else {
       // No postSaveStages at all — stage tracking is missing
       if (summary.postSave && typeof summary.postSave === 'object') {
         const postSave = summary.postSave as Record<string, unknown>;
         if (postSave.enrich || postSave.matchSkills) {
-          issues.push('stuck_pending_enrichment');
+          findings.push('stuck_pending_enrichment');
         }
       }
     }
 
-    if (issues.length === 0) continue;
+    if (findings.length === 0) continue;
+
+    const issues = [...new Set(findings.map(reasonCodeForRepairFinding))];
 
     // Filter by requested categories
     if (wantedCategories) {
       const matched = issues.filter((i) => wantedCategories.has(i));
       if (matched.length === 0) continue;
+      const matchedFindings = findings.filter((finding) => matched.includes(reasonCodeForRepairFinding(finding)));
       candidates.push({
         spec_slug: row.spec_slug,
         log_id: row.id,
         status: row.status,
         issues: matched,
+        findings: matchedFindings,
         context_summary_json: summary,
       });
     } else {
@@ -526,6 +551,7 @@ export async function listRepairCandidatesFromLogs(
         log_id: row.id,
         status: row.status,
         issues,
+        findings,
         context_summary_json: summary,
       });
     }

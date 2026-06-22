@@ -52,7 +52,17 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { createJob, updateJobStatus, listActiveJobs, listJobsForSpec, listRepairCandidatesFromLogs, type JsonValue, type RepairIssueCategory, type SpecJob } from '../db/spec-jobs';
+import {
+  createJob,
+  updateJobStatus,
+  listActiveJobs,
+  listJobsForSpec,
+  listRepairCandidatesFromLogs,
+  type JsonValue,
+  type RepairDiscoveryKind,
+  type RepairIssueCategory,
+  type SpecJob,
+} from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import {
   buildPersistPostSaveStages,
@@ -94,6 +104,7 @@ import {
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
+import { SpecReadinessReasonCode } from '../reason-codes';
 import {
   getSpecOperationalSurface,
   WORKFLOW_STAGE_KEYS,
@@ -6488,12 +6499,56 @@ router.get('/search/stories', async (req: Request, res: Response) => {
 // ─── GET /repair-candidates — List specs that need repair in a workspace ─────
 
 const VALID_REPAIR_CATEGORIES: RepairIssueCategory[] = [
-  'missing_generation_log',
-  'missing_context_summary',
-  'stuck_pending_enrichment',
-  'failed_enrichment',
-  'missing_suggested_skills',
+  SpecReadinessReasonCode.MissingContext,
+  SpecReadinessReasonCode.PostSavePending,
+  SpecReadinessReasonCode.StageFailed,
+  SpecReadinessReasonCode.NoInstalledSkills,
 ];
+
+const LEGACY_REPAIR_CATEGORY_ALIASES: Record<string, RepairIssueCategory> = {
+  missing_generation_log: SpecReadinessReasonCode.MissingContext,
+  missing_context_summary: SpecReadinessReasonCode.MissingContext,
+  stuck_pending_enrichment: SpecReadinessReasonCode.PostSavePending,
+  failed_enrichment: SpecReadinessReasonCode.StageFailed,
+  missing_suggested_skills: SpecReadinessReasonCode.NoInstalledSkills,
+};
+
+function normalizeRepairCategories(rawValues: string[]): RepairIssueCategory[] {
+  const normalized = rawValues.map((value) => LEGACY_REPAIR_CATEGORY_ALIASES[value] ?? value);
+  for (const category of normalized) {
+    if (!VALID_REPAIR_CATEGORIES.includes(category as RepairIssueCategory)) {
+      throw new ValidationError(`Invalid category: ${category}. Valid categories: ${VALID_REPAIR_CATEGORIES.join(', ')}`);
+    }
+  }
+  return [...new Set(normalized as RepairIssueCategory[])];
+}
+
+function requestedRepairStagesFromFindings(findings: RepairDiscoveryKind[]): RepairStageRequest[] | undefined {
+  const stages = new Set<RepairStageRequest>();
+  for (const finding of findings) {
+    if (finding === 'missing_generation_log') {
+      stages.add('context');
+      stages.add('enrich');
+      stages.add('match-skills');
+      stages.add('memorySynthesis');
+      continue;
+    }
+    if (finding === 'missing_context_summary') {
+      stages.add('context');
+      continue;
+    }
+    if (finding === 'missing_suggested_skills') {
+      stages.add('match-skills');
+      continue;
+    }
+    if (finding === 'failed_enrichment' || finding === 'stuck_pending_enrichment') {
+      stages.add('enrich');
+      stages.add('match-skills');
+      stages.add('memorySynthesis');
+    }
+  }
+  return stages.size > 0 ? [...stages] : undefined;
+}
 
 /**
  * @swagger
@@ -6515,8 +6570,8 @@ const VALID_REPAIR_CATEGORIES: RepairIssueCategory[] = [
  *         required: false
  *         schema:
  *           type: string
- *           enum: [missing_generation_log, missing_context_summary, stuck_pending_enrichment, failed_enrichment, missing_suggested_skills]
- *         description: Filter to a single issue category. Can be repeated for multiple categories.
+ *           enum: [missing_context, post_save_pending, stage_failed, no_installed_skills]
+ *         description: Filter to canonical repair/readiness reason codes. Legacy aliases are accepted for backward compatibility.
  *       - in: query
  *         name: limit
  *         required: false
@@ -6563,12 +6618,7 @@ router.get('/repair-candidates', async (req: Request, res: Response) => {
       const catList = Array.isArray(rawCategories)
         ? rawCategories.map(String)
         : [String(rawCategories)];
-      for (const cat of catList) {
-        if (!VALID_REPAIR_CATEGORIES.includes(cat as RepairIssueCategory)) {
-          throw new ValidationError(`Invalid category: ${cat}. Valid categories: ${VALID_REPAIR_CATEGORIES.join(', ')}`);
-        }
-      }
-      categories = catList as RepairIssueCategory[];
+      categories = normalizeRepairCategories(catList);
     }
 
     const limit = Math.min(
@@ -6582,7 +6632,7 @@ router.get('/repair-candidates', async (req: Request, res: Response) => {
       limit,
     });
 
-    // Phase 2: If looking for missing_generation_log, scan filesystem for specs without any log
+    // Phase 2: If looking for missing_context, scan filesystem for specs without any log
     const candidates: Array<{
       specId: string;
       issues: RepairIssueCategory[];
@@ -6599,8 +6649,8 @@ router.get('/repair-candidates', async (req: Request, res: Response) => {
     }
 
     // Filesystem scan for specs with no generation log at all
-    const wantMissingLog = !categories || categories.includes('missing_generation_log');
-    if (wantMissingLog && candidates.length < limit) {
+    const wantMissingContext = !categories || categories.includes(SpecReadinessReasonCode.MissingContext);
+    if (wantMissingContext && candidates.length < limit) {
       const { pendingDir, approvedDir } = specsDirs(workspace.path);
       const specFiles: string[] = [];
       for (const dir of [pendingDir, approvedDir]) {
@@ -6629,7 +6679,7 @@ router.get('/repair-candidates', async (req: Request, res: Response) => {
           if (!loggedSlugs.has(slug)) {
             candidates.push({
               specId: slug,
-              issues: ['missing_generation_log'],
+              issues: [SpecReadinessReasonCode.MissingContext],
               logStatus: null,
             });
             if (candidates.length >= limit) break;
@@ -6677,8 +6727,8 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  *                 type: array
  *                 items:
  *                   type: string
- *                   enum: [missing_generation_log, missing_context_summary, stuck_pending_enrichment, failed_enrichment, missing_suggested_skills]
- *                 description: Filter to specific issue categories. Required to prevent unbounded repair.
+ *                   enum: [missing_context, post_save_pending, stage_failed, no_installed_skills]
+ *                 description: Filter to canonical repair/readiness reason codes. Legacy aliases are accepted for backward compatibility.
  *               limit:
  *                 type: integer
  *                 minimum: 1
@@ -6759,11 +6809,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
       throw new ValidationError('categories is required and must be a non-empty array — batch repair requires explicit filters');
     }
 
-    for (const cat of categories) {
-      if (!VALID_REPAIR_CATEGORIES.includes(cat as RepairIssueCategory)) {
-        throw new ValidationError(`Invalid category: ${cat}. Valid categories: ${VALID_REPAIR_CATEGORIES.join(', ')}`);
-      }
-    }
+    const normalizedCategories = normalizeRepairCategories(categories);
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
@@ -6777,18 +6823,19 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
 
     // Discover candidates using the same discovery logic
     const logCandidates = await listRepairCandidatesFromLogs(workspaceId, {
-      categories: categories as RepairIssueCategory[],
+      categories: normalizedCategories,
       limit,
     });
 
-    // Also discover filesystem-only candidates if missing_generation_log is requested
-    type BatchCandidate = { specId: string; issues: RepairIssueCategory[] };
+    // Also discover filesystem-only candidates if missing_context is requested
+    type BatchCandidate = { specId: string; issues: RepairIssueCategory[]; findings: RepairDiscoveryKind[] };
     const allCandidates: BatchCandidate[] = logCandidates.map((c) => ({
       specId: c.spec_slug,
       issues: c.issues,
+      findings: c.findings,
     }));
 
-    if (categories.includes('missing_generation_log') && allCandidates.length < limit) {
+    if (normalizedCategories.includes(SpecReadinessReasonCode.MissingContext) && allCandidates.length < limit) {
       const { pendingDir, approvedDir } = specsDirs(workspace.path);
       const specFiles: string[] = [];
       for (const dir of [pendingDir, approvedDir]) {
@@ -6811,7 +6858,11 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
         const loggedSlugs = new Set(existingLogs.map((r) => r.spec_slug));
         for (const slug of unknownSlugs) {
           if (!loggedSlugs.has(slug) && allCandidates.length < limit) {
-            allCandidates.push({ specId: slug, issues: ['missing_generation_log'] });
+            allCandidates.push({
+              specId: slug,
+              issues: [SpecReadinessReasonCode.MissingContext],
+              findings: ['missing_generation_log'],
+            });
           }
         }
       }
@@ -6838,7 +6889,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
         const repair = await executeSpecRepair({
           specId: candidate.specId,
           workspaceId,
-          requestedStages: requestedRepairStagesFromIssues(candidate.issues),
+          requestedStages: requestedRepairStagesFromFindings(candidate.findings),
           dryRun,
           postSavePolicyInput: postSavePolicy ?? policyPresetId,
           invocationSurface: 'api.specs.repair-batch',
@@ -6892,7 +6943,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
     if (!dryRun && queued > 0) {
       const walPayload = {
         workspace_id: workspaceId,
-        categories,
+        categories: normalizedCategories,
         queued,
         skipped,
         blocked,
@@ -15210,33 +15261,6 @@ function diagnoseSpecHealth(
 }
 
 const VALID_REPAIR_STAGE_REQUESTS = new Set<RepairStageRequest>(['context', 'enrich', 'match-skills', 'memorySynthesis']);
-
-function requestedRepairStagesFromIssues(issues: RepairIssueCategory[]): RepairStageRequest[] | undefined {
-  const stages = new Set<RepairStageRequest>();
-  for (const issue of issues) {
-    if (issue === 'missing_generation_log') {
-      stages.add('context');
-      stages.add('enrich');
-      stages.add('match-skills');
-      stages.add('memorySynthesis');
-      continue;
-    }
-    if (issue === 'missing_context_summary') {
-      stages.add('context');
-      continue;
-    }
-    if (issue === 'missing_suggested_skills') {
-      stages.add('match-skills');
-      continue;
-    }
-    if (issue === 'failed_enrichment' || issue === 'stuck_pending_enrichment') {
-      stages.add('enrich');
-      stages.add('match-skills');
-      stages.add('memorySynthesis');
-    }
-  }
-  return stages.size > 0 ? [...stages] : undefined;
-}
 
 function parseRequestedRepairStages(requestedStages?: string[]): RepairStageRequest[] | undefined {
   if (!requestedStages) return undefined;

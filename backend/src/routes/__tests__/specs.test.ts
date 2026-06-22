@@ -14,6 +14,7 @@ import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 import { updateJobStatus } from '../../db/spec-jobs';
 import { advancePersistPostSaveDependencies, syncPersistPostSaveStageFromJob } from '../../lib/spec-post-save';
+import { SpecReadinessReasonCode } from '../../reason-codes';
 
 /** pg returns jsonb columns as already-parsed objects; this handles both cases */
 function parsePayload(p: unknown): Record<string, unknown> {
@@ -1551,7 +1552,7 @@ describe('POST /api/specs/persist', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: 'ws-test',
-        categories: ['missing_generation_log'],
+        categories: [SpecReadinessReasonCode.MissingContext],
         limit: 10,
         dryRun: true,
       });

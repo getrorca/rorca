@@ -21,7 +21,11 @@ import {
   type SpecReadinessReason,
   type SpecReadinessStageState,
 } from './spec-readiness';
-import { SpecReadinessReasonCode } from '../reason-codes';
+import {
+  SpecReadinessReasonCode,
+  SpecWorkflowReasonCode,
+  type SpecOperationalReasonCode,
+} from '../reason-codes';
 
 export const WORKFLOW_STAGE_KEYS = ['context', 'enrich', 'matchSkills', 'memorySynthesis'] as const;
 
@@ -42,7 +46,7 @@ export interface WorkflowActionHint {
   target: 'spec' | 'stage';
   allowed: boolean;
   label: string;
-  reasonCode: string;
+  reasonCode: SpecOperationalReasonCode;
   stageKey?: WorkflowStageKey;
   request: {
     method: 'GET' | 'POST';
@@ -55,7 +59,7 @@ export interface SpecWorkflowStageSnapshot {
   key: WorkflowStageKey;
   requested: boolean;
   status: WorkflowStageStatus;
-  reasonCode: string | null;
+  reasonCode: SpecOperationalReasonCode | string | null;
   reason: string | null;
   workflowRunId: number | null;
   jobId: string | null;
@@ -130,7 +134,10 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
 }
 
-function firstReasonCode(readiness: SpecReadinessPayload, fallback = 'inspection_available'): string {
+function firstReasonCode(
+  readiness: SpecReadinessPayload,
+  fallback: SpecOperationalReasonCode = SpecWorkflowReasonCode.InspectionAvailable,
+): SpecOperationalReasonCode {
   return readiness.blockingReasons[0]?.code ?? readiness.warnings[0]?.code ?? fallback;
 }
 
@@ -165,7 +172,6 @@ function buildStageHints(input: {
   stageKey: WorkflowStageKey;
   requested: boolean;
   status: WorkflowStageStatus;
-  reasonCode: string | null;
   readiness: SpecReadinessPayload;
 }): WorkflowActionHint[] {
   const hints: WorkflowActionHint[] = [];
@@ -177,7 +183,7 @@ function buildStageHints(input: {
       stageKey: input.stageKey,
       allowed: true,
       label: `Wait for ${input.stageKey} to finish`,
-      reasonCode: input.reasonCode ?? SpecReadinessReasonCode.PostSavePending,
+      reasonCode: SpecReadinessReasonCode.PostSavePending,
       request: {
         method: 'GET',
         path: workflowPath(input.specId),
@@ -193,7 +199,7 @@ function buildStageHints(input: {
       stageKey: input.stageKey,
       allowed: true,
       label: `Retry ${input.stageKey}`,
-      reasonCode: input.reasonCode ?? SpecReadinessReasonCode.StageFailed,
+      reasonCode: SpecReadinessReasonCode.StageFailed,
       request: {
         method: 'POST',
         path: stagePath(input.specId, input.stageKey),
@@ -216,7 +222,7 @@ function buildTopLevelHints(input: {
       target: 'spec',
       allowed: true,
       label: 'Inspect workflow state',
-      reasonCode: 'inspection_available',
+      reasonCode: SpecWorkflowReasonCode.InspectionAvailable,
       request: {
         method: 'GET',
         path: workflowPath(input.specId),
@@ -228,7 +234,7 @@ function buildTopLevelHints(input: {
       target: 'spec',
       allowed: true,
       label: 'Inspect readiness state',
-      reasonCode: 'inspection_available',
+      reasonCode: SpecWorkflowReasonCode.InspectionAvailable,
       request: {
         method: 'GET',
         path: readinessPath(input.specId),
@@ -273,7 +279,7 @@ function buildTopLevelHints(input: {
       target: 'spec',
       allowed: true,
       label: 'Approve spec',
-      reasonCode: 'ready_for_approval',
+      reasonCode: SpecWorkflowReasonCode.ReadyForApproval,
       request: {
         method: 'POST',
         path: `/api/specs/${encodeURIComponent(input.specId)}/approve`,
@@ -288,7 +294,7 @@ function buildTopLevelHints(input: {
       target: 'spec',
       allowed: true,
       label: 'Run spec',
-      reasonCode: 'ready_for_run',
+      reasonCode: SpecWorkflowReasonCode.ReadyForRun,
       request: {
         method: 'POST',
         path: '/api/pipeline/trigger',
@@ -331,7 +337,7 @@ function buildStageSnapshot(input: {
   const readinessStage = input.readinessStage;
   const requested = workflowStage?.requested ?? readinessStage?.requested ?? false;
   const status = (workflowStage?.status ?? readinessStage?.status ?? 'missing') as WorkflowStageStatus;
-  const reasonCode = workflowStage?.reason ?? readinessStage?.reason ?? (status === 'missing' ? 'stage_state_missing' : null);
+  const reasonCode = workflowStage?.reason ?? readinessStage?.reason ?? (status === 'missing' ? SpecWorkflowReasonCode.StageStateMissing : null);
   const snapshot: SpecWorkflowStageSnapshot = {
     key: input.stageKey,
     requested,
@@ -359,7 +365,6 @@ function buildStageSnapshot(input: {
     stageKey: input.stageKey,
     requested,
     status,
-    reasonCode,
     readiness: input.readiness,
   });
 
