@@ -437,6 +437,7 @@ async function enqueueStage(input: {
       stageKey: input.stage.stageKey,
       status: 'queued',
       reason: input.reason,
+      allowedCurrentStatuses: ['queued'],
       jobId: job.id,
       bossJobId,
       queueName: definition.queueName,

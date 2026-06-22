@@ -221,6 +221,39 @@ describe('spec-post-save-workflow v1 orchestrator', () => {
     expect(mockBossSend).toHaveBeenCalledWith('spec:match-skills', expect.objectContaining({ specId: 'spec-2' }), expect.any(Object));
   });
 
+  it('guards the post-send queued write so a worker race cannot regress stage state', async () => {
+    mockListStagesByRun
+      .mockResolvedValueOnce([
+        stage('context', 'completed'),
+        stage('enrich', 'pending'),
+        stage('matchSkills', 'pending'),
+        stage('memorySynthesis', 'pending'),
+      ])
+      .mockResolvedValueOnce([
+        stage('context', 'completed'),
+        stage('enrich', 'running'),
+        stage('matchSkills', 'pending'),
+        stage('memorySynthesis', 'pending'),
+      ]);
+    mockUpdateStageStatus.mockImplementation(async (input) => {
+      if (input.stageKey === 'enrich' && input.reason === 'durable_job_enqueued_after_dependency') {
+        return null;
+      }
+      return { ...stage(input.stageKey, input.status), ...input };
+    });
+
+    const { startSpecPostSaveWorkflow } = await import('../spec-post-save-workflow');
+    await startSpecPostSaveWorkflow({ specId: 'spec-race', workspaceId: 'ws-1', effectivePolicy: bestEffortPolicy, saveGeneration: 1 });
+
+    expect(mockUpdateStageStatus).toHaveBeenCalledWith(expect.objectContaining({
+      stageKey: 'enrich',
+      status: 'queued',
+      reason: 'durable_job_enqueued_after_dependency',
+      allowedCurrentStatuses: ['queued'],
+    }));
+    expect(mockBossSend).toHaveBeenCalledTimes(1);
+  });
+
   it('queues memory synthesis only after match-skills durably completes', async () => {
     const completedMatchSkillsJob = {
       id: 'job-match-skills',
