@@ -289,6 +289,21 @@ function stageStateForJob(job: SpecJob, metadata: SpecPostSaveWorkflowJobMetadat
   } as Partial<PostSaveWorkflowStage> & Pick<PostSaveWorkflowStage, 'status' | 'reason'>;
 }
 
+function allowedCurrentStatusesForSyncedState(status: SpecPostSaveWorkflowStageStatus): SpecPostSaveWorkflowStageStatus[] {
+  switch (status) {
+    case 'pending':
+      return ['pending'];
+    case 'queued':
+      return ['pending', 'queued'];
+    case 'running':
+      return ['pending', 'queued', 'running'];
+    case 'completed':
+    case 'failed':
+    case 'skipped':
+      return ['pending', 'queued', 'running'];
+  }
+}
+
 export async function syncSpecPostSaveWorkflowStageFromJob(jobId: string): Promise<void> {
   const job = await getJob(jobId);
   if (!job) return;
@@ -304,6 +319,7 @@ export async function syncSpecPostSaveWorkflowStageFromJob(jobId: string): Promi
     stageKey: metadata.stage,
     status: state.status,
     reason: state.reason,
+    allowedCurrentStatuses: allowedCurrentStatusesForSyncedState(state.status),
     jobId: job.id,
     bossJobId: job.bossJobId,
     queueName: STAGE_BY_KEY.get(metadata.stage)?.queueName ?? null,
@@ -484,6 +500,13 @@ async function blockStageAndDependents(input: {
   }
 }
 
+async function ensureStageGraphMaterialized(run: PostSaveWorkflowRun, input: StartSpecPostSaveWorkflowInput): Promise<void> {
+  const existingStages = await listStagesByRun(run.id);
+  const existingStageKeys = new Set(existingStages.map((stage) => stage.stageKey));
+  const missingStages = buildInitialStages(input).filter((stage) => !existingStageKeys.has(stage.stageKey));
+  await insertStages(run.id, missingStages, [...SPEC_POST_SAVE_STAGE_DEPENDENCIES]);
+}
+
 async function advanceReadyStages(run: PostSaveWorkflowRun, options: { workspaceId: string; specId: string; memory?: SpecPostSaveWorkflowMemoryPayload }): Promise<void> {
   let progressed = true;
   while (progressed) {
@@ -533,6 +556,7 @@ export async function startSpecPostSaveWorkflow(input: StartSpecPostSaveWorkflow
   });
   const sameRunConflict = conflicts.find((conflict) => conflict.idempotencyKey === idempotencyKey);
   if (sameRunConflict) {
+    await ensureStageGraphMaterialized(sameRunConflict, input);
     await advanceReadyStages(sameRunConflict, { workspaceId: input.workspaceId, specId: input.specId, memory: input.memory });
     return sameRunConflict;
   }

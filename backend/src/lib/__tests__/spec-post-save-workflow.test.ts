@@ -153,6 +153,46 @@ describe('spec-post-save-workflow v1 orchestrator', () => {
     expect(events).toEqual(['insertStages', 'bossSend']);
   });
 
+  it('re-materializes missing stages on an idempotent retry before queueing work', async () => {
+    mockListActiveWorkflowConflicts.mockResolvedValueOnce([
+      { id: 7, idempotencyKey: 'spec-post-save-v1:ws-1:spec-retry:1', saveGeneration: 1, effectivePolicyHash: 'hash' },
+    ]);
+    mockListStagesByRun
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        stage('context', 'completed'),
+        stage('enrich', 'pending'),
+        stage('matchSkills', 'pending'),
+        stage('memorySynthesis', 'pending'),
+      ])
+      .mockResolvedValueOnce([
+        stage('context', 'completed'),
+        stage('enrich', 'queued'),
+        stage('matchSkills', 'pending'),
+        stage('memorySynthesis', 'pending'),
+      ]);
+
+    const { startSpecPostSaveWorkflow } = await import('../spec-post-save-workflow');
+    await startSpecPostSaveWorkflow({ specId: 'spec-retry', workspaceId: 'ws-1', effectivePolicy: bestEffortPolicy, saveGeneration: 1 });
+
+    expect(mockCreateRun).not.toHaveBeenCalled();
+    expect(mockInsertStages).toHaveBeenCalledWith(
+      7,
+      expect.arrayContaining([
+        expect.objectContaining({ stageKey: 'context', status: 'completed' }),
+        expect.objectContaining({ stageKey: 'enrich', status: 'pending' }),
+        expect.objectContaining({ stageKey: 'matchSkills', status: 'pending' }),
+        expect.objectContaining({ stageKey: 'memorySynthesis', status: 'pending' }),
+      ]),
+      [
+        { stageKey: 'enrich', dependsOnStageKey: 'context' },
+        { stageKey: 'matchSkills', dependsOnStageKey: 'enrich' },
+        { stageKey: 'memorySynthesis', dependsOnStageKey: 'matchSkills' },
+      ],
+    );
+    expect(events).toEqual(['insertStages', 'bossSend']);
+  });
+
   it('lets an explicitly skipped enrich stage satisfy match-skills when policy requests skills', async () => {
     const policy = { ...bestEffortPolicy, enrich: 'skip' as const, memory: 'skip' as const };
     mockListStagesByRun
@@ -179,6 +219,50 @@ describe('spec-post-save-workflow v1 orchestrator', () => {
       expect.objectContaining({ stage: 'matchSkills', workflow: 'spec-post-save-v1' }),
     );
     expect(mockBossSend).toHaveBeenCalledWith('spec:match-skills', expect.objectContaining({ specId: 'spec-2' }), expect.any(Object));
+  });
+
+  it('queues memory synthesis only after match-skills durably completes', async () => {
+    const completedMatchSkillsJob = {
+      id: 'job-match-skills',
+      specId: 'spec-2b',
+      workspaceId: 'ws-1',
+      jobType: 'match-skills',
+      status: 'completed',
+      bossJobId: 'boss-match',
+      requestPayload: { origin: 'persist-post-save', workflow: 'spec-post-save-v1', workflowRunId: 7, stage: 'matchSkills', saveGeneration: 1, priority: 1, singletonKey: 'persist-post-save:ws-1:spec-2b' },
+      resultPayload: null,
+      errorMessage: null,
+      createdAt: new Date(),
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      saveGeneration: 1,
+    };
+    mockGetJob.mockResolvedValue(completedMatchSkillsJob);
+    mockQueryOne.mockResolvedValue({ save_generation: 1 });
+    mockListStagesByRun
+      .mockResolvedValueOnce([
+        stage('context', 'completed'),
+        stage('enrich', 'completed'),
+        stage('matchSkills', 'completed'),
+        stage('memorySynthesis', 'pending'),
+      ])
+      .mockResolvedValueOnce([
+        stage('context', 'completed'),
+        stage('enrich', 'completed'),
+        stage('matchSkills', 'completed'),
+        stage('memorySynthesis', 'queued'),
+      ]);
+
+    const { advanceSpecPostSaveWorkflowDependencies } = await import('../spec-post-save-workflow');
+    await advanceSpecPostSaveWorkflowDependencies('job-match-skills');
+
+    expect(mockCreateJob).toHaveBeenCalledWith(
+      'ws-1',
+      'spec-2b',
+      'memory-synthesis',
+      expect.objectContaining({ stage: 'memorySynthesis', workflow: 'spec-post-save-v1' }),
+    );
+    expect(mockBossSend).toHaveBeenCalledWith('spec:memory-synthesis', expect.objectContaining({ specId: 'spec-2b' }), expect.any(Object));
   });
 
   it('does not duplicate-enqueue dependents that durable stage state already released', async () => {
@@ -210,6 +294,35 @@ describe('spec-post-save-workflow v1 orchestrator', () => {
     await advanceSpecPostSaveWorkflowDependencies('job-enrich');
 
     expect(mockBossSend).not.toHaveBeenCalled();
+  });
+
+  it('guards terminal stage syncs so duplicate completion events stay idempotent', async () => {
+    const completedEnrichJob = {
+      id: 'job-enrich-sync',
+      specId: 'spec-sync',
+      workspaceId: 'ws-1',
+      jobType: 'enrich',
+      status: 'completed',
+      bossJobId: 'boss-sync',
+      requestPayload: { origin: 'persist-post-save', workflow: 'spec-post-save-v1', workflowRunId: 7, stage: 'enrich', saveGeneration: 1, priority: 1, singletonKey: 'persist-post-save:ws-1:spec-sync' },
+      resultPayload: null,
+      errorMessage: null,
+      createdAt: new Date(),
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      saveGeneration: 1,
+    };
+    mockGetJob.mockResolvedValue(completedEnrichJob);
+    mockQueryOne.mockResolvedValue({ save_generation: 1 });
+
+    const { syncSpecPostSaveWorkflowStageFromJob } = await import('../spec-post-save-workflow');
+    await syncSpecPostSaveWorkflowStageFromJob('job-enrich-sync');
+
+    expect(mockUpdateStageStatus).toHaveBeenCalledWith(expect.objectContaining({
+      stageKey: 'enrich',
+      status: 'completed',
+      allowedCurrentStatuses: ['pending', 'queued', 'running'],
+    }));
   });
 
   it('blocks downstream pending stages with a durable reason when a required dependency fails', async () => {
