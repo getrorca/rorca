@@ -86,6 +86,7 @@ import {
   type PersistedPostSavePolicyMetadata,
   type PostSaveLegacyOptions as SpecPostSaveOptions,
   type PostSavePolicyInput,
+  type PostSavePolicyPresetId,
   type ResolvedPostSavePolicy,
 } from '../lib/post-save-policy';
 import {
@@ -93,6 +94,11 @@ import {
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
+import {
+  getSpecOperationalSurface,
+  WORKFLOW_STAGE_KEYS,
+  type WorkflowStageKey,
+} from '../lib/spec-workflow';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -4176,6 +4182,45 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *     responses:
  *       200:
  *         description: Spec persisted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 slug: { type: string }
+ *                 title: { type: string }
+ *                 postSave:
+ *                   type: object
+ *                   properties:
+ *                     enrich: { type: boolean }
+ *                     matchSkills: { type: boolean }
+ *                     memorySynthesis: { type: boolean }
+ *                 postSavePolicy:
+ *                   type: object
+ *                   properties:
+ *                     callerPolicy:
+ *                       nullable: true
+ *                       oneOf:
+ *                         - type: boolean
+ *                         - type: string
+ *                         - type: object
+ *                           additionalProperties: true
+ *                     effectivePolicy:
+ *                       type: object
+ *                       additionalProperties: true
+ *                     legacyOptions:
+ *                       type: object
+ *                       properties:
+ *                         enrich: { type: boolean }
+ *                         matchSkills: { type: boolean }
+ *                         memorySynthesis: { type: boolean }
+ *                 workflow:
+ *                   type: object
+ *                   properties:
+ *                     engine: { type: string, enum: [spec-post-save-v1] }
+ *                     runId: { type: integer }
+ *                     status: { type: string }
+ *                     saveGeneration: { type: integer, nullable: true }
  *       400:
  *         description: Invalid stories, dependencies, or request fields
  *       404:
@@ -6614,10 +6659,10 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  * /api/specs/repair-batch:
  *   post:
  *     tags: [Specs]
- *     summary: Enqueue workspace-scope repair for matching specs
+ *     summary: Diagnose and repair a bounded batch of specs in one workspace
  *     operationId: rorca_specs_repair_batch
- *     x-rorca-tier: admin
- *     x-rorca-rationale: "Operator-level batch mutation that can enqueue repair work across specs; unsafe for public/MCP automation."
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Bounded workspace-scoped repair is a user-owned recovery workflow that authenticated local MCP and UI clients may invoke safely when explicit filters and limits are required."
  *     requestBody:
  *       required: true
  *       content:
@@ -6643,6 +6688,16 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  *                 type: boolean
  *                 default: false
  *                 description: If true, only report what would be repaired without applying changes.
+ *               policyPresetId:
+ *                 type: string
+ *                 enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *               postSavePolicy:
+ *                 oneOf:
+ *                   - type: boolean
+ *                   - type: string
+ *                     enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *                   - type: object
+ *                     additionalProperties: true
  *     responses:
  *       200:
  *         description: Batch repair results
@@ -6665,6 +6720,16 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  *                       status: { type: string, enum: [queued, skipped, blocked] }
  *                       reason: { type: string }
  *                       reasonCode: { type: string }
+ *                       reasonCodes:
+ *                         type: array
+ *                         items: { type: string }
+ *                       workflowRunId: { type: integer, nullable: true }
+ *                       stages:
+ *                         type: array
+ *                         items: { type: object, additionalProperties: true }
+ *                       safeActionHints:
+ *                         type: array
+ *                         items: { type: object, additionalProperties: true }
  *       400:
  *         description: Missing workspaceId or categories
  *       404:
@@ -6672,15 +6737,21 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  */
 router.post('/repair-batch', async (req: Request, res: Response) => {
   try {
-    const { workspaceId, categories, limit: rawLimit, dryRun = false } = req.body as {
+    const { workspaceId, categories, limit: rawLimit, dryRun = false, policyPresetId, postSavePolicy } = req.body as {
       workspaceId?: string;
       categories?: string[];
       limit?: number;
       dryRun?: boolean;
+      policyPresetId?: PostSavePolicyPresetId;
+      postSavePolicy?: PostSavePolicyInput;
     };
 
     if (!workspaceId) {
       throw new ValidationError('Missing required body param: workspaceId');
+    }
+
+    if (policyPresetId !== undefined && postSavePolicy !== undefined) {
+      throw new ValidationError('Provide either policyPresetId or postSavePolicy, not both');
     }
 
     if (!categories || !Array.isArray(categories) || categories.length === 0) {
@@ -6751,7 +6822,11 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
       status: 'queued' | 'skipped' | 'blocked';
       reason: string;
       reasonCode: RepairReasonCode;
+      reasonCodes: RepairReasonCode[];
       repairStatus: RepairExecutionStatus;
+      workflowRunId: number | null;
+      stages: NonNullable<RepairExecutionResult['workflow']>['stages'];
+      safeActionHints: NonNullable<RepairExecutionResult['readiness']>['safeActionHints'];
     }> = [];
     let queued = 0;
     let skipped = 0;
@@ -6764,6 +6839,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
           workspaceId,
           requestedStages: requestedRepairStagesFromIssues(candidate.issues),
           dryRun,
+          postSavePolicyInput: postSavePolicy ?? policyPresetId,
           invocationSurface: 'api.specs.repair-batch',
           source: 'repair-batch',
         });
@@ -6784,7 +6860,11 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
           status: detailStatus,
           reason: detailReason,
           reasonCode: detailReasonCode,
+          reasonCodes: repair.reasonCodes,
           repairStatus: repair.status,
+          workflowRunId: repair.workflow?.workflow.runId ?? repair.actions.find((action) => action.workflowRunId !== undefined)?.workflowRunId ?? null,
+          stages: repair.workflow?.stages ?? [],
+          safeActionHints: repair.readiness?.safeActionHints ?? [],
         });
 
         if (detailStatus === 'queued') queued++;
@@ -6797,7 +6877,11 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
           status: 'skipped',
           reason: `Repair failed: ${reason}`,
           reasonCode: 'spec_file_missing',
+          reasonCodes: ['spec_file_missing'],
           repairStatus: 'no_op',
+          workflowRunId: null,
+          stages: [],
+          safeActionHints: [],
         });
         skipped++;
       }
@@ -8546,6 +8630,252 @@ function surfacePostSaveStages(log: Record<string, unknown>): Record<string, unk
     ...(contextCaptureStatus ? { contextCaptureStatus } : {}),
   };
 }
+
+function parseWorkflowStageKeyParam(stageKey: string): WorkflowStageKey {
+  if ((WORKFLOW_STAGE_KEYS as readonly string[]).includes(stageKey)) return stageKey as WorkflowStageKey;
+  throw new ValidationError(`Invalid workflow stage key: ${stageKey}. Valid stages: ${WORKFLOW_STAGE_KEYS.join(', ')}`);
+}
+
+/**
+ * @swagger
+ * /api/specs/{specId}/workflow:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Inspect durable post-save workflow state for a spec
+ *     operationId: rorca_specs_by_specId_workflow
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only durable workflow inspection is safe for CLI, MCP, and UI clients and avoids forcing them to reverse-engineer state from generation logs."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Stable workflow snapshot
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specId: { type: string }
+ *                 workspaceId: { type: string }
+ *                 persistence:
+ *                   type: object
+ *                   properties:
+ *                     specPath: { type: string, nullable: true }
+ *                     location: { type: string, enum: [pending, approved, missing] }
+ *                     exists: { type: boolean }
+ *                     saveGeneration: { type: integer, nullable: true }
+ *                 workflow:
+ *                   type: object
+ *                   properties:
+ *                     runId: { type: integer, nullable: true }
+ *                     status: { type: string, nullable: true }
+ *                     source: { type: string, nullable: true }
+ *                     effectivePolicy:
+ *                       type: object
+ *                       nullable: true
+ *                       additionalProperties: true
+ *                 reasonCodes:
+ *                   type: array
+ *                   items: { type: string }
+ *                 stages:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       key: { type: string, enum: [context, enrich, matchSkills, memorySynthesis] }
+ *                       requested: { type: boolean }
+ *                       status: { type: string, enum: [missing, pending, queued, running, completed, failed, skipped, superseded] }
+ *                       reasonCode: { type: string, nullable: true }
+ *                       jobId: { type: string, nullable: true }
+ *                       bossJobId: { type: string, nullable: true }
+ *                       workflowRunId: { type: integer, nullable: true }
+ *                       safeActionHints:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             action: { type: string }
+ *                             target: { type: string, enum: [spec, stage] }
+ *                             allowed: { type: boolean }
+ *                             reasonCode: { type: string }
+ *                 safeActionHints:
+ *                   type: array
+ *                   items: { type: object, additionalProperties: true }
+ */
+router.get('/:specId/workflow', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const workspaceId = String(req.query.workspaceId ?? '');
+    if (!workspaceId) throw new ValidationError('Missing required query param: workspaceId');
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) throw new NotFoundError('Workspace not found');
+    const surface = await getSpecOperationalSurface({ workspaceId, workspacePath: workspace.path, specId });
+    res.json(surface.workflow);
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Workflow');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/readiness:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Inspect execution readiness for a spec
+ *     operationId: rorca_specs_by_specId_readiness
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only readiness inspection is safe for CLI, MCP, and UI clients and exposes stable reason codes plus safe recovery hints."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Stable readiness snapshot
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specId: { type: string }
+ *                 workspaceId: { type: string }
+ *                 readinessState:
+ *                   type: object
+ *                   properties:
+ *                     status: { type: string, enum: [ready, degraded, blocked] }
+ *                     reason: { type: string }
+ *                 executionGate:
+ *                   type: object
+ *                   properties:
+ *                     status: { type: string, enum: [allowed, blocked] }
+ *                     overrideAllowed: { type: boolean }
+ *                     overrideReasonCode: { type: string }
+ *                 blockingReasons:
+ *                   type: array
+ *                   items: { type: object, additionalProperties: true }
+ *                 warnings:
+ *                   type: array
+ *                   items: { type: object, additionalProperties: true }
+ *                 availableActions:
+ *                   type: array
+ *                   items: { type: string }
+ *                 reasonCodes:
+ *                   type: array
+ *                   items: { type: string }
+ *                 stages:
+ *                   type: array
+ *                   items: { type: object, additionalProperties: true }
+ *                 safeActionHints:
+ *                   type: array
+ *                   items: { type: object, additionalProperties: true }
+ */
+router.get('/:specId/readiness', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const workspaceId = String(req.query.workspaceId ?? '');
+    if (!workspaceId) throw new ValidationError('Missing required query param: workspaceId');
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) throw new NotFoundError('Workspace not found');
+    const surface = await getSpecOperationalSurface({ workspaceId, workspacePath: workspace.path, specId });
+    res.json(surface.readiness);
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Readiness');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/workflow/stages/{stageKey}/retry:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Retry one durable post-save workflow stage for a spec
+ *     operationId: rorca_specs_by_specId_workflow_stage_retry
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Single-stage workflow retry is a bounded workspace-scoped recovery action that local authenticated MCP and UI clients need for safe repair orchestration."
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: stageKey
+ *         required: true
+ *         schema: { type: string, enum: [context, enrich, matchSkills, memorySynthesis] }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               dryRun: { type: boolean, default: false }
+ *               policyPresetId:
+ *                 type: string
+ *                 enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *               postSavePolicy:
+ *                 oneOf:
+ *                   - type: boolean
+ *                   - type: string
+ *                     enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *                   - type: object
+ *                     additionalProperties: true
+ *     responses:
+ *       200:
+ *         description: Stage retry result with current workflow/readiness snapshots
+ *       409:
+ *         description: Active pipeline or workflow conflict blocked the retry
+ */
+router.post('/:specId/workflow/stages/:stageKey/retry', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const stageKey = parseWorkflowStageKeyParam(String(req.params.stageKey));
+    const { workspaceId, dryRun = false, policyPresetId, postSavePolicy } = req.body as {
+      workspaceId?: string;
+      dryRun?: boolean;
+      policyPresetId?: PostSavePolicyPresetId;
+      postSavePolicy?: PostSavePolicyInput;
+    };
+
+    if (!workspaceId) throw new ValidationError('Missing required body param: workspaceId');
+    if (policyPresetId !== undefined && postSavePolicy !== undefined) {
+      throw new ValidationError('Provide either policyPresetId or postSavePolicy, not both');
+    }
+
+    const result = await executeSpecRepair({
+      specId,
+      workspaceId,
+      requestedStages: [workflowStageKeyToRepairStage(stageKey)],
+      dryRun,
+      postSavePolicyInput: postSavePolicy ?? policyPresetId,
+      invocationSurface: 'api.specs.workflow.stage-retry',
+      source: 'repair',
+    });
+
+    if (result.status === 'conflict') {
+      throw new RepairConflictError(result);
+    }
+
+    res.json({ requestedStageKey: stageKey, ...result });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Workflow stage retry');
+  }
+});
 
 // ─── SV-001: GET /:specId/check — Structural spec validation ─────────────────
 
@@ -14298,12 +14628,14 @@ type RepairReasonCode =
 
 interface RepairAction {
   action: string;
+  stageKey?: RepairPostSaveStage;
   status: RepairActionStatus;
   reason: string;
   reasonCode: RepairReasonCode;
   jobId?: string;
   workflowRunId?: number;
   bossJobId?: string | null;
+  policy?: PersistedPostSavePolicyMetadata;
 }
 
 interface RepairExecutionResult {
@@ -14315,6 +14647,9 @@ interface RepairExecutionResult {
   dryRun: boolean;
   status: RepairExecutionStatus;
   reasonCodes: RepairReasonCode[];
+  requestedPolicy?: PostSavePolicyInput;
+  workflow?: Awaited<ReturnType<typeof getSpecOperationalSurface>>['workflow'];
+  readiness?: Awaited<ReturnType<typeof getSpecOperationalSurface>>['readiness'];
   conflict?: {
     reasonCode: Extract<RepairReasonCode, 'active_pipeline_run' | 'active_workflow_run' | 'stage_conflict_live_job'>;
     message: string;
@@ -14373,6 +14708,15 @@ const REPAIR_STALE_QUEUED_MINUTES = Math.max(Number(process.env.RORCA_REPAIR_STA
 
 type RepairStageRequest = 'context' | 'enrich' | 'match-skills' | 'memorySynthesis';
 type RepairPostSaveStage = 'context' | 'enrich' | 'matchSkills' | 'memorySynthesis';
+
+function workflowStageKeyToRepairStage(stageKey: WorkflowStageKey): RepairStageRequest {
+  if (stageKey === 'matchSkills') return 'match-skills';
+  return stageKey;
+}
+
+function resolveRequestedRepairPolicy(input?: PostSavePolicyInput, fallback: PostSavePolicyInput = 'repair_only'): ResolvedPostSavePolicy {
+  return resolvePostSavePolicy(input ?? fallback);
+}
 
 type RepairPostSaveJobMetadata = {
   origin?: unknown;
@@ -14752,15 +15096,19 @@ async function markStaleQueuedJobRecovering(assessment: RepairStageAssessment): 
   }
 }
 
-function resolveRepairPostSavePolicyForStage(stage: RepairPostSaveStage): ResolvedPostSavePolicy {
+function resolveRepairPostSavePolicyForStage(
+  stage: RepairPostSaveStage,
+  input?: PostSavePolicyInput,
+): ResolvedPostSavePolicy {
+  const requested = resolveRequestedRepairPolicy(input);
   return resolvePostSavePolicy({
     version: 'v1',
-    presetId: 'repair_only',
+    ...(requested.effectivePolicy.presetId ? { presetId: requested.effectivePolicy.presetId } : {}),
     context: 'capture',
     enrich: stage === 'enrich' ? 'enqueue' : 'skip',
     skills: stage === 'matchSkills' ? 'match' : 'skip',
     memory: stage === 'memorySynthesis' ? 'synthesize' : 'skip',
-    onFailure: 'continue',
+    onFailure: requested.effectivePolicy.onFailure,
   });
 }
 
@@ -14770,14 +15118,14 @@ async function startRepairPostSaveWorkflowForStage(input: {
   assessment: RepairStageAssessment;
   summary: Record<string, unknown>;
   saveGeneration: number | null;
+  repairPolicy: ResolvedPostSavePolicy;
   memory?: SpecPostSaveWorkflowMemoryPayload;
   source?: string;
 }): Promise<{ workflowRun: PostSaveWorkflowRun; jobId?: string; bossJobId?: string | null; status?: string; reason?: string }> {
-  const repairPolicy = resolveRepairPostSavePolicyForStage(input.assessment.postSaveStage);
   const workflowRun = await startSpecPostSaveWorkflow({
     specId: input.specId,
     workspaceId: input.workspaceId,
-    effectivePolicy: repairPolicy.effectivePolicy,
+    effectivePolicy: input.repairPolicy.effectivePolicy,
     ...(input.saveGeneration !== null ? { saveGeneration: input.saveGeneration, generationLogId: input.saveGeneration } : {}),
     source: input.source ?? 'repair',
     currentFingerprints: {
@@ -14789,8 +15137,8 @@ async function startRepairPostSaveWorkflowForStage(input: {
 
   if (input.saveGeneration !== null) {
     await recordPostSaveWorkflowMetadata(input.specId, input.saveGeneration, workflowRun, {
-      postSave: repairPolicy.legacyOptions,
-      postSavePolicy: postSavePolicyMetadata(repairPolicy),
+      postSave: input.repairPolicy.legacyOptions,
+      postSavePolicy: postSavePolicyMetadata(input.repairPolicy),
     });
   }
 
@@ -14905,6 +15253,9 @@ function finalizeRepairExecutionResult(input: {
   diagnosis: RepairDiagnosis;
   actions: RepairAction[];
   dryRun: boolean;
+  requestedPolicy?: PostSavePolicyInput;
+  workflow?: RepairExecutionResult['workflow'];
+  readiness?: RepairExecutionResult['readiness'];
   conflict?: RepairExecutionResult['conflict'];
 }): RepairExecutionResult {
   const healthy = input.actions.every((action) => action.status === 'skipped');
@@ -14926,6 +15277,9 @@ function finalizeRepairExecutionResult(input: {
     dryRun: input.dryRun,
     status,
     reasonCodes,
+    ...(input.requestedPolicy !== undefined ? { requestedPolicy: input.requestedPolicy } : {}),
+    ...(input.workflow ? { workflow: input.workflow } : {}),
+    ...(input.readiness ? { readiness: input.readiness } : {}),
     ...(input.conflict ? { conflict: input.conflict } : {}),
   };
 }
@@ -14935,11 +15289,14 @@ async function executeSpecRepair(input: {
   workspaceId: string;
   requestedStages?: string[];
   dryRun?: boolean;
-  invocationSurface: 'api.specs.repair' | 'api.specs.repair-batch';
+  postSavePolicyInput?: PostSavePolicyInput;
+  invocationSurface: 'api.specs.repair' | 'api.specs.repair-batch' | 'api.specs.workflow.stage-retry';
   source: 'repair' | 'repair-batch';
 }): Promise<RepairExecutionResult> {
   const { specId, workspaceId } = input;
   const dryRun = input.dryRun === true;
+  const requestedPolicyInput = input.postSavePolicyInput;
+  if (requestedPolicyInput !== undefined) resolveRequestedRepairPolicy(requestedPolicyInput);
   const workspace = await getWorkspace(workspaceId);
   if (!workspace) {
     throw new NotFoundError('Workspace not found');
@@ -15008,12 +15365,20 @@ async function executeSpecRepair(input: {
       reason: `Spec '${specId}' has an active pipeline run (run #${activePipelineRun.id}) — repair is blocked until it finishes`,
       reasonCode: 'active_pipeline_run',
     });
+    const surface = await getSpecOperationalSurface({
+      workspaceId,
+      workspacePath: workspace.path,
+      specId,
+    });
     return finalizeRepairExecutionResult({
       specId,
       workspaceId,
       diagnosis,
       actions,
       dryRun,
+      ...(requestedPolicyInput !== undefined ? { requestedPolicy: requestedPolicyInput } : {}),
+      workflow: surface.workflow,
+      readiness: surface.readiness,
       conflict: {
         reasonCode: 'active_pipeline_run',
         message: `Spec '${specId}' has an active pipeline run (run #${activePipelineRun.id}) — repair is blocked until it finishes`,
@@ -15031,12 +15396,20 @@ async function executeSpecRepair(input: {
       reasonCode: 'active_workflow_run',
       workflowRunId: preexistingWorkflowConflict.id,
     });
+    const surface = await getSpecOperationalSurface({
+      workspaceId,
+      workspacePath: workspace.path,
+      specId,
+    });
     return finalizeRepairExecutionResult({
       specId,
       workspaceId,
       diagnosis,
       actions,
       dryRun,
+      ...(requestedPolicyInput !== undefined ? { requestedPolicy: requestedPolicyInput } : {}),
+      workflow: surface.workflow,
+      readiness: surface.readiness,
       conflict: {
         reasonCode: 'active_workflow_run',
         message: `Active post-save workflow run #${preexistingWorkflowConflict.id} (${preexistingWorkflowConflict.status}) blocks repair`,
@@ -15066,7 +15439,7 @@ async function executeSpecRepair(input: {
         matchSkills: wantMatchSkills,
         memorySynthesis: wantMemorySynthesis,
       };
-      const postSavePolicy = resolvePostSavePolicy(postSaveOptions);
+      const postSavePolicy = resolveRequestedRepairPolicy(requestedPolicyInput, postSaveOptions);
       const seeded = await seedPersistGenerationLog({
         slug: specId,
         workspaceId,
@@ -15169,6 +15542,7 @@ async function executeSpecRepair(input: {
     if (assessment.superseded) {
       actions.push({
         action: assessment.action,
+        stageKey: assessment.postSaveStage,
         status: 'skipped',
         reason: assessment.reason,
         reasonCode: 'stage_superseded',
@@ -15189,6 +15563,7 @@ async function executeSpecRepair(input: {
     if (assessment.conflictReason) {
       actions.push({
         action: assessment.action,
+        stageKey: assessment.postSaveStage,
         status: 'blocked',
         reason: assessment.conflictReason,
         reasonCode: 'stage_conflict_live_job',
@@ -15213,6 +15588,7 @@ async function executeSpecRepair(input: {
         : 'stage_already_healthy';
       actions.push({
         action: assessment.action,
+        stageKey: assessment.postSaveStage,
         status: 'skipped',
         reason: assessment.reason,
         reasonCode,
@@ -15224,6 +15600,7 @@ async function executeSpecRepair(input: {
     if (dryRun) {
       actions.push({
         action: assessment.action,
+        stageKey: assessment.postSaveStage,
         status: 'skipped',
         reason: `Dry run — would enqueue ${assessment.stage} repair: ${assessment.reason}`,
         reasonCode: 'dry_run',
@@ -15237,6 +15614,7 @@ async function executeSpecRepair(input: {
       const reason = `Active post-save workflow run #${activeWorkflowConflict.id} (${activeWorkflowConflict.status}) blocks repair stage ${assessment.stage}`;
       actions.push({
         action: assessment.action,
+        stageKey: assessment.postSaveStage,
         status: 'blocked',
         reason,
         reasonCode: 'active_workflow_run',
@@ -15265,6 +15643,7 @@ async function executeSpecRepair(input: {
       if (remainingConflict) {
         actions.push({
           action: assessment.action,
+          stageKey: assessment.postSaveStage,
           status: 'blocked',
           reason: remainingConflict,
           reasonCode: 'stage_conflict_live_job',
@@ -15283,7 +15662,9 @@ async function executeSpecRepair(input: {
     }
 
     const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8')) as { title?: string; userStories?: unknown[]; brief?: string; specBrief?: string };
+    const stageRepairPolicy = resolveRepairPostSavePolicyForStage(assessment.postSaveStage, requestedPolicyInput);
     const payload = await startRepairPostSaveWorkflowForStage({
+      repairPolicy: stageRepairPolicy,
       specId,
       workspaceId,
       assessment,
@@ -15298,12 +15679,14 @@ async function executeSpecRepair(input: {
     });
     actions.push({
       action: assessment.action,
+      stageKey: assessment.postSaveStage,
       status: 'repaired',
       reason: `Re-enqueued ${assessment.stage} repair through workflow run #${payload.workflowRun.id}: ${assessment.reason}`,
       reasonCode: 'stage_requeued',
       ...(payload.jobId ? { jobId: payload.jobId } : {}),
       workflowRunId: payload.workflowRun.id,
       ...(payload.bossJobId !== undefined ? { bossJobId: payload.bossJobId } : {}),
+      policy: postSavePolicyMetadata(stageRepairPolicy),
     });
     await emitRepairAuditEvent(specId, workspaceId, {
       action: assessment.action,
@@ -15334,7 +15717,23 @@ async function executeSpecRepair(input: {
     if (walEvent) broadcastAll(walEvent);
   }
 
-  return finalizeRepairExecutionResult({ specId, workspaceId, diagnosis, actions, dryRun, ...(conflict ? { conflict } : {}) });
+  const surface = await getSpecOperationalSurface({
+    workspaceId,
+    workspacePath: workspace.path,
+    specId,
+  });
+
+  return finalizeRepairExecutionResult({
+    specId,
+    workspaceId,
+    diagnosis,
+    actions,
+    dryRun,
+    ...(requestedPolicyInput !== undefined ? { requestedPolicy: requestedPolicyInput } : {}),
+    workflow: surface.workflow,
+    readiness: surface.readiness,
+    ...(conflict ? { conflict } : {}),
+  });
 }
 
 /**
@@ -15342,10 +15741,10 @@ async function executeSpecRepair(input: {
  * /api/specs/{specId}/repair:
  *   post:
  *     tags: [Specs]
- *     summary: Diagnose and repair post-save enrichment state for a spec
+ *     summary: Diagnose and repair durable post-save state for a spec
  *     operationId: rorca_specs_by_id_repair
- *     x-rorca-tier: admin
- *     x-rorca-rationale: "Operator-level mutation that can enqueue repair work and resolve stale post-save jobs; unsafe for public/MCP automation."
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Single-spec repair is a bounded workspace-owned recovery action that authenticated local MCP and UI clients need when workflow stages fail or context metadata is missing."
  *     parameters:
  *       - in: path
  *         name: specId
@@ -15368,6 +15767,16 @@ async function executeSpecRepair(input: {
  *                 type: boolean
  *                 default: false
  *                 description: If true, only diagnose — do not apply repairs.
+ *               policyPresetId:
+ *                 type: string
+ *                 enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *               postSavePolicy:
+ *                 oneOf:
+ *                   - type: boolean
+ *                   - type: string
+ *                     enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *                   - type: object
+ *                     additionalProperties: true
  *     responses:
  *       200:
  *         description: Repair diagnosis and actions
@@ -15391,10 +15800,25 @@ async function executeSpecRepair(input: {
  *                     type: object
  *                     properties:
  *                       action: { type: string }
+ *                       stageKey: { type: string, enum: [context, enrich, matchSkills, memorySynthesis] }
  *                       status: { type: string, enum: [repaired, skipped, blocked] }
  *                       reason: { type: string }
  *                       reasonCode: { type: string }
  *                       jobId: { type: string }
+ *                       bossJobId: { type: string }
+ *                       workflowRunId: { type: integer }
+ *                       policy:
+ *                         type: object
+ *                         additionalProperties: true
+ *                 reasonCodes:
+ *                   type: array
+ *                   items: { type: string }
+ *                 workflow:
+ *                   type: object
+ *                   additionalProperties: true
+ *                 readiness:
+ *                   type: object
+ *                   additionalProperties: true
  *                 dryRun: { type: boolean }
  *       404:
  *         description: Spec or workspace not found
@@ -15404,14 +15828,19 @@ async function executeSpecRepair(input: {
 router.post('/:specId/repair', async (req: Request, res: Response) => {
   try {
     const specId = String(req.params.specId);
-    const { workspaceId, stages: requestedStages, dryRun = false } = req.body as {
+    const { workspaceId, stages: requestedStages, dryRun = false, policyPresetId, postSavePolicy } = req.body as {
       workspaceId?: string;
       stages?: string[];
       dryRun?: boolean;
+      policyPresetId?: PostSavePolicyPresetId;
+      postSavePolicy?: PostSavePolicyInput;
     };
 
     if (!workspaceId) {
       throw new ValidationError('Missing required body param: workspaceId');
+    }
+    if (policyPresetId !== undefined && postSavePolicy !== undefined) {
+      throw new ValidationError('Provide either policyPresetId or postSavePolicy, not both');
     }
 
     const result = await executeSpecRepair({
@@ -15419,6 +15848,7 @@ router.post('/:specId/repair', async (req: Request, res: Response) => {
       workspaceId,
       requestedStages,
       dryRun,
+      postSavePolicyInput: postSavePolicy ?? policyPresetId,
       invocationSurface: 'api.specs.repair',
       source: 'repair',
     });

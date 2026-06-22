@@ -17,7 +17,10 @@ import {
   getCanonicalPostSaveStatus,
   getCanonicalPostSaveStageStates,
   getCurrentPostSaveState,
+  getCurrentPostSaveStateFromWorkflow,
   postSaveActiveJobCopy,
+  readinessInspectionToContextCaptureStatus,
+  workflowInspectionToPostSaveStages,
   type PostSaveStageMap,
   type ContextCaptureStatus,
   type ContextClassification,
@@ -267,6 +270,103 @@ const SAMPLE_STAGES: PostSaveStageMap = {
   matchSkills: { requested: true, status: 'running', reason: 'job_started', jobId: 'ccc-333' },
   memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
 };
+
+describe('workflow/readiness exact surface adapters', () => {
+  it('maps workflow inspection stages into the legacy post-save stage card shape', () => {
+    const stages = workflowInspectionToPostSaveStages({
+      specId: 'spec-1',
+      workspaceId: 'ws-1',
+      persistence: {
+        specPath: 'forge/specs/pending/spec-1.json',
+        location: 'pending',
+        exists: true,
+        latestGenerationLogId: 11,
+        latestGenerationLogStatus: 'persisted',
+        saveGeneration: 11,
+      },
+      workflow: {
+        runId: 99,
+        status: 'running',
+        source: 'repair',
+        saveGeneration: 11,
+        effectivePolicy: { version: 'v1', presetId: 'repair_only' },
+        idempotencyKey: 'wf-99',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:01:00.000Z',
+        finishedAt: null,
+      },
+      reasonCodes: ['post_save_pending'],
+      stages: [
+        { key: 'context', requested: true, status: 'completed', reasonCode: 'context_captured', reason: 'context_captured', workflowRunId: 99, jobId: null, bossJobId: null, queueName: null, queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+        { key: 'enrich', requested: true, status: 'queued', reasonCode: 'durable_job_enqueued', reason: 'durable_job_enqueued', workflowRunId: 99, jobId: 'job-enrich', bossJobId: 'boss-enrich', queueName: 'spec:enrich', queueStatus: 'waiting', queuePosition: 3, activeJobsAhead: 2, queuePriority: null, singletonKey: 'singleton', error: null, updatedAt: '2026-01-01T00:01:00.000Z', startedAt: null, finishedAt: null, safeActionHints: [] },
+        { key: 'matchSkills', requested: true, status: 'failed', reasonCode: 'job_failed', reason: 'job_failed', workflowRunId: 99, jobId: 'job-match', bossJobId: 'boss-match', queueName: 'spec:match-skills', queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: 'boom', updatedAt: '2026-01-01T00:02:00.000Z', startedAt: null, finishedAt: null, safeActionHints: [] },
+        { key: 'memorySynthesis', requested: false, status: 'missing', reasonCode: 'stage_state_missing', reason: 'stage_state_missing', workflowRunId: 99, jobId: null, bossJobId: null, queueName: null, queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+      ],
+      safeActionHints: [],
+    } as any);
+
+    expect(stages).toMatchObject({
+      enrich: { status: 'queued', queueStatus: 'waiting', queuePosition: 3, activeJobsAhead: 2, jobId: 'job-enrich', bossJobId: 'boss-enrich' },
+      matchSkills: { status: 'failed', error: 'boom', jobId: 'job-match' },
+      memorySynthesis: { status: 'skipped', requested: false },
+    });
+  });
+
+  it('maps readiness inspection context capture and active workflow state without log parsing', () => {
+    const readiness = {
+      specId: 'spec-1',
+      workspaceId: 'ws-1',
+      persistence: {
+        workspaceId: 'ws-1',
+        specId: 'spec-1',
+        specPath: 'forge/specs/pending/spec-1.json',
+        location: 'pending',
+        exists: true,
+        latestGenerationLogId: 11,
+        latestGenerationLogStatus: 'persisted',
+        saveGeneration: 11,
+        contextCapture: { status: 'backfilled', reason: 'context_summary_derived_from_context_used_meta' },
+      },
+      workflow: {
+        runId: 99,
+        status: 'queued',
+        source: 'repair',
+        saveGeneration: 11,
+        effectivePolicy: { version: 'v1', presetId: 'repair_only' },
+        idempotencyKey: 'wf-99',
+        createdAt: null,
+        updatedAt: null,
+        finishedAt: null,
+      },
+      stages: [
+        { key: 'context', requested: true, status: 'completed', reasonCode: 'context_captured', reason: 'context_captured', workflowRunId: 99, jobId: null, bossJobId: null, queueName: null, queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+        { key: 'enrich', requested: true, status: 'queued', reasonCode: 'durable_job_enqueued', reason: 'durable_job_enqueued', workflowRunId: 99, jobId: 'job-enrich', bossJobId: null, queueName: null, queueStatus: 'waiting', queuePosition: 2, activeJobsAhead: 1, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+        { key: 'matchSkills', requested: false, status: 'skipped', reasonCode: 'disabled_by_policy', reason: 'disabled_by_policy', workflowRunId: 99, jobId: null, bossJobId: null, queueName: null, queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+        { key: 'memorySynthesis', requested: false, status: 'skipped', reasonCode: 'disabled_by_policy', reason: 'disabled_by_policy', workflowRunId: 99, jobId: null, bossJobId: null, queueName: null, queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+      ],
+      readinessState: { status: 'blocked', reason: 'blocked' },
+      executionGate: { status: 'blocked', overrideAllowed: true, overrideReasonCode: 'run_anyway_override_used' },
+      blockingReasons: [{ code: 'post_save_pending', message: 'pending', severity: 'blocking' }],
+      warnings: [],
+      availableActions: ['wait_for_post_save'],
+      reasonCodes: ['post_save_pending'],
+      safeActionHints: [],
+    } as any;
+
+    expect(readinessInspectionToContextCaptureStatus(readiness)).toEqual({
+      status: 'backfilled',
+      reason: 'context_summary_derived_from_context_used_meta',
+      contextUsed: 'missing',
+      contextSummary: 'backfilled',
+    });
+    expect(getCurrentPostSaveStateFromWorkflow({ stages: readiness.stages } as any)).toMatchObject({
+      stage: 'enrich',
+      status: 'waiting-for-worker',
+      queuePosition: 2,
+      activeJobsAhead: 1,
+    });
+  });
+});
 
 describe('PSE-003: parsePostSaveStages', () => {
   it('reads postSaveStages from top-level field (surfaced by backend)', () => {

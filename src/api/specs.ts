@@ -8,6 +8,11 @@
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import type { SpecReadinessPayload } from '../lib/specReadiness';
 import type {
+  SpecReadinessInspectionPayload,
+  SpecWorkflowInspectionPayload,
+  WorkflowStageKey,
+} from '../lib/specWorkflow';
+import type {
   ApiOptions,
   PaginatedResponse,
   ArchiveSpec,
@@ -64,6 +69,41 @@ export function getSpec(
   opts?: ApiOptions,
 ): Promise<SpecDetail> {
   return apiFetch(`/api/specs/${specId}?workspaceId=${workspaceId}`, { signal: opts?.signal });
+}
+
+export function getSpecWorkflow(
+  specId: string,
+  workspaceId: string,
+  opts?: ApiOptions,
+): Promise<SpecWorkflowInspectionPayload> {
+  return apiFetch(`/api/specs/${specId}/workflow?workspaceId=${workspaceId}`, { signal: opts?.signal });
+}
+
+export function getSpecReadinessInspection(
+  specId: string,
+  workspaceId: string,
+  opts?: ApiOptions,
+): Promise<SpecReadinessInspectionPayload> {
+  return apiFetch(`/api/specs/${specId}/readiness?workspaceId=${workspaceId}`, { signal: opts?.signal });
+}
+
+export function retrySpecWorkflowStage(
+  specId: string,
+  stageKey: WorkflowStageKey,
+  body: {
+    workspaceId: string;
+    dryRun?: boolean;
+    policyPresetId?: string;
+    postSavePolicy?: unknown;
+  },
+  opts?: ApiOptions,
+): Promise<Record<string, unknown>> {
+  return apiFetch(`/api/specs/${specId}/workflow/stages/${stageKey}/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: opts?.signal,
+  });
 }
 
 export interface GenerateSpecParams extends ApiOptions {

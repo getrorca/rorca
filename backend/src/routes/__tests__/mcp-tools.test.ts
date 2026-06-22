@@ -40,6 +40,13 @@ describe('GET /api/mcp/tools', () => {
     expect(names).toContain('rorca_get_memories');
     expect(names).toContain('rorca_trigger_run');
     expect(names).toContain('rorca_retry_story');
+    expect(names).toContain('rorca_create_spec');
+    expect(names).toContain('rorca_persist_spec');
+    expect(names).toContain('rorca_spec_workflow');
+    expect(names).toContain('rorca_spec_readiness');
+    expect(names).toContain('rorca_retry_spec_stage');
+    expect(names).toContain('rorca_repair_spec');
+    expect(names).toContain('rorca_repair_spec_batch');
     expect(names).not.toContain('rorca_log_decision');
 
     const saveMemory = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_save_memory');

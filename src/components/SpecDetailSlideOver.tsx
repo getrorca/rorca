@@ -45,6 +45,7 @@ import type { SpecModelFields } from './SpecModelControlBar';
 import type { EngineValue } from './EngineSelector';
 import { isRunStatusBlocking } from '../lib/kanbanRunStatus';
 import { SpecReadinessReasonCode } from '../lib/readinessReasonCodes';
+import type { SpecReadinessInspectionPayload, SpecWorkflowInspectionPayload } from '../lib/specWorkflow';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -430,6 +431,8 @@ function SpecDetailContent({
   // context usage is visible without opening the Context tab. Null when no
   // persisted context exists yet (older specs predate context logging).
   const [headlineContext, setHeadlineContext] = useState<ContextSummary | null>(null);
+  const [workflowInspection, setWorkflowInspection] = useState<SpecWorkflowInspectionPayload | null>(null);
+  const [readinessInspection, setReadinessInspection] = useState<SpecReadinessInspectionPayload | null>(null);
   const [activePostSaveJob, setActivePostSaveJob] = useState<CanonicalPostSaveStageState | null>(null);
 
   // Approve/Reject
@@ -485,22 +488,34 @@ function SpecDetailContent({
   // Reset tab on spec change
   useEffect(() => { setActiveTab(initialTab ?? 'stories'); }, [specId, initialTab]);
 
-  // Fetch the latest generation log so the context summary can be surfaced
-  // above the fold. Re-runs after enrichment so the headline reflects the
-  // richer summary. Tolerates older logs that lack a parseable summary.
+  // Fetch the latest generation log for rich context summary rendering, plus the
+  // exact workflow/readiness surfaces so UI state does not depend on log parsing.
   useEffect(() => {
-    if (!specId) return;
+    if (!specId || !workspaceId) return;
     let cancelled = false;
-    apiFetch<GenerationLog | { logs: GenerationLog[] }>(`/api/specs/${specId}/generation-log`)
-      .then(res => {
-        if (cancelled) return;
-        const latest = 'logs' in res ? res.logs[0] : res;
-        setHeadlineContext(latest ? parseContextSummary(latest) : null);
-        setActivePostSaveJob(latest ? getCurrentPostSaveState(latest) : null);
-      })
-      .catch(() => { if (!cancelled) { setHeadlineContext(null); setActivePostSaveJob(null); } });
+
+    Promise.all([
+      apiFetch<GenerationLog | { logs: GenerationLog[] }>(`/api/specs/${specId}/generation-log`).catch(() => null),
+      apiFetch<SpecWorkflowInspectionPayload>(`/api/specs/${specId}/workflow?workspaceId=${workspaceId}`).catch(() => null),
+      apiFetch<SpecReadinessInspectionPayload>(`/api/specs/${specId}/readiness?workspaceId=${workspaceId}`).catch(() => null),
+    ]).then(([logResponse, workflowResponse, readinessResponse]) => {
+      if (cancelled) return;
+      const latest = logResponse && 'logs' in logResponse ? logResponse.logs[0] : logResponse;
+      setHeadlineContext(latest ? parseContextSummary(latest as GenerationLog) : null);
+      setWorkflowInspection(workflowResponse);
+      setReadinessInspection(readinessResponse);
+      setActivePostSaveJob(getCurrentPostSaveStateFromWorkflow(workflowResponse));
+    }).catch(() => {
+      if (!cancelled) {
+        setHeadlineContext(null);
+        setWorkflowInspection(null);
+        setReadinessInspection(null);
+        setActivePostSaveJob(null);
+      }
+    });
+
     return () => { cancelled = true; };
-  }, [specId, enrichRefreshKey]);
+  }, [specId, workspaceId, enrichRefreshKey]);
 
   // Check if workspace has an active run (so we can show Queue button upfront)
   useEffect(() => {
@@ -834,7 +849,7 @@ function SpecDetailContent({
                 onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields, model: fields.model ?? undefined } : prev)} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} workspaceId={workspaceId ?? ''} activeRunStatus={activeRunStatus} blockingPostSaveJob={activePostSaveJob} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} workspaceId={workspaceId ?? ''} activeRunStatus={activeRunStatus} blockingPostSaveJob={activePostSaveJob} workflowInspection={workflowInspection} readinessInspection={readinessInspection} onWorkflowRefresh={() => setEnrichRefreshKey((value) => value + 1)} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <GraphTabWithSubTabs specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -1787,6 +1802,49 @@ export function parseContextCaptureStatus(log: GenerationLog): ContextCaptureSta
   return ccs as ContextCaptureStatus;
 }
 
+export function workflowInspectionToPostSaveStages(workflow: SpecWorkflowInspectionPayload | null): PostSaveStageMap | null {
+  if (!workflow) return null;
+  const build = (key: CanonicalPostSaveStage): PostSaveStageState => {
+    const stage = workflow.stages.find((entry) => entry.key === key);
+    return {
+      requested: stage?.requested ?? false,
+      status: (stage?.status === 'missing' ? 'skipped' : (stage?.status ?? 'skipped')) as PostSaveStageStatus,
+      reason: stage?.reasonCode ?? stage?.reason ?? 'stage_state_missing',
+      ...(stage?.jobId ? { jobId: stage.jobId } : {}),
+      ...(stage?.bossJobId !== null && stage?.bossJobId !== undefined ? { bossJobId: stage.bossJobId } : {}),
+      ...(stage?.error ? { error: stage.error } : {}),
+      ...(stage?.updatedAt ? { updatedAt: stage.updatedAt } : {}),
+      ...(stage?.queueName ? { queueName: stage.queueName } : {}),
+      ...(stage?.queueStatus ? { queueStatus: stage.queueStatus } : {}),
+      ...(stage?.queuePosition !== null && stage?.queuePosition !== undefined ? { queuePosition: stage.queuePosition } : {}),
+      ...(stage?.activeJobsAhead !== null && stage?.activeJobsAhead !== undefined ? { activeJobsAhead: stage.activeJobsAhead } : {}),
+    };
+  };
+
+  return {
+    enrich: build('enrich'),
+    matchSkills: build('matchSkills'),
+    memorySynthesis: build('memorySynthesis'),
+  };
+}
+
+export function readinessInspectionToContextCaptureStatus(readiness: SpecReadinessInspectionPayload | null): ContextCaptureStatus | null {
+  const capture = readiness?.persistence.contextCapture;
+  if (!capture || capture.status === 'unknown') return null;
+  return {
+    status: capture.status,
+    reason: capture.reason ?? 'unknown',
+    contextUsed: capture.status === 'provided' ? 'provided' : 'missing',
+    contextSummary: capture.status === 'provided' ? 'provided' : capture.status === 'backfilled' ? 'backfilled' : 'missing',
+  };
+}
+
+export function getCurrentPostSaveStateFromWorkflow(workflow: SpecWorkflowInspectionPayload | null): CanonicalPostSaveStageState | null {
+  const stages = workflowInspectionToPostSaveStages(workflow);
+  if (!stages) return null;
+  return getCurrentPostSaveState({ postSaveStages: stages } as GenerationLog);
+}
+
 /** Rough per-1K-token cost estimates by model family (input/output). */
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number | null {
   const rates: Record<string, [number, number]> = {
@@ -1915,12 +1973,6 @@ interface RepairResponse {
   dryRun: boolean;
 }
 
-/** Map stage key to the backend repair stage filter value */
-const STAGE_REPAIR_FILTER: Partial<Record<keyof PostSaveStageMap, string>> = {
-  enrich: 'enrich',
-  matchSkills: 'match-skills',
-};
-
 function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, blockingPostSaveJob, onRetried }: {
   stages: PostSaveStageMap;
   specId?: string;
@@ -1940,16 +1992,14 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, bloc
 
   const handleRetryStage = async (stageName: keyof PostSaveStageMap) => {
     if (!specId || !workspaceId || retrying || isRunActive || isBlockedByActivePostSave) return;
-    const filter = STAGE_REPAIR_FILTER[stageName];
-    if (!filter) return;
     setRetrying(stageName);
     try {
-      await apiFetch<RepairResponse>(
-        `/api/specs/${specId}/repair`,
+      await apiFetch<Record<string, unknown>>(
+        `/api/specs/${specId}/workflow/stages/${stageName}/retry`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspaceId, stages: [filter] }),
+          body: JSON.stringify({ workspaceId }),
         },
       );
       toast.show(`Retry initiated for ${STAGE_LABELS[stageName]}`, 'success');
@@ -1969,7 +2019,7 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, bloc
           const stage = stages[name];
           const canonicalStatus = getCanonicalPostSaveStatus(stage);
           const statusConfig = STAGE_STATUS_CONFIG[canonicalStatus];
-          const canRetry = specId && workspaceId && stage.requested && stage.status === 'failed' && !isBlockedByActivePostSave && STAGE_REPAIR_FILTER[name];
+          const canRetry = specId && workspaceId && stage.requested && stage.status === 'failed' && !isBlockedByActivePostSave;
           return (
             <div key={name} className="flex items-start gap-2" data-testid={`stage-${name}`}>
               <span className={`mt-1 shrink-0 w-2 h-2 rounded-full ${statusConfig.dotClass}`} />
@@ -2208,10 +2258,12 @@ function ContextTabEmptyState({ specId, workspaceId, classification, activeRunSt
   );
 }
 
-function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunStatus, blockingPostSaveJob }: { specId: string; stories: Story[]; refreshKey?: number; workspaceId: string; activeRunStatus?: 'running' | 'queued'; blockingPostSaveJob?: CanonicalPostSaveStageState | null }) {
+function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunStatus, blockingPostSaveJob, workflowInspection, readinessInspection, onWorkflowRefresh }: { specId: string; stories: Story[]; refreshKey?: number; workspaceId: string; activeRunStatus?: 'running' | 'queued'; blockingPostSaveJob?: CanonicalPostSaveStageState | null; workflowInspection?: SpecWorkflowInspectionPayload | null; readinessInspection?: SpecReadinessInspectionPayload | null; onWorkflowRefresh?: () => void }) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
+  const [workflowState, setWorkflowState] = useState<SpecWorkflowInspectionPayload | null>(workflowInspection ?? null);
+  const [readinessState, setReadinessState] = useState<SpecReadinessInspectionPayload | null>(readinessInspection ?? null);
 
   // Aggregate skillDetails from all stories' suggestedSkills, taking max relevance per unique name
   const skillDetails = useMemo(() => {
@@ -2231,22 +2283,31 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
   }, [stories]);
 
   useEffect(() => {
+    setWorkflowState(workflowInspection ?? null);
+    setReadinessState(readinessInspection ?? null);
+  }, [workflowInspection, readinessInspection]);
+
+  useEffect(() => {
     let cancelled = false;
     setLoading(true);
 
-    apiFetch<GenerationLog | { logs: GenerationLog[] }>(
-      `/api/specs/${specId}/generation-log${showAll ? '?all=true' : ''}`
-    )
-      .then(res => {
+    Promise.all([
+      apiFetch<GenerationLog | { logs: GenerationLog[] }>(`/api/specs/${specId}/generation-log${showAll ? '?all=true' : ''}`).catch(() => null),
+      apiFetch<SpecWorkflowInspectionPayload>(`/api/specs/${specId}/workflow?workspaceId=${workspaceId}`).catch(() => null),
+      apiFetch<SpecReadinessInspectionPayload>(`/api/specs/${specId}/readiness?workspaceId=${workspaceId}`).catch(() => null),
+    ])
+      .then(([logResponse, workflowResponse, readinessResponse]) => {
         if (cancelled) return;
-        if ('logs' in res) setLogs(res.logs);
-        else setLogs([res]);
+        if (!logResponse) setLogs([]);
+        else if ('logs' in logResponse) setLogs(logResponse.logs);
+        else setLogs([logResponse]);
+        setWorkflowState(workflowResponse);
+        setReadinessState(readinessResponse);
       })
-      .catch(() => { if (!cancelled) setLogs([]); })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
-  }, [specId, showAll, refreshKey]);
+  }, [specId, workspaceId, showAll, refreshKey]);
 
   if (loading) {
     return (
@@ -2264,7 +2325,7 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
         classification="legacy_no_log"
         activeRunStatus={activeRunStatus}
         blockingPostSaveJob={blockingPostSaveJob}
-        onRepaired={() => setLogs([])} // triggers re-fetch via refreshKey in parent
+        onRepaired={() => { setLogs([]); onWorkflowRefresh?.(); }}
       />
     );
   }
@@ -2272,8 +2333,8 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
   // Determine if the latest log is persisted-without-context or has pending/failed post-save
   const latestLog = logs[0];
   const latestContext = parseContextSummary(latestLog);
-  const latestStages = parsePostSaveStages(latestLog);
-  const latestCapture = parseContextCaptureStatus(latestLog);
+  const latestStages = workflowInspectionToPostSaveStages(workflowState) ?? parsePostSaveStages(latestLog);
+  const latestCapture = readinessInspectionToContextCaptureStatus(readinessState) ?? parseContextCaptureStatus(latestLog);
 
   const emptyClassification = classifyContextState(latestContext, latestStages, latestCapture);
 
@@ -2286,7 +2347,7 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
           classification={emptyClassification}
           activeRunStatus={activeRunStatus}
           blockingPostSaveJob={blockingPostSaveJob}
-          onRepaired={() => setShowAll(s => !s)} // toggle to trigger re-fetch
+          onRepaired={() => { setShowAll(s => !s); onWorkflowRefresh?.(); }}
         />
       )}
       {logs.map((log, i) => {
@@ -2296,9 +2357,16 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
 
         const contextSummary = parseContextSummary(log);
         const isEnriched = !!log.enriched;
-        const presentation = getGenerationLogPresentation(log);
-        const postSaveStages = parsePostSaveStages(log);
-        const contextCaptureStatus = parseContextCaptureStatus(log);
+        const effectiveLog = i === 0 && workflowState
+          ? {
+            ...log,
+            postSaveStages: workflowInspectionToPostSaveStages(workflowState) ?? log.postSaveStages,
+            contextCaptureStatus: readinessInspectionToContextCaptureStatus(readinessState) ?? log.contextCaptureStatus,
+          }
+          : log;
+        const presentation = getGenerationLogPresentation(effectiveLog);
+        const postSaveStages = parsePostSaveStages(effectiveLog);
+        const contextCaptureStatus = parseContextCaptureStatus(effectiveLog);
 
         return (
           <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
@@ -2386,7 +2454,7 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
             {contextCaptureStatus && <ContextCaptureCard status={contextCaptureStatus} />}
 
             {/* PSE-003: Per-stage post-save pipeline status */}
-            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} specId={specId} workspaceId={workspaceId} activeRunStatus={activeRunStatus} blockingPostSaveJob={blockingPostSaveJob} onRetried={() => setShowAll(s => !s)} />}
+            {postSaveStages && <PostSaveStagesCard stages={postSaveStages} specId={specId} workspaceId={workspaceId} activeRunStatus={activeRunStatus} blockingPostSaveJob={blockingPostSaveJob} onRetried={() => { setShowAll(s => !s); onWorkflowRefresh?.(); }} />}
 
             {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
             {log.enriched && log.retrieval_method && (() => {

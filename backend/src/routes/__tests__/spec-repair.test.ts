@@ -29,7 +29,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { query, queryOne, execute } from '../../db/index';
+import { queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -423,5 +423,97 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
     const backfillAction = res.body.actions.find((a: { action: string }) => a.action === 'backfill_context_summary');
     expect(backfillAction).toBeDefined();
     expect(backfillAction.status).toBe('repaired');
+  });
+});
+
+describe('workflow/readiness exact surfaces', () => {
+  test('GET /api/specs/:specId/workflow returns stable stage snapshots and safe action hints', async () => {
+    writeSpecFile(os.tmpdir(), 'workflow-surface-spec');
+    await seedGenerationLog('workflow-surface-spec', {
+      enrichStatus: 'failed',
+      matchSkillsStatus: 'completed',
+    });
+
+    await request(app)
+      .post('/api/specs/workflow-surface-spec/workflow/stages/enrich/retry')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID, policyPresetId: 'skill_first_strict' });
+
+    const res = await request(app)
+      .get(`/api/specs/workflow-surface-spec/workflow?workspaceId=${WORKSPACE_ID}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.stages.map((stage: { key: string }) => stage.key)).toEqual(['context', 'enrich', 'matchSkills', 'memorySynthesis']);
+    expect(res.body.reasonCodes).toEqual(expect.arrayContaining(['post_save_pending']));
+    expect(res.body.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'enrich',
+        status: expect.stringMatching(/queued|pending|running/),
+        workflowRunId: expect.any(Number),
+        safeActionHints: expect.any(Array),
+      }),
+    ]));
+    expect(res.body.safeActionHints).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'inspect_workflow', request: expect.objectContaining({ method: 'GET' }) }),
+    ]));
+  });
+
+  test('GET /api/specs/:specId/readiness returns reason codes, stage states, and safe action hints', async () => {
+    writeSpecFile(os.tmpdir(), 'readiness-surface-spec');
+    await seedGenerationLog('readiness-surface-spec', {
+      enrichStatus: 'failed',
+      matchSkillsStatus: 'completed',
+    });
+
+    await request(app)
+      .post('/api/specs/readiness-surface-spec/workflow/stages/enrich/retry')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID });
+
+    const res = await request(app)
+      .get(`/api/specs/readiness-surface-spec/readiness?workspaceId=${WORKSPACE_ID}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.readinessState.status).toBe('blocked');
+    expect(res.body.reasonCodes).toEqual(expect.arrayContaining(['post_save_pending']));
+    expect(res.body.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'enrich', status: expect.stringMatching(/queued|pending|running/) }),
+    ]));
+    expect(res.body.safeActionHints).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'wait_for_post_save' }),
+      expect.objectContaining({ action: 'inspect_readiness' }),
+    ]));
+  });
+
+  test('POST /api/specs/:specId/workflow/stages/:stageKey/retry echoes policy-aware action metadata', async () => {
+    writeSpecFile(os.tmpdir(), 'stage-retry-spec');
+    await seedGenerationLog('stage-retry-spec', {
+      enrichStatus: 'completed',
+      matchSkillsStatus: 'failed',
+    });
+
+    const res = await request(app)
+      .post('/api/specs/stage-retry-spec/workflow/stages/matchSkills/retry')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID, policyPresetId: 'skill_first_strict' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.requestedStageKey).toBe('matchSkills');
+    expect(res.body.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'enqueue_match_skills',
+        stageKey: 'matchSkills',
+        status: 'repaired',
+        policy: expect.objectContaining({
+          effectivePolicy: expect.objectContaining({ onFailure: 'fail', presetId: 'skill_first_strict' }),
+        }),
+      }),
+    ]));
+    expect(res.body.workflow.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'matchSkills', bossJobId: expect.any(String) }),
+    ]));
+    expect(res.body.readiness.reasonCodes).toContain('post_save_pending');
   });
 });

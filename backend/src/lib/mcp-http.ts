@@ -521,6 +521,36 @@ export const MCP_FRIENDLY_ALIASES: readonly McpFriendlyAlias[] = [
     path: '/api/specs/persist',
   },
   {
+    toolName: 'rorca_spec_workflow',
+    description: 'Inspect the durable post-save workflow state for a single spec.',
+    method: 'GET',
+    path: '/api/specs/{specId}/workflow',
+  },
+  {
+    toolName: 'rorca_spec_readiness',
+    description: 'Inspect execution readiness, reason codes, and safe action hints for a single spec.',
+    method: 'GET',
+    path: '/api/specs/{specId}/readiness',
+  },
+  {
+    toolName: 'rorca_retry_spec_stage',
+    description: 'Retry a single durable post-save workflow stage for a spec.',
+    method: 'POST',
+    path: '/api/specs/{specId}/workflow/stages/{stageKey}/retry',
+  },
+  {
+    toolName: 'rorca_repair_spec',
+    description: 'Diagnose and repair durable post-save state for a single spec.',
+    method: 'POST',
+    path: '/api/specs/{specId}/repair',
+  },
+  {
+    toolName: 'rorca_repair_spec_batch',
+    description: 'Diagnose and repair a bounded batch of specs in one workspace.',
+    method: 'POST',
+    path: '/api/specs/repair-batch',
+  },
+  {
     toolName: 'rorca_list_specs',
     description: 'Friendly alias for listing specs in a workspace.',
     method: 'GET',
