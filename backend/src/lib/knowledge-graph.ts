@@ -25,10 +25,11 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { pool, query } from '../db/index';
+import { pool, query, queryOne } from '../db/index';
 import { logger } from './logger';
 import type { PoolClient } from 'pg';
 import { checkAge, getAgeUnavailableBody, invalidateAgeCache } from './age-guard';
+import { getRuntimeGraphCapability } from './graph-runtime';
 
 const RORCA_V2_GRAPH = 'rorca_v2';
 const RORCA_V2_KEYED_NODE_LABELS = ['Story', 'File', 'Spec', 'Memory', 'Convention', 'Skill'] as const;
@@ -1633,6 +1634,186 @@ export async function querySkillPathAffinity(limit: number = 50): Promise<SkillP
 
 // ── Spec Knowledge Graph Query ──────────────────────────────────────────────
 
+interface LiteKnowledgeGraphMemoryRow {
+  id: string;
+  category: string | null;
+  source_story_id: string | null;
+  source_spec_id: string | null;
+  related_files: string[] | string | null;
+}
+
+function parseGraphStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => normalizeGraphFilePath(item));
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? parsed
+          .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          .map((item) => normalizeGraphFilePath(item))
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+async function resolveKnowledgeGraphWorkspacePath(workspaceId: string): Promise<string | null> {
+  const row = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+  return row?.path ?? null;
+}
+
+function readSpecStoryTitles(workspacePath: string | null, specIds: string[]): Map<string, Map<string, string>> {
+  const titles = new Map<string, Map<string, string>>();
+  if (!workspacePath) return titles;
+
+  for (const specId of specIds) {
+    const candidates = [
+      path.join(workspacePath, 'forge', 'specs', 'approved', `${specId}.json`),
+      path.join(workspacePath, 'forge', 'specs', 'pending', `${specId}.json`),
+    ];
+
+    for (const candidate of candidates) {
+      if (!fs.existsSync(candidate)) continue;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8')) as {
+          userStories?: Array<{ id?: unknown; title?: unknown }>;
+        };
+        const storyTitles = new Map<string, string>();
+        for (const story of parsed.userStories ?? []) {
+          if (typeof story.id !== 'string' || story.id.trim().length === 0) continue;
+          storyTitles.set(
+            story.id.trim(),
+            typeof story.title === 'string' && story.title.trim().length > 0 ? story.title.trim() : story.id.trim(),
+          );
+        }
+        titles.set(specId, storyTitles);
+        break;
+      } catch (error) {
+        logger.warn({ error, specId, candidate }, '[knowledge-graph] Failed to parse spec for lite knowledge graph fallback');
+      }
+    }
+  }
+
+  return titles;
+}
+
+async function querySpecKnowledgeGraphLite(specId: string, workspaceId?: string): Promise<SpecKnowledgeGraphResult> {
+  const where = ['deleted_at IS NULL', 'source_spec_id = $1'];
+  const params: unknown[] = [specId];
+  if (workspaceId) {
+    params.push(workspaceId);
+    where.push(`workspace_id = $${params.length}`);
+  }
+
+  const memoryRows = await query<LiteKnowledgeGraphMemoryRow>(
+    `SELECT id::text AS id,
+            category,
+            source_story_id,
+            source_spec_id,
+            related_files
+       FROM memories
+      WHERE ${where.join(' AND ')}
+      ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+      LIMIT 40`,
+    params,
+  );
+
+  const memories: KnowledgeGraphMemory[] = memoryRows.map((row) => ({
+    id: row.id,
+    category: row.category ?? '',
+    relationship: row.source_story_id ? 'LEARNED_FROM' : 'FROM_SPEC',
+    storyId: row.source_story_id ?? specId,
+  }));
+
+  const relatedFiles = [...new Set(memoryRows.flatMap((row) => parseGraphStringArray(row.related_files)).filter(Boolean))];
+  const conventions: KnowledgeGraphConvention[] = [];
+
+  if (workspaceId && relatedFiles.length > 0) {
+    const workspacePath = await resolveKnowledgeGraphWorkspacePath(workspaceId);
+    if (workspacePath) {
+      try {
+        const { loadRorcaConfig } = await import('./rorca-config');
+        const micromatch = (await import('micromatch')).default;
+        const config = loadRorcaConfig(workspacePath);
+        for (const scope of config.routing.scopes) {
+          const matchedFiles = micromatch(relatedFiles, scope.path);
+          for (const injectFile of scope.inject) {
+            for (const filePath of matchedFiles) {
+              conventions.push({
+                name: injectFile,
+                source: 'config.json',
+                relationship: 'APPLIES_TO',
+                filePath,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn({ error, workspaceId, specId }, '[knowledge-graph] Lite convention fallback failed');
+      }
+    }
+  }
+
+  const relatedStories: KnowledgeGraphRelatedStory[] = [];
+  if (workspaceId && relatedFiles.length > 0) {
+    const relatedRows = await query<{ story_id: string | null; spec_id: string | null }>(
+      `WITH spec_files AS (
+         SELECT DISTINCT jsonb_array_elements_text(related_files) AS file_path
+           FROM memories
+          WHERE workspace_id = $1
+            AND deleted_at IS NULL
+            AND source_spec_id = $2
+            AND jsonb_typeof(related_files) = 'array'
+       )
+       SELECT DISTINCT m.source_story_id AS story_id,
+                       m.source_spec_id AS spec_id
+         FROM memories m
+        WHERE m.workspace_id = $1
+          AND m.deleted_at IS NULL
+          AND m.source_story_id IS NOT NULL
+          AND m.source_spec_id IS NOT NULL
+          AND m.source_spec_id <> $2
+          AND jsonb_typeof(m.related_files) = 'array'
+          AND EXISTS (
+            SELECT 1
+              FROM jsonb_array_elements_text(m.related_files) AS rf(path)
+              JOIN spec_files sf ON sf.file_path = rf.path
+          )
+        ORDER BY m.source_spec_id, m.source_story_id
+        LIMIT 20`,
+      [workspaceId, specId],
+    );
+
+    const relatedSpecIds = [...new Set(relatedRows.map((row) => row.spec_id).filter((value): value is string => Boolean(value)))];
+    const workspacePath = await resolveKnowledgeGraphWorkspacePath(workspaceId);
+    const storyTitles = readSpecStoryTitles(workspacePath, relatedSpecIds);
+
+    for (const row of relatedRows) {
+      if (!row.story_id || !row.spec_id) continue;
+      relatedStories.push({
+        id: row.story_id,
+        specId: row.spec_id,
+        title: storyTitles.get(row.spec_id)?.get(row.story_id) ?? row.story_id,
+        relationship: 'SHARES_FILE_CONTEXT',
+      });
+    }
+  }
+
+  return {
+    memories,
+    conventions: [...new Map(conventions.map((item) => [`${item.name}::${item.filePath}`, item] as const)).values()],
+    relatedStories,
+  };
+}
+
 export interface KnowledgeGraphMemory {
   id: string;
   category: string;
@@ -1662,13 +1843,15 @@ export interface SpecKnowledgeGraphResult {
 
 /**
  * Query the knowledge graph for data related to a spec's stories.
- * Returns memories linked via LEARNED_FROM, conventions linked via APPLIES_TO/TOUCHES,
- * and related stories from other specs connected via DEPENDS_ON or TOUCHES.
- * PG-019: Returns empty arrays if AGE is unavailable.
+ * Returns AGE-backed results in full graph mode and relational fallbacks in Graph Lite.
  */
 export async function querySpecKnowledgeGraph(specId: string, workspaceId?: string): Promise<SpecKnowledgeGraphResult> {
   const empty: SpecKnowledgeGraphResult = { memories: [], conventions: [], relatedStories: [] };
-  if (!(await isGraphAvailable())) return empty;
+  const runtime = await getRuntimeGraphCapability('knowledge');
+  if (runtime.graphMode === 'disabled') return empty;
+  if (runtime.provider !== 'age') {
+    return querySpecKnowledgeGraphLite(specId, workspaceId);
+  }
 
   const specLookup = buildScopedGraphNodeLookup('Spec', specId, { workspaceId });
   const safeSpecLookupValue = escCypher(specLookup.value);
@@ -1761,8 +1944,12 @@ export async function querySpecKnowledgeGraph(specId: string, workspaceId?: stri
 
     return { memories, conventions, relatedStories };
   } catch (err) {
-    logger.warn({ err, specId, workspaceId: workspaceId ?? null }, '[knowledge-graph] querySpecKnowledgeGraph failed');
-    return empty;
+    logger.warn({ err, specId, workspaceId: workspaceId ?? null }, '[knowledge-graph] querySpecKnowledgeGraph failed; attempting lite fallback');
+    try {
+      return await querySpecKnowledgeGraphLite(specId, workspaceId);
+    } catch {
+      return empty;
+    }
   }
 }
 

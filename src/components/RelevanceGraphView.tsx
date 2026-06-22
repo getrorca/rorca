@@ -96,14 +96,16 @@ export default function RelevanceGraphView({ state, onNodeClick }: RelevanceGrap
   // Unavailable (backend has no telemetry / AGE data)
   if (state.status === 'unavailable') {
     const reasons = state.data?.fallback?.missingReasons ?? [];
+    const runtimeMessage = state.data?.runtime?.message;
+    const runtimeHint = state.data?.runtime?.hint;
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-2 py-10" data-testid="graph-unavailable">
         <Network size={20} className="text-muted opacity-40" />
         <span className="text-xs text-muted">Graph evidence unavailable</span>
         <span className="text-[10px] text-muted/70 max-w-xs text-center">
-          This run has semantic-only retrieval data. Graph neighborhood evidence
-          requires retrieval telemetry or Apache AGE graph paths.
+          {runtimeMessage ?? 'This run has semantic-only retrieval data. Graph neighborhood evidence requires retrieval telemetry or Apache AGE graph paths.'}
         </span>
+        {runtimeHint && <span className="text-[10px] text-muted/60 max-w-xs text-center">{runtimeHint}</span>}
         {reasons.length > 0 && (
           <ul className="text-[10px] text-muted/60 list-disc pl-4 mt-1">
             {reasons.map((r, i) => <li key={i}>{r}</li>)}
@@ -156,6 +158,9 @@ function GraphCanvas({
         )}
         {data.truncation.filesTruncated && (
           <span className="text-amber-500" title="File nodes truncated to cap">truncated</span>
+        )}
+        {data.runtime.graphMode !== 'full' && (
+          <span className="text-amber-500/80" title={data.runtime.message}>{data.runtime.graphMode}</span>
         )}
         {!data.fallback.graphPathsAvailable && (
           <span className="text-muted/60" title="No Apache AGE graph paths">semantic-only</span>

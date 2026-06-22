@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { screen } from '@testing-library/react';
 import { renderWithProviders } from '../../test/helpers';
 import SpecRelevanceGraph from '../SpecRelevanceGraph';
@@ -121,6 +121,13 @@ function makeGraphResponse(
 
   return {
     available: true,
+    runtime: {
+      graphMode: 'lite',
+      provider: 'semantic',
+      ageAvailable: false,
+      hint: 'Install Apache AGE on the current Postgres instance or switch to `rorca db start` for the full graph stack.',
+      message: 'Graph Lite active. Relevance graph uses semantic and telemetry evidence without AGE graph paths.',
+    },
     hub,
     nodes,
     edges,
@@ -504,7 +511,7 @@ describe('Fallback state rendering', () => {
     });
     renderWithProviders(<SpecRelevanceGraph data={data} state="unavailable" />);
     expect(screen.getByTestId('srg-state-unavailable')).toBeInTheDocument();
-    expect(screen.getByText('No retrieval telemetry available')).toBeInTheDocument();
+    expect(screen.getAllByText('No retrieval telemetry available')).toHaveLength(2);
   });
 
   it('renders partial state banner', () => {

@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { screen, fireEvent, waitFor } from '@testing-library/react';
+import { screen, fireEvent } from '@testing-library/react';
 import { renderWithProviders } from '../../test/helpers';
 import PreFlightGraph from '../PreFlightGraph';
 import type { SpecRelevanceGraphResponse } from '../../types/spec-relevance-graph';
@@ -33,6 +33,13 @@ function makeGraphResponse(
 ): SpecRelevanceGraphResponse {
   return {
     available: true,
+    runtime: {
+      graphMode: 'lite',
+      provider: 'semantic',
+      ageAvailable: false,
+      hint: 'Install Apache AGE on the current Postgres instance or switch to `rorca db start` for the full graph stack.',
+      message: 'Graph Lite active. Relevance graph uses semantic and telemetry evidence without AGE graph paths.',
+    },
     hub: {
       id: 'hub:ws::test-spec',
       type: 'hub',

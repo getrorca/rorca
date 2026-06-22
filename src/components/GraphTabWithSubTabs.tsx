@@ -36,6 +36,13 @@ interface KnowledgeGraphRelatedStory {
 
 interface KnowledgeGraphResponse {
   available: boolean;
+  runtime?: {
+    graphMode: 'full' | 'lite' | 'disabled';
+    provider: 'age' | 'relational' | 'semantic' | 'none';
+    ageAvailable: boolean;
+    hint: string;
+    message: string;
+  };
   memories: KnowledgeGraphMemory[];
   conventions: KnowledgeGraphConvention[];
   relatedStories: KnowledgeGraphRelatedStory[];
@@ -120,8 +127,9 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
   }
 
   if (!data?.available) {
-    const graphMode = databaseCapability?.graphMode ?? 'lite';
-    const primaryWarning = databaseCapability?.warnings?.[0];
+    const graphMode = data?.runtime?.graphMode ?? databaseCapability?.graphMode ?? 'lite';
+    const message = data?.runtime?.message;
+    const hint = data?.runtime?.hint ?? databaseCapability?.warnings?.[0];
 
     return (
       <div className="flex flex-col items-center justify-center py-16 text-muted">
@@ -130,11 +138,11 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
           {graphMode === 'disabled' ? 'Knowledge graph disabled' : 'Knowledge graph in lite mode'}
         </p>
         <p className="text-xs mt-1 opacity-70 text-center max-w-sm">
-          {graphMode === 'disabled'
+          {message ?? (graphMode === 'disabled'
             ? 'The active database is unreachable or still starting up, so graph features are temporarily disabled.'
-            : 'Apache AGE is unavailable in the current database mode, so this tab stays semantic-only until full graph support is enabled.'}
+            : 'Apache AGE is unavailable in the current database mode, so this tab is using a lighter fallback.')}
         </p>
-        {primaryWarning ? <p className="text-[11px] mt-2 opacity-60 text-center max-w-sm">{primaryWarning}</p> : null}
+        {hint ? <p className="text-[11px] mt-2 opacity-60 text-center max-w-sm">{hint}</p> : null}
       </div>
     );
   }
@@ -146,7 +154,11 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
       <div className="flex flex-col items-center justify-center py-16 text-muted">
         <Brain size={32} className="mb-3 opacity-40" />
         <p className="text-sm font-medium">No graph data yet</p>
-        <p className="text-xs mt-1 opacity-70">Run this spec to populate the knowledge graph.</p>
+        <p className="text-xs mt-1 opacity-70">
+          {data.runtime?.graphMode === 'lite'
+            ? 'Graph Lite is active, but no relational graph context has been captured for this spec yet.'
+            : 'Run this spec to populate the knowledge graph.'}
+        </p>
       </div>
     );
   }
@@ -154,7 +166,9 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
   return (
     <div className="p-3 space-y-3">
       <div className="rounded-lg border border-border bg-panel/60 px-3 py-2 text-[11px] text-muted">
-        Semantic-only surface: this tab visualizes raw knowledge-graph links and does not yet apply GraphRAG scoring v1. Scored retrieval currently flows through recall, context assembly, and story prompt-building surfaces.
+        {data.runtime?.graphMode === 'lite'
+          ? `Graph Lite fallback active: ${data.runtime.message}`
+          : 'Semantic-only surface: this tab visualizes raw knowledge-graph links and does not yet apply GraphRAG scoring v1. Scored retrieval currently flows through recall, context assembly, and story prompt-building surfaces.'}
       </div>
       {data.memories.length > 0 && (
         <CollapsibleSection title="Memories" icon={Brain} count={data.memories.length}>

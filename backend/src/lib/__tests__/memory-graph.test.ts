@@ -12,12 +12,15 @@ const mockConnect = jest.fn(async () => ({
   release: mockRelease,
 }));
 const mockCheckAge = jest.fn();
+const mockQuery = jest.fn();
+const mockQueryOne = jest.fn();
 
 jest.mock('../../db/index', () => ({
   pool: {
     connect: () => mockConnect(),
   },
-  query: jest.fn(),
+  query: (...args: unknown[]) => mockQuery(...args),
+  queryOne: (...args: unknown[]) => mockQueryOne(...args),
 }));
 
 jest.mock('../age-guard', () => ({
@@ -52,6 +55,8 @@ describe('memory-graph helper', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCheckAge.mockResolvedValue(true);
+    mockQuery.mockResolvedValue([]);
+    mockQueryOne.mockResolvedValue(undefined);
     mockClientQuery.mockImplementation(async (sql: string) => {
       if (sql === "SELECT current_setting('search_path') AS search_path") {
         return { rows: [{ search_path: 'rorca, public' }], rowCount: 1 };
@@ -234,22 +239,42 @@ describe('memory-graph helper', () => {
     expect(sql).toContain("AND s.id IN ['US-001', 'US-002']");
   });
 
-  it('returns a graceful available=false payload when AGE is unavailable', async () => {
+  it('returns a relational lite fallback when AGE is unavailable', async () => {
     mockCheckAge.mockResolvedValue(false);
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM memories')) {
+        return [
+          {
+            memoryId: '42',
+            category: 'Architecture',
+            pinned: true,
+            createdAt: '2026-06-02T10:00:00.000Z',
+            updatedAt: '2026-06-02T10:00:00.000Z',
+            storyId: 'US-001',
+            specId: 'spec-a',
+            relatedFiles: ['src/app.tsx'],
+          },
+        ];
+      }
+      if (sql.includes('FROM memory_relations')) {
+        return [];
+      }
+      return [];
+    });
+    mockQueryOne.mockResolvedValue({ path: '/tmp/ws-1' });
 
     const result = await getMemoryGraphOverview('ws-1');
 
-    expect(result).toMatchObject({
-      available: false,
-      scope: { workspaceId: 'ws-1', view: 'overview', memoryId: null },
-      code: 'AGE_NOT_AVAILABLE',
-      mode: 'lite',
-      hint: expect.stringMatching(/rorca db start/i),
-    });
+    expect(result.available).toBe(true);
+    expect(result.runtime.graphMode).toBe('lite');
+    expect(result.runtime.provider).toBe('relational');
+    expect(result.selection.relatedStoryIds).toEqual(['US-001']);
+    expect(result.selection.relatedSpecIds).toEqual(['spec-a']);
+    expect(result.selection.relatedFilePaths).toEqual(['src/app.tsx']);
     expect(mockConnect).not.toHaveBeenCalled();
   });
 
-  it('restores search_path and returns available=false when a query fails', async () => {
+  it('restores search_path and falls back to relational mode when an AGE query fails', async () => {
     mockClientQuery.mockImplementation(async (sql: string) => {
       if (sql === "SELECT current_setting('search_path') AS search_path") {
         return { rows: [{ search_path: 'rorca, public' }], rowCount: 1 };
@@ -262,11 +287,13 @@ describe('memory-graph helper', () => {
       }
       throw new Error('boom');
     });
+    mockQuery.mockResolvedValue([]);
+    mockQueryOne.mockResolvedValue(undefined);
 
     const result = await getMemoryGraphOverview('ws-1');
 
-    expect(result.available).toBe(false);
-    expect(result.code).toBe('GRAPH_QUERY_FAILED');
+    expect(result.available).toBe(true);
+    expect(result.runtime.provider).toBe('relational');
     expect(mockClientQuery).toHaveBeenCalledWith("SELECT set_config('search_path', $1, false)", ['rorca, public']);
   });
 });

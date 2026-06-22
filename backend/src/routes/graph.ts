@@ -22,7 +22,8 @@ import {
   type RetrievalTelemetryEvent,
 } from '../lib/retrieval-telemetry';
 import { listRetrievalFeedback, summarizeRetrievalFeedback } from '../lib/retrieval-feedback';
-import { checkAge, getAgeUnavailableBody } from '../lib/age-guard';
+import { getAgeUnavailableBody } from '../lib/age-guard';
+import { describeRuntimeGraph, getRuntimeGraphCapability } from '../lib/graph-runtime';
 import { ForbiddenError, ValidationError } from '../lib/errors';
 import { invalidateGraphContextCacheForWorkspace } from '../lib/graph-context';
 
@@ -35,6 +36,7 @@ const activePopulations = new Set<string>();
 
 interface GraphStatsResponse {
   available: boolean;
+  runtime: ReturnType<typeof describeRuntimeGraph>;
   vertexCount: number;
   edgeCount: number;
   graphName: string;
@@ -109,7 +111,10 @@ function attachTelemetryExplainability(
  *     tags: [Graph]
  *     summary: Get knowledge graph statistics
  *     operationId: getGraphStats
- *     description: Returns Apache AGE knowledge graph availability and basic statistics including vertex count, edge count, graph name, and last populated timestamp. When AGE is not installed, returns available=false with zeroed counts and null timestamps — never a 500 error.
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only graph capability and counter summary with no write or operator-only side effects."
+ *     x-rorca-public-api: true
+ *     description: Returns runtime graph mode plus basic graph statistics including vertex count, edge count, graph name, and last populated timestamp. When AGE is not installed, returns available=false with zeroed counts and null timestamps — never a 500 error.
  *     responses:
  *       200:
  *         description: Graph statistics
@@ -138,11 +143,13 @@ function attachTelemetryExplainability(
  */
 router.get('/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
+    const runtime = describeRuntimeGraph(await getRuntimeGraphCapability('knowledge'));
     const stats = await graphStats();
 
     if (!stats.available) {
       const result: GraphStatsResponse = {
         available: false,
+        runtime,
         vertexCount: 0,
         edgeCount: 0,
         graphName: 'rorca',
@@ -161,6 +168,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
 
     const result: GraphStatsResponse = {
       available: true,
+      runtime,
       vertexCount: stats.vertexCount,
       edgeCount: stats.edgeCount,
       graphName: 'rorca',
@@ -313,7 +321,8 @@ router.post('/populate', async (req: Request, res: Response, next: NextFunction)
       return res.status(400).json({ error: 'workspaceId is required' });
     }
 
-    if (!(await checkAge())) {
+    const runtime = await getRuntimeGraphCapability('admin');
+    if (!runtime.adminAvailable) {
       return res.status(503).json(getAgeUnavailableBody());
     }
 

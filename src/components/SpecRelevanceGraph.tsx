@@ -36,7 +36,6 @@ import type {
   RelevanceScoreLegend,
   RelevanceGraphTruncation,
   RelevanceGraphFallback,
-  RelevanceGraphSummary,
   GraphLoadingState,
 } from '../types/spec-relevance-graph';
 
@@ -304,7 +303,7 @@ function FallbackState({ state, error, fallback }: FallbackProps) {
           data-testid="srg-state-unavailable"
         >
           <p className="text-sm mb-2" style={{ color: 'var(--text-muted)' }}>
-            Relevance graph is currently unavailable.
+            {fallback?.missingReasons[0] ?? 'Relevance graph is currently unavailable.'}
           </p>
           {fallback && fallback.missingReasons.length > 0 && (
             <ul className="text-xs list-disc pl-4" style={{ color: 'var(--text-muted)' }}>
@@ -397,6 +396,7 @@ export default function SpecRelevanceGraph({
         <span>{data.summary.edgeCount} edges</span>
         <span>{data.summary.selectedCount} selected</span>
         <span>{data.summary.droppedCount} dropped</span>
+        {data.runtime.graphMode !== 'full' && <span>{data.runtime.graphMode} / {data.runtime.provider}</span>}
         {data.summary.avgRelevanceScore != null && (
           <span>Avg score: {data.summary.avgRelevanceScore.toFixed(3)}</span>
         )}
@@ -456,6 +456,17 @@ export default function SpecRelevanceGraph({
       {/* Node detail popover (shown on focus) */}
       {focusedNode && focusedNode.type !== 'hub' && (
         <NodeDetailPopover node={focusedNode} />
+      )}
+
+      {data.runtime.graphMode !== 'full' && (
+        <div
+          className="px-2 py-1 text-xs rounded"
+          style={{ color: 'var(--text-muted)', background: 'var(--surface-200)' }}
+          role="status"
+          aria-label="Graph runtime"
+        >
+          {data.runtime.message}
+        </div>
       )}
 
       {/* Score legend */}

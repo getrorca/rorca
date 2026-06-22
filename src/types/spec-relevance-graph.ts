@@ -99,6 +99,14 @@ export interface RelevanceGraphFallback {
   missingReasons: string[];
 }
 
+export interface GraphRuntimeDescriptor {
+  graphMode: 'full' | 'lite' | 'disabled';
+  provider: 'age' | 'relational' | 'semantic' | 'none';
+  ageAvailable: boolean;
+  hint: string;
+  message: string;
+}
+
 export interface RelevanceGraphSummary {
   hubLabel: string;
   nodeCount: number;
@@ -110,6 +118,7 @@ export interface RelevanceGraphSummary {
 
 export interface SpecRelevanceGraphResponse {
   available: boolean;
+  runtime: GraphRuntimeDescriptor;
   hub: RelevanceNode | null;
   nodes: RelevanceNode[];
   edges: RelevanceEdge[];

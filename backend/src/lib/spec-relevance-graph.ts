@@ -23,8 +23,12 @@
 
 import path from 'path';
 import { queryOne, query } from '../db/index';
-import { checkAge } from './age-guard';
 import { logger } from './logger';
+import {
+  describeRuntimeGraph,
+  getRuntimeGraphCapability,
+  type GraphRuntimeDescriptor,
+} from './graph-runtime';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -125,6 +129,7 @@ export interface RelevanceGraphSummary {
 
 export interface SpecRelevanceGraphResponse {
   available: boolean;
+  runtime: GraphRuntimeDescriptor;
   hub: RelevanceNode | null;
   nodes: RelevanceNode[];
   edges: RelevanceEdge[];
@@ -200,9 +205,13 @@ function graphPathMissingReason(candidate: Record<string, any>): string | null {
   return null;
 }
 
-function buildUnavailableResponse(reasons: string[]): SpecRelevanceGraphResponse {
+function buildUnavailableResponse(
+  reasons: string[],
+  runtime: GraphRuntimeDescriptor,
+): SpecRelevanceGraphResponse {
   return {
     available: false,
+    runtime,
     hub: null,
     nodes: [],
     edges: [],
@@ -224,7 +233,7 @@ function buildUnavailableResponse(reasons: string[]): SpecRelevanceGraphResponse
       returnedCandidates: 0,
     },
     fallback: {
-      ageAvailable: false,
+      ageAvailable: runtime.ageAvailable,
       telemetryAvailable: false,
       graphPathsAvailable: false,
       missingReasons: reasons,
@@ -325,16 +334,6 @@ async function fetchRoutedFiles(
   return traceRows.map(r => r.file_path);
 }
 
-async function fetchSpecMeta(
-  specSlug: string,
-  workspaceId: string,
-): Promise<{ id: string; specName: string } | null> {
-  return queryOne<{ id: string; specName: string }>(
-    `SELECT id, spec_name AS "specName" FROM specs WHERE id = $1 AND workspace_id = $2`,
-    [specSlug, workspaceId],
-  ) as Promise<{ id: string; specName: string } | null>;
-}
-
 function specSlugFromPath(specPath: string | null | undefined): string | undefined {
   if (!specPath) return undefined;
   const base = path.basename(specPath).replace(/\.json$/i, '').trim();
@@ -374,13 +373,16 @@ export async function buildSpecRelevanceGraph(options: {
     maxEdges: Math.max(1, Math.min(options.caps?.maxEdges ?? DEFAULT_CAPS.maxEdges, 150)),
   };
 
+  const runtimeCapability = await getRuntimeGraphCapability('relevance');
+  const runtime = describeRuntimeGraph(runtimeCapability);
   const missingReasons: string[] = [];
-  let ageAvailable = false;
+  const ageAvailable = runtime.ageAvailable;
 
-  try {
-    ageAvailable = await checkAge();
-  } catch {
-    missingReasons.push('AGE availability check failed');
+  if (runtime.graphMode === 'disabled') {
+    return buildUnavailableResponse([
+      runtime.message,
+      ...runtimeCapability.capability.warnings,
+    ], runtime);
   }
 
   // Resolve telemetry
@@ -407,7 +409,7 @@ export async function buildSpecRelevanceGraph(options: {
     if (runMeta) {
       resolvedSpecSlug = specSlugFromPath(runMeta.spec_path) ?? null;
       if (runMeta.workspace_id !== workspaceId) {
-        return buildUnavailableResponse(['Run does not belong to this workspace']);
+        return buildUnavailableResponse(['Run does not belong to this workspace'], runtime);
       }
     }
   }
@@ -563,7 +565,7 @@ export async function buildSpecRelevanceGraph(options: {
   }
 
   if (!ageAvailable) {
-    missingReasons.push('Apache AGE not available — graph/path scores will be null');
+    missingReasons.push(runtime.message);
   }
 
   if (!graphPathsAvailable && telemetry) {
@@ -575,6 +577,7 @@ export async function buildSpecRelevanceGraph(options: {
 
   return {
     available: true,
+    runtime,
     hub,
     nodes,
     edges: edges.slice(0, caps.maxEdges),

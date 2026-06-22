@@ -36,8 +36,8 @@ import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
 import { recordRetrievedContextOutcome } from '../lib/retrieval-outcome';
-import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, graphStats, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
-import { requireAge } from '../lib/age-guard';
+import { querySkillEffectiveness, querySkillPathAffinity, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
+import { describeRuntimeGraph, getRuntimeGraphCapability } from '../lib/graph-runtime';
 import { maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
@@ -10097,7 +10097,10 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Get knowledge graph data for a spec
  *     operationId: getSpecKnowledgeGraph
- *     description: Returns memories, conventions, and related stories from the Apache AGE knowledge graph linked to this spec's stories. Returns empty arrays when AGE is unavailable.
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only spec knowledge graph surface with relational fallback in Graph Lite and no write side effects."
+ *     x-rorca-public-api: true
+ *     description: Returns memories, conventions, and related stories from the knowledge graph surface linked to this spec's stories. Uses Apache AGE in full mode and a relational fallback in Graph Lite.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -10146,13 +10149,24 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
  *                       title: { type: string }
  *                       relationship: { type: string }
  */
-router.get('/:specId/knowledge-graph', requireAge(), async (req: Request, res: Response) => {
+router.get('/:specId/knowledge-graph', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+    const runtime = describeRuntimeGraph(await getRuntimeGraphCapability('knowledge'));
+
+    if (runtime.graphMode === 'disabled') {
+      return res.json({
+        available: false,
+        runtime,
+        memories: [],
+        conventions: [],
+        relatedStories: [],
+      });
+    }
 
     const result = await querySpecKnowledgeGraph(specId, workspaceId);
-    res.json({ available: true, ...result });
+    res.json({ available: true, runtime, ...result });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Knowledge Graph');
   }

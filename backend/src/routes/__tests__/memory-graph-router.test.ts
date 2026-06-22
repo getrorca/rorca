@@ -71,6 +71,13 @@ describe('memory graph routes', () => {
     });
     mockGraphOverview.mockResolvedValue({
       available: false,
+      runtime: {
+        graphMode: 'lite',
+        provider: 'relational',
+        ageAvailable: false,
+        hint: 'Run `rorca db start` to enable graph memory (requires Docker)',
+        message: 'Graph Lite active. This surface uses relational fallback data instead of Apache AGE.',
+      },
       nodes: [],
       edges: [],
       scope: { workspaceId: 'ws-1', view: 'overview', memoryId: null },
@@ -90,6 +97,13 @@ describe('memory graph routes', () => {
     });
     mockGraphNeighborhood.mockResolvedValue({
       available: true,
+      runtime: {
+        graphMode: 'full',
+        provider: 'age',
+        ageAvailable: true,
+        hint: 'Docker Postgres with Apache AGE is active.',
+        message: 'Full graph mode active. Apache AGE-backed graph projections are available.',
+      },
       nodes: [],
       edges: [],
       scope: { workspaceId: 'ws-1', view: 'neighborhood', memoryId: '7' },
