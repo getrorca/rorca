@@ -35,7 +35,14 @@ import { inferDomain } from '../lib/domain-inference';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { authRequired, requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
-import { getDatabaseCapability } from '../lib/db-strategy';
+import {
+  getDatabaseCapability,
+  setDbMode,
+  setPersistedByopDatabaseUrl,
+  validateByopConnection,
+  type DbMode,
+  type DatabaseSelectionValidationError,
+} from '../lib/db-strategy';
 
 const router = Router();
 
@@ -73,10 +80,14 @@ function parseWorkspace(row: WorkspaceRow) {
  *     tags: [Workspaces]
  *     summary: Register a new workspace
  *     operationId: createWorkspace
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace creation mutates user-owned project configuration and should require authenticated access."
  *     description: >
  *       Registers a new workspace by path. Validates the filesystem path exists,
- *       creates the workspace record, auto-creates a default agent profile from
- *       L3 direction content, and runs echolocation on the workspace root.
+ *       optionally persists a database mode selection (including hosted BYOP
+ *       Postgres validation), creates the workspace record, auto-creates a
+ *       default agent profile from L3 direction content, and runs echolocation
+ *       on the workspace root.
  *     requestBody:
  *       required: true
  *       content:
@@ -89,6 +100,8 @@ function parseWorkspace(row: WorkspaceRow) {
  *               label: { type: string, example: "CashflowAI" }
  *               path: { type: string, example: "/Users/dev/cashflow-ai" }
  *               domains: { type: array, items: { type: string }, example: ["saas"] }
+ *               dbMode: { type: string, enum: [native, docker, byop], nullable: true }
+ *               databaseUrl: { type: string, nullable: true, example: "postgres://postgres:secret@db.example.supabase.co:5432/postgres?sslmode=require" }
  *     responses:
  *       201:
  *         description: Workspace created
@@ -122,15 +135,78 @@ const CreateWorkspaceSchema = z.object({
   label: z.string().min(1),
   path: z.string().min(1),
   domains: z.array(z.string()),
+  dbMode: z.enum(['native', 'docker', 'byop']).optional(),
+  databaseUrl: z.string().optional(),
 });
+
+function resolveRequestedDbMode(input: { dbMode?: unknown; databaseUrl?: unknown }): DbMode | null {
+  if (input.dbMode === 'native' || input.dbMode === 'docker' || input.dbMode === 'byop') {
+    return input.dbMode;
+  }
+  if (typeof input.databaseUrl === 'string' && input.databaseUrl.trim()) {
+    return 'byop';
+  }
+  return null;
+}
+
+async function persistRequestedDatabaseMode(input: { dbMode?: unknown; databaseUrl?: unknown }) {
+  const mode = resolveRequestedDbMode(input);
+  if (!mode) return null;
+
+  if (mode === 'byop') {
+    const databaseUrl = typeof input.databaseUrl === 'string' ? input.databaseUrl : '';
+    const validation = await validateByopConnection(databaseUrl);
+    setPersistedByopDatabaseUrl(validation.normalizedUrl);
+    setDbMode('byop');
+    return {
+      mode,
+      restartRequired: true,
+      provider: validation.provider,
+      connection: validation.connection,
+      extensions: validation.extensions,
+      warnings: validation.warnings,
+    };
+  }
+
+  setDbMode(mode);
+  return {
+    mode,
+    restartRequired: true,
+    provider: mode === 'docker' ? 'docker-postgres' : 'native-postgres',
+    connection: null,
+    extensions: null,
+    warnings: [],
+  };
+}
+
+function throwDatabaseSelectionError(error: unknown): never {
+  const dbError = error as Partial<DatabaseSelectionValidationError>;
+  switch (dbError.code) {
+    case 'INVALID_DATABASE_URL':
+      throw new ValidationError((error as Error).message);
+    case 'PGVECTOR_REQUIRED':
+    case 'EXTENSION_CHECK_FAILED':
+    case 'DATABASE_UNREACHABLE':
+      throw new UnprocessableError((error as Error).message);
+    default:
+      throw error;
+  }
+}
 
 router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan('workspaces'), async (req, res, next) => {
   try {
-    const { id, label, path, domains } = req.body;
+    const { id, label, path, domains, dbMode, databaseUrl } = req.body;
 
     if (!fs.existsSync(path)) {
       throw new ValidationError(`Path does not exist on filesystem: ${path}`);
       return;
+    }
+
+    let databaseSelection = null;
+    try {
+      databaseSelection = await persistRequestedDatabaseMode({ dbMode, databaseUrl });
+    } catch (error) {
+      throwDatabaseSelectionError(error);
     }
 
     try {
@@ -196,7 +272,12 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
     });
 
     const needsBootstrap = (health?.score ?? 0) < 40;
-    res.status(201).json({ workspace: parseWorkspace(row!), health, needsBootstrap });
+    res.status(201).json({
+      workspace: parseWorkspace(row!),
+      health,
+      needsBootstrap,
+      ...(databaseSelection ? { databaseSelection } : {}),
+    });
   } catch (err) {
     next(err);
   }
@@ -721,6 +802,8 @@ router.get('/:id', async (req, res, next) => {
  *       Partially updates a workspace. All body fields are optional — only provided
  *       fields are updated. If path is supplied, it must exist on the filesystem.
  *       Domains should be an array of domain strings (e.g. ["saas", "fintech"]).
+ *       dbMode/native/docker/byop changes are persisted globally for the running
+ *       Rorca installation, and BYOP URLs are validated before persistence.
  *       pr_template can be set to null or empty string to clear the PR template.
  *     parameters:
  *       - in: path
@@ -755,6 +838,14 @@ router.get('/:id', async (req, res, next) => {
  *                 type: string
  *                 nullable: true
  *                 description: Markdown template for auto-generated pull request bodies
+ *               dbMode:
+ *                 type: string
+ *                 enum: [native, docker, byop]
+ *                 description: Process-wide database mode for this Rorca installation
+ *               databaseUrl:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Hosted PostgreSQL connection string used when dbMode=byop
  *     responses:
  *       200:
  *         description: Workspace updated successfully
@@ -793,7 +884,14 @@ router.patch('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
       return;
     }
 
-    const { label, path: wsPath, domains, pr_template } = req.body;
+    const { label, path: wsPath, domains, pr_template, dbMode, databaseUrl } = req.body;
+
+    let databaseSelection = null;
+    try {
+      databaseSelection = await persistRequestedDatabaseMode({ dbMode, databaseUrl });
+    } catch (error) {
+      throwDatabaseSelectionError(error);
+    }
 
     if (label !== undefined) {
       await execute('UPDATE workspaces SET label = $1 WHERE id = $2', [String(label), req.params.id]);
@@ -817,7 +915,10 @@ router.patch('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
     }
 
     const updated = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
-    res.json({ workspace: parseWorkspace(updated!) });
+    res.json({
+      workspace: parseWorkspace(updated!),
+      ...(databaseSelection ? { databaseSelection } : {}),
+    });
   } catch (err) {
     next(err);
   }

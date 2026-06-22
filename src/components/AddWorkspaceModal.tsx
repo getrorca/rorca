@@ -18,6 +18,8 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
   const [label, setLabel] = useState('');
   const [path, setPath] = useState('');
   const [domains, setDomains] = useState('');
+  const [dbMode, setDbMode] = useState<'native' | 'docker' | 'byop'>('native');
+  const [databaseUrl, setDatabaseUrl] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const trapRef = useFocusTrap<HTMLDivElement>(true);
@@ -36,6 +38,7 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
     else if (label.length > 64) errs.label = 'Label must be 64 characters or fewer';
     if (!path.trim()) errs.path = 'Path is required';
     else if (!path.startsWith('/')) errs.path = 'Path must be an absolute path (start with /)';
+    if (dbMode === 'byop' && !databaseUrl.trim()) errs.databaseUrl = 'DATABASE_URL is required for BYOP mode';
     return errs;
   }
 
@@ -66,7 +69,14 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, label: label.trim(), path: path.trim(), domains: domainList }),
+          body: JSON.stringify({
+            id,
+            label: label.trim(),
+            path: path.trim(),
+            domains: domainList,
+            dbMode,
+            databaseUrl: dbMode === 'byop' ? databaseUrl.trim() : undefined,
+          }),
         },
       );
       onSuccess({ id: res.workspace.id, name: res.workspace.label, git_path: res.workspace.path, needsBootstrap: res.needsBootstrap });
@@ -76,6 +86,8 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
         setErrors({ path: 'Path does not exist on filesystem' });
       } else if (msg.includes('already exists')) {
         setErrors({ label: 'A workspace with this name already exists' });
+      } else if (msg.toLowerCase().includes('database_url') || msg.toLowerCase().includes('postgres') || msg.toLowerCase().includes('pgvector')) {
+        setErrors({ databaseUrl: msg });
       } else {
         setErrors({ label: msg });
       }
@@ -148,6 +160,43 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
             />
             <p className="text-xs text-muted mt-1">Comma-separated tags</p>
           </div>
+
+          {/* Database mode */}
+          <div>
+            <label htmlFor="ws-db-mode" className="block text-sm font-medium mb-1">
+              Database Mode
+            </label>
+            <select
+              id="ws-db-mode"
+              value={dbMode}
+              onChange={(e) => setDbMode(e.target.value as 'native' | 'docker' | 'byop')}
+              className="w-full px-3 py-2 rounded border border-border bg-bg text-sm focus:border-accent"
+            >
+              <option value="native">Native Postgres</option>
+              <option value="docker">Docker Postgres</option>
+              <option value="byop">Hosted Postgres (BYOP)</option>
+            </select>
+            <p className="text-xs text-muted mt-1">Use BYOP for Supabase, Neon, Railway, and other hosted Postgres providers.</p>
+          </div>
+
+          {dbMode === 'byop' && (
+            <div>
+              <label htmlFor="ws-database-url" className="block text-sm font-medium mb-1">
+                DATABASE_URL
+              </label>
+              <textarea
+                id="ws-database-url"
+                value={databaseUrl}
+                onChange={(e) => setDatabaseUrl(e.target.value)}
+                placeholder="postgres://postgres:password@db.example.supabase.co:5432/postgres?sslmode=require"
+                rows={4}
+                spellCheck={false}
+                className="w-full px-3 py-2 rounded border border-border bg-bg text-sm font-mono focus:border-accent resize-y"
+              />
+              <p className="text-xs text-muted mt-1">Validated before save. The selected database must be reachable and have the pgvector extension installed.</p>
+              {errors.databaseUrl && <p className="text-red-500 text-xs mt-1">{errors.databaseUrl}</p>}
+            </div>
+          )}
 
           {/* Actions */}
           <div className="flex justify-end gap-2 mt-2">

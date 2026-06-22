@@ -62,7 +62,7 @@ export function detectCloudProvider(connectionString?: string): CloudProvider {
  * - PGSSLMODE=require env var → ssl: { rejectUnauthorized: false }
  * - PGSSLROOTCERT=/path/to/ca.crt → loads CA cert for strict verification
  */
-function buildSslConfig(connectionString?: string): PoolConfig['ssl'] | undefined {
+export function buildSslConfig(connectionString?: string): PoolConfig['ssl'] | undefined {
   const urlNeedsSsl = connectionString
     ? connectionString.includes('sslmode=require') || connectionString.includes('sslmode=verify-full')
     : false;

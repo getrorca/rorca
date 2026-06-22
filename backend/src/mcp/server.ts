@@ -15,7 +15,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
-import { applySelectedDbModeEnvironment } from '../lib/db-strategy';
+import { applySelectedDbModeEnvironment, formatDbModeBootstrapLog } from '../lib/db-strategy';
 import { createMcpHttpServer, getMcpToolDefinitions } from '../lib/mcp-http';
 import { logger } from '../lib/logger';
 import { swaggerSpec } from '../lib/swagger';
@@ -23,7 +23,7 @@ import { swaggerSpec } from '../lib/swagger';
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 const mcpDbModeBootstrap = applySelectedDbModeEnvironment();
 if (mcpDbModeBootstrap.changed) {
-  console.info(`[db-mode] Using ${mcpDbModeBootstrap.mode} database ${mcpDbModeBootstrap.databaseUrl}`);
+  console.info(formatDbModeBootstrapLog(mcpDbModeBootstrap));
 }
 
 export const server: McpServer = createMcpHttpServer(swaggerSpec as any);

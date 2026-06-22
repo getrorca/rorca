@@ -7,21 +7,32 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { detectCloudProvider, query } from '../db/index';
+import { Pool } from 'pg';
+import { buildSslConfig, detectCloudProvider, query } from '../db/index';
 const DEFAULT_NATIVE_PORT = 5433;
 const DOCKER_PORT = 5432;
 const DB_MODE_FILENAME = 'db-mode';
+const BYOP_DATABASE_URL_FILENAME = 'database-url';
 const EMPTY_EXTENSIONS = {
     age: false,
     vector: false,
     pgcrypto: false,
 };
+const CONTROL_CHARACTER_REGEX = /[\u0000-\u001F\u007F]/;
 let cachedNativePort = null;
+function createValidationError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+}
 function getRorcaHome() {
     return path.join(os.homedir(), '.rorca');
 }
 function getDbModePath() {
     return path.join(getRorcaHome(), DB_MODE_FILENAME);
+}
+function getPersistedByopDatabaseUrlPath() {
+    return path.join(getRorcaHome(), BYOP_DATABASE_URL_FILENAME);
 }
 function parseDatabaseUrl(databaseUrl) {
     try {
@@ -104,12 +115,6 @@ function resolveNativePort() {
     cachedNativePort = DEFAULT_NATIVE_PORT;
     return cachedNativePort;
 }
-function getEffectiveDatabaseUrl(mode, env = process.env) {
-    const current = env.DATABASE_URL?.trim() || '';
-    if (mode === 'byop')
-        return current;
-    return current || getDbConnectionString(mode);
-}
 function resolveDatabaseProvider(mode, databaseUrl) {
     if (mode === 'docker')
         return 'docker-postgres';
@@ -130,6 +135,12 @@ function providerLabel(provider) {
             return 'native Postgres';
         case 'self-hosted':
             return 'self-hosted Postgres';
+        case 'supabase':
+            return 'Supabase Postgres';
+        case 'neon':
+            return 'Neon Postgres';
+        case 'railway':
+            return 'Railway Postgres';
         default:
             return provider;
     }
@@ -183,6 +194,70 @@ export function getRedactedDatabaseConnection(databaseUrl) {
         database: url?.pathname.replace(/^\//, '') || null,
         local: !isRemoteHost(host),
     };
+}
+export function readPersistedByopDatabaseUrl() {
+    try {
+        const value = fs.readFileSync(getPersistedByopDatabaseUrlPath(), 'utf8').trim();
+        return value || null;
+    }
+    catch {
+        return null;
+    }
+}
+export function clearPersistedByopDatabaseUrl() {
+    try {
+        fs.unlinkSync(getPersistedByopDatabaseUrlPath());
+    }
+    catch {
+        // Ignore missing file and cleanup failures here — callers are switching away from BYOP.
+    }
+}
+export function validateByopDatabaseUrl(databaseUrl) {
+    const trimmed = databaseUrl.trim();
+    if (!trimmed) {
+        throw createValidationError('INVALID_DATABASE_URL', 'DATABASE_URL is required for BYOP mode.');
+    }
+    if (CONTROL_CHARACTER_REGEX.test(trimmed)) {
+        throw createValidationError('INVALID_DATABASE_URL', 'DATABASE_URL contains unsupported control characters.');
+    }
+    const parsed = parseDatabaseUrl(trimmed);
+    if (!parsed) {
+        throw createValidationError('INVALID_DATABASE_URL', 'DATABASE_URL must be a valid postgres:// or postgresql:// connection string.');
+    }
+    if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+        throw createValidationError('INVALID_DATABASE_URL', 'DATABASE_URL must use the postgres:// or postgresql:// protocol.');
+    }
+    if (!parsed.hostname) {
+        throw createValidationError('INVALID_DATABASE_URL', 'DATABASE_URL must include a hostname.');
+    }
+    if (!parsed.pathname || parsed.pathname === '/') {
+        throw createValidationError('INVALID_DATABASE_URL', 'DATABASE_URL must include a database name.');
+    }
+    const sslMode = parsed.searchParams.get('sslmode')?.toLowerCase();
+    if (sslMode === 'disable') {
+        throw createValidationError('INVALID_DATABASE_URL', 'DATABASE_URL must not disable SSL/TLS with sslmode=disable.');
+    }
+    const normalizedUrl = parsed.toString();
+    return {
+        normalizedUrl,
+        provider: detectCloudProvider(normalizedUrl),
+        connection: getRedactedDatabaseConnection(normalizedUrl),
+    };
+}
+export function setPersistedByopDatabaseUrl(databaseUrl) {
+    const { normalizedUrl } = validateByopDatabaseUrl(databaseUrl);
+    const rorcaHome = getRorcaHome();
+    fs.mkdirSync(rorcaHome, { recursive: true });
+    const byopPath = getPersistedByopDatabaseUrlPath();
+    fs.writeFileSync(byopPath, `${normalizedUrl}\n`, { mode: 0o600 });
+    fs.chmodSync(byopPath, 0o600);
+}
+function getEffectiveDatabaseUrl(mode, env = process.env) {
+    const current = env.DATABASE_URL?.trim() || '';
+    if (mode === 'byop') {
+        return readPersistedByopDatabaseUrl() || current;
+    }
+    return current || getDbConnectionString(mode);
 }
 export function buildDatabaseCapability(input) {
     const dbMode = input.dbMode ?? detectDbMode();
@@ -272,13 +347,22 @@ export function buildDatabaseCapabilityFromHealth(health) {
     });
 }
 export function detectDbMode() {
-    const databaseUrl = process.env.DATABASE_URL?.trim();
-    if (databaseUrl && isRemoteHost(parseDatabaseHost(databaseUrl))) {
-        return 'byop';
-    }
     const persistedMode = readDbModeFile();
     if (persistedMode === 'docker' || persistedMode === 'native') {
         return persistedMode;
+    }
+    if (persistedMode === 'byop') {
+        const persistedByopUrl = readPersistedByopDatabaseUrl();
+        if (persistedByopUrl)
+            return 'byop';
+        const envDatabaseUrl = process.env.DATABASE_URL?.trim();
+        if (envDatabaseUrl && isRemoteHost(parseDatabaseHost(envDatabaseUrl))) {
+            return 'byop';
+        }
+    }
+    const databaseUrl = process.env.DATABASE_URL?.trim();
+    if (databaseUrl && isRemoteHost(parseDatabaseHost(databaseUrl))) {
+        return 'byop';
     }
     const localPort = databaseUrl ? parseDatabasePort(databaseUrl) : null;
     if (localPort === DOCKER_PORT)
@@ -293,13 +377,16 @@ export function setDbMode(mode) {
     const dbModePath = getDbModePath();
     fs.writeFileSync(dbModePath, `${mode}\n`, { mode: 0o600 });
     fs.chmodSync(dbModePath, 0o600);
+    if (mode !== 'byop') {
+        clearPersistedByopDatabaseUrl();
+    }
 }
 export function getDbConnectionString(mode) {
     if (mode === 'docker') {
         return `postgres://rorca:rorca@localhost:${DOCKER_PORT}/rorca`;
     }
     if (mode === 'byop') {
-        return process.env.DATABASE_URL || '';
+        return readPersistedByopDatabaseUrl() || process.env.DATABASE_URL || '';
     }
     return `postgres://rorca:rorca@localhost:${resolveNativePort()}/rorca`;
 }
@@ -308,10 +395,15 @@ export function applySelectedDbModeEnvironment(env = process.env) {
     const current = env.DATABASE_URL?.trim() || '';
     const currentDatabaseName = parseDatabaseName(current);
     if (mode === 'byop') {
+        const databaseUrl = readPersistedByopDatabaseUrl() || current;
+        const changed = current !== databaseUrl;
+        if (databaseUrl) {
+            env.DATABASE_URL = databaseUrl;
+        }
         return {
             mode,
-            databaseUrl: current,
-            changed: false,
+            databaseUrl,
+            changed,
         };
     }
     let databaseUrl = getDbConnectionString(mode);
@@ -321,6 +413,82 @@ export function applySelectedDbModeEnvironment(env = process.env) {
     const changed = current !== databaseUrl;
     env.DATABASE_URL = databaseUrl;
     return { mode, databaseUrl, changed };
+}
+export async function validateByopConnection(databaseUrl) {
+    const { normalizedUrl, provider, connection } = validateByopDatabaseUrl(databaseUrl);
+    const ssl = buildSslConfig(normalizedUrl);
+    const pool = new Pool({
+        connectionString: normalizedUrl,
+        max: 1,
+        min: 0,
+        idleTimeoutMillis: 1_000,
+        connectionTimeoutMillis: 5_000,
+        statement_timeout: 5_000,
+        ...(ssl ? { ssl } : {}),
+    });
+    try {
+        let pgVersion = null;
+        try {
+            const versionRow = await pool.query('SELECT version()');
+            pgVersion = versionRow.rows[0]?.version ?? null;
+        }
+        catch {
+            throw createValidationError('DATABASE_UNREACHABLE', `Could not connect to ${connection.host ?? 'the PostgreSQL server'} using the supplied DATABASE_URL.`);
+        }
+        let connectionLimit = null;
+        try {
+            const limitRow = await pool.query('SHOW max_connections');
+            const parsed = Number.parseInt(limitRow.rows[0]?.max_connections ?? '', 10);
+            connectionLimit = Number.isFinite(parsed) ? parsed : null;
+        }
+        catch {
+            connectionLimit = null;
+        }
+        let extensions = { ...EMPTY_EXTENSIONS };
+        try {
+            const extRows = await pool.query("SELECT extname FROM pg_extension WHERE extname IN ('age', 'vector', 'pgcrypto') ORDER BY extname");
+            extensions = extRows.rows.reduce((acc, row) => {
+                if (row.extname === 'age')
+                    acc.age = true;
+                if (row.extname === 'vector')
+                    acc.vector = true;
+                if (row.extname === 'pgcrypto')
+                    acc.pgcrypto = true;
+                return acc;
+            }, { ...EMPTY_EXTENSIONS });
+        }
+        catch {
+            throw createValidationError('EXTENSION_CHECK_FAILED', 'Connected successfully, but could not verify required PostgreSQL extensions for BYOP mode.');
+        }
+        if (!extensions.vector) {
+            throw createValidationError('PGVECTOR_REQUIRED', 'The selected PostgreSQL database must have the pgvector extension installed before Rorca can use BYOP mode.');
+        }
+        return {
+            normalizedUrl,
+            provider,
+            connection,
+            extensions,
+            pgVersion,
+            connectionLimit,
+            warnings: buildWarnings({
+                dbMode: 'byop',
+                provider,
+                connected: true,
+                extensions,
+                rawDatabaseUrl: normalizedUrl,
+                connection,
+            }),
+        };
+    }
+    finally {
+        await pool.end().catch(() => { });
+    }
+}
+export function formatDbModeBootstrapLog(input) {
+    const display = input.databaseUrl
+        ? (redactDatabaseUrl(input.databaseUrl) ?? '(redacted unavailable)')
+        : '(not configured)';
+    return `[db-mode] Using ${input.mode} database ${display}`;
 }
 export async function isAgeAvailable() {
     const capability = await getDatabaseCapability();
