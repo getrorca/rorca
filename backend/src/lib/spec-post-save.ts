@@ -520,6 +520,36 @@ async function mergeStageStateMaps(baseStages: PersistPostSaveStageMap, jobs: Sp
   return effectiveStages;
 }
 
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value);
+  return null;
+}
+
+async function overlayDurableStagesOnGenerationLog(
+  specId: string,
+  log: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const summary = parseRecord(log.context_summary_json);
+  const workspaceId = typeof summary.workspaceId === 'string' ? summary.workspaceId : undefined;
+  const saveGeneration = numberFromUnknown(summary.saveGeneration) ?? numberFromUnknown(log.save_generation);
+  const durableStages = await projectedDurableStagesForSpec(specId, {
+    workspaceId,
+    saveGeneration,
+  });
+
+  if (!durableStages) return log;
+
+  return {
+    ...log,
+    status: deriveOverallStatus(String(log.status ?? ''), durableStages),
+    context_summary_json: {
+      ...summary,
+      postSaveStages: durableStages,
+    },
+  };
+}
+
 export async function getEffectiveGenerationLog(specId: string): Promise<Record<string, unknown> | null> {
   const logs = await readGenerationLogs(specId);
   if (logs.length === 0) {
@@ -531,11 +561,7 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
   const latestWorkspaceId = typeof latestSummary.workspaceId === 'string'
     ? latestSummary.workspaceId
     : undefined;
-  const latestSaveGeneration = typeof latestSummary.saveGeneration === 'number'
-    ? latestSummary.saveGeneration
-    : typeof latestSummary.saveGeneration === 'string'
-      ? Number(latestSummary.saveGeneration)
-      : null;
+  const latestSaveGeneration = numberFromUnknown(latestSummary.saveGeneration);
 
   const persistLog = logs.find((log) => {
     const summary = parseRecord(log.context_summary_json);
@@ -543,27 +569,13 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
   });
 
   if (!persistLog) {
-    const durableStages = await projectedDurableStagesForSpec(specId, {
-      workspaceId: latestWorkspaceId,
-      saveGeneration: latestSaveGeneration,
-    });
-    if (!durableStages) {
-      return latest;
-    }
-    return {
-      ...latest,
-      status: deriveOverallStatus(String(latest.status ?? ''), durableStages),
-      context_summary_json: {
-        ...latestSummary,
-        postSaveStages: durableStages,
-      },
-    };
+    return overlayDurableStagesOnGenerationLog(specId, latest);
   }
 
   const persistSummary = parseRecord(persistLog.context_summary_json);
   const baseStages = persistSummary.postSaveStages as PersistPostSaveStageMap | undefined;
   if (!baseStages) {
-    return latest;
+    return overlayDurableStagesOnGenerationLog(specId, latest);
   }
 
   const workspaceId = typeof persistSummary.workspaceId === 'string'
@@ -573,11 +585,7 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
     ? await listJobsForSpec(workspaceId, specId, ['enrich', 'match-skills'])
     : [];
 
-  const summarySaveGeneration = typeof persistSummary.saveGeneration === 'number'
-    ? persistSummary.saveGeneration
-    : typeof persistSummary.saveGeneration === 'string'
-      ? Number(persistSummary.saveGeneration)
-      : latestSaveGeneration;
+  const summarySaveGeneration = numberFromUnknown(persistSummary.saveGeneration) ?? latestSaveGeneration;
   const jobMergedStages = await mergeStageStateMaps(baseStages, jobs, summarySaveGeneration, workspaceId);
   const durableStages = await projectedDurableStagesForSpec(specId, {
     workspaceId,
@@ -606,9 +614,15 @@ export async function getEffectiveGenerationLog(specId: string): Promise<Record<
 export async function getEffectiveGenerationLogs(specId: string): Promise<Array<Record<string, unknown>>> {
   const logs = await readGenerationLogs(specId);
   if (logs.length === 0) return logs;
+
   const effectiveLatest = await getEffectiveGenerationLog(specId);
   if (!effectiveLatest) return logs;
-  return [effectiveLatest, ...logs.slice(1)];
+
+  const projectedHistoricalLogs = await Promise.all(
+    logs.slice(1).map((log) => overlayDurableStagesOnGenerationLog(specId, log)),
+  );
+
+  return [effectiveLatest, ...projectedHistoricalLogs];
 }
 
 export async function updatePersistPostSaveStage(
