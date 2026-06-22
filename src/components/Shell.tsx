@@ -9,7 +9,6 @@ import { useState, useEffect, useRef } from 'react';
 import { HelpCircle, Settings, Zap, Check, Network, X } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
-import PricingModal from './PricingModal';
 import { useHelpTips } from '../contexts/HelpTipsContext';
 import { useNetworkOffline, NetworkIndicator } from './NetworkBanner';
 import { apiFetch } from '../lib/apiFetch';
@@ -256,20 +255,20 @@ interface ShellProps {
 const AGE_BANNER_DISMISS_KEY = 'rorca_age_banner_dismissed';
 
 function LiteModeBanner() {
-  const { capabilities, mode, recheckAge } = useCapabilities();
+  const { capabilities, mode, databaseCapability, recheckAge } = useCapabilities();
   const [dismissed, setDismissed] = useState(() => sessionStorage.getItem(AGE_BANNER_DISMISS_KEY) === '1');
   const [open, setOpen] = useState(false);
   const [rechecking, setRechecking] = useState(false);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (capabilities?.age) {
+    if (databaseCapability?.graphMode === 'full' || capabilities?.age) {
       setDismissed(false);
       sessionStorage.removeItem(AGE_BANNER_DISMISS_KEY);
     }
-  }, [capabilities?.age]);
+  }, [capabilities?.age, databaseCapability?.graphMode]);
 
-  if (capabilities?.age !== false || dismissed) {
+  if ((databaseCapability?.graphMode ?? (capabilities?.age === false ? 'lite' : 'full')) === 'full' || dismissed) {
     return null;
   }
 
@@ -307,7 +306,9 @@ function LiteModeBanner() {
         <div className="flex min-w-0 items-center gap-2.5">
           <Network size={14} className="text-amber-500 shrink-0" />
           <p className="truncate text-sm text-[var(--text)]">
-            Graph memory disabled (Lite Mode).
+            {databaseCapability?.graphMode === 'disabled'
+              ? 'Graph memory disabled until the database is reachable.'
+              : 'Graph memory disabled (Lite Mode).'}
           </p>
           <button
             onClick={() => setOpen(true)}
@@ -336,9 +337,11 @@ function LiteModeBanner() {
                     Enable Apache AGE for graph memory features?
                   </h2>
                   <p className="mt-2 text-sm text-muted">
-                    Lite Mode is active because Apache AGE is unavailable in {mode ?? 'this database mode'}.
-                    Run <code className="mx-1 rounded bg-bg px-1.5 py-0.5 text-xs text-[var(--text)]">rorca db start</code>
-                    in your terminal yourself. The frontend cannot execute shell commands.
+                    {databaseCapability?.graphMode === 'disabled'
+                      ? 'Graph support is currently disabled because the active database is unreachable or not fully initialised.'
+                      : `Lite Mode is active because Apache AGE is unavailable in ${mode ?? 'this database mode'}.`}
+                    {' '}Run <code className="mx-1 rounded bg-bg px-1.5 py-0.5 text-xs text-[var(--text)]">rorca db start</code>
+                    {' '}in your terminal yourself. The frontend cannot execute shell commands.
                   </p>
                 </div>
                 <button
@@ -352,6 +355,13 @@ function LiteModeBanner() {
 
               <div className="mt-4 rounded-xl border border-border bg-bg/60 p-4 text-sm text-muted">
                 <p>Enabling AGE requires Docker, adds roughly a 200MB image, and unlocks:</p>
+                {databaseCapability?.warnings?.length ? (
+                  <ul className="mt-2 list-disc pl-5">
+                    {databaseCapability.warnings.slice(0, 2).map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                ) : null}
                 <ul className="mt-2 list-disc pl-5">
                   <li><code>/api/specs/:id/knowledge-graph</code> for graph memory in spec review</li>
                   <li><code>/api/admin/graph-backfill</code> and <code>/api/admin/graph-stats</code></li>

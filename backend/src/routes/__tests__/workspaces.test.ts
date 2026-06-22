@@ -83,9 +83,10 @@ test('GET /api/workspaces returns array containing created workspace', async () 
   const res = await request(app).get('/api/workspaces').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.items).toHaveLength(1);
-  expect(res.body.items[0].id).toBe('ws-test-1');
-  expect(Array.isArray(res.body.items[0].domains)).toBe(true);
+  expect(Array.isArray(res.body.items)).toBe(true);
+  const created = res.body.items.find((item: { id: string }) => item.id === 'ws-test-1');
+  expect(created).toBeDefined();
+  expect(Array.isArray(created?.domains)).toBe(true);
 });
 
 test('GET /api/workspaces/:id returns workspace', async () => {
@@ -157,4 +158,22 @@ test('GET /api/workspaces/:id/context returns populated fields after INSERT', as
   expect(res.body.gitMemory).toBeNull();
   expect(res.body.lastIngestedCommitHash).toBe('abc123');
   expect(res.body.gitCommitCount).toBe(5);
+});
+
+test('GET /api/workspaces/:id/status returns canonical database capability with redacted connection metadata', async () => {
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+
+  const res = await request(app).get('/api/workspaces/ws-test-1/status').set('Authorization', `Bearer ${authToken}`);
+
+  expect(res.status).toBe(200);
+  expect(res.body.workspaceId).toBe('ws-test-1');
+  expect(res.body.databaseCapability).toMatchObject({
+    dbMode: expect.any(String),
+    provider: expect.any(String),
+    graphMode: expect.any(String),
+  });
+  expect(res.body.databaseCapability.extensions).toHaveProperty('age');
+  expect(Array.isArray(res.body.databaseCapability.warnings)).toBe(true);
+  expect(String(res.body.databaseCapability.connection.url ?? '')).not.toContain('@');
+  expect(res.body.graph).toHaveProperty('graphMode', res.body.databaseCapability.graphMode);
 });

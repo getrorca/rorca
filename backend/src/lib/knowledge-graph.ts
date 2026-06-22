@@ -28,20 +28,8 @@ import * as path from 'path';
 import { pool, query } from '../db/index';
 import { logger } from './logger';
 import type { PoolClient } from 'pg';
-import { checkAge, getAgeUnavailableBody } from './age-guard';
+import { checkAge, getAgeUnavailableBody, invalidateAgeCache } from './age-guard';
 
-// ── Graph Availability Flag ─────────────────────────────────────────────────
-
-/**
- * PG-019: Track whether Apache AGE is available on this Postgres instance.
- * Checked on first graph operation, then cached with TTL.
- *   - `null` = not yet checked
- *   - `true` = AGE available (cached indefinitely)
- *   - `false` = AGE unavailable — re-checked every 60s so recovery is automatic
- */
-let _graphAvailable: boolean | null = null;
-let _graphAvailableCheckedAt = 0;
-const GRAPH_AVAILABLE_NEGATIVE_TTL_MS = 60_000; // re-check every 60s on negative result
 const RORCA_V2_GRAPH = 'rorca_v2';
 const RORCA_V2_KEYED_NODE_LABELS = ['Story', 'File', 'Spec', 'Memory', 'Convention', 'Skill'] as const;
 
@@ -52,7 +40,7 @@ export interface GraphBootstrapUnavailable {
   statusCode: 503;
   error: string;
   code: 'AGE_NOT_INSTALLED';
-  mode: 'lite';
+  mode: 'lite' | 'disabled';
   hint: string;
 }
 
@@ -67,45 +55,13 @@ export type GraphBootstrapResult = GraphBootstrapReady | GraphBootstrapUnavailab
 
 /**
  * Check if Apache AGE is available on the current Postgres instance.
- * Positive results are cached indefinitely. Negative results expire after 60s
- * so the system auto-recovers if AGE becomes available after startup.
+ * Delegates to the shared AGE capability helper so routes and graph code do not
+ * perform separate ad hoc probes.
  */
 export async function isGraphAvailable(): Promise<boolean> {
-  if (_graphAvailable === true) return true;
-
-  // Negative result with TTL — re-check after expiry
-  if (_graphAvailable === false) {
-    const elapsed = Date.now() - _graphAvailableCheckedAt;
-    if (elapsed < GRAPH_AVAILABLE_NEGATIVE_TTL_MS) return false;
-    // TTL expired, re-check below
-    _graphAvailable = null;
-  }
-
-  try {
-    const result = await pool.query<{ extname: string }>(
-      "SELECT extname FROM pg_extension WHERE extname = 'age'"
-    );
-    _graphAvailable = result.rows.length > 0;
-    _graphAvailableCheckedAt = Date.now();
-
-    if (_graphAvailable) {
-      logger.info('[knowledge-graph] isGraphAvailable=true — AGE extension found');
-    } else {
-      logger.info(
-        '[knowledge-graph] isGraphAvailable=false — AGE extension not found in pg_extension. ' +
-        'Will re-check in 60s. Use self-hosted Postgres for full graph support.'
-      );
-    }
-  } catch (err) {
-    _graphAvailable = false;
-    _graphAvailableCheckedAt = Date.now();
-    logger.info(
-      { err },
-      '[knowledge-graph] isGraphAvailable=false — query error checking AGE extension. Will re-check in 60s.'
-    );
-  }
-
-  return _graphAvailable;
+  const available = await checkAge();
+  logger.debug({ available }, '[knowledge-graph] isGraphAvailable via shared AGE helper');
+  return available;
 }
 
 /**
@@ -113,8 +69,7 @@ export async function isGraphAvailable(): Promise<boolean> {
  * Useful after extension installation or for testing.
  */
 export function resetGraphAvailability(): void {
-  _graphAvailable = null;
-  _graphAvailableCheckedAt = 0;
+  invalidateAgeCache();
 }
 
 // ── agtype Parsing ──────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@
  */
 import { spawn } from 'child_process';
 import * as readline from 'readline/promises';
+import { setDbMode } from './db-strategy';
 const CONTAINER_NAME = 'rorca-db';
 const VOLUME_NAME = 'rorca-db-data';
 const DOCKER_IMAGE = 'apache/age:latest';
@@ -117,6 +118,7 @@ export async function dbStart() {
     }
     await waitForReady();
     await enableAgeExtension();
+    setDbMode('docker');
 }
 export async function dbStop() {
     await runDockerOrThrow(['stop', CONTAINER_NAME]);

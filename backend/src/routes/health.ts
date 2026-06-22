@@ -18,6 +18,7 @@ import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
 import { getMcpTransportCount } from '../lib/mcp-http';
+import { buildDatabaseCapability, type DatabaseProvider } from '../lib/db-strategy';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -60,9 +61,27 @@ function detectEngines(): EnginesStatus {
 
   const claudeInstalled = agentType === 'claude' || detectClaudeBinary();
 
-  const opencode = detectOpenCode();
-  const codex = detectCodex();
-  const pi = detectPi();
+  const opencode = (() => {
+    try {
+      return detectOpenCode();
+    } catch {
+      return { opencodeInstalled: false, opencodeVersion: undefined };
+    }
+  })();
+  const codex = (() => {
+    try {
+      return detectCodex();
+    } catch {
+      return { codexInstalled: false, codexVersion: undefined };
+    }
+  })();
+  const pi = (() => {
+    try {
+      return detectPi();
+    } catch {
+      return { piInstalled: false, piVersion: undefined };
+    }
+  })();
 
   const result: EnginesStatus = {
     claude: { installed: claudeInstalled },
@@ -88,7 +107,6 @@ function detectEngines(): EnginesStatus {
 // Cache package.json version at module load — avoids fs.readFileSync on every request
 let VERSION = '0.0.1';
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   VERSION = (require('../../package.json') as { version: string }).version;
 } catch {
   // Fall back to default if package.json is unavailable (e.g. compiled build)
@@ -220,6 +238,12 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
 
     const dbConnected = dbHealth.status !== 'down';
     const workerDown = workerHealth.status === 'down' || workerHealth.status === 'not_running';
+    const rawDbHealth = dbHealth as ComponentDatabaseHealth;
+    const databaseCapability = buildDatabaseCapability({
+      connected: dbConnected,
+      provider: rawDbHealth.provider,
+      extensionStatus: rawDbHealth.extensionStatus,
+    });
 
     // Overall status: 'down' if DB or worker is down, 'degraded' if any component is amber, 'ok' if all green
     let overallStatus: 'ok' | 'degraded' | 'down';
@@ -237,6 +261,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         error: 'Database unreachable',
         version: VERSION,
         uptime: Math.floor((Date.now() - startTime) / 1000),
+        databaseCapability,
       });
     }
 
@@ -270,9 +295,6 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
     const engines = detectEngines();
     const mcp = getMcpBridgeHealth();
 
-    // Reconstruct dbHealthCheck fields from our component check
-    const rawDbHealth = (dbHealth as ComponentDatabaseHealth);
-
     res.status(200).json({
       status: overallStatus,
       version: VERSION,
@@ -290,6 +312,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       provider: rawDbHealth.provider,
       ...(rawDbHealth.extensionStatus ? { extensionStatus: rawDbHealth.extensionStatus } : {}),
       ...(rawDbHealth.connectionLimit ? { connectionLimit: rawDbHealth.connectionLimit } : {}),
+      databaseCapability,
       // CA-021: Report MCP transport mode + bridge health
       mcpTransport: mcp.enabled ? 'http' : 'disabled',
       mcp,
@@ -339,7 +362,7 @@ interface ComponentDatabaseHealth {
   pgVersion?: string;
   extensions?: string[];
   cloud?: boolean;
-  provider?: string;
+  provider?: DatabaseProvider;
   extensionStatus?: { vector: boolean; age: boolean };
   connectionLimit?: number;
 }
@@ -381,6 +404,11 @@ async function checkDatabaseComponent(): Promise<ComponentDatabaseHealth> {
         connectionPoolSize: result.poolStats.maxSize,
         activeConnections: result.poolStats.total - result.poolStats.idle,
         error: 'SELECT 1 failed',
+        poolStats: result.poolStats,
+        cloud: result.cloud,
+        provider: result.provider,
+        extensionStatus: result.extensionStatus,
+        connectionLimit: result.connectionLimit,
       };
     }
     return {
@@ -397,7 +425,10 @@ async function checkDatabaseComponent(): Promise<ComponentDatabaseHealth> {
       connectionLimit: result.connectionLimit,
     };
   } catch {
-    return { status: 'down', error: 'Database unreachable' };
+    return {
+      status: 'down',
+      error: 'Database unreachable',
+    };
   }
 }
 
@@ -619,6 +650,11 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
 
     const healthResult = await dbHealthCheck();
     const dbConnected = healthResult.ok;
+    const databaseCapability = buildDatabaseCapability({
+      connected: healthResult.ok,
+      provider: healthResult.provider,
+      extensionStatus: healthResult.extensionStatus,
+    });
 
     // Pending specs count — count spec files across all workspaces
     let pendingSpecsCount = 0;
@@ -683,6 +719,7 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       pending_specs_count: pendingSpecsCount,
       memory_usage: memoryUsage,
       last_backup_at: lastBackupAt,
+      databaseCapability,
       ...(agentType === 'opencode' && opencode ? {
         opencodeInstalled: opencode.opencodeInstalled,
         opencodeVersion: opencode.opencodeVersion,

@@ -8,6 +8,7 @@
 const mockSpawn = jest.fn();
 const mockQuestion = jest.fn();
 const mockClose = jest.fn();
+const mockSetDbMode = jest.fn();
 
 jest.mock('child_process', () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
@@ -18,6 +19,10 @@ jest.mock('readline/promises', () => ({
     question: (...args: unknown[]) => mockQuestion(...args),
     close: (...args: unknown[]) => mockClose(...args),
   }),
+}));
+
+jest.mock('../db-strategy', () => ({
+  setDbMode: (...args: unknown[]) => mockSetDbMode(...args),
 }));
 
 function createChildProcess(
@@ -51,6 +56,7 @@ describe('db-sidecar', () => {
   beforeEach(() => {
     jest.resetModules();
     jest.clearAllMocks();
+    mockSetDbMode.mockReset();
   });
 
   it('dbStart throws DOCKER_UNAVAILABLE when docker info fails', async () => {
@@ -83,6 +89,7 @@ describe('db-sidecar', () => {
       expect.arrayContaining(['start', 'rorca-db']),
       expect.any(Object)
     );
+    expect(mockSetDbMode).toHaveBeenCalledWith('docker');
   });
 
   it('dbStatus never throws and returns false flags on docker errors', async () => {

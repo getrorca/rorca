@@ -7,6 +7,7 @@
 
 import { spawn } from 'child_process';
 import * as readline from 'readline/promises';
+import { setDbMode } from './db-strategy';
 
 const CONTAINER_NAME = 'rorca-db';
 const VOLUME_NAME = 'rorca-db-data';
@@ -139,6 +140,7 @@ export async function dbStart(): Promise<void> {
   }
   await waitForReady();
   await enableAgeExtension();
+  setDbMode('docker');
 }
 
 export async function dbStop(): Promise<void> {

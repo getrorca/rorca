@@ -5,12 +5,10 @@
  * See LICENSE file in the project root for full license text.
  */
 
-const mockIsGraphAvailable = jest.fn();
-const mockResetGraphAvailability = jest.fn();
+const mockGetDatabaseCapability = jest.fn();
 
-jest.mock('../knowledge-graph', () => ({
-  isGraphAvailable: (...args: unknown[]) => mockIsGraphAvailable(...args),
-  resetGraphAvailability: (...args: unknown[]) => mockResetGraphAvailability(...args),
+jest.mock('../db-strategy', () => ({
+  getDatabaseCapability: (...args: unknown[]) => mockGetDatabaseCapability(...args),
 }));
 
 describe('age-guard', () => {
@@ -19,19 +17,28 @@ describe('age-guard', () => {
     jest.clearAllMocks();
   });
 
-  test('checkAge delegates to the canonical graph availability check', async () => {
-    mockIsGraphAvailable.mockResolvedValue(true);
+  test('checkAge delegates to the canonical database capability helper', async () => {
+    mockGetDatabaseCapability.mockResolvedValue({
+      extensions: { age: true, vector: true, pgcrypto: false },
+      graphMode: 'full',
+    });
     const { checkAge } = require('../age-guard');
 
     await expect(checkAge()).resolves.toBe(true);
-    expect(mockIsGraphAvailable).toHaveBeenCalledTimes(1);
+    expect(mockGetDatabaseCapability).toHaveBeenCalledTimes(1);
   });
 
-  test('invalidateAgeCache resets the canonical graph availability cache', () => {
-    const { invalidateAgeCache } = require('../age-guard');
+  test('invalidateAgeCache clears the cached capability probe', async () => {
+    mockGetDatabaseCapability.mockResolvedValue({
+      extensions: { age: false, vector: false, pgcrypto: false },
+      graphMode: 'lite',
+    });
+    const { checkAge, invalidateAgeCache } = require('../age-guard');
 
+    await expect(checkAge()).resolves.toBe(false);
     invalidateAgeCache();
-    expect(mockResetGraphAvailability).toHaveBeenCalledTimes(1);
+    await expect(checkAge()).resolves.toBe(false);
+    expect(mockGetDatabaseCapability).toHaveBeenCalledTimes(2);
   });
 });
 

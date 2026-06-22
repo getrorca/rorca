@@ -35,6 +35,7 @@ import { inferDomain } from '../lib/domain-inference';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { authRequired, requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
+import { getDatabaseCapability } from '../lib/db-strategy';
 
 const router = Router();
 
@@ -135,8 +136,8 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
     try {
       await withUserClient(req, async (client) => {
         await client.query(
-          'INSERT INTO workspaces (id, label, path, domains, owner_id) VALUES ($1, $2, $3, $4, $5)',
-          [id, label, path, JSON.stringify(domains), req.user?.id ?? 'local-admin']
+          'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
+          [id, label, path, JSON.stringify(domains)]
         );
       });
     } catch (err: any) {
@@ -268,6 +269,65 @@ router.get('/', authRequired, async (req, res, next) => {
 });
 
 router.use('/:id', requireWorkspaceMember());
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/status:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get lightweight workspace runtime status
+ *     operationId: getWorkspaceStatus
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace runtime status includes local environment metadata and should only be exposed to authenticated callers."
+ *     description: >
+ *       Returns a lightweight runtime status payload for a workspace including the
+ *       canonical database capability model and current knowledge-graph counters.
+ *       Database connection metadata is redacted before returning to the client.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Workspace runtime status
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/:id/status', async (req, res, next) => {
+  try {
+    const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+      return;
+    }
+
+    const [databaseCapability, stats, lastEvent] = await Promise.all([
+      getDatabaseCapability(),
+      graphStats(),
+      queryOne<{ ts: string }>(
+        `SELECT ts FROM wal_events
+         WHERE event_type IN ('graph_populated', 'graph_backfill_complete', 'graph_populate_finished', 'run_finished')
+         ORDER BY ts DESC LIMIT 1`,
+      ),
+    ]);
+
+    res.json({
+      workspaceId: workspace.id,
+      databaseCapability,
+      graph: {
+        available: stats.available,
+        graphMode: databaseCapability.graphMode,
+        vertexCount: stats.vertexCount,
+        edgeCount: stats.edgeCount,
+        graphName: 'rorca',
+        lastPopulatedAt: lastEvent?.ts ?? null,
+        warnings: databaseCapability.warnings,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /**
  * @swagger
@@ -436,11 +496,11 @@ router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
       }
 
       const newCommits = summaries.reduce((acc, s) => acc + s.commitCount, 0);
-      let gitMemory: string;
+      let _gitMemory: string;
 
       if (newCommits > 0) {
         try {
-          gitMemory = await gitReduceStep({
+          _gitMemory = await gitReduceStep({
             summaries,
             workspaceLabel: workspace.label,
           });
@@ -450,9 +510,9 @@ router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
         }
 
         // git_memory column was dropped (migration 075) — knowledge now lives in memories table.
-        // gitMemory variable is kept for the API response only.
+        // _gitMemory is intentionally retained only for local flow symmetry and future response hooks.
       } else {
-        gitMemory = '';
+        _gitMemory = '';
       }
 
       const latestHash = getLatestHash(summaries) ?? existingCtx?.last_ingested_commit_hash ?? null;

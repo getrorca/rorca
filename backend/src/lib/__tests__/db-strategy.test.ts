@@ -9,7 +9,7 @@ const mockReadFileSync = jest.fn();
 const mockWriteFileSync = jest.fn();
 const mockMkdirSync = jest.fn();
 const mockChmodSync = jest.fn();
-const mockQueryOne = jest.fn();
+const mockQuery = jest.fn();
 
 jest.mock('fs', () => ({
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
@@ -22,8 +22,11 @@ jest.mock('os', () => ({
   homedir: () => '/tmp/test-home',
 }));
 
-jest.mock('../../db', () => ({
-  queryOne: (...args: unknown[]) => mockQueryOne(...args),
+jest.mock('../../db/index', () => ({
+  detectCloudProvider: jest.fn((connectionString?: string) => (
+    connectionString?.includes('supabase') ? 'supabase' : 'self-hosted'
+  )),
+  query: (...args: unknown[]) => mockQuery(...args),
 }));
 
 describe('db-strategy', () => {
@@ -33,7 +36,7 @@ describe('db-strategy', () => {
     mockWriteFileSync.mockReset();
     mockMkdirSync.mockReset();
     mockChmodSync.mockReset();
-    mockQueryOne.mockReset();
+    mockQuery.mockReset();
     delete process.env.DATABASE_URL;
   });
 
@@ -132,32 +135,49 @@ describe('db-strategy', () => {
     expect(process.env.DATABASE_URL).toBe('postgres://rorca:rorca@localhost:5432/rorca_test');
   });
 
-  it('returns false for AGE when the extension probe does not find AGE/cypher', async () => {
-    mockQueryOne.mockResolvedValue(undefined);
+  it('redacts credentials from database URLs in the canonical capability model', () => {
+    process.env.DATABASE_URL = 'postgres://user:secret@db.example.com:5432/rorca?sslmode=require';
+    const { buildDatabaseCapability } = require('../db-strategy');
+    const capability = buildDatabaseCapability({
+      connected: true,
+      dbMode: 'byop',
+      extensionStatus: { age: false, vector: true },
+      databaseUrl: process.env.DATABASE_URL,
+    });
+
+    expect(capability).toMatchObject({
+      dbMode: 'byop',
+      provider: 'self-hosted',
+      graphMode: 'lite',
+      extensions: { age: false, vector: true, pgcrypto: false },
+    });
+    expect(capability.connection.url).toBe('postgres://db.example.com:5432/rorca');
+    expect(capability.warnings.some((warning: string) => warning.includes('lite graph mode'))).toBe(true);
+  });
+
+  it('returns full graph capability when AGE is installed', async () => {
+    mockQuery.mockResolvedValue([{ extname: 'age' }, { extname: 'vector' }]);
+    const { getDatabaseCapability } = require('../db-strategy');
+
+    await expect(getDatabaseCapability()).resolves.toMatchObject({
+      graphMode: 'full',
+      extensions: { age: true, vector: true, pgcrypto: false },
+      connected: true,
+    });
+  });
+
+  it('returns false for AGE when the canonical capability probe does not find AGE', async () => {
+    mockQuery.mockResolvedValue([]);
     const { isAgeAvailable } = require('../db-strategy');
     await expect(isAgeAvailable()).resolves.toBe(false);
-    expect(mockQueryOne).toHaveBeenCalledWith(
-      `SELECT 1 AS present
-     FROM pg_extension e
-     JOIN pg_proc p ON p.proname = 'cypher'
-     JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'ag_catalog'
-     WHERE e.extname = 'age'
-     LIMIT 1`
+    expect(mockQuery).toHaveBeenCalledWith(
+      "SELECT extname FROM pg_extension WHERE extname IN ('age', 'vector', 'pgcrypto') ORDER BY extname"
     );
   });
 
   it('returns true for AGE when the extension row exists', async () => {
-    process.env.DATABASE_URL = 'postgres://user:pass@db.example.com:5432/rorca';
-    mockQueryOne.mockResolvedValue({ present: 1 });
+    mockQuery.mockResolvedValue([{ extname: 'age' }]);
     const { isAgeAvailable } = require('../db-strategy');
     await expect(isAgeAvailable()).resolves.toBe(true);
-    expect(mockQueryOne).toHaveBeenCalledWith(
-      `SELECT 1 AS present
-     FROM pg_extension e
-     JOIN pg_proc p ON p.proname = 'cypher'
-     JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'ag_catalog'
-     WHERE e.extname = 'age'
-     LIMIT 1`
-    );
   });
 });

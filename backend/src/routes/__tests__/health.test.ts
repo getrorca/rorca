@@ -76,6 +76,12 @@ describe('GET /api/health', () => {
     expect(res.body).toHaveProperty('mcp.enabled', true);
     expect(res.body).toHaveProperty('mcp.status', 'healthy');
     expect(res.body).toHaveProperty('mcp.url', 'http://localhost:3030/mcp');
+    expect(res.body).toHaveProperty('databaseCapability.dbMode');
+    expect(res.body).toHaveProperty('databaseCapability.provider');
+    expect(res.body).toHaveProperty('databaseCapability.extensions.age');
+    expect(res.body).toHaveProperty('databaseCapability.graphMode');
+    expect(Array.isArray(res.body.databaseCapability.warnings)).toBe(true);
+    expect(String(res.body.databaseCapability.connection.url ?? '')).not.toContain('@');
   });
 
   it('returns no-cache headers', async () => {
@@ -141,6 +147,7 @@ describe('GET /api/health/detailed', () => {
     expect(res.body.memory_usage).toHaveProperty('heapUsed');
     expect(res.body.memory_usage).toHaveProperty('external');
     expect(res.body).toHaveProperty('last_backup_at');
+    expect(res.body).toHaveProperty('databaseCapability.graphMode');
   });
 
   it('returns no-cache headers', async () => {

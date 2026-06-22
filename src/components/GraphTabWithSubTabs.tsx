@@ -8,6 +8,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Brain, BookOpen, GitBranch, AlertCircle } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { useCapabilities } from '../contexts/CapabilitiesContext';
 import DependencyGraph from './DependencyGraph';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -46,8 +47,7 @@ type GraphSubTab = 'dependencies' | 'knowledge';
 
 function CollapsibleSection({ title, icon: Icon, count, children }: {
   title: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  icon: React.ComponentType<any>;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
   count: number;
   children: React.ReactNode;
 }) {
@@ -74,6 +74,7 @@ function CollapsibleSection({ title, icon: Icon, count, children }: {
 /* ─── Knowledge Graph Content ─────────────────────────────────────── */
 
 function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; workspaceId: string }) {
+  const { databaseCapability } = useCapabilities();
   const [data, setData] = useState<KnowledgeGraphResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -85,7 +86,16 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
       const resp = await apiFetch<KnowledgeGraphResponse>(`/api/specs/${specId}/knowledge-graph?workspaceId=${encodeURIComponent(workspaceId)}`);
       setData(resp);
     } catch (err: any) {
-      setError(err.message ?? 'Failed to load knowledge graph');
+      if (err?.code === 'AGE_NOT_INSTALLED') {
+        setData({
+          available: false,
+          memories: [],
+          conventions: [],
+          relatedStories: [],
+        });
+      } else {
+        setError(err.message ?? 'Failed to load knowledge graph');
+      }
     } finally {
       setLoading(false);
     }
@@ -110,11 +120,21 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
   }
 
   if (!data?.available) {
+    const graphMode = databaseCapability?.graphMode ?? 'lite';
+    const primaryWarning = databaseCapability?.warnings?.[0];
+
     return (
       <div className="flex flex-col items-center justify-center py-16 text-muted">
         <AlertCircle size={32} className="mb-3 opacity-40" />
-        <p className="text-sm font-medium">Knowledge graph not available</p>
-        <p className="text-xs mt-1 opacity-70">Apache AGE extension is required for knowledge graph features.</p>
+        <p className="text-sm font-medium">
+          {graphMode === 'disabled' ? 'Knowledge graph disabled' : 'Knowledge graph in lite mode'}
+        </p>
+        <p className="text-xs mt-1 opacity-70 text-center max-w-sm">
+          {graphMode === 'disabled'
+            ? 'The active database is unreachable or still starting up, so graph features are temporarily disabled.'
+            : 'Apache AGE is unavailable in the current database mode, so this tab stays semantic-only until full graph support is enabled.'}
+        </p>
+        {primaryWarning ? <p className="text-[11px] mt-2 opacity-60 text-center max-w-sm">{primaryWarning}</p> : null}
       </div>
     );
   }
