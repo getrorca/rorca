@@ -11,6 +11,7 @@ import { execute, query, queryOne } from '../db/index';
 import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 import { logger } from './logger';
 import { chatComplete, DEFAULT_MODEL, isValidModel } from './llm-client';
+import { completeMatchSkillsPrompt } from './match-skills-llm';
 import { retrieveContext, type RetrievedContext } from './memory-router';
 import { buildContextForStory } from './context-enrichment';
 import {
@@ -22,6 +23,7 @@ import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenes
 import { SkillRegistry } from './skill-registry';
 import { PersonaRegistry } from './agent-personas';
 import { matchSkills, type MatchSkillsResult as SkillMatcherResult, type SuggestedSkill } from './skill-matcher';
+import { heuristicMatchSkills } from './match-skills-heuristic';
 import { broadcastAll, type WalEvent } from './sse-hub';
 
 export interface WorkspaceRow {
@@ -153,6 +155,7 @@ async function buildCatalogContext(workspacePath: string, workspaceId?: string):
   memoryMd: string;
   agentsMd: string;
   skillNames: Set<string>;
+  skills: ReturnType<SkillRegistry['getAll']>;
 }> {
   const skillRegistry = await new SkillRegistry().discover(workspacePath);
   const rorcaDir = path.join(workspacePath, '.rorca');
@@ -187,8 +190,9 @@ async function buildCatalogContext(workspacePath: string, workspaceId?: string):
   const agentsMd = safeReadFile(path.join(workspacePath, 'AGENTS.md'))
     || safeReadFile(path.join(rorcaDir, 'AGENTS.md'));
 
-  const skillNames = new Set(skillRegistry.getAll().map((s) => s.metadata.name.toLowerCase()));
-  return { skillCatalog, personaCatalog, memoryMd, agentsMd, skillNames };
+  const skills = skillRegistry.getAll();
+  const skillNames = new Set(skills.map((s) => s.metadata.name.toLowerCase()));
+  return { skillCatalog, personaCatalog, memoryMd, agentsMd, skillNames, skills };
 }
 
 async function resolveSpecFile(workspacePath: string, specId: string): Promise<{ specFilePath: string; specStatus: 'approved' | 'pending' }> {
@@ -333,14 +337,13 @@ export async function runMatchSkillsJob(
   }
 
   const storyList = stories.map((s, i) => `${i + 1}. [${s.id}] ${s.title}\n   ${s.description ?? ''}`).join('\n');
-  let resolvedModel: string = DEFAULT_MODEL;
+  const specRequestedModel = typeof (specContent as { model?: unknown }).model === 'string'
+    ? (specContent as { model?: string }).model ?? null
+    : null;
   const l3Pref = await queryOne<{ preferred_model: string | null }>(
     `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
     [workspaceId],
   );
-  if (l3Pref?.preferred_model) {
-    resolvedModel = l3Pref.preferred_model;
-  }
 
   const hasEffectiveness = skillEffectivenessSection.length > 0;
   const hasGraphContext = !!skillGraphSection;
@@ -370,27 +373,40 @@ ${storyList}`;
       message: formatProgressMessage('Running skill match LLM pass for', totalStories, totalStories, specId),
     });
 
-    const llmResult = await chatComplete([{ role: 'user', content: prompt }], { model: resolvedModel as never });
+    let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
+    try {
+      const completion = await completeMatchSkillsPrompt(prompt, [specRequestedModel, l3Pref?.preferred_model, DEFAULT_MODEL]);
+      const llmResult = completion.result;
+      logger.info(
+        { workspaceId, specId, model: completion.model, source: completion.source },
+        '[spec-job-handlers] match-skills: LLM candidate selected',
+      );
 
-  let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
-  try {
-    let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    const jsonStart = cleaned.indexOf('{');
-    if (jsonStart > 0) {
-      cleaned = cleaned.slice(jsonStart);
+      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const jsonStart = cleaned.indexOf('{');
+      if (jsonStart > 0) {
+        cleaned = cleaned.slice(jsonStart);
+      }
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.slice(0, lastBrace + 1);
+      }
+      parsed = JSON.parse(cleaned);
+      if (!Array.isArray(parsed.matches)) {
+        throw new Error('LLM response missing matches array');
+      }
+    } catch (llmError) {
+      logger.warn(
+        { workspaceId, specId, error: llmError instanceof Error ? llmError.message : String(llmError) },
+        '[spec-job-handlers] match-skills: LLM unavailable — using heuristic fallback',
+      );
+      parsed = {
+        matches: heuristicMatchSkills(stories, catalogs.skills).map((match) => ({
+          storyId: match.storyId,
+          suggestedSkills: match.suggestedSkills,
+        })),
+      };
     }
-    const lastBrace = cleaned.lastIndexOf('}');
-    if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
-      cleaned = cleaned.slice(0, lastBrace + 1);
-    }
-    parsed = JSON.parse(cleaned);
-  } catch {
-    throw new Error(`LLM returned invalid JSON for skill matching: ${llmResult.text.slice(0, 500)}`);
-  }
-
-  if (!Array.isArray(parsed.matches)) {
-    throw new Error('LLM response missing matches array');
-  }
 
   const matchMap = new Map<string, SuggestedSkillRaw[]>();
   for (const match of parsed.matches) {

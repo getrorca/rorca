@@ -18,8 +18,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { chatComplete, DEFAULT_MODEL } from './llm-client';
+import { DEFAULT_MODEL } from './llm-client';
+import { completeMatchSkillsPrompt } from './match-skills-llm';
 import { SkillRegistry } from './skill-registry';
+import { heuristicMatchSkills } from './match-skills-heuristic';
 import { queryOne } from '../db/index';
 import { logger } from './logger';
 
@@ -104,7 +106,8 @@ export async function matchSkills(
   // ── 1. Build skill catalog ──────────────────────────────────────────────
   const skillRegistry = await new SkillRegistry().discover(workspacePath);
   const skillCatalog = skillRegistry.getCatalogForPrompt();
-  const skillNames = new Set(skillRegistry.getAll().map(s => s.metadata.name.toLowerCase()));
+  const installedSkills = skillRegistry.getAll();
+  const skillNames = new Set(installedSkills.map(s => s.metadata.name.toLowerCase()));
 
   if (skillNames.size === 0) {
     throw new NoInstalledSkillsError();
@@ -124,18 +127,17 @@ export async function matchSkills(
   ).slice(0, 2000);
 
   // ── 3. Resolve model ───────────────────────────────────────────────────
-  let resolvedModel: string = DEFAULT_MODEL;
+  let preferredModel: string | null = typeof spec.model === 'string' ? spec.model : null;
+  let l3PreferredModel: string | null = null;
   if (workspaceId) {
     try {
       const l3Pref = await queryOne<{ preferred_model: string | null }>(
         `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
         [workspaceId],
       );
-      if (l3Pref?.preferred_model) {
-        resolvedModel = l3Pref.preferred_model;
-      }
+      l3PreferredModel = l3Pref?.preferred_model ?? null;
     } catch {
-      // Non-fatal — use default model
+      // Non-fatal — use fallbacks below
     }
   }
 
@@ -165,14 +167,11 @@ ${agentsMd || '(empty)'}
 ${storyList}`;
 
   // ── 6. Call LLM ────────────────────────────────────────────────────────
-  const llmResult = await chatComplete(
-    [{ role: 'user', content: prompt }],
-    resolvedModel,
-  );
-
-  // ── 7. Parse response ──────────────────────────────────────────────────
+  // ── 7. Parse response or use heuristic fallback ───────────────────────
   let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkill[] }> };
   try {
+    const completion = await completeMatchSkillsPrompt(prompt, [preferredModel, l3PreferredModel, DEFAULT_MODEL]);
+    const llmResult = completion.result;
     let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
     const jsonStart = cleaned.indexOf('{');
     if (jsonStart > 0) cleaned = cleaned.slice(jsonStart);
@@ -181,13 +180,17 @@ ${storyList}`;
       cleaned = cleaned.slice(0, lastBrace + 1);
     }
     parsed = JSON.parse(cleaned);
-  } catch {
-    logger.error(`[SkillMatcher] LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
-    throw new Error('LLM returned invalid JSON for skill matching');
-  }
-
-  if (!Array.isArray(parsed.matches)) {
-    throw new Error('LLM response missing matches array');
+    if (!Array.isArray(parsed.matches)) {
+      throw new Error('LLM response missing matches array');
+    }
+  } catch (error) {
+    logger.warn(`[SkillMatcher] LLM unavailable for skill matching — using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`);
+    parsed = {
+      matches: heuristicMatchSkills(stories, installedSkills).map((match) => ({
+        storyId: match.storyId,
+        suggestedSkills: match.suggestedSkills,
+      })),
+    };
   }
 
   // ── 8. Validate and map skills ─────────────────────────────────────────

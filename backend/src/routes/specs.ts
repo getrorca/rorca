@@ -43,6 +43,8 @@ import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
 import { loadRorcaConfig } from '../lib/rorca-config';
+import { completeMatchSkillsPrompt } from '../lib/match-skills-llm';
+import { heuristicMatchSkills } from '../lib/match-skills-heuristic';
 import { getWorkspaceEnvVars } from './env-vars';
 import { score as scoreStory, type ScorerStory } from '../lib/complexity-scorer';
 // git-hydrator imports removed — git_memory column dropped in migration 075
@@ -468,6 +470,7 @@ async function buildCatalogContext(workspacePath: string, workspaceId?: string):
   memoryMd: string;
   agentsMd: string;
   skillNames: Set<string>;
+  skills: ReturnType<SkillRegistry['getAll']>;
 }> {
   const skillRegistry = await new SkillRegistry().discover(workspacePath);
   const rorcaDir = path.join(workspacePath, '.rorca');
@@ -501,9 +504,10 @@ async function buildCatalogContext(workspacePath: string, workspaceId?: string):
   const agentsMd = safeReadFile(path.join(workspacePath, 'AGENTS.md'))
     || safeReadFile(path.join(rorcaDir, 'AGENTS.md'));
 
-  const skillNames = new Set(skillRegistry.getAll().map(s => s.metadata.name.toLowerCase()));
+  const skills = skillRegistry.getAll();
+  const skillNames = new Set(skills.map(s => s.metadata.name.toLowerCase()));
 
-  return { skillCatalog, personaCatalog, memoryMd, agentsMd, skillNames };
+  return { skillCatalog, personaCatalog, memoryMd, agentsMd, skillNames, skills };
 }
 
 /**
@@ -12269,12 +12273,8 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       `${i + 1}. [${s.id}] ${s.title}\n   ${s.description ?? ''}`
     ).join('\n');
 
-    // Resolve model: workspace L3 preferred_model > DEFAULT_MODEL
-    let resolvedModel: string = DEFAULT_MODEL;
+    const specRequestedModel = typeof specContent.model === 'string' ? specContent.model : null;
     const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
-    if (l3Pref?.preferred_model) {
-      resolvedModel = l3Pref.preferred_model;
-    }
 
     const hasEffectiveness = skillEffectivenessSection.length > 0;
     const hasGraphContext = !!skillGraphSection;
@@ -12302,14 +12302,16 @@ ${agentsContext || '(empty)'}
 ## Stories to match
 ${storyList}`;
 
-    const llmResult = await chatComplete(
-      [{ role: 'user', content: prompt }],
-      { model: resolvedModel as any },
-    );
-
     // Parse LLM response — strip markdown fences and prose preamble before JSON
     let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
     try {
+      const completion = await completeMatchSkillsPrompt(prompt, [specRequestedModel, l3Pref?.preferred_model, DEFAULT_MODEL]);
+      const llmResult = completion.result;
+      logger.info(
+        { workspaceId, specId, model: completion.model, source: completion.source },
+        '[Specs] match-skills: LLM candidate selected',
+      );
+
       let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
       // If the LLM added prose before the JSON, extract the first { ... } block
       const jsonStart = cleaned.indexOf('{');
@@ -12322,17 +12324,17 @@ ${storyList}`;
         cleaned = cleaned.slice(0, lastBrace + 1);
       }
       parsed = JSON.parse(cleaned);
-    } catch {
-      await recordRetrievedContextOutcome(workspaceId, matchSkillsRetrievedContext, false);
-      logger.error(`[Specs] match-skills: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
-      res.status(500).json({ error: 'LLM returned invalid JSON for skill matching' });
-      return;
-    }
-
-    if (!Array.isArray(parsed.matches)) {
-      await recordRetrievedContextOutcome(workspaceId, matchSkillsRetrievedContext, false);
-      res.status(500).json({ error: 'LLM response missing matches array' });
-      return;
+      if (!Array.isArray(parsed.matches)) {
+        throw new Error('LLM response missing matches array');
+      }
+    } catch (llmError) {
+      logger.warn({ workspaceId, specId, err: llmError }, '[Specs] match-skills: LLM unavailable — using heuristic fallback');
+      parsed = {
+        matches: heuristicMatchSkills(stories, catalogs.skills).map((match) => ({
+          storyId: match.storyId,
+          suggestedSkills: match.suggestedSkills,
+        })),
+      };
     }
 
     // Build a map of storyId -> suggestedSkills from LLM response
