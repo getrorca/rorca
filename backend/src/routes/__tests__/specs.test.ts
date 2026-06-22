@@ -1454,6 +1454,116 @@ describe('POST /api/specs/persist', () => {
       },
     });
   });
+
+  test('persist detects active post-save workflow conflicts before creating a new save', async () => {
+    const first = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Persist Workflow Conflict',
+        stories: [
+          { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [] },
+        ],
+      });
+
+    expect(first.status).toBe(200);
+
+    const second = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Persist Workflow Conflict',
+        overwrite: true,
+        stories: [
+          { id: 'US-001', title: 'Story', description: 'Updated', acceptanceCriteria: ['AC1'], dependsOn: [] },
+        ],
+      });
+
+    expect(second.status).toBe(409);
+    expect(second.body.error).toContain('active post-save workflow run');
+  });
+
+  test('generate uses the shared persist conflict guard for active pipeline runs', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 90, outputTokens: 120 } });
+    seedSpecFile(path.join(os.tmpdir(), 'forge', 'specs', 'pending'), 'generate-pipeline-conflict', {
+      title: 'Generate Pipeline Conflict',
+      userStories: [
+        { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [] },
+      ],
+    });
+    await execute(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, 'ws-test', 'running')`,
+      ['forge/specs/pending/generate-pipeline-conflict.json'],
+    );
+
+    const res = await request(app)
+      .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Generate Pipeline Conflict',
+        brief: 'Try to regenerate while a pipeline run is active',
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('active pipeline run');
+  });
+
+  test('repair dry-run returns diagnosis instead of 409 when a pipeline run is active', async () => {
+    seedSpecFile(path.join(os.tmpdir(), 'forge', 'specs', 'pending'), 'repair-dry-run-conflict', {
+      title: 'Repair Dry Run Conflict',
+      userStories: [
+        { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [] },
+      ],
+    });
+    await execute(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, 'ws-test', 'running')`,
+      ['forge/specs/pending/repair-dry-run-conflict.json'],
+    );
+
+    const res = await request(app)
+      .post('/api/specs/repair-dry-run-conflict/repair')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', dryRun: true, stages: ['context'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('dry_run');
+    expect(res.body.reasonCodes).toContain('dry_run');
+    expect(res.body.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'seed_generation_log', status: 'skipped', reasonCode: 'dry_run' }),
+    ]));
+  });
+
+  test('repair-batch reuses the shared repair engine and returns machine-readable reason codes', async () => {
+    seedSpecFile(path.join(os.tmpdir(), 'forge', 'specs', 'pending'), 'repair-batch-missing-log', {
+      title: 'Repair Batch Missing Log',
+      userStories: [
+        { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [] },
+      ],
+    });
+
+    const res = await request(app)
+      .post('/api/specs/repair-batch')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        categories: ['missing_generation_log'],
+        limit: 10,
+        dryRun: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.details).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        specId: 'repair-batch-missing-log',
+        status: 'skipped',
+        reasonCode: 'dry_run',
+        repairStatus: 'dry_run',
+      }),
+    ]));
+  });
 });
 
 describe('GET /api/specs (list)', () => {
