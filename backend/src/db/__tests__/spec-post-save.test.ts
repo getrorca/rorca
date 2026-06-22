@@ -335,6 +335,36 @@ describe('spec-post-save durable workflow helpers', () => {
     expect(secondRun.id).toBeGreaterThan(firstRun.id);
   });
 
+  it('locks the v1 migration contract for workflow stage keys and idempotency columns', async () => {
+    const stageConstraint = await pool.query<{ constraintdef: string }>(
+      `SELECT pg_get_constraintdef(oid) AS constraintdef
+       FROM pg_constraint
+       WHERE conname = 'spec_post_save_workflow_stages_stage_key_check'`,
+    );
+    expect(stageConstraint.rows).toHaveLength(1);
+    expect(stageConstraint.rows[0].constraintdef).toContain('context');
+    expect(stageConstraint.rows[0].constraintdef).toContain('enrich');
+    expect(stageConstraint.rows[0].constraintdef).toContain('matchSkills');
+    expect(stageConstraint.rows[0].constraintdef).toContain('memorySynthesis');
+
+    const idempotencyColumns = await pool.query<{ column_name: string }>(
+      `SELECT kcu.column_name
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+       WHERE tc.table_name = 'spec_post_save_workflow_runs'
+         AND tc.constraint_name = 'spec_post_save_workflow_runs_idempotency_unique'
+       ORDER BY kcu.ordinal_position`,
+    );
+    expect(idempotencyColumns.rows.map((row) => row.column_name)).toEqual([
+      'workspace_id',
+      'spec_id',
+      'effective_policy_hash',
+      'idempotency_key',
+    ]);
+  });
+
   it('projects durable stage rows into the legacy postSaveStages shape', () => {
     const now = new Date('2026-06-18T15:00:00.000Z');
     const stages: PostSaveWorkflowStage[] = [

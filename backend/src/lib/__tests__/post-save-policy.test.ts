@@ -62,6 +62,18 @@ describe('resolvePostSavePolicy', () => {
     expect(POST_SAVE_FAILURE_FIELDS).toEqual(['continue', 'fail']);
   });
 
+  test.each([
+    ['fast_import', { context: 'capture', enrich: 'skip', skills: 'skip', memory: 'skip', onFailure: 'continue' }, { enrich: false, matchSkills: false, memorySynthesis: false }],
+    ['best_effort', { context: 'capture', enrich: 'enqueue', skills: 'match', memory: 'synthesize', onFailure: 'continue' }, { enrich: true, matchSkills: true, memorySynthesis: true }],
+    ['skill_first_strict', { context: 'capture', enrich: 'enqueue', skills: 'match', memory: 'synthesize', onFailure: 'fail' }, { enrich: true, matchSkills: true, memorySynthesis: true }],
+    ['enterprise_governed', { context: 'capture', enrich: 'enqueue', skills: 'match', memory: 'synthesize', onFailure: 'fail' }, { enrich: true, matchSkills: true, memorySynthesis: true }],
+    ['repair_only', { context: 'capture', enrich: 'enqueue', skills: 'match', memory: 'skip', onFailure: 'continue' }, { enrich: true, matchSkills: true, memorySynthesis: false }],
+  ] as const)('normalizes preset %s into the stable v1 policy matrix', (presetId, expectedPolicy, expectedLegacyOptions) => {
+    const resolved = resolvePostSavePolicy(presetId);
+    expect(resolved.effectivePolicy).toEqual({ version: 'v1', presetId, ...expectedPolicy });
+    expect(resolved.legacyOptions).toEqual(expectedLegacyOptions);
+  });
+
   test('normalizes stable preset ids', () => {
     const resolved = resolvePostSavePolicy('skill_first_strict');
     expect(resolved.effectivePolicy).toMatchObject({ presetId: 'skill_first_strict', onFailure: 'fail' });
@@ -89,6 +101,28 @@ describe('resolvePostSavePolicy', () => {
       onFailure: 'fail',
     });
     expect(resolved.legacyOptions).toEqual({ enrich: false, matchSkills: true, memorySynthesis: false });
+  });
+
+  test('prefers canonical overrides over preset defaults while preserving preset identity', () => {
+    const resolved = resolvePostSavePolicy({
+      presetId: 'repair_only',
+      context: 'skip',
+      enrich: 'skip',
+      skills: 'skip',
+      memory: 'synthesize',
+      onFailure: 'fail',
+    });
+
+    expect(resolved.effectivePolicy).toEqual({
+      version: 'v1',
+      presetId: 'repair_only',
+      context: 'skip',
+      enrich: 'skip',
+      skills: 'skip',
+      memory: 'synthesize',
+      onFailure: 'fail',
+    });
+    expect(resolved.legacyOptions).toEqual({ enrich: false, matchSkills: false, memorySynthesis: true });
   });
 
   test('rejects invalid preset ids and enum values with ValidationError details', () => {

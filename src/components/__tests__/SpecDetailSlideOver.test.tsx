@@ -5,7 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { describe, it, expect } from 'vitest';
+import { fireEvent, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
 import {
   getGenerationLogPresentation,
   parseContextSummary,
@@ -24,10 +25,12 @@ import {
   workflowTopLevelActionAllowed,
   workflowStageActionAllowed,
   shouldRefreshSpecDetailFromWalEvent,
+  WorkflowChecklistCard,
   type PostSaveStageMap,
   type ContextCaptureStatus,
   type ContextClassification,
 } from '../SpecDetailSlideOver';
+import { renderWithProviders } from '../../test/helpers';
 
 describe('parseContextSummary', () => {
   it('extracts a nested contextSummary from persisted explicit-draft logs', () => {
@@ -850,6 +853,106 @@ describe('PSP-007: workflow action gating helpers', () => {
   it('only exposes stage retry when the backend hint marks it allowed', () => {
     expect(workflowStageActionAllowed(workflow, 'enrich', 'retry_stage')).toBe(true);
     expect(workflowStageActionAllowed(workflow, 'matchSkills', 'retry_stage')).toBe(false);
+  });
+});
+
+describe('PSP-009: workflow checklist rendering', () => {
+  const workflow = {
+    specId: 'spec-1',
+    workspaceId: 'ws-1',
+    persistence: {
+      specPath: 'forge/specs/approved/spec-1.json',
+      location: 'approved',
+      exists: true,
+      latestGenerationLogId: 11,
+      latestGenerationLogStatus: 'persisted',
+      saveGeneration: 11,
+    },
+    workflow: {
+      runId: 99,
+      status: 'queued',
+      source: 'repair',
+      saveGeneration: 11,
+      effectivePolicy: { version: 'v1', presetId: 'repair_only' },
+      idempotencyKey: 'wf-99',
+      createdAt: null,
+      updatedAt: null,
+      finishedAt: null,
+    },
+    reasonCodes: ['no_installed_skills'],
+    stages: [
+      { key: 'context', requested: true, status: 'completed', reasonCode: 'context_captured', reason: 'context_captured', workflowRunId: 99, jobId: null, bossJobId: null, queueName: null, queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+      { key: 'enrich', requested: true, status: 'completed', reasonCode: 'job_completed', reason: 'job_completed', workflowRunId: 99, jobId: 'job-enrich', bossJobId: 'boss-enrich', queueName: 'spec:enrich', queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+      { key: 'matchSkills', requested: true, status: 'failed', reasonCode: 'job_failed', reason: 'job_failed', workflowRunId: 99, jobId: 'job-match', bossJobId: 'boss-match', queueName: 'spec:match-skills', queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: 'missing skill set', updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [{ action: 'retry_stage', target: 'stage', allowed: true, label: 'Retry Match Skills', reasonCode: 'stage_failed', stageKey: 'matchSkills', request: { method: 'POST', path: '/api/specs/spec-1/workflow/stages/matchSkills/retry', workspaceIdLocation: 'body' } }] },
+      { key: 'memorySynthesis', requested: false, status: 'skipped', reasonCode: 'disabled_by_policy', reason: 'disabled_by_policy', workflowRunId: 99, jobId: null, bossJobId: null, queueName: null, queueStatus: null, queuePosition: null, activeJobsAhead: null, queuePriority: null, singletonKey: null, error: null, updatedAt: null, startedAt: null, finishedAt: null, safeActionHints: [] },
+    ],
+    safeActionHints: [],
+  } as any;
+
+  const readiness = {
+    specId: 'spec-1',
+    workspaceId: 'ws-1',
+    persistence: {
+      workspaceId: 'ws-1',
+      specId: 'spec-1',
+      specPath: 'forge/specs/approved/spec-1.json',
+      location: 'approved',
+      exists: true,
+      latestGenerationLogId: 11,
+      latestGenerationLogStatus: 'persisted',
+      saveGeneration: 11,
+      contextCapture: { status: 'provided', reason: 'caller_supplied_context' },
+    },
+    workflow: workflow.workflow,
+    stages: workflow.stages,
+    readinessState: { status: 'degraded', reason: 'degraded' },
+    executionGate: { status: 'allowed', overrideAllowed: false, overrideReasonCode: 'run_anyway_override_used' },
+    blockingReasons: [],
+    warnings: [{ code: 'no_installed_skills', message: 'Skill matching was skipped because no installed skills were available.', severity: 'warning' }],
+    availableActions: ['install_skills'],
+    reasonCodes: ['no_installed_skills'],
+    safeActionHints: [],
+  } as any;
+
+  it('renders the v1 checklist, policy label, exact stage rows, and install-skills helper', () => {
+    const onOpenSkillsTab = vi.fn();
+    renderWithProviders(
+      <WorkflowChecklistCard
+        specId="spec-1"
+        workspaceId="ws-1"
+        workflow={workflow}
+        readiness={readiness}
+        onOpenSkillsTab={onOpenSkillsTab}
+      />,
+    );
+
+    expect(screen.getByTestId('workflow-policy-label')).toHaveTextContent('Policy · repair_only');
+    expect(screen.getByTestId('workflow-summary-saved')).toHaveTextContent('Approved');
+    expect(screen.getByTestId('workflow-summary-readiness')).toHaveTextContent('Degraded');
+    expect(screen.getByTestId('workflow-stage-context')).toHaveTextContent('Context');
+    expect(screen.getByTestId('workflow-stage-enrich')).toHaveTextContent('Enrich');
+    expect(screen.getByTestId('workflow-stage-matchSkills')).toHaveTextContent('Match Skills');
+    expect(screen.getByTestId('workflow-stage-memorySynthesis')).toHaveTextContent('Memory Synthesis');
+    expect(screen.getByTestId('workflow-stage-reason-code-matchSkills')).toHaveTextContent('job_failed');
+    expect(screen.getByTestId('workflow-install-skills-help')).toHaveTextContent('Install skills help available');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review skills' }));
+    expect(onOpenSkillsTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps retry actions visible but disabled while a run is active', () => {
+    renderWithProviders(
+      <WorkflowChecklistCard
+        specId="spec-1"
+        workspaceId="ws-1"
+        workflow={workflow}
+        readiness={readiness}
+        activeRunStatus="running"
+      />,
+    );
+
+    expect(screen.getByTestId('workflow-stage-retry-matchSkills')).toBeDisabled();
+    expect(screen.queryByTestId('workflow-stage-retry-memorySynthesis')).toBeNull();
   });
 });
 

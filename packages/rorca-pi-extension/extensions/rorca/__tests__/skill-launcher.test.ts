@@ -20,6 +20,26 @@ describe("rorca skill launcher", () => {
     ]);
   });
 
+  it("adds approve/run tool groups when forge flows request end-to-end launch", () => {
+    expect(getRequiredToolGroups({
+      workflow: "forge",
+      skillName: "rorca-forge-run",
+      workspaceId: "cashflow",
+      brief: "Ship OAuth login",
+      briefSource: "inline",
+      autoApprove: true,
+      autoRun: true,
+      queue: true,
+    })).toEqual([
+      ["rorca_specs_generation_context"],
+      ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
+      ["getSpec", "rorca_get_specs_by_specId"],
+      ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
+      ["rorca_approve_spec", "rorca_specs_by_specId_approve"],
+      ["rorca_trigger_run", "rorca_pipeline_trigger"],
+    ]);
+  });
+
   it("pins the forge prompt to context forwarding, explicit policy passing, workflow/readiness verification, and repair-only fallback semantics", () => {
     const prompt = formatSkillLaunchPrompt({
       workflow: "forge",
@@ -36,8 +56,11 @@ describe("rorca skill launcher", () => {
     expect(prompt).toContain("forgeSequence: [rorca_specs_generation_context, draft_in_pi, rorca_create_spec, get_saved_spec, inspect_workflow_or_readiness, verify_saved_spec]");
     expect(prompt).toContain("contextContract: fetch rorca_specs_generation_context before persistence, then forward its contextUsed and contextSummary into rorca_create_spec or rorca_persist_spec");
     expect(prompt).toContain("policyContract: persist with explicit policy metadata by passing either policyPresetId or postSavePolicy derived from the effective post-save policy/postSaveDefaults bundle, and report which preset or effective policy was used");
+    expect(prompt).toContain("policyPresetId");
     expect(prompt).toContain("postSaveContract: keep post-save enrich and matchSkills enabled by forwarding the bundle defaults as explicit policy intent unless the launcher or user explicitly requests an opt-out");
     expect(prompt).toContain("verificationContract: after persistence, read the saved spec plus rorca_spec_workflow or rorca_spec_readiness and classify each story skill state as present, pending, skipped:no_installed_skills, or failed:<retryable_reason>; never treat slug creation alone as proof that skill enrichment succeeded");
+    expect(prompt).toContain("skipped:no_installed_skills");
+    expect(prompt).toContain("failed:<retryable_reason>");
     expect(prompt).toContain("fallbackContract: backend/server contextSummary backfill is a repair-only fallback and must not be treated as the normal creation contract or as a substitute for caller-observed drafting context");
     expect(prompt).toContain("availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, getSpec, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness");
 

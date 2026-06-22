@@ -141,6 +141,65 @@ async function seedGenerationLog(specId: string, options: {
   );
 }
 
+async function seedDurableWorkflowRun(specId: string, stages: {
+  context?: { requested: boolean; status: string; reason: string };
+  enrich?: { requested: boolean; status: string; reason: string };
+  matchSkills?: { requested: boolean; status: string; reason: string };
+  memorySynthesis?: { requested: boolean; status: string; reason: string };
+}, runStatus: 'completed' | 'failed' = 'completed') {
+  const log = await queryOne<{ id: number; save_generation: string | number | null }>(
+    `SELECT id, COALESCE(save_generation, id::bigint) AS save_generation
+     FROM spec_generation_logs
+     WHERE spec_slug = $1
+     ORDER BY id DESC
+     LIMIT 1`,
+    [specId],
+  );
+  if (!log) throw new Error(`missing generation log for ${specId}`);
+
+  const insertedRun = await queryOne<{ id: number }>(
+    `INSERT INTO spec_post_save_workflow_runs (
+       workspace_id,
+       spec_id,
+       generation_log_id,
+       save_generation,
+       effective_policy_hash,
+       effective_policy,
+       idempotency_key,
+       status,
+       source,
+       finished_at
+     ) VALUES ($1, $2, $3, $4, 'test-policy-hash', $5::jsonb, $6, $7, 'repair', CASE WHEN $7 IN ('completed', 'failed') THEN NOW() ELSE NULL END)
+     RETURNING id`,
+    [
+      WORKSPACE_ID,
+      specId,
+      log.id,
+      Number(log.save_generation),
+      JSON.stringify({ version: 'v1', presetId: 'best_effort', context: 'capture', enrich: 'enqueue', skills: 'match', memory: 'synthesize', onFailure: 'continue' }),
+      `test:${specId}:${Number(log.save_generation)}`,
+      runStatus,
+    ],
+  );
+  const runId = insertedRun?.id;
+  if (!runId) throw new Error(`failed to insert workflow run for ${specId}`);
+
+  const allStages = {
+    context: { requested: true, status: 'completed', reason: 'context_captured', ...stages.context },
+    enrich: { requested: true, status: 'completed', reason: 'job_completed', ...stages.enrich },
+    matchSkills: { requested: true, status: 'completed', reason: 'job_completed', ...stages.matchSkills },
+    memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_policy', ...stages.memorySynthesis },
+  };
+
+  for (const [stageKey, stage] of Object.entries(allStages)) {
+    await execute(
+      `INSERT INTO spec_post_save_workflow_stages (run_id, stage_key, requested, status, reason, finished_at)
+       VALUES ($1, $2, $3, $4, $5, CASE WHEN $4 IN ('completed', 'failed', 'skipped') THEN NOW() ELSE NULL END)`,
+      [runId, stageKey, stage.requested, stage.status, stage.reason],
+    );
+  }
+}
+
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
@@ -159,7 +218,9 @@ beforeEach(async () => {
   const tablesToClean = [
     'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
     'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
-    'workspace_context', 'direction_layers', 'batch_spec_generation', 'spec_jobs',
+    'workspace_context', 'direction_layers', 'batch_spec_generation',
+    'spec_post_save_stage_dependencies', 'spec_post_save_workflow_stages', 'spec_post_save_workflow_runs',
+    'spec_jobs',
   ];
   for (const t of tablesToClean) {
     await execute(`TRUNCATE ${t} CASCADE`).catch(() => {});
@@ -234,12 +295,13 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
     expect(res.body.error).toMatch(/active pipeline run/i);
   });
 
-  test('healthy spec returns all-skipped actions and healthy=true', async () => {
+  test('healthy spec with a durable workflow returns a true no-op repair result', async () => {
     writeSpecFile(os.tmpdir(), 'healthy-spec');
     await seedGenerationLog('healthy-spec', {
       enrichStatus: 'completed',
       matchSkillsStatus: 'completed',
     });
+    await seedDurableWorkflowRun('healthy-spec', {});
 
     const res = await request(app)
       .post('/api/specs/healthy-spec/repair')
@@ -248,15 +310,14 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.healthy).toBe(true);
+    expect(res.body.status).toBe('no_op');
     expect(res.body.specId).toBe('healthy-spec');
     expect(res.body.diagnosis.missingGenerationLog).toBe(false);
-    expect(res.body.diagnosis.missingContextSummary).toBe(false);
-    expect(res.body.diagnosis.enrichNeedsRepair).toBe(false);
-    expect(res.body.diagnosis.matchSkillsNeedsRepair).toBe(false);
+    expect(res.body.diagnosis.missingWorkflowRun).toBe(false);
     expect(res.body.actions.every((a: { status: string }) => a.status === 'skipped')).toBe(true);
   });
 
-  test('missing generation log is seeded', async () => {
+  test('missing generation log is seeded before repair reports an active workflow conflict', async () => {
     writeSpecFile(os.tmpdir(), 'no-log-spec');
     // No generation log seeded
 
@@ -265,15 +326,15 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: WORKSPACE_ID });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(409);
+    expect(res.body.status).toBe('conflict');
     expect(res.body.healthy).toBe(false);
-    expect(res.body.diagnosis.missingGenerationLog).toBe(true);
 
     const seedAction = res.body.actions.find((a: { action: string }) => a.action === 'seed_generation_log');
     expect(seedAction).toBeDefined();
     expect(seedAction.status).toBe('repaired');
+    expect(res.body.conflict).toMatchObject({ reasonCode: 'active_workflow_run' });
 
-    // Verify generation log was actually created in DB
     const log = await queryOne<{ spec_slug: string; context_summary_json: unknown }>(
       'SELECT spec_slug, context_summary_json FROM spec_generation_logs WHERE spec_slug = $1',
       ['no-log-spec'],
@@ -286,13 +347,16 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
     writeSpecFile(os.tmpdir(), 'failed-enrich-spec');
     await seedGenerationLog('failed-enrich-spec', {
       enrichStatus: 'failed',
-      matchSkillsStatus: 'failed',
+      matchSkillsStatus: 'completed',
     });
+    await seedDurableWorkflowRun('failed-enrich-spec', {
+      enrich: { requested: true, status: 'failed', reason: 'job_failed' },
+    }, 'failed');
 
     const res = await request(app)
       .post('/api/specs/failed-enrich-spec/repair')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: WORKSPACE_ID });
+      .send({ workspaceId: WORKSPACE_ID, stages: ['enrich'] });
 
     expect(res.status).toBe(200);
     expect(res.body.healthy).toBe(false);
@@ -353,14 +417,14 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
     expect(log).toBeUndefined();
   });
 
-  test('idempotency — second repair on already-repaired spec is no-op', async () => {
+  test('idempotency — repeated repair on a durably healthy spec stays no-op', async () => {
     writeSpecFile(os.tmpdir(), 'idem-spec');
     await seedGenerationLog('idem-spec', {
       enrichStatus: 'completed',
       matchSkillsStatus: 'completed',
     });
+    await seedDurableWorkflowRun('idem-spec', {});
 
-    // First repair
     const res1 = await request(app)
       .post('/api/specs/idem-spec/repair')
       .set('Authorization', `Bearer ${authToken}`)
@@ -368,8 +432,8 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
 
     expect(res1.status).toBe(200);
     expect(res1.body.healthy).toBe(true);
+    expect(res1.body.status).toBe('no_op');
 
-    // Second repair — should also be healthy/no-op
     const res2 = await request(app)
       .post('/api/specs/idem-spec/repair')
       .set('Authorization', `Bearer ${authToken}`)
@@ -377,6 +441,7 @@ describe('PSE-005: POST /api/specs/:specId/repair', () => {
 
     expect(res2.status).toBe(200);
     expect(res2.body.healthy).toBe(true);
+    expect(res2.body.status).toBe('no_op');
     expect(res2.body.actions.every((a: { status: string }) => a.status === 'skipped')).toBe(true);
   });
 
@@ -515,6 +580,59 @@ describe('workflow/readiness exact surfaces', () => {
       expect.objectContaining({ key: 'matchSkills', bossJobId: expect.any(String) }),
     ]));
     expect(res.body.readiness.reasonCodes).toContain('post_save_pending');
+  });
+
+  test('POST /api/specs/:specId/workflow/stages/:stageKey/retry backfills legacy generation-log state into a durable workflow run', async () => {
+    writeSpecFile(os.tmpdir(), 'legacy-backfill-spec');
+    await seedGenerationLog('legacy-backfill-spec', {
+      enrichStatus: 'completed',
+      matchSkillsStatus: 'failed',
+    });
+
+    const before = await queryOne<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM spec_post_save_workflow_runs WHERE workspace_id = $1 AND spec_id = $2`,
+      [WORKSPACE_ID, 'legacy-backfill-spec'],
+    );
+    expect(Number(before?.count ?? '0')).toBe(0);
+
+    const retryRes = await request(app)
+      .post('/api/specs/legacy-backfill-spec/workflow/stages/matchSkills/retry')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID, policyPresetId: 'repair_only' });
+
+    expect(retryRes.status).toBe(200);
+    expect(retryRes.body.workflow.workflow.runId).toEqual(expect.any(Number));
+
+    const runId = retryRes.body.workflow.workflow.runId as number;
+    const persistedRun = await queryOne<{ effective_policy: unknown }>(
+      `SELECT effective_policy FROM spec_post_save_workflow_runs WHERE id = $1`,
+      [runId],
+    );
+    expect(persistedRun?.effective_policy).toMatchObject({
+      version: 'v1',
+      presetId: 'repair_only',
+      enrich: 'skip',
+      skills: 'match',
+      memory: 'skip',
+    });
+
+    const persistedStages = await queryOne<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM spec_post_save_workflow_stages WHERE run_id = $1`,
+      [runId],
+    );
+    expect(Number(persistedStages?.count ?? '0')).toBe(4);
+
+    const workflowRes = await request(app)
+      .get(`/api/specs/legacy-backfill-spec/workflow?workspaceId=${WORKSPACE_ID}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(workflowRes.status).toBe(200);
+    expect(workflowRes.body.workflow.runId).toBe(runId);
+    expect(workflowRes.body.stages.map((stage: { key: string }) => stage.key)).toEqual(['context', 'enrich', 'matchSkills', 'memorySynthesis']);
+    expect(workflowRes.body.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'context', status: 'completed', reasonCode: 'context_captured' }),
+      expect.objectContaining({ key: 'matchSkills', requested: true, status: expect.stringMatching(/queued|pending|running/) }),
+    ]));
   });
 
   test('POST /api/specs/repair-batch returns the same durable workflow/readiness model plus requestedPolicy', async () => {

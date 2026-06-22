@@ -2170,7 +2170,7 @@ function ContextCaptureCard({ status }: { status: ContextCaptureStatus }) {
   );
 }
 
-function WorkflowChecklistCard({
+export function WorkflowChecklistCard({
   specId,
   workspaceId,
   workflow,
