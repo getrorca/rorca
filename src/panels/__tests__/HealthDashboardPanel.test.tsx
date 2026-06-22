@@ -49,6 +49,24 @@ const MOCK_HEALTH_BASIC = {
 const MOCK_HEALTH_DETAILED = {
   ...MOCK_HEALTH_BASIC,
   db_size: 1024 * 1024 * 5, // 5 MB
+  dbMode: 'docker',
+  graphMode: 'lite',
+  graphWarnings: ['Run `rorca db start` to ensure the Docker Postgres sidecar is ready with Apache AGE enabled.'],
+  databaseCapability: {
+    dbMode: 'docker',
+    provider: 'docker-postgres',
+    extensions: { age: false, vector: true, pgcrypto: true },
+    graphMode: 'lite',
+    warnings: ['Run `rorca db start` to ensure the Docker Postgres sidecar is ready with Apache AGE enabled.'],
+    connection: {
+      url: 'postgres://localhost:5432/rorca',
+      host: 'localhost',
+      port: 5432,
+      database: 'rorca',
+      local: true,
+    },
+    connected: true,
+  },
   pending_specs_count: 2,
   memory_usage: {
     rss: 1024 * 1024 * 100,
@@ -228,16 +246,17 @@ beforeEach(() => {
   localStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.removeItem('rorca_memory_analytics_drilldown');
-  vi.stubGlobal('fetch', vi.fn(async () => ({
-    json: async () => MOCK_HEALTH_DETAILED,
-  })) as unknown as typeof fetch);
-  mockApiFetch.mockResolvedValue({ items: [], total: 0, hasMore: false });
+  mockApiFetch.mockImplementation(async (path: string) => {
+    if (path === '/api/health/detailed') return MOCK_HEALTH_DETAILED;
+    return { items: [], total: 0, hasMore: false } as never;
+  });
 });
 
 describe('HealthDashboardPanel', () => {
   it('renders ontology health metrics and drilldowns on the analytics surface', async () => {
     const user = userEvent.setup();
     mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/health/detailed') return MOCK_HEALTH_DETAILED;
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
       if (path === '/api/analytics/ontology-health?workspace_id=ws-1') return MOCK_ONTOLOGY_HEALTH;
       if (path === '/api/workspaces/ws-1/health') return { ...MOCK_WORKSPACE_HEALTH, semantic: undefined };
@@ -248,6 +267,8 @@ describe('HealthDashboardPanel', () => {
     renderWithProviders(<HealthDashboardPanel />);
 
     expect(await screen.findByText('Ontology Health')).toBeInTheDocument();
+    expect(screen.getByText('Docker Postgres')).toBeInTheDocument();
+    expect(screen.getAllByText('Graph Lite').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Active conflicts').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Hotspot density').length).toBeGreaterThan(0);
     expect(screen.getByText('Direction Stack says follow the old flow.')).toBeInTheDocument();
@@ -264,6 +285,7 @@ describe('HealthDashboardPanel', () => {
 
   it('shows explicit SQL fallback copy when AGE-backed ontology data is unavailable', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/health/detailed') return MOCK_HEALTH_DETAILED;
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
       if (path === '/api/analytics/ontology-health?workspace_id=ws-1') {
         return {
@@ -286,6 +308,7 @@ describe('HealthDashboardPanel', () => {
 
   it('shows ontology unavailable copy when the analytics endpoint fails', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/health/detailed') return MOCK_HEALTH_DETAILED;
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
       if (path === '/api/analytics/ontology-health?workspace_id=ws-1') throw new Error('Ontology request failed');
       if (path === '/api/workspaces/ws-1/health') return { ...MOCK_WORKSPACE_HEALTH, semantic: undefined };

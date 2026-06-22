@@ -8,9 +8,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle, ShieldCheck, ChevronDown, ChevronRight, Loader2, Network, Braces, Search, Zap, GitMerge, Flame, History, ArrowRight } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { BASE_URL, apiFetch } from '../lib/apiFetch';
+import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAppNavigate } from '../routes';
+import type { DatabaseCapability } from '../contexts/CapabilitiesContext';
+import { GraphCapabilityNotice, dbModeLabel, graphModeLabel } from '../components/GraphCapabilityNotice';
 import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, type MemoryAnalyticsDrilldown, type MemoryAnalyticsDrilldownMetric } from '../lib/memoryAnalyticsDrilldown';
 
 interface HealthBasic {
@@ -24,6 +26,10 @@ interface HealthBasic {
 
 interface HealthDetailed extends HealthBasic {
   db_size: number;
+  dbMode?: DatabaseCapability['dbMode'];
+  graphMode?: DatabaseCapability['graphMode'];
+  graphWarnings?: string[];
+  databaseCapability?: DatabaseCapability;
   pending_specs_count: number;
   memory_usage: {
     rss: number;
@@ -237,8 +243,7 @@ export default function HealthDashboardPanel() {
 
   const fetchHealth = useCallback(async () => {
     try {
-      const res = await fetch(`${BASE_URL}/api/health/detailed`);
-      const data = await res.json() as HealthDetailed;
+      const data = await apiFetch<HealthDetailed>('/api/health/detailed', { silent: true });
       setHealth(data);
       setError(null);
 
@@ -471,7 +476,7 @@ export default function HealthDashboardPanel() {
 
       {/* Error banner */}
       {error && (
-        <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded text-red-400 text-sm">
+        <div className="flex items-center gap-2 rounded border border-error/30 bg-error/10 p-3 text-sm text-error">
           <AlertTriangle size={16} />
           Backend unreachable: {error}
         </div>
@@ -506,6 +511,32 @@ export default function HealthDashboardPanel() {
               )}
             </div>
           </div>
+
+          {health.databaseCapability && (
+            <div className="space-y-3 rounded-lg border border-border bg-panel p-4">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+                <span className="inline-flex items-center rounded-full border border-border bg-surface-200 px-2 py-0.5 font-medium text-[var(--text)]">
+                  {dbModeLabel(health.databaseCapability.dbMode)}
+                </span>
+                <span className="inline-flex items-center rounded-full border border-border bg-surface-200 px-2 py-0.5 font-medium text-[var(--text)]">
+                  {graphModeLabel(health.databaseCapability.graphMode)}
+                </span>
+                <span className="inline-flex items-center rounded-full border border-border bg-surface-200 px-2 py-0.5 font-medium">
+                  {health.databaseCapability.provider}
+                </span>
+              </div>
+              {health.databaseCapability.graphMode !== 'full' && (
+                <GraphCapabilityNotice
+                  graphMode={health.databaseCapability.graphMode}
+                  dbMode={health.databaseCapability.dbMode}
+                  message={health.databaseCapability.graphMode === 'lite'
+                    ? 'Health checks confirm Graph Lite is active. Graph panels should keep showing fallback data instead of failing outright.'
+                    : 'Health checks show the active database is unavailable, so graph views are paused until PostgreSQL reconnects.'}
+                  hint={health.databaseCapability.warnings[0] ?? undefined}
+                />
+              )}
+            </div>
+          )}
 
           {/* Metric cards */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">

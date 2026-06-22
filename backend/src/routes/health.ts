@@ -158,6 +158,11 @@ function getMcpBridgeHealth(): {
  *                 uptime: { type: integer, description: "Uptime in seconds" }
  *                 db_connected: { type: boolean }
  *                 active_runs: { type: integer }
+ *                 dbMode: { type: string, enum: [native, docker, byop] }
+ *                 graphMode: { type: string, enum: [full, lite, disabled] }
+ *                 graphWarnings:
+ *                   type: array
+ *                   items: { type: string }
  *                 agentType: { type: string }
  *                 agentModel: { type: string, nullable: true }
  *                 mcpTransport: { type: string }
@@ -199,6 +204,9 @@ function getMcpBridgeHealth(): {
  *                       properties:
  *                         installed: { type: boolean }
  *                         version: { type: string }
+ *                 databaseCapability:
+ *                   type: object
+ *                   description: Canonical redacted database capability contract for DB mode, connection metadata, graph mode, and extension availability.
  *                 components:
  *                   type: object
  *                   properties:
@@ -261,6 +269,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         error: 'Database unreachable',
         version: VERSION,
         uptime: Math.floor((Date.now() - startTime) / 1000),
+        dbMode: databaseCapability.dbMode,
+        graphMode: databaseCapability.graphMode,
+        graphWarnings: databaseCapability.warnings,
         databaseCapability,
       });
     }
@@ -302,6 +313,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       database: 'postgresql',
       db_connected: dbConnected,
       active_runs: activeRuns,
+      dbMode: databaseCapability.dbMode,
+      graphMode: databaseCapability.graphMode,
+      graphWarnings: databaseCapability.warnings,
       agentType: activeAgent,
       agentModel: activeModel,
       db: rawDbHealth.poolStats,
@@ -618,7 +632,9 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
  *     tags: [Health]
  *     summary: Detailed health check with extended metrics
  *     operationId: getHealthDetailed
- *     description: Returns extended health metrics including pending spec count, memory usage, last backup timestamp, and execution engine status.
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Detailed health diagnostics remain read-only and are safe for local tooling that needs richer readiness and environment context before invoking workflows."
+ *     description: Returns extended health metrics including pending spec count, memory usage, last backup timestamp, database mode, graph mode, and execution engine status.
  *     responses:
  *       200:
  *         description: Detailed health metrics
@@ -632,6 +648,11 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
  *                 uptime: { type: integer }
  *                 db_connected: { type: boolean }
  *                 active_runs: { type: integer }
+ *                 dbMode: { type: string, enum: [native, docker, byop] }
+ *                 graphMode: { type: string, enum: [full, lite, disabled] }
+ *                 graphWarnings:
+ *                   type: array
+ *                   items: { type: string }
  *                 pending_specs_count: { type: integer }
  *                 memory_usage:
  *                   type: object
@@ -641,6 +662,9 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
  *                     heapUsed: { type: integer }
  *                     external: { type: integer }
  *                 last_backup_at: { type: string, nullable: true }
+ *                 databaseCapability:
+ *                   type: object
+ *                   description: Canonical redacted database capability contract for DB mode, connection metadata, graph mode, and extension availability.
  *       503:
  *         description: Server is degraded
  */
@@ -716,6 +740,9 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       uptime: Math.floor((Date.now() - startTime) / 1000),
       db_connected: dbConnected,
       active_runs: activeRuns,
+      dbMode: databaseCapability.dbMode,
+      graphMode: databaseCapability.graphMode,
+      graphWarnings: databaseCapability.warnings,
       pending_specs_count: pendingSpecsCount,
       memory_usage: memoryUsage,
       last_backup_at: lastBackupAt,

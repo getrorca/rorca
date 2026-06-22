@@ -19,6 +19,7 @@
 
 import React, { useMemo, useState, useRef, useCallback } from 'react';
 import { computeRadialLayout } from '../lib/radial-layout';
+import { GraphCapabilityNotice, runtimeToNoticeProps } from './GraphCapabilityNotice';
 import {
   nodeVisualState,
   edgeCssClass,
@@ -255,9 +256,10 @@ interface FallbackProps {
   state: GraphLoadingState;
   error?: string | null;
   fallback?: RelevanceGraphFallback;
+  runtime?: SpecRelevanceGraphResponse['runtime'] | null;
 }
 
-function FallbackState({ state, error, fallback }: FallbackProps) {
+function FallbackState({ state, error, fallback, runtime }: FallbackProps) {
   switch (state) {
     case 'loading':
       return (
@@ -283,13 +285,16 @@ function FallbackState({ state, error, fallback }: FallbackProps) {
     case 'empty':
       return (
         <div
-          className="srg-fallback flex flex-col items-center justify-center p-8"
+          className="srg-fallback flex flex-col items-center justify-center gap-3 p-8"
           role="status"
           aria-label="No graph data available"
           data-testid="srg-state-empty"
         >
+          {runtime ? <GraphCapabilityNotice {...(runtimeToNoticeProps(runtime) ?? { graphMode: runtime.graphMode })} compact className="w-full max-w-2xl text-left" /> : null}
           <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-            No relevance data available for this context.
+            {runtime?.graphMode === 'lite'
+              ? 'Graph Lite is active, but no relevance graph data was captured for this context yet.'
+              : 'No relevance data available for this context.'}
           </p>
         </div>
       );
@@ -297,13 +302,16 @@ function FallbackState({ state, error, fallback }: FallbackProps) {
     case 'unavailable':
       return (
         <div
-          className="srg-fallback flex flex-col items-center justify-center p-8"
+          className="srg-fallback flex flex-col items-center justify-center gap-3 p-8"
           role="status"
           aria-label="Relevance graph unavailable"
           data-testid="srg-state-unavailable"
         >
-          <p className="text-sm mb-2" style={{ color: 'var(--text-muted)' }}>
-            {fallback?.missingReasons[0] ?? 'Relevance graph is currently unavailable.'}
+          {runtime ? <GraphCapabilityNotice {...(runtimeToNoticeProps(runtime) ?? { graphMode: runtime.graphMode })} className="w-full max-w-2xl text-left" /> : null}
+          <p className="text-sm mb-1" style={{ color: 'var(--text-muted)' }}>
+            {runtime?.graphMode === 'lite'
+              ? 'Full graph-path evidence was unavailable for this result.'
+              : fallback?.missingReasons[0] ?? 'Relevance graph is currently unavailable.'}
           </p>
           {fallback && fallback.missingReasons.length > 0 && (
             <ul className="text-xs list-disc pl-4" style={{ color: 'var(--text-muted)' }}>
@@ -372,6 +380,7 @@ export default function SpecRelevanceGraph({
         state={state}
         error={error}
         fallback={data?.fallback}
+        runtime={data?.runtime ?? null}
       />
     );
   }
@@ -384,6 +393,13 @@ export default function SpecRelevanceGraph({
 
   return (
     <div className="srg-container flex flex-col gap-3" data-testid="srg-container">
+      {data.runtime.graphMode !== 'full' && (
+        <GraphCapabilityNotice
+          {...(runtimeToNoticeProps(data.runtime) ?? { graphMode: data.runtime.graphMode })}
+          compact
+        />
+      )}
+
       {/* Summary header */}
       <div
         className="srg-summary flex flex-wrap gap-4 text-xs px-2"
@@ -458,14 +474,14 @@ export default function SpecRelevanceGraph({
         <NodeDetailPopover node={focusedNode} />
       )}
 
-      {data.runtime.graphMode !== 'full' && (
+      {data.runtime.graphMode !== 'full' && data.fallback.missingReasons.length > 0 && (
         <div
           className="px-2 py-1 text-xs rounded"
           style={{ color: 'var(--text-muted)', background: 'var(--surface-200)' }}
           role="status"
           aria-label="Graph runtime"
         >
-          {data.runtime.message}
+          {data.fallback.missingReasons[0]}
         </div>
       )}
 

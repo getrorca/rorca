@@ -10,6 +10,7 @@ import { ChevronDown, ChevronRight, Loader2, Brain, BookOpen, GitBranch, AlertCi
 import { apiFetch } from '../lib/apiFetch';
 import { useCapabilities } from '../contexts/CapabilitiesContext';
 import DependencyGraph from './DependencyGraph';
+import { GraphCapabilityNotice, runtimeToNoticeProps } from './GraphCapabilityNotice';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -96,6 +97,16 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
       if (err?.code === 'AGE_NOT_INSTALLED') {
         setData({
           available: false,
+          runtime: {
+            graphMode: databaseCapability?.graphMode ?? 'lite',
+            provider: (databaseCapability?.graphMode ?? 'lite') === 'disabled' ? 'none' : 'relational',
+            ageAvailable: databaseCapability?.extensions.age ?? false,
+            hint: databaseCapability?.warnings?.[0]
+              ?? 'To get Full Graph back, switch to local or Docker Postgres with Apache AGE.',
+            message: (databaseCapability?.graphMode ?? 'lite') === 'disabled'
+              ? 'The active database connection is unavailable, so graph views are paused for now.'
+              : 'Graph Lite is active. This tab is using relational fallback data until Apache AGE is available again.',
+          },
           memories: [],
           conventions: [],
           relatedStories: [],
@@ -106,7 +117,7 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
     } finally {
       setLoading(false);
     }
-  }, [specId, workspaceId]);
+  }, [databaseCapability, specId, workspaceId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -126,23 +137,24 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
     );
   }
 
-  if (!data?.available) {
-    const graphMode = data?.runtime?.graphMode ?? databaseCapability?.graphMode ?? 'lite';
-    const message = data?.runtime?.message;
-    const hint = data?.runtime?.hint ?? databaseCapability?.warnings?.[0];
+  const graphMode = data?.runtime?.graphMode ?? databaseCapability?.graphMode ?? 'lite';
+  const runtimeNotice = runtimeToNoticeProps(data?.runtime, databaseCapability?.dbMode);
 
+  if (!data?.available) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-muted">
-        <AlertCircle size={32} className="mb-3 opacity-40" />
-        <p className="text-sm font-medium">
-          {graphMode === 'disabled' ? 'Knowledge graph disabled' : 'Knowledge graph in lite mode'}
-        </p>
-        <p className="text-xs mt-1 opacity-70 text-center max-w-sm">
-          {message ?? (graphMode === 'disabled'
-            ? 'The active database is unreachable or still starting up, so graph features are temporarily disabled.'
-            : 'Apache AGE is unavailable in the current database mode, so this tab is using a lighter fallback.')}
-        </p>
-        {hint ? <p className="text-[11px] mt-2 opacity-60 text-center max-w-sm">{hint}</p> : null}
+      <div className="p-3 space-y-4">
+        {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} /> : null}
+        <div className="flex flex-col items-center justify-center py-12 text-muted">
+          <AlertCircle size={32} className="mb-3 opacity-40" />
+          <p className="text-sm font-medium text-[var(--text)]">
+            {graphMode === 'disabled' ? 'Knowledge Graph is paused for now' : 'Knowledge Graph fallback is ready'}
+          </p>
+          <p className="mt-1 max-w-sm text-center text-xs opacity-80">
+            {graphMode === 'disabled'
+              ? 'Reconnect PostgreSQL and this tab will resume automatically.'
+              : 'This spec does not have fallback graph records yet, but Graph Lite remains available once related data is captured.'}
+          </p>
+        </div>
       </div>
     );
   }
@@ -151,23 +163,27 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
 
   if (!hasData) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-muted">
-        <Brain size={32} className="mb-3 opacity-40" />
-        <p className="text-sm font-medium">No graph data yet</p>
-        <p className="text-xs mt-1 opacity-70">
-          {data.runtime?.graphMode === 'lite'
-            ? 'Graph Lite is active, but no relational graph context has been captured for this spec yet.'
-            : 'Run this spec to populate the knowledge graph.'}
-        </p>
+      <div className="p-3 space-y-4">
+        {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} /> : null}
+        <div className="flex flex-col items-center justify-center py-12 text-muted">
+          <Brain size={32} className="mb-3 opacity-40" />
+          <p className="text-sm font-medium text-[var(--text)]">No graph data yet</p>
+          <p className="mt-1 max-w-sm text-center text-xs opacity-80">
+            {graphMode === 'lite'
+              ? 'Graph Lite is active, but no fallback knowledge-graph context has been captured for this spec yet.'
+              : 'Run this spec to populate the knowledge graph.'}
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="p-3 space-y-3">
+      {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} compact /> : null}
       <div className="rounded-lg border border-border bg-panel/60 px-3 py-2 text-[11px] text-muted">
         {data.runtime?.graphMode === 'lite'
-          ? `Graph Lite fallback active: ${data.runtime.message}`
+          ? 'Graph Lite keeps this tab useful with relational fallback data while AGE-backed graph paths are unavailable.'
           : 'Semantic-only surface: this tab visualizes raw knowledge-graph links and does not yet apply GraphRAG scoring v1. Scored retrieval currently flows through recall, context assembly, and story prompt-building surfaces.'}
       </div>
       {data.memories.length > 0 && (

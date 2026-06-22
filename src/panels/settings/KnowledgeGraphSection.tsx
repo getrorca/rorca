@@ -11,6 +11,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useWalSSE, type WalEvent } from '../../hooks/useWalSSE';
 import type { DatabaseCapability } from '../../contexts/CapabilitiesContext';
+import { GraphCapabilityNotice, dbModeLabel, graphModeLabel } from '../../components/GraphCapabilityNotice';
 
 /* ─── Types ───────────────────────────────────────────────────────────────── */
 
@@ -112,29 +113,29 @@ function formatScore(score: number): string {
 }
 
 function decisionBadgeClass(decision?: RetrievalDebugCandidate['decision']): string {
-  if (decision === 'drop') return 'border-amber-500/20 bg-amber-500/10 text-amber-400';
-  if (decision === 'conflict') return 'border-red-500/20 bg-red-500/10 text-red-300';
-  if (decision === 'needs-more') return 'border-blue-500/20 bg-blue-500/10 text-blue-300';
-  return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400';
+  if (decision === 'drop') return 'border-warning/30 bg-warning/10 text-warning';
+  if (decision === 'conflict') return 'border-error/30 bg-error/10 text-error';
+  if (decision === 'needs-more') return 'border-accent/30 bg-accent/10 text-accent';
+  return 'border-success/30 bg-success/10 text-success';
 }
 
 function graphModeBadgeClass(graphMode: DatabaseCapability['graphMode']): string {
-  if (graphMode === 'full') return 'bg-green-500/10 text-green-400 border border-green-500/20';
-  if (graphMode === 'lite') return 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
-  return 'bg-red-500/10 text-red-400 border border-red-500/20';
-}
-
-function graphModeLabel(graphMode: DatabaseCapability['graphMode']): string {
-  if (graphMode === 'full') return 'Available';
-  if (graphMode === 'lite') return 'Lite';
-  return 'Disabled';
+  if (graphMode === 'full') return 'border border-success/30 bg-success/10 text-success';
+  if (graphMode === 'lite') return 'border border-warning/30 bg-warning/10 text-warning';
+  return 'border border-border bg-surface text-muted';
 }
 
 function graphModeDescription(status: WorkspaceStatusResponse | null): string {
   const graphMode = status?.databaseCapability.graphMode ?? 'disabled';
-  if (graphMode === 'full') return 'Apache AGE graph database for codebase relationship tracking';
-  if (graphMode === 'lite') return 'Semantic-only graph surfaces are active until Apache AGE is enabled for the current database mode';
-  return 'Graph features are disabled until the active database is reachable again';
+  if (graphMode === 'full') return 'Apache AGE is active, so full graph views and graph-backed admin tools are available.';
+  if (graphMode === 'lite') return 'Graph Lite keeps knowledge and relevance surfaces useful with fallback data until AGE is available again.';
+  return 'Graph features are paused because the active database connection is unavailable.';
+}
+
+function providerLabel(provider: string): string {
+  return provider
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 /* ─── Component ───────────────────────────────────────────────────────────── */
@@ -280,48 +281,70 @@ export function KnowledgeGraphSection() {
 
         {error && !loading && (
           <div className="flex items-center gap-2 text-muted">
-            <XCircle className="w-4 h-4 text-red-400" />
+            <XCircle className="w-4 h-4 text-error" />
             <span className="text-xs">{error}</span>
           </div>
         )}
 
         {status && !loading && !error && (
           <>
-            <div className="flex items-center gap-2 mb-4">
+            <div className="mb-4 flex flex-wrap items-center gap-2">
               <Share2 size={16} className="text-muted" />
               <span className="text-sm font-medium text-[var(--text)]">Status</span>
-              <span className="ml-auto inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium">
-                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium ${graphModeBadgeClass(graphMode)}`}>
-                  {graphMode === 'full' ? <CheckCircle2 className="w-3 h-3" /> : graphMode === 'lite' ? <AlertTriangle className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
-                  {graphModeLabel(graphMode)}
-                </span>
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${graphModeBadgeClass(graphMode)}`}>
+                {graphMode === 'full' ? <CheckCircle2 className="h-3 w-3" /> : graphMode === 'lite' ? <AlertTriangle className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                {graphModeLabel(graphMode)}
+              </span>
+              <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] font-medium text-[var(--text)]">
+                {dbModeLabel(status.databaseCapability.dbMode)}
+              </span>
+              <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] font-medium text-muted">
+                {providerLabel(status.databaseCapability.provider)}
               </span>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="bg-surface border border-border rounded-lg p-3">
-                <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Vertices</p>
+            {graphMode !== 'full' && (
+              <GraphCapabilityNotice
+                graphMode={graphMode}
+                dbMode={status.databaseCapability.dbMode}
+                message={graphMode === 'lite'
+                  ? 'Graph Lite is active. Knowledge Graph, relevance, and memory surfaces stay useful with fallback data instead of opaque failures.'
+                  : 'The current database connection is unavailable, so graph views and graph population are paused until PostgreSQL reconnects.'}
+                hint={graphWarnings[0] ?? undefined}
+                className="mb-4"
+              />
+            )}
+
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">DB Mode</p>
+                <p className="text-sm font-semibold text-primary">{dbModeLabel(status.databaseCapability.dbMode)}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Graph Mode</p>
+                <p className="text-sm font-semibold text-primary">{graphModeLabel(graphMode)}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Vertices</p>
                 <p className="text-lg font-semibold text-primary">{status.graph.vertexCount.toLocaleString()}</p>
               </div>
-              <div className="bg-surface border border-border rounded-lg p-3">
-                <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Edges</p>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Edges</p>
                 <p className="text-lg font-semibold text-primary">{status.graph.edgeCount.toLocaleString()}</p>
               </div>
-              <div className="bg-surface border border-border rounded-lg p-3">
-                <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Graph Name</p>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Graph Name</p>
                 <p className="text-sm font-mono text-primary">{status.graph.graphName}</p>
               </div>
-              <div className="bg-surface border border-border rounded-lg p-3">
-                <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Last Populated</p>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Last Populated</p>
                 <p className="text-xs text-primary">{formatTimestamp(status.graph.lastPopulatedAt)}</p>
               </div>
             </div>
 
             <div className="mt-3 rounded-lg border border-border bg-surface p-3 text-xs text-muted space-y-1">
               <p>
-                Mode: <span className="font-medium text-primary">{status.databaseCapability.dbMode}</span>
-                {' · '}
-                Provider: <span className="font-medium text-primary">{status.databaseCapability.provider}</span>
+                Provider: <span className="font-medium text-primary">{providerLabel(status.databaseCapability.provider)}</span>
               </p>
               <p>
                 Connection: <span className="font-mono text-primary">{status.databaseCapability.connection.url ?? 'unavailable'}</span>
@@ -334,7 +357,7 @@ export function KnowledgeGraphSection() {
             </div>
 
             {graphWarnings.length > 0 && (
-              <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-200">
+              <div className="mt-3 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
                 <ul className="space-y-1">
                   {graphWarnings.map((warning) => (
                     <li key={warning}>{warning}</li>
@@ -355,7 +378,7 @@ export function KnowledgeGraphSection() {
                   </div>
                   <div className="w-full bg-surface border border-border rounded-full h-2 overflow-hidden">
                     <div
-                      className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-out"
+                      className="h-full bg-accent rounded-full transition-all duration-300 ease-out"
                       style={{ width: `${progressPct}%` }}
                     />
                   </div>
@@ -365,7 +388,7 @@ export function KnowledgeGraphSection() {
                   <button
                     onClick={handlePopulate}
                     disabled={!workspaceId || graphMode !== 'full'}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Database className="w-3.5 h-3.5" />
                     Populate Graph
@@ -376,7 +399,7 @@ export function KnowledgeGraphSection() {
                     </span>
                   )}
                   {populateError && (
-                    <span className="text-xs text-red-400">{populateError}</span>
+                    <span className="text-xs text-error">{populateError}</span>
                   )}
                 </div>
               )}
@@ -398,7 +421,7 @@ export function KnowledgeGraphSection() {
                 </div>
 
                 {debugError && (
-                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
+                  <div className="rounded-lg border border-error/30 bg-error/10 p-3 text-xs text-error">
                     {debugError}
                   </div>
                 )}
@@ -472,7 +495,7 @@ export function KnowledgeGraphSection() {
                                 <div className="space-y-2 rounded-md border border-border bg-surface px-3 py-2">
                                   <div className="flex flex-wrap items-center gap-2">
                                     <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">Ontology</span>
-                                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${candidate.explainability.ontologyExplainability.status === 'available' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : candidate.explainability.ontologyExplainability.status === 'partial' ? 'border-amber-500/20 bg-amber-500/10 text-amber-400' : 'border-border bg-bg text-muted'}`}>
+                                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${candidate.explainability.ontologyExplainability.status === 'available' ? 'border-success/30 bg-success/10 text-success' : candidate.explainability.ontologyExplainability.status === 'partial' ? 'border-warning/30 bg-warning/10 text-warning' : 'border-border bg-bg text-muted'}`}>
                                       {candidate.explainability.ontologyExplainability.status}
                                     </span>
                                   </div>
@@ -482,7 +505,7 @@ export function KnowledgeGraphSection() {
                                       {candidate.explainability.ontologyExplainability.explanations.map((explanation) => (
                                         <span
                                           key={explanation.relationKey}
-                                          className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${explanation.tone === 'active' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : explanation.tone === 'suppressed' ? 'border-amber-500/20 bg-amber-500/10 text-amber-400' : 'border-red-500/20 bg-red-500/10 text-red-300'}`}
+                                          className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${explanation.tone === 'active' ? 'border-success/30 bg-success/10 text-success' : explanation.tone === 'suppressed' ? 'border-warning/30 bg-warning/10 text-warning' : 'border-error/30 bg-error/10 text-error'}`}
                                         >
                                           {explanation.label}
                                         </span>
@@ -495,10 +518,10 @@ export function KnowledgeGraphSection() {
                                     </div>
                                   ) : null}
                                   {candidate.supersededBy && (
-                                    <p className="text-xs text-amber-300">Suppressed by {candidate.supersededBy}</p>
+                                    <p className="text-xs text-warning">Suppressed by {candidate.supersededBy}</p>
                                   )}
                                   {(candidate.conflictsWith?.length ?? 0) > 0 && (
-                                    <p className="text-xs text-red-300">Conflicts with {candidate.conflictsWith?.slice(0, 2).join(', ')}{(candidate.conflictsWith?.length ?? 0) > 2 ? ` +${(candidate.conflictsWith?.length ?? 0) - 2} more` : ''}</p>
+                                    <p className="text-xs text-error">Conflicts with {candidate.conflictsWith?.slice(0, 2).join(', ')}{(candidate.conflictsWith?.length ?? 0) > 2 ? ` +${(candidate.conflictsWith?.length ?? 0) - 2} more` : ''}</p>
                                   )}
                                 </div>
                               </div>

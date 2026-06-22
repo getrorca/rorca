@@ -499,7 +499,7 @@ describe('Fallback state rendering', () => {
     expect(screen.getByText('Request timed out')).toBeInTheDocument();
   });
 
-  it('renders unavailable state with missing reasons', () => {
+  it('renders unavailable state with Graph Lite messaging when AGE is unavailable', () => {
     const data = makeGraphResponse({
       available: false,
       fallback: {
@@ -511,10 +511,12 @@ describe('Fallback state rendering', () => {
     });
     renderWithProviders(<SpecRelevanceGraph data={data} state="unavailable" />);
     expect(screen.getByTestId('srg-state-unavailable')).toBeInTheDocument();
-    expect(screen.getAllByText('No retrieval telemetry available')).toHaveLength(2);
+    expect(screen.getByText('Graph Lite is active')).toBeInTheDocument();
+    expect(screen.getByText('Full graph-path evidence was unavailable for this result.')).toBeInTheDocument();
+    expect(screen.getByText('No retrieval telemetry available')).toBeInTheDocument();
   });
 
-  it('renders partial state banner', () => {
+  it('renders partial state banner and Graph Lite notice', () => {
     const data = makeGraphResponse({
       fallback: {
         ageAvailable: false,
@@ -525,7 +527,8 @@ describe('Fallback state rendering', () => {
     });
     renderWithProviders(<SpecRelevanceGraph data={data} state="partial" />);
     expect(screen.getByTestId('srg-state-partial')).toBeInTheDocument();
-    expect(screen.getByText(/AGE not connected/)).toBeInTheDocument();
+    expect(screen.getByText('Graph Lite is active')).toBeInTheDocument();
+    expect(screen.getAllByText(/AGE not connected/).length).toBeGreaterThan(0);
   });
 });
 
