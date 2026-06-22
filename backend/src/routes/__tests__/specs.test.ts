@@ -889,6 +889,29 @@ describe('POST /api/specs/persist', () => {
     expect(summary.contextUsed).toBeUndefined();
   });
 
+  test('accepts policyPresetId on the canonical persist/create path and echoes requestedPolicy', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Preset Policy Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        policyPresetId: 'fast_import',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.requestedPolicy).toBe('fast_import');
+    expect(res.body.postSave).toEqual({ enrich: false, matchSkills: false, memorySynthesis: false });
+    expect(res.body.postSavePolicy).toMatchObject({
+      callerPolicy: 'fast_import',
+      effectivePolicy: { version: 'v1', presetId: 'fast_import', enrich: 'skip', skills: 'skip', memory: 'skip' },
+      legacyOptions: { enrich: false, matchSkills: false, memorySynthesis: false },
+    });
+  });
+
   test('rejects invalid postSave preset ids with ValidationError details', async () => {
     const res = await request(app)
       .post('/api/specs/persist')
@@ -910,6 +933,25 @@ describe('POST /api/specs/persist', () => {
       allowedValues: 'fast_import,best_effort,skill_first_strict,enterprise_governed,repair_only',
       allowedValuesList: ['fast_import', 'best_effort', 'skill_first_strict', 'enterprise_governed', 'repair_only'],
     });
+  });
+
+  test('rejects ambiguous persist policy inputs so callers must pick one contract field', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Ambiguous Policy Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        postSave: false,
+        policyPresetId: 'fast_import',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('VALIDATION_ERROR');
+    expect(String(res.body.error)).toContain('Provide only one post-save policy input');
   });
 
   test('seeds a generation log immediately so the Context tab is non-null before enrich completes', async () => {

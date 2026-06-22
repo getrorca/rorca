@@ -516,4 +516,43 @@ describe('workflow/readiness exact surfaces', () => {
     ]));
     expect(res.body.readiness.reasonCodes).toContain('post_save_pending');
   });
+
+  test('POST /api/specs/repair-batch returns the same durable workflow/readiness model plus requestedPolicy', async () => {
+    writeSpecFile(os.tmpdir(), 'batch-repair-spec');
+    await seedGenerationLog('batch-repair-spec', {
+      enrichStatus: 'failed',
+      matchSkillsStatus: 'completed',
+    });
+
+    const res = await request(app)
+      .post('/api/specs/repair-batch')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: WORKSPACE_ID,
+        categories: ['stage_failed'],
+        limit: 1,
+        policyPresetId: 'repair_only',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.requestedPolicy).toBe('repair_only');
+    expect(res.body.details).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        specId: 'batch-repair-spec',
+        requestedPolicy: 'repair_only',
+        workflow: expect.objectContaining({
+          reasonCodes: expect.arrayContaining(['post_save_pending']),
+          stages: expect.arrayContaining([
+            expect.objectContaining({ key: 'enrich', bossJobId: expect.any(String) }),
+          ]),
+        }),
+        readiness: expect.objectContaining({
+          reasonCodes: expect.arrayContaining(['post_save_pending']),
+          safeActionHints: expect.arrayContaining([
+            expect.objectContaining({ action: 'wait_for_post_save' }),
+          ]),
+        }),
+      }),
+    ]));
+  });
 });

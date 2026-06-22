@@ -59,5 +59,18 @@ describe('GET /api/mcp/tools', () => {
     expect(triggerRun).toMatchObject({
       category: 'Specs & Pipeline',
     });
+
+    const createSpec = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_create_spec');
+    const persistSpec = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_persist_spec');
+    expect(createSpec.description).toContain('Canonical');
+    expect(persistSpec.description).toContain('Compatibility alias');
+    expect(createSpec.inputSchema).toEqual(expect.objectContaining({
+      workspaceId: expect.any(Object),
+      title: expect.any(Object),
+      stories: expect.any(Object),
+      policyPresetId: expect.any(Object),
+      postSavePolicy: expect.any(Object),
+      postSave: expect.any(Object),
+    }));
   });
 });

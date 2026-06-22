@@ -26,6 +26,11 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
+import {
+  getSpecReadinessInspection,
+  getSpecWorkflow,
+  retrySpecWorkflowStage,
+} from '../api/specs';
 import { StoryCard } from './StoryCard';
 import type { Story } from './StoryCard';
 import { InlineStoryEditor } from './InlineStoryEditor';
@@ -496,8 +501,8 @@ function SpecDetailContent({
 
     Promise.all([
       apiFetch<GenerationLog | { logs: GenerationLog[] }>(`/api/specs/${specId}/generation-log`).catch(() => null),
-      apiFetch<SpecWorkflowInspectionPayload>(`/api/specs/${specId}/workflow?workspaceId=${workspaceId}`).catch(() => null),
-      apiFetch<SpecReadinessInspectionPayload>(`/api/specs/${specId}/readiness?workspaceId=${workspaceId}`).catch(() => null),
+      getSpecWorkflow(specId, workspaceId).catch(() => null),
+      getSpecReadinessInspection(specId, workspaceId).catch(() => null),
     ]).then(([logResponse, workflowResponse, readinessResponse]) => {
       if (cancelled) return;
       const latest = logResponse && 'logs' in logResponse ? logResponse.logs[0] : logResponse;
@@ -1994,14 +1999,7 @@ function PostSaveStagesCard({ stages, specId, workspaceId, activeRunStatus, bloc
     if (!specId || !workspaceId || retrying || isRunActive || isBlockedByActivePostSave) return;
     setRetrying(stageName);
     try {
-      await apiFetch<Record<string, unknown>>(
-        `/api/specs/${specId}/workflow/stages/${stageName}/retry`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspaceId }),
-        },
-      );
+      await retrySpecWorkflowStage(specId, stageName, { workspaceId });
       toast.show(`Retry initiated for ${STAGE_LABELS[stageName]}`, 'success');
       onRetried?.();
     } catch (err: unknown) {
@@ -2293,8 +2291,8 @@ function GenerationLogTab({ specId, stories, refreshKey, workspaceId, activeRunS
 
     Promise.all([
       apiFetch<GenerationLog | { logs: GenerationLog[] }>(`/api/specs/${specId}/generation-log${showAll ? '?all=true' : ''}`).catch(() => null),
-      apiFetch<SpecWorkflowInspectionPayload>(`/api/specs/${specId}/workflow?workspaceId=${workspaceId}`).catch(() => null),
-      apiFetch<SpecReadinessInspectionPayload>(`/api/specs/${specId}/readiness?workspaceId=${workspaceId}`).catch(() => null),
+      getSpecWorkflow(specId, workspaceId).catch(() => null),
+      getSpecReadinessInspection(specId, workspaceId).catch(() => null),
     ])
       .then(([logResponse, workflowResponse, readinessResponse]) => {
         if (cancelled) return;

@@ -87,6 +87,15 @@ export function getSpecReadinessInspection(
   return apiFetch(`/api/specs/${specId}/readiness?workspaceId=${workspaceId}`, { signal: opts?.signal });
 }
 
+export interface RetrySpecWorkflowStageResult {
+  requestedStageKey: WorkflowStageKey;
+  requestedPolicy?: unknown;
+  reasonCodes: string[];
+  workflow?: SpecWorkflowInspectionPayload;
+  readiness?: SpecReadinessInspectionPayload;
+  actions: Array<Record<string, unknown>>;
+}
+
 export function retrySpecWorkflowStage(
   specId: string,
   stageKey: WorkflowStageKey,
@@ -97,7 +106,7 @@ export function retrySpecWorkflowStage(
     postSavePolicy?: unknown;
   },
   opts?: ApiOptions,
-): Promise<Record<string, unknown>> {
+): Promise<RetrySpecWorkflowStageResult> {
   return apiFetch(`/api/specs/${specId}/workflow/stages/${stageKey}/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -105,6 +114,81 @@ export function retrySpecWorkflowStage(
     signal: opts?.signal,
   });
 }
+
+export interface CreateSpecParams extends ApiOptions {
+  workspaceId: string;
+  title: string;
+  stories: Story[];
+  slug?: string;
+  brief?: string;
+  specBrief?: string;
+  storyPrefix?: string;
+  overwrite?: boolean;
+  source?: string;
+  diagrams?: Record<string, { mermaid: string; ascii: string }>;
+  mermaidDiagram?: string;
+  model?: string;
+  contextUsed?: unknown;
+  contextSummary?: Record<string, unknown>;
+  reasoning?: { enabled: boolean; effort?: string };
+  postSave?: boolean | string | Record<string, unknown>;
+  policyPresetId?: string;
+  postSavePolicy?: unknown;
+}
+
+export interface CreateSpecResult {
+  slug: string;
+  title: string;
+  status: 'pending';
+  source: string;
+  stories: Story[];
+  postSave: {
+    enrich: boolean;
+    matchSkills: boolean;
+    memorySynthesis: boolean;
+  };
+  postSavePolicy: Record<string, unknown>;
+  requestedPolicy?: unknown;
+  workflow: {
+    engine: 'spec-post-save-v1';
+    runId: number;
+    status: string;
+    saveGeneration: number | null;
+  };
+  contextSummary?: Record<string, unknown>;
+}
+
+export function createSpec(
+  p: CreateSpecParams,
+): Promise<CreateSpecResult> {
+  return apiFetch('/api/specs/persist', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      workspaceId: p.workspaceId,
+      title: p.title,
+      stories: p.stories,
+      slug: p.slug,
+      brief: p.brief,
+      specBrief: p.specBrief,
+      storyPrefix: p.storyPrefix,
+      overwrite: p.overwrite,
+      source: p.source,
+      diagrams: p.diagrams,
+      mermaidDiagram: p.mermaidDiagram,
+      model: p.model,
+      contextUsed: p.contextUsed,
+      contextSummary: p.contextSummary,
+      reasoning: p.reasoning,
+      postSave: p.postSave,
+      policyPresetId: p.policyPresetId,
+      postSavePolicy: p.postSavePolicy,
+    }),
+    signal: p.signal,
+  });
+}
+
+export const persistSpec = createSpec;
 
 export interface GenerateSpecParams extends ApiOptions {
   brief: string;

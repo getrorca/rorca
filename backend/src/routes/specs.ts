@@ -92,6 +92,7 @@ import {
   type SpecEditPostSaveDecision,
 } from '../lib/spec-edit-change-class';
 import {
+  POST_SAVE_POLICY_PRESET_IDS,
   resolvePostSavePolicy,
   type PersistedPostSavePolicyMetadata,
   type PostSaveLegacyOptions as SpecPostSaveOptions,
@@ -1001,10 +1002,26 @@ const PersistSpecDraftSchema = z.object({
   overwrite: z.boolean().optional(),
   source: z.string().optional(),
   postSave: z.unknown().optional(),
+  policyPresetId: z.enum(POST_SAVE_POLICY_PRESET_IDS).optional(),
+  postSavePolicy: z.unknown().optional(),
 }).refine(data => Array.isArray(data.stories) || Array.isArray(data.userStories), {
   message: 'stories (or userStories) is required',
   path: ['stories'],
 });
+
+function resolvePersistPostSavePolicyInput(body: Pick<z.infer<typeof PersistSpecDraftSchema>, 'postSave' | 'policyPresetId' | 'postSavePolicy'>): PostSavePolicyInput {
+  const providedFields = [
+    body.postSave !== undefined ? 'postSave' : null,
+    body.policyPresetId !== undefined ? 'policyPresetId' : null,
+    body.postSavePolicy !== undefined ? 'postSavePolicy' : null,
+  ].filter((field): field is 'postSave' | 'policyPresetId' | 'postSavePolicy' => field !== null);
+
+  if (providedFields.length > 1) {
+    throw new ValidationError(`Provide only one post-save policy input: ${providedFields.join(', ')}`);
+  }
+
+  return (body.postSavePolicy ?? body.policyPresetId ?? body.postSave) as PostSavePolicyInput;
+}
 
 interface PersistSpecDraftNormalizationChange {
   from?: string;
@@ -1637,7 +1654,7 @@ async function persistExplicitDraftInternal(
   const slug = rawSlug || briefToSlug(title);
   const source = body.source?.trim() || 'explicit-draft';
   const overwrite = body.overwrite === true;
-  const requestedPostSavePolicy = resolvePostSavePolicy(body.postSave);
+  const requestedPostSavePolicy = resolvePostSavePolicy(resolvePersistPostSavePolicyInput(body));
   const requestedPostSave = requestedPostSavePolicy.legacyOptions;
   let postSavePolicy = requestedPostSavePolicy;
   let postSave = requestedPostSave;
@@ -4199,7 +4216,19 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *                     enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
  *                   - type: object
  *                     additionalProperties: true
- *                 description: Canonical post-save policy input; legacy enrich/matchSkills/memorySynthesis booleans are still accepted.
+ *                 description: Legacy-compatible post-save policy input. New callers should prefer policyPresetId or postSavePolicy and provide only one of these policy fields.
+ *               policyPresetId:
+ *                 type: string
+ *                 enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *                 description: Preferred preset-based policy selector for canonical create-spec callers.
+ *               postSavePolicy:
+ *                 oneOf:
+ *                   - type: boolean
+ *                   - type: string
+ *                     enum: [fast_import, best_effort, skill_first_strict, enterprise_governed, repair_only]
+ *                   - type: object
+ *                     additionalProperties: true
+ *                 description: Preferred canonical alias for postSave when the caller wants an explicit policy object or preset string.
  *     responses:
  *       200:
  *         description: Spec persisted successfully
@@ -4235,6 +4264,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *                         enrich: { type: boolean }
  *                         matchSkills: { type: boolean }
  *                         memorySynthesis: { type: boolean }
+ *                 requestedPolicy:
+ *                   nullable: true
+ *                   oneOf:
+ *                     - type: boolean
+ *                     - type: string
+ *                     - type: object
+ *                       additionalProperties: true
  *                 workflow:
  *                   type: object
  *                   properties:
@@ -4252,9 +4288,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Request, res: Response) => {
   try {
     const parsedBody = PersistSpecDraftSchema.parse(req.body);
-    resolvePostSavePolicy(parsedBody.postSave);
+    resolvePostSavePolicy(resolvePersistPostSavePolicyInput(parsedBody));
     const result = await persistExplicitDraftInternal(req, parsedBody);
-    res.json(result);
+    res.json({
+      ...result,
+      requestedPolicy: resolvePersistPostSavePolicyInput(parsedBody) ?? null,
+    });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Persist explicit draft');
   }
@@ -6772,6 +6811,13 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  *                 blocked: { type: integer }
  *                 total: { type: integer }
  *                 dryRun: { type: boolean }
+ *                 requestedPolicy:
+ *                   nullable: true
+ *                   oneOf:
+ *                     - type: boolean
+ *                     - type: string
+ *                     - type: object
+ *                       additionalProperties: true
  *                 details:
  *                   type: array
  *                   items:
@@ -6784,7 +6830,22 @@ const MAX_REPAIR_BATCH_LIMIT = 50;
  *                       reasonCodes:
  *                         type: array
  *                         items: { type: string }
+ *                       requestedPolicy:
+ *                         nullable: true
+ *                         oneOf:
+ *                           - type: boolean
+ *                           - type: string
+ *                           - type: object
+ *                             additionalProperties: true
  *                       workflowRunId: { type: integer, nullable: true }
+ *                       workflow:
+ *                         type: object
+ *                         nullable: true
+ *                         additionalProperties: true
+ *                       readiness:
+ *                         type: object
+ *                         nullable: true
+ *                         additionalProperties: true
  *                       stages:
  *                         type: array
  *                         items: { type: object, additionalProperties: true }
@@ -6879,6 +6940,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
     }
 
     // Process each candidate through the shared single-spec repair engine
+    const requestedPolicyInput = postSavePolicy ?? policyPresetId;
     const details: Array<{
       specId: string;
       status: 'queued' | 'skipped' | 'blocked';
@@ -6886,7 +6948,10 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
       reasonCode: RepairReasonCode;
       reasonCodes: RepairReasonCode[];
       repairStatus: RepairExecutionStatus;
+      requestedPolicy: PostSavePolicyInput;
       workflowRunId: number | null;
+      workflow: RepairExecutionResult['workflow'] | null;
+      readiness: RepairExecutionResult['readiness'] | null;
       stages: NonNullable<RepairExecutionResult['workflow']>['stages'];
       safeActionHints: NonNullable<RepairExecutionResult['readiness']>['safeActionHints'];
     }> = [];
@@ -6901,7 +6966,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
           workspaceId,
           requestedStages: requestedRepairStagesFromFindings(candidate.findings),
           dryRun,
-          postSavePolicyInput: postSavePolicy ?? policyPresetId,
+          postSavePolicyInput: requestedPolicyInput,
           invocationSurface: 'api.specs.repair-batch',
           source: 'repair-batch',
         });
@@ -6924,7 +6989,10 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
           reasonCode: detailReasonCode,
           reasonCodes: repair.reasonCodes,
           repairStatus: repair.status,
+          requestedPolicy: repair.requestedPolicy,
           workflowRunId: repair.workflow?.workflow.runId ?? repair.actions.find((action) => action.workflowRunId !== undefined)?.workflowRunId ?? null,
+          workflow: repair.workflow ?? null,
+          readiness: repair.readiness ?? null,
           stages: repair.workflow?.stages ?? [],
           safeActionHints: repair.readiness?.safeActionHints ?? [],
         });
@@ -6941,7 +7009,10 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
           reasonCode: 'spec_file_missing',
           reasonCodes: ['spec_file_missing'],
           repairStatus: 'no_op',
+          requestedPolicy: requestedPolicyInput,
           workflowRunId: null,
+          workflow: null,
+          readiness: null,
           stages: [],
           safeActionHints: [],
         });
@@ -6972,6 +7043,7 @@ router.post('/repair-batch', async (req: Request, res: Response) => {
       blocked,
       total: allCandidates.length,
       dryRun,
+      requestedPolicy: requestedPolicyInput ?? null,
       details,
     });
   } catch (error: unknown) {
@@ -15863,6 +15935,13 @@ async function executeSpecRepair(input: {
  *                 reasonCodes:
  *                   type: array
  *                   items: { type: string }
+ *                 requestedPolicy:
+ *                   nullable: true
+ *                   oneOf:
+ *                     - type: boolean
+ *                     - type: string
+ *                     - type: object
+ *                       additionalProperties: true
  *                 workflow:
  *                   type: object
  *                   additionalProperties: true

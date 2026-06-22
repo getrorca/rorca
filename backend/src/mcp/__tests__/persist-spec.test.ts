@@ -93,6 +93,7 @@ test('calls POST /api/specs/persist with the explicit drafted spec body', async 
     ],
     overwrite: true,
     source: 'skill-first',
+    policyPresetId: 'skill_first_strict',
     contextUsed: {
       text: 'L1/L2/L3 context text',
       meta: { standards: true, conventions: true, project: true, totalTokens: 1234, scopesMatched: [] },
@@ -135,6 +136,7 @@ test('calls POST /api/specs/persist with the explicit drafted spec body', async 
     ],
     overwrite: true,
     source: 'skill-first',
+    policyPresetId: 'skill_first_strict',
     contextUsed: {
       text: 'L1/L2/L3 context text',
       meta: { standards: true, conventions: true, project: true, totalTokens: 1234, scopesMatched: [] },
@@ -151,6 +153,43 @@ test('calls POST /api/specs/persist with the explicit drafted spec body', async 
       modelContextWindow: 200000,
       retrieval: { cagHits: 1, ragHits: 3, graphHits: 2, tier: 'hybrid', latencyMs: 25 },
     },
+  });
+});
+
+test('forwards explicit postSavePolicy objects for compatibility alias callers', async () => {
+  mockJsonResponse(MOCK_SPEC);
+
+  const handler = getToolHandler('rorca_persist_spec');
+  await handler({
+    workspaceId: 'ws-456',
+    title: 'Explicit Draft',
+    stories: [
+      {
+        id: 'US-001',
+        title: 'User login',
+        description: 'As a user I can log in with email and password',
+        acceptanceCriteria: ['Login form exists'],
+        dependsOn: [],
+      },
+    ],
+    postSavePolicy: {
+      version: 'v1',
+      presetId: 'repair_only',
+      enrich: 'enqueue',
+      skills: 'match',
+      memory: 'skip',
+      onFailure: 'continue',
+    },
+  });
+
+  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  expect(body.postSavePolicy).toEqual({
+    version: 'v1',
+    presetId: 'repair_only',
+    enrich: 'enqueue',
+    skills: 'match',
+    memory: 'skip',
+    onFailure: 'continue',
   });
 });
 
