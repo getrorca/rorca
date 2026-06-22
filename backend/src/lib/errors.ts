@@ -39,8 +39,8 @@ export abstract class AppError extends Error {
 export class ValidationError extends AppError {
   readonly statusCode = 400 as const;
 
-  constructor(message: string, details?: Record<string, string>) {
-    super(message, 'VALIDATION_ERROR', details as Record<string, unknown> | undefined);
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 'VALIDATION_ERROR', details);
   }
 }
 

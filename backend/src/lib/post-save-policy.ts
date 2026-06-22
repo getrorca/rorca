@@ -139,8 +139,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function validationError(path: string, value: unknown, allowedValues: readonly string[]): ValidationError {
   return new ValidationError('Invalid postSave policy', {
     field: path,
-    value: typeof value === 'string' ? value : JSON.stringify(value),
+    value: typeof value === 'string' ? value : JSON.stringify(value) ?? String(value),
     allowedValues: allowedValues.join(','),
+    allowedValuesList: [...allowedValues],
   });
 }
 

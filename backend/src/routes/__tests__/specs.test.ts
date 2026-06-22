@@ -211,6 +211,7 @@ test('POST /api/specs/generate rejects invalid postSave enum values with Validat
     field: 'postSave.skills',
     value: 'sometimes',
     allowedValues: 'match,skip',
+    allowedValuesList: ['match', 'skip'],
   });
   expect(mockChatComplete).not.toHaveBeenCalled();
 });
@@ -899,6 +900,7 @@ describe('POST /api/specs/persist', () => {
       field: 'postSave',
       value: 'unknown_preset',
       allowedValues: 'fast_import,best_effort,skill_first_strict,enterprise_governed,repair_only',
+      allowedValuesList: ['fast_import', 'best_effort', 'skill_first_strict', 'enterprise_governed', 'repair_only'],
     });
   });
 

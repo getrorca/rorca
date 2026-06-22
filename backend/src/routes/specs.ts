@@ -4231,6 +4231,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Request, res: Response) => {
   try {
     const parsedBody = PersistSpecDraftSchema.parse(req.body);
+    resolvePostSavePolicy(parsedBody.postSave);
     const result = await persistExplicitDraftInternal(req, parsedBody);
     res.json(result);
   } catch (error: any) {

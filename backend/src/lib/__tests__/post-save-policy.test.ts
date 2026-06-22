@@ -6,7 +6,12 @@
  */
 
 import {
+  POST_SAVE_CONTEXT_FIELDS,
+  POST_SAVE_ENRICH_FIELDS,
+  POST_SAVE_FAILURE_FIELDS,
+  POST_SAVE_MEMORY_FIELDS,
   POST_SAVE_POLICY_PRESET_IDS,
+  POST_SAVE_SKILLS_FIELDS,
   resolvePostSavePolicy,
 } from '../post-save-policy';
 import { ValidationError } from '../errors';
@@ -42,7 +47,7 @@ describe('resolvePostSavePolicy', () => {
     });
   });
 
-  test('normalizes stable preset ids', () => {
+  test('exports stable preset ids and field enums', () => {
     expect(POST_SAVE_POLICY_PRESET_IDS).toEqual([
       'fast_import',
       'best_effort',
@@ -50,7 +55,14 @@ describe('resolvePostSavePolicy', () => {
       'enterprise_governed',
       'repair_only',
     ]);
+    expect(POST_SAVE_CONTEXT_FIELDS).toEqual(['capture', 'skip']);
+    expect(POST_SAVE_ENRICH_FIELDS).toEqual(['enqueue', 'skip']);
+    expect(POST_SAVE_SKILLS_FIELDS).toEqual(['match', 'skip']);
+    expect(POST_SAVE_MEMORY_FIELDS).toEqual(['synthesize', 'skip']);
+    expect(POST_SAVE_FAILURE_FIELDS).toEqual(['continue', 'fail']);
+  });
 
+  test('normalizes stable preset ids', () => {
     const resolved = resolvePostSavePolicy('skill_first_strict');
     expect(resolved.effectivePolicy).toMatchObject({ presetId: 'skill_first_strict', onFailure: 'fail' });
     expect(resolved.legacyOptions).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
@@ -91,6 +103,7 @@ describe('resolvePostSavePolicy', () => {
         field: 'postSave.skills',
         value: 'maybe',
         allowedValues: 'match,skip',
+        allowedValuesList: ['match', 'skip'],
       });
     }
   });
