@@ -6,6 +6,7 @@
  */
 
 import { apiFetch } from '../lib/apiFetch';
+import type { SpecReadinessPayload } from '../lib/specReadiness';
 import type {
   ApiOptions,
   PaginatedResponse,
@@ -43,10 +44,10 @@ type TriggerTerminalFields = {
 };
 
 export type TriggerResponse =
-  | ({ ok: true; runId: number; worktreePath?: string; branchName?: string; capabilityWarnings?: CapabilityWarning[]; capabilityMismatchMode?: string } & TriggerTerminalFields)
+  | ({ ok: true; runId: number; worktreePath?: string; branchName?: string; capabilityWarnings?: CapabilityWarning[]; capabilityMismatchMode?: string; specReadiness?: SpecReadinessPayload } & TriggerTerminalFields)
   | { dryRun: true; estimate: unknown }
   | { conflict: true; activeRunId: number }
-  | ({ queued: true; runId: number; position: number; queuePosition?: number } & TriggerTerminalFields);
+  | ({ queued: true; runId: number; position: number; queuePosition?: number; specReadiness?: SpecReadinessPayload } & TriggerTerminalFields);
 
 export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
   return apiFetch('/api/pipeline/trigger', {

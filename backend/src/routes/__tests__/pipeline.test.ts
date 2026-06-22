@@ -93,6 +93,11 @@ beforeEach(async () => {
   await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs)`);
   await execute(`DELETE FROM pipeline_runs`);
   await execute(`DELETE FROM wal_events`);
+  await execute(`DELETE FROM spec_post_save_stage_dependencies`).catch(() => {});
+  await execute(`DELETE FROM spec_post_save_workflow_stages`).catch(() => {});
+  await execute(`DELETE FROM spec_post_save_workflow_runs`).catch(() => {});
+  await execute(`DELETE FROM spec_jobs`).catch(() => {});
+  await execute(`DELETE FROM spec_generation_logs`).catch(() => {});
 
   // Ensure both users exist with plan='pro' (global teardown truncates users between test files).
   // Use ON CONFLICT DO UPDATE covering both id and email unique constraints.
@@ -140,6 +145,30 @@ function seedSpec(status: 'pending' | 'approved', slug: string) {
     generatedAt: '2026-02-20T12:00:00.000Z',
   };
   fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec, null, 2), 'utf8');
+  return spec;
+}
+
+async function seedSpecReadinessLog(specSlug: string, workspaceId = 'ws-pipe'): Promise<void> {
+  await execute(
+    `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, enriched, retrieval_method, context_summary_json, status, save_generation)
+     VALUES ($1, 'claude-sonnet-4-5-20250929', 'api', 0, 'test', false, 'none', $2, 'persisted', 1)`,
+    [
+      specSlug,
+      JSON.stringify({
+        workspaceId,
+        contextCaptureStatus: { status: 'provided', reason: 'caller_supplied_context' },
+        postSaveStages: {
+          enrich: { requested: true, status: 'completed', reason: 'job_completed' },
+          matchSkills: { requested: true, status: 'completed', reason: 'job_completed' },
+        },
+      }),
+    ],
+  );
+}
+
+async function seedRunnableSpec(slug: string, status: 'pending' | 'approved' = 'approved') {
+  const spec = seedSpec(status, slug);
+  await seedSpecReadinessLog(slug);
   return spec;
 }
 
@@ -205,9 +234,52 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.body.error).toBe('Workspace not found');
   });
 
+  test('rejects blocked specs by default and exposes canonical readiness reasons', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'blocked-readiness');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/blocked-readiness.json', workspaceId: 'ws-pipe' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('SPEC_READINESS_BLOCKED');
+    expect(res.body.details.blockingReasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'missing_context' }),
+    ]));
+  });
+
+  test('allows readiness override and records audit WAL events', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'blocked-override');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/blocked-override.json',
+        workspaceId: 'ws-pipe',
+        readinessOverride: true,
+      });
+
+    expect(res.status).toBe(201);
+    const overrideEvent = await queryOne<{ payload: unknown }>(
+      `SELECT payload FROM wal_events WHERE event_type = 'spec_readiness_override_used' AND spec_id = 'blocked-override' ORDER BY id DESC LIMIT 1`,
+    );
+    expect(overrideEvent).toBeDefined();
+    const overridePayload = typeof overrideEvent?.payload === 'string'
+      ? JSON.parse(overrideEvent.payload)
+      : overrideEvent?.payload;
+    expect(overridePayload).toMatchObject({
+      reasonCode: 'run_anyway_override_used',
+      action: 'run',
+    });
+  });
+
   test('falls back to TypeScript run-loop when run-loop.sh not found', async () => {
     // Don't create run-loop.sh — backend's run-loop.ts should be used as fallback
-    seedSpec('approved', 'ts-fallback');
+    await seedRunnableSpec('ts-fallback');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -220,26 +292,28 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.body.runId).toBeDefined();
   });
 
-  test('detects conflict when another run is active for same workspace', async () => {
+  test('blocks when another pipeline run is already active for the same spec', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'test-spec');
+    await seedRunnableSpec('test-spec');
 
-    // Seed an active run
-    await seedRun({ status: 'running' });
+    // Seed an active run for the same spec path.
+    await seedRun({ status: 'running', spec_path: 'forge/specs/approved/test-spec.json' });
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ specPath: 'forge/specs/approved/test-spec.json', workspaceId: 'ws-pipe' });
 
-    expect(res.status).toBe(200);
-    expect(res.body.conflict).toBe(true);
-    expect(res.body.activeRunId).toBeDefined();
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('SPEC_READINESS_BLOCKED');
+    expect(res.body.details.blockingReasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'active_pipeline_conflict' }),
+    ]));
   });
 
   test('rejects a stale reusable worktree before queueing a run', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'stale-worktree-trigger');
+    await seedRunnableSpec('stale-worktree-trigger');
     const { worktreePath } = createDeterministicSpecWorktree('stale-worktree-trigger');
     advanceWorkspaceMain('advance-main-after-worktree');
 
@@ -269,7 +343,7 @@ describe('POST /api/pipeline/trigger', () => {
 
   test('rejects a stale reusable branch before recreating its worktree', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'stale-branch-trigger');
+    await seedRunnableSpec('stale-branch-trigger');
     const { worktreePath } = createDeterministicSpecWorktree('stale-branch-trigger');
     execSync(`git worktree remove --force "${worktreePath}"`, { cwd: wsDir, stdio: 'pipe' });
     advanceWorkspaceMain('advance-main-after-worktree-removal');
@@ -300,7 +374,7 @@ describe('POST /api/pipeline/trigger', () => {
 
   test('spawns run-loop.sh and returns 201 with runId', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'trigger-spec');
+    await seedRunnableSpec('trigger-spec');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -321,7 +395,7 @@ describe('POST /api/pipeline/trigger', () => {
 
   test('emits WAL events when run is triggered', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'wal-trigger');
+    await seedRunnableSpec('wal-trigger');
 
     await request(app)
       .post('/api/pipeline/trigger')
@@ -393,6 +467,7 @@ describe('POST /api/pipeline/trigger', () => {
       generatedAt: '2026-02-20T12:00:00.000Z',
     };
     fs.writeFileSync(path.join(dir, 'excl-trigger.json'), JSON.stringify(spec, null, 2), 'utf8');
+    await seedSpecReadinessLog('excl-trigger');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -432,6 +507,7 @@ describe('POST /api/pipeline/trigger', () => {
       generatedAt: '2026-02-20T12:00:00.000Z',
     };
     fs.writeFileSync(path.join(dir, 'reasoning-spec.json'), JSON.stringify(spec, null, 2), 'utf8');
+    await seedSpecReadinessLog('reasoning-spec');
 
     // Get a reference to the mocked getBoss().send so we can inspect call args
     const pgBossMock = jest.requireMock('../../lib/pg-boss');
@@ -471,6 +547,7 @@ describe('POST /api/pipeline/trigger', () => {
       generatedAt: '2026-02-20T12:00:00.000Z',
     };
     fs.writeFileSync(path.join(dir, 'reasoning-override-spec.json'), JSON.stringify(spec, null, 2), 'utf8');
+    await seedSpecReadinessLog('reasoning-override-spec');
 
     const pgBossMock = jest.requireMock('../../lib/pg-boss');
     const mockSend = pgBossMock.getBoss().send as jest.Mock;
@@ -1082,7 +1159,7 @@ describe('GET /api/pipeline/runs/compare', () => {
 describe('OC-006: Pipeline trigger agent integration', () => {
   test('trigger stores agent_type and agent_model in pipeline_runs', async () => {
     // Default agent is 'claude' — execution-engine.ts or run-loop.ts will be used
-    seedSpec('approved', 'agent-record');
+    await seedRunnableSpec('agent-record');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1100,7 +1177,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
   });
 
   test('trigger with agentOverride=pi creates a standard queued/run-now pipeline run', async () => {
-    seedSpec('approved', 'pi-agent-record');
+    await seedRunnableSpec('pi-agent-record');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1119,7 +1196,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
   });
 
   test('trigger with agentOverride=pi remaps unavailable spec models to an available local Pi model', async () => {
-    const spec = seedSpec('approved', 'pi-model-fallback') as any;
+    const spec = await seedRunnableSpec('pi-model-fallback') as any;
     spec.model = 'claude-sonnet-4-6';
     fs.writeFileSync(path.join(wsDir, 'forge', 'specs', 'approved', 'pi-model-fallback.json'), JSON.stringify(spec, null, 2), 'utf8');
 
@@ -1152,7 +1229,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
   });
 
   test('queued trigger also works for agentOverride=pi', async () => {
-    seedSpec('approved', 'pi-queued');
+    await seedRunnableSpec('pi-queued');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1168,7 +1245,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
   });
 
   test('trigger with storyId forwards only a specificStory single-story target into the pipeline job payload', async () => {
-    seedSpec('approved', 'specific-story');
+    await seedRunnableSpec('specific-story');
 
     const pgBossMock = jest.requireMock('../../lib/pg-boss');
     const mockSend = pgBossMock.getBoss().send as jest.Mock;
@@ -1238,7 +1315,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
   });
 
   test('trigger response includes agentType and agentModel', async () => {
-    seedSpec('approved', 'agent-response');
+    await seedRunnableSpec('agent-response');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1251,7 +1328,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
   });
 
   test('trigger accepts terminal_mode=pty, persists it, and forwards it to pg-boss', async () => {
-    seedSpec('approved', 'terminal-mode-pty');
+    await seedRunnableSpec('terminal-mode-pty');
 
     const pgBossMock = jest.requireMock('../../lib/pg-boss');
     const mockSend = pgBossMock.getBoss().send as jest.Mock;
@@ -1648,7 +1725,7 @@ describe('POST /api/pipeline/queue', () => {
 describe('auto_merge column in pipeline_runs', () => {
   test('defaults auto_merge to true when autoWorktree=true', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'auto-merge-default');
+    await seedRunnableSpec('auto-merge-default');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1674,7 +1751,7 @@ describe('auto_merge column in pipeline_runs', () => {
 
   test('forces auto_merge to false when autoWorktree=false', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'auto-merge-no-worktree');
+    await seedRunnableSpec('auto-merge-no-worktree');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1700,7 +1777,7 @@ describe('auto_merge column in pipeline_runs', () => {
 
   test('respects explicit autoMerge=false when autoWorktree=true', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'auto-merge-explicit-false');
+    await seedRunnableSpec('auto-merge-explicit-false');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1727,7 +1804,7 @@ describe('auto_merge column in pipeline_runs', () => {
 
   test('includes autoMerge in pg-boss job payload', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'auto-merge-payload');
+    await seedRunnableSpec('auto-merge-payload');
 
     // Mock getBoss to capture the job payload
     const { getBoss } = require('../../lib/pg-boss');
@@ -1756,7 +1833,7 @@ describe('auto_merge column in pipeline_runs', () => {
 
   test('GET /api/pipeline/runs/:id includes auto_merge field', async () => {
     createRunLoopStub();
-    seedSpec('approved', 'auto-merge-response');
+    await seedRunnableSpec('auto-merge-response');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')

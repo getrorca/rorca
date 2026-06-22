@@ -192,8 +192,12 @@ function derivePostSaveMode(
   if (workflowRun && workflowRun.status === 'failed') return 'failed';
   if (stages.some(stageIsLive)) return 'pending';
   if (stages.some(stageIsFailed)) return 'failed';
+
   const requestedStages = stages.filter((stage) => stage.requested);
+  const requestedPostSaveStages = requestedStages.filter((stage) => stage.stage !== 'context');
+  if (requestedPostSaveStages.length > 0 && requestedPostSaveStages.every((stage) => stage.status === 'skipped')) return 'skipped';
   if (requestedStages.length > 0 && requestedStages.every((stage) => stage.status === 'skipped')) return 'skipped';
+
   if (source === 'workflow') return 'strict';
   if (source === 'generation_log' && stages.length > 0) return 'best_effort';
   if (source === 'generation_log') return 'best_effort';
@@ -285,7 +289,7 @@ export function evaluateSpecReadiness(input: EvaluateSpecReadinessInput): SpecRe
         'warning',
         { stage: stage.stage },
       ));
-    } else if (stage.status === 'skipped' && isPolicySkipped(stage.reason)) {
+    } else if (stage.requested && stage.status === 'skipped' && isPolicySkipped(stage.reason)) {
       warnings.push(reason(
         SpecReadinessReasonCode.PolicySkipped,
         `Post-save stage ${stage.stage} was skipped by policy.`,

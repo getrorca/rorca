@@ -6,6 +6,7 @@
  */
 
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import type { SpecReadinessPayload } from '../lib/specReadiness';
 import type {
   ApiOptions,
   PaginatedResponse,
@@ -194,7 +195,7 @@ export function approveSpec(
   specId: string,
   workspaceId: string,
   opts?: ApiOptions,
-): Promise<{ ok: true; approvedPath: string }> {
+): Promise<{ ok: true; approvedPath: string; readiness: SpecReadinessPayload }> {
   return apiFetch(`/api/specs/${specId}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

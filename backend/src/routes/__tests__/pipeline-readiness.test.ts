@@ -63,6 +63,11 @@ beforeEach(async () => {
   await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-ready')`);
   await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-ready'`);
   await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-ready'`);
+  await execute(`DELETE FROM spec_post_save_stage_dependencies`).catch(() => {});
+  await execute(`DELETE FROM spec_post_save_workflow_stages`).catch(() => {});
+  await execute(`DELETE FROM spec_post_save_workflow_runs`).catch(() => {});
+  await execute(`DELETE FROM spec_jobs`).catch(() => {});
+  await execute(`DELETE FROM spec_generation_logs`).catch(() => {});
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-ready', 'Pipeline Ready', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [wsDir]);
 });
 
@@ -81,6 +86,24 @@ function writeSpec(slug: string, spec: Record<string, unknown>): void {
     path.join(wsDir, 'forge', 'specs', 'approved', `${slug}.json`),
     JSON.stringify(spec, null, 2),
     'utf8',
+  );
+}
+
+async function seedSpecReadinessLog(specSlug: string): Promise<void> {
+  await execute(
+    `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, enriched, retrieval_method, context_summary_json, status, save_generation)
+     VALUES ($1, 'claude-sonnet-4-5-20250929', 'api', 0, 'test', false, 'none', $2, 'persisted', 1)`,
+    [
+      specSlug,
+      JSON.stringify({
+        workspaceId: 'ws-ready',
+        contextCaptureStatus: { status: 'provided', reason: 'caller_supplied_context' },
+        postSaveStages: {
+          enrich: { requested: true, status: 'completed', reason: 'job_completed' },
+          matchSkills: { requested: true, status: 'completed', reason: 'job_completed' },
+        },
+      }),
+    ],
   );
 }
 
@@ -134,6 +157,7 @@ describe('pipeline execution readiness', () => {
         },
       ],
     });
+    await seedSpecReadinessLog('readiness-trigger');
 
     const res = await request(app)
       .post('/api/pipeline/trigger')

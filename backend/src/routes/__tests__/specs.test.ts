@@ -796,6 +796,24 @@ function seedSpecFile(dir: string, slug: string, overrides?: Record<string, unkn
   return spec;
 }
 
+async function seedSpecReadinessLog(specSlug: string, workspaceId = 'ws-test'): Promise<void> {
+  await execute(
+    `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, enriched, retrieval_method, context_summary_json, status, save_generation)
+     VALUES ($1, 'explicit-draft', 'api', 0, 'test', false, 'none', $2, 'persisted', 1)`,
+    [
+      specSlug,
+      JSON.stringify({
+        workspaceId,
+        contextCaptureStatus: { status: 'provided', reason: 'caller_supplied_context' },
+        postSaveStages: {
+          enrich: { requested: true, status: 'completed', reason: 'job_completed' },
+          matchSkills: { requested: true, status: 'completed', reason: 'job_completed' },
+        },
+      }),
+    ],
+  );
+}
+
 describe('POST /api/specs/persist', () => {
   test('persists an explicit drafted spec to pending with canonical source metadata', async () => {
     const res = await request(app)
@@ -1518,6 +1536,7 @@ describe('POST /api/specs/:id/approve', () => {
     const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
 
     seedSpecFile(pendingDir, 'to-approve');
+    await seedSpecReadinessLog('to-approve');
 
     const res = await request(app)
       .post('/api/specs/to-approve/approve')
@@ -1537,6 +1556,7 @@ describe('POST /api/specs/:id/approve', () => {
   test('emits WAL event with event_type=spec_approved', async () => {
     const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedSpecFile(pendingDir, 'wal-approve');
+    await seedSpecReadinessLog('wal-approve');
 
     await request(app)
       .post('/api/specs/wal-approve/approve')
@@ -1557,6 +1577,7 @@ describe('POST /api/specs/:id/approve', () => {
     const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
 
     seedSpecFile(pendingDir, 'auto-mkdir');
+    await seedSpecReadinessLog('auto-mkdir');
     // Ensure approved/ doesn't exist
     expect(fs.existsSync(approvedDir)).toBe(false);
 
@@ -1567,6 +1588,42 @@ describe('POST /api/specs/:id/approve', () => {
 
     expect(res.status).toBe(200);
     expect(fs.existsSync(approvedDir)).toBe(true);
+  });
+
+  test('rejects blocked specs by default with canonical readiness details', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    seedSpecFile(pendingDir, 'blocked-approve');
+
+    const res = await request(app)
+      .post('/api/specs/blocked-approve/approve')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('SPEC_READINESS_BLOCKED');
+    expect(res.body.details.blockingReasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'missing_context' }),
+    ]));
+  });
+
+  test('allows readiness override and records audit WAL events', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
+    seedSpecFile(pendingDir, 'blocked-approve-override');
+
+    const res = await request(app)
+      .post('/api/specs/blocked-approve-override/approve')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', readinessOverride: true });
+
+    expect(res.status).toBe(200);
+    expect(fs.existsSync(path.join(approvedDir, 'blocked-approve-override.json'))).toBe(true);
+    const event = await queryOne<{ payload: unknown }>(
+      `SELECT payload FROM wal_events WHERE event_type = 'spec_readiness_override_used' AND spec_id = 'blocked-approve-override' ORDER BY id DESC LIMIT 1`,
+    );
+    expect(event).toBeDefined();
+    const payload = typeof event?.payload === 'string' ? JSON.parse(event.payload) : event?.payload;
+    expect(payload).toMatchObject({ reasonCode: 'run_anyway_override_used', action: 'approve' });
   });
 
   test('spec not found → 404', async () => {
