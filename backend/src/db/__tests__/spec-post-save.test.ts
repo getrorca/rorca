@@ -191,6 +191,65 @@ describe('spec-post-save durable workflow helpers', () => {
     expect(conflicts).toEqual([]);
   });
 
+  it('treats the effective policy hash as part of run idempotency', async () => {
+    const policyA = {
+      version: 1,
+      postSave: {
+        enrich: true,
+        matchSkills: false,
+        memorySynthesis: false,
+      },
+    };
+    const policyB = {
+      version: 1,
+      postSave: {
+        enrich: false,
+        matchSkills: true,
+        memorySynthesis: false,
+      },
+    };
+
+    const firstRun = await createRun({
+      workspaceId: 'ws-test',
+      specId: 'spec-policy-idempotency',
+      saveGeneration: 9100,
+      effectivePolicy: policyA,
+      idempotencyKey: 'same-save-generation',
+      status: 'pending',
+    });
+
+    const replayedRun = await createRun({
+      workspaceId: 'ws-test',
+      specId: 'spec-policy-idempotency',
+      saveGeneration: 9100,
+      effectivePolicy: policyA,
+      idempotencyKey: 'same-save-generation',
+      status: 'pending',
+    });
+    expect(replayedRun.id).toBe(firstRun.id);
+
+    const policyChangedRun = await createRun({
+      workspaceId: 'ws-test',
+      specId: 'spec-policy-idempotency',
+      saveGeneration: 9100,
+      effectivePolicy: policyB,
+      idempotencyKey: 'same-save-generation',
+      status: 'pending',
+    });
+
+    expect(policyChangedRun.id).not.toBe(firstRun.id);
+    expect(policyChangedRun.effectivePolicyHash).toBe(hashEffectivePolicy(policyB));
+
+    await expect(createRun({
+      workspaceId: 'ws-test',
+      specId: 'spec-policy-idempotency',
+      saveGeneration: 9101,
+      effectivePolicy: policyB,
+      idempotencyKey: 'different-idempotency-same-policy',
+      status: 'pending',
+    })).rejects.toThrow(/duplicate key|idx_spec_post_save_runs_active_policy_unique/i);
+  });
+
   it('blocks duplicate active runs for the same spec and effective policy but allows a new run after completion', async () => {
     const policy = {
       version: 1,
