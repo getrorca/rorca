@@ -201,12 +201,19 @@ Freeform intent routing is helpful, but it is not the contract.
 
 ### Prerequisites
 - Node.js **20+**
-- PostgreSQL **16**
+- A PostgreSQL **16** database — pick one of the three supported paths in
+  [Database modes & graph capability](#database-modes--graph-capability):
+  - **Docker Postgres with AGE** (recommended, Full Graph) via `rorca db start`
+  - **Native / local Postgres** (Graph Lite unless you install Apache AGE)
+  - **BYOP hosted Postgres** such as Supabase or Neon (Graph Lite, BYOP)
 - Git
 - one execution path:
   - **Claude Code CLI**
   - **OpenCode**
   - or another configured runtime path
+
+> Rorca runs on PostgreSQL 16 only. SQLite and PGlite are **not** part of the
+> launch scope — there is no embedded/file database fallback.
 
 ### Install
 
@@ -301,6 +308,87 @@ If the backend gets stuck on `:3030`, restart it:
 lsof -ti:3030 | xargs kill -9
 cd backend && npm run dev
 ```
+
+---
+
+## Database modes & graph capability
+
+Rorca always runs on **PostgreSQL 16**. There is no SQLite or PGlite fallback in
+launch scope. What changes between setups is *where* that Postgres lives and
+whether **Apache AGE** (the graph extension) is available.
+
+Rorca recognizes three database modes — `native`, `docker`, and `byop` — and
+reports the active mode plus the resulting graph capability on
+`GET /api/health` (`dbMode`, `graphMode`, and the redacted `databaseCapability`
+contract). You can also pick a mode explicitly in the onboarding wizard and in
+**Settings → Knowledge Graph**.
+
+### Pick your database path
+
+| Mode | How to start it | Graph capability |
+|---|---|---|
+| **Docker Postgres with AGE** (recommended) | `rorca db start` — provisions the managed container from `docker-compose.yml`, which builds Apache AGE | **Full Graph** out of the box |
+| **Native / local Postgres** | Run your own Postgres 16 on `localhost:5433` (or let `rorca start` manage a native instance) | **Graph Lite** unless you install Apache AGE locally |
+| **BYOP hosted Postgres** (Supabase, Neon, Railway, self-hosted) | Paste a `postgres://…` `DATABASE_URL` with SSL into the BYOP field and validate it (pgvector required) | **Graph Lite** unless that instance already has AGE |
+
+#### Docker Postgres with AGE (recommended)
+
+The smoothest path to Full Graph. The bundled `docker-compose.yml` builds a
+PostgreSQL 16 image with Apache AGE compiled in.
+
+```bash
+rorca db start        # provision/start the managed Docker Postgres (AGE included)
+rorca db status       # check it
+npm run dev           # start the app against it
+```
+
+#### Native / local Postgres
+
+Use a Postgres 16 instance you run yourself. This is the lightest setup, but it
+starts in **Graph Lite** because Apache AGE is not installed by default — install
+AGE manually on that instance to unlock Full Graph.
+
+```bash
+# Point DATABASE_URL at your local Postgres (default native port is 5433), then:
+npm run dev
+```
+
+If you want a managed local instance without Docker, `rorca init --skip-docker`
+sets up the native path.
+
+#### BYOP — Bring Your Own Postgres (Supabase, Neon, …)
+
+Connect a hosted Postgres instance. Rorca stores the `DATABASE_URL` outside your
+repo (`~/.rorca/database-url`, `chmod 600`) and only ever shows redacted
+host/database details. BYOP validation requires:
+
+- a reachable connection over **SSL/TLS** (`sslmode=disable` is rejected)
+- a valid hostname and database name
+- the **pgvector** extension installed
+
+BYOP is a **bring-your-own-database** path, **not** a full-graph replacement for
+the AGE-backed Docker/native setups. Hosted Postgres typically runs in **Graph
+Lite** unless that instance already has Apache AGE. See
+[`docs/supabase-setup.md`](docs/supabase-setup.md) for a step-by-step Supabase
+walkthrough.
+
+### Full Graph vs Graph Lite
+
+- **Full Graph** requires Apache AGE on the active Postgres. You get AGE-backed
+  graph traversal and the full graph-admin/visualisation experience.
+- **Graph Lite** is the honest fallback when AGE is unavailable. Knowledge,
+  relevance, and memory workflows still work using relational + semantic
+  (pgvector) evidence instead of AGE graph paths. AGE-only graph-traversal/admin
+  operations are unavailable until AGE is enabled — this is expected, not an
+  error.
+
+**How to get Full Graph back from Graph Lite:** switch to **Docker mode**
+(`rorca db start`, AGE included), or install Apache AGE on your native/BYOP
+Postgres and reconnect. The Knowledge Graph and Health views surface the current
+mode and what's missing rather than pretending AGE is present.
+
+For a chooser-oriented walkthrough of all three paths, see
+[`QUICKSTART.md`](QUICKSTART.md).
 
 ---
 
@@ -545,6 +633,9 @@ Prefer the explicit path:
 
 ## Further reading
 
+- `QUICKSTART.md` — chooser-oriented startup guide for native, Docker, and BYOP database paths
+- `docs/supabase-setup.md` — BYOP setup for Supabase / hosted Postgres
+- `docs/mcp-integration.md` — MCP/Hermes integration, Graph Lite + BYOP expectations
 - `docs/context-injection.md`
 - `docs/graph-rag-deep-dive.md`
 - `docs/OPEN_API_CONTRACT.md`

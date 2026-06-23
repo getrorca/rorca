@@ -200,6 +200,11 @@ Rorca supports three database modes: `native`, `docker`, and `byop`.
 Hermes can read `dbMode` and `graphMode` from `GET /api/health` to adapt its
 messaging instead of guessing.
 
+For human setup of each database path, see
+[`../README.md`](../README.md#database-modes--graph-capability),
+[`../QUICKSTART.md`](../QUICKSTART.md), and the BYOP walkthrough in
+[`supabase-setup.md`](supabase-setup.md).
+
 ## 6. Do not overclaim
 
 To keep Hermes honest:
