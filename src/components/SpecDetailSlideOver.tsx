@@ -609,7 +609,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean; readinessOverride?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean; rerunFromScratch?: boolean; readinessOverride?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -629,6 +629,7 @@ function SpecDetailContent({
           ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
           ...(options?.reasoningOverride !== undefined ? { reasoning: options.reasoningOverride } : {}),
           ...(options?.forceRerun ? { forceRerun: true } : {}),
+          ...(options?.rerunFromScratch ? { rerunFromScratch: true } : {}),
           ...(options?.readinessOverride ? { readinessOverride: true } : {}),
         }) },
       );
@@ -1015,7 +1016,7 @@ function SpecDetailContent({
                   )}
                   {allPassed && runAllowed && (
                     <button
-                      onClick={() => handleRun(isolateInBranch, { forceRerun: true })}
+                      onClick={() => handleRun(isolateInBranch, { rerunFromScratch: true })}
                       disabled={runState === 'triggering' || hasBlockingPostSaveJob}
                       title={hasBlockingPostSaveJob ? 'Re-run is gated while a post-save job is queued or running for this spec' : 'Re-run this spec from scratch'}
                       className="w-full flex items-center justify-center gap-1.5 py-2 mt-1 rounded text-sm font-medium bg-[var(--surface-2)] text-[var(--text-muted)] border border-[var(--border)] hover:text-[var(--text)] hover:border-[var(--border-hover)] disabled:opacity-60 transition-colors"

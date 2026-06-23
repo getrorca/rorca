@@ -1268,6 +1268,46 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(payload.startFromStoryId).toBeUndefined();
   });
 
+  test('forceRerun preserves passed story state and continues from the first unfinished story', async () => {
+    const spec = await seedRunnableSpec('force-rerun-continuation');
+    spec.userStories[0].passes = true;
+    spec.userStories[1].passes = false;
+    const specFile = path.join(wsDir, 'forge', 'specs', 'approved', 'force-rerun-continuation.json');
+    fs.writeFileSync(specFile, JSON.stringify(spec, null, 2), 'utf8');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/force-rerun-continuation.json',
+        workspaceId: 'ws-pipe',
+        agentOverride: 'pi',
+        forceRerun: true,
+      });
+
+    expect(res.status).toBe(201);
+    const persisted = JSON.parse(fs.readFileSync(specFile, 'utf8'));
+    expect(persisted.userStories.map((story: any) => [story.id, story.passes])).toEqual([
+      ['US-001', true],
+      ['US-002', false],
+    ]);
+
+    expect(mockSend).toHaveBeenCalled();
+    const [, payload] = mockSend.mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect(payload.startFromStoryId).toBe('US-002');
+    expect(payload.specificStory).toBeUndefined();
+
+    const skipped = await queryOne<{ status: string; reason: string }>(
+      `SELECT status, reason FROM story_results WHERE run_id = $1 AND story_id = 'US-001'`,
+      [res.body.runId],
+    );
+    expect(skipped).toEqual({ status: 'skip', reason: 'previously_passed' });
+  });
+
   test('GET /runs/:runId returns agentType and agentModel fields', async () => {
     // Seed a run with explicit agent info
     const insertResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)
