@@ -23,6 +23,10 @@ jest.mock('readline/promises', () => ({
 
 jest.mock('../db-strategy', () => ({
   setDbMode: (...args: unknown[]) => mockSetDbMode(...args),
+  describePgvectorFix: (mode: string) =>
+    mode === 'docker'
+      ? 'pgvector is not available in the Docker Postgres image. Rerun `rorca db start`.'
+      : `pgvector is not available (${mode}).`,
 }));
 
 function createChildProcess(
@@ -70,7 +74,9 @@ describe('db-sidecar', () => {
       .mockReturnValueOnce(createChildProcess(0))
       .mockReturnValueOnce(createChildProcess(0, 'true'))
       .mockReturnValueOnce(createChildProcess(0))
-      .mockReturnValueOnce(createChildProcess(0));
+      .mockReturnValueOnce(createChildProcess(0))
+      // vectorExtensionEnabled probe → '1'
+      .mockReturnValueOnce(createChildProcess(0, '1'));
     const { dbStart } = require('../db-sidecar');
     await dbStart();
     expect(mockSpawn).toHaveBeenNthCalledWith(
@@ -103,7 +109,9 @@ describe('db-sidecar', () => {
       // pg_isready (waitForReady)
       .mockReturnValueOnce(createChildProcess(0))
       // enableAgeExtension psql CREATE EXTENSION
-      .mockReturnValueOnce(createChildProcess(0));
+      .mockReturnValueOnce(createChildProcess(0))
+      // vectorExtensionEnabled probe → '1'
+      .mockReturnValueOnce(createChildProcess(0, '1'));
 
     const { dbStart } = require('../db-sidecar');
     await dbStart();
@@ -140,7 +148,9 @@ describe('db-sidecar', () => {
       // pg_isready
       .mockReturnValueOnce(createChildProcess(0))
       // enableAgeExtension
-      .mockReturnValueOnce(createChildProcess(0));
+      .mockReturnValueOnce(createChildProcess(0))
+      // vectorExtensionEnabled probe → '1'
+      .mockReturnValueOnce(createChildProcess(0, '1'));
 
     const { dbStart } = require('../db-sidecar');
     await dbStart();
@@ -158,11 +168,13 @@ describe('db-sidecar', () => {
     expect(mockSetDbMode).toHaveBeenCalledWith('docker');
   });
 
-  it('dbStatus reports AGE-enabled when the container is running with the extension', async () => {
+  it('dbStatus reports AGE- and pgvector-enabled when the container is running with both extensions', async () => {
     mockSpawn
       // docker inspect → running
       .mockReturnValueOnce(createChildProcess(0, 'true'))
       // psql AGE probe → '1'
+      .mockReturnValueOnce(createChildProcess(0, '1'))
+      // psql vector probe → '1'
       .mockReturnValueOnce(createChildProcess(0, '1'));
 
     const { dbStatus } = require('../db-sidecar');
@@ -170,7 +182,29 @@ describe('db-sidecar', () => {
       running: true,
       containerExists: true,
       ageEnabled: true,
+      vectorEnabled: true,
     });
+  });
+
+  it('dbStart throws a pgvector fix path when the vector extension never bootstraps', async () => {
+    mockSpawn
+      // docker info (requireDocker)
+      .mockReturnValueOnce(createChildProcess(0))
+      // docker inspect → does not exist
+      .mockReturnValueOnce(createChildProcess(1))
+      // docker run
+      .mockReturnValueOnce(createChildProcess(0))
+      // pg_isready (waitForReady)
+      .mockReturnValueOnce(createChildProcess(0))
+      // enableAgeExtension psql CREATE EXTENSION
+      .mockReturnValueOnce(createChildProcess(0))
+      // vectorExtensionEnabled probe → empty (missing)
+      .mockReturnValueOnce(createChildProcess(0, ''));
+
+    const { dbStart } = require('../db-sidecar');
+    await expect(dbStart()).rejects.toThrow(/pgvector is not available in the Docker Postgres image/i);
+    // The Docker path must not be persisted when pgvector is missing.
+    expect(mockSetDbMode).not.toHaveBeenCalled();
   });
 
   it('dbStatus never throws and returns false flags on docker errors', async () => {
@@ -182,6 +216,7 @@ describe('db-sidecar', () => {
       running: false,
       containerExists: false,
       ageEnabled: false,
+      vectorEnabled: false,
     });
   });
 

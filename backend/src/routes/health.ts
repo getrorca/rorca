@@ -160,6 +160,7 @@ function getMcpBridgeHealth(): {
  *                 active_runs: { type: integer }
  *                 dbMode: { type: string, enum: [native, docker, byop] }
  *                 graphMode: { type: string, enum: [full, lite, disabled] }
+ *                 pgvectorReady: { type: boolean, description: "Whether the pgvector extension is installed for the active database mode" }
  *                 graphWarnings:
  *                   type: array
  *                   items: { type: string }
@@ -271,6 +272,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         uptime: Math.floor((Date.now() - startTime) / 1000),
         dbMode: databaseCapability.dbMode,
         graphMode: databaseCapability.graphMode,
+        pgvectorReady: databaseCapability.extensions.vector,
         graphWarnings: databaseCapability.warnings,
         databaseCapability,
         databaseSetup: buildDatabaseSetupGuidance(databaseCapability.dbMode),
@@ -317,6 +319,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       active_runs: activeRuns,
       dbMode: databaseCapability.dbMode,
       graphMode: databaseCapability.graphMode,
+      // LHM-009: Explicit pgvector readiness so clients see (and can surface the
+      // fix path in graphWarnings) when the active DB mode lacks pgvector.
+      pgvectorReady: databaseCapability.extensions.vector,
       graphWarnings: databaseCapability.warnings,
       agentType: activeAgent,
       agentModel: activeModel,
@@ -653,6 +658,7 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
  *                 active_runs: { type: integer }
  *                 dbMode: { type: string, enum: [native, docker, byop] }
  *                 graphMode: { type: string, enum: [full, lite, disabled] }
+ *                 pgvectorReady: { type: boolean, description: "Whether the pgvector extension is installed for the active database mode" }
  *                 graphWarnings:
  *                   type: array
  *                   items: { type: string }
@@ -746,6 +752,7 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       active_runs: activeRuns,
       dbMode: databaseCapability.dbMode,
       graphMode: databaseCapability.graphMode,
+      pgvectorReady: databaseCapability.extensions.vector,
       graphWarnings: databaseCapability.warnings,
       pending_specs_count: pendingSpecsCount,
       memory_usage: memoryUsage,

@@ -277,10 +277,40 @@ describe('db-strategy', () => {
       .mockResolvedValueOnce({ rows: [{ extname: 'age' }] });
 
     const { validateByopConnection } = require('../db-strategy');
-    await expect(validateByopConnection('postgres://user:secret@db.example.neon.tech:5432/rorca?sslmode=require')).rejects.toMatchObject({
-      code: 'PGVECTOR_REQUIRED',
-    });
+    const rejection = validateByopConnection('postgres://user:secret@db.example.neon.tech:5432/rorca?sslmode=require');
+    await expect(rejection).rejects.toMatchObject({ code: 'PGVECTOR_REQUIRED' });
+    // The rejection must name the provider and explain how to enable pgvector.
+    await expect(rejection).rejects.toThrow(/Neon Postgres/);
+    await expect(rejection).rejects.toThrow(/CREATE EXTENSION IF NOT EXISTS vector/);
+    await expect(rejection).rejects.toThrow(/docs\/supabase-setup\.md/);
     expect(mockPoolEnd).toHaveBeenCalled();
+  });
+
+  it('describePgvectorFix returns mode-specific remediation', () => {
+    const { describePgvectorFix } = require('../db-strategy');
+    expect(describePgvectorFix('native')).toMatch(/native Postgres/i);
+    expect(describePgvectorFix('native')).toMatch(/rorca start/);
+    expect(describePgvectorFix('docker')).toMatch(/Docker Postgres image/i);
+    expect(describePgvectorFix('docker')).toMatch(/rorca db start/);
+    expect(describePgvectorFix('byop', 'supabase')).toMatch(/Supabase Postgres/);
+    expect(describePgvectorFix('byop', 'neon')).toMatch(/Neon Postgres/);
+  });
+
+  it('assertPgvectorInstalled throws PGVECTOR_REQUIRED only when vector is missing', () => {
+    const { assertPgvectorInstalled } = require('../db-strategy');
+    expect(() => assertPgvectorInstalled({ vector: true }, 'native')).not.toThrow();
+    expect(() => assertPgvectorInstalled({ vector: false }, 'docker')).toThrow(
+      expect.objectContaining({ code: 'PGVECTOR_REQUIRED' }),
+    );
+  });
+
+  it('surfaces a pgvector fix path in capability warnings when vector is missing', async () => {
+    mockQuery.mockResolvedValue([{ extname: 'age' }]);
+    const { getDatabaseCapability } = require('../db-strategy');
+    const capability = await getDatabaseCapability();
+    expect(capability.extensions.vector).toBe(false);
+    expect(capability.warnings.some((w: string) => /pgvector is not installed/.test(w))).toBe(true);
+    expect(capability.warnings.some((w: string) => /CREATE EXTENSION IF NOT EXISTS vector|rorca/.test(w))).toBe(true);
   });
 
   it('returns full graph capability when AGE is installed', async () => {

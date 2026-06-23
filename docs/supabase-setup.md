@@ -26,6 +26,21 @@ When you save a BYOP `DATABASE_URL`, Rorca validates it before accepting it:
 Apache AGE is **optional**. If it is not present, Rorca stays in Graph Lite
 rather than failing.
 
+> **pgvector is verified in every database mode.** Rorca checks for pgvector on
+> all three paths before declaring a setup ready:
+>
+> - **Native/local Postgres** — startup verifies pgvector is installable on the
+>   bundled Postgres before reporting success; if it is missing you are told to
+>   reinstall with `rorca start` or run `CREATE EXTENSION IF NOT EXISTS vector;`.
+> - **Docker Postgres** — `rorca db start` confirms pgvector bootstrapped in the
+>   AGE image before the Docker path is marked ready.
+> - **BYOP (Supabase/Neon/Railway/self-hosted)** — saving a `DATABASE_URL` is
+>   rejected if pgvector is absent, with a provider-named fix path.
+>
+> In each case the rejection names the exact `CREATE EXTENSION IF NOT EXISTS
+> vector;` command and never echoes your credentials — connection details are
+> always shown redacted.
+
 ---
 
 ## 1. Get your Supabase connection string
@@ -115,7 +130,7 @@ You have two options:
 | Symptom | Check |
 | --- | --- |
 | `DATABASE_URL must not disable SSL/TLS` | remove `sslmode=disable`; use `sslmode=require` |
-| `pgvector extension must be installed` | run `create extension if not exists vector;` in Supabase |
+| `pgvector is not installed on …` | run `create extension if not exists vector;` in Supabase (or enable the `vector` extension), then reconnect |
 | `Could not connect…` | verify host, password, and that the project is not paused |
 | Graph features missing | expected on Supabase — confirm `graphMode: "lite"` on `/api/health`; use Docker mode for Full Graph |
 
