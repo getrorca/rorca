@@ -6,18 +6,26 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { CheckCircle2, XCircle, Loader2, Share2, Database, ListOrdered, RefreshCw, AlertTriangle } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, Share2, Database, ListOrdered, RefreshCw, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { apiFetch } from '../../lib/apiFetch';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useWalSSE, type WalEvent } from '../../hooks/useWalSSE';
-import type { DatabaseCapability } from '../../contexts/CapabilitiesContext';
+import { useCapabilities, type DatabaseCapability } from '../../contexts/CapabilitiesContext';
+import { useGlobalToast } from '../../contexts/ToastContext';
 import { GraphCapabilityNotice, dbModeLabel, graphModeLabel } from '../../components/GraphCapabilityNotice';
+import {
+  defaultDatabaseSetupGuidance,
+  getDatabaseModeGuide,
+  type DatabaseSetupGuidance,
+  type DbMode,
+} from '../../lib/databaseSetup';
 
 /* ─── Types ───────────────────────────────────────────────────────────────── */
 
 interface WorkspaceStatusResponse {
   workspaceId: string;
   databaseCapability: DatabaseCapability;
+  databaseSetup: DatabaseSetupGuidance;
   graph: {
     available: boolean;
     graphMode: DatabaseCapability['graphMode'];
@@ -142,6 +150,8 @@ function providerLabel(provider: string): string {
 
 export function KnowledgeGraphSection() {
   const { workspaceId } = useWorkspace();
+  const { refreshCapabilities } = useCapabilities();
+  const { show: showToast } = useGlobalToast();
   const [status, setStatus] = useState<WorkspaceStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +165,10 @@ export function KnowledgeGraphSection() {
   const [debugEvent, setDebugEvent] = useState<RetrievalDebugEvent | null>(null);
   const [debugLoading, setDebugLoading] = useState(false);
   const [debugError, setDebugError] = useState<string | null>(null);
+  const [selectedMode, setSelectedMode] = useState<DbMode>('native');
+  const [databaseUrlInput, setDatabaseUrlInput] = useState('');
+  const [modeSaving, setModeSaving] = useState(false);
+  const [modeSaveError, setModeSaveError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     if (!workspaceId) {
@@ -250,15 +264,60 @@ export function KnowledgeGraphSection() {
     }
   }
 
+  async function handleSaveMode() {
+    if (!workspaceId || modeSaving) return;
+    if (selectedMode === 'byop' && !databaseUrlInput.trim()) {
+      setModeSaveError('DATABASE_URL is required for BYOP mode');
+      return;
+    }
+
+    setModeSaving(true);
+    setModeSaveError(null);
+    try {
+      const res = await apiFetch<{ databaseSelection?: { restartRequired?: boolean } }>(`/api/workspaces/${workspaceId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dbMode: selectedMode,
+          databaseUrl: selectedMode === 'byop' ? databaseUrlInput.trim() : undefined,
+        }),
+      });
+      await fetchStatus();
+      await refreshCapabilities().catch(() => undefined);
+      setDatabaseUrlInput('');
+      showToast(
+        res.databaseSelection?.restartRequired
+          ? 'Database mode saved. Restart Rorca to switch the live connection.'
+          : 'Database mode saved.',
+        'success',
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to save database mode';
+      setModeSaveError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setModeSaving(false);
+    }
+  }
+
   useEffect(() => {
     setDebugEvent(null);
     setDebugError(null);
   }, [workspaceId]);
 
+  useEffect(() => {
+    if (!status) return;
+    setSelectedMode(status.databaseSetup?.selectedMode ?? status.databaseCapability.dbMode);
+    setDatabaseUrlInput('');
+    setModeSaveError(null);
+  }, [status]);
+
   const progressPct = populateTotal > 0
     ? Math.round((populateCompleted / populateTotal) * 100)
     : 0;
 
+  const databaseSetup = status?.databaseSetup ?? defaultDatabaseSetupGuidance;
+  const selectedGuide = getDatabaseModeGuide(databaseSetup, selectedMode);
   const graphMode = status?.databaseCapability.graphMode ?? 'disabled';
   const graphWarnings = status?.databaseCapability.warnings ?? [];
 
@@ -288,6 +347,148 @@ export function KnowledgeGraphSection() {
 
         {status && !loading && !error && (
           <>
+            <div className="mb-4 rounded-lg border border-border bg-surface p-4 space-y-4">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-sm font-medium text-[var(--text)]">Database mode</p>
+                  <p className="text-xs text-muted mt-1">{databaseSetup.selectionNote}</p>
+                </div>
+                <span className="inline-flex items-center gap-1 rounded-full border border-border bg-bg px-2.5 py-1 text-[11px] font-medium text-muted">
+                  <ShieldCheck className="h-3.5 w-3.5 text-accent" />
+                  Saved selection applies on next restart/session
+                </span>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                {databaseSetup.modes.map((option) => {
+                  const selected = selectedMode === option.mode;
+                  return (
+                    <button
+                      key={option.mode}
+                      type="button"
+                      onClick={() => {
+                        setSelectedMode(option.mode);
+                        setModeSaveError(null);
+                      }}
+                      className={`rounded-lg border p-3 text-left transition-colors ${selected ? 'border-accent bg-accent/10' : 'border-border bg-bg hover:border-accent/40'}`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-primary">{option.label}</p>
+                          <p className="mt-1 text-xs text-muted">{option.summary}</p>
+                        </div>
+                        {selected ? <CheckCircle2 className="h-4 w-4 text-accent shrink-0" /> : null}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${option.graphExpectation === 'full' ? 'bg-success/10 text-success border border-success/20' : 'bg-warning/10 text-warning border border-warning/20'}`}>
+                          {graphModeLabel(option.graphExpectation)} expected
+                        </span>
+                        {databaseSetup.selectedMode === option.mode ? (
+                          <span className="rounded-full border border-border bg-surface px-2 py-0.5 text-[10px] font-medium text-muted">Current default</span>
+                        ) : null}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-[1.35fr,1fr]">
+                <div className="rounded-lg border border-border bg-bg p-4">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-medium text-primary">{selectedGuide.label}</p>
+                      <p className="text-xs text-muted mt-1">{selectedGuide.graphSummary}</p>
+                    </div>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${selectedGuide.graphExpectation === 'full' ? 'bg-success/10 text-success border border-success/20' : 'bg-warning/10 text-warning border border-warning/20'}`}>
+                      {graphModeLabel(selectedGuide.graphExpectation)}
+                    </span>
+                  </div>
+                  <ol className="mt-3 space-y-2 list-decimal pl-4 text-xs text-muted">
+                    {selectedGuide.startupGuide.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Tradeoffs</p>
+                      <ul className="mt-1 space-y-1 text-xs text-muted">
+                        {selectedGuide.tradeoffs.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Best for</p>
+                      <ul className="mt-1 space-y-1 text-xs text-muted">
+                        {selectedGuide.bestFor.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-border bg-bg p-4 space-y-3">
+                  <p className="text-sm font-medium text-primary">Full Graph vs Graph Lite</p>
+                  {databaseSetup.graphModes.map((entry) => (
+                    <div key={entry.mode} className="rounded-lg border border-border bg-surface p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold text-primary">{entry.label}</p>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${entry.mode === 'full' ? 'bg-success/10 text-success border border-success/20' : 'bg-warning/10 text-warning border border-warning/20'}`}>
+                          {entry.mode === 'full' ? 'AGE required' : 'Fallback mode'}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted">{entry.summary}</p>
+                      <ul className="mt-2 space-y-1 text-xs text-muted">
+                        {entry.tradeoffs.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {selectedMode === 'byop' && (
+                <div className="rounded-lg border border-border bg-bg p-4">
+                  <label htmlFor="knowledge-graph-database-url" className="block text-sm font-medium text-primary mb-1">
+                    Secure DATABASE_URL input
+                  </label>
+                  <textarea
+                    id="knowledge-graph-database-url"
+                    value={databaseUrlInput}
+                    onChange={(e) => setDatabaseUrlInput(e.target.value)}
+                    placeholder="postgres://postgres:password@db.example.supabase.co:5432/postgres?sslmode=require"
+                    rows={4}
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="w-full rounded border border-border bg-surface px-3 py-2 text-sm font-mono text-primary focus:border-accent resize-y"
+                  />
+                  <p className="mt-2 text-xs text-muted">{databaseSetup.byop.secretSafeInput}</p>
+                  <p className="mt-1 text-xs text-muted">Validation on save: {databaseSetup.byop.validationChecks.join(' · ')}</p>
+                </div>
+              )}
+
+              {modeSaveError ? (
+                <div className="rounded-lg border border-error/30 bg-error/10 p-3 text-xs text-error">
+                  {modeSaveError}
+                </div>
+              ) : null}
+
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <p className="text-xs text-muted">{databaseSetup.validationFlow}</p>
+                <button
+                  type="button"
+                  onClick={handleSaveMode}
+                  disabled={modeSaving || !workspaceId}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {modeSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Database className="h-3.5 w-3.5" />}
+                  {modeSaving ? 'Saving…' : 'Save database mode'}
+                </button>
+              </div>
+            </div>
+
             <div className="mb-4 flex flex-wrap items-center gap-2">
               <Share2 size={16} className="text-muted" />
               <span className="text-sm font-medium text-[var(--text)]">Status</span>

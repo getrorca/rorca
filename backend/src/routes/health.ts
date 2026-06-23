@@ -18,7 +18,7 @@ import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
 import { getMcpTransportCount } from '../lib/mcp-http';
-import { buildDatabaseCapability, type DatabaseProvider } from '../lib/db-strategy';
+import { buildDatabaseCapability, buildDatabaseSetupGuidance, type DatabaseProvider } from '../lib/db-strategy';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -273,6 +273,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         graphMode: databaseCapability.graphMode,
         graphWarnings: databaseCapability.warnings,
         databaseCapability,
+        databaseSetup: buildDatabaseSetupGuidance(databaseCapability.dbMode),
       });
     }
 
@@ -305,6 +306,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
     // MP-009: Detect all engines (cached 30s) for EngineSelector availability dots
     const engines = detectEngines();
     const mcp = getMcpBridgeHealth();
+    const databaseSetup = buildDatabaseSetupGuidance(databaseCapability.dbMode);
 
     res.status(200).json({
       status: overallStatus,
@@ -327,6 +329,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       ...(rawDbHealth.extensionStatus ? { extensionStatus: rawDbHealth.extensionStatus } : {}),
       ...(rawDbHealth.connectionLimit ? { connectionLimit: rawDbHealth.connectionLimit } : {}),
       databaseCapability,
+      databaseSetup,
       // CA-021: Report MCP transport mode + bridge health
       mcpTransport: mcp.enabled ? 'http' : 'disabled',
       mcp,
@@ -679,6 +682,7 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       provider: healthResult.provider,
       extensionStatus: healthResult.extensionStatus,
     });
+    const databaseSetup = buildDatabaseSetupGuidance(databaseCapability.dbMode);
 
     // Pending specs count — count spec files across all workspaces
     let pendingSpecsCount = 0;
@@ -747,6 +751,7 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       memory_usage: memoryUsage,
       last_backup_at: lastBackupAt,
       databaseCapability,
+      databaseSetup,
       ...(agentType === 'opencode' && opencode ? {
         opencodeInstalled: opencode.opencodeInstalled,
         opencodeVersion: opencode.opencodeVersion,

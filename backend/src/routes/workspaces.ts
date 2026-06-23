@@ -36,6 +36,7 @@ import { ConflictError, NotFoundError, UnprocessableError, ValidationError } fro
 import { handleRouteError } from '../lib/async-handler';
 import { authRequired, requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
 import {
+  buildDatabaseSetupGuidance,
   getDatabaseCapability,
   setDbMode,
   setPersistedByopDatabaseUrl,
@@ -276,6 +277,7 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
       workspace: parseWorkspace(row!),
       health,
       needsBootstrap,
+      databaseSetup: buildDatabaseSetupGuidance(),
       ...(databaseSelection ? { databaseSelection } : {}),
     });
   } catch (err) {
@@ -395,6 +397,7 @@ router.get('/:id/status', async (req, res, next) => {
     res.json({
       workspaceId: workspace.id,
       databaseCapability,
+      databaseSetup: buildDatabaseSetupGuidance(databaseCapability.dbMode),
       graph: {
         available: stats.available,
         graphMode: databaseCapability.graphMode,
@@ -917,6 +920,7 @@ router.patch('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
     const updated = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     res.json({
       workspace: parseWorkspace(updated!),
+      databaseSetup: buildDatabaseSetupGuidance(),
       ...(databaseSelection ? { databaseSelection } : {}),
     });
   } catch (err) {

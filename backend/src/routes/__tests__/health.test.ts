@@ -84,6 +84,10 @@ describe('GET /api/health', () => {
     expect(res.body).toHaveProperty('databaseCapability.extensions.age');
     expect(res.body).toHaveProperty('databaseCapability.graphMode');
     expect(Array.isArray(res.body.databaseCapability.warnings)).toBe(true);
+    expect(res.body).toHaveProperty('databaseSetup.selectedMode');
+    expect(res.body.databaseSetup).toHaveProperty('selectionPersistsAcrossSessions', true);
+    expect(res.body.databaseSetup.modes).toHaveLength(3);
+    expect(res.body.databaseSetup.graphModes.map((entry: { mode: string }) => entry.mode).sort()).toEqual(['full', 'lite']);
     expect(res.body.dbMode).toBe(res.body.databaseCapability.dbMode);
     expect(res.body.graphMode).toBe(res.body.databaseCapability.graphMode);
     expect(String(res.body.databaseCapability.connection.url ?? '')).not.toContain('@');
@@ -156,6 +160,8 @@ describe('GET /api/health/detailed', () => {
     expect(res.body).toHaveProperty('graphMode');
     expect(Array.isArray(res.body.graphWarnings)).toBe(true);
     expect(res.body).toHaveProperty('databaseCapability.graphMode');
+    expect(res.body).toHaveProperty('databaseSetup.selectedMode');
+    expect(res.body.databaseSetup.modes).toHaveLength(3);
     expect(res.body.dbMode).toBe(res.body.databaseCapability.dbMode);
     expect(res.body.graphMode).toBe(res.body.databaseCapability.graphMode);
   });

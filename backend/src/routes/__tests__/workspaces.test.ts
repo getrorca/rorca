@@ -175,5 +175,11 @@ test('GET /api/workspaces/:id/status returns canonical database capability with 
   expect(res.body.databaseCapability.extensions).toHaveProperty('age');
   expect(Array.isArray(res.body.databaseCapability.warnings)).toBe(true);
   expect(String(res.body.databaseCapability.connection.url ?? '')).not.toContain('@');
+  expect(res.body.databaseSetup).toMatchObject({
+    selectedMode: expect.any(String),
+    selectionPersistsAcrossSessions: true,
+  });
+  expect(res.body.databaseSetup.modes).toHaveLength(3);
+  expect(res.body.databaseSetup.graphModes.map((entry: { mode: string }) => entry.mode).sort()).toEqual(['full', 'lite']);
   expect(res.body.graph).toHaveProperty('graphMode', res.body.databaseCapability.graphMode);
 });
