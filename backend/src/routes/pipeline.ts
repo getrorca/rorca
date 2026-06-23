@@ -1224,7 +1224,8 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               thinkingEnabled: { type: boolean, description: "Enable extended reasoning for supported agents" }
  *               thinkingBudget: { type: integer, description: "Budget for extended reasoning" }
  *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh], description: "Reasoning effort level hint for supported agents" }
- *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists" }
+ *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists; does not reset passed story state." }
+ *               rerunFromScratch: { type: boolean, description: "Reset passed story state and execute the spec from the first non-excluded story." }
  *               readinessOverride: { type: boolean, description: "Explicitly run despite readiness blockers; usage is logged to WAL for auditability." }
  *               terminal_mode:
  *                 type: string
@@ -1272,6 +1273,7 @@ const PipelineTriggerSchema = z.object({
   effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
   forceRerun: z.boolean().optional(),
+  rerunFromScratch: z.boolean().optional(),
   readinessOverride: z.boolean().optional(),
   runAnywayOverride: z.boolean().optional(),
   overrideReadinessGate: z.boolean().optional(),
@@ -1281,7 +1283,7 @@ const PipelineTriggerSchema = z.object({
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1960,8 +1962,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         broadcastAll(walEvent!);
       }
 
-      // forceRerun: reset all passes=true to false so every story runs fresh
-      if (forceRerun) {
+      // `forceRerun` is an idempotency bypass only. It must not mutate story pass state;
+      // continuation runs depend on passes:true remaining authoritative. Use the explicit
+      // `rerunFromScratch` option for the UI action that intentionally re-executes all stories.
+      if (rerunFromScratch) {
         let modified = false;
         for (const s of (specJson.userStories ?? [])) {
           if (s.passes === true) { s.passes = false; modified = true; }
@@ -1971,7 +1975,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
       }
 
-      const alreadyPassing = forceRerun ? [] : (specJson.userStories ?? []).filter(
+      const alreadyPassing = rerunFromScratch ? [] : (specJson.userStories ?? []).filter(
         (s: { passes?: boolean; excluded?: boolean }) => s.passes === true && s.excluded !== true
       );
       for (const s of alreadyPassing) {
@@ -1983,8 +1987,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         broadcastAll(walEvent!);
       }
 
-      // Compute startFromStoryId: first story where passes !== true and not excluded
-      // When forceRerun, all passes are already reset so start from the first non-excluded story
+      // Compute startFromStoryId: first story where passes !== true and not excluded.
+      // When rerunFromScratch is true, pass flags were intentionally reset above.
       const startFromStory = (specJson.userStories ?? []).find(
         (s: { passes?: boolean; excluded?: boolean }) => s.passes !== true && s.excluded !== true
       );
