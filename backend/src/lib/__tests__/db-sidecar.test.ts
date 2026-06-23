@@ -92,6 +92,87 @@ describe('db-sidecar', () => {
     expect(mockSetDbMode).toHaveBeenCalledWith('docker');
   });
 
+  it('dbStart creates the AGE container, enables extensions, and persists docker mode (Miguel full-graph path)', async () => {
+    mockSpawn
+      // docker info (requireDocker)
+      .mockReturnValueOnce(createChildProcess(0))
+      // docker inspect → container does not exist
+      .mockReturnValueOnce(createChildProcess(1))
+      // docker run
+      .mockReturnValueOnce(createChildProcess(0))
+      // pg_isready (waitForReady)
+      .mockReturnValueOnce(createChildProcess(0))
+      // enableAgeExtension psql CREATE EXTENSION
+      .mockReturnValueOnce(createChildProcess(0));
+
+    const { dbStart } = require('../db-sidecar');
+    await dbStart();
+
+    // Regression guard: the managed container is provisioned from the apache/age image
+    // on the canonical 5432 port + named volume — Miguel's Full-Graph startup contract.
+    const runCall = mockSpawn.mock.calls.find(
+      (call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes('run'),
+    );
+    expect(runCall).toBeDefined();
+    const runArgs = runCall![1] as string[];
+    expect(runArgs).toEqual(expect.arrayContaining(['--name', 'rorca-db']));
+    expect(runArgs).toEqual(expect.arrayContaining(['-p', '5432:5432']));
+    expect(runArgs).toEqual(expect.arrayContaining(['-v', 'rorca-db-data:/var/lib/postgresql/data']));
+    expect(runArgs).toContain('apache/age:latest');
+
+    // AGE + pgvector extensions are created so the graph comes up in Full mode.
+    const psqlCall = mockSpawn.mock.calls.find(
+      (call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes('CREATE EXTENSION IF NOT EXISTS age; CREATE EXTENSION IF NOT EXISTS vector;'),
+    );
+    expect(psqlCall).toBeDefined();
+
+    expect(mockSetDbMode).toHaveBeenCalledWith('docker');
+  });
+
+  it('dbStart starts an existing stopped container without recreating it', async () => {
+    mockSpawn
+      // docker info
+      .mockReturnValueOnce(createChildProcess(0))
+      // docker inspect → exists but stopped
+      .mockReturnValueOnce(createChildProcess(0, 'false'))
+      // docker start
+      .mockReturnValueOnce(createChildProcess(0))
+      // pg_isready
+      .mockReturnValueOnce(createChildProcess(0))
+      // enableAgeExtension
+      .mockReturnValueOnce(createChildProcess(0));
+
+    const { dbStart } = require('../db-sidecar');
+    await dbStart();
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['start', 'rorca-db']),
+      expect.any(Object),
+    );
+    expect(mockSpawn).not.toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['run']),
+      expect.any(Object),
+    );
+    expect(mockSetDbMode).toHaveBeenCalledWith('docker');
+  });
+
+  it('dbStatus reports AGE-enabled when the container is running with the extension', async () => {
+    mockSpawn
+      // docker inspect → running
+      .mockReturnValueOnce(createChildProcess(0, 'true'))
+      // psql AGE probe → '1'
+      .mockReturnValueOnce(createChildProcess(0, '1'));
+
+    const { dbStatus } = require('../db-sidecar');
+    await expect(dbStatus()).resolves.toEqual({
+      running: true,
+      containerExists: true,
+      ageEnabled: true,
+    });
+  });
+
   it('dbStatus never throws and returns false flags on docker errors', async () => {
     mockSpawn.mockImplementation(() => {
       throw new Error('boom');

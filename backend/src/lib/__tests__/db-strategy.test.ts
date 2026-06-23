@@ -82,6 +82,26 @@ describe('db-strategy', () => {
     expect(detectDbMode()).toBe('docker');
   });
 
+  it('honors a persisted byop mode when a BYOP DATABASE_URL has been saved', () => {
+    mockReadFileSync.mockImplementation((target: string) => {
+      if (target.endsWith('/db-mode')) return 'byop\n';
+      if (target.endsWith('/database-url')) return 'postgres://user:pass@db.example.com:5432/rorca?sslmode=require\n';
+      throw new Error('missing');
+    });
+    const { detectDbMode } = require('../db-strategy');
+    expect(detectDbMode()).toBe('byop');
+  });
+
+  it('falls back off persisted byop to native when no saved URL or remote env URL exists', () => {
+    // db-mode says byop, but no persisted database-url file and no remote DATABASE_URL.
+    mockReadFileSync.mockImplementation((target: string) => {
+      if (target.endsWith('/db-mode')) return 'byop\n';
+      throw new Error('missing');
+    });
+    const { detectDbMode } = require('../db-strategy');
+    expect(detectDbMode()).toBe('native');
+  });
+
   it('returns native by default', () => {
     mockReadFileSync.mockImplementation(() => {
       throw new Error('missing');
@@ -195,6 +215,29 @@ describe('db-strategy', () => {
     });
     expect(capability.connection.url).toBe('postgres://db.example.com:5432/rorca');
     expect(capability.warnings.some((warning: string) => warning.includes('lite graph mode'))).toBe(true);
+  });
+
+  it('disables the graph and warns when the database is unreachable', () => {
+    const { buildDatabaseCapability } = require('../db-strategy');
+    const capability = buildDatabaseCapability({
+      connected: false,
+      dbMode: 'docker',
+      extensionStatus: { age: false, vector: false },
+      databaseUrl: 'postgres://rorca:rorca@localhost:5432/rorca',
+    });
+    expect(capability.graphMode).toBe('disabled');
+    expect(capability.connected).toBe(false);
+    expect(capability.warnings.some((warning: string) => /connectivity is unavailable/i.test(warning))).toBe(true);
+  });
+
+  it('falls back to lite graph mode when connected without AGE', async () => {
+    mockQuery.mockResolvedValue([{ extname: 'vector' }]);
+    const { getDatabaseCapability } = require('../db-strategy');
+    await expect(getDatabaseCapability()).resolves.toMatchObject({
+      graphMode: 'lite',
+      extensions: { age: false, vector: true },
+      connected: true,
+    });
   });
 
   it('rejects malformed or unsafe BYOP connection strings before persistence', () => {
