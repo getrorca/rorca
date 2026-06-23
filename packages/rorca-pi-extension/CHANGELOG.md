@@ -6,6 +6,42 @@ The format is inspired by Keep a Changelog and uses semantic-version style relea
 
 ---
 
+## [0.2.0] - 2026-06-22
+
+Hermes launch-handoff release (LHM-006). Makes Rorca usable from Hermes —
+Rorca's external distribution channel — by documenting the integration, install
+and update path, and keeping the skill surface honest about current MCP tool
+names and Graph Lite / BYOP behavior.
+
+### Added
+
+- Added [`docs/mcp-integration.md`](../../docs/mcp-integration.md): the canonical
+  Hermes-facing guide covering MCP server registration, the discoverable tool
+  surface, the brief → spec → review → approve → run → inspect workflow, a
+  clean-environment install/update flow, version validation and rollback, and
+  Graph Lite / BYOP truthfulness.
+- Documented the canonical, current MCP tool names (e.g. `rorca_get_context`,
+  `rorca_create_spec`, `rorca_list_specs`, `rorca_approve_spec`,
+  `rorca_trigger_run`, `rorca_pipeline_status`, `rorca_run_status`) and their
+  stable aliases in the README and integration doc.
+
+### Changed
+
+- README now positions this package explicitly as **Hermes** (an external
+  distribution channel, not a replacement for the first-party Rorca app/TUI),
+  adds an update/rollback section tied to this package's version, and documents
+  Graph Lite / BYOP behavior with `dbMode` / `graphMode` from `/api/health`.
+- `rorca-forge` and `rorca-forge-run` skills now warn that graph/retrieval
+  context may be Graph-Lite-shaped depending on DB mode, so they avoid promising
+  AGE-only graph behavior.
+
+### Versioning
+
+- This release pins the extension and bundled skills to `0.2.0` so installs can
+  be validated against `CHANGELOG.md` and rolled back as a unit.
+
+---
+
 ## [0.1.0] - 2026-05-14
 
 Initial public-ready release of the **Rorca Pi Extension**.

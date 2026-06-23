@@ -38,12 +38,17 @@ Follow the same retrieval principle as `rorca-forge`:
 
 Use retrieval to improve the draft, not just to decorate it.
 
+Graph/retrieval context may be **Graph Lite** when the workspace has no Apache
+AGE (common for BYOP/hosted Postgres). In that case relevance comes from
+semantic and telemetry evidence rather than AGE graph paths — degrade gracefully
+and do not promise AGE-only graph behavior.
+
 ## Approval and run behavior
 
 Before triggering a run:
 - confirm the saved spec exists
 - confirm the persist call sent either `policyPresetId` or an effective `postSavePolicy`, then surface which policy was used
-- inspect `getSpec` / `rorca_get_specs_by_specId` plus `rorca_spec_workflow` or `rorca_spec_readiness`
+- inspect `rorca_get_specs_by_specId` plus `rorca_spec_workflow` or `rorca_spec_readiness`
 - classify story-level skill state as `present`, `pending`, `skipped:no_installed_skills`, or `failed:<retryable_reason>` rather than assuming the persist response means enrichment finished
 - if skill state is `failed:<retryable_reason>`, explain the retryable reason and use `rorca_retry_spec_stage` / `rorca_repair_spec` before claiming success
 - confirm approval succeeded if approval is required
@@ -62,7 +67,7 @@ Do not claim a run was triggered unless a canonical run id or equivalent confirm
 - internal backend adapters are acceptable when this workflow is launched from backend-owned flows
 - use REST only as explicit fallback when allowed by the launcher
 - backend/server context backfill is recovery-grade fallback only, never a substitute for true caller-observed drafting context
-- preferred tool sequence: `rorca_specs_generation_context` -> draft -> `rorca_create_spec` -> `getSpec` -> `rorca_spec_workflow` or `rorca_spec_readiness` -> verify story skill state -> `rorca_approve_spec` -> `rorca_trigger_run`
+- preferred tool sequence: `rorca_specs_generation_context` -> draft -> `rorca_create_spec` -> `rorca_get_specs_by_specId` -> `rorca_spec_workflow` or `rorca_spec_readiness` -> verify story skill state -> `rorca_approve_spec` -> `rorca_trigger_run`
 
 ## Output contract
 

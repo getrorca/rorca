@@ -67,7 +67,7 @@ Use tools/internal operations to gather context such as:
 Use structured operations for:
 - `rorca_create_spec` as the canonical explicit create-spec path when available
 - `rorca_persist_spec` as a compatibility alias for the same persistence contract
-- `getSpec` / `rorca_get_specs_by_specId` to verify the saved stories and inspect story-level `suggestedSkills`
+- `rorca_get_specs_by_specId` to verify the saved stories and inspect story-level `suggestedSkills`
 - `rorca_spec_workflow` / `rorca_specs_by_specId_workflow` and `rorca_spec_readiness` / `rorca_specs_by_specId_readiness` to verify durable post-save state after persistence
 - `rorca_retry_spec_stage` or `rorca_repair_spec` when verification shows a retryable post-save failure
 - `rorca_approve_spec` / `rorca_specs_by_specId_approve` if approval was requested
@@ -113,6 +113,15 @@ You may need to decide between:
 
 Do not blindly accept the first retrieval result set.
 Reject noisy or stale context when appropriate.
+
+### Graph context may be Graph Lite
+Graph/retrieval context depends on the workspace's database configuration.
+When the workspace runs in **Graph Lite** (no Apache AGE, common for BYOP/hosted
+Postgres such as Supabase or Neon), relevance comes from semantic and telemetry
+evidence rather than AGE graph traversal. Treat graph results as possibly
+Graph-Lite-shaped, degrade gracefully, and do not promise AGE-only graph
+behavior. You can read `graphMode` / `dbMode` from the backend health surface to
+know which mode is active.
 
 ## Clarifying questions
 
@@ -191,7 +200,7 @@ Once you have a complete draft:
 3. make the persist payload explicitly policy-aware: pass either `policyPresetId` when a preset is known or an effective `postSavePolicy` object derived from the bundle/defaults; do not hide policy choice behind vague success copy
 4. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
 5. keep post-save enrich and matchSkills enabled unless the launcher or user explicitly asked for an opt-out; server-side context backfill is repair-only fallback, not the normal creation contract
-6. read the saved spec back via `getSpec` / `rorca_get_specs_by_specId`
+6. read the saved spec back via `rorca_get_specs_by_specId`
 7. verify that a real slug/id exists and that the saved story set broadly matches the draft
 8. inspect `rorca_spec_workflow` or `rorca_spec_readiness` after save and classify each story's skill-injection state honestly:
    - `present` — the saved story already has the expected `suggestedSkills` outcome
