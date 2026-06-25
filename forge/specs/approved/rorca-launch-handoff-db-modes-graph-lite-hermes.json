@@ -1,0 +1,456 @@
+{
+  "title": "Rorca Launch Handoff: DB Modes, Graph Lite, and Hermes",
+  "generatedAt": "2026-06-22T19:50:00.955Z",
+  "autoWorktree": true,
+  "userStories": [
+    {
+      "id": "LHM-001",
+      "title": "Add a canonical database capability model and redacted runtime status surface",
+      "description": "Introduce a single source of truth for database mode, provider, extension support, warnings, and graph capability so the rest of Rorca can reason about native local Postgres, Docker Postgres with AGE, and BYOP hosted Postgres consistently while also finishing any remaining gaps in Miguel’s setup/bootstrap work with the minimum necessary changes.",
+      "acceptanceCriteria": [
+        "A canonical capability object exists with dbMode, provider, extensions, graphMode, and warnings fields.",
+        "AGE availability is detected through one shared helper and is not re-probed ad hoc by UI components or individual routes.",
+        "A health or status API surface exposes the capability model for frontend and operator use.",
+        "Any DB URL or connection metadata shown by the status surface is redacted so no secrets appear in logs, toasts, API responses, or UI.",
+        "Capability output includes enough guidance for the UI to distinguish full, lite, and disabled graph support without guessing.",
+        "Native, Docker, and BYOP modes are distinguished, and any remaining gaps in Miguel-owned DB startup, sidecar, or bootstrap lifecycle code are completed with the minimum necessary changes rather than a rewrite."
+      ],
+      "dependsOn": [],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "env-and-assets-bootstrap",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: bootstrap, setup, any, full"
+        },
+        {
+          "name": "api-documentation",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: api, rest"
+        },
+        {
+          "name": "code-migration",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: code, frontend"
+        }
+      ],
+      "files": [
+        "backend/src/lib/db-strategy.ts",
+        "backend/src/lib/age-guard.ts",
+        "backend/src/lib/db-sidecar.ts",
+        "backend/src/routes/health.ts",
+        "backend/src/routes/workspaces.ts",
+        "src/components/GraphTabWithSubTabs.tsx",
+        "src/components/RelevanceGraphView.tsx",
+        "src/components/SpecRelevanceGraph.tsx",
+        "src/panels/settings/KnowledgeGraphSection.tsx"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-002",
+      "title": "Implement BYOP database handling for Supabase and other hosted Postgres providers",
+      "description": "Allow users to provide, validate, and persist their own PostgreSQL connection string and switch into byop mode for Supabase, Neon, and similar providers without relying on local Docker or native bootstrap logic.",
+      "acceptanceCriteria": [
+        "Users can supply a hosted PostgreSQL DATABASE_URL and persist it as byop mode.",
+        "Connection strings are validated safely and clearly malformed or unsafe values are rejected before persistence.",
+        "Supabase, Neon, and other remote Postgres providers are treated as byop rather than native or docker whenever the capability model can identify them.",
+        "Switching back from byop to native or docker does not leave stale settings that break startup or cause the wrong mode to be reported.",
+        "The app can validate a BYOP connection without printing passwords, tokens, or other secrets in responses or logs.",
+        "The app rejects a BYOP PostgreSQL connection unless the server has the pgvector extension installed and usable for the selected database mode.",
+        "The flow does not depend on local DB bootstrap, and any new route or setting surface is annotated with the correct Swagger tier/rationale if exposed publicly."
+      ],
+      "dependsOn": [
+        "LHM-001"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "env-and-assets-bootstrap",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: bootstrap, before, any"
+        },
+        {
+          "name": "distributed-tracing-logs",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: logs, implement"
+        },
+        {
+          "name": "database-optimization",
+          "relevance": 8,
+          "reason": "Heuristic fallback matched story terms to skill metadata: database"
+        }
+      ],
+      "files": [
+        "backend/src/routes/workspaces.ts",
+        "backend/src/routes/health.ts",
+        "backend/src/lib/db-strategy.ts",
+        "backend/src/lib/db-sidecar.ts",
+        "src/components/AddWorkspaceModal.tsx"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-003",
+      "title": "Add Graph Lite providers and graceful fallback behavior",
+      "description": "Create a graph abstraction that uses Apache AGE for full mode and relational or semantic fallback logic for Graph Lite when AGE is unavailable, so hosted BYOP providers still have useful graph-related features.",
+      "acceptanceCriteria": [
+        "Graph mode is selected from the runtime capability model, not hardcoded per route or component.",
+        "When AGE is available, existing full graph behavior remains intact for graph surfaces that already depend on it and the native/Docker full-graph setup is complete end-to-end.",
+        "When AGE is unavailable, graph-facing features use a relational or semantic fallback instead of failing outright wherever practical.",
+        "Fallback behavior is consistent across memory graph, knowledge graph, and spec relevance graph surfaces.",
+        "Story dependency graphs remain functional in every supported DB mode and do not regress when Graph Lite is enabled.",
+        "AGE-only admin operations remain gated or clearly unavailable in lite mode, and product-facing routes do not present opaque 503-style failures."
+      ],
+      "dependsOn": [
+        "LHM-001",
+        "LHM-002"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "rorca-spec-creation",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: spec, create, when"
+        },
+        {
+          "name": "cloud-cost-optimization",
+          "relevance": 8,
+          "reason": "Heuristic fallback matched story terms to skill metadata: when, across, providers"
+        }
+      ],
+      "files": [
+        "backend/src/lib/knowledge-graph.ts",
+        "backend/src/lib/memory-graph.ts",
+        "backend/src/lib/spec-relevance-graph.ts",
+        "backend/src/routes/graph.ts",
+        "backend/src/routes/spec-relevance-graph.ts",
+        "src/components/GraphTabWithSubTabs.tsx",
+        "src/components/RelevanceGraphView.tsx",
+        "src/components/SpecRelevanceGraph.tsx"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-004",
+      "title": "Update Knowledge Graph and health UI to be honest in full and lite modes",
+      "description": "Expose database mode and graph capability in the UI so users understand whether they are in full graph, Graph Lite, or disabled mode, and keep dependency, relevance, and memory views useful in degraded states.",
+      "acceptanceCriteria": [
+        "Settings or health surfaces show the selected DB mode and graphMode clearly.",
+        "Knowledge Graph-related panels show a non-scary Graph Lite banner when AGE is unavailable.",
+        "Full graph views continue to work unchanged for native and Docker AGE setups.",
+        "Lite mode shows useful fallback data or empty states instead of opaque failure UX wherever possible.",
+        "UI copy explains how to get Full Graph back by switching to local or Docker Postgres with AGE.",
+        "Frontend API calls continue to go through src/lib/apiFetch, and the UI uses design tokens rather than hardcoded hex values.",
+        "Fallback messaging distinguishes between unavailable graph capability and an actual backend failure."
+      ],
+      "dependsOn": [
+        "LHM-001",
+        "LHM-003"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "tailwind-design-system",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: design, tokens, when, frontend"
+        },
+        {
+          "name": "database-optimization",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: database, when, design, backend"
+        },
+        {
+          "name": "gap-analysis",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: between, actual, through, frontend"
+        }
+      ],
+      "files": [
+        "backend/src/routes/health.ts",
+        "src/components/GraphTabWithSubTabs.tsx",
+        "src/components/RelevanceGraphView.tsx",
+        "src/components/SpecRelevanceGraph.tsx",
+        "src/panels/settings/KnowledgeGraphSection.tsx"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-005",
+      "title": "Add explicit DB mode selection UX for onboarding and settings",
+      "description": "Provide a clear user-facing path to choose native managed Postgres, Docker Postgres with AGE, or BYOP hosted Postgres during first install/setup and later in settings, while reflecting the completed native/Docker setup path rather than a half-finished bootstrap flow.",
+      "acceptanceCriteria": [
+        "First install/onboarding explicitly asks the user which database mode they want to use before starting DB bootstrap or connection validation.",
+        "Users can choose among native, docker, and byop modes from a discoverable UI surface.",
+        "Each selectable mode links to or embeds a mode-specific startup guide: native/local Postgres, Docker Postgres with AGE, and BYOP hosted Postgres such as Supabase or Neon.",
+        "The UI explains the tradeoffs between Full Graph and Graph Lite modes before the user commits.",
+        "The selected mode is persisted and reflected in the next startup or session.",
+        "The onboarding path can prefill sensible defaults without forcing users through hidden bootstrap behavior.",
+        "If a BYOP connection is chosen, the UI guides the user to the right secret-safe connection input and validation flow.",
+        "The UX does not force a rewrite of Miguel’s setup work; if a small adapter is needed to complete the mode-selection path, it is included in this spec."
+      ],
+      "dependsOn": [
+        "LHM-001",
+        "LHM-002",
+        "LHM-004"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "env-and-assets-bootstrap",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: bootstrap, path, setup, before"
+        },
+        {
+          "name": "reality-validation",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: validation, behavior, rather"
+        },
+        {
+          "name": "spec-gap-analysis",
+          "relevance": 8,
+          "reason": "Heuristic fallback matched story terms to skill metadata: spec, between"
+        }
+      ],
+      "files": [
+        "backend/src/routes/workspaces.ts",
+        "backend/src/routes/health.ts",
+        "src/components/AddWorkspaceModal.tsx",
+        "src/panels/settings/KnowledgeGraphSection.tsx"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-006",
+      "title": "Package Hermes skills and verify MCP discovery against the real Rorca tool surface",
+      "description": "Make Rorca usable from Hermes by packaging the skills, documenting the install/update path, and verifying that Hermes can register and discover the current Rorca MCP surface without overclaiming unsupported features.",
+      "acceptanceCriteria": [
+        "The Hermes-facing skills reference the correct MCP server and the current tool names rather than stale aliases.",
+        "A documented install or update flow exists for the Rorca skills and can be followed in a clean environment.",
+        "Hermes can register the Rorca MCP server and discover the intended tools, including create-spec, get-context, list/approve specs, and pipeline trigger/status surfaces.",
+        "The skill docs teach the intended brief → spec → review → approve → run → inspect workflow and avoid promising unsupported behavior.",
+        "The Hermes docs remain truthful about Graph Lite, BYOP, and the fact that Hermes is an external distribution channel rather than a replacement for first-party Rorca UX.",
+        "Any published skill package or release artifact is versioned so updates can be validated and rolled back cleanly."
+      ],
+      "dependsOn": [
+        "LHM-001",
+        "LHM-004",
+        "LHM-005"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "env-and-assets-bootstrap",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: environment, skill, first, path"
+        },
+        {
+          "name": "rorca-spec-creation",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: rorca, spec, create"
+        },
+        {
+          "name": "reality-validation",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: behavior, against, real, rather"
+        }
+      ],
+      "files": [
+        "packages/rorca-pi-extension/extensions/rorca/skill-launcher.ts",
+        "packages/rorca-pi-extension/skills/rorca-forge/SKILL.md",
+        "packages/rorca-pi-extension/skills/rorca-forge-run/SKILL.md",
+        "packages/rorca-pi-extension/README.md",
+        "docs/mcp-integration.md"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-007",
+      "title": "Truth-align launch docs, install paths, and deployment guidance",
+      "description": "Update the user-facing docs and launch scripts so README, Quickstart, Supabase, MCP, install, and Helm guidance match the real implementation and either validate or remove broken claims.",
+      "acceptanceCriteria": [
+        "README, QUICKSTART, docs/supabase-setup.md, docs/mcp-integration.md, and related launch docs accurately describe native, Docker, and BYOP modes.",
+        "The install/setup docs include a clear chooser-oriented startup guide for each supported database path: native/local Postgres, Docker Postgres with AGE, and BYOP hosted Postgres such as Supabase or Neon.",
+        "Any install or deployment path that remains in the docs is verified by a working command or is removed from the launch story until it is fixed.",
+        "Supabase is documented as BYOP, not as a full-graph replacement for AGE-backed local or Docker setups.",
+        "Docs explicitly explain Graph Lite and how to get Full Graph back.",
+        "Launch docs do not overclaim about Docker, Helm, or install.sh behavior, and they do not imply SQLite or PGlite are in launch scope.",
+        "Where docs show commands, the commands are internally consistent with the current repo layout and current package/tool names."
+      ],
+      "dependsOn": [
+        "LHM-001",
+        "LHM-002",
+        "LHM-003",
+        "LHM-004",
+        "LHM-005",
+        "LHM-006"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "env-and-assets-bootstrap",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: readme, repo, path, setup"
+        },
+        {
+          "name": "reality-validation",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: behavior, real"
+        }
+      ],
+      "files": [
+        "README.md",
+        "QUICKSTART.md",
+        "docs/supabase-setup.md",
+        "docs/mcp-integration.md",
+        "install.sh",
+        "helm/rorca/README.md",
+        "helm/rorca/templates/deployment.yaml",
+        "docker-compose.supabase.yml"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-008",
+      "title": "Lock the capability layer with regression tests and Miguel boundary checks",
+      "description": "Add focused backend, frontend, and extension coverage proving that mode detection, Graph Lite fallback, UI honesty, Hermes discovery, and BYOP handling work correctly while finishing and protecting Miguel’s full-graph setup path end-to-end.",
+      "acceptanceCriteria": [
+        "Tests cover native, docker, and byop detection plus persisted mode behavior.",
+        "Tests cover AGE present versus absent and the resulting graphMode.",
+        "Fallback behavior is covered for at least one knowledge graph surface and one memory or relevance surface.",
+        "UI and status tests verify that Graph Lite copy appears when AGE is missing and that secrets remain redacted.",
+        "Existing local/Docker full-graph startup behavior continues to pass, and any previously incomplete setup gaps in Miguel’s path are closed by this spec rather than deferred.",
+        "Regression tests ensure Miguel’s db-sidecar, bootstrap, and Docker image lifecycle behavior are not altered by this spec."
+      ],
+      "dependsOn": [
+        "LHM-001",
+        "LHM-002",
+        "LHM-003",
+        "LHM-004",
+        "LHM-005",
+        "LHM-006",
+        "LHM-007"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "env-and-assets-bootstrap",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: bootstrap, when, path, setup"
+        },
+        {
+          "name": "spec-gap-analysis",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: spec, gaps, backend"
+        },
+        {
+          "name": "rorca-spec-creation",
+          "relevance": 9,
+          "reason": "Heuristic fallback matched story terms to skill metadata: spec, when, backend"
+        }
+      ],
+      "files": [
+        "backend/src/lib/db-sidecar.ts",
+        "backend/src/lib/db-strategy.ts",
+        "backend/src/lib/age-guard.ts",
+        "backend/src/routes/workspaces.ts",
+        "backend/src/routes/health.ts",
+        "src/components/AddWorkspaceModal.tsx",
+        "src/panels/settings/KnowledgeGraphSection.tsx"
+      ],
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "LHM-009",
+      "title": "Require pgvector for every PostgreSQL install path",
+      "description": "Validate that native/local Postgres, Docker Postgres with AGE, and BYOP hosted Postgres such as Supabase or Neon all have pgvector available before the setup is accepted, and surface a clear fix path when it is missing.",
+      "acceptanceCriteria": [
+        "Native/local startup checks for pgvector explicitly and tells the user how to enable or install it before declaring the setup successful.",
+        "Docker startup verifies pgvector is present in the Rorca PostgreSQL image or bootstrap step before the Docker path is marked ready.",
+        "BYOP validation rejects Supabase/Neon-style PostgreSQL connections that do not have pgvector and explains how to fix the hosted database before proceeding.",
+        "The pgvector check keeps secrets redacted and does not change the existing native, Docker, or BYOP mode selection flow."
+      ],
+      "dependsOn": [
+        "LHM-001",
+        "LHM-002",
+        "LHM-005"
+      ],
+      "passes": true,
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 9,
+          "reason": "pgvector validation is a PostgreSQL capability check that directly affects database feature readiness and extension-aware setup flows"
+        },
+        {
+          "name": "reality-validation",
+          "relevance": 8,
+          "reason": "The story verifies that each claimed install path actually has the required extension instead of assuming the environment is ready"
+        }
+      ],
+      "files": [
+        "backend/src/lib/db-strategy.ts",
+        "backend/src/lib/db-sidecar.ts",
+        "backend/src/lib/postgres-manager.ts",
+        "backend/src/routes/workspaces.ts",
+        "backend/src/routes/health.ts",
+        "docs/supabase-setup.md"
+      ],
+      "notes": "Completed by Rorca engine"
+    }
+  ],
+  "mermaidDiagram": "graph LR\n  LHM-001[\"LHM-001\"]\n  LHM-002[\"LHM-002\"]\n  LHM-003[\"LHM-003\"]\n  LHM-004[\"LHM-004\"]\n  LHM-005[\"LHM-005\"]\n  LHM-006[\"LHM-006\"]\n  LHM-007[\"LHM-007\"]\n  LHM-008[\"LHM-008\"]\n  LHM-009[\"LHM-009\"]\n  LHM-001 --> LHM-002\n  LHM-001 --> LHM-003\n  LHM-002 --> LHM-003\n  LHM-001 --> LHM-004\n  LHM-003 --> LHM-004\n  LHM-001 --> LHM-005\n  LHM-002 --> LHM-005\n  LHM-004 --> LHM-005\n  LHM-001 --> LHM-006\n  LHM-004 --> LHM-006\n  LHM-005 --> LHM-006\n  LHM-001 --> LHM-007\n  LHM-002 --> LHM-007\n  LHM-003 --> LHM-007\n  LHM-004 --> LHM-007\n  LHM-005 --> LHM-007\n  LHM-006 --> LHM-007\n  LHM-001 --> LHM-008\n  LHM-002 --> LHM-008\n  LHM-003 --> LHM-008\n  LHM-004 --> LHM-008\n  LHM-005 --> LHM-008\n  LHM-006 --> LHM-008\n  LHM-007 --> LHM-008\n  LHM-001 --> LHM-009\n  LHM-002 --> LHM-009\n  LHM-005 --> LHM-009",
+  "contextUsed": {
+    "text": "Global standards: prefer root-cause fixes over UI-only patches, validate with focused tests and typecheck, preserve MCP-first behavior, use apiFetch, design tokens, and AppError subclasses. Project context: Rorca is the AI spec orchestration platform; backend routes need swagger tier annotations, pg-boss queues must be explicitly created, and explicit-draft spec creation is canonical. Brief: improve the launch-handoff scope around DB modes, Graph Lite, Hermes, and docs while preserving Miguel’s full-graph setup work.",
+    "meta": {
+      "standards": true,
+      "conventions": true,
+      "project": true,
+      "memory": true,
+      "totalTokens": 2663,
+      "scopesMatched": [
+        "AGENTS.md",
+        ".rorca/config.json",
+        "backend/src/routes/specs.ts",
+        "backend/src/lib/spec-post-save.ts",
+        "backend/src/lib/spec-job-worker.ts",
+        "src/components/SpecDetailSlideOver.tsx",
+        "packages/rorca-pi-extension/skills/rorca-forge/SKILL.md"
+      ]
+    }
+  },
+  "contextSummary": {
+    "directionLayers": {
+      "l1": true,
+      "l2": {
+        "present": true,
+        "domain": "developer-tools"
+      },
+      "l3": true
+    },
+    "skills": [
+      "workflow-orchestrator",
+      "distributed-tracing-logs",
+      "observability-logging",
+      "assumption-testing",
+      "devils-advocate",
+      "api-documentation",
+      "react-review"
+    ],
+    "memoryEntries": 1021,
+    "agentsMd": true,
+    "template": null,
+    "schemaSnapshot": false,
+    "gitMemory": false,
+    "estimatedTokens": 2663,
+    "modelContextWindow": 200000,
+    "retrieval": {
+      "cagHits": 3,
+      "ragHits": 4,
+      "graphHits": 0,
+      "tier": "hybrid",
+      "latencyMs": 64
+    }
+  },
+  "source": "explicit-draft"
+}
