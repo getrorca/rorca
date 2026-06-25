@@ -195,6 +195,7 @@ describe('POST /api/pipeline/trigger with includeGraph', () => {
         specPath: 'forge/specs/approved/graph-trigger-spec.json',
         workspaceId: 'ws-graph-test',
         includeGraph: true,
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
@@ -244,6 +245,7 @@ describe('POST /api/pipeline/trigger with includeGraph', () => {
       .send({
         specPath: 'forge/specs/approved/no-graph-spec.json',
         workspaceId: 'ws-graph-test',
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
