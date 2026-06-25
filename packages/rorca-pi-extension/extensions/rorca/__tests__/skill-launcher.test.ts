@@ -15,7 +15,7 @@ describe("rorca skill launcher", () => {
     })).toEqual([
       ["rorca_specs_generation_context"],
       ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
-      ["getSpec", "rorca_get_specs_by_specId"],
+      ["rorca_get_specs_by_specId"],
       ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
     ]);
   });
@@ -33,7 +33,7 @@ describe("rorca skill launcher", () => {
     })).toEqual([
       ["rorca_specs_generation_context"],
       ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
-      ["getSpec", "rorca_get_specs_by_specId"],
+      ["rorca_get_specs_by_specId"],
       ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
       ["rorca_approve_spec", "rorca_specs_by_specId_approve"],
       ["rorca_trigger_run", "rorca_pipeline_trigger"],
@@ -62,7 +62,7 @@ describe("rorca skill launcher", () => {
     expect(prompt).toContain("skipped:no_installed_skills");
     expect(prompt).toContain("failed:<retryable_reason>");
     expect(prompt).toContain("fallbackContract: backend/server contextSummary backfill is a repair-only fallback and must not be treated as the normal creation contract or as a substitute for caller-observed drafting context");
-    expect(prompt).toContain("availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, getSpec, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness");
+    expect(prompt).toContain("availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness");
 
     const forgeSequenceIndex = prompt.indexOf("forgeSequence:");
     const contextContractIndex = prompt.indexOf("contextContract:");

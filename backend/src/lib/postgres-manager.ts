@@ -22,7 +22,6 @@ import * as path from 'path';
 import * as os from 'os';
 import * as https from 'https';
 import * as http from 'http';
-import { createGunzip } from 'zlib';
 import { logger } from './logger';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -210,6 +209,12 @@ export class PostgresManager {
   /** Path to the createdb binary. */
   getCreatedbPath(): string {
     const name = process.platform === 'win32' ? 'createdb.exe' : 'createdb';
+    return path.join(this.cacheDir, 'bin', name);
+  }
+
+  /** Path to the psql binary. */
+  getPsqlPath(): string {
+    const name = process.platform === 'win32' ? 'psql.exe' : 'psql';
     return path.join(this.cacheDir, 'bin', name);
   }
 
@@ -557,6 +562,48 @@ export class PostgresManager {
   }
 
   /**
+   * LHM-009: Verify pgvector is available on the managed native Postgres before
+   * the native setup is declared successful. The bundled Rorca Postgres binary
+   * ships with pgvector, but a partial/foreign extraction can leave the
+   * extension's shared library missing. We check that `vector` is an available
+   * extension and that `CREATE EXTENSION IF NOT EXISTS vector` succeeds, and on
+   * failure return a concrete fix path instead of silently degrading.
+   *
+   * Returns { ok: true } when pgvector is installable/installed, or
+   * { ok: false, fixPath } with actionable remediation when it is not.
+   */
+  verifyPgvector(): { ok: boolean; fixPath?: string } {
+    const fixPath =
+      'pgvector is not available on the bundled native Postgres. Reinstall it with `rorca start` ' +
+      `(the binary at ${this.cacheDir} ships pgvector), or on a custom local Postgres install the ` +
+      'pgvector extension and run `CREATE EXTENSION IF NOT EXISTS vector;` before continuing.';
+
+    const psql = this.getPsqlPath();
+    try {
+      // 1. Confirm the extension's shared library is present and registered.
+      const available = execSync(
+        `"${psql}" -h localhost -p ${this.port} -d ${DEFAULT_DATABASE} -tAc ` +
+          `"SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"`,
+        { encoding: 'utf-8', timeout: 10_000, stdio: 'pipe' }
+      ).trim();
+
+      if (available !== '1') {
+        return { ok: false, fixPath };
+      }
+
+      // 2. Ensure it is actually creatable in the rorca database.
+      execSync(
+        `"${psql}" -h localhost -p ${this.port} -d ${DEFAULT_DATABASE} -c ` +
+          `"CREATE EXTENSION IF NOT EXISTS vector;"`,
+        { encoding: 'utf-8', timeout: 10_000, stdio: 'pipe' }
+      );
+      return { ok: true };
+    } catch {
+      return { ok: false, fixPath };
+    }
+  }
+
+  /**
    * Poll pg_isready until the server is accepting connections.
    * Throws if timeout is exceeded.
    */
@@ -590,6 +637,14 @@ export class PostgresManager {
     this.initCluster();
     await this.start();
     this.createDatabase();
+
+    // LHM-009: Native/local startup checks for pgvector explicitly and tells the
+    // user how to enable or install it before declaring the setup successful.
+    const pgvector = this.verifyPgvector();
+    if (!pgvector.ok) {
+      throw new Error(pgvector.fixPath ?? 'pgvector is required but is not available on the native Postgres.');
+    }
+    logger.info('[postgres] pgvector extension verified');
 
     const url = this.getDatabaseUrl();
     process.env.DATABASE_URL = url;

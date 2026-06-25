@@ -8,12 +8,12 @@
 // Load environment variables before any other imports so module-level constants
 // (e.g. GITHUB_CLIENT_ID in auth.ts) pick up the correct values.
 import dotenv from 'dotenv';
-import { applySelectedDbModeEnvironment } from './lib/db-strategy';
+import { applySelectedDbModeEnvironment, formatDbModeBootstrapLog } from './lib/db-strategy';
 
 dotenv.config();
 const dbModeBootstrap = applySelectedDbModeEnvironment();
 if (dbModeBootstrap.changed) {
-  console.info(`[db-mode] Using ${dbModeBootstrap.mode} database ${dbModeBootstrap.databaseUrl}`);
+  console.info(formatDbModeBootstrapLog(dbModeBootstrap));
 }
 
 // Patch Express 4 to catch async route handler rejections — must be first import

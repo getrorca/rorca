@@ -21,6 +21,7 @@
 import { useMemo } from 'react';
 import { Loader2, AlertTriangle, Network } from 'lucide-react';
 import { computeRadialLayout } from '../lib/radial-layout';
+import { GraphCapabilityNotice, runtimeToNoticeProps } from './GraphCapabilityNotice';
 import type {
   SpecRelevanceGraphResponse,
   GraphFetchState,
@@ -40,16 +41,16 @@ const NODE_RADIUS: Record<RelevanceNodeType, number> = {
 
 const NODE_COLOR: Record<RelevanceNodeType, string> = {
   hub: 'var(--accent)',
-  file: '#60a5fa',      // blue-400
-  memory: '#a78bfa',    // violet-400
-  context: '#34d399',   // emerald-400
+  file: 'var(--accent-border)',
+  memory: 'var(--warning)',
+  context: 'var(--success)',
 };
 
 function nodeStatusColor(node: PositionedNode): string {
-  if (node.dropped) return '#f87171';   // rose-400
-  if (node.enteredPrompt) return '#34d399'; // emerald-400
-  if (node.selected) return '#fbbf24';  // amber-400
-  return NODE_COLOR[node.type] ?? '#9ca3af';
+  if (node.dropped) return 'var(--error)';
+  if (node.enteredPrompt) return 'var(--success)';
+  if (node.selected) return 'var(--warning)';
+  return NODE_COLOR[node.type] ?? 'var(--text-muted)';
 }
 
 function nodeAriaLabel(node: PositionedNode): string {
@@ -86,8 +87,8 @@ export default function RelevanceGraphView({ state, onNodeClick }: RelevanceGrap
   if (state.status === 'error') {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-2 py-10" data-testid="graph-error">
-        <AlertTriangle size={20} className="text-rose-400" />
-        <span className="text-xs text-rose-400">Could not load relevance graph</span>
+        <AlertTriangle size={20} className="text-error" />
+        <span className="text-xs text-error">Could not load relevance graph</span>
         <span className="text-[10px] text-muted">{state.error}</span>
       </div>
     );
@@ -96,29 +97,51 @@ export default function RelevanceGraphView({ state, onNodeClick }: RelevanceGrap
   // Unavailable (backend has no telemetry / AGE data)
   if (state.status === 'unavailable') {
     const reasons = state.data?.fallback?.missingReasons ?? [];
+    const runtimeNotice = runtimeToNoticeProps(state.data?.runtime);
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-2 py-10" data-testid="graph-unavailable">
-        <Network size={20} className="text-muted opacity-40" />
-        <span className="text-xs text-muted">Graph evidence unavailable</span>
-        <span className="text-[10px] text-muted/70 max-w-xs text-center">
-          This run has semantic-only retrieval data. Graph neighborhood evidence
-          requires retrieval telemetry or Apache AGE graph paths.
-        </span>
-        {reasons.length > 0 && (
-          <ul className="text-[10px] text-muted/60 list-disc pl-4 mt-1">
-            {reasons.map((r, i) => <li key={i}>{r}</li>)}
-          </ul>
-        )}
+      <div className="flex-1 px-4 py-6" data-testid="graph-unavailable">
+        <div className="mx-auto flex max-w-lg flex-col gap-4">
+          {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} /> : null}
+          <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
+            <Network size={20} className="text-muted opacity-40" />
+            <span className="text-xs text-muted">
+              {state.data?.runtime?.graphMode === 'lite'
+                ? 'Full graph evidence is unavailable for this run'
+                : 'Graph evidence is unavailable for this run'}
+            </span>
+            <span className="max-w-xs text-[10px] text-muted/70">
+              {state.data?.runtime?.graphMode === 'lite'
+                ? 'Graph Lite can still use semantic retrieval telemetry, but AGE graph-path evidence was not available for this result.'
+                : state.data?.runtime?.message ?? 'This run has semantic-only retrieval data. Graph neighborhood evidence requires retrieval telemetry or Apache AGE graph paths.'}
+            </span>
+            {reasons.length > 0 && (
+              <ul className="mt-1 list-disc pl-4 text-[10px] text-muted/60">
+                {reasons.map((r, i) => <li key={i}>{r}</li>)}
+              </ul>
+            )}
+          </div>
+        </div>
       </div>
     );
   }
 
   // Empty (available but zero nodes)
   if (state.status === 'empty' || !state.data) {
+    const runtimeNotice = runtimeToNoticeProps(state.data?.runtime);
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-2 py-10" data-testid="graph-empty">
-        <Network size={20} className="text-muted opacity-40" />
-        <span className="text-xs text-muted">No graph data for this run</span>
+      <div className="flex-1 px-4 py-6" data-testid="graph-empty">
+        <div className="mx-auto flex max-w-lg flex-col gap-4">
+          {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} compact /> : null}
+          <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
+            <Network size={20} className="text-muted opacity-40" />
+            <span className="text-xs text-muted">No graph data for this run</span>
+            <span className="max-w-xs text-[10px] text-muted/70">
+              {state.data?.runtime?.graphMode === 'lite'
+                ? 'Graph Lite is active, but this run did not capture fallback graph evidence yet.'
+                : 'No graph evidence was captured for this run yet.'}
+            </span>
+          </div>
+        </div>
       </div>
     );
   }
@@ -145,17 +168,25 @@ function GraphCanvas({
 
   return (
     <div className="flex-1 flex flex-col min-h-0" data-testid="graph-canvas">
+      {data.runtime.graphMode !== 'full' ? (
+        <div className="shrink-0 px-4 pt-3">
+          <GraphCapabilityNotice {...(runtimeToNoticeProps(data.runtime) ?? { graphMode: data.runtime.graphMode })} compact />
+        </div>
+      ) : null}
       {/* Summary bar */}
       <div className="shrink-0 px-4 py-2 border-b border-border flex items-center gap-4 text-[10px] text-muted">
         <span>{data.summary.nodeCount} nodes</span>
         <span>{data.summary.edgeCount} edges</span>
-        <span className="text-emerald-500">{data.summary.selectedCount} selected</span>
-        <span className="text-rose-400">{data.summary.droppedCount} dropped</span>
+        <span className="text-success">{data.summary.selectedCount} selected</span>
+        <span className="text-error">{data.summary.droppedCount} dropped</span>
         {data.summary.avgRelevanceScore != null && (
           <span>avg score: {Math.round(data.summary.avgRelevanceScore * 100)}%</span>
         )}
         {data.truncation.filesTruncated && (
-          <span className="text-amber-500" title="File nodes truncated to cap">truncated</span>
+          <span className="text-warning" title="File nodes truncated to cap">truncated</span>
+        )}
+        {data.runtime.graphMode !== 'full' && (
+          <span className="text-warning/80" title={data.runtime.message}>{data.runtime.graphMode}</span>
         )}
         {!data.fallback.graphPathsAvailable && (
           <span className="text-muted/60" title="No Apache AGE graph paths">semantic-only</span>
@@ -249,7 +280,7 @@ function NodeCircle({
         r={r}
         fill={color}
         fillOpacity={node.dropped ? 0.3 : 0.8}
-        stroke={node.dropped ? '#f87171' : color}
+        stroke={node.dropped ? 'var(--error)' : color}
         strokeWidth={node.enteredPrompt ? 3 : 1.5}
         strokeDasharray={node.dropped ? '3 2' : undefined}
       />

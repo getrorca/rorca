@@ -8,7 +8,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Brain, BookOpen, GitBranch, AlertCircle } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { useCapabilities } from '../contexts/CapabilitiesContext';
 import DependencyGraph from './DependencyGraph';
+import { GraphCapabilityNotice, runtimeToNoticeProps } from './GraphCapabilityNotice';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -35,6 +37,13 @@ interface KnowledgeGraphRelatedStory {
 
 interface KnowledgeGraphResponse {
   available: boolean;
+  runtime?: {
+    graphMode: 'full' | 'lite' | 'disabled';
+    provider: 'age' | 'relational' | 'semantic' | 'none';
+    ageAvailable: boolean;
+    hint: string;
+    message: string;
+  };
   memories: KnowledgeGraphMemory[];
   conventions: KnowledgeGraphConvention[];
   relatedStories: KnowledgeGraphRelatedStory[];
@@ -46,8 +55,7 @@ type GraphSubTab = 'dependencies' | 'knowledge';
 
 function CollapsibleSection({ title, icon: Icon, count, children }: {
   title: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  icon: React.ComponentType<any>;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
   count: number;
   children: React.ReactNode;
 }) {
@@ -74,6 +82,7 @@ function CollapsibleSection({ title, icon: Icon, count, children }: {
 /* ─── Knowledge Graph Content ─────────────────────────────────────── */
 
 function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; workspaceId: string }) {
+  const { databaseCapability } = useCapabilities();
   const [data, setData] = useState<KnowledgeGraphResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -85,11 +94,30 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
       const resp = await apiFetch<KnowledgeGraphResponse>(`/api/specs/${specId}/knowledge-graph?workspaceId=${encodeURIComponent(workspaceId)}`);
       setData(resp);
     } catch (err: any) {
-      setError(err.message ?? 'Failed to load knowledge graph');
+      if (err?.code === 'AGE_NOT_INSTALLED') {
+        setData({
+          available: false,
+          runtime: {
+            graphMode: databaseCapability?.graphMode ?? 'lite',
+            provider: (databaseCapability?.graphMode ?? 'lite') === 'disabled' ? 'none' : 'relational',
+            ageAvailable: databaseCapability?.extensions.age ?? false,
+            hint: databaseCapability?.warnings?.[0]
+              ?? 'To get Full Graph back, switch to local or Docker Postgres with Apache AGE.',
+            message: (databaseCapability?.graphMode ?? 'lite') === 'disabled'
+              ? 'The active database connection is unavailable, so graph views are paused for now.'
+              : 'Graph Lite is active. This tab is using relational fallback data until Apache AGE is available again.',
+          },
+          memories: [],
+          conventions: [],
+          relatedStories: [],
+        });
+      } else {
+        setError(err.message ?? 'Failed to load knowledge graph');
+      }
     } finally {
       setLoading(false);
     }
-  }, [specId, workspaceId]);
+  }, [databaseCapability, specId, workspaceId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -109,12 +137,24 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
     );
   }
 
+  const graphMode = data?.runtime?.graphMode ?? databaseCapability?.graphMode ?? 'lite';
+  const runtimeNotice = runtimeToNoticeProps(data?.runtime, databaseCapability?.dbMode);
+
   if (!data?.available) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-muted">
-        <AlertCircle size={32} className="mb-3 opacity-40" />
-        <p className="text-sm font-medium">Knowledge graph not available</p>
-        <p className="text-xs mt-1 opacity-70">Apache AGE extension is required for knowledge graph features.</p>
+      <div className="p-3 space-y-4">
+        {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} /> : null}
+        <div className="flex flex-col items-center justify-center py-12 text-muted">
+          <AlertCircle size={32} className="mb-3 opacity-40" />
+          <p className="text-sm font-medium text-[var(--text)]">
+            {graphMode === 'disabled' ? 'Knowledge Graph is paused for now' : 'Knowledge Graph fallback is ready'}
+          </p>
+          <p className="mt-1 max-w-sm text-center text-xs opacity-80">
+            {graphMode === 'disabled'
+              ? 'Reconnect PostgreSQL and this tab will resume automatically.'
+              : 'This spec does not have fallback graph records yet, but Graph Lite remains available once related data is captured.'}
+          </p>
+        </div>
       </div>
     );
   }
@@ -123,18 +163,28 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
 
   if (!hasData) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-muted">
-        <Brain size={32} className="mb-3 opacity-40" />
-        <p className="text-sm font-medium">No graph data yet</p>
-        <p className="text-xs mt-1 opacity-70">Run this spec to populate the knowledge graph.</p>
+      <div className="p-3 space-y-4">
+        {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} /> : null}
+        <div className="flex flex-col items-center justify-center py-12 text-muted">
+          <Brain size={32} className="mb-3 opacity-40" />
+          <p className="text-sm font-medium text-[var(--text)]">No graph data yet</p>
+          <p className="mt-1 max-w-sm text-center text-xs opacity-80">
+            {graphMode === 'lite'
+              ? 'Graph Lite is active, but no fallback knowledge-graph context has been captured for this spec yet.'
+              : 'Run this spec to populate the knowledge graph.'}
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="p-3 space-y-3">
+      {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} compact /> : null}
       <div className="rounded-lg border border-border bg-panel/60 px-3 py-2 text-[11px] text-muted">
-        Semantic-only surface: this tab visualizes raw knowledge-graph links and does not yet apply GraphRAG scoring v1. Scored retrieval currently flows through recall, context assembly, and story prompt-building surfaces.
+        {data.runtime?.graphMode === 'lite'
+          ? 'Graph Lite keeps this tab useful with relational fallback data while AGE-backed graph paths are unavailable.'
+          : 'Semantic-only surface: this tab visualizes raw knowledge-graph links and does not yet apply GraphRAG scoring v1. Scored retrieval currently flows through recall, context assembly, and story prompt-building surfaces.'}
       </div>
       {data.memories.length > 0 && (
         <CollapsibleSection title="Memories" icon={Brain} count={data.memories.length}>

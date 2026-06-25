@@ -35,6 +35,15 @@ import { inferDomain } from '../lib/domain-inference';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { authRequired, requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
+import {
+  buildDatabaseSetupGuidance,
+  getDatabaseCapability,
+  setDbMode,
+  setPersistedByopDatabaseUrl,
+  validateByopConnection,
+  type DbMode,
+  type DatabaseSelectionValidationError,
+} from '../lib/db-strategy';
 
 const router = Router();
 
@@ -72,10 +81,14 @@ function parseWorkspace(row: WorkspaceRow) {
  *     tags: [Workspaces]
  *     summary: Register a new workspace
  *     operationId: createWorkspace
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace creation mutates user-owned project configuration and should require authenticated access."
  *     description: >
  *       Registers a new workspace by path. Validates the filesystem path exists,
- *       creates the workspace record, auto-creates a default agent profile from
- *       L3 direction content, and runs echolocation on the workspace root.
+ *       optionally persists a database mode selection (including hosted BYOP
+ *       Postgres validation), creates the workspace record, auto-creates a
+ *       default agent profile from L3 direction content, and runs echolocation
+ *       on the workspace root.
  *     requestBody:
  *       required: true
  *       content:
@@ -88,6 +101,8 @@ function parseWorkspace(row: WorkspaceRow) {
  *               label: { type: string, example: "CashflowAI" }
  *               path: { type: string, example: "/Users/dev/cashflow-ai" }
  *               domains: { type: array, items: { type: string }, example: ["saas"] }
+ *               dbMode: { type: string, enum: [native, docker, byop], nullable: true }
+ *               databaseUrl: { type: string, nullable: true, example: "postgres://postgres:secret@db.example.supabase.co:5432/postgres?sslmode=require" }
  *     responses:
  *       201:
  *         description: Workspace created
@@ -121,22 +136,85 @@ const CreateWorkspaceSchema = z.object({
   label: z.string().min(1),
   path: z.string().min(1),
   domains: z.array(z.string()),
+  dbMode: z.enum(['native', 'docker', 'byop']).optional(),
+  databaseUrl: z.string().optional(),
 });
+
+function resolveRequestedDbMode(input: { dbMode?: unknown; databaseUrl?: unknown }): DbMode | null {
+  if (input.dbMode === 'native' || input.dbMode === 'docker' || input.dbMode === 'byop') {
+    return input.dbMode;
+  }
+  if (typeof input.databaseUrl === 'string' && input.databaseUrl.trim()) {
+    return 'byop';
+  }
+  return null;
+}
+
+async function persistRequestedDatabaseMode(input: { dbMode?: unknown; databaseUrl?: unknown }) {
+  const mode = resolveRequestedDbMode(input);
+  if (!mode) return null;
+
+  if (mode === 'byop') {
+    const databaseUrl = typeof input.databaseUrl === 'string' ? input.databaseUrl : '';
+    const validation = await validateByopConnection(databaseUrl);
+    setPersistedByopDatabaseUrl(validation.normalizedUrl);
+    setDbMode('byop');
+    return {
+      mode,
+      restartRequired: true,
+      provider: validation.provider,
+      connection: validation.connection,
+      extensions: validation.extensions,
+      warnings: validation.warnings,
+    };
+  }
+
+  setDbMode(mode);
+  return {
+    mode,
+    restartRequired: true,
+    provider: mode === 'docker' ? 'docker-postgres' : 'native-postgres',
+    connection: null,
+    extensions: null,
+    warnings: [],
+  };
+}
+
+function throwDatabaseSelectionError(error: unknown): never {
+  const dbError = error as Partial<DatabaseSelectionValidationError>;
+  switch (dbError.code) {
+    case 'INVALID_DATABASE_URL':
+      throw new ValidationError((error as Error).message);
+    case 'PGVECTOR_REQUIRED':
+    case 'EXTENSION_CHECK_FAILED':
+    case 'DATABASE_UNREACHABLE':
+      throw new UnprocessableError((error as Error).message);
+    default:
+      throw error;
+  }
+}
 
 router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan('workspaces'), async (req, res, next) => {
   try {
-    const { id, label, path, domains } = req.body;
+    const { id, label, path, domains, dbMode, databaseUrl } = req.body;
 
     if (!fs.existsSync(path)) {
       throw new ValidationError(`Path does not exist on filesystem: ${path}`);
       return;
     }
 
+    let databaseSelection = null;
+    try {
+      databaseSelection = await persistRequestedDatabaseMode({ dbMode, databaseUrl });
+    } catch (error) {
+      throwDatabaseSelectionError(error);
+    }
+
     try {
       await withUserClient(req, async (client) => {
         await client.query(
-          'INSERT INTO workspaces (id, label, path, domains, owner_id) VALUES ($1, $2, $3, $4, $5)',
-          [id, label, path, JSON.stringify(domains), req.user?.id ?? 'local-admin']
+          'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
+          [id, label, path, JSON.stringify(domains)]
         );
       });
     } catch (err: any) {
@@ -195,7 +273,13 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
     });
 
     const needsBootstrap = (health?.score ?? 0) < 40;
-    res.status(201).json({ workspace: parseWorkspace(row!), health, needsBootstrap });
+    res.status(201).json({
+      workspace: parseWorkspace(row!),
+      health,
+      needsBootstrap,
+      databaseSetup: buildDatabaseSetupGuidance(),
+      ...(databaseSelection ? { databaseSelection } : {}),
+    });
   } catch (err) {
     next(err);
   }
@@ -268,6 +352,66 @@ router.get('/', authRequired, async (req, res, next) => {
 });
 
 router.use('/:id', requireWorkspaceMember());
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/status:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get lightweight workspace runtime status
+ *     operationId: getWorkspaceStatus
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace runtime status includes local environment metadata and should only be exposed to authenticated callers."
+ *     description: >
+ *       Returns a lightweight runtime status payload for a workspace including the
+ *       canonical database capability model and current knowledge-graph counters.
+ *       Database connection metadata is redacted before returning to the client.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Workspace runtime status
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/:id/status', async (req, res, next) => {
+  try {
+    const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+      return;
+    }
+
+    const [databaseCapability, stats, lastEvent] = await Promise.all([
+      getDatabaseCapability(),
+      graphStats(),
+      queryOne<{ ts: string }>(
+        `SELECT ts FROM wal_events
+         WHERE event_type IN ('graph_populated', 'graph_backfill_complete', 'graph_populate_finished', 'run_finished')
+         ORDER BY ts DESC LIMIT 1`,
+      ),
+    ]);
+
+    res.json({
+      workspaceId: workspace.id,
+      databaseCapability,
+      databaseSetup: buildDatabaseSetupGuidance(databaseCapability.dbMode),
+      graph: {
+        available: stats.available,
+        graphMode: databaseCapability.graphMode,
+        vertexCount: stats.vertexCount,
+        edgeCount: stats.edgeCount,
+        graphName: 'rorca',
+        lastPopulatedAt: lastEvent?.ts ?? null,
+        warnings: databaseCapability.warnings,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /**
  * @swagger
@@ -436,11 +580,11 @@ router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
       }
 
       const newCommits = summaries.reduce((acc, s) => acc + s.commitCount, 0);
-      let gitMemory: string;
+      let _gitMemory: string;
 
       if (newCommits > 0) {
         try {
-          gitMemory = await gitReduceStep({
+          _gitMemory = await gitReduceStep({
             summaries,
             workspaceLabel: workspace.label,
           });
@@ -450,9 +594,9 @@ router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
         }
 
         // git_memory column was dropped (migration 075) — knowledge now lives in memories table.
-        // gitMemory variable is kept for the API response only.
+        // _gitMemory is intentionally retained only for local flow symmetry and future response hooks.
       } else {
-        gitMemory = '';
+        _gitMemory = '';
       }
 
       const latestHash = getLatestHash(summaries) ?? existingCtx?.last_ingested_commit_hash ?? null;
@@ -661,6 +805,8 @@ router.get('/:id', async (req, res, next) => {
  *       Partially updates a workspace. All body fields are optional — only provided
  *       fields are updated. If path is supplied, it must exist on the filesystem.
  *       Domains should be an array of domain strings (e.g. ["saas", "fintech"]).
+ *       dbMode/native/docker/byop changes are persisted globally for the running
+ *       Rorca installation, and BYOP URLs are validated before persistence.
  *       pr_template can be set to null or empty string to clear the PR template.
  *     parameters:
  *       - in: path
@@ -695,6 +841,14 @@ router.get('/:id', async (req, res, next) => {
  *                 type: string
  *                 nullable: true
  *                 description: Markdown template for auto-generated pull request bodies
+ *               dbMode:
+ *                 type: string
+ *                 enum: [native, docker, byop]
+ *                 description: Process-wide database mode for this Rorca installation
+ *               databaseUrl:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Hosted PostgreSQL connection string used when dbMode=byop
  *     responses:
  *       200:
  *         description: Workspace updated successfully
@@ -733,7 +887,14 @@ router.patch('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
       return;
     }
 
-    const { label, path: wsPath, domains, pr_template } = req.body;
+    const { label, path: wsPath, domains, pr_template, dbMode, databaseUrl } = req.body;
+
+    let databaseSelection = null;
+    try {
+      databaseSelection = await persistRequestedDatabaseMode({ dbMode, databaseUrl });
+    } catch (error) {
+      throwDatabaseSelectionError(error);
+    }
 
     if (label !== undefined) {
       await execute('UPDATE workspaces SET label = $1 WHERE id = $2', [String(label), req.params.id]);
@@ -757,7 +918,11 @@ router.patch('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
     }
 
     const updated = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
-    res.json({ workspace: parseWorkspace(updated!) });
+    res.json({
+      workspace: parseWorkspace(updated!),
+      databaseSetup: buildDatabaseSetupGuidance(),
+      ...(databaseSelection ? { databaseSelection } : {}),
+    });
   } catch (err) {
     next(err);
   }

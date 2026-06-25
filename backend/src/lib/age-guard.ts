@@ -6,43 +6,71 @@
  */
 
 import type { RequestHandler } from 'express';
-import { isAgeAvailable } from './db-strategy';
+import { getDatabaseCapability, type DatabaseCapability } from './db-strategy';
 
-let _ageAvailable: boolean | null = null;
-let _ageAvailableCheckedAt = 0;
-const AGE_NEGATIVE_TTL_MS = 60_000;
+let cachedCapability: DatabaseCapability | null = null;
+let cachedCapabilityCheckedAt = 0;
+const CAPABILITY_NEGATIVE_TTL_MS = 60_000;
+
+export async function getCachedDatabaseCapability(): Promise<DatabaseCapability> {
+  if (cachedCapability && cachedCapability.graphMode === 'full') {
+    return cachedCapability;
+  }
+
+  if (cachedCapability) {
+    const elapsed = Date.now() - cachedCapabilityCheckedAt;
+    if (elapsed < CAPABILITY_NEGATIVE_TTL_MS) {
+      return cachedCapability;
+    }
+    cachedCapability = null;
+  }
+
+  cachedCapability = await getDatabaseCapability();
+  cachedCapabilityCheckedAt = Date.now();
+  return cachedCapability;
+}
 
 export async function checkAge(): Promise<boolean> {
-  if (_ageAvailable === true) return true;
-  if (_ageAvailable === false) {
-    const elapsed = Date.now() - _ageAvailableCheckedAt;
-    if (elapsed < AGE_NEGATIVE_TTL_MS) return false;
-    _ageAvailable = null;
-  }
-
-  if (_ageAvailable === null) {
-    _ageAvailable = await isAgeAvailable();
-    _ageAvailableCheckedAt = Date.now();
-  }
-  return _ageAvailable;
+  const capability = await getCachedDatabaseCapability();
+  return capability.extensions.age;
 }
 
 export function invalidateAgeCache(): void {
-  _ageAvailable = null;
-  _ageAvailableCheckedAt = 0;
+  cachedCapability = null;
+  cachedCapabilityCheckedAt = 0;
 }
 
 export function getAgeUnavailableBody(): {
   error: string;
   code: 'AGE_NOT_INSTALLED';
-  mode: 'lite';
+  mode: 'lite' | 'disabled';
   hint: string;
+  capability: DatabaseCapability;
 } {
+  const fallbackCapability: DatabaseCapability = cachedCapability ?? {
+    dbMode: 'native',
+    provider: 'native-postgres',
+    extensions: { age: false, vector: false, pgcrypto: false },
+    graphMode: 'lite',
+    warnings: ['Apache AGE is unavailable.'],
+    connection: {
+      url: null,
+      host: null,
+      port: null,
+      database: null,
+      local: true,
+    },
+    connected: false,
+  };
+
   return {
     error: 'Apache AGE extension not available',
     code: 'AGE_NOT_INSTALLED',
-    mode: 'lite',
-    hint: 'Run `rorca db start` to enable graph memory (requires Docker)',
+    mode: fallbackCapability.graphMode === 'disabled' ? 'disabled' : 'lite',
+    hint: fallbackCapability.dbMode === 'docker'
+      ? 'Run `rorca db start` to ensure the Docker Postgres sidecar is ready with Apache AGE enabled.'
+      : 'Run `rorca db start` to enable Docker Postgres with Apache AGE, or install Apache AGE on your current Postgres instance.',
+    capability: fallbackCapability,
   };
 }
 

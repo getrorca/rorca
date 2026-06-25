@@ -2,6 +2,15 @@
 
 Pi-native extension package for operating Rorca from inside a Pi session.
 
+> **Hermes.** This package *is* Hermes — Rorca's external distribution channel for
+> MCP-capable agent hosts. "Hermes" is how the project refers to driving Rorca
+> from outside its first-party app/TUI; concretely it is this Pi extension plus
+> the bundled skills, which register the Rorca MCP server and the brief → spec →
+> run skills into an external Pi session. Hermes is an external channel, **not** a
+> replacement for the first-party Rorca UX. For the canonical MCP integration,
+> tool surface, install/update flow, and Graph Lite / BYOP behavior, see
+> [`docs/mcp-integration.md`](../../docs/mcp-integration.md).
+
 This package gives you:
 - slash commands for forge / approve / run / retry / status workflows
 - optional live run watching inside Pi widgets/status bars
@@ -85,6 +94,30 @@ If you are testing the extension entry directly during development, you can also
 ```bash
 pi --no-extensions -e ./packages/rorca-pi-extension/extensions/rorca/index.ts
 ```
+
+## Update and rollback
+
+The extension and the bundled skills are versioned together via this package's
+`version` field in `package.json` and the release notes in `CHANGELOG.md`. A
+given install therefore corresponds to a known release that can be validated and
+rolled back as a unit — there is no version skew between the skills and the
+extension that ships them.
+
+Update flow:
+
+1. Pull the Rorca repo to the desired release.
+2. Read `CHANGELOG.md` for the new version and what changed.
+3. Re-run `rorca pi install` (or `pi install ./packages/rorca-pi-extension -l`).
+4. Run `/reload` inside Pi, then `/rorca-mcp-status` to confirm the bridge.
+
+Validate the installed version by matching `package.json` `version` against the
+top entry of `CHANGELOG.md`.
+
+Roll back by checking out the previous release of the Rorca repo and re-running
+`rorca pi install` against that checkout, then `/reload`.
+
+A clean-environment install/update walkthrough also lives in
+[`docs/mcp-integration.md`](../../docs/mcp-integration.md).
 
 ## Environment variables
 
@@ -330,6 +363,45 @@ Bridge details:
 Important:
 - slash commands continue to work even if MCP bridging is unavailable
 - MCP bridging is additive, not required for the command UX
+
+### Discoverable Rorca MCP tools
+
+Once bridged, these are the canonical, current tool names for the core
+brief → spec → review → approve → run → inspect loop (each also resolves through
+stable aliases — prefer the canonical name):
+
+- get project context: `rorca_get_context`, generation bundle `rorca_specs_generation_context`
+- create/persist a spec: `rorca_create_spec`
+- read a spec: `rorca_get_specs_by_specId`
+- inspect workflow/readiness: `rorca_spec_workflow`, `rorca_spec_readiness`
+- list specs: `rorca_list_specs`
+- approve a spec: `rorca_approve_spec`
+- trigger a run: `rorca_trigger_run`
+- pipeline/run status: `rorca_pipeline_status`, `rorca_run_status`
+- retry stories: `rorca_retry_story`
+
+The authoritative source is `backend/src/lib/mcp-http.ts`. Do not hard code older
+names that are not present in that surface. See
+[`docs/mcp-integration.md`](../../docs/mcp-integration.md) for the full table and
+registration details.
+
+## Graph Lite and BYOP behavior
+
+Rorca's database and graph capabilities depend on how the connected workspace's
+database is configured, and this extension stays honest about that:
+
+- **DB modes** — Rorca supports `native`, `docker`, and `byop` (Bring Your Own
+  Postgres, e.g. Supabase / Neon / Railway). BYOP connection strings are stored
+  outside the repo and only redacted host/database details are surfaced.
+- **Graph modes** — `GET /api/health` reports `graphMode` as `full`, `lite`, or
+  `disabled`. Full Graph requires Apache AGE; without it Rorca runs in **Graph
+  Lite**, where the relevance graph uses semantic and telemetry evidence instead
+  of AGE graph paths. Hosted/BYOP Postgres usually runs in Graph Lite unless AGE
+  is already installed there.
+
+Do not assume Full Graph features when a workspace is in Graph Lite. Read
+`dbMode` / `graphMode` from `/api/health` to adapt messaging. Details:
+[`docs/mcp-integration.md`](../../docs/mcp-integration.md).
 
 ## Typical workflows
 

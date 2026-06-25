@@ -13,7 +13,7 @@ import '../../lib/async-handler';
 
 const mockQueryOne = jest.fn();
 const mockQuery = jest.fn();
-const mockCheckAge = jest.fn();
+const mockGetRuntimeGraphCapability = jest.fn();
 
 jest.mock('../../db/index', () => ({
   execute: jest.fn(),
@@ -21,8 +21,15 @@ jest.mock('../../db/index', () => ({
   queryOne: (...args: unknown[]) => mockQueryOne(...args),
 }));
 
-jest.mock('../../lib/age-guard', () => ({
-  checkAge: () => mockCheckAge(),
+jest.mock('../../lib/graph-runtime', () => ({
+  getRuntimeGraphCapability: (...args: unknown[]) => mockGetRuntimeGraphCapability(...args),
+  describeRuntimeGraph: (runtime: any) => ({
+    graphMode: runtime.graphMode,
+    provider: runtime.provider,
+    ageAvailable: runtime.ageAvailable,
+    hint: runtime.hint,
+    message: runtime.message,
+  }),
 }));
 
 import specRelevanceGraphRouter from '../spec-relevance-graph';
@@ -113,7 +120,25 @@ function makeTelemetryRow(overrides: Record<string, any> = {}) {
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
 function setupDefaultMocks() {
-  mockCheckAge.mockResolvedValue(true);
+  mockGetRuntimeGraphCapability.mockResolvedValue({
+    surface: 'relevance',
+    graphMode: 'full',
+    provider: 'age',
+    ageAvailable: true,
+    available: true,
+    adminAvailable: true,
+    hint: 'Apache AGE is active on the current Postgres instance.',
+    message: 'Full graph mode active. Graph/path evidence can be included when telemetry captured it.',
+    capability: {
+      dbMode: 'native',
+      provider: 'native-postgres',
+      extensions: { age: true, vector: true, pgcrypto: true },
+      graphMode: 'full',
+      warnings: [],
+      connection: { url: null, host: null, port: null, database: null, local: true },
+      connected: true,
+    },
+  });
 
   mockQueryOne.mockImplementation(async (sql: string, params: unknown[]) => {
     // Workspace lookup
@@ -258,18 +283,38 @@ describe('spec-relevance-graph routes', () => {
       expect(droppedEdge.evidence).toMatch(/proximity unavailable/i);
     });
 
-    it('reports AGE unavailable in fallback when checkAge returns false', async () => {
-      mockCheckAge.mockResolvedValue(false);
+    it('reports Graph Lite runtime in fallback when AGE is unavailable', async () => {
+      mockGetRuntimeGraphCapability.mockResolvedValue({
+        surface: 'relevance',
+        graphMode: 'lite',
+        provider: 'semantic',
+        ageAvailable: false,
+        available: true,
+        adminAvailable: false,
+        hint: 'Install Apache AGE on the current Postgres instance or switch to `rorca db start` for the full graph stack.',
+        message: 'Graph Lite active. Relevance graph uses semantic and telemetry evidence without AGE graph paths.',
+        capability: {
+          dbMode: 'byop',
+          provider: 'supabase',
+          extensions: { age: false, vector: true, pgcrypto: true },
+          graphMode: 'lite',
+          warnings: ['Apache AGE is unavailable.'],
+          connection: { url: null, host: null, port: null, database: null, local: false },
+          connected: true,
+        },
+      });
 
       const res = await request(app)
         .get('/api/spec-relevance-graph')
         .query({ workspaceId: WS_ID, runId: RUN_ID });
 
       expect(res.status).toBe(200);
-      expect(res.body.available).toBe(true); // still returns data from telemetry
+      expect(res.body.available).toBe(true);
+      expect(res.body.runtime.graphMode).toBe('lite');
+      expect(res.body.runtime.provider).toBe('semantic');
       expect(res.body.fallback.ageAvailable).toBe(false);
       expect(res.body.fallback.missingReasons).toContain(
-        'Apache AGE not available — graph/path scores will be null',
+        'Graph Lite active. Relevance graph uses semantic and telemetry evidence without AGE graph paths.',
       );
     });
 

@@ -6,19 +6,35 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { CheckCircle2, XCircle, Loader2, Share2, Database, ListOrdered, RefreshCw } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, Share2, Database, ListOrdered, RefreshCw, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { apiFetch } from '../../lib/apiFetch';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useWalSSE, type WalEvent } from '../../hooks/useWalSSE';
+import { useCapabilities, type DatabaseCapability } from '../../contexts/CapabilitiesContext';
+import { useGlobalToast } from '../../contexts/ToastContext';
+import { GraphCapabilityNotice, dbModeLabel, graphModeLabel } from '../../components/GraphCapabilityNotice';
+import {
+  defaultDatabaseSetupGuidance,
+  getDatabaseModeGuide,
+  type DatabaseSetupGuidance,
+  type DbMode,
+} from '../../lib/databaseSetup';
 
 /* ─── Types ───────────────────────────────────────────────────────────────── */
 
-interface GraphStatsResponse {
-  available: boolean;
-  vertexCount: number;
-  edgeCount: number;
-  graphName: string;
-  lastPopulatedAt: string | null;
+interface WorkspaceStatusResponse {
+  workspaceId: string;
+  databaseCapability: DatabaseCapability;
+  databaseSetup: DatabaseSetupGuidance;
+  graph: {
+    available: boolean;
+    graphMode: DatabaseCapability['graphMode'];
+    vertexCount: number;
+    edgeCount: number;
+    graphName: string;
+    lastPopulatedAt: string | null;
+    warnings: string[];
+  };
 }
 
 interface PopulateResponse {
@@ -105,17 +121,38 @@ function formatScore(score: number): string {
 }
 
 function decisionBadgeClass(decision?: RetrievalDebugCandidate['decision']): string {
-  if (decision === 'drop') return 'border-amber-500/20 bg-amber-500/10 text-amber-400';
-  if (decision === 'conflict') return 'border-red-500/20 bg-red-500/10 text-red-300';
-  if (decision === 'needs-more') return 'border-blue-500/20 bg-blue-500/10 text-blue-300';
-  return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400';
+  if (decision === 'drop') return 'border-warning/30 bg-warning/10 text-warning';
+  if (decision === 'conflict') return 'border-error/30 bg-error/10 text-error';
+  if (decision === 'needs-more') return 'border-accent/30 bg-accent/10 text-accent';
+  return 'border-success/30 bg-success/10 text-success';
+}
+
+function graphModeBadgeClass(graphMode: DatabaseCapability['graphMode']): string {
+  if (graphMode === 'full') return 'border border-success/30 bg-success/10 text-success';
+  if (graphMode === 'lite') return 'border border-warning/30 bg-warning/10 text-warning';
+  return 'border border-border bg-surface text-muted';
+}
+
+function graphModeDescription(status: WorkspaceStatusResponse | null): string {
+  const graphMode = status?.databaseCapability.graphMode ?? 'disabled';
+  if (graphMode === 'full') return 'Apache AGE is active, so full graph views and graph-backed admin tools are available.';
+  if (graphMode === 'lite') return 'Graph Lite keeps knowledge and relevance surfaces useful with fallback data until AGE is available again.';
+  return 'Graph features are paused because the active database connection is unavailable.';
+}
+
+function providerLabel(provider: string): string {
+  return provider
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 /* ─── Component ───────────────────────────────────────────────────────────── */
 
 export function KnowledgeGraphSection() {
   const { workspaceId } = useWorkspace();
-  const [stats, setStats] = useState<GraphStatsResponse | null>(null);
+  const { refreshCapabilities } = useCapabilities();
+  const { show: showToast } = useGlobalToast();
+  const [status, setStatus] = useState<WorkspaceStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -128,26 +165,37 @@ export function KnowledgeGraphSection() {
   const [debugEvent, setDebugEvent] = useState<RetrievalDebugEvent | null>(null);
   const [debugLoading, setDebugLoading] = useState(false);
   const [debugError, setDebugError] = useState<string | null>(null);
+  const [selectedMode, setSelectedMode] = useState<DbMode>('native');
+  const [databaseUrlInput, setDatabaseUrlInput] = useState('');
+  const [modeSaving, setModeSaving] = useState(false);
+  const [modeSaveError, setModeSaveError] = useState<string | null>(null);
 
-  const fetchStats = useCallback(async () => {
+  const fetchStatus = useCallback(async () => {
+    if (!workspaceId) {
+      setStatus(null);
+      setLoading(false);
+      return;
+    }
+
     try {
-      const data = await apiFetch<GraphStatsResponse>('/api/graph/stats');
-      setStats(data);
-    } catch {
-      setError('Failed to load graph stats');
+      const data = await apiFetch<WorkspaceStatusResponse>(`/api/workspaces/${workspaceId}/status`);
+      setStatus(data);
+      setError(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to load graph status');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await fetchStats();
+      await fetchStatus();
       if (cancelled) return;
     })();
     return () => { cancelled = true; };
-  }, [fetchStats]);
+  }, [fetchStatus]);
 
   // Subscribe to WAL events for population progress
   useWalSSE(useCallback((event: WalEvent) => {
@@ -172,10 +220,9 @@ export function KnowledgeGraphSection() {
       if (payload?.error) {
         setPopulateError('Population encountered errors');
       }
-      // Refresh stats after population completes
-      fetchStats();
+      void fetchStatus();
     }
-  }, [workspaceId, fetchStats]));
+  }, [workspaceId, fetchStatus]));
 
   const loadRankingDebug = useCallback(async () => {
     if (!workspaceId) return;
@@ -193,7 +240,7 @@ export function KnowledgeGraphSection() {
   }, [workspaceId]);
 
   async function handlePopulate() {
-    if (!workspaceId || populating) return;
+    if (!workspaceId || populating || status?.databaseCapability.graphMode !== 'full') return;
     setPopulateError(null);
     setPopulateCompleted(0);
 
@@ -217,21 +264,69 @@ export function KnowledgeGraphSection() {
     }
   }
 
+  async function handleSaveMode() {
+    if (!workspaceId || modeSaving) return;
+    if (selectedMode === 'byop' && !databaseUrlInput.trim()) {
+      setModeSaveError('DATABASE_URL is required for BYOP mode');
+      return;
+    }
+
+    setModeSaving(true);
+    setModeSaveError(null);
+    try {
+      const res = await apiFetch<{ databaseSelection?: { restartRequired?: boolean } }>(`/api/workspaces/${workspaceId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dbMode: selectedMode,
+          databaseUrl: selectedMode === 'byop' ? databaseUrlInput.trim() : undefined,
+        }),
+      });
+      await fetchStatus();
+      await refreshCapabilities().catch(() => undefined);
+      setDatabaseUrlInput('');
+      showToast(
+        res.databaseSelection?.restartRequired
+          ? 'Database mode saved. Restart Rorca to switch the live connection.'
+          : 'Database mode saved.',
+        'success',
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to save database mode';
+      setModeSaveError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setModeSaving(false);
+    }
+  }
+
   useEffect(() => {
     setDebugEvent(null);
     setDebugError(null);
   }, [workspaceId]);
 
+  useEffect(() => {
+    if (!status) return;
+    setSelectedMode(status.databaseSetup?.selectedMode ?? status.databaseCapability.dbMode);
+    setDatabaseUrlInput('');
+    setModeSaveError(null);
+  }, [status]);
+
   const progressPct = populateTotal > 0
     ? Math.round((populateCompleted / populateTotal) * 100)
     : 0;
+
+  const databaseSetup = status?.databaseSetup ?? defaultDatabaseSetupGuidance;
+  const selectedGuide = getDatabaseModeGuide(databaseSetup, selectedMode);
+  const graphMode = status?.databaseCapability.graphMode ?? 'disabled';
+  const graphWarnings = status?.databaseCapability.warnings ?? [];
 
   return (
     <section className="space-y-4">
       <div>
         <h2 className="text-sm font-semibold text-primary">Knowledge Graph</h2>
         <p className="text-xs text-muted mt-0.5">
-          Apache AGE graph database for codebase relationship tracking
+          {graphModeDescription(status)}
         </p>
       </div>
 
@@ -239,235 +334,407 @@ export function KnowledgeGraphSection() {
         {loading && (
           <div className="flex items-center gap-2 text-muted">
             <Loader2 className="w-4 h-4 animate-spin" />
-            <span className="text-xs">Loading graph stats…</span>
+            <span className="text-xs">Loading graph status…</span>
           </div>
         )}
 
         {error && !loading && (
           <div className="flex items-center gap-2 text-muted">
-            <XCircle className="w-4 h-4 text-red-400" />
+            <XCircle className="w-4 h-4 text-error" />
             <span className="text-xs">{error}</span>
           </div>
         )}
 
-        {stats && !loading && !error && (
+        {status && !loading && !error && (
           <>
-            {/* Status badge */}
-            <div className="flex items-center gap-2 mb-4">
+            <div className="mb-4 rounded-lg border border-border bg-surface p-4 space-y-4">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-sm font-medium text-[var(--text)]">Database mode</p>
+                  <p className="text-xs text-muted mt-1">{databaseSetup.selectionNote}</p>
+                </div>
+                <span className="inline-flex items-center gap-1 rounded-full border border-border bg-bg px-2.5 py-1 text-[11px] font-medium text-muted">
+                  <ShieldCheck className="h-3.5 w-3.5 text-accent" />
+                  Saved selection applies on next restart/session
+                </span>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                {databaseSetup.modes.map((option) => {
+                  const selected = selectedMode === option.mode;
+                  return (
+                    <button
+                      key={option.mode}
+                      type="button"
+                      onClick={() => {
+                        setSelectedMode(option.mode);
+                        setModeSaveError(null);
+                      }}
+                      className={`rounded-lg border p-3 text-left transition-colors ${selected ? 'border-accent bg-accent/10' : 'border-border bg-bg hover:border-accent/40'}`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-primary">{option.label}</p>
+                          <p className="mt-1 text-xs text-muted">{option.summary}</p>
+                        </div>
+                        {selected ? <CheckCircle2 className="h-4 w-4 text-accent shrink-0" /> : null}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${option.graphExpectation === 'full' ? 'bg-success/10 text-success border border-success/20' : 'bg-warning/10 text-warning border border-warning/20'}`}>
+                          {graphModeLabel(option.graphExpectation)} expected
+                        </span>
+                        {databaseSetup.selectedMode === option.mode ? (
+                          <span className="rounded-full border border-border bg-surface px-2 py-0.5 text-[10px] font-medium text-muted">Current default</span>
+                        ) : null}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-[1.35fr,1fr]">
+                <div className="rounded-lg border border-border bg-bg p-4">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-medium text-primary">{selectedGuide.label}</p>
+                      <p className="text-xs text-muted mt-1">{selectedGuide.graphSummary}</p>
+                    </div>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${selectedGuide.graphExpectation === 'full' ? 'bg-success/10 text-success border border-success/20' : 'bg-warning/10 text-warning border border-warning/20'}`}>
+                      {graphModeLabel(selectedGuide.graphExpectation)}
+                    </span>
+                  </div>
+                  <ol className="mt-3 space-y-2 list-decimal pl-4 text-xs text-muted">
+                    {selectedGuide.startupGuide.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Tradeoffs</p>
+                      <ul className="mt-1 space-y-1 text-xs text-muted">
+                        {selectedGuide.tradeoffs.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Best for</p>
+                      <ul className="mt-1 space-y-1 text-xs text-muted">
+                        {selectedGuide.bestFor.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-border bg-bg p-4 space-y-3">
+                  <p className="text-sm font-medium text-primary">Full Graph vs Graph Lite</p>
+                  {databaseSetup.graphModes.map((entry) => (
+                    <div key={entry.mode} className="rounded-lg border border-border bg-surface p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold text-primary">{entry.label}</p>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${entry.mode === 'full' ? 'bg-success/10 text-success border border-success/20' : 'bg-warning/10 text-warning border border-warning/20'}`}>
+                          {entry.mode === 'full' ? 'AGE required' : 'Fallback mode'}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted">{entry.summary}</p>
+                      <ul className="mt-2 space-y-1 text-xs text-muted">
+                        {entry.tradeoffs.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {selectedMode === 'byop' && (
+                <div className="rounded-lg border border-border bg-bg p-4">
+                  <label htmlFor="knowledge-graph-database-url" className="block text-sm font-medium text-primary mb-1">
+                    Secure DATABASE_URL input
+                  </label>
+                  <textarea
+                    id="knowledge-graph-database-url"
+                    value={databaseUrlInput}
+                    onChange={(e) => setDatabaseUrlInput(e.target.value)}
+                    placeholder="postgres://postgres:password@db.example.supabase.co:5432/postgres?sslmode=require"
+                    rows={4}
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="w-full rounded border border-border bg-surface px-3 py-2 text-sm font-mono text-primary focus:border-accent resize-y"
+                  />
+                  <p className="mt-2 text-xs text-muted">{databaseSetup.byop.secretSafeInput}</p>
+                  <p className="mt-1 text-xs text-muted">Validation on save: {databaseSetup.byop.validationChecks.join(' · ')}</p>
+                </div>
+              )}
+
+              {modeSaveError ? (
+                <div className="rounded-lg border border-error/30 bg-error/10 p-3 text-xs text-error">
+                  {modeSaveError}
+                </div>
+              ) : null}
+
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <p className="text-xs text-muted">{databaseSetup.validationFlow}</p>
+                <button
+                  type="button"
+                  onClick={handleSaveMode}
+                  disabled={modeSaving || !workspaceId}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {modeSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Database className="h-3.5 w-3.5" />}
+                  {modeSaving ? 'Saving…' : 'Save database mode'}
+                </button>
+              </div>
+            </div>
+
+            <div className="mb-4 flex flex-wrap items-center gap-2">
               <Share2 size={16} className="text-muted" />
               <span className="text-sm font-medium text-[var(--text)]">Status</span>
-              <span className="ml-auto">
-                {stats.available ? (
-                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
-                    <CheckCircle2 className="w-3 h-3" />
-                    Available
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-500/10 text-red-400 border border-red-500/20">
-                    <XCircle className="w-3 h-3" />
-                    Unavailable
-                  </span>
-                )}
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${graphModeBadgeClass(graphMode)}`}>
+                {graphMode === 'full' ? <CheckCircle2 className="h-3 w-3" /> : graphMode === 'lite' ? <AlertTriangle className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                {graphModeLabel(graphMode)}
+              </span>
+              <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] font-medium text-[var(--text)]">
+                {dbModeLabel(status.databaseCapability.dbMode)}
+              </span>
+              <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] font-medium text-muted">
+                {providerLabel(status.databaseCapability.provider)}
               </span>
             </div>
 
-            {stats.available ? (
-              <>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div className="bg-surface border border-border rounded-lg p-3">
-                    <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Vertices</p>
-                    <p className="text-lg font-semibold text-primary">{stats.vertexCount.toLocaleString()}</p>
-                  </div>
-                  <div className="bg-surface border border-border rounded-lg p-3">
-                    <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Edges</p>
-                    <p className="text-lg font-semibold text-primary">{stats.edgeCount.toLocaleString()}</p>
-                  </div>
-                  <div className="bg-surface border border-border rounded-lg p-3">
-                    <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Graph Name</p>
-                    <p className="text-sm font-mono text-primary">{stats.graphName}</p>
-                  </div>
-                  <div className="bg-surface border border-border rounded-lg p-3">
-                    <p className="text-[10px] uppercase tracking-wide text-muted mb-1">Last Populated</p>
-                    <p className="text-xs text-primary">{formatTimestamp(stats.lastPopulatedAt)}</p>
-                  </div>
-                </div>
+            {graphMode !== 'full' && (
+              <GraphCapabilityNotice
+                graphMode={graphMode}
+                dbMode={status.databaseCapability.dbMode}
+                message={graphMode === 'lite'
+                  ? 'Graph Lite is active. Knowledge Graph, relevance, and memory surfaces stay useful with fallback data instead of opaque failures.'
+                  : 'The current database connection is unavailable, so graph views and graph population are paused until PostgreSQL reconnects.'}
+                hint={graphWarnings[0] ?? undefined}
+                className="mb-4"
+              />
+            )}
 
-                {/* Populate Graph button + progress */}
-                <div className="mt-4 space-y-4">
-                  {populating ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-xs text-muted">
-                        <span className="flex items-center gap-1.5">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          Populating graph…
-                        </span>
-                        <span>{populateCompleted} / {populateTotal} ({progressPct}%)</span>
-                      </div>
-                      <div className="w-full bg-surface border border-border rounded-full h-2 overflow-hidden">
-                        <div
-                          className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-out"
-                          style={{ width: `${progressPct}%` }}
-                        />
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={handlePopulate}
-                        disabled={!workspaceId}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <Database className="w-3.5 h-3.5" />
-                        Populate Graph
-                      </button>
-                      {populateError && (
-                        <span className="text-xs text-red-400">{populateError}</span>
-                      )}
-                    </div>
-                  )}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">DB Mode</p>
+                <p className="text-sm font-semibold text-primary">{dbModeLabel(status.databaseCapability.dbMode)}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Graph Mode</p>
+                <p className="text-sm font-semibold text-primary">{graphModeLabel(graphMode)}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Vertices</p>
+                <p className="text-lg font-semibold text-primary">{status.graph.vertexCount.toLocaleString()}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Edges</p>
+                <p className="text-lg font-semibold text-primary">{status.graph.edgeCount.toLocaleString()}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Graph Name</p>
+                <p className="text-sm font-mono text-primary">{status.graph.graphName}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Last Populated</p>
+                <p className="text-xs text-primary">{formatTimestamp(status.graph.lastPopulatedAt)}</p>
+              </div>
+            </div>
 
-                  <div className="border-t border-border pt-4 space-y-3">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-[var(--text)]">Ranking debug</p>
-                        <p className="text-xs text-muted">Inspect why the latest ranked graph candidates won for this workspace.</p>
-                      </div>
-                      <button
-                        onClick={loadRankingDebug}
-                        disabled={!workspaceId || debugLoading}
-                        className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-surface text-primary border border-border hover:bg-bg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {debugLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                        Load Debug
-                      </button>
-                    </div>
+            <div className="mt-3 rounded-lg border border-border bg-surface p-3 text-xs text-muted space-y-1">
+              <p>
+                Provider: <span className="font-medium text-primary">{providerLabel(status.databaseCapability.provider)}</span>
+              </p>
+              <p>
+                Connection: <span className="font-mono text-primary">{status.databaseCapability.connection.url ?? 'unavailable'}</span>
+              </p>
+              <p>
+                Extensions: AGE <span className="font-medium text-primary">{status.databaseCapability.extensions.age ? 'on' : 'off'}</span>
+                {' · '}
+                pgvector <span className="font-medium text-primary">{status.databaseCapability.extensions.vector ? 'on' : 'off'}</span>
+              </p>
+            </div>
 
-                    {debugError && (
-                      <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
-                        {debugError}
-                      </div>
-                    )}
-
-                    {!debugLoading && !debugError && !debugEvent && (
-                      <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted">
-                        No debug data loaded yet.
-                      </div>
-                    )}
-
-                    {debugEvent && (
-                      <div className="space-y-3 rounded-lg border border-border bg-surface p-3">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 text-sm font-medium text-[var(--text)]">
-                            <ListOrdered className="w-4 h-4 text-muted" />
-                            Latest retrieval event
-                          </div>
-                          <p className="text-xs text-muted">{debugEvent.queryPreview || 'No query preview available.'}</p>
-                          <div className="flex flex-wrap gap-2 text-[11px] text-muted">
-                            <span className="rounded-full border border-border px-2 py-0.5">mode: {debugEvent.retrievalMode ?? 'unknown'}</span>
-                            <span className="rounded-full border border-border px-2 py-0.5">scoring: {debugEvent.scoringVersion ?? 'unknown'}</span>
-                          </div>
-                        </div>
-
-                        {debugEvent.candidates.length === 0 ? (
-                          <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted">
-                            No ranked candidates were captured for this event.
-                          </div>
-                        ) : (
-                          <div className="space-y-3">
-                            {debugEvent.candidates.slice(0, 3).map((candidate) => (
-                              <div key={candidate.key} className="rounded-lg border border-border bg-bg p-3">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                  <p className="text-xs font-mono text-primary break-all">{candidate.key}</p>
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    {candidate.decision && (
-                                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${decisionBadgeClass(candidate.decision)}`}>
-                                        {candidate.decision}
-                                      </span>
-                                    )}
-                                    <span className="text-xs font-medium text-[var(--text)]">score {candidate.finalScore.toFixed(3)}</span>
-                                  </div>
-                                </div>
-
-                                {!candidate.explainability ? (
-                                  <p className="mt-2 text-xs text-muted">No debug data for this candidate.</p>
-                                ) : (
-                                  <div className="mt-3 space-y-3">
-                                    <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
-                                      {Object.entries(candidate.explainability.scoreBreakdown).map(([label, value]) => (
-                                        <div key={label} className="rounded-md border border-border bg-surface px-2 py-1.5">
-                                          <p className="text-[10px] uppercase tracking-wide text-muted">{label}</p>
-                                          <p className="font-mono text-primary">{formatScore(value)}</p>
-                                        </div>
-                                      ))}
-                                    </div>
-                                    <div className="space-y-2 text-xs text-muted">
-                                      <p>
-                                        Edges: {candidate.explainability.provenanceEdges.length > 0 ? candidate.explainability.provenanceEdges.join(', ') : 'No graph edges recorded'}
-                                        {candidate.explainability.provenanceEdgeOverflow > 0 ? ` (+${candidate.explainability.provenanceEdgeOverflow} more)` : ''}
-                                      </p>
-                                      <p>Provenance: {candidate.explainability.provenanceSourceType ?? 'unknown'} / {candidate.explainability.provenanceConfidence ?? 'unknown'}</p>
-                                      {candidate.explainability.rankReasons.length > 0 && (
-                                        <p>
-                                          Why it ranked: {candidate.explainability.rankReasons.join(' • ')}
-                                          {candidate.explainability.rankReasonOverflow > 0 ? ` • +${candidate.explainability.rankReasonOverflow} more` : ''}
-                                        </p>
-                                      )}
-                                    </div>
-
-                                    <div className="space-y-2 rounded-md border border-border bg-surface px-3 py-2">
-                                      <div className="flex flex-wrap items-center gap-2">
-                                        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">Ontology</span>
-                                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${candidate.explainability.ontologyExplainability.status === 'available' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : candidate.explainability.ontologyExplainability.status === 'partial' ? 'border-amber-500/20 bg-amber-500/10 text-amber-400' : 'border-border bg-bg text-muted'}`}>
-                                          {candidate.explainability.ontologyExplainability.status}
-                                        </span>
-                                      </div>
-                                      <p className="text-xs text-muted">{candidate.explainability.ontologyExplainability.message}</p>
-                                      {candidate.explainability.ontologyExplainability.explanations.length > 0 ? (
-                                        <div className="flex flex-wrap gap-1.5">
-                                          {candidate.explainability.ontologyExplainability.explanations.map((explanation) => (
-                                            <span
-                                              key={explanation.relationKey}
-                                              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${explanation.tone === 'active' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : explanation.tone === 'suppressed' ? 'border-amber-500/20 bg-amber-500/10 text-amber-400' : 'border-red-500/20 bg-red-500/10 text-red-300'}`}
-                                            >
-                                              {explanation.label}
-                                            </span>
-                                          ))}
-                                          {candidate.explainability.ontologyExplainability.hiddenExplanationCount > 0 && (
-                                            <span className="rounded-full bg-bg px-2 py-0.5 text-[10px] text-muted">
-                                              +{candidate.explainability.ontologyExplainability.hiddenExplanationCount} more
-                                            </span>
-                                          )}
-                                        </div>
-                                      ) : null}
-                                      {candidate.supersededBy && (
-                                        <p className="text-xs text-amber-300">Suppressed by {candidate.supersededBy}</p>
-                                      )}
-                                      {(candidate.conflictsWith?.length ?? 0) > 0 && (
-                                        <p className="text-xs text-red-300">Conflicts with {candidate.conflictsWith?.slice(0, 2).join(', ')}{(candidate.conflictsWith?.length ?? 0) > 2 ? ` +${(candidate.conflictsWith?.length ?? 0) - 2} more` : ''}</p>
-                                      )}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="bg-surface border border-border rounded-lg p-4 text-center">
-                <p className="text-sm text-muted">
-                  Knowledge graph not available — install Apache AGE extension
-                </p>
-                <p className="text-xs text-muted/60 mt-1">
-                  Use self-hosted PostgreSQL with AGE for full graph support.
-                  The graph layer is optional — core functionality works without it.
-                </p>
+            {graphWarnings.length > 0 && (
+              <div className="mt-3 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
+                <ul className="space-y-1">
+                  {graphWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
               </div>
             )}
+
+            <div className="mt-4 space-y-4">
+              {populating ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-muted">
+                    <span className="flex items-center gap-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Populating graph…
+                    </span>
+                    <span>{populateCompleted} / {populateTotal} ({progressPct}%)</span>
+                  </div>
+                  <div className="w-full bg-surface border border-border rounded-full h-2 overflow-hidden">
+                    <div
+                      className="h-full bg-accent rounded-full transition-all duration-300 ease-out"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    onClick={handlePopulate}
+                    disabled={!workspaceId || graphMode !== 'full'}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Database className="w-3.5 h-3.5" />
+                    Populate Graph
+                  </button>
+                  {graphMode !== 'full' && (
+                    <span className="text-xs text-muted">
+                      Graph population requires full AGE support.
+                    </span>
+                  )}
+                  {populateError && (
+                    <span className="text-xs text-error">{populateError}</span>
+                  )}
+                </div>
+              )}
+
+              <div className="border-t border-border pt-4 space-y-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-[var(--text)]">Ranking debug</p>
+                    <p className="text-xs text-muted">Inspect why the latest ranked graph candidates won for this workspace.</p>
+                  </div>
+                  <button
+                    onClick={loadRankingDebug}
+                    disabled={!workspaceId || debugLoading}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-surface text-primary border border-border hover:bg-bg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {debugLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    Load Debug
+                  </button>
+                </div>
+
+                {debugError && (
+                  <div className="rounded-lg border border-error/30 bg-error/10 p-3 text-xs text-error">
+                    {debugError}
+                  </div>
+                )}
+
+                {!debugLoading && !debugError && !debugEvent && (
+                  <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted">
+                    No debug data loaded yet.
+                  </div>
+                )}
+
+                {debugEvent && (
+                  <div className="space-y-3 rounded-lg border border-border bg-surface p-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium text-[var(--text)]">
+                        <ListOrdered className="w-4 h-4 text-muted" />
+                        Latest retrieval event
+                      </div>
+                      <p className="text-xs text-muted">{debugEvent.queryPreview || 'No query preview available.'}</p>
+                      <div className="flex flex-wrap gap-2 text-[11px] text-muted">
+                        <span className="rounded-full border border-border px-2 py-0.5">mode: {debugEvent.retrievalMode ?? 'unknown'}</span>
+                        <span className="rounded-full border border-border px-2 py-0.5">scoring: {debugEvent.scoringVersion ?? 'unknown'}</span>
+                      </div>
+                    </div>
+
+                    {debugEvent.candidates.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted">
+                        No ranked candidates were captured for this event.
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {debugEvent.candidates.slice(0, 3).map((candidate) => (
+                          <div key={candidate.key} className="rounded-lg border border-border bg-bg p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-xs font-mono text-primary break-all">{candidate.key}</p>
+                              <div className="flex flex-wrap items-center gap-2">
+                                {candidate.decision && (
+                                  <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${decisionBadgeClass(candidate.decision)}`}>
+                                    {candidate.decision}
+                                  </span>
+                                )}
+                                <span className="text-xs font-medium text-[var(--text)]">score {candidate.finalScore.toFixed(3)}</span>
+                              </div>
+                            </div>
+
+                            {!candidate.explainability ? (
+                              <p className="mt-2 text-xs text-muted">No debug data for this candidate.</p>
+                            ) : (
+                              <div className="mt-3 space-y-3">
+                                <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                                  {Object.entries(candidate.explainability.scoreBreakdown).map(([label, value]) => (
+                                    <div key={label} className="rounded-md border border-border bg-surface px-2 py-1.5">
+                                      <p className="text-[10px] uppercase tracking-wide text-muted">{label}</p>
+                                      <p className="font-mono text-primary">{formatScore(value)}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div className="space-y-2 text-xs text-muted">
+                                  <p>
+                                    Edges: {candidate.explainability.provenanceEdges.length > 0 ? candidate.explainability.provenanceEdges.join(', ') : 'No graph edges recorded'}
+                                    {candidate.explainability.provenanceEdgeOverflow > 0 ? ` (+${candidate.explainability.provenanceEdgeOverflow} more)` : ''}
+                                  </p>
+                                  <p>Provenance: {candidate.explainability.provenanceSourceType ?? 'unknown'} / {candidate.explainability.provenanceConfidence ?? 'unknown'}</p>
+                                  {candidate.explainability.rankReasons.length > 0 && (
+                                    <p>
+                                      Why it ranked: {candidate.explainability.rankReasons.join(' • ')}
+                                      {candidate.explainability.rankReasonOverflow > 0 ? ` • +${candidate.explainability.rankReasonOverflow} more` : ''}
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div className="space-y-2 rounded-md border border-border bg-surface px-3 py-2">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">Ontology</span>
+                                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${candidate.explainability.ontologyExplainability.status === 'available' ? 'border-success/30 bg-success/10 text-success' : candidate.explainability.ontologyExplainability.status === 'partial' ? 'border-warning/30 bg-warning/10 text-warning' : 'border-border bg-bg text-muted'}`}>
+                                      {candidate.explainability.ontologyExplainability.status}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-muted">{candidate.explainability.ontologyExplainability.message}</p>
+                                  {candidate.explainability.ontologyExplainability.explanations.length > 0 ? (
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {candidate.explainability.ontologyExplainability.explanations.map((explanation) => (
+                                        <span
+                                          key={explanation.relationKey}
+                                          className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${explanation.tone === 'active' ? 'border-success/30 bg-success/10 text-success' : explanation.tone === 'suppressed' ? 'border-warning/30 bg-warning/10 text-warning' : 'border-error/30 bg-error/10 text-error'}`}
+                                        >
+                                          {explanation.label}
+                                        </span>
+                                      ))}
+                                      {candidate.explainability.ontologyExplainability.hiddenExplanationCount > 0 && (
+                                        <span className="rounded-full bg-bg px-2 py-0.5 text-[10px] text-muted">
+                                          +{candidate.explainability.ontologyExplainability.hiddenExplanationCount} more
+                                        </span>
+                                      )}
+                                    </div>
+                                  ) : null}
+                                  {candidate.supersededBy && (
+                                    <p className="text-xs text-warning">Suppressed by {candidate.supersededBy}</p>
+                                  )}
+                                  {(candidate.conflictsWith?.length ?? 0) > 0 && (
+                                    <p className="text-xs text-error">Conflicts with {candidate.conflictsWith?.slice(0, 2).join(', ')}{(candidate.conflictsWith?.length ?? 0) > 2 ? ` +${(candidate.conflictsWith?.length ?? 0) - 2} more` : ''}</p>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
           </>
         )}
       </div>

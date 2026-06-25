@@ -6,8 +6,8 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { pool, query, queryOne } from '../db/index';
-import { detectDbMode } from '../lib/db-strategy';
+import { query, queryOne } from '../db/index';
+import { getDatabaseCapability } from '../lib/db-strategy';
 
 const router = Router();
 
@@ -16,7 +16,6 @@ const MIN_CLI_VERSION = '0.1.0';
 
 let VERSION = '0.0.1';
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   VERSION = (require('../../package.json') as { version: string }).version;
 } catch {
   // Compiled builds may not expose package.json.
@@ -52,31 +51,8 @@ async function hasVectorExtension(): Promise<boolean> {
   }
 }
 
-async function isAgeAvailableForVersionProbe(): Promise<boolean> {
-  const client = await pool.connect();
-  try {
-    await client.query('RESET ROLE');
-    await client.query('RESET request.jwt.claim.sub');
-    await client.query('RESET request.jwt.claims');
-    await client.query('SET search_path TO rorca, public');
-    await client.query(`LOAD 'age'`);
-    await client.query('SET search_path = ag_catalog, "$user", public');
-    await client.query('SELECT 1');
-    return true;
-  } catch {
-    return false;
-  } finally {
-    try {
-      await client.query('SET search_path = rorca, public');
-    } catch {
-      // Best effort cleanup before returning the client to the pool.
-    }
-    client.release();
-  }
-}
-
-function hasDockerSidecar(): boolean {
-  return detectDbMode() === 'docker';
+function hasDockerSidecar(dbMode: 'native' | 'docker' | 'byop'): boolean {
+  return dbMode === 'docker';
 }
 
 /**
@@ -133,12 +109,15 @@ function hasDockerSidecar(): boolean {
  *                       type: boolean
  *                     vector:
  *                       type: boolean
+ *                 databaseCapability:
+ *                   type: object
+ *                   description: Canonical database runtime capability model used by frontend and operators.
  */
 router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [schemaVersion, age, vector] = await Promise.all([
+    const [schemaVersion, databaseCapability, vector] = await Promise.all([
       getCurrentSchemaVersion(),
-      isAgeAvailableForVersionProbe(),
+      getDatabaseCapability(),
       hasVectorExtension(),
     ]);
 
@@ -147,13 +126,14 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       apiVersion: API_VERSION,
       schemaVersion,
       minCliVersion: MIN_CLI_VERSION,
-      mode: detectDbMode(),
+      mode: databaseCapability.dbMode,
       capabilities: {
         pi: true,
-        docker: hasDockerSidecar(),
-        age,
-        vector,
+        docker: hasDockerSidecar(databaseCapability.dbMode),
+        age: databaseCapability.extensions.age,
+        vector: databaseCapability.extensions.vector || vector,
       },
+      databaseCapability,
     });
   } catch (err) {
     next(err);

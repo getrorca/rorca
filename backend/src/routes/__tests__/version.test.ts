@@ -39,6 +39,11 @@ describe('GET /api/version', () => {
     expect(typeof res.body.capabilities.pi).toBe('boolean');
     expect(typeof res.body.capabilities.docker).toBe('boolean');
     expect(typeof res.body.capabilities.age).toBe('boolean');
+    expect(res.body).toHaveProperty('databaseCapability.dbMode');
+    expect(res.body).toHaveProperty('databaseCapability.provider');
+    expect(res.body).toHaveProperty('databaseCapability.extensions.age');
+    expect(res.body).toHaveProperty('databaseCapability.graphMode');
+    expect(String(res.body.databaseCapability.connection.url ?? '')).not.toContain('@');
   });
 
   it('does not require authentication', async () => {

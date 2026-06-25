@@ -102,6 +102,7 @@ function writeSpec(slug: string, spec: object, status: 'pending' | 'approved' = 
 
 function mockAgeUnavailable() {
   const kg = require('../../lib/knowledge-graph');
+  const runtime = require('../../lib/graph-runtime');
   jest.spyOn(kg, 'isGraphAvailable').mockResolvedValue(false);
   jest.spyOn(kg, 'graphStats').mockResolvedValue({
     available: false,
@@ -109,6 +110,32 @@ function mockAgeUnavailable() {
     edgeCount: 0,
     labels: [],
   });
+  jest.spyOn(runtime, 'getRuntimeGraphCapability').mockResolvedValue({
+    surface: 'knowledge',
+    graphMode: 'lite',
+    provider: 'relational',
+    ageAvailable: false,
+    available: true,
+    adminAvailable: false,
+    hint: 'Run `rorca db start` to ensure the Docker Postgres sidecar is ready with Apache AGE enabled.',
+    message: 'Graph Lite active. This surface uses relational fallback data instead of Apache AGE.',
+    capability: {
+      dbMode: 'docker',
+      provider: 'docker-postgres',
+      extensions: { age: false, vector: true, pgcrypto: true },
+      graphMode: 'lite',
+      warnings: ['Apache AGE is unavailable.'],
+      connection: { url: null, host: null, port: null, database: null, local: true },
+      connected: true,
+    },
+  });
+  jest.spyOn(runtime, 'describeRuntimeGraph').mockImplementation((value: any) => ({
+    graphMode: value.graphMode,
+    provider: value.provider,
+    ageAvailable: value.ageAvailable,
+    hint: value.hint,
+    message: value.message,
+  }));
 }
 
 // ─── 1. GET /api/graph/stats — AGE unavailable ───────────────────────────
@@ -168,6 +195,7 @@ describe('POST /api/pipeline/trigger with includeGraph', () => {
         specPath: 'forge/specs/approved/graph-trigger-spec.json',
         workspaceId: 'ws-graph-test',
         includeGraph: true,
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
@@ -217,6 +245,7 @@ describe('POST /api/pipeline/trigger with includeGraph', () => {
       .send({
         specPath: 'forge/specs/approved/no-graph-spec.json',
         workspaceId: 'ws-graph-test',
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
@@ -242,18 +271,20 @@ function expectAgeUnavailable(body: Record<string, unknown>) {
 // ─── 3. GET /api/specs/:specId/knowledge-graph — AGE unavailable ──────────
 
 describe('GET /api/specs/:specId/knowledge-graph (AGE unavailable)', () => {
-  test('returns 503 with Lite Mode contract', async () => {
+  test('returns a 200 Graph Lite fallback payload', async () => {
     mockAgeUnavailable();
 
     const res = await request(app)
       .get('/api/specs/any-spec/knowledge-graph')
       .set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(503);
-    expectAgeUnavailable(res.body);
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+    expect(res.body.runtime.graphMode).toBe('lite');
+    expect(res.body.runtime.provider).toBe('relational');
   });
 
-  test('stays on the Lite Mode error path for a real spec', async () => {
+  test('stays on the Graph Lite fallback path for a real spec', async () => {
     mockAgeUnavailable();
 
     writeSpec('real-spec', {
@@ -273,8 +304,9 @@ describe('GET /api/specs/:specId/knowledge-graph (AGE unavailable)', () => {
       .get('/api/specs/real-spec/knowledge-graph')
       .set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(503);
-    expectAgeUnavailable(res.body);
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+    expect(res.body.runtime.graphMode).toBe('lite');
   });
 });
 

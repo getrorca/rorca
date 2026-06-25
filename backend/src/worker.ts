@@ -20,11 +20,11 @@
  */
 
 import 'dotenv/config';
-import { applySelectedDbModeEnvironment } from './lib/db-strategy';
+import { applySelectedDbModeEnvironment, formatDbModeBootstrapLog } from './lib/db-strategy';
 
 const workerDbModeBootstrap = applySelectedDbModeEnvironment();
 if (workerDbModeBootstrap.changed) {
-  console.info(`[db-mode] Using ${workerDbModeBootstrap.mode} database ${workerDbModeBootstrap.databaseUrl}`);
+  console.info(formatDbModeBootstrapLog(workerDbModeBootstrap));
 }
 
 // Mark this process as 'worker' so db/index.ts doesn't register its own

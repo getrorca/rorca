@@ -5,9 +5,10 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import type { PoolClient } from 'pg';
-import { pool } from '../db/index';
-import { checkAge } from './age-guard';
+import { pool, query, queryOne } from '../db/index';
 import {
   buildFileNodeKey,
   buildMemoryNodeKey,
@@ -17,11 +18,16 @@ import {
   parseAgtype,
 } from './knowledge-graph';
 import { logger } from './logger';
+import {
+  describeRuntimeGraph,
+  getRuntimeGraphCapability,
+  type GraphRuntimeDescriptor,
+} from './graph-runtime';
 
 export type MemoryGraphNodeType = 'Memory' | 'Story' | 'Spec' | 'File';
 export type MemoryGraphEdgeType = 'ABOUT' | 'LEARNED_FROM' | 'FROM_SPEC' | 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'SUPERSEDES' | 'CONFLICTS_WITH';
 export type MemoryGraphView = 'overview' | 'neighborhood';
-export type MemoryGraphUnavailableCode = 'AGE_NOT_AVAILABLE' | 'GRAPH_QUERY_FAILED';
+export type MemoryGraphUnavailableCode = 'AGE_NOT_AVAILABLE' | 'GRAPH_QUERY_FAILED' | 'GRAPH_DISABLED';
 
 export interface MemoryGraphCaps {
   memories: number;
@@ -84,6 +90,7 @@ export interface MemoryGraphScope {
 
 export interface MemoryGraphResponse {
   available: boolean;
+  runtime: GraphRuntimeDescriptor;
   scope: MemoryGraphScope;
   nodes: MemoryGraphNode[];
   edges: MemoryGraphEdge[];
@@ -91,7 +98,7 @@ export interface MemoryGraphResponse {
   selection: MemoryGraphSelectionHints;
   error?: string;
   code?: MemoryGraphUnavailableCode;
-  mode?: 'lite';
+  mode?: 'lite' | 'disabled';
   hint?: string;
 }
 
@@ -157,6 +164,30 @@ interface MemoryRelationRow {
   targetPinned: boolean | null;
   targetCreatedAt: string | null;
   relationType: 'SUPERSEDES' | 'CONFLICTS_WITH';
+}
+
+interface RelationalMemoryRow {
+  memoryId: string;
+  category: string | null;
+  pinned: boolean | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  storyId: string | null;
+  specId: string | null;
+  relatedFiles: string[] | string | null;
+}
+
+interface ParsedSpecStory {
+  id: string;
+  title: string;
+  dependsOn: string[];
+}
+
+interface ParsedSpecMeta {
+  specId: string;
+  title: string;
+  status: string;
+  stories: Map<string, ParsedSpecStory>;
 }
 
 const EDGE_TYPE_ORDER: MemoryGraphEdgeType[] = [
@@ -225,6 +256,82 @@ function parseAgtypeRow<T>(row: Record<string, unknown>): T {
   ) as T;
 }
 
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => normalizeGraphFilePath(item));
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          .map((item) => normalizeGraphFilePath(item));
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function specFileCandidates(workspacePath: string, specId: string): Array<{ filePath: string; status: string }> {
+  return [
+    { filePath: path.join(workspacePath, 'forge', 'specs', 'approved', `${specId}.json`), status: 'approved' },
+    { filePath: path.join(workspacePath, 'forge', 'specs', 'pending', `${specId}.json`), status: 'pending' },
+  ];
+}
+
+async function resolveWorkspacePath(workspaceId: string): Promise<string | null> {
+  const row = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+  return row?.path ?? null;
+}
+
+function loadSpecMetaMap(workspacePath: string | null, specIds: string[]): Map<string, ParsedSpecMeta> {
+  const meta = new Map<string, ParsedSpecMeta>();
+  if (!workspacePath) return meta;
+
+  for (const specId of specIds) {
+    for (const candidate of specFileCandidates(workspacePath, specId)) {
+      if (!fs.existsSync(candidate.filePath)) continue;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(candidate.filePath, 'utf8')) as {
+          title?: unknown;
+          userStories?: Array<{ id?: unknown; title?: unknown; dependsOn?: unknown }>;
+        };
+        const stories = new Map<string, ParsedSpecStory>();
+        for (const story of parsed.userStories ?? []) {
+          if (typeof story.id !== 'string' || story.id.trim().length === 0) continue;
+          const storyId = story.id.trim();
+          const dependsOn = Array.isArray(story.dependsOn)
+            ? story.dependsOn.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            : [];
+          stories.set(storyId, {
+            id: storyId,
+            title: typeof story.title === 'string' && story.title.trim().length > 0 ? story.title.trim() : storyId,
+            dependsOn,
+          });
+        }
+        meta.set(specId, {
+          specId,
+          title: typeof parsed.title === 'string' && parsed.title.trim().length > 0 ? parsed.title.trim() : specId,
+          status: candidate.status,
+          stories,
+        });
+        break;
+      } catch (error) {
+        logger.warn({ error, workspacePath, specId, filePath: candidate.filePath }, '[memory-graph] Failed to parse spec for lite graph fallback');
+      }
+    }
+  }
+
+  return meta;
+}
+
 function sortStrings(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
@@ -264,6 +371,7 @@ function buildScope(workspaceId: string, view: MemoryGraphView, memoryId: string
 }
 
 function buildUnavailable(
+  runtime: GraphRuntimeDescriptor,
   scope: MemoryGraphScope,
   caps: MemoryGraphCaps,
   code: MemoryGraphUnavailableCode,
@@ -271,6 +379,7 @@ function buildUnavailable(
 ): MemoryGraphResponse {
   return {
     available: false,
+    runtime,
     scope,
     nodes: [],
     edges: [],
@@ -291,12 +400,13 @@ function buildUnavailable(
     },
     error,
     code,
-    mode: 'lite',
-    hint: 'Run `rorca db start` to enable graph memory (requires Docker)',
+    mode: runtime.graphMode === 'disabled' ? 'disabled' : 'lite',
+    hint: runtime.hint,
   };
 }
 
 function buildSuccess(
+  runtime: GraphRuntimeDescriptor,
   scope: MemoryGraphScope,
   caps: MemoryGraphCaps,
   nodes: MemoryGraphNode[],
@@ -312,6 +422,7 @@ function buildSuccess(
 
   return {
     available: true,
+    runtime,
     scope,
     nodes: sortedNodes,
     edges: sortedEdges,
@@ -651,6 +762,78 @@ async function queryMemoryRelations(
   );
 }
 
+async function queryRelationalMemories(
+  workspaceId: string,
+  options: { memoryId?: string | null; memoryIds?: string[]; limit: number },
+): Promise<RelationalMemoryRow[]> {
+  if (options.limit <= 0) return [];
+
+  const params: unknown[] = [workspaceId];
+  const where: string[] = ['workspace_id = $1', 'deleted_at IS NULL'];
+
+  if (options.memoryId) {
+    params.push(options.memoryId);
+    where.push(`id::text = $${params.length}`);
+  }
+
+  if (options.memoryIds && options.memoryIds.length > 0) {
+    params.push(options.memoryIds);
+    where.push(`id::text = ANY($${params.length}::text[])`);
+  }
+
+  params.push(options.limit);
+
+  return query<RelationalMemoryRow>(
+    `SELECT id::text AS "memoryId",
+            category,
+            COALESCE(pinned, false) AS pinned,
+            created_at::text AS "createdAt",
+            updated_at::text AS "updatedAt",
+            source_story_id AS "storyId",
+            source_spec_id AS "specId",
+            related_files AS "relatedFiles"
+       FROM memories
+      WHERE ${where.join(' AND ')}
+      ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+}
+
+async function queryRelationalMemoryRelations(
+  workspaceId: string,
+  memoryIds: string[],
+  relationType: 'SUPERSEDES' | 'CONFLICTS_WITH',
+  limit: number,
+): Promise<MemoryRelationRow[]> {
+  if (memoryIds.length === 0 || limit <= 0) return [];
+
+  return query<MemoryRelationRow>(
+    `SELECT mr.source_memory_id::text AS "sourceMemoryId",
+            sm.category AS "sourceCategory",
+            COALESCE(sm.pinned, false) AS "sourcePinned",
+            COALESCE(sm.updated_at, sm.created_at)::text AS "sourceCreatedAt",
+            mr.target_memory_id::text AS "targetMemoryId",
+            tm.category AS "targetCategory",
+            COALESCE(tm.pinned, false) AS "targetPinned",
+            COALESCE(tm.updated_at, tm.created_at)::text AS "targetCreatedAt",
+            mr.relation_type AS "relationType"
+       FROM memory_relations mr
+       JOIN memories sm ON sm.id = mr.source_memory_id AND sm.workspace_id = mr.workspace_id
+       JOIN memories tm ON tm.id = mr.target_memory_id AND tm.workspace_id = mr.workspace_id
+      WHERE mr.workspace_id = $1
+        AND mr.status = 'active'
+        AND mr.relation_type = $2
+        AND (
+          mr.source_memory_id::text = ANY($3::text[])
+          OR mr.target_memory_id::text = ANY($3::text[])
+        )
+      ORDER BY mr.updated_at DESC, mr.id DESC
+      LIMIT $4`,
+    [workspaceId, relationType, memoryIds, limit],
+  );
+}
+
 function addMemoryNodes(
   workspaceId: string,
   graph: ReturnType<typeof createAccumulator>,
@@ -867,7 +1050,175 @@ function storyIds(graph: ReturnType<typeof createAccumulator>): string[] {
   );
 }
 
+async function buildRelationalGraph(
+  runtime: GraphRuntimeDescriptor,
+  workspaceId: string,
+  scope: MemoryGraphScope,
+  caps: MemoryGraphCaps,
+): Promise<MemoryGraphResponse> {
+  const graph = createAccumulator(caps);
+  const edgeBudgets = allocateEdgeBudgets(scope.view, caps.edges);
+
+  const anchorRows = await queryRelationalMemories(workspaceId, {
+    memoryId: scope.memoryId,
+    limit: caps.memories,
+  });
+  const anchorIds = anchorRows.map((row) => row.memoryId);
+
+  addMemoryNodes(
+    workspaceId,
+    graph,
+    anchorRows.map((row) => ({
+      memoryId: row.memoryId,
+      category: row.category,
+      pinned: row.pinned,
+      createdAt: row.updatedAt ?? row.createdAt,
+    })),
+    scope.memoryId,
+  );
+
+  const supersedes = await queryRelationalMemoryRelations(workspaceId, anchorIds, 'SUPERSEDES', edgeBudgets.SUPERSEDES);
+  const conflicts = await queryRelationalMemoryRelations(workspaceId, anchorIds, 'CONFLICTS_WITH', edgeBudgets.CONFLICTS_WITH);
+  const relatedIds = sortStrings([
+    ...supersedes.flatMap((row) => [row.sourceMemoryId, row.targetMemoryId]),
+    ...conflicts.flatMap((row) => [row.sourceMemoryId, row.targetMemoryId]),
+  ]).filter((memoryId) => !anchorIds.includes(memoryId));
+
+  const relatedRows = await queryRelationalMemories(workspaceId, {
+    memoryIds: relatedIds,
+    limit: Math.max(0, caps.memories - anchorRows.length),
+  });
+
+  addMemoryNodes(
+    workspaceId,
+    graph,
+    relatedRows.map((row) => ({
+      memoryId: row.memoryId,
+      category: row.category,
+      pinned: row.pinned,
+      createdAt: row.updatedAt ?? row.createdAt,
+    })),
+    scope.memoryId,
+  );
+  addRelatedMemoryNodes(workspaceId, graph, [...supersedes, ...conflicts], scope.memoryId);
+
+  const memoryRows = [...anchorRows, ...relatedRows];
+  const specIds = sortStrings(memoryRows.map((row) => row.specId ?? '').filter(Boolean));
+  const workspacePath = await resolveWorkspacePath(workspaceId);
+  const specMeta = loadSpecMetaMap(workspacePath, specIds);
+  const storyFileEdges = new Map<string, Set<string>>();
+
+  for (const row of memoryRows) {
+    const memoryNodeId = buildMemoryNodeKey(workspaceId, row.memoryId);
+    const files = parseStringArray(row.relatedFiles);
+
+    if (row.specId) {
+      const meta = specMeta.get(row.specId);
+      graph.addNode({
+        id: buildSpecNodeKey(workspaceId, row.specId),
+        type: 'Spec',
+        entityId: row.specId,
+        label: meta?.title || row.specId,
+        workspaceId,
+        selected: false,
+        specId: row.specId,
+        title: meta?.title || row.specId,
+        status: meta?.status,
+      });
+      graph.addEdge('FROM_SPEC', memoryNodeId, buildSpecNodeKey(workspaceId, row.specId));
+    }
+
+    if (row.storyId && row.specId) {
+      const storyMeta = specMeta.get(row.specId)?.stories.get(row.storyId);
+      const storyNodeId = buildStoryNodeKey(workspaceId, row.specId, row.storyId);
+      graph.addNode({
+        id: storyNodeId,
+        type: 'Story',
+        entityId: row.storyId,
+        label: storyMeta?.title || row.storyId,
+        workspaceId,
+        selected: false,
+        storyId: row.storyId,
+        specId: row.specId,
+        title: storyMeta?.title || row.storyId,
+      });
+      graph.addEdge('LEARNED_FROM', memoryNodeId, storyNodeId);
+      graph.addEdge('BELONGS_TO', storyNodeId, buildSpecNodeKey(workspaceId, row.specId));
+
+      for (const filePath of files) {
+        const normalizedPath = normalizeGraphFilePath(filePath);
+        if (!normalizedPath) continue;
+        graph.addNode({
+          id: buildFileNodeKey(workspaceId, normalizedPath),
+          type: 'File',
+          entityId: normalizedPath,
+          label: normalizedPath,
+          workspaceId,
+          selected: false,
+          path: normalizedPath,
+        });
+        graph.addEdge('ABOUT', memoryNodeId, buildFileNodeKey(workspaceId, normalizedPath));
+        if (!storyFileEdges.has(storyNodeId)) {
+          storyFileEdges.set(storyNodeId, new Set<string>());
+        }
+        storyFileEdges.get(storyNodeId)!.add(normalizedPath);
+      }
+    } else {
+      for (const filePath of files) {
+        const normalizedPath = normalizeGraphFilePath(filePath);
+        if (!normalizedPath) continue;
+        graph.addNode({
+          id: buildFileNodeKey(workspaceId, normalizedPath),
+          type: 'File',
+          entityId: normalizedPath,
+          label: normalizedPath,
+          workspaceId,
+          selected: false,
+          path: normalizedPath,
+        });
+        graph.addEdge('ABOUT', memoryNodeId, buildFileNodeKey(workspaceId, normalizedPath));
+      }
+    }
+  }
+
+  for (const [storyNodeId, filePaths] of storyFileEdges.entries()) {
+    for (const filePath of filePaths) {
+      graph.addEdge('TOUCHES', storyNodeId, buildFileNodeKey(workspaceId, filePath));
+    }
+  }
+
+  const graphStories = [...graph.nodes.values()].filter((node) => node.type === 'Story' && node.specId && node.storyId);
+  for (const node of graphStories) {
+    const specId = node.specId as string;
+    const storyId = node.storyId as string;
+    const storyMeta = specMeta.get(specId)?.stories.get(storyId);
+    for (const dependsOnId of storyMeta?.dependsOn ?? []) {
+      const dependsMeta = specMeta.get(specId)?.stories.get(dependsOnId);
+      const dependsNodeId = buildStoryNodeKey(workspaceId, specId, dependsOnId);
+      graph.addNode({
+        id: dependsNodeId,
+        type: 'Story',
+        entityId: dependsOnId,
+        label: dependsMeta?.title || dependsOnId,
+        workspaceId,
+        selected: false,
+        storyId: dependsOnId,
+        specId,
+        title: dependsMeta?.title || dependsOnId,
+      });
+      graph.addEdge('BELONGS_TO', dependsNodeId, buildSpecNodeKey(workspaceId, specId));
+      graph.addEdge('DEPENDS_ON', buildStoryNodeKey(workspaceId, specId, storyId), dependsNodeId);
+    }
+  }
+
+  addMemoryRelationEdges(workspaceId, graph, supersedes);
+  addMemoryRelationEdges(workspaceId, graph, conflicts);
+
+  return buildSuccess(runtime, scope, caps, [...graph.nodes.values()], [...graph.edges.values()]);
+}
+
 async function buildGraph(
+  runtime: GraphRuntimeDescriptor,
   workspaceId: string,
   scope: MemoryGraphScope,
   caps: MemoryGraphCaps,
@@ -924,7 +1275,7 @@ async function buildGraph(
   addMemoryRelationEdges(workspaceId, graph, conflicts);
   addStoryEdges(workspaceId, graph, storyFiles, storySpecs, dependencies);
 
-  return buildSuccess(scope, caps, [...graph.nodes.values()], [...graph.edges.values()]);
+  return buildSuccess(runtime, scope, caps, [...graph.nodes.values()], [...graph.edges.values()]);
 }
 
 async function queryGraph(
@@ -935,16 +1286,22 @@ async function queryGraph(
 ): Promise<MemoryGraphResponse> {
   const scope = buildScope(workspaceId, view, memoryId);
   const caps = resolveCaps(view, overrides);
+  const runtimeCapability = await getRuntimeGraphCapability('memory');
+  let runtime = describeRuntimeGraph(runtimeCapability);
 
-  if (!(await checkAge())) {
-    return buildUnavailable(scope, caps, 'AGE_NOT_AVAILABLE', 'Apache AGE extension not available');
+  if (runtime.graphMode === 'disabled') {
+    return buildUnavailable(runtime, scope, caps, 'GRAPH_DISABLED', runtime.message);
   }
 
   try {
-    const anchors = memoryId
-      ? await querySingleMemory(workspaceId, memoryId)
-      : await queryAnchorMemories(workspaceId, caps.memories);
-    return await buildGraph(workspaceId, scope, caps, anchors);
+    if (runtime.provider === 'age') {
+      const anchors = memoryId
+        ? await querySingleMemory(workspaceId, memoryId)
+        : await queryAnchorMemories(workspaceId, caps.memories);
+      return await buildGraph(runtime, workspaceId, scope, caps, anchors);
+    }
+
+    return await buildRelationalGraph(runtime, workspaceId, scope, caps);
   } catch (error) {
     logger.warn({
       error,
@@ -953,8 +1310,26 @@ async function queryGraph(
       workspaceId,
       view,
       memoryId,
+      runtime,
     }, '[memory-graph] Graph query failed');
-    return buildUnavailable(scope, caps, 'GRAPH_QUERY_FAILED', 'Memory graph unavailable');
+
+    try {
+      runtime = {
+        ...runtime,
+        provider: 'relational',
+        message: 'Apache AGE query failed; using relational fallback data instead.',
+      };
+      return await buildRelationalGraph(runtime, workspaceId, scope, caps);
+    } catch (fallbackError) {
+      logger.warn({
+        error: fallbackError,
+        workspaceId,
+        view,
+        memoryId,
+      }, '[memory-graph] Relational fallback also failed');
+    }
+
+    return buildUnavailable(runtime, scope, caps, 'GRAPH_QUERY_FAILED', 'Memory graph unavailable');
   }
 }
 

@@ -54,7 +54,7 @@ export function getRequiredToolGroups(input: RorcaSkillWorkflowRequest): string[
       const groups: string[][] = [
         ["rorca_specs_generation_context"],
         ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
-        ["getSpec", "rorca_get_specs_by_specId"],
+        ["rorca_get_specs_by_specId"],
         ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
       ];
       if (input.autoApprove) groups.push(["rorca_approve_spec", "rorca_specs_by_specId_approve"]);
@@ -83,7 +83,7 @@ export function formatSkillLaunchPrompt(input: RorcaSkillWorkflowRequest): strin
       `autoRun: ${input.autoRun}`,
       `queue: ${input.queue}`,
       ...(input.modelOverride ? [`modelOverride: ${input.modelOverride}`] : []),
-      "availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, getSpec, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness, rorca_retry_spec_stage, rorca_repair_spec, rorca_approve_spec, rorca_trigger_run, rorca_pipeline_trigger]",
+      "availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness, rorca_retry_spec_stage, rorca_repair_spec, rorca_approve_spec, rorca_trigger_run, rorca_pipeline_trigger]",
       "forgeSequence: [rorca_specs_generation_context, draft_in_pi, rorca_create_spec, get_saved_spec, inspect_workflow_or_readiness, verify_saved_spec]",
       "contextContract: fetch rorca_specs_generation_context before persistence, then forward its contextUsed and contextSummary into rorca_create_spec or rorca_persist_spec so the saved spec Context tab reflects the true caller-observed drafting context",
       "policyContract: persist with explicit policy metadata by passing either policyPresetId or postSavePolicy derived from the effective post-save policy/postSaveDefaults bundle, and report which preset or effective policy was used",
