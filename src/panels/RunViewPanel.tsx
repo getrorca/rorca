@@ -981,11 +981,18 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     const lastStartedStoryId = [...walEvents]
       .reverse()
       .find((event) => event.event_type === 'story_started' && event.story_id)?.story_id ?? null;
+    const latestDbStoryId = [...dbStories]
+      .reverse()
+      .find((story) => !!story.story_id)?.story_id ?? null;
+    const actualContextStoryId = contextComparison?.actual
+      ? Object.keys(contextComparison.actual)[0] ?? null
+      : null;
 
     let carriedForwardCount = runState?.completedStories.length ?? 0;
     let continueFromId = runState?.currentStory
-      ?? specStories.find((story) => !finishedIds.has(story.id))?.id
       ?? lastStartedStoryId
+      ?? latestDbStoryId
+      ?? actualContextStoryId
       ?? null;
     let resumedAfterId = runState?.resumedFromStory ?? null;
 
@@ -999,7 +1006,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
     if (!continueFromId && !resumedAfterId && carriedForwardCount === 0) return null;
     return { continueFromId, resumedAfterId, carriedForwardCount };
-  }, [runState, specStories, walEvents]);
+  }, [runState, specStories, walEvents, dbStories, contextComparison]);
 
   // Derive effective status from SSE events
   const effectiveStatus = useMemo(() => {

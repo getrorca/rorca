@@ -993,10 +993,10 @@ function ConnectionsHubSection() {
   const fetchData = useCallback(async () => {
     try {
       const [keyData, config, claude, ollama, healthData] = await Promise.all([
-        apiFetch<{ keys: ApiKeyEntry[] }>(workspaceId ? `/api/vault/keys?workspaceId=${encodeURIComponent(workspaceId)}` : '/api/vault/keys'),
-        apiFetch<AgentConfig>('/api/config'),
-        apiFetch<ClaudeAuthState>('/api/config/claude-auth'),
-        apiFetch<OllamaStatus>('/api/config/ollama'),
+        apiFetch<{ keys: ApiKeyEntry[] }>(workspaceId ? `/api/vault/keys?workspaceId=${encodeURIComponent(workspaceId)}` : '/api/vault/keys', { silent: true }).catch(() => ({ keys: [] })),
+        apiFetch<AgentConfig>('/api/config', { silent: true }).catch(() => null),
+        apiFetch<ClaudeAuthState>('/api/config/claude-auth', { silent: true }).catch(() => null),
+        apiFetch<OllamaStatus>('/api/config/ollama', { silent: true }).catch(() => null),
         apiFetch<HealthResponse>('/api/health', { silent: true }).catch(() => null),
       ]);
       setKeys(keyData.keys);
@@ -1004,8 +1004,8 @@ function ConnectionsHubSection() {
       setClaudeAuth(claude);
       setOllamaStatus(ollama);
       setHealth(healthData);
-      setOpenrouterViaEnv(!!(config as any).openrouterViaEnv);
-    } catch { /* silent */ } finally {
+      setOpenrouterViaEnv(!!(config as any)?.openrouterViaEnv);
+    } finally {
       setLoading(false);
     }
   }, [workspaceId]);
