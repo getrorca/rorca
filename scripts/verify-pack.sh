@@ -73,10 +73,19 @@ if [[ -d "$ROOT_DIR/supabase/migrations" ]]; then
   }
 fi
 
-if grep -Eq '^package/packages/' "$TMPDIR/contents.txt"; then
+if grep -E '^package/packages/' "$TMPDIR/contents.txt" | grep -Ev '^package/packages/rorca-pi-extension/' >/dev/null; then
   echo "✗ Unexpected workspace package content leaked into tarball"
   exit 1
 fi
+
+for required_pi_asset in \
+  "package/packages/rorca-pi-extension/package.json" \
+  "package/packages/rorca-pi-extension/README.md" \
+  "package/packages/rorca-pi-extension/skills/rorca-forge/SKILL.md" \
+  "package/packages/rorca-pi-extension/skills/rorca-forge-run/SKILL.md"
+do
+  grep -qx "$required_pi_asset" "$TMPDIR/contents.txt" || { echo "✗ MISSING: $required_pi_asset"; exit 1; }
+done
 
 BASELINE_FILE="$ROOT_DIR/.tarball-size-baseline"
 if [[ -f "$BASELINE_FILE" ]]; then

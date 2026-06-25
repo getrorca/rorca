@@ -145,6 +145,44 @@ function providerLabel(provider) {
             return provider;
     }
 }
+/**
+ * LHM-009: Mode-aware pgvector fix path.
+ *
+ * pgvector is required in every database mode (native, docker, byop) because
+ * embedding-backed retrieval depends on it. When it is missing we never want a
+ * silent "lite" downgrade — we surface a concrete, mode-specific remediation so
+ * the user can fix the database before the setup is accepted. Secrets are never
+ * embedded here; callers pass already-redacted provider metadata only.
+ */
+export function describePgvectorFix(mode, provider) {
+    switch (mode) {
+        case 'native':
+            return ('pgvector is not available on the local/native Postgres. The bundled Rorca Postgres ships with pgvector — ' +
+                'reinstall or restart it with `rorca start`, or on a custom local Postgres install the pgvector extension and run ' +
+                '`CREATE EXTENSION IF NOT EXISTS vector;` before continuing.');
+        case 'docker':
+            return ('pgvector is not available in the Docker Postgres image. Rerun `rorca db start` (or `rorca db reset` to rebuild the volume) ' +
+                'so the AGE image bootstraps `CREATE EXTENSION IF NOT EXISTS vector;` before the Docker path is marked ready.');
+        case 'byop':
+        default: {
+            const label = provider ? providerLabel(provider) : 'the hosted Postgres';
+            return (`pgvector is not installed on ${label}. Enable it on your hosted database — for example run ` +
+                '`CREATE EXTENSION IF NOT EXISTS vector;` in the SQL editor (Supabase/Neon expose it as the `vector` extension) — ' +
+                'then reconnect. See docs/supabase-setup.md for provider-specific steps.');
+        }
+    }
+}
+/**
+ * LHM-009: Assert pgvector is present, throwing a PGVECTOR_REQUIRED validation
+ * error carrying a mode-specific fix path when it is missing. Shared by BYOP
+ * validation and the native/Docker readiness checks so every mode rejects a
+ * pgvector-less Postgres with the same actionable message.
+ */
+export function assertPgvectorInstalled(extensions, mode, provider) {
+    if (!extensions.vector) {
+        throw createValidationError('PGVECTOR_REQUIRED', describePgvectorFix(mode, provider));
+    }
+}
 function buildWarnings(input) {
     const warnings = [];
     if (input.rawDatabaseUrl && !input.connection.url) {
@@ -166,7 +204,7 @@ function buildWarnings(input) {
         }
     }
     if (!input.extensions.vector) {
-        warnings.push('pgvector is not installed; embedding-backed retrieval may be limited.');
+        warnings.push(`pgvector is not installed; embedding-backed retrieval is unavailable. ${describePgvectorFix(input.dbMode, input.provider)}`);
     }
     return warnings;
 }
@@ -460,9 +498,9 @@ export async function validateByopConnection(databaseUrl) {
         catch {
             throw createValidationError('EXTENSION_CHECK_FAILED', 'Connected successfully, but could not verify required PostgreSQL extensions for BYOP mode.');
         }
-        if (!extensions.vector) {
-            throw createValidationError('PGVECTOR_REQUIRED', 'The selected PostgreSQL database must have the pgvector extension installed before Rorca can use BYOP mode.');
-        }
+        // LHM-009: Reject Supabase/Neon-style hosted Postgres without pgvector and
+        // explain exactly how to enable it before the BYOP setup is accepted.
+        assertPgvectorInstalled(extensions, 'byop', provider);
         return {
             normalizedUrl,
             provider,

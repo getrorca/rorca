@@ -6,7 +6,7 @@
  */
 import { spawn } from 'child_process';
 import * as readline from 'readline/promises';
-import { setDbMode } from './db-strategy';
+import { describePgvectorFix, setDbMode } from './db-strategy';
 const CONTAINER_NAME = 'rorca-db';
 const VOLUME_NAME = 'rorca-db-data';
 const DOCKER_IMAGE = 'apache/age:latest';
@@ -86,7 +86,7 @@ async function confirmReset() {
         rl.close();
     }
 }
-async function ageExtensionEnabled() {
+async function extensionEnabled(extname) {
     const result = await runDockerCommand([
         'exec',
         CONTAINER_NAME,
@@ -96,9 +96,15 @@ async function ageExtensionEnabled() {
         '-d',
         'rorca',
         '-tAc',
-        "SELECT 1 FROM pg_extension WHERE extname = 'age'",
+        `SELECT 1 FROM pg_extension WHERE extname = '${extname}'`,
     ]);
     return result.code === 0 && result.stdout === '1';
+}
+async function ageExtensionEnabled() {
+    return extensionEnabled('age');
+}
+async function vectorExtensionEnabled() {
+    return extensionEnabled('vector');
 }
 export async function dbStart() {
     await requireDocker();
@@ -118,6 +124,13 @@ export async function dbStart() {
     }
     await waitForReady();
     await enableAgeExtension();
+    // LHM-009: Verify pgvector actually bootstrapped in the image before the Docker
+    // path is marked ready. enableAgeExtension() requests it, but a stale/foreign
+    // image may not provide it — surface a concrete fix path instead of silently
+    // accepting a vector-less database.
+    if (!(await vectorExtensionEnabled())) {
+        throw new Error(describePgvectorFix('docker'));
+    }
     setDbMode('docker');
 }
 export async function dbStop() {
@@ -127,13 +140,14 @@ export async function dbStatus() {
     try {
         const status = await inspectContainer();
         if (!status.exists) {
-            return { running: false, containerExists: false, ageEnabled: false };
+            return { running: false, containerExists: false, ageEnabled: false, vectorEnabled: false };
         }
         const ageEnabled = status.running ? await ageExtensionEnabled() : false;
-        return { running: status.running, containerExists: true, ageEnabled };
+        const vectorEnabled = status.running ? await vectorExtensionEnabled() : false;
+        return { running: status.running, containerExists: true, ageEnabled, vectorEnabled };
     }
     catch {
-        return { running: false, containerExists: false, ageEnabled: false };
+        return { running: false, containerExists: false, ageEnabled: false, vectorEnabled: false };
     }
 }
 export async function dbReset() {
