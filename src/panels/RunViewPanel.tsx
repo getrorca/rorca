@@ -323,7 +323,7 @@ function StoriesListTab({ dbStories, specStories, liveStatuses, contextCompariso
           const hasAnyData = hasSkills || hasContextFiles || hasTokens;
 
           return (
-            <div key={row.id} className={i % 2 === 0 ? 'bg-transparent' : 'bg-panel/30'}>
+            <div key={`${row.id}:${i}`} className={i % 2 === 0 ? 'bg-transparent' : 'bg-panel/30'}>
               {/* Story row */}
               <div className="flex items-center gap-3 px-4 py-2.5 text-sm">
                 <span className={`shrink-0 w-2 h-2 rounded-full ${style.dot}`} />

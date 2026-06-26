@@ -116,7 +116,9 @@ export default function WorktreesPanel() {
       const data = await apiFetch<{ items?: GitWorktree[]; worktrees?: GitWorktree[] }>(
         `/api/worktrees?workspaceId=${workspaceId}`,
       );
-      setWorktrees(data.items ?? data.worktrees ?? []);
+      const nextWorktrees = data.items ?? data.worktrees ?? [];
+      setWorktrees(nextWorktrees);
+      setSelectedPath((current) => current && nextWorktrees.some((wt) => wt.path === current) ? current : null);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load worktrees';
       setError(msg);
@@ -162,9 +164,13 @@ export default function WorktreesPanel() {
     setDetailLoading(true);
     apiFetch<WorktreeStatus>(
       `/api/worktrees/status?workspaceId=${workspaceId}&path=${encodeURIComponent(selectedPath)}`,
+      { silent: true },
     )
       .then(setDetailStatus)
-      .catch(() => setDetailStatus(null))
+      .catch(() => {
+        setDetailStatus(null);
+        fetchWorktrees();
+      })
       .finally(() => setDetailLoading(false));
   }, [selectedPath, workspaceId]);
 
@@ -383,9 +389,9 @@ export default function WorktreesPanel() {
               </div>
             </div>
           ) : (
-            worktrees.map((wt) => (
+            worktrees.map((wt, index) => (
               <button
-                key={wt.path}
+                key={`${wt.path}:${wt.branch}:${index}`}
                 onClick={() => setSelectedPath(wt.path)}
                 aria-pressed={selectedPath === wt.path}
                 aria-label={`Worktree: ${wt.branch || '(detached)'}`}
