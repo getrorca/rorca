@@ -212,4 +212,76 @@ describe('spec-job handlers retrieval feedback wiring', () => {
       false,
     );
   });
+
+  test('runEnrichJob preserves post-save save generation and context metadata', async () => {
+    const specPath = path.join(workspacePath, 'forge', 'specs', 'approved', 'spec-c.json');
+    fs.writeFileSync(specPath, JSON.stringify({
+      title: 'Spec C',
+      userStories: [
+        { id: 'US-001', title: 'Gateway config', description: 'Define gateway config' },
+      ],
+    }));
+
+    const priorSummary = {
+      workspaceId: 'ws-1',
+      saveGeneration: 777,
+      contextCaptureStatus: { status: 'provided', reason: 'caller_supplied_context' },
+      postSaveStages: {
+        enrich: { requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency' },
+        matchSkills: { requested: true, status: 'pending', reason: 'requested_by_policy' },
+        memorySynthesis: { requested: true, status: 'pending', reason: 'requested_by_policy' },
+      },
+    };
+
+    mockQueryOne.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM workspaces')) return { id: 'ws-1', label: 'Test', path: workspacePath };
+      if (sql.includes('SELECT id FROM pipeline_runs')) return undefined;
+      if (sql.includes('FROM spec_jobs')) {
+        return {
+          id: 'job-enrich-777',
+          spec_id: 'spec-c',
+          workspace_id: 'ws-1',
+          job_type: 'enrich',
+          status: 'running',
+          boss_job_id: 'boss-777',
+          save_generation: 777,
+          progress_current: 0,
+          progress_total: 1,
+          progress_message: null,
+          request_payload: { origin: 'persist-post-save', saveGeneration: 777 },
+          result_payload: null,
+          error_message: null,
+          started_at: null,
+          finished_at: null,
+          created_at: new Date('2026-01-01T00:00:00.000Z'),
+        };
+      }
+      if (sql.includes('FROM spec_generation_logs')) return { context_summary_json: priorSummary };
+      if (sql.includes('INSERT INTO wal_events')) return { id: 1 };
+      return undefined;
+    });
+
+    mockRetrieveContext.mockResolvedValueOnce({
+      direction: {},
+      memory: [],
+      skills: [],
+      graphSection: '',
+      meta: { cagHits: 1, ragHits: 0, graphHits: 0, totalTokens: 50, latencyMs: 3, tier: 'cache', matchedSkills: ['Gateway'], selectedCandidateIds: ['33'] },
+    });
+    mockBuildRetrievalSelectionsFromContext.mockReturnValueOnce([{ candidateKey: 'memory:33', candidateKind: 'memory', skillName: 'Gateway' }]);
+    mockChatComplete.mockResolvedValueOnce({ text: '- Preserve post-save metadata', usage: { inputTokens: 10, outputTokens: 5 } });
+
+    await runEnrichJob('ws-1', 'spec-c', undefined, { jobId: 'job-enrich-777' });
+
+    const generationLogInsert = mockExecute.mock.calls.find(([sql]) =>
+      typeof sql === 'string' && sql.includes('INSERT INTO spec_generation_logs'),
+    );
+    expect(generationLogInsert).toBeDefined();
+    const params = generationLogInsert?.[1] as unknown[];
+    expect(params[9]).toBe(777);
+    const insertedSummary = JSON.parse(params[8] as string);
+    expect(insertedSummary.saveGeneration).toBe(777);
+    expect(insertedSummary.contextCaptureStatus).toEqual(priorSummary.contextCaptureStatus);
+    expect(insertedSummary.postSaveStages).toEqual(priorSummary.postSaveStages);
+  });
 });
