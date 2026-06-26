@@ -735,7 +735,16 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+
+    if (executionEnvironment !== 'remote-rorca') {
+      logger.error({ jobId, runId, executionEnvironment }, '[worker] unsupported execution environment reached remote worker');
+      await execute(
+        `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = $2 WHERE id = $1`,
+        [runId, `unsupported_execution_environment:${executionEnvironment}`],
+      );
+      return;
+    }
 
     if (payload.agent === 'pi' && isPiExternalOrchestrationEnabled()) {
       const runRow = await queryOne<{ workspace_id: number }>(

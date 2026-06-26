@@ -19,6 +19,7 @@
 
 import { z } from 'zod';
 import { TerminalModeSchema } from './terminal-mode';
+import { ExecutionEnvironmentSchema } from './execution-environment';
 
 // ── pipeline:run ─────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ export const PipelineRunJobPayload = z.object({
   worktreePath: z.string().nullable(),
   branchName: z.string().nullable(),
   terminalMode: TerminalModeSchema.optional().default('ansi-html'),
+  executionEnvironment: ExecutionEnvironmentSchema.optional().default('remote-rorca'),
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),

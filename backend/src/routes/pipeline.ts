@@ -67,6 +67,7 @@ import {
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
+import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -1233,6 +1234,11 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                 nullable: true
  *                 default: ansi-html
  *                 description: "Run-level terminal renderer mode. null/missing resolves to ansi-html for backward compatibility."
+ *               executionEnvironment:
+ *                 type: string
+ *                 enum: [remote-rorca, local-user]
+ *                 default: remote-rorca
+ *                 description: "Where the implementation engine executes. local-user requires a configured local execution bridge and fails closed otherwise."
  *     responses:
  *       200:
  *         description: Pipeline started or conflict detected
@@ -1279,11 +1285,12 @@ const PipelineTriggerSchema = z.object({
   overrideReadinessGate: z.boolean().optional(),
   terminal_mode: z.string().nullable().optional(),
   terminalMode: z.string().nullable().optional(),
+  executionEnvironment: z.enum(['remote-rorca', 'local-user']).optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, executionEnvironment } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1296,6 +1303,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
     assertTerminalModeAvailable(resolvedTerminalMode);
+    const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
+    await assertExecutionEnvironmentReady(resolvedExecutionEnvironment);
 
     // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
 
@@ -1320,7 +1329,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
         : undefined;
       const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
-      res.json({ dryRun: true, estimate });
+      res.json({
+        dryRun: true,
+        executionEnvironment: resolvedExecutionEnvironment.effective,
+        terminalMode: resolvedTerminalMode,
+        terminal_mode: resolvedTerminalMode,
+        estimate,
+      });
       return;
     }
 
@@ -1640,6 +1655,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           queuePosition: position,
           terminalMode: resolvedTerminalMode,
           terminal_mode: resolvedTerminalMode,
+          executionEnvironment: resolvedExecutionEnvironment.effective,
           ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
           ...(executionReadiness ? { executionReadiness } : {}),
           ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
@@ -1701,6 +1717,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           spec_id: specId,
           workspace_id: workspaceId,
           model: finalAgentModel ?? null,
+          execution_environment: resolvedExecutionEnvironment.effective,
         })],
       );
 
@@ -1711,6 +1728,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         status: 'pi_native',
         terminalMode: resolvedTerminalMode,
         terminal_mode: resolvedTerminalMode,
+        executionEnvironment: resolvedExecutionEnvironment.effective,
         expectsExternalOrchestration: true,
         specReadiness: (req as any)._specReadiness,
       });
@@ -2007,6 +2025,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       worktreePath: worktreePath ?? null,
       branchName: branchName ?? null,
       terminalMode: resolvedTerminalMode,
+      executionEnvironment: resolvedExecutionEnvironment.effective,
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
