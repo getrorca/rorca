@@ -12,10 +12,10 @@ describe('execution-environment', () => {
     expect(resolution.localBridgeUrl).toBeNull();
   });
 
-  it('accepts explicit local-user but fails closed without a bridge', async () => {
+  it('accepts explicit local-user at parse time; registry readiness performs fail-closed gating', async () => {
     const resolution = resolveExecutionEnvironment('local-user', {});
     expect(resolution.effective).toBe('local-user');
-    await expect(assertExecutionEnvironmentReady(resolution)).rejects.toThrow('local_user_execution_bridge_not_configured');
+    await expect(assertExecutionEnvironmentReady(resolution)).resolves.toBeUndefined();
   });
 
   it('rejects invalid execution environments', () => {

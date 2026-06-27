@@ -6,7 +6,7 @@
  */
 
 import { z } from 'zod';
-import { ServiceUnavailableError, ValidationError } from './errors';
+import { ValidationError } from './errors';
 
 /**
  * Where a pipeline run's implementation engine should execute.
@@ -41,24 +41,8 @@ export function resolveExecutionEnvironment(input: unknown, env: NodeJS.ProcessE
   };
 }
 
-export async function assertExecutionEnvironmentReady(resolution: ExecutionEnvironmentResolution): Promise<void> {
-  if (resolution.effective === 'remote-rorca') return;
-
-  if (!resolution.localBridgeUrl) {
-    throw new ServiceUnavailableError(
-      'local_user_execution_bridge_not_configured',
-    );
-  }
-
-  const healthUrl = new URL('/health', resolution.localBridgeUrl).toString();
-  let response: Response;
-  try {
-    response = await fetch(healthUrl, { method: 'GET' });
-  } catch {
-    throw new ServiceUnavailableError('local_user_execution_bridge_unreachable');
-  }
-
-  if (!response.ok) {
-    throw new ServiceUnavailableError(`local_user_execution_bridge_unhealthy:${response.status}`);
-  }
+export async function assertExecutionEnvironmentReady(_resolution: ExecutionEnvironmentResolution): Promise<void> {
+  // Legacy compatibility hook. Full readiness is evaluated after agent/model
+  // resolution by execution-environment-registry.ts so local-user can be backed
+  // by either the old bridge URL or the new outbound runner registry.
 }
