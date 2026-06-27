@@ -25,8 +25,10 @@ const environmentId = process.env.RORCA_RUNNER_ENVIRONMENT_ID ?? 'local-user';
 const token = process.env.RORCA_RUNNER_TOKEN ?? '';
 const runnerId = process.env.RORCA_RUNNER_ID ?? `${os.hostname()}-${process.pid}`;
 const pollIntervalMs = Number(process.env.RORCA_RUNNER_POLL_INTERVAL_MS ?? 3000);
-const apiPort = new URL(apiUrl).port || '3030';
+const apiUrlObj = new URL(apiUrl);
+const apiPort = apiUrlObj.port || (apiUrlObj.protocol === 'https:' ? '443' : '80');
 const engineApiPort = Number(process.env.RORCA_ENGINE_API_PORT ?? apiPort);
+const engineApiBaseUrl = (process.env.RORCA_ENGINE_API_BASE_URL ?? `${apiUrlObj.protocol}//${apiUrlObj.host}`).replace(/\/+$/, '');
 const workspacePathOverride = process.env.RORCA_RUNNER_WORKSPACE_PATH;
 let shuttingDown = false;
 
@@ -86,6 +88,15 @@ function localAgentReport() {
   return agents;
 }
 
+
+async function preflightEngineApi(): Promise<void> {
+  const healthUrl = `${engineApiBaseUrl.replace(/\/api$/, '')}/api/health`;
+  const response = await fetch(healthUrl);
+  if (!response.ok) {
+    throw new Error(`Rorca engine callback API unhealthy at ${healthUrl}: HTTP ${response.status}`);
+  }
+}
+
 async function heartbeat(): Promise<void> {
   await api(`/execution-environments/${environmentId}/runner/heartbeat`, {
     runnerId,
@@ -141,7 +152,11 @@ async function runJob(job: any): Promise<void> {
   const child = spawn(command, args, {
     cwd: workspacePath,
     stdio: 'inherit',
-    env: { ...process.env, ...(payload.envOverrides ?? {}) },
+    env: {
+      ...process.env,
+      RORCA_ENGINE_API_BASE_URL: engineApiBaseUrl,
+      ...(payload.envOverrides ?? {}),
+    },
   });
 
   const exitCode = await new Promise<number>((resolve) => {
@@ -157,7 +172,8 @@ async function runJob(job: any): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  console.log(`[rorca-runner] starting runnerId=${runnerId} environment=${environmentId} api=${apiUrl}`);
+  await preflightEngineApi();
+  console.log(`[rorca-runner] starting runnerId=${runnerId} environment=${environmentId} api=${apiUrl} engineApiBase=${engineApiBaseUrl}`);
   while (!shuttingDown) {
     try {
       await heartbeat();

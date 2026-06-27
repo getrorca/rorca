@@ -960,6 +960,24 @@ function setFallbackContext(cwd: string, runId: number): void {
   _fallbackRunId = runId;
 }
 
+
+function engineApiEndpoint(port: number, apiPath: string): string {
+  const rawBase = process.env.RORCA_ENGINE_API_BASE_URL?.trim();
+  const base = (rawBase && rawBase.length > 0 ? rawBase : `http://localhost:${port}`).replace(/\/+$/, '');
+  const path = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+  if (base.endsWith('/api') && path.startsWith('/api/')) {
+    return `${base}${path.slice('/api'.length)}`;
+  }
+  return `${base}${path}`;
+}
+
+function engineMcpEndpoint(port: number): string {
+  const rawBase = process.env.RORCA_ENGINE_API_BASE_URL?.trim();
+  const base = (rawBase && rawBase.length > 0 ? rawBase : `http://127.0.0.1:${port}`).replace(/\/+$/, '');
+  const root = base.endsWith('/api') ? base.slice(0, -'/api'.length) : base;
+  return `${root}/mcp`;
+}
+
 async function emitWalEvent(
   port: number,
   eventType: string,
@@ -977,7 +995,7 @@ async function emitWalEvent(
   };
 
   const ok = await retryPost(
-    `http://localhost:${port}/api/wal`,
+    engineApiEndpoint(port, '/api/wal'),
     body,
     `WAL:${eventType}`,
   );
@@ -1049,7 +1067,7 @@ async function postStoryResult(
   body: Record<string, unknown>,
 ): Promise<void> {
   const ok = await retryPost(
-    `http://localhost:${port}/api/pipeline/story-result`,
+    engineApiEndpoint(port, '/api/pipeline/story-result'),
     body,
     `story-result:${body.storyId ?? 'unknown'}`,
   );
@@ -4385,7 +4403,7 @@ async function postReviewComment(
   };
 
   await retryPost(
-    `http://localhost:${port}/api/review/comment`,
+    engineApiEndpoint(port, '/api/review/comment'),
     body,
     `review:${review.reviewerName}:${storyId}`,
   );
@@ -4956,7 +4974,7 @@ async function executeStory(
       // Build the MCP servers map.
       // Rorca MCP is the preferred direct memory/control-plane path for agents that support remote MCP.
       const mcpServers: Record<string, string> = {
-        rorca: `http://127.0.0.1:${config.port}/mcp`,
+        rorca: engineMcpEndpoint(config.port),
       };
       if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
       if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
@@ -5305,7 +5323,7 @@ async function executeStory(
               if (entry && typeof entry === 'object') {
                 const e = entry as Record<string, unknown>;
                 try {
-                  await fetch(`http://localhost:${config.port}/api/memory`, {
+                  await fetch(engineApiEndpoint(config.port, '/api/memory'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -6333,7 +6351,7 @@ async function runParallel(
 
 async function resolveWorkspaceId(port: number, cwd: string): Promise<string | null> {
   try {
-    const res = await fetch(`http://localhost:${port}/api/workspaces`);
+    const res = await fetch(engineApiEndpoint(port, '/api/workspaces'));
     if (!res.ok) return null;
     const data = await res.json() as { items?: Array<{ id: string; path: string }>; workspaces?: Array<{ id: string; path: string }> };
     // API returns `items` (paginated format), fallback to `workspaces` for compat

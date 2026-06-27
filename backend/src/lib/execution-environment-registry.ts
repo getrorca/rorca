@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { ConflictError, NotFoundError, ServiceUnavailableError, ValidationError } from './errors';
-import { getAgentCredentialChecks, hasAgentCredentials, type SecretProvider } from './secret-resolver';
+import { evaluateSecretProfileReadiness, getAgentCredentialChecks, hasAgentCredentials, type SecretProfileReadiness, type SecretProvider } from './secret-resolver';
 import type { AgentType } from './config';
 import type { ExecutionEnvironment } from './execution-environment';
 
@@ -47,6 +47,7 @@ export interface EnvironmentReadiness {
   agents: Record<string, AgentReadiness>;
   supportedAgents: string[];
   secretProfileId: string | null;
+  secretProfile?: SecretProfileReadiness | null;
 }
 
 const RUNNER_HEARTBEAT_STALE_MS = Number(process.env.RORCA_RUNNER_HEARTBEAT_STALE_MS ?? 120_000);
@@ -90,6 +91,21 @@ export async function getExecutionEnvironmentById(id: string): Promise<Execution
   const env = await queryOne<ExecutionEnvironmentRow>(`SELECT * FROM execution_environments WHERE id = $1`, [id]);
   if (!env) throw new NotFoundError('Execution environment', id);
   return env;
+}
+
+async function getSecretProfileReadiness(profileId: string | null): Promise<SecretProfileReadiness | null> {
+  if (!profileId) return null;
+  const row = await queryOne<{ id: string; label: string; provider: SecretProvider; config: Record<string, unknown> | string }>(
+    `SELECT id, label, provider, config FROM execution_secret_profiles WHERE id = $1`,
+    [profileId],
+  );
+  if (!row) return null;
+  return evaluateSecretProfileReadiness({
+    id: row.id,
+    label: row.label,
+    provider: row.provider,
+    config: parseJsonObject(row.config),
+  });
 }
 
 export async function upsertExecutionEnvironment(input: {
@@ -231,6 +247,8 @@ export async function getExecutionEnvironmentReadiness(id: string): Promise<Envi
     reason = 'execution_runner_not_connected';
   }
 
+  const secretProfile = await getSecretProfileReadiness(env.secret_profile_id);
+
   return {
     id: env.id,
     label: env.label,
@@ -243,6 +261,7 @@ export async function getExecutionEnvironmentReadiness(id: string): Promise<Envi
     agents,
     supportedAgents,
     secretProfileId: env.secret_profile_id,
+    secretProfile,
   };
 }
 

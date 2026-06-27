@@ -7,6 +7,7 @@
  * dependency.
  */
 
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -20,6 +21,69 @@ export interface SecretProfile {
   label: string;
   provider: SecretProvider;
   config: Record<string, unknown>;
+}
+
+
+export interface SecretResolveOptions {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  execFile?: typeof execFileSync;
+}
+
+export interface SecretResolutionResult {
+  provider: SecretProvider;
+  env: Record<string, string>;
+  warnings: string[];
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function parseDotenv(content: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    let value = line.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) out[key] = value;
+  }
+  return out;
+}
+
+function parseInfisicalExport(content: string): Record<string, string> {
+  const trimmed = content.trim();
+  if (!trimmed) return {};
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      const out: Record<string, string> = {};
+      for (const item of parsed) {
+        if (!item || typeof item !== 'object') continue;
+        const key = String((item as any).secretKey ?? (item as any).key ?? '');
+        const value = (item as any).secretValue ?? (item as any).value;
+        if (key && value != null) out[key] = String(value);
+      }
+      return out;
+    }
+    if (parsed && typeof parsed === 'object') {
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value === 'string') out[key] = value;
+        else if (value && typeof value === 'object' && 'secretValue' in value) out[key] = String((value as any).secretValue);
+      }
+      return out;
+    }
+  } catch {
+    return parseDotenv(trimmed);
+  }
+  return {};
 }
 
 export interface SecretProfileReadiness {
@@ -126,4 +190,71 @@ export function evaluateSecretProfileReadiness(profile: SecretProfile, env: Node
     reason: checks.every((c) => c.ok) ? undefined : 'infisical_credentials_missing',
     checks,
   };
+}
+
+export function resolveSecretProfileEnvironment(profile: SecretProfile, options: SecretResolveOptions = {}): SecretResolutionResult {
+  const env = options.env ?? process.env;
+  const home = options.home ?? os.homedir();
+  const execFile = options.execFile ?? execFileSync;
+  const resolved: Record<string, string> = {};
+  const warnings: string[] = [];
+
+  if (profile.provider === 'env') {
+    for (const name of stringArray(profile.config.env)) {
+      const value = env[name];
+      if (value && value.trim()) resolved[name] = value;
+      else warnings.push(`env_missing:${name}`);
+    }
+    return { provider: profile.provider, env: resolved, warnings };
+  }
+
+  if (profile.provider === 'mounted-file') {
+    const dotenvFiles = stringArray(profile.config.dotenvFiles);
+    for (const file of dotenvFiles) {
+      const expanded = expandHome(file, home);
+      try {
+        Object.assign(resolved, parseDotenv(fs.readFileSync(expanded, 'utf8')));
+      } catch {
+        warnings.push(`dotenv_file_unreadable:${file}`);
+      }
+    }
+
+    const files = Array.isArray(profile.config.files) ? profile.config.files : [];
+    for (const entry of files) {
+      if (typeof entry === 'string') {
+        const name = path.basename(entry).replace(/[^A-Za-z0-9_]/g, '_').toUpperCase();
+        try { resolved[name] = fs.readFileSync(expandHome(entry, home), 'utf8').trim(); }
+        catch { warnings.push(`file_unreadable:${entry}`); }
+        continue;
+      }
+      if (!entry || typeof entry !== 'object') continue;
+      const envName = String((entry as any).env ?? '');
+      const filePath = String((entry as any).path ?? '');
+      if (!envName || !filePath) continue;
+      try { resolved[envName] = fs.readFileSync(expandHome(filePath, home), 'utf8').trim(); }
+      catch { warnings.push(`file_unreadable:${filePath}`); }
+    }
+    return { provider: profile.provider, env: resolved, warnings };
+  }
+
+  if (profile.provider === 'host-local') {
+    return { provider: profile.provider, env: {}, warnings };
+  }
+
+  const args = ['export', '--format=json'];
+  const projectId = String(profile.config.projectId ?? env.INFISICAL_PROJECT_ID ?? '');
+  const environment = String(profile.config.environment ?? profile.config.envSlug ?? env.INFISICAL_ENVIRONMENT ?? env.INFISICAL_ENV ?? '');
+  const secretPath = String(profile.config.path ?? profile.config.secretPath ?? '/');
+  if (projectId) args.push('--projectId', projectId);
+  if (environment) args.push('--env', environment);
+  if (secretPath) args.push('--path', secretPath);
+  if (profile.config.recursive === true) args.push('--recursive');
+
+  try {
+    const output = execFile('infisical', args, { encoding: 'utf8', env: env as NodeJS.ProcessEnv, timeout: 15000 }) as unknown as string;
+    Object.assign(resolved, parseInfisicalExport(output));
+  } catch (err) {
+    warnings.push(`infisical_export_failed:${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { provider: profile.provider, env: resolved, warnings };
 }
