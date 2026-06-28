@@ -17,6 +17,7 @@ import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
 import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
 import { ingestCommit, ingestGitRange } from '../backend/src/lib/ingest-commit';
 import { CaptureClient, CaptureQueue } from '../backend/src/lib/capture-client';
+import { installHook, uninstallHook, isHookInstalled, readHookContent } from '../backend/src/lib/git-hook-installer';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -2724,6 +2725,111 @@ capture
         if (result.failed > 0) {
             for (const entry of result.entries.filter((e) => !e.success)) {
                 console.log(`  Failed: ${entry.idempotencyKey} — ${entry.error ?? 'unknown'}`);
+            }
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
+        process.exitCode = 1;
+    }
+});
+const gitHook = capture
+    .command('git-hook')
+    .description('Safe git post-commit hook installer/uninstaller for best-effort local capture');
+gitHook
+    .command('install')
+    .description('Install or update a Rorca-managed post-commit hook')
+    .option('--repo-path <path>', 'Path to the git repository root', process.cwd())
+    .option('--workspace-id <id>', 'Rorca workspace ID (passed to the capture command)')
+    .option('--backend-url <url>', 'Rorca backend URL for the capture command', 'http://localhost:3030')
+    .option('--api-key <key>', 'API key for auth-gated deployments')
+    .option('--strict', 'Hook failures block commits (non-zero exit)')
+    .option('--json', 'Emit JSON output')
+    .action(async (options) => {
+    try {
+        let extraArgs = `--workspace-path ${options.repoPath} --backend-url ${options.backendUrl}`;
+        if (options.workspaceId) {
+            extraArgs += ` --workspace-id ${options.workspaceId}`;
+        }
+        if (options.apiKey) {
+            extraArgs += ` --api-key ${options.apiKey}`;
+        }
+        const result = installHook({
+            repoPath: options.repoPath,
+            extraArgs,
+            strict: Boolean(options.strict),
+        });
+        if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+        }
+        else {
+            const verb = result.action === 'updated' ? 'Updated' : 'Installed';
+            console.log(`${green('✓')} ${verb} post-commit hook at ${result.hookPath}`);
+            if (result.hadExistingHook) {
+                console.log(`${dim('  Existing hook preserved and chained.')}`);
+            }
+            if (options.strict) {
+                console.log(`${yellow('  Strict mode enabled — capture failures will block commits.')}`);
+            }
+            else {
+                console.log(`${dim('  Best-effort mode — capture failures will not block commits.')}`);
+            }
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
+        process.exitCode = 1;
+    }
+});
+gitHook
+    .command('uninstall')
+    .description('Remove the Rorca-managed post-commit hook and restore previous state')
+    .option('--repo-path <path>', 'Path to the git repository root', process.cwd())
+    .option('--json', 'Emit JSON output')
+    .action(async (options) => {
+    try {
+        const result = uninstallHook({ repoPath: options.repoPath });
+        if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+        }
+        else {
+            if (result.action === 'not-installed') {
+                console.log(`${yellow('⚠')} No Rorca hook found at ${result.hookPath}`);
+            }
+            else {
+                console.log(`${green('✓')} Uninstalled Rorca post-commit hook from ${result.hookPath}`);
+                if (result.hadExistingHook) {
+                    console.log(`${dim('  Previous hook content restored.')}`);
+                }
+            }
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
+        process.exitCode = 1;
+    }
+});
+gitHook
+    .command('status')
+    .description('Check if a Rorca post-commit hook is installed')
+    .option('--repo-path <path>', 'Path to the git repository root', process.cwd())
+    .option('--json', 'Emit JSON output')
+    .action(async (options) => {
+    try {
+        const installed = isHookInstalled(options.repoPath);
+        const content = installed ? readHookContent(options.repoPath) : null;
+        if (options.json) {
+            console.log(JSON.stringify({ installed, hookPath: `${options.repoPath}/.git/hooks/post-commit`, content }, null, 2));
+        }
+        else {
+            if (installed) {
+                console.log(`${green('✓')} Rorca post-commit hook is installed`);
+            }
+            else {
+                console.log(`Rorca post-commit hook is not installed`);
             }
         }
     }
