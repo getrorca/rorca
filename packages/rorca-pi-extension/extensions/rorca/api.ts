@@ -14,6 +14,20 @@ import type {
   WorkspaceContextRoutingResponse,
 } from "./types.js";
 
+export type MemoryCandidateInput = {
+  workspace_id: string;
+  source_system: string;
+  category: string;
+  title: string;
+  rule: string;
+  context?: string;
+  related_files: string[];
+  confidence: 'high' | 'medium' | 'low';
+  trust_tier: 'authoritative' | 'trusted' | 'community' | 'unverified';
+  source_ref?: string;
+  idempotency_key: string;
+};
+
 export class RorcaApiClient {
   readonly baseUrl: string;
 
@@ -182,6 +196,45 @@ export class RorcaApiClient {
       method: "POST",
       body: JSON.stringify(body),
     }, 60_000);
+  }
+
+  /**
+   * Submit a memory candidate to the review queue (pending status).
+   * Uses the candidates ingestion API with idempotency.
+   */
+  async submitCandidate(input: MemoryCandidateInput): Promise<{ id: string; created: boolean }> {
+    const response = await this.fetchJson<{
+      id: string;
+      created_at: string;
+      updated_at: string;
+    }>("/api/candidates", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    const created = Math.abs(
+      new Date(response.updated_at).getTime() - new Date(response.created_at).getTime(),
+    ) < 1000;
+    return { id: response.id, created };
+  }
+
+  /**
+   * Save a memory entry directly (approved/permanent).
+   * Uses the memory API (skip review gate).
+   */
+  async saveMemory(input: {
+    workspaceId: string;
+    category: string;
+    title: string;
+    rule: string;
+    context?: string;
+    source?: string;
+    sourceType?: string;
+    relatedFiles?: string[];
+  }): Promise<{ total: number }> {
+    return this.fetchJson<{ total: number }>("/api/memory", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   async fetchJson<T>(pathname: string, init?: RequestInit, timeoutMs: number = 30_000): Promise<T> {
