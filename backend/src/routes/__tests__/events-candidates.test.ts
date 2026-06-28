@@ -955,3 +955,600 @@ describe('GET /api/candidates/:id (detail)', () => {
     expect(res.body.candidate.relatedFiles).toEqual(['src/foo.ts', 'src/bar.ts']);
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// US-034: Review actions — approve, edit-and-approve, reject, duplicate,
+// supersede, revisit, lifecycle validation, idempotency
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('US-034: Review actions', () => {
+  /** Helper: create a candidate via POST and return its parsed body. */
+  async function createCandidate(overrides: Record<string, unknown> = {}) {
+    const key = `mc-review-${crypto.randomUUID()}`;
+    const res = await request(app)
+      .post('/api/candidates')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspace_id: testWorkspaceId,
+        source_system: 'manual',
+        category: 'Pattern',
+        title: `Review Test ${key.slice(0, 8)}`,
+        rule: 'Always write tests',
+        context: 'Tests prevent regressions',
+        related_files: ['src/foo.ts'],
+        confidence: 'high',
+        trust_tier: 'trusted',
+        idempotency_key: key,
+        ...overrides,
+        idempotency_key: key,
+      });
+    return res.body;
+  }
+
+  // ── Approve ──────────────────────────────────────────────────────────────
+
+  describe('POST /api/candidates/:id/approve', () => {
+    test('approves a pending candidate and promotes to durable memory', async () => {
+      const candidate = await createCandidate({ title: 'Approve Me' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'test-user', review_note: 'Looks correct' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('approved');
+      expect(res.body.candidate.reviewer).toBe('test-user');
+      expect(res.body.candidate.reviewNote).toContain('Approved');
+      expect(res.body.candidate.reviewNote).toContain('Looks correct');
+      expect(res.body.candidate.reviewedAt).toBeDefined();
+      expect(res.body.candidate.promotedMemoryId).toBeDefined();
+      expect(res.body.candidate.promotedAt).toBeDefined();
+      expect(res.body.promotedMemoryId).toBeDefined();
+      expect(typeof res.body.promotedMemoryId).toBe('number');
+    });
+
+    test('approval is idempotent: re-approving returns 200 with same promotedMemoryId', async () => {
+      const candidate = await createCandidate({ title: 'Idempotent Approve' });
+      const id = candidate.id;
+
+      const first = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'test-user' });
+
+      expect(first.status).toBe(200);
+      const firstMemoryId = first.body.promotedMemoryId;
+      expect(firstMemoryId).toBeDefined();
+
+      const second = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'other-user' });
+
+      expect(second.status).toBe(200);
+      expect(second.body.promotedMemoryId).toBe(firstMemoryId);
+      expect(second.body.candidate.reviewStatus).toBe('approved');
+      // Reviewer should NOT change on idempotent re-approval
+      expect(second.body.candidate.reviewer).toBe('test-user');
+    });
+
+    test('edit-and-approve: modifies candidate fields before promotion', async () => {
+      const candidate = await createCandidate({ title: 'Original Title', category: 'Pattern' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          reviewer: 'editor',
+          review_note: 'Renamed for clarity',
+          title: 'Edited Title',
+          category: 'Bug Fix',
+          confidence: 'low',
+          related_files: ['src/edited.ts', 'src/bar.ts'],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('approved');
+      expect(res.body.candidate.title).toBe('Edited Title');
+      expect(res.body.candidate.category).toBe('Bug Fix');
+      expect(res.body.candidate.confidence).toBe('low');
+      expect(res.body.candidate.relatedFiles).toEqual(['src/edited.ts', 'src/bar.ts']);
+      // The original rule should be preserved (not overridden)
+      expect(res.body.candidate.rule).toContain('Always write tests');
+      expect(res.body.promotedMemoryId).toBeDefined();
+    });
+
+    test('edit-and-approve: redacts secrets in edited fields', async () => {
+      const candidate = await createCandidate({ title: 'Secret Test' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          reviewer: 'security',
+          rule: 'Use API key sk-ant-api03-super-secret-key-here',
+          context: 'Password is hunter2_secret',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.rule).toContain('[REDACTED]');
+      expect(res.body.candidate.rule).not.toContain('super-secret-key-here');
+      expect(res.body.candidate.context).toContain('[REDACTED]');
+      expect(res.body.candidate.context).not.toContain('hunter2_secret');
+    });
+
+    test('rejects approval of already-rejected candidate (409)', async () => {
+      const candidate = await createCandidate({ title: 'Already Rejected' });
+      const id = candidate.id;
+
+      // First reject it
+      await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'rejector' });
+
+      // Then try to approve
+      const res = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'approver' });
+
+      expect(res.status).toBe(409);
+    });
+
+    test('rejects approval of non-existent candidate (404)', async () => {
+      const res = await request(app)
+        .post('/api/candidates/99999999/approve')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'ghost' });
+
+      expect(res.status).toBe(404);
+    });
+
+    test('rejects approval with invalid ID (400)', async () => {
+      const res = await request(app)
+        .post('/api/candidates/abc/approve')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'bad' });
+
+      expect(res.status).toBe(400);
+    });
+
+    test('approves without reviewer (null reviewer is allowed)', async () => {
+      const candidate = await createCandidate({ title: 'No Reviewer' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('approved');
+      expect(res.body.candidate.reviewer).toBeNull();
+    });
+
+    test('approved candidate appears in promoted memory via detail endpoint', async () => {
+      const candidate = await createCandidate({
+        title: 'Promoted Detail',
+        rule: 'Detail promotes correctly',
+        category: 'Gotcha',
+        related_files: ['src/detail.ts'],
+      });
+      const id = candidate.id;
+
+      // Approve
+      await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'promoter' });
+
+      // Check detail endpoint shows promoted memory
+      const detail = await request(app)
+        .get(`/api/candidates/${id}`)
+        .set('Authorization', `Bearer ${authToken}`);
+
+      expect(detail.status).toBe(200);
+      expect(detail.body.promotedMemory).not.toBeNull();
+      expect(detail.body.promotedMemory.category).toBe('Gotcha');
+      expect(detail.body.promotedMemory.content).toContain('Promoted Detail');
+      expect(detail.body.promotedMemory.content).toContain('Detail promotes correctly');
+    });
+  });
+
+  // ── Reject ───────────────────────────────────────────────────────────────
+
+  describe('POST /api/candidates/:id/reject', () => {
+    test('rejects a pending candidate', async () => {
+      const candidate = await createCandidate({ title: 'Reject Me' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'rejector', review_note: 'Not relevant' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('rejected');
+      expect(res.body.candidate.reviewer).toBe('rejector');
+      expect(res.body.candidate.reviewNote).toContain('Rejected');
+      expect(res.body.candidate.reviewNote).toContain('Not relevant');
+      expect(res.body.candidate.reviewedAt).toBeDefined();
+    });
+
+    test('reject is idempotent', async () => {
+      const candidate = await createCandidate({ title: 'Double Reject' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'first' });
+
+      const second = await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'second' });
+
+      expect(second.status).toBe(200);
+      expect(second.body.candidate.reviewStatus).toBe('rejected');
+      // Reviewer should NOT change on idempotent reject
+      expect(second.body.candidate.reviewer).toBe('first');
+    });
+
+    test('rejects rejecting an approved candidate (409)', async () => {
+      const candidate = await createCandidate({ title: 'Approved No Reject' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'approver' });
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'would-be-rejector' });
+
+      expect(res.status).toBe(409);
+    });
+  });
+
+  // ── Duplicate ────────────────────────────────────────────────────────────
+
+  describe('POST /api/candidates/:id/mark-duplicate', () => {
+    test('marks candidate as duplicate of another', async () => {
+      const original = await createCandidate({ title: 'Original Candidate' });
+      const dup = await createCandidate({ title: 'Duplicate Candidate' });
+
+      const res = await request(app)
+        .post(`/api/candidates/${dup.id}/mark-duplicate`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          reviewer: 'deduper',
+          review_note: 'Same as original',
+          duplicate_of_candidate_id: original.id,
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('duplicate');
+      expect(res.body.candidate.duplicateOfCandidateId).toBe(original.id);
+      expect(res.body.candidate.reviewNote).toContain('Duplicate of candidate');
+      expect(res.body.candidate.reviewNote).toContain('Same as original');
+    });
+
+    test('rejects missing duplicate_of_candidate_id (400)', async () => {
+      const candidate = await createCandidate({ title: 'Missing Dup Ref' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/mark-duplicate`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'oops' });
+
+      expect(res.status).toBe(400);
+    });
+
+    test('rejects self-duplicate (400)', async () => {
+      const candidate = await createCandidate({ title: 'Self Dup' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/mark-duplicate`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          reviewer: 'self',
+          duplicate_of_candidate_id: id,
+        });
+
+      expect(res.status).toBe(400);
+    });
+
+    test('rejects marking duplicate of approved candidate (409)', async () => {
+      const candidate = await createCandidate({ title: 'Approved No Dup' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'approver' });
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/mark-duplicate`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          reviewer: 'nope',
+          duplicate_of_candidate_id: 1,
+        });
+
+      expect(res.status).toBe(409);
+    });
+
+    test('rejects duplicate target that does not exist (404)', async () => {
+      const candidate = await createCandidate({ title: 'Bad Target' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/mark-duplicate`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          reviewer: 'ghost',
+          duplicate_of_candidate_id: 99999999,
+        });
+
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ── Supersede ────────────────────────────────────────────────────────────
+
+  describe('POST /api/candidates/:id/mark-superseded', () => {
+    test('marks candidate as superseded', async () => {
+      const candidate = await createCandidate({ title: 'Supersede Me' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/mark-superseded`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'superseder', review_note: 'Obsolete' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('superseded');
+      expect(res.body.candidate.reviewer).toBe('superseder');
+      expect(res.body.candidate.reviewNote).toContain('Superseded');
+      expect(res.body.candidate.reviewNote).toContain('Obsolete');
+    });
+
+    test('supersede is idempotent', async () => {
+      const candidate = await createCandidate({ title: 'Double Supersede' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/mark-superseded`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'first' });
+
+      const second = await request(app)
+        .post(`/api/candidates/${id}/mark-superseded`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'second' });
+
+      expect(second.status).toBe(200);
+      expect(second.body.candidate.reviewStatus).toBe('superseded');
+      expect(second.body.candidate.reviewer).toBe('first');
+    });
+
+    test('rejects superseding already-approved candidate (409)', async () => {
+      const candidate = await createCandidate({ title: 'Approved No Supersede' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'approver' });
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/mark-superseded`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'nope' });
+
+      expect(res.status).toBe(409);
+    });
+  });
+
+  // ── Revisit ──────────────────────────────────────────────────────────────
+
+  describe('POST /api/candidates/:id/revisit', () => {
+    test('reopens a rejected candidate', async () => {
+      const candidate = await createCandidate({ title: 'Reopen Me' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'rejector' });
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'reopener', review_note: 'Reconsidered' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('revisit');
+      expect(res.body.candidate.reviewNote).toContain('Reopened');
+      expect(res.body.candidate.reviewNote).toContain('Reconsidered');
+    });
+
+    test('reopens a duplicate candidate', async () => {
+      const original = await createCandidate({ title: 'Original' });
+      const dup = await createCandidate({ title: 'Dup Reopen' });
+
+      await request(app)
+        .post(`/api/candidates/${dup.id}/mark-duplicate`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'dedup', duplicate_of_candidate_id: original.id });
+
+      const res = await request(app)
+        .post(`/api/candidates/${dup.id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'reopen' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('revisit');
+    });
+
+    test('reopens a superseded candidate', async () => {
+      const candidate = await createCandidate({ title: 'Superseded Reopen' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/mark-superseded`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'superseder' });
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'reopen' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.candidate.reviewStatus).toBe('revisit');
+    });
+
+    test('rejects revisit of pending candidate (409)', async () => {
+      const candidate = await createCandidate({ title: 'Pending No Revisit' });
+      const id = candidate.id;
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'nope' });
+
+      expect(res.status).toBe(409);
+    });
+
+    test('rejects revisit of approved candidate (409)', async () => {
+      const candidate = await createCandidate({ title: 'Approved No Revisit' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'approver' });
+
+      const res = await request(app)
+        .post(`/api/candidates/${id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'nope' });
+
+      expect(res.status).toBe(409);
+    });
+
+    test('revisit is idempotent', async () => {
+      const candidate = await createCandidate({ title: 'Double Revisit' });
+      const id = candidate.id;
+
+      await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'rejector' });
+
+      await request(app)
+        .post(`/api/candidates/${id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'first' });
+
+      const second = await request(app)
+        .post(`/api/candidates/${id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'second' });
+
+      expect(second.status).toBe(200);
+      expect(second.body.candidate.reviewStatus).toBe('revisit');
+      expect(second.body.candidate.reviewer).toBe('first');
+    });
+
+    test('revisit → approve full lifecycle works', async () => {
+      const candidate = await createCandidate({ title: 'Full Lifecycle' });
+      const id = candidate.id;
+
+      // pending → rejected
+      await request(app)
+        .post(`/api/candidates/${id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'rejector' });
+
+      // rejected → revisit
+      const revisitRes = await request(app)
+        .post(`/api/candidates/${id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'reopener' });
+      expect(revisitRes.body.candidate.reviewStatus).toBe('revisit');
+
+      // revisit → approved (with edits)
+      const approveRes = await request(app)
+        .post(`/api/candidates/${id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          reviewer: 'final-approver',
+          title: 'Final Approved Title',
+          category: 'Decision',
+        });
+
+      expect(approveRes.status).toBe(200);
+      expect(approveRes.body.candidate.reviewStatus).toBe('approved');
+      expect(approveRes.body.candidate.title).toBe('Final Approved Title');
+      expect(approveRes.body.candidate.category).toBe('Decision');
+      expect(approveRes.body.promotedMemoryId).toBeDefined();
+    });
+  });
+
+  // ── Combined lifecycle validation ────────────────────────────────────────
+
+  describe('Lifecycle transition validation', () => {
+    test('all invalid transitions return 409', async () => {
+      // approved → reject
+      const approved = await createCandidate({ title: 'Approved Terminal' });
+      await request(app)
+        .post(`/api/candidates/${approved.id}/approve`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'a' });
+
+      let res = await request(app)
+        .post(`/api/candidates/${approved.id}/reject`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'r' });
+      expect(res.status).toBe(409);
+
+      res = await request(app)
+        .post(`/api/candidates/${approved.id}/mark-superseded`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 's' });
+      expect(res.status).toBe(409);
+
+      res = await request(app)
+        .post(`/api/candidates/${approved.id}/mark-duplicate`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'd', duplicate_of_candidate_id: 1 });
+      expect(res.status).toBe(409);
+
+      res = await request(app)
+        .post(`/api/candidates/${approved.id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'v' });
+      expect(res.status).toBe(409);
+
+      // pending → revisit
+      const pending = await createCandidate({ title: 'Pending No Revisit' });
+      res = await request(app)
+        .post(`/api/candidates/${pending.id}/revisit`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ reviewer: 'v' });
+      expect(res.status).toBe(409);
+    });
+  });
+});

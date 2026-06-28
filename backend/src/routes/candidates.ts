@@ -36,9 +36,10 @@ import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
-import { ValidationError, NotFoundError } from '../lib/errors';
+import { ValidationError, NotFoundError, ConflictError } from '../lib/errors';
 import { redactSecrets } from '../lib/context-safety';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { embedText, prepareText } from '../lib/embedding-pipeline';
 
 const router = Router();
 
@@ -791,6 +792,716 @@ router.get('/:id', async (req: Request, res: Response) => {
     });
   } catch (error) {
     handleRouteError(res, error, '[candidates] detail');
+  }
+});
+
+// ── US-034: Review Actions ─────────────────────────────────────────────────
+
+/** Valid lifecycle transitions. */
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  pending: ['approved', 'rejected', 'duplicate', 'superseded'],
+  revisit: ['approved', 'rejected', 'duplicate', 'superseded'],
+  rejected: ['revisit'],
+  duplicate: ['revisit'],
+  superseded: ['revisit'],
+  // approved is terminal; idempotent re-approval returns 200
+};
+
+/** Editable fields that a reviewer can override on edit-and-approve. */
+const CandidateEditsSchema = z.object({
+  category: z.string().min(1).max(255).optional(),
+  title: z.string().min(1).max(1000).optional(),
+  rule: z.string().min(1).optional(),
+  context: z.string().max(5000).optional(),
+  related_files: z.array(z.string()).optional(),
+  confidence: z.enum(['high', 'medium', 'low']).optional(),
+  trust_tier: z.enum(['authoritative', 'trusted', 'community', 'unverified']).optional(),
+});
+
+/** Validate a lifecycle transition, returning true if allowed (including idempotent). */
+function validateTransition(
+  currentStatus: string,
+  targetStatus: string,
+): { valid: boolean; idempotent: boolean } {
+  if (currentStatus === targetStatus) {
+    // Idempotent: same status requested
+    return { valid: true, idempotent: true };
+  }
+  const allowed = VALID_TRANSITIONS[currentStatus];
+  if (allowed && allowed.includes(targetStatus)) {
+    return { valid: true, idempotent: false };
+  }
+  return { valid: false, idempotent: false };
+}
+
+/** Fetch a candidate by ID or throw NotFoundError. */
+async function getCandidateOrThrow(id: number): Promise<CandidateRow> {
+  const candidate = await queryOne<CandidateRow>(
+    'SELECT * FROM memory_candidates WHERE id = $1',
+    [id],
+  );
+  if (!candidate) throw new NotFoundError(`Candidate ${id} not found`);
+  return candidate;
+}
+
+/** Build a reviewer string from request headers. */
+function resolveReviewer(req: Request): string | null {
+  return (req.body?.reviewer as string)?.trim() || null;
+}
+
+/**
+ * Promote a candidate to durable memory by inserting into the `memories` table
+ * and linking back to the candidate. Uses the candidate's current fields (which
+ * may have been edited before calling this).
+ */
+async function promoteCandidateToMemory(
+  candidate: CandidateRow,
+  _reviewer: string | null,
+): Promise<number> {
+  const title = candidate.title;
+  const rule = candidate.rule;
+  const contextStr = candidate.context?.trim();
+  const content = contextStr
+    ? `${title}: ${rule}\nContext: ${contextStr}`
+    : `${title}: ${rule}`;
+
+  // Try to generate an embedding (non-fatal if it fails)
+  let embedding: number[] | null = null;
+  try {
+    const prepared = prepareText('memory', content);
+    embedding = await embedText(prepared);
+  } catch {
+    // Embedding failure is non-fatal
+  }
+
+  const relatedFiles = parseRelatedFiles(candidate.related_files);
+  const sourceField = (candidate.source_system || 'capture').slice(0, 64);
+  const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+
+  let memoryId: number | undefined;
+
+  if (embeddingStr) {
+    try {
+      const row = await queryOne<{ id: string }>(
+        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source, embedding)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector) RETURNING id`,
+        [
+          candidate.workspace_id,
+          candidate.category,
+          content,
+          candidate.confidence,
+          JSON.stringify(relatedFiles),
+          'import',
+          sourceField,
+          embeddingStr,
+        ],
+      );
+      memoryId = row ? Number(row.id) : undefined;
+    } catch {
+      // embedding column may not exist — fallback to non-embedding insert
+    }
+  }
+
+  if (!memoryId) {
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [
+        candidate.workspace_id,
+        candidate.category,
+        content,
+        candidate.confidence,
+        JSON.stringify(relatedFiles),
+        'import',
+        sourceField,
+      ],
+    );
+    memoryId = row ? Number(row.id) : undefined;
+  }
+
+  if (!memoryId) throw new Error('Failed to create durable memory');
+  return memoryId;
+}
+
+/** Build review note combining body note with auto-generated lifecycle note. */
+function buildReviewNote(body: Record<string, unknown>, autoPrefix: string): string | null {
+  const bodyNote = (body.review_note as string)?.trim() || null;
+  return bodyNote ? `${autoPrefix}: ${bodyNote}` : autoPrefix;
+}
+
+// ── POST /api/candidates/:id/approve ───────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/candidates/{id}/approve:
+ *   post:
+ *     summary: Approve a memory candidate and promote it to durable memory
+ *     operationId: approveMemoryCandidate
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Safe local/MCP approval that promotes reviewed knowledge through the governance gate — idempotent and non-destructive."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Approves a pending or revisit candidate, creates a durable memory entry
+ *       in the `memories` table, and links it back to the candidate. Supports
+ *       edit-and-approve by accepting optional overrides for candidate fields.
+ *       Idempotent: re-approving an already-approved candidate returns 200
+ *       with the existing promoted memory link.
+ *     tags: [Context Intelligence]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Candidate ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reviewer:
+ *                 type: string
+ *                 description: Who took the review decision
+ *               review_note:
+ *                 type: string
+ *                 description: Optional review note
+ *               category:
+ *                 type: string
+ *                 description: Override category
+ *               title:
+ *                 type: string
+ *                 description: Override title
+ *               rule:
+ *                 type: string
+ *                 description: Override rule
+ *               context:
+ *                 type: string
+ *                 description: Override context
+ *               related_files:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               confidence:
+ *                 type: string
+ *                 enum: [high, medium, low]
+ *               trust_tier:
+ *                 type: string
+ *                 enum: [authoritative, trusted, community, unverified]
+ *     responses:
+ *       200:
+ *         description: Candidate approved (or already approved — idempotent)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 candidate:
+ *                   type: object
+ *                 promotedMemoryId:
+ *                   type: integer
+ *       400:
+ *         description: Invalid transition or invalid ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Candidate not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Invalid lifecycle transition (e.g. rejecting an approved candidate)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/:id/approve', validateBody(CandidateEditsSchema.optional()), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id) || id <= 0) throw new ValidationError('Candidate ID must be a positive integer');
+
+    const candidate = await getCandidateOrThrow(id);
+    const reviewer = resolveReviewer(req);
+
+    // Validate lifecycle transition
+    const transition = validateTransition(candidate.review_status, 'approved');
+    if (!transition.valid) {
+      throw new ConflictError(
+        `Cannot approve candidate in '${candidate.review_status}' status — only pending or revisit candidates can be approved`,
+      );
+    }
+
+    // Idempotent: already approved — return existing promotion data
+    if (transition.idempotent) {
+      const out = mapCandidateOutput(candidate);
+      res.json({
+        candidate: out,
+        promotedMemoryId: candidate.promoted_memory_id,
+      });
+      return;
+    }
+
+    // Apply reviewer edits before promotion (edit-and-approve)
+    const edits = req.body || {};
+    if (edits.category) candidate.category = edits.category;
+    if (edits.title) candidate.title = edits.title;
+    if (edits.rule) {
+      const { redacted } = redactSecrets(edits.rule);
+      candidate.rule = redacted;
+    }
+    if (edits.context !== undefined) {
+      candidate.context = edits.context ? redactSecrets(edits.context).redacted : null;
+    }
+    if (edits.related_files) {
+      candidate.related_files = edits.related_files;
+    }
+    if (edits.confidence) candidate.confidence = edits.confidence;
+    if (edits.trust_tier) candidate.trust_tier = edits.trust_tier;
+
+    // Persist edits to the candidate row
+    await execute(
+      `UPDATE memory_candidates
+       SET category = $1, title = $2, rule = $3, context = $4,
+           related_files = $5, confidence = $6, trust_tier = $7, updated_at = NOW()
+       WHERE id = $8`,
+      [
+        candidate.category,
+        candidate.title,
+        candidate.rule,
+        candidate.context,
+        JSON.stringify(parseRelatedFiles(candidate.related_files)),
+        candidate.confidence,
+        candidate.trust_tier,
+        id,
+      ],
+    );
+
+    // Promote to durable memory
+    const memoryId = await promoteCandidateToMemory(candidate, reviewer);
+
+    // Finalize approval on candidate
+    const note = buildReviewNote(req.body, 'Approved');
+    await execute(
+      `UPDATE memory_candidates
+       SET review_status = 'approved', reviewer = $1, reviewed_at = NOW(),
+           review_note = $2, promoted_memory_id = $3, promoted_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $4`,
+      [reviewer, note, memoryId, id],
+    );
+
+    // Re-fetch updated candidate
+    const updated = await getCandidateOrThrow(id);
+    const out = mapCandidateOutput(updated);
+
+    res.json({
+      candidate: out,
+      promotedMemoryId: memoryId,
+    });
+  } catch (error) {
+    handleRouteError(res, error, '[candidates] approve');
+  }
+});
+
+// ── POST /api/candidates/:id/reject ────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/candidates/{id}/reject:
+ *   post:
+ *     summary: Reject a memory candidate
+ *     operationId: rejectMemoryCandidate
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Safe local/MCP rejection that keeps candidates out of retrieval — non-destructive, reversible via revisit."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Rejects a pending or revisit candidate. The candidate stays in the
+ *       `memory_candidates` table but will never be retrievable unless
+ *       reopened via the revisit action.
+ *     tags: [Context Intelligence]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Candidate ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reviewer:
+ *                 type: string
+ *               review_note:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Candidate rejected
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid transition or invalid ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Candidate not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Invalid lifecycle transition
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/:id/reject', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id) || id <= 0) throw new ValidationError('Candidate ID must be a positive integer');
+
+    const candidate = await getCandidateOrThrow(id);
+    const reviewer = resolveReviewer(req);
+
+    const transition = validateTransition(candidate.review_status, 'rejected');
+    if (!transition.valid) {
+      throw new ConflictError(
+        `Cannot reject candidate in '${candidate.review_status}' status — only pending or revisit candidates can be rejected`,
+      );
+    }
+
+    // Idempotent: already rejected
+    if (transition.idempotent) {
+      res.json({ candidate: mapCandidateOutput(candidate) });
+      return;
+    }
+
+    const note = buildReviewNote(req.body, 'Rejected');
+    await execute(
+      `UPDATE memory_candidates
+       SET review_status = 'rejected', reviewer = $1, reviewed_at = NOW(),
+           review_note = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [reviewer, note, id],
+    );
+
+    const updated = await getCandidateOrThrow(id);
+    res.json({ candidate: mapCandidateOutput(updated) });
+  } catch (error) {
+    handleRouteError(res, error, '[candidates] reject');
+  }
+});
+
+// ── POST /api/candidates/:id/mark-duplicate ────────────────────────────────
+
+/**
+ * @swagger
+ * /api/candidates/{id}/mark-duplicate:
+ *   post:
+ *     summary: Mark a memory candidate as a duplicate of another
+ *     operationId: markDuplicateCandidate
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Safe dedup action that prevents duplicate knowledge from entering retrieval — non-destructive, reversible."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Marks a pending or revisit candidate as a duplicate of an existing
+ *       candidate. The candidate will not be retrievable unless reopened
+ *       via revisit.
+ *     tags: [Context Intelligence]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Candidate ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reviewer:
+ *                 type: string
+ *               review_note:
+ *                 type: string
+ *               duplicate_of_candidate_id:
+ *                 type: integer
+ *                 description: ID of the candidate this one duplicates
+ *     responses:
+ *       200:
+ *         description: Candidate marked as duplicate
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid transition, missing duplicate_of_candidate_id, or invalid ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Candidate or duplicate target not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Invalid lifecycle transition
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/:id/mark-duplicate', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id) || id <= 0) throw new ValidationError('Candidate ID must be a positive integer');
+
+    const duplicateOf = req.body?.duplicate_of_candidate_id;
+    if (!duplicateOf || !Number.isInteger(duplicateOf) || duplicateOf <= 0) {
+      throw new ValidationError('duplicate_of_candidate_id must be a positive integer');
+    }
+    if (duplicateOf === id) {
+      throw new ValidationError('A candidate cannot duplicate itself');
+    }
+
+    const candidate = await getCandidateOrThrow(id);
+    const reviewer = resolveReviewer(req);
+
+    const transition = validateTransition(candidate.review_status, 'duplicate');
+    if (!transition.valid) {
+      throw new ConflictError(
+        `Cannot mark candidate in '${candidate.review_status}' status as duplicate — only pending or revisit candidates can be marked duplicate`,
+      );
+    }
+
+    // Idempotent: already marked as duplicate of the same candidate
+    if (transition.idempotent && candidate.duplicate_of_candidate_id === duplicateOf) {
+      res.json({ candidate: mapCandidateOutput(candidate) });
+      return;
+    }
+
+    // Verify the target candidate exists
+    await getCandidateOrThrow(duplicateOf);
+
+    const note = buildReviewNote(req.body, `Duplicate of candidate #${duplicateOf}`);
+    await execute(
+      `UPDATE memory_candidates
+       SET review_status = 'duplicate', reviewer = $1, reviewed_at = NOW(),
+           review_note = $2, duplicate_of_candidate_id = $3, updated_at = NOW()
+       WHERE id = $4`,
+      [reviewer, note, duplicateOf, id],
+    );
+
+    const updated = await getCandidateOrThrow(id);
+    res.json({ candidate: mapCandidateOutput(updated) });
+  } catch (error) {
+    handleRouteError(res, error, '[candidates] mark-duplicate');
+  }
+});
+
+// ── POST /api/candidates/:id/mark-superseded ───────────────────────────────
+
+/**
+ * @swagger
+ * /api/candidates/{id}/mark-superseded:
+ *   post:
+ *     summary: Mark a memory candidate as superseded
+ *     operationId: markSupersededCandidate
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Safe local/MCP action that marks stale knowledge — non-destructive, reversible via revisit."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Marks a pending or revisit candidate as superseded. The candidate
+ *       will not be retrievable unless reopened via revisit.
+ *     tags: [Context Intelligence]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Candidate ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reviewer:
+ *                 type: string
+ *               review_note:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Candidate marked as superseded
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid transition or invalid ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Candidate not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Invalid lifecycle transition
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/:id/mark-superseded', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id) || id <= 0) throw new ValidationError('Candidate ID must be a positive integer');
+
+    const candidate = await getCandidateOrThrow(id);
+    const reviewer = resolveReviewer(req);
+
+    const transition = validateTransition(candidate.review_status, 'superseded');
+    if (!transition.valid) {
+      throw new ConflictError(
+        `Cannot mark candidate in '${candidate.review_status}' status as superseded — only pending or revisit candidates can be marked superseded`,
+      );
+    }
+
+    // Idempotent: already superseded
+    if (transition.idempotent) {
+      res.json({ candidate: mapCandidateOutput(candidate) });
+      return;
+    }
+
+    const note = buildReviewNote(req.body, 'Superseded');
+    await execute(
+      `UPDATE memory_candidates
+       SET review_status = 'superseded', reviewer = $1, reviewed_at = NOW(),
+           review_note = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [reviewer, note, id],
+    );
+
+    const updated = await getCandidateOrThrow(id);
+    res.json({ candidate: mapCandidateOutput(updated) });
+  } catch (error) {
+    handleRouteError(res, error, '[candidates] mark-superseded');
+  }
+});
+
+// ── POST /api/candidates/:id/revisit ───────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/candidates/{id}/revisit:
+ *   post:
+ *     summary: Reopen a rejected, duplicate, or superseded candidate for review
+ *     operationId: revisitCandidate
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Safe local/MCP action that reopens a previously-decided candidate — non-destructive, allows changing reviewer decisions."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Reopens a previously-decided candidate by setting its status back to
+ *       'revisit'. The candidate can then be approved, rejected, marked as
+ *       duplicate, or marked as superseded again. Never clears the promoted
+ *       memory link if one was created (that history is preserved).
+ *     tags: [Context Intelligence]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Candidate ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reviewer:
+ *                 type: string
+ *               review_note:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Candidate reopened for review
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid transition or invalid ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Candidate not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Invalid lifecycle transition (pending or approved candidate cannot be revisited)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/:id/revisit', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id) || id <= 0) throw new ValidationError('Candidate ID must be a positive integer');
+
+    const candidate = await getCandidateOrThrow(id);
+    const reviewer = resolveReviewer(req);
+
+    const transition = validateTransition(candidate.review_status, 'revisit');
+    if (!transition.valid) {
+      throw new ConflictError(
+        `Cannot revisit candidate in '${candidate.review_status}' status — only rejected, duplicate, or superseded candidates can be reopened`,
+      );
+    }
+
+    // Idempotent: already in revisit
+    if (transition.idempotent) {
+      res.json({ candidate: mapCandidateOutput(candidate) });
+      return;
+    }
+
+    const note = buildReviewNote(req.body, 'Reopened for review');
+    await execute(
+      `UPDATE memory_candidates
+       SET review_status = 'revisit', reviewer = $1, reviewed_at = NOW(),
+           review_note = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [reviewer, note, id],
+    );
+
+    const updated = await getCandidateOrThrow(id);
+    res.json({ candidate: mapCandidateOutput(updated) });
+  } catch (error) {
+    handleRouteError(res, error, '[candidates] revisit');
   }
 });
 
