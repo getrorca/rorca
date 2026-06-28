@@ -29,6 +29,15 @@ import {
   retrievalTrace,
   // context bundle
   specContextBundle,
+  BUNDLE_SECTIONS,
+  isExcludedCandidateStatus,
+  shouldExcludeItem,
+  composeWithApprovedCandidates,
+  createEmptyBundle,
+  adaptFromContextSummary,
+  adaptToContextSummary,
+  type BundleItem,
+  type ContextBundleSection,
   // context events
   contextEvent,
   // memory candidates
@@ -279,23 +288,487 @@ describe('specContextBundle', () => {
     ],
   };
 
+  const makeItem = (source: string, ref: string, trust: string, overrides: Record<string, unknown> = {}) => ({
+    content: `item from ${source}`,
+    provenance: { source, ref, trust, ...overrides },
+  });
+
+  // ── Required field validation ──────────────────────────────────────────
+
+  it('rejects a bundle missing schemaVersion', () => {
+    const { schemaVersion: _, ...rest } = valid;
+    expect(specContextBundle.safeParse(rest).success).toBe(false);
+  });
+
+  it('rejects a bundle with wrong schemaVersion', () => {
+    expect(specContextBundle.safeParse({ ...valid, schemaVersion: 'v2' }).success).toBe(false);
+  });
+
+  it('rejects a bundle missing workspaceId', () => {
+    const { workspaceId: _, ...rest } = valid;
+    expect(specContextBundle.safeParse(rest).success).toBe(false);
+  });
+
+  it('rejects a malformed workspaceId', () => {
+    expect(specContextBundle.safeParse({ ...valid, workspaceId: '../x' }).success).toBe(false);
+    expect(specContextBundle.safeParse({ ...valid, workspaceId: '' }).success).toBe(false);
+  });
+
+  it('rejects a bundle missing briefHash', () => {
+    const { briefHash: _, ...rest } = valid;
+    expect(specContextBundle.safeParse(rest).success).toBe(false);
+  });
+
+  it('rejects a bundle missing createdAt', () => {
+    const { createdAt: _, ...rest } = valid;
+    expect(specContextBundle.safeParse(rest).success).toBe(false);
+  });
+
+  it('rejects a malformed createdAt', () => {
+    expect(specContextBundle.safeParse({ ...valid, createdAt: '2026-06-27' }).success).toBe(false);
+  });
+
+  // ── Full provenance validation on every item ───────────────────────────
+
   it('accepts a valid bundle with provenance on every item', () => {
     expect(specContextBundle.safeParse(valid).success).toBe(true);
   });
 
-  it('rejects an item missing provenance and an unknown section', () => {
+  it('rejects an item missing provenance', () => {
     expect(
       specContextBundle.safeParse({
         ...valid,
         sections: [{ section: 'memories', items: [{ content: 'no provenance' }] }],
       }).success,
     ).toBe(false);
+  });
+
+  it('rejects an item with missing provenance.source', () => {
+    const item = { content: 'x', provenance: { ref: 'r1', trust: 'reviewed' } };
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{ section: 'memories', items: [item] }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an item with missing provenance.ref', () => {
+    const item = { content: 'x', provenance: { source: 'memory', trust: 'reviewed' } };
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{ section: 'memories', items: [item] }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an item with missing provenance.trust', () => {
+    const item = { content: 'x', provenance: { source: 'memory', ref: 'm1' } };
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{ section: 'memories', items: [item] }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an item with invalid provenance.trust', () => {
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{
+          section: 'memories',
+          items: [makeItem('memory', 'm1', 'super-trusted')],
+        }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts provenance with optional reason and confidence', () => {
+    const item = {
+      content: 'x',
+      provenance: {
+        source: 'memory' as const,
+        ref: 'm1',
+        trust: 'reviewed' as const,
+        reason: 'Manually reviewed and approved',
+        confidence: 0.95,
+      },
+    };
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{ section: 'memories', items: [item] }],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects provenance confidence out of 0-1 range', () => {
+    const item = makeItem('memory', 'm1', 'reviewed', { confidence: 1.5 });
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{ section: 'memories', items: [item] }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts provenance with traceId for traceability', () => {
+    const item = {
+      content: 'x',
+      provenance: {
+        source: 'source' as const,
+        ref: 'src/lib/foo.ts',
+        trust: 'derived' as const,
+        traceId: 'trace:42:context',
+      },
+    };
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{ section: 'sourceFiles', items: [item] }],
+      }).success,
+    ).toBe(true);
+  });
+
+  // ── All section types with provenance ──────────────────────────────────
+
+  it.each(BUNDLE_SECTIONS)(
+    'accepts section "%s" with valid provenance items',
+    (section) => {
+      const sourceMap: Record<string, string> = {
+        directions: 'direction',
+        memories: 'memory',
+        docs: 'doc',
+        sourceFiles: 'source',
+        tests: 'test',
+        graphSummary: 'graph',
+        branchDiff: 'diff',
+        risksGotchas: 'risk',
+      };
+      const source = sourceMap[section] ?? 'memory';
+      const bundle = {
+        schemaVersion: 'v1' as const,
+        workspaceId: 'ws-1',
+        briefHash: 'deadbeef',
+        createdAt: '2026-06-27T12:00:00Z',
+        sections: [{
+          section,
+          items: [{ content: 'x', provenance: { source, ref: 'r1', trust: 'reviewed' as const } }],
+        }],
+      };
+      expect(specContextBundle.safeParse(bundle).success).toBe(true);
+    },
+  );
+
+  it('rejects an unknown section name', () => {
     expect(
       specContextBundle.safeParse({
         ...valid,
         sections: [{ section: 'mystery', items: [] }],
       }).success,
     ).toBe(false);
+  });
+
+  // ── Budget metadata on sections ────────────────────────────────────────
+
+  it('accepts a section with tokenBudget and tokensUsed', () => {
+    const bundle = {
+      schemaVersion: 'v1' as const,
+      workspaceId: 'ws-1',
+      briefHash: 'deadbeef',
+      createdAt: '2026-06-27T12:00:00Z',
+      sections: [
+        {
+          section: 'memories' as const,
+          items: [makeItem('memory', 'm1', 'reviewed')],
+          tokenBudget: 500,
+          tokensUsed: 120,
+        },
+        {
+          section: 'sourceFiles' as const,
+          items: [
+            makeItem('source', 'src/a.ts', 'derived'),
+            makeItem('source', 'src/b.ts', 'derived'),
+          ],
+          tokenBudget: 2000,
+          tokensUsed: 350,
+        },
+      ],
+      totalTokens: 470,
+    };
+    expect(specContextBundle.safeParse(bundle).success).toBe(true);
+  });
+
+  it('rejects negative tokenBudget', () => {
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{
+          section: 'memories',
+          items: [makeItem('memory', 'm1', 'reviewed')],
+          tokenBudget: -1,
+        }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects negative tokensUsed', () => {
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        sections: [{
+          section: 'memories',
+          items: [makeItem('memory', 'm1', 'reviewed')],
+          tokensUsed: -1,
+        }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects negative totalTokens', () => {
+    expect(
+      specContextBundle.safeParse({
+        ...valid,
+        totalTokens: -1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts a bundle with traceIds and degraded flag', () => {
+    const bundle = {
+      ...valid,
+      traceIds: ['trace:1:context', 'trace:1:memory'],
+      degraded: true,
+    };
+    expect(specContextBundle.safeParse(bundle).success).toBe(true);
+  });
+
+  it('accepts optional gitSha for hydration freshness', () => {
+    expect(specContextBundle.safeParse({ ...valid, gitSha: 'abc1234' }).success).toBe(true);
+    expect(specContextBundle.safeParse({ ...valid, gitSha: '0'.repeat(40) }).success).toBe(true);
+    expect(specContextBundle.safeParse({ ...valid, gitSha: 'bad!hex' }).success).toBe(false);
+  });
+
+  // ── Candidate exclusion behavior (US-035 gate) ─────────────────────────
+
+  it('excludeNonApprovedCandidates rejects pending/rejected/duplicate/superseded', () => {
+    expect(isExcludedCandidateStatus('pending')).toBe(true);
+    expect(isExcludedCandidateStatus('rejected')).toBe(true);
+    expect(isExcludedCandidateStatus('duplicate')).toBe(true);
+    expect(isExcludedCandidateStatus('superseded')).toBe(true);
+    expect(isExcludedCandidateStatus('approved')).toBe(false);
+  });
+
+  it('shouldExcludeItem rejects captured and unverified trust items', () => {
+    
+    const captured: BundleItem = {
+      content: 'x',
+      provenance: { source: 'memory', ref: 'm1', trust: 'captured' },
+    };
+    const unverified: BundleItem = {
+      content: 'x',
+      provenance: { source: 'memory', ref: 'm1', trust: 'unverified' },
+    };
+    const reviewed: BundleItem = {
+      content: 'x',
+      provenance: { source: 'memory', ref: 'm1', trust: 'reviewed' },
+    };
+    expect(shouldExcludeItem(captured)).toBe(true);
+    expect(shouldExcludeItem(unverified)).toBe(true);
+    expect(shouldExcludeItem(reviewed)).toBe(false);
+  });
+
+  // ── Composition with approved candidates ───────────────────────────────
+
+  it('composeWithApprovedCandidates excludes captured/unverified items', () => {
+    
+    const base = createEmptyBundle('ws-1', 'deadbeef');
+
+    const approved: BundleItem = {
+      content: 'approved content',
+      provenance: { source: 'memory', ref: 'm1', trust: 'reviewed' },
+    };
+    const excluded: BundleItem = {
+      content: 'excluded content',
+      provenance: { source: 'memory', ref: 'm2', trust: 'captured' },
+    };
+
+    const result = composeWithApprovedCandidates(base, [
+      { item: approved, section: 'memories' as const },
+      { item: excluded, section: 'memories' as const },
+    ]);
+
+    expect(result.sections.length).toBeGreaterThanOrEqual(1);
+    const memSection = result.sections.find((s: ContextBundleSection) => s.section === 'memories')!;
+    expect(memSection.items.length).toBe(1);
+    expect(memSection.items[0].content).toBe('approved content');
+    expect(result.totalTokens).toBeGreaterThan(0);
+  });
+
+  it('composeWithApprovedCandidates adds new sections', () => {
+    
+    const base = createEmptyBundle('ws-1', 'deadbeef');
+
+    const item: BundleItem = {
+      content: 'test file content',
+      provenance: { source: 'test', ref: 'src/__tests__/foo.test.ts', trust: 'derived' },
+    };
+
+    const result = composeWithApprovedCandidates(base, [
+      { item, section: 'tests' as const },
+    ]);
+
+    const testSection = result.sections.find((s: ContextBundleSection) => s.section === 'tests')!;
+    expect(testSection.items.length).toBe(1);
+    expect(testSection.tokensUsed).toBeGreaterThan(0);
+  });
+
+  it('composeWithApprovedCandidates appends traceIds from item provenance', () => {
+    
+    const base = createEmptyBundle('ws-1', 'deadbeef');
+
+    const item: BundleItem = {
+      content: 'x',
+      provenance: { source: 'memory', ref: 'm1', trust: 'reviewed', traceId: 'trace:42:context' },
+    };
+
+    const result = composeWithApprovedCandidates(base, [
+      { item, section: 'memories' as const },
+    ]);
+
+    expect(result.traceIds).toBeDefined();
+    expect(result.traceIds!.length).toBe(1);
+    expect(result.traceIds![0]).toBe('trace:42:context');
+  });
+
+  // ── Empty bundle factory ───────────────────────────────────────────────
+
+  it('createEmptyBundle returns a valid bundle with all 8 sections empty', () => {
+    
+    const bundle = createEmptyBundle('ws-1', 'deadbeef');
+
+    expect(specContextBundle.safeParse(bundle).success).toBe(true);
+    expect(bundle.sections.length).toBe(8);
+    expect(bundle.totalTokens).toBe(0);
+    expect(bundle.degraded).toBe(false);
+
+    for (const section of bundle.sections) {
+      expect(section.items).toHaveLength(0);
+      expect(section.tokenBudget).toBe(0);
+      expect(section.tokensUsed).toBe(0);
+    }
+  });
+
+  it('createEmptyBundle stamps workspaceId, briefHash, and createdAt', () => {
+    
+    const bundle = createEmptyBundle('ws-test', 'hash123', 'abc1234');
+
+    expect(bundle.workspaceId).toBe('ws-test');
+    expect(bundle.briefHash).toBe('hash123');
+    expect(bundle.gitSha).toBe('abc1234');
+    expect(bundle.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  // ── Adaptation: context_summary_json ↔ SpecContextBundle ───────────────
+
+  it('adaptFromContextSummary maps direction layers into directions section', () => {
+    
+    const summary = {
+      directionLayers: {
+        l1: 'Use async/await for all DB calls',
+        l2: null,
+        l3: 'Project: Rorca — spec orchestration platform',
+      },
+      skills: ['excalidraw-diagram', 'rorca-approve'],
+      estimatedTokens: 5000,
+    };
+
+    const bundle = adaptFromContextSummary(summary, 'ws-1', 'deadbeef');
+    expect(specContextBundle.safeParse(bundle).success).toBe(true);
+
+    const dirSection = bundle.sections.find((s) => s.section === 'directions');
+    expect(dirSection).toBeDefined();
+    expect(dirSection!.items.length).toBe(2); // l1 + l3
+    expect(dirSection!.items[0].provenance.source).toBe('direction');
+    expect(dirSection!.items[0].provenance.trust).toBe('authoritative');
+    expect(dirSection!.items[0].provenance.confidence).toBe(1.0);
+  });
+
+  it('adaptFromContextSummary maps skills into memories section', () => {
+    
+    const summary = {
+      skills: ['excalidraw-diagram', 'rorca-approve'],
+    };
+
+    const bundle = adaptFromContextSummary(summary, 'ws-1', 'deadbeef');
+    const memSection = bundle.sections.find((s) => s.section === 'memories');
+    expect(memSection).toBeDefined();
+    expect(memSection!.items.length).toBe(2);
+    expect(memSection!.items[0].content).toContain('excalidraw-diagram');
+    expect(memSection!.items[0].provenance.source).toBe('memory');
+  });
+
+  it('adaptFromContextSummary handles null/undefined summary gracefully', () => {
+    
+
+    const nullBundle = adaptFromContextSummary(null, 'ws-1', 'deadbeef');
+    expect(specContextBundle.safeParse(nullBundle).success).toBe(true);
+    expect(nullBundle.sections.length).toBe(0);
+    expect(nullBundle.totalTokens).toBe(0);
+
+    const undefinedBundle = adaptFromContextSummary(undefined, 'ws-1', 'deadbeef');
+    expect(specContextBundle.safeParse(undefinedBundle).success).toBe(true);
+  });
+
+  it('adaptFromContextSummary sets degraded when estimatedTokens exceeds model window', () => {
+    
+    const summary = {
+      estimatedTokens: 300_000,
+      modelContextWindow: 200_000,
+    };
+    const bundle = adaptFromContextSummary(summary, 'ws-1', 'deadbeef');
+    expect(bundle.degraded).toBe(true);
+  });
+
+  it('adaptToContextSummary round-trips basic direction and skills', () => {
+    
+    const summary = {
+      directionLayers: {
+        l1: 'Direction L1: Global Standards',
+        l2: null,
+        l3: 'Direction L3: Project Context',
+      },
+      skills: ['excalidraw-diagram', 'rorca-approve'],
+      estimatedTokens: 5000,
+    };
+
+    const bundle = adaptFromContextSummary(summary, 'ws-1', 'deadbeef');
+    const rtSummary = adaptToContextSummary(bundle);
+
+    expect(rtSummary.directionLayers?.l1).toBe(summary.directionLayers.l1);
+    expect(rtSummary.directionLayers?.l3).toBe(summary.directionLayers.l3);
+    expect(rtSummary.skills).toEqual(summary.skills);
+  });
+
+  it('adaptFromContextSummary tolerates empty summary (no directionLayers, no skills)', () => {
+    
+    const bundle = adaptFromContextSummary({}, 'ws-1', 'deadbeef');
+    expect(specContextBundle.safeParse(bundle).success).toBe(true);
+    expect(bundle.sections.length).toBe(0);
+  });
+
+  it('adaptFromContextSummary tolerates extra unknown keys (forward compat)', () => {
+    
+    const summary = {
+      directionLayers: { l1: 'Some direction' },
+      futureFeatureFlag: true,
+      unknownNested: { nested: 'value' },
+    };
+    const bundle = adaptFromContextSummary(summary, 'ws-1', 'deadbeef');
+    expect(specContextBundle.safeParse(bundle).success).toBe(true);
+    expect(bundle.sections.length).toBe(1); // only directions
   });
 });
 
