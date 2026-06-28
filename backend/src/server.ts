@@ -113,6 +113,7 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import contextEventsRouter from './routes/context-events';
+import hydrationRouter from './routes/hydration';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
 import {
@@ -400,6 +401,7 @@ app.use('/api/memory/cross-workspace', crossWorkspaceMemoryRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/workspaces', contextRoutingRouter);
 app.use('/api/workspaces', contextFilesRouter);
+app.use('/api/workspaces', hydrationRouter);
 app.use('/api/conventions', conventionsRouter);
 app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
