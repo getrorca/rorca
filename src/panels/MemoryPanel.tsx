@@ -1096,6 +1096,9 @@ function ReviewWorkflowSection({
   onFocusMemory: (memoryId: string) => void;
 }) {
   const [reviewExpanded, setReviewExpanded] = useState(false);
+  const [filterReviewStatus, setFilterReviewStatus] = useState<string>('');
+  const [filterReviewCategory, setFilterReviewCategory] = useState<string>('');
+  const [filterReviewSourceType, setFilterReviewSourceType] = useState<string>('');
 
   if (loading) {
     return (
@@ -1135,9 +1138,15 @@ function ReviewWorkflowSection({
     mode: 'bounded-sql',
     reason: null,
   };
-  const queueItems = data.staleCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted');
-  const provenanceItems = provenanceCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted');
-  const recoverableItems = data.staleCandidates.items.filter((item) => item.status === 'archived' || item.status === 'deleted');
+  const applyReviewFilters = (items: MemoryReviewItem[]) => items.filter((item) => {
+    if (filterReviewStatus && item.status !== filterReviewStatus) return false;
+    if (filterReviewCategory && item.category !== filterReviewCategory) return false;
+    if (filterReviewSourceType && (item.sourceType ?? '') !== filterReviewSourceType) return false;
+    return true;
+  });
+  const queueItems = applyReviewFilters(data.staleCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted'));
+  const provenanceItems = applyReviewFilters(provenanceCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted'));
+  const recoverableItems = applyReviewFilters(data.staleCandidates.items.filter((item) => item.status === 'archived' || item.status === 'deleted'));
   const boundedCopy = `Review queue is intentionally bounded to ${data.staleCandidates.heuristics.scanLimit} low-recency memories and ${data.hotspots.windowSize} recent active memories. Provenance cleanup is separately bounded to ${provenanceCandidates.heuristics.scanLimit} provenance-poor memories.`;
   const statusClass: Record<MemoryReviewStatus, string> = {
     candidate: 'border-amber-500/20 bg-amber-500/10 text-amber-400',
@@ -1153,6 +1162,12 @@ function ReviewWorkflowSection({
     archived: 'Archived',
     deleted: 'Deleted',
   };
+  const trustLabel = (score: number): { label: string; color: string } => {
+    if (score >= 70) return { label: 'Critical', color: 'text-red-400' };
+    if (score >= 40) return { label: 'Needs review', color: 'text-amber-400' };
+    return { label: 'Healthy', color: 'text-emerald-400' };
+  };
+  const isPromoted = (item: MemoryReviewItem) => item.status === 'kept' && item.lastAction?.action === 'keep';
   const filesHot = data.hotspots.files;
   const specsHot = data.hotspots.specs;
   const hotspotCount = filesHot.length + specsHot.length;
@@ -1171,8 +1186,17 @@ function ReviewWorkflowSection({
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusClass[item.status]}`}>{statusLabel[item.status]}</span>
                   <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${CATEGORY_COLORS[item.category] ?? 'bg-gray-500/10 text-gray-500'}`}>{item.category}</span>
-                  <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">score {item.staleScore}</span>
+                  <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${trustLabel(item.staleScore).color} bg-surface-200`} title={`Stale score: ${item.staleScore} — ${trustLabel(item.staleScore).label}`}>
+                    <span className={`h-1.5 w-1.5 rounded-full ${trustLabel(item.staleScore).color.replace('text-', 'bg-')}`} />
+                    {trustLabel(item.staleScore).label}
+                  </span>
                   {item.sourceType && <span className={`rounded px-1.5 py-0.5 text-[10px] ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>{SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}</span>}
+                  {isPromoted(item) && (
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-500" title="Promoted to live memory">
+                      <Check size={9} />
+                      Promoted
+                    </span>
+                  )}
                 </div>
                 <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/85">{item.content}</p>
                 <div className="mt-2 flex flex-wrap gap-1">
@@ -1255,6 +1279,11 @@ function ReviewWorkflowSection({
                 <AlertTriangle size={10} /> SQL fallback
               </span>
             )}
+            {(filterReviewStatus || filterReviewCategory || filterReviewSourceType) && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent" title="Review filters active">
+                Filtered
+              </span>
+            )}
           </div>
           <button
             type="button"
@@ -1293,6 +1322,55 @@ function ReviewWorkflowSection({
 
       <div className="mt-3 space-y-2">
         <div className="rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">{boundedCopy}</div>
+      </div>
+
+      {/* Review candidate filters */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <select
+          value={filterReviewStatus}
+          onChange={(e) => setFilterReviewStatus(e.target.value)}
+          aria-label="Filter review items by status"
+          className="rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+        >
+          <option value="">All statuses</option>
+          {(['candidate', 'kept', 'revisit', 'archived', 'deleted'] as const).map((status) => (
+            <option key={status} value={status}>{statusLabel[status]}</option>
+          ))}
+        </select>
+
+        <select
+          value={filterReviewCategory}
+          onChange={(e) => setFilterReviewCategory(e.target.value)}
+          aria-label="Filter review items by category"
+          className="rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+        >
+          <option value="">All categories</option>
+          {CATEGORIES.map((category) => (
+            <option key={category} value={category}>{category}</option>
+          ))}
+        </select>
+
+        <select
+          value={filterReviewSourceType}
+          onChange={(e) => setFilterReviewSourceType(e.target.value)}
+          aria-label="Filter review items by source type"
+          className="rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+        >
+          <option value="">All sources</option>
+          {SOURCE_TYPES.map((sourceType) => (
+            <option key={sourceType} value={sourceType}>{SOURCE_TYPE_LABELS[sourceType]}</option>
+          ))}
+        </select>
+
+        {(filterReviewStatus || filterReviewCategory || filterReviewSourceType) && (
+          <button
+            type="button"
+            onClick={() => { setFilterReviewStatus(''); setFilterReviewCategory(''); setFilterReviewSourceType(''); }}
+            className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface-200"
+          >
+            Clear filters
+          </button>
+        )}
       </div>
 
       <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
