@@ -61,6 +61,7 @@ interface MemoryReviewReason {
 
 interface MemoryReviewItem extends MemoryItem {
   source: string | null;
+  sourceRef: string | null;
   updatedAt: string;
   deletedAt: string | null;
   staleScore: number;
@@ -69,6 +70,7 @@ interface MemoryReviewItem extends MemoryItem {
   lastAction: {
     action: MemoryReviewAction;
     at: string;
+    actor: string | null;
     previousStatus: string | null;
     nextStatus: MemoryReviewStatus | null;
   } | null;
@@ -1099,6 +1101,7 @@ function ReviewWorkflowSection({
   const [filterReviewStatus, setFilterReviewStatus] = useState<string>('');
   const [filterReviewCategory, setFilterReviewCategory] = useState<string>('');
   const [filterReviewSourceType, setFilterReviewSourceType] = useState<string>('');
+  const [expandedContentIds, setExpandedContentIds] = useState<Set<number>>(new Set());
 
   if (loading) {
     return (
@@ -1175,10 +1178,29 @@ function ReviewWorkflowSection({
   const hasActiveReviewWork = queueItems.length > 0 || provenanceItems.length > 0 || recoverableItems.length > 0 || hotspotCount > 0;
   const showExpandedReview = hasActiveReviewWork || reviewExpanded;
 
-  const renderReviewItems = (items: MemoryReviewItem[], listAriaLabel: string) => (
+  const renderReviewItems = (items: MemoryReviewItem[], listAriaLabel: string) => {
+    const CONTENT_LIMIT = 300;
+    const RELATED_FILES_SHOWN = 5;
+    return (
     <ul className="space-y-3" role="list" aria-label={listAriaLabel}>
       {items.map((item) => {
         const lastActionAt = item.lastAction?.at ? new Date(item.lastAction.at).toLocaleString() : null;
+        const occurredAt = new Date(item.createdAt).toLocaleString();
+        const contentOverflow = item.content.length > CONTENT_LIMIT;
+        const expanded = expandedContentIds.has(item.id);
+        const toggleExpanded = () => {
+          setExpandedContentIds(prev => {
+            const next = new Set(prev);
+            if (next.has(item.id)) next.delete(item.id); else next.add(item.id);
+            return next;
+          });
+        };
+        const relatedFiles = item.relatedFiles ?? [];
+        const shownFiles = relatedFiles.slice(0, RELATED_FILES_SHOWN);
+        const hiddenCount = relatedFiles.length - RELATED_FILES_SHOWN;
+        const displayContent = contentOverflow && !expanded
+          ? item.content.slice(0, CONTENT_LIMIT)
+          : item.content;
         return (
           <li key={item.id} className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1198,22 +1220,78 @@ function ReviewWorkflowSection({
                     </span>
                   )}
                 </div>
-                <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/85">{item.content}</p>
+                {/* Occurred at (createdAt) — provenance timestamp */}
+                <p className="mt-2 text-[10px] text-muted/70">
+                  <span className="font-medium text-muted">Occurred:</span> {occurredAt}
+                </p>
+                {/* Source ref — provenance reference */}
+                {item.sourceRef && (
+                  <p className="mt-1 text-[10px] text-muted/70">
+                    <span className="font-medium text-muted">Source ref:</span>{' '}
+                    <span className="font-mono text-[10px] rounded bg-surface-200 px-1 py-0.5">{item.sourceRef}</span>
+                  </p>
+                )}
+                {/* Content with collapse for large payloads */}
+                <div className="mt-2">
+                  <p className="text-xs leading-relaxed text-[var(--text)]/85 break-words">
+                    {displayContent}
+                  </p>
+                  {contentOverflow && (
+                    <div className="mt-1">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); toggleExpanded(); }}
+                        className="text-[10px] font-medium text-accent hover:underline"
+                      >
+                        {expanded ? 'Show less' : `Show all (${item.content.length} chars)`}
+                      </button>
+                      {!expanded && (
+                        <span className="ml-2 inline-flex items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 text-[9px] font-medium text-warning" title={`Content truncated at ${CONTENT_LIMIT} character limit`}>
+                          <AlertTriangle size={9} />
+                          Truncated at {CONTENT_LIMIT} chars
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {/* Changed/related files — with provenance file list */}
+                {relatedFiles.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-[10px] font-medium text-muted mb-1">
+                      Changed files ({relatedFiles.length}):
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {shownFiles.map((file) => (
+                        <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
+                      ))}
+                      {hiddenCount > 0 && (
+                        <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted/60">+{hiddenCount} more</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {/* Provenance source badges */}
                 <div className="mt-2 flex flex-wrap gap-1">
                   {item.sourceStoryId && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-500">Story {item.sourceStoryId}</span>}
                   {item.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {item.sourceSpecId}</span>}
                   {item.sourceRunId && <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">Run #{item.sourceRunId}</span>}
-                  {(item.relatedFiles ?? []).slice(0, 2).map((file) => (
-                    <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
-                  ))}
                 </div>
+                {/* Redaction marker — for items with missing provenance */}
+                {!item.sourceStoryId && !item.sourceSpecId && !item.sourceRef && relatedFiles.length === 0 && (
+                  <span className="mt-1.5 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[9px] font-medium text-red-400" title="No provenance or file context available for this memory">
+                    <AlertTriangle size={9} />
+                    No provenance
+                  </span>
+                )}
                 <div className="mt-2 flex flex-wrap gap-1">
                   {item.reasons.map((reason) => (
                     <span key={reason.code} className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{reason.label}</span>
                   ))}
                 </div>
                 {lastActionAt && (
-                  <p className="mt-2 text-[10px] text-muted">Last review action: {item.lastAction?.action} · {lastActionAt}</p>
+                  <p className="mt-2 text-[10px] text-muted">
+                    Last review action: {item.lastAction?.action}{item.lastAction?.actor ? ` by ${item.lastAction.actor}` : ''} · {lastActionAt}
+                  </p>
                 )}
               </div>
               <div className="flex shrink-0 flex-col gap-2">
@@ -1262,7 +1340,8 @@ function ReviewWorkflowSection({
         );
       })}
     </ul>
-  );
+    );
+  };
 
   if (!showExpandedReview) {
     return (
