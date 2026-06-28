@@ -110,6 +110,7 @@ import { StoryLogFollower } from './lib/story-log-follower';
 import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
+import contextEventsRouter from './routes/context-events';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
 import {
@@ -408,6 +409,7 @@ app.use('/api/recall', recallRouter);
 app.use('/api/graph', graphRouter);
 app.use('/api/spec-relevance-graph', specRelevanceGraphRouter);
 app.use('/api/workflow-router', workflowRouterRouter);
+app.use('/api/context-events', contextEventsRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
