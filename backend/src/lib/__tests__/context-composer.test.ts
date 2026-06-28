@@ -23,6 +23,7 @@ import {
   type ComposerFeed,
 } from '../context-composer';
 import { BUNDLE_SECTIONS, type SpecContextBundle } from '../context-bundle-contracts';
+import { NON_DURABLE_LABEL, type BranchDiffSummary } from '../context-diff';
 
 // ════════════════════════════════════════════════════════════════════════════
 // HELPERS
@@ -30,6 +31,35 @@ import { BUNDLE_SECTIONS, type SpecContextBundle } from '../context-bundle-contr
 
 const WORKSPACE_ID = 'test-workspace';
 const FIXED_TIMESTAMP = '2026-06-27T12:00:00.000Z';
+
+/** Build a BranchDiffSummary for a dirty tree with known changes. */
+function makeDirtyDiffSummary(): BranchDiffSummary {
+  return {
+    branch: 'feat/test-branch',
+    clean: false,
+    isGitRepo: true,
+    nonDurable: true,
+    gatheredAt: '2026-06-27T11:55:00.000Z',
+    stats: { filesChanged: 2, insertions: 15, deletions: 3 },
+    changedFiles: [
+      { path: 'backend/src/routes/auth.ts', status: 'modified', additions: 10, deletions: 2 },
+      { path: 'backend/src/lib/auth-utils.ts', status: 'modified', additions: 5, deletions: 1 },
+    ],
+  };
+}
+
+/** Build a BranchDiffSummary for a clean tree. */
+function makeCleanDiffSummary(): BranchDiffSummary {
+  return {
+    branch: 'main',
+    clean: true,
+    isGitRepo: true,
+    nonDurable: true,
+    gatheredAt: '2026-06-27T11:55:00.000Z',
+    stats: { filesChanged: 0, insertions: 0, deletions: 0 },
+    changedFiles: [],
+  };
+}
 
 function makeInput(overrides: Partial<ComposeContextInput> = {}): ComposeContextInput {
   return {
@@ -98,7 +128,7 @@ function makeFullFeed(): ComposerFeed {
       edgeCount: 420,
       lastHydrated: '2026-06-27T10:00:00.000Z',
     },
-    diff: 'diff --git a/backend/src/routes/auth.ts b/backend/src/routes/auth.ts\n+// new auth route',
+    diff: makeDirtyDiffSummary(),
   };
 }
 
@@ -723,6 +753,80 @@ describe('context-composer (US-021)', () => {
           expect(item.provenance.ref.length).toBeGreaterThan(0);
         }
       }
+    });
+  });
+
+  // ── Test Scenario: branch diff section (US-024) ───────────────────────
+
+  describe('branch diff section (US-024)', () => {
+    it('includes changed files and diff stats when tree is dirty', () => {
+      const result = composeContext(makeInput({ includeGraph: false }), {
+        diff: makeDirtyDiffSummary(),
+      });
+
+      const diffSection = result.bundle.sections.find((s) => s.section === 'branchDiff')!;
+      expect(diffSection.items.length).toBe(1);
+
+      const content = diffSection.items[0].content;
+      expect(content).toContain(NON_DURABLE_LABEL);
+      expect(content).toContain('feat/test-branch');
+      expect(content).toContain('dirty');
+      expect(content).toContain('backend/src/routes/auth.ts');
+      expect(content).toContain('backend/src/lib/auth-utils.ts');
+      expect(content).toContain('+15');
+      expect(content).toContain('-3');
+
+      // Full patch text must NOT be present
+      expect(content).not.toContain('diff --git');
+      expect(content).not.toContain('@@');
+    });
+
+    it('handles clean tree gracefully', () => {
+      const result = composeContext(makeInput({ includeGraph: false }), {
+        diff: makeCleanDiffSummary(),
+      });
+
+      const diffSection = result.bundle.sections.find((s) => s.section === 'branchDiff')!;
+      expect(diffSection.items.length).toBe(1);
+
+      const content = diffSection.items[0].content;
+      expect(content).toContain(NON_DURABLE_LABEL);
+      expect(content).toContain('clean');
+      expect(content).toContain('Changed files: none');
+    });
+
+    it('labels WIP/diff context as non-durable', () => {
+      const result = composeContext(makeInput(), makeFullFeed());
+
+      const diffSection = result.bundle.sections.find((s) => s.section === 'branchDiff')!;
+      expect(diffSection.items.length).toBeGreaterThan(0);
+
+      for (const item of diffSection.items) {
+        expect(item.content).toContain(NON_DURABLE_LABEL);
+        expect(item.provenance.source).toBe('diff');
+        expect(item.provenance.trust).toBe('captured');
+        expect(item.provenance.reason).toContain(NON_DURABLE_LABEL);
+        expect(item.provenance.reason).toContain('non-durable');
+      }
+    });
+
+    it('handles legacy raw diff string (passthrough, limited)', () => {
+      const rawDiff = 'diff --git a/file.ts b/file.ts\n+// new code\n-final code';
+      const result = composeContext(
+        makeInput({ includeGraph: false }),
+        { diff: rawDiff },
+      );
+
+      const diffSection = result.bundle.sections.find((s) => s.section === 'branchDiff')!;
+      expect(diffSection.items.length).toBe(1);
+
+      const content = diffSection.items[0].content;
+      expect(content).toContain('diff --git');
+      expect(content).toContain('+// new code');
+
+      // Legacy path is still marked non-durable
+      expect(diffSection.items[0].provenance.reason).toContain(NON_DURABLE_LABEL);
+      expect(diffSection.items[0].provenance.reason).toContain('legacy');
     });
   });
 

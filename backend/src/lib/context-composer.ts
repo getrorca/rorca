@@ -40,6 +40,11 @@ import {
   type TrustTier,
   type GraphMode,
 } from './context-bundle-contracts';
+import {
+  renderDiffSummary,
+  NON_DURABLE_LABEL,
+  type BranchDiffSummary,
+} from './context-diff';
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC TYPES
@@ -496,17 +501,48 @@ function buildGraphSummarySection(
 }
 
 /**
- * Build the branch diff section.
- * When no diff is available, the section is empty.
+ * Build the branch diff section (US-024).
+ *
+ * When a structured {@link BranchDiffSummary} is available, renders it with the
+ * non-durable label and diff stats (changed files, insertions, deletions).
+ * Full patch text is NEVER included here — only the summary.
+ *
+ * Legacy callers may still pass a raw string; it is included as-is but
+ * constrained to a safe size.
  */
 function buildBranchDiffSection(
-  diff?: string,
+  diff?: string | BranchDiffSummary,
 ): BundleItem[] {
   if (!diff) return [];
 
+  if (typeof diff === 'object' && 'nonDurable' in diff) {
+    // Structured BranchDiffSummary (US-024 path)
+    const { text } = renderDiffSummary(diff);
+    if (!text) return [];
+
+    return [makeBundleItem(
+      text,
+      makeProvenance(
+        'diff',
+        `branch:${diff.branch}`,
+        'captured',
+        `${NON_DURABLE_LABEL} Current branch diff summary — non-durable WIP context`,
+      ),
+    )];
+  }
+
+  // Legacy raw string path
+  const safeDiff = typeof diff === 'string' ? diff.slice(0, 32_000) : '';
+  if (!safeDiff) return [];
+
   return [makeBundleItem(
-    diff,
-    makeProvenance('diff', 'branch:diff', 'derived', 'Current branch changes'),
+    safeDiff,
+    makeProvenance(
+      'diff',
+      'branch:diff',
+      'captured',
+      `${NON_DURABLE_LABEL} Raw diff content — non-durable WIP context (legacy path)`,
+    ),
   )];
 }
 
@@ -557,8 +593,14 @@ export interface ComposerFeed {
   tests?: Array<{ path: string; content: string; reason?: string }>;
   /** Graph statistics (when available). */
   graphStats?: { nodeCount?: number; edgeCount?: number; lastHydrated?: string };
-  /** Current branch diff. */
-  diff?: string;
+  /**
+   * Current branch diff summary (US-024).
+   *
+   * Accepts a BranchDiffSummary from `gatherBranchDiff()` for structured,
+   * non-durable diff awareness. Legacy callers may still pass a raw string,
+   * which is treated as a passthrough with minimal safe rendering.
+   */
+  diff?: string | BranchDiffSummary;
   /** Additional risks to surface. */
   risks?: string[];
 }
