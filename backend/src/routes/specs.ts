@@ -42,6 +42,7 @@ import { maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
+import { composeContext, type ComposeContextResult, type ComposerFeed } from '../lib/context-composer';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { completeMatchSkillsPrompt } from '../lib/match-skills-llm';
 import { heuristicMatchSkills } from '../lib/match-skills-heuristic';
@@ -4243,6 +4244,67 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     };
     const contextSummary = precomputedContextSummary;
 
+    // US-022: Compose structured context via the context-composer for rich
+    // provenance, trace IDs, and degradation tracking. Nonfatal — never blocks.
+    let composerResult: ComposeContextResult | undefined;
+    try {
+      const graphCap = await getRuntimeGraphCapability(workspaceId);
+      const graphMode = graphCap.graphMode;
+      const graphStats = retrievalMeta?.graphHits != null ? {
+        nodeCount: retrievalMeta.graphHits,
+        lastHydrated: undefined as string | undefined,
+      } : undefined;
+
+      const composerFeed: ComposerFeed = {
+        memories: (specGenerationRetrievedContext?.memory ?? []).map((m) => ({
+          text: m.text,
+          id: m.id,
+          confidence: m.score,
+        })),
+        docs: [],
+        sourceFiles: [],
+        tests: [],
+        graphStats,
+        diff: undefined,
+        risks: [],
+      };
+
+      composerResult = composeContext(
+        {
+          workspaceId,
+          brief,
+          annotations: domain ? [domain] : undefined,
+          includeGraph: graphMode !== 'disabled' && retrievalMeta != null,
+          graphMode,
+          gitSha: undefined,
+          freshnessPolicy: 'relaxed',
+        },
+        composerFeed,
+      );
+    } catch (_composerErr) {
+      // Nonfatal — proceed without composer enrichment
+    }
+
+    // Enrich contextSummary with composer metadata when available
+    const enrichedContextSummary = composerResult
+      ? {
+          ...(contextSummary ?? {}),
+          composedAt: composerResult.contextSummary.composedAt,
+          briefHash: composerResult.contextSummary.briefHash,
+          ...(composerResult.degraded ? {
+            composerDegraded: true,
+            composerDegradationReasons: composerResult.degradationReasons,
+          } : {}),
+          composerTraceIds: composerResult.bundle.traceIds,
+          composerSections: composerResult.bundle.sections.map((s) => ({
+            section: s.section,
+            itemCount: s.items.length,
+            tokenBudget: s.tokenBudget,
+            tokensUsed: s.tokensUsed,
+          })),
+        }
+      : contextSummary;
+
     const persistResult = await persistExplicitDraftInternal(req, {
       workspaceId,
       title: effectiveTitle,
@@ -4255,7 +4317,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       mermaidDiagram,
       model: resolvedModel,
       contextUsed,
-      ...(contextSummary ? { contextSummary } : {}),
+      ...(enrichedContextSummary ? { contextSummary: enrichedContextSummary } : {}),
       ...(thinkingEnabled ? { reasoning: { enabled: true, ...(reasoningEffort ? { effort: reasoningEffort } : {}) } } : {}),
       overwrite: true,
       source: 'generate',
@@ -4293,7 +4355,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       specPath: persistResult.specPath,
       diagramsPath: persistResult.diagramsPath,
       contextUsed,
-      contextSummary,
+      contextSummary: enrichedContextSummary,
       postSave: persistResult.postSave,
       postSavePolicy: persistResult.postSavePolicy,
       workflow: persistResult.workflow,
