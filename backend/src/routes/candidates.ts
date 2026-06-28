@@ -6,12 +6,18 @@
  */
 
 /**
- * candidates.ts — US-032: Memory candidate ingestion route.
+ * candidates.ts — US-032 & US-033: Memory candidate ingestion, list, and detail routes.
  *
- * Exposes POST /api/candidates for the capture sidecar (rorca-capture) and
+ * US-032 exposes POST /api/candidates for the capture sidecar (rorca-capture) and
  * external tools to submit reviewable memory candidates into the
  * `memory_candidates` table. This is the ONLY supported ingestion path — the
  * sidecar MUST never write to the DB directly.
+ *
+ * US-033 adds paginated list (GET /api/candidates) with key filters and a
+ * detail view (GET /api/candidates/:id) that returns event provenance,
+ * related files, metadata, and the promoted memory link. Both endpoints
+ * redact sensitive fields (rule, context, event payload) on output for
+ * defense-in-depth.
  *
  * Capabilities:
  *   - Validates the shared payload contract (zod)
@@ -19,6 +25,9 @@
  *   - Validates workspace existence, category/lifecycle/trust values
  *   - Idempotent: duplicate idempotency_key returns the existing record (201 on
  *     first insert, 200 on duplicate)
+ *   - Paginated list with filters: status, source_system, category, confidence,
+ *     trust_tier, search, and date range
+ *   - Detail view with event provenance, promoted memory link, and full metadata
  *   - Swagger tier/rationale annotations for MCP exposure
  */
 
@@ -29,6 +38,7 @@ import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
 import { ValidationError, NotFoundError } from '../lib/errors';
 import { redactSecrets } from '../lib/context-safety';
+import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
 const router = Router();
 
@@ -302,6 +312,485 @@ router.post('/', validateBody(MemoryCandidateSchema), async (req: Request, res: 
     res.status(isNew ? 201 : 200).json(row);
   } catch (error) {
     handleRouteError(res, error, '[candidates] ingest');
+  }
+});
+
+// ── Types for list/detail output ────────────────────────────────────────────
+
+/** Row shape returned by the database (snake_case). */
+interface CandidateRow {
+  id: string;
+  workspace_id: string;
+  context_event_id: number | null;
+  source_system: string;
+  source_ref: string | null;
+  category: string;
+  title: string;
+  rule: string;
+  context: string | null;
+  related_files: string[] | string;
+  confidence: string;
+  trust_tier: string;
+  review_status: string;
+  reviewer: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+  duplicate_of_candidate_id: number | null;
+  promoted_memory_id: number | null;
+  promoted_at: string | null;
+  idempotency_key: string;
+  schema_version: number;
+  metadata: Record<string, unknown> | string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ContextEventRow {
+  id: number;
+  workspace_id: string;
+  source_system: string;
+  source_ref: string | null;
+  event_type: string;
+  actor: string | null;
+  occurred_at: string;
+  summary: string | null;
+  payload: Record<string, unknown> | string;
+  idempotency_key: string;
+  schema_version: number;
+  created_at: string;
+}
+
+interface PromotedMemoryRow {
+  id: number;
+  category: string;
+  content: string;
+  created_at: string;
+}
+
+/** Safe parsed form of related_files. */
+function parseRelatedFiles(value: string[] | string | null | undefined): string[] {
+  if (Array.isArray(value)) return value.filter((f): f is string => typeof f === 'string');
+  if (typeof value === 'string') {
+    try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed.filter((f: unknown): f is string => typeof f === 'string') : []; } catch { return []; }
+  }
+  return [];
+}
+
+/** Parse metadata JSONB field. */
+function parseMetadata(value: Record<string, unknown> | string | null | undefined): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value === 'string') {
+    try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; }
+  }
+  return {};
+}
+
+/** Parse context_event payload JSONB field, redacting secrets. */
+function parsePayloadRedacted(value: Record<string, unknown> | string | null | undefined): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const str = JSON.stringify(value);
+    const { redacted } = redactSecrets(str);
+    try { return JSON.parse(redacted); } catch { return {}; }
+  }
+  if (typeof value === 'string') {
+    const { redacted } = redactSecrets(value);
+    try { return JSON.parse(redacted); } catch { return {}; }
+  }
+  return {};
+}
+
+/**
+ * Map a raw candidate row to the output shape, redacting rule & context.
+ * Applies redactSecrets as defense-in-depth (ingestion already redacts, but
+ * this keeps direct-DB-loaded rows safe when displayed).
+ */
+function mapCandidateOutput(row: CandidateRow) {
+  const { redacted: safeRule } = redactSecrets(row.rule);
+  const safeContext = row.context ? redactSecrets(row.context).redacted : null;
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    contextEventId: row.context_event_id,
+    sourceSystem: row.source_system,
+    sourceRef: row.source_ref,
+    category: row.category,
+    title: row.title,
+    rule: safeRule,
+    context: safeContext,
+    relatedFiles: parseRelatedFiles(row.related_files),
+    confidence: row.confidence,
+    trustTier: row.trust_tier,
+    reviewStatus: row.review_status,
+    reviewer: row.reviewer,
+    reviewedAt: row.reviewed_at,
+    reviewNote: row.review_note,
+    duplicateOfCandidateId: row.duplicate_of_candidate_id,
+    promotedMemoryId: row.promoted_memory_id,
+    promotedAt: row.promoted_at,
+    metadata: parseMetadata(row.metadata),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// ── GET /api/candidates (list) ─────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/candidates:
+ *   get:
+ *     summary: List memory candidates with pagination and filters
+ *     operationId: listMemoryCandidates
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only candidate listing with workspace scoping — safe for local/MCP automation with no write or admin side effects."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Returns a paginated, filterable list of memory candidates for a workspace.
+ *       Supports filtering by review status, source system, category, confidence,
+ *       trust tier, search text, and date range. Sensitive fields (rule, context)
+ *       are redacted on output for defense-in-depth.
+ *     tags: [Context Intelligence]
+ *     parameters:
+ *       - name: workspace_id
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *       - name: status
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [pending, approved, rejected, duplicate, superseded, revisit]
+ *         description: Filter by review status
+ *       - name: source_system
+ *         in: query
+ *         schema:
+ *           type: string
+ *         description: Filter by source system
+ *       - name: category
+ *         in: query
+ *         schema:
+ *           type: string
+ *         description: Filter by knowledge category
+ *       - name: confidence
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [high, medium, low]
+ *         description: Filter by confidence level
+ *       - name: trust_tier
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [authoritative, trusted, community, unverified]
+ *         description: Filter by trust tier
+ *       - name: search
+ *         in: query
+ *         schema:
+ *           type: string
+ *         description: Full-text search on title, rule, and context
+ *       - name: date_from
+ *         in: query
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Filter candidates created on or after this ISO 8601 timestamp
+ *       - name: date_to
+ *         in: query
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Filter candidates created on or before this ISO 8601 timestamp
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *           maximum: 250
+ *     responses:
+ *       200:
+ *         description: Paginated list of memory candidates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 total:
+ *                   type: integer
+ *                 hasMore:
+ *                   type: boolean
+ *                 cursor:
+ *                   type: string
+ *                   nullable: true
+ *       400:
+ *         description: Missing workspace_id
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get('/', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspace_id as string;
+    if (!workspaceId) throw new ValidationError('workspace_id required');
+
+    // Validate workspace exists
+    await assertWorkspaceExists(workspaceId);
+
+    // Build filters
+    const where: string[] = ['mc.workspace_id = $1'];
+    const params: unknown[] = [workspaceId];
+    let paramIdx = 2;
+
+    const status = req.query.status as string;
+    if (status) {
+      const validStatuses = ['pending', 'approved', 'rejected', 'duplicate', 'superseded', 'revisit'];
+      if (!validStatuses.includes(status)) {
+        throw new ValidationError(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+      }
+      where.push(`mc.review_status = $${paramIdx}`);
+      params.push(status);
+      paramIdx++;
+    }
+
+    const sourceSystem = req.query.source_system as string;
+    if (sourceSystem) {
+      where.push(`mc.source_system = $${paramIdx}`);
+      params.push(sourceSystem);
+      paramIdx++;
+    }
+
+    const category = req.query.category as string;
+    if (category) {
+      where.push(`mc.category = $${paramIdx}`);
+      params.push(category);
+      paramIdx++;
+    }
+
+    const confidence = req.query.confidence as string;
+    if (confidence) {
+      const validConfidences = ['high', 'medium', 'low'];
+      if (!validConfidences.includes(confidence)) {
+        throw new ValidationError(`Invalid confidence. Must be one of: ${validConfidences.join(', ')}`);
+      }
+      where.push(`mc.confidence = $${paramIdx}`);
+      params.push(confidence);
+      paramIdx++;
+    }
+
+    const trustTier = req.query.trust_tier as string;
+    if (trustTier) {
+      const validTiers = ['authoritative', 'trusted', 'community', 'unverified'];
+      if (!validTiers.includes(trustTier)) {
+        throw new ValidationError(`Invalid trust_tier. Must be one of: ${validTiers.join(', ')}`);
+      }
+      where.push(`mc.trust_tier = $${paramIdx}`);
+      params.push(trustTier);
+      paramIdx++;
+    }
+
+    const search = req.query.search as string;
+    if (search) {
+      where.push(`(
+        mc.title ILIKE $${paramIdx}
+        OR mc.rule ILIKE $${paramIdx}
+        OR mc.context ILIKE $${paramIdx}
+      )`);
+      params.push(`%${search}%`);
+      paramIdx++;
+    }
+
+    const dateFrom = req.query.date_from as string;
+    if (dateFrom) {
+      where.push(`mc.created_at >= $${paramIdx}::timestamptz`);
+      params.push(dateFrom);
+      paramIdx++;
+    }
+
+    const dateTo = req.query.date_to as string;
+    if (dateTo) {
+      where.push(`mc.created_at <= $${paramIdx}::timestamptz`);
+      params.push(dateTo);
+      paramIdx++;
+    }
+
+    const whereClause = where.join(' AND ');
+
+    const baseQuery = `SELECT
+      id, workspace_id, context_event_id, source_system, source_ref,
+      category, title, rule, context, related_files,
+      confidence, trust_tier, review_status, reviewer, reviewed_at, review_note,
+      duplicate_of_candidate_id, promoted_memory_id, promoted_at,
+      idempotency_key, schema_version, metadata, created_at, updated_at
+    FROM memory_candidates mc
+    WHERE ${whereClause}`;
+
+    const countQuery = `SELECT COUNT(*)::int AS total
+      FROM memory_candidates mc
+      WHERE ${whereClause}`;
+
+    const pagination = parsePaginationParams(req);
+
+    const page = await paginateQuery<CandidateRow>({
+      query: baseQuery,
+      countQuery,
+      params,
+      pagination,
+      orderBy: 'mc.created_at DESC, mc.id DESC',
+      cursorColumn: 'mc.id',
+      cursorDirection: 'desc',
+    });
+
+    // Defence-in-depth: redact rule & context on every row
+    const items = page.items.map(mapCandidateOutput);
+
+    res.json({ ...page, items });
+  } catch (error) {
+    handleRouteError(res, error, '[candidates] list');
+  }
+});
+
+// ── GET /api/candidates/:id (detail) ───────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/candidates/{id}:
+ *   get:
+ *     summary: Get a single memory candidate with full provenance
+ *     operationId: getMemoryCandidate
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only candidate detail with workspace scoping — safe for local/MCP automation with no write or admin side effects."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Returns a single memory candidate with its full provenance: the originating
+ *       context event (with redacted payload), related files, metadata, and the
+ *       promoted memory link if the candidate has been approved and promoted.
+ *       Sensitive fields (rule, context, event payload) are redacted on output.
+ *     tags: [Context Intelligence]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Candidate ID
+ *     responses:
+ *       200:
+ *         description: Memory candidate with full provenance
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 candidate:
+ *                   type: object
+ *                 eventProvenance:
+ *                   type: object
+ *                   nullable: true
+ *                   description: The originating context event (null if no event linked)
+ *                 promotedMemory:
+ *                   type: object
+ *                   nullable: true
+ *                   description: The durable memory this candidate was promoted into
+ *       400:
+ *         description: Invalid candidate ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Candidate not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id) || id <= 0) {
+      throw new ValidationError('Candidate ID must be a positive integer');
+    }
+
+    // Fetch the candidate
+    const row = await queryOne<CandidateRow>(
+      `SELECT * FROM memory_candidates WHERE id = $1`,
+      [id],
+    );
+    if (!row) {
+      throw new NotFoundError(`Candidate ${id} not found`);
+    }
+
+    // Map candidate output (redacts rule & context)
+    const candidate = mapCandidateOutput(row);
+
+    // Fetch provenance event if linked
+    let eventProvenance: Record<string, unknown> | null = null;
+    if (row.context_event_id) {
+      const event = await queryOne<ContextEventRow>(
+        `SELECT id, workspace_id, source_system, source_ref, event_type, actor,
+                occurred_at, summary, payload, idempotency_key, schema_version, created_at
+         FROM context_events WHERE id = $1`,
+        [row.context_event_id],
+      );
+      if (event) {
+        eventProvenance = {
+          id: event.id,
+          workspaceId: event.workspace_id,
+          sourceSystem: event.source_system,
+          sourceRef: event.source_ref,
+          eventType: event.event_type,
+          actor: event.actor,
+          occurredAt: event.occurred_at,
+          summary: event.summary,
+          payload: parsePayloadRedacted(event.payload),
+          schemaVersion: event.schema_version,
+          createdAt: event.created_at,
+        };
+      }
+    }
+
+    // Fetch promoted memory link if candidate was promoted
+    let promotedMemory: Record<string, unknown> | null = null;
+    if (row.promoted_memory_id) {
+      const mem = await queryOne<PromotedMemoryRow>(
+        `SELECT id, category, content, created_at
+         FROM memories WHERE id = $1 AND deleted_at IS NULL`,
+        [row.promoted_memory_id],
+      );
+      if (mem) {
+        promotedMemory = {
+          id: mem.id,
+          category: mem.category,
+          content: mem.content,
+          createdAt: mem.created_at,
+        };
+      }
+    }
+
+    res.json({
+      candidate,
+      eventProvenance: eventProvenance ?? null,
+      promotedMemory: promotedMemory ?? null,
+    });
+  } catch (error) {
+    handleRouteError(res, error, '[candidates] detail');
   }
 });
 
