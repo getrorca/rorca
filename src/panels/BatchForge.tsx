@@ -9,6 +9,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { forgeSpecBatch, getForgeBatchStreamUrl } from '../api/specs';
 import { titleToSlug, KEBAB_RE } from '../lib/slugify';
+import ContextPreviewCard from '../components/ContextPreviewCard';
 
 /* ─── Types ──────────────────────────────────────────────────────── */
 
@@ -284,38 +285,47 @@ export default function BatchForge() {
             ) : (
               <div className="space-y-4">
                 {entries.map((entry, i) => (
-                  <div key={i} className="p-3 rounded border border-border bg-panel space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium text-muted">#{i + 1}</span>
-                      {entries.length > 1 && !batchId && (
-                        <button
-                          onClick={() => removeEntry(i)}
-                          aria-label={`Remove brief #${i + 1}`}
-                          className="text-xs text-muted hover:text-error transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 rounded"
-                        >
-                          Remove
-                        </button>
+                  <div key={i} className="space-y-2">
+                    <div className="p-3 rounded border border-border bg-panel space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-muted">#{i + 1}</span>
+                        {entries.length > 1 && !batchId && (
+                          <button
+                            onClick={() => removeEntry(i)}
+                            aria-label={`Remove brief #${i + 1}`}
+                            className="text-xs text-muted hover:text-error transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 rounded"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                      <input
+                        type="text"
+                        value={entry.title}
+                        onChange={(e) => updateEntry(i, 'title', e.target.value)}
+                        placeholder="Spec title (kebab-case, e.g. user-auth-oauth)"
+                        disabled={!!batchId}
+                        className="w-full px-3 py-1.5 text-sm bg-bg border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors disabled:opacity-50"
+                      />
+                      {titleErrors[i] && (
+                        <p className="text-xs text-error">{titleErrors[i]}</p>
                       )}
+                      <textarea
+                        rows={3}
+                        value={entry.brief}
+                        onChange={(e) => updateEntry(i, 'brief', e.target.value)}
+                        placeholder="Describe what this spec builds..."
+                        disabled={!!batchId}
+                        className="w-full px-3 py-1.5 text-sm bg-bg border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-y font-mono disabled:opacity-50"
+                      />
                     </div>
-                    <input
-                      type="text"
-                      value={entry.title}
-                      onChange={(e) => updateEntry(i, 'title', e.target.value)}
-                      placeholder="Spec title (kebab-case, e.g. user-auth-oauth)"
-                      disabled={!!batchId}
-                      className="w-full px-3 py-1.5 text-sm bg-bg border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors disabled:opacity-50"
-                    />
-                    {titleErrors[i] && (
-                      <p className="text-xs text-error">{titleErrors[i]}</p>
+                    {/* Context preview card for each valid brief */}
+                    {workspaceId && entry.brief.trim() && !batchId && (
+                      <ContextPreviewCard
+                        workspaceId={workspaceId}
+                        brief={entry.brief.trim()}
+                      />
                     )}
-                    <textarea
-                      rows={3}
-                      value={entry.brief}
-                      onChange={(e) => updateEntry(i, 'brief', e.target.value)}
-                      placeholder="Describe what this spec builds..."
-                      disabled={!!batchId}
-                      className="w-full px-3 py-1.5 text-sm bg-bg border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-y font-mono disabled:opacity-50"
-                    />
                   </div>
                 ))}
               </div>
