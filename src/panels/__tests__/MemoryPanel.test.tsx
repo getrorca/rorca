@@ -93,6 +93,7 @@ const MEMORY_REVIEW_RESPONSE: any = {
         pinned: false,
         sourceType: 'manual',
         source: 'MOG-001',
+        sourceRef: 'MOG-001',
         createdAt: '2026-06-02T10:00:00.000Z',
         updatedAt: '2026-04-02T10:00:00.000Z',
         deletedAt: null,
@@ -117,13 +118,14 @@ const MEMORY_REVIEW_RESPONSE: any = {
         pinned: false,
         sourceType: 'synthesis',
         source: 'MOG-002',
+        sourceRef: 'MOG-002',
         createdAt: '2026-05-10T10:00:00.000Z',
         updatedAt: '2026-05-12T10:00:00.000Z',
         deletedAt: '2026-05-15T10:00:00.000Z',
         staleScore: 0,
         reasons: [],
         status: 'archived',
-        lastAction: { action: 'archive', at: '2026-05-15T10:00:00.000Z', previousStatus: 'candidate', nextStatus: 'archived' },
+        lastAction: { action: 'archive', at: '2026-05-15T10:00:00.000Z', actor: null, previousStatus: 'candidate', nextStatus: 'archived' },
       },
     ],
     total: 2,
@@ -1193,5 +1195,179 @@ describe('MemoryPanel', () => {
     // Click clear and verify both items are shown again
     await user.click(clearBtn);
     expect(await screen.findAllByText(/Stale memory review/)).toBeTruthy();
+  });
+
+  // ─── US-037: Candidate provenance and related-file previews ──────────────
+
+  it('displays sourceRef, occurredAt, and actor in review item detail', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            sourceRef: 'abc123def',
+            createdAt: '2026-06-15T14:30:00.000Z',
+            lastAction: {
+              action: 'keep' as const,
+              at: '2026-06-16T10:00:00.000Z',
+              actor: 'operator@rorca.local',
+              previousStatus: 'candidate',
+              nextStatus: 'kept' as const,
+            },
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Source ref should be displayed
+    expect(within(reviewQueue).getByText(/Source ref:/)).toBeTruthy();
+    expect(within(reviewQueue).getByText('abc123def')).toBeTruthy();
+
+    // Occurred timestamp should be displayed
+    expect(within(reviewQueue).getByText(/Occurred:/)).toBeTruthy();
+
+    // Actor should be shown in the review action text
+    expect(within(reviewQueue).getByText(/by operator@rorca\.local/)).toBeTruthy();
+  });
+
+  it('shows redaction marker when provenance is missing', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            sourceStoryId: null,
+            sourceSpecId: null,
+            sourceRunId: null,
+            sourceRef: null,
+            relatedFiles: [],
+            content: 'A memory with no provenance attached.',
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Should display the "No provenance" redaction marker
+    expect(within(reviewQueue).getByText('No provenance')).toBeTruthy();
+    expect(within(reviewQueue).getByTitle('No provenance or file context available for this memory')).toBeTruthy();
+  });
+
+  it('collapses large payloads with truncation limit and redacted marker', async () => {
+    const longContent = 'A'.repeat(500) + ' end';
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            content: longContent,
+            relatedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'src/f.ts', 'src/g.ts'],
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Content should be truncated (only first 300 chars shown by default)
+    const displayedContent = within(reviewQueue).getByText(/^A{300}$/);
+    expect(displayedContent).toBeTruthy();
+
+    // Should show truncated badge
+    expect(within(reviewQueue).getByText(/Truncated at 300 chars/)).toBeTruthy();
+
+    // Should show "Show all" button with character count
+    expect(within(reviewQueue).getByText(/Show all \(504 chars\)/)).toBeTruthy();
+
+    // Related files should show first 5 with "+N more" indicator
+    expect(within(reviewQueue).getByText('Changed files (7):')).toBeTruthy();
+    expect(within(reviewQueue).getByText('src/a.ts')).toBeTruthy();
+    expect(within(reviewQueue).getByText('src/e.ts')).toBeTruthy();
+    expect(within(reviewQueue).getByText('+2 more')).toBeTruthy();
+  });
+
+  it('expands collapsed content on toggle', async () => {
+    const user = userEvent.setup();
+    const longContent = 'A'.repeat(500) + ' end';
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            content: longContent,
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Click "Show all" to expand
+    const showAllBtn = within(reviewQueue).getByText(/Show all \(504 chars\)/);
+    await user.click(showAllBtn);
+
+    // Full content should now be displayed
+    expect(within(reviewQueue).getByText(longContent)).toBeTruthy();
+
+    // Truncation badge should disappear
+    expect(within(reviewQueue).queryByText(/Truncated at 300 chars/)).toBeNull();
+
+    // Button should now say "Show less"
+    expect(within(reviewQueue).getByText('Show less')).toBeTruthy();
+  });
+
+  it('does not display sourceRef or occurredAt labels when values are absent', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            sourceRef: null,
+            source: null,
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Source ref label should not appear when sourceRef is null
+    expect(within(reviewQueue).queryByText(/Source ref:/)).toBeNull();
+
+    // Occurred should still be shown (createdAt always present)
+    expect(within(reviewQueue).getByText(/Occurred:/)).toBeTruthy();
   });
 });

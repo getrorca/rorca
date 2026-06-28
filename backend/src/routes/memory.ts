@@ -247,6 +247,7 @@ interface MemoryReviewActionRecord {
   memoryId: number;
   action: MemoryReviewAction;
   at: string;
+  actor: string | null;
   previousStatus: string | null;
   nextStatus: MemoryReviewCandidateStatus | null;
 }
@@ -446,6 +447,7 @@ function mapMemoryReviewItem(
     pinned: Boolean(row.pinned),
     sourceType: row.source_type,
     source: row.source,
+    sourceRef: row.source,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -456,6 +458,7 @@ function mapMemoryReviewItem(
       ? {
         action: latestAction.action,
         at: latestAction.at,
+        actor: latestAction.actor,
         previousStatus: latestAction.previousStatus,
         nextStatus: latestAction.nextStatus,
       }
@@ -464,8 +467,8 @@ function mapMemoryReviewItem(
 }
 
 async function loadMemoryReviewActionHistory(workspaceId: string): Promise<MemoryReviewActionRecord[]> {
-  const rows = await dbQuery<{ ts: string; payload: Record<string, unknown> | string | null }>(
-    `SELECT ts, payload
+  const rows = await dbQuery<{ ts: string; actor: string | null; payload: Record<string, unknown> | string | null }>(
+    `SELECT ts, actor, payload
        FROM wal_events
       WHERE workspace_id = $1
         AND event_type = 'memory_reviewed'
@@ -492,6 +495,7 @@ async function loadMemoryReviewActionHistory(workspaceId: string): Promise<Memor
       memoryId,
       action,
       at: row.ts,
+      actor: row.actor ?? null,
       previousStatus: typeof (payload as Record<string, unknown>).previousStatus === 'string'
         ? (payload as Record<string, unknown>).previousStatus as string
         : null,
@@ -2444,6 +2448,7 @@ router.get('/review', async (req: Request, res: Response) => {
         lastAction: {
           action: action.action,
           at: action.at,
+          actor: action.actor,
           previousStatus: action.previousStatus,
           nextStatus: action.nextStatus,
         },
