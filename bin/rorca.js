@@ -2614,130 +2614,125 @@ mcp
     process.exitCode = await runMcpDiagnoseClients();
 });
 const capture = program.command('capture').description('Capture sidecar — submit context events and memory candidates');
-
 capture
-  .command('ingest-commit [sha]')
-  .description('Ingest a single git commit as a context event + memory candidates')
-  .option('--workspace-id <id>', 'Rorca workspace ID (required)')
-  .option('--workspace-path <path>', 'Absolute path to the git repository root (default: cwd)', process.cwd())
-  .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
-  .option('--api-key <key>', 'API key for auth-gated deployments')
-  .option('--dry-run', 'Extract and print metadata without submitting')
-  .option('--json', 'Emit JSON output')
-  .action(async (sha, options) => {
+    .command('ingest-commit [sha]')
+    .description('Ingest a single git commit as a context event + memory candidates')
+    .option('--workspace-id <id>', 'Rorca workspace ID (required)')
+    .option('--workspace-path <path>', 'Absolute path to the git repository root (default: cwd)', process.cwd())
+    .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
+    .option('--api-key <key>', 'API key for auth-gated deployments')
+    .option('--dry-run', 'Extract and print metadata without submitting')
+    .option('--json', 'Emit JSON output')
+    .action(async (sha, options) => {
     try {
-      if (!options.workspaceId) {
-        console.error('Error: --workspace-id is required');
+        if (!options.workspaceId) {
+            console.error('Error: --workspace-id is required');
+            process.exitCode = 1;
+            return;
+        }
+        const result = await ingestCommit({
+            workspaceId: options.workspaceId,
+            workspacePath: options.workspacePath,
+            backendUrl: options.backendUrl,
+            apiKey: options.apiKey,
+            dryRun: Boolean(options.dryRun),
+            sha: sha || undefined,
+        });
+        if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+        }
+        else {
+            const mode = options.dryRun ? 'DRY RUN' : 'INGEST';
+            console.log(`${mode} commit ${result.commitSha.slice(0, 8)}`);
+            console.log(`  Subject: ${result.subject.slice(0, 80)}`);
+            console.log(`  Event:   ${result.event.queued ? 'queued' : result.event.created ? (result.event.created ? 'created' : 'exists') : 'dry-run'}`);
+            console.log(`  Candidates: ${result.candidates.length} (${result.noise ? 'noise' : 'submitted'})`);
+            if (!result.noise) {
+                for (const c of result.candidates) {
+                    console.log(`    - ${c.queued ? 'queued' : c.created ? 'created' : 'exists'}`);
+                }
+            }
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
         process.exitCode = 1;
-        return;
-      }
-
-      const result = await ingestCommit({
-        workspaceId: options.workspaceId,
-        workspacePath: options.workspacePath,
-        backendUrl: options.backendUrl,
-        apiKey: options.apiKey,
-        dryRun: Boolean(options.dryRun),
-        sha: sha || undefined,
-      });
-
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        const mode = options.dryRun ? 'DRY RUN' : 'INGEST';
-        console.log(`${mode} commit ${result.commitSha.slice(0, 8)}`);
-        console.log(`  Subject: ${result.subject.slice(0, 80)}`);
-        console.log(`  Event:   ${result.event.queued ? 'queued' : result.event.created ? (result.event.created ? 'created' : 'exists') : 'dry-run'}`);
-        console.log(`  Candidates: ${result.candidates.length} (${result.noise ? 'noise' : 'submitted'})`);
-        if (!result.noise) {
-          for (const c of result.candidates) {
-            console.log(`    - ${c.queued ? 'queued' : c.created ? 'created' : 'exists'}`);
-          }
-        }
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`Error: ${message}`);
-      process.exitCode = 1;
     }
-  });
-
+});
 capture
-  .command('ingest-git')
-  .description('Ingest a range of git commits (since..HEAD)')
-  .requiredOption('--since <ref>', 'Starting ref (branch, tag, or SHA)')
-  .option('--workspace-id <id>', 'Rorca workspace ID (required)')
-  .option('--workspace-path <path>', 'Absolute path to the git repository root (default: cwd)', process.cwd())
-  .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
-  .option('--api-key <key>', 'API key for auth-gated deployments')
-  .option('--dry-run', 'List commits without submitting')
-  .option('--json', 'Emit JSON output')
-  .action(async (options) => {
+    .command('ingest-git')
+    .description('Ingest a range of git commits (since..HEAD)')
+    .requiredOption('--since <ref>', 'Starting ref (branch, tag, or SHA)')
+    .option('--workspace-id <id>', 'Rorca workspace ID (required)')
+    .option('--workspace-path <path>', 'Absolute path to the git repository root (default: cwd)', process.cwd())
+    .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
+    .option('--api-key <key>', 'API key for auth-gated deployments')
+    .option('--dry-run', 'List commits without submitting')
+    .option('--json', 'Emit JSON output')
+    .action(async (options) => {
     try {
-      if (!options.workspaceId) {
-        console.error('Error: --workspace-id is required');
+        if (!options.workspaceId) {
+            console.error('Error: --workspace-id is required');
+            process.exitCode = 1;
+            return;
+        }
+        const result = await ingestGitRange({
+            workspaceId: options.workspaceId,
+            workspacePath: options.workspacePath,
+            backendUrl: options.backendUrl,
+            apiKey: options.apiKey,
+            dryRun: Boolean(options.dryRun),
+            since: options.since,
+        });
+        if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+        }
+        else {
+            const mode = options.dryRun ? 'DRY RUN' : 'INGEST';
+            console.log(`${mode} range ${result.range}: ${result.commits} commits`);
+            console.log(`  Ingested: ${result.ingested}  Noise: ${result.noise}`);
+            for (const r of result.results) {
+                const status = r.noise ? dim('(noise)') : green('✓');
+                console.log(`  ${r.commitSha.slice(0, 8)} ${status} ${r.subject.slice(0, 60)}`);
+            }
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
         process.exitCode = 1;
-        return;
-      }
-
-      const result = await ingestGitRange({
-        workspaceId: options.workspaceId,
-        workspacePath: options.workspacePath,
-        backendUrl: options.backendUrl,
-        apiKey: options.apiKey,
-        dryRun: Boolean(options.dryRun),
-        since: options.since,
-      });
-
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        const mode = options.dryRun ? 'DRY RUN' : 'INGEST';
-        console.log(`${mode} range ${result.range}: ${result.commits} commits`);
-        console.log(`  Ingested: ${result.ingested}  Noise: ${result.noise}`);
-        for (const r of result.results) {
-          const status = r.noise ? dim('(noise)') : green('✓');
-          console.log(`  ${r.commitSha.slice(0, 8)} ${status} ${r.subject.slice(0, 60)}`);
-        }
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`Error: ${message}`);
-      process.exitCode = 1;
     }
-  });
-
+});
 capture
-  .command('flush')
-  .description('Flush the local offline queue to the Rorca backend')
-  .option('--workspace-path <path>', 'Path to the workspace root containing .rorca-capture-queue.jsonl', process.cwd())
-  .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
-  .option('--api-key <key>', 'API key for auth-gated deployments')
-  .action(async (options) => {
+    .command('flush')
+    .description('Flush the local offline queue to the Rorca backend')
+    .option('--workspace-path <path>', 'Path to the workspace root containing .rorca-capture-queue.jsonl', process.cwd())
+    .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
+    .option('--api-key <key>', 'API key for auth-gated deployments')
+    .action(async (options) => {
     try {
-      const queue = new CaptureQueue(options.workspacePath);
-      const client = new CaptureClient({ baseUrl: options.backendUrl, apiKey: options.apiKey });
-
-      if (queue.isEmpty) {
-        console.log('Queue is empty — nothing to flush.');
-        return;
-      }
-
-      console.log(`Flushing ${queue.length} queued entries...`);
-      const result = await client.flushQueue(queue);
-      console.log(`Succeeded: ${result.succeeded}  Failed: ${result.failed}`);
-      if (result.failed > 0) {
-        for (const entry of result.entries.filter((e) => !e.success)) {
-          console.log(`  Failed: ${entry.idempotencyKey} — ${entry.error ?? 'unknown'}`);
+        const queue = new CaptureQueue(options.workspacePath);
+        const client = new CaptureClient({ baseUrl: options.backendUrl, apiKey: options.apiKey });
+        if (queue.isEmpty) {
+            console.log('Queue is empty — nothing to flush.');
+            return;
         }
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`Error: ${message}`);
-      process.exitCode = 1;
+        console.log(`Flushing ${queue.length} queued entries...`);
+        const result = await client.flushQueue(queue);
+        console.log(`Succeeded: ${result.succeeded}  Failed: ${result.failed}`);
+        if (result.failed > 0) {
+            for (const entry of result.entries.filter((e) => !e.success)) {
+                console.log(`  Failed: ${entry.idempotencyKey} — ${entry.error ?? 'unknown'}`);
+            }
+        }
     }
-  });
-
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
+        process.exitCode = 1;
+    }
+});
 const db = program.command('db').description('Manage the Docker Postgres sidecar');
 db.command('start').action(async () => {
     await handleDbCommand('start');
