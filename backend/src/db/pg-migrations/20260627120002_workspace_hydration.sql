@@ -1,4 +1,5 @@
--- 20260627120000_workspace_hydration.sql — Hilo workspace hydration status (Context Intelligence Platform US-003).
+-- 20260627120002_workspace_hydration.sql — Hilo workspace hydration status (Context Intelligence Platform US-003).
+-- (Renamed from prefix 20260627120000, which collided with US-004's context_events; migration prefixes must be unique.)
 --
 -- Tracks each Hilo-backed hydration of a workspace checkout: its status, the git SHA it ran
 -- against (freshness key), the rebuildable graph output location, normalized counts, runtime,
