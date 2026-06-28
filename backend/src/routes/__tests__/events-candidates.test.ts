@@ -1552,3 +1552,295 @@ describe('US-034: Review actions', () => {
     });
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// US-035: Candidate retrieval gating — governance gate integration tests
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('US-035: Candidate retrieval gating', () => {
+  const { queryOne } = require('../../db/index');
+
+  /** Helper: create a candidate via POST and return its parsed body. */
+  async function createCandidate(overrides: Record<string, unknown> = {}) {
+    const key = `mc-gate-${crypto.randomUUID()}`;
+    const res = await request(app)
+      .post('/api/candidates')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspace_id: testWorkspaceId,
+        source_system: 'manual',
+        category: 'Decision',
+        title: `Gate Test ${key.slice(0, 8)}`,
+        rule: 'Always use the governance gate for candidate retrieval',
+        context: 'Prevents unvetted knowledge from entering prompt composition',
+        related_files: ['src/lib/memory-router.ts'],
+        confidence: 'high',
+        trust_tier: 'trusted',
+        idempotency_key: key,
+        ...overrides,
+        idempotency_key: key,
+      });
+    return res.body;
+  }
+
+  /** Query the memories table for a specific content pattern. */
+  async function findMemoryByContent(contentSubstring: string): Promise<{ id: number; content: string } | null> {
+    const row = await queryOne<{ id: number; content: string }>(
+      `SELECT id, content FROM memories
+       WHERE workspace_id = $1 AND content ILIKE $2 AND deleted_at IS NULL
+       LIMIT 1`,
+      [testWorkspaceId, `%${contentSubstring}%`],
+    );
+    return row ?? null;
+  }
+
+  // ── Exclusion before approval ──────────────────────────────────────────
+
+  test('pending candidate is NOT in the memories table (exclusion before approval)', async () => {
+    const candidate = await createCandidate({
+      title: 'Exclusion Test',
+      rule: 'Exclusion before approval rule',
+    });
+
+    // The candidate exists in memory_candidates...
+    expect(candidate.review_status).toBe('pending');
+
+    // ...but MUST NOT appear in the memories table (the retrieval source)
+    const mem = await findMemoryByContent('Exclusion before approval');
+    expect(mem).toBeNull();
+  });
+
+  test('rejected candidate is NOT in the memories table', async () => {
+    const candidate = await createCandidate({
+      title: 'Rejected Gate Test',
+      rule: 'Rejected candidate should not be retrievable',
+    });
+
+    await request(app)
+      .post(`/api/candidates/${candidate.id}/reject`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'gating-test', review_note: 'Not valid knowledge' });
+
+    const mem = await findMemoryByContent('Rejected candidate should not be retrievable');
+    expect(mem).toBeNull();
+  });
+
+  test('duplicate candidate is NOT in the memories table', async () => {
+    const original = await createCandidate({
+      title: 'Original Knowledge',
+      rule: 'Original durable knowledge rule',
+    });
+    const duplicate = await createCandidate({
+      title: 'Duplicate Gated',
+      rule: 'Duplicate candidate should not be retrievable',
+    });
+
+    await request(app)
+      .post(`/api/candidates/${duplicate.id}/mark-duplicate`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'gating-test', duplicate_of_candidate_id: original.id });
+
+    const mem = await findMemoryByContent('Duplicate candidate should not be retrievable');
+    expect(mem).toBeNull();
+  });
+
+  test('superseded candidate is NOT in the memories table', async () => {
+    const candidate = await createCandidate({
+      title: 'Superseded Gate Test',
+      rule: 'Superseded candidate should not be retrievable',
+    });
+
+    await request(app)
+      .post(`/api/candidates/${candidate.id}/mark-superseded`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'gating-test', review_note: 'Obsolete knowledge' });
+
+    const mem = await findMemoryByContent('Superseded candidate should not be retrievable');
+    expect(mem).toBeNull();
+  });
+
+  // ── Inclusion after promotion ───────────────────────────────────────────
+
+  test('approved candidate IS promoted into the memories table (inclusion after promotion)', async () => {
+    const candidate = await createCandidate({
+      title: 'Inclusion Test',
+      rule: 'Inclusion after promotion rule',
+      category: 'Gotcha',
+    });
+
+    const approveRes = await request(app)
+      .post(`/api/candidates/${candidate.id}/approve`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'gating-test', review_note: 'Verified and approved' });
+
+    expect(approveRes.status).toBe(200);
+    expect(approveRes.body.candidate.reviewStatus).toBe('approved');
+    expect(approveRes.body.promotedMemoryId).toBeDefined();
+
+    // The approved candidate MUST now appear in the memories table
+    const mem = await findMemoryByContent('Inclusion after promotion');
+    expect(mem).not.toBeNull();
+    expect(mem!.content).toContain('Inclusion Test');
+    expect(mem!.content).toContain('Inclusion after promotion rule');
+  });
+
+  test('edit-and-approve candidate IS promoted into the memories table with edited fields', async () => {
+    const candidate = await createCandidate({
+      title: 'Edit Include Test',
+      rule: 'Original rule before edit',
+      category: 'Pattern',
+      related_files: ['src/original.ts'],
+    });
+
+    const approveRes = await request(app)
+      .post(`/api/candidates/${candidate.id}/approve`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        reviewer: 'gating-test',
+        title: 'Edited Title After Promotion',
+        rule: 'Edited rule after approval and promotion',
+        category: 'Bug Fix',
+        related_files: ['src/edited.ts'],
+      });
+
+    expect(approveRes.status).toBe(200);
+    expect(approveRes.body.promotedMemoryId).toBeDefined();
+
+    // The promoted memory must contain the edited fields, not the originals
+    const mem = await findMemoryByContent('Edited Title After Promotion');
+    expect(mem).not.toBeNull();
+    expect(mem!.content).toContain('Edited Title After Promotion');
+    expect(mem!.content).toContain('Edited rule after approval and promotion');
+    expect(mem!.content).not.toContain('Original rule before edit');
+  });
+
+  // ── Governance gate: unapproved statuses collectively excluded ─────────
+
+  test('ALL unapproved statuses (pending/rejected/duplicate/superseded/revisit) are excluded from memories', async () => {
+    // Create candidates for each non-approved status
+    const pendingCandidate = await createCandidate({
+      title: 'Pending Bulk',
+      rule: 'Pending bulk test rule',
+    });
+
+    const rejectedCandidate = await createCandidate({
+      title: 'Rejected Bulk',
+      rule: 'Rejected bulk test rule',
+    });
+    await request(app)
+      .post(`/api/candidates/${rejectedCandidate.id}/reject`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'gating-test' });
+
+    const supersededCandidate = await createCandidate({
+      title: 'Superseded Bulk',
+      rule: 'Superseded bulk test rule',
+    });
+    await request(app)
+      .post(`/api/candidates/${supersededCandidate.id}/mark-superseded`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'gating-test' });
+
+    // Verify none of them appear in memories
+    const mem1 = await findMemoryByContent('Pending bulk test rule');
+    expect(mem1).toBeNull();
+
+    const mem2 = await findMemoryByContent('Rejected bulk test rule');
+    expect(mem2).toBeNull();
+
+    const mem3 = await findMemoryByContent('Superseded bulk test rule');
+    expect(mem3).toBeNull();
+
+    // Now approve the pending candidate → must appear
+    await request(app)
+      .post(`/api/candidates/${pendingCandidate.id}/approve`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'gating-test' });
+
+    const mem4 = await findMemoryByContent('Pending bulk test rule');
+    expect(mem4).not.toBeNull();
+
+    // Rejected and superseded must still be excluded
+    const mem5 = await findMemoryByContent('Rejected bulk test rule');
+    expect(mem5).toBeNull();
+
+    const mem6 = await findMemoryByContent('Superseded bulk test rule');
+    expect(mem6).toBeNull();
+  });
+
+  // ── Auditable candidates remain in memory_candidates after rejection ────
+
+  test('rejected/duplicate/superseded candidates remain auditable via the candidates API', async () => {
+    const rejected = await createCandidate({
+      title: 'Auditable Rejected',
+      rule: 'Auditable rejected rule for audit trail',
+    });
+
+    await request(app)
+      .post(`/api/candidates/${rejected.id}/reject`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'auditor', review_note: 'Not relevant' });
+
+    // The candidate MUST still be visible in the candidates list
+    const listRes = await request(app)
+      .get('/api/candidates')
+      .set('Authorization', `Bearer ${authToken}`)
+      .query({ workspace_id: testWorkspaceId, status: 'rejected' });
+
+    expect(listRes.status).toBe(200);
+    const found = listRes.body.items.find((i: any) => i.id === String(rejected.id));
+    expect(found).toBeDefined();
+    expect(found.reviewStatus).toBe('rejected');
+
+    // The detail endpoint must also show it
+    const detailRes = await request(app)
+      .get(`/api/candidates/${rejected.id}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(detailRes.status).toBe(200);
+    expect(detailRes.body.candidate.reviewStatus).toBe('rejected');
+
+    // But it must NOT be in the memories table
+    const mem = await findMemoryByContent('Auditable rejected rule for audit trail');
+    expect(mem).toBeNull();
+  });
+
+  // ── Revived candidate (revisit → approve) reaches memories ─────────────
+
+  test('revived candidate (revisit → approve) reaches the memories table', async () => {
+    const candidate = await createCandidate({
+      title: 'Revived Knowledge',
+      rule: 'Revived candidate after revisit approval rule',
+    });
+
+    // Reject first
+    await request(app)
+      .post(`/api/candidates/${candidate.id}/reject`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'first-reviewer' });
+
+    // Verify exclusion after rejection
+    let mem = await findMemoryByContent('Revived candidate after revisit');
+    expect(mem).toBeNull();
+
+    // Revisit
+    await request(app)
+      .post(`/api/candidates/${candidate.id}/revisit`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'reopener' });
+
+    // Approve after revisit
+    const approveRes = await request(app)
+      .post(`/api/candidates/${candidate.id}/approve`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ reviewer: 'second-reviewer', review_note: 'Reconsidered and approved' });
+
+    expect(approveRes.status).toBe(200);
+    expect(approveRes.body.promotedMemoryId).toBeDefined();
+
+    // Now it MUST appear in memories
+    mem = await findMemoryByContent('Revived candidate after revisit');
+    expect(mem).not.toBeNull();
+    expect(mem!.content).toContain('Revived Knowledge');
+  });
+});
