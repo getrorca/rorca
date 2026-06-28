@@ -20,10 +20,35 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Network, RefreshCw, AlertTriangle, CheckCircle, Loader2,
   XCircle, Clock, GitBranch, FileCode, Hash, ArrowRightLeft,
-  TestTube, Brackets, Zap, ChevronDown,
+  TestTube, Brackets, Zap, ChevronDown, Inbox, HardDrive,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+
+// ─── US-038 Diagnostics types ─────────────────────────────────────────────
+
+interface OperatorWarning {
+  severity: 'warning' | 'error' | 'info';
+  category: 'hilo' | 'graph' | 'candidate' | 'hydration' | 'capture' | 'retrieval';
+  message: string;
+  detail: string | null;
+}
+
+interface CandidateHealthDiag {
+  totalCandidates: number;
+  pendingCount: number;
+  approvedCount: number;
+  hasBacklog: boolean;
+  backlogWarning: string | null;
+}
+
+interface DiagnosticsStatus {
+  status: 'ok' | 'degraded' | 'warning';
+  graph: { available: boolean; vertexCount: number; edgeCount: number; isStale: boolean; staleReason: string | null };
+  candidates: CandidateHealthDiag;
+  warnings: OperatorWarning[];
+  timestamp: string;
+}
 
 // ─── Types matching GET /api/workspaces/{workspaceId}/hydration ─────────────
 
@@ -184,6 +209,30 @@ export default function ContextHealthPanel() {
   const [expanded, setExpanded] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // US-038: Diagnostics state
+  const [diag, setDiag] = useState<DiagnosticsStatus | null>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+
+  // ── Fetch Diagnostics ────────────────────────────────────────────────────
+  const fetchDiagnostics = useCallback(async () => {
+    if (!workspaceId) return;
+    setDiagLoading(true);
+    try {
+      const params = new URLSearchParams({ workspaceId });
+      const resp = await apiFetch<DiagnosticsStatus>(`/api/diagnostics/status?${params}`, { silent: true });
+      setDiag(resp);
+    } catch {
+      // Non-fatal — diagnostics just won't show
+      setDiag(null);
+    } finally {
+      setDiagLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (workspaceId) fetchDiagnostics();
+  }, [workspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
   const fetchStatus = useCallback(async () => {
@@ -573,6 +622,121 @@ export default function ContextHealthPanel() {
               <span>No hydration has been attempted. Click Hydrate to build the codegraph.</span>
             </div>
           )}
+
+          {/* ─── US-038: Operator Diagnostics Warnings ─────────────────── */}
+          <div className="space-y-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+              Diagnostics
+            </p>
+
+            {/* Candidate backlog */}
+            {diag?.candidates && diag.candidates.hasBacklog && (
+              <div
+                className="flex items-start gap-2 p-2.5 rounded border border-rose-500/20 bg-rose-500/5 text-xs text-rose-400"
+                data-testid="context-health-candidate-backlog"
+              >
+                <Inbox size={13} className="mt-0.5 shrink-0" />
+                <div>
+                  <span className="font-medium">Candidate Backlog</span>
+                  <p className="mt-0.5 text-rose-400/80">
+                    {diag.candidates.backlogWarning ?? `${diag.candidates.pendingCount} pending candidates need review`}
+                  </p>
+                  <p className="mt-1 text-rose-400/60">
+                    {diag.candidates.approvedCount} approved, {diag.candidates.totalCandidates} total
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Candidate info (no backlog) */}
+            {diag?.candidates && !diag.candidates.hasBacklog && diag.candidates.totalCandidates > 0 && (
+              <div className="flex items-center gap-2 p-2 rounded border border-border bg-[var(--surface-200)] text-xs text-muted">
+                <Inbox size={12} className="shrink-0" />
+                <span>
+                  <span className="font-medium text-[var(--text)]">
+                    {diag.candidates.pendingCount} pending
+                  </span>
+                  {' · '}{diag.candidates.approvedCount} approved · {diag.candidates.totalCandidates} total candidates
+                </span>
+              </div>
+            )}
+
+            {/* Stale graph warning */}
+            {diag?.graph && diag.graph.isStale && (
+              <div
+                className="flex items-start gap-2 p-2.5 rounded border border-amber-500/20 bg-amber-500/5 text-xs text-amber-500"
+                data-testid="context-health-stale-graph"
+              >
+                <HardDrive size={13} className="mt-0.5 shrink-0" />
+                <div>
+                  <span className="font-medium">Stale Knowledge Graph</span>
+                  <p className="mt-0.5 text-amber-500/80">
+                    {diag.graph.staleReason ?? 'Graph data is out of date'}
+                  </p>
+                  <p className="mt-1 text-amber-500/60">
+                    {diag.graph.vertexCount} vertices, {diag.graph.edgeCount} edges
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Missing Hilo / graph unavailable */}
+            {diag?.graph && !diag.graph.available && (
+              <div
+                className="flex items-start gap-2 p-2.5 rounded border border-amber-500/20 bg-amber-500/5 text-xs text-amber-500"
+                data-testid="context-health-missing-hilo"
+              >
+                <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                <div>
+                  <span className="font-medium">Hilo Graph Unavailable</span>
+                  <p className="mt-0.5 text-amber-500/80">
+                    Install Apache AGE or enable graph lite mode for knowledge graph features.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Other operator warnings */}
+            {diag?.warnings
+              ?.filter(w => w.category !== 'graph' && w.category !== 'candidate')
+              .map((warning, idx) => (
+                <div
+                  key={idx}
+                  className={`flex items-start gap-2 p-2.5 rounded border text-xs ${
+                    warning.severity === 'error'
+                      ? 'border-rose-500/20 bg-rose-500/5 text-rose-400'
+                      : warning.severity === 'warning'
+                        ? 'border-amber-500/20 bg-amber-500/5 text-amber-500'
+                        : 'border-border bg-[var(--surface-200)] text-muted'
+                  }`}
+                  data-testid={`context-health-warning-${warning.category}`}
+                >
+                  <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                  <div>
+                    <span className="font-medium">{warning.message}</span>
+                    {warning.detail && (
+                      <p className="mt-0.5 opacity-80">{warning.detail}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+            {/* No diagnostics warnings / loading state */}
+            {diagLoading && !diag && (
+              <div className="flex items-center gap-2 text-xs text-muted p-2">
+                <Loader2 size={12} className="animate-spin" />
+                Loading diagnostics…
+              </div>
+            )}
+
+            {/* All clear */}
+            {diag && diag.warnings.length === 0 && (
+              <div className="flex items-center gap-2 p-2 rounded border border-emerald-500/20 bg-emerald-500/5 text-xs text-emerald-500">
+                <CheckCircle size={12} className="shrink-0" />
+                <span>All diagnostics clear — no warnings or issues detected.</span>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
