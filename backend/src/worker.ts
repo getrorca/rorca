@@ -64,6 +64,7 @@ import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
 import { validateReusableWorktree } from './lib/worktree-freshness';
+import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -85,6 +86,13 @@ function findTsxBin(): string {
     `tsx binary not found at ${local} and not in PATH. ` +
     `Run 'cd backend && npm install' to install devDependencies.`
   );
+}
+
+function resolveExecutionEngineLauncher(entrypoint: { path: string; extension: '.js' | '.ts' }): { bin: string; args: string[] } {
+  if (entrypoint.extension === '.js') {
+    return { bin: process.execPath, args: [entrypoint.path] };
+  }
+  return { bin: findTsxBin(), args: [entrypoint.path] };
 }
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
@@ -873,12 +881,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     // 3. Build engine args
-    const executionEngineTs = path.join(__dirname, 'lib', 'execution-engine.ts');
-    const tsxBin = findTsxBin();
+    const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(__dirname);
+    if (!executionEngineEntrypoint.exists) {
+      throw new Error('No execution engine found — expected execution-engine.js or execution-engine.ts');
+    }
+    const engineLauncher = resolveExecutionEngineLauncher(executionEngineEntrypoint);
     const backendPort = process.env.PORT ?? '3030';
 
     const engineArgs = [
-      executionEngineTs,
+      ...engineLauncher.args,
       '--json', path.join(workspacePath, specPath),
       '--cwd', cwd,
       '--run-id', String(runId),
@@ -935,9 +946,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       RORCA_TERMINAL_MODE: terminalMode,
     };
 
-    logger.info({ runId, agent, model, cwd }, '[worker] Spawning execution-engine.ts');
+    logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Spawning execution-engine');
 
-    const child = spawn(tsxBin, engineArgs, {
+    const child = spawn(engineLauncher.bin, engineArgs, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env,
@@ -1382,8 +1393,11 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     });
 
     // 4. Build execution-engine args with the temp retry spec
-    const executionEngineTs = path.join(__dirname, 'lib', 'execution-engine.ts');
-    const tsxBin = findTsxBin();
+    const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(__dirname);
+    if (!executionEngineEntrypoint.exists) {
+      throw new Error('No execution engine found — expected execution-engine.js or execution-engine.ts');
+    }
+    const engineLauncher = resolveExecutionEngineLauncher(executionEngineEntrypoint);
     const backendPort = process.env.PORT ?? '3030';
 
     // Verify the temp retry spec file still exists (route handler should have written it)
@@ -1398,7 +1412,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
 
     const engineArgs = [
-      executionEngineTs,
+      ...engineLauncher.args,
       '--json', retrySpecPath,
       '--cwd', cwd,
       '--run-id', String(runId),
@@ -1425,9 +1439,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       RORCA_TERMINAL_MODE: terminalMode ?? 'ansi-html',
     };
 
-    logger.info({ runId, agent, model, cwd }, '[worker] Spawning execution-engine.ts for retry');
+    logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Spawning execution-engine for retry');
 
-    const child = spawn(tsxBin, engineArgs, {
+    const child = spawn(engineLauncher.bin, engineArgs, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env,

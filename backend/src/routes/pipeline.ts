@@ -70,6 +70,7 @@ import {
 import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
 import { createRunnerJob } from '../lib/execution-runner-jobs';
+import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -1624,14 +1625,14 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
     }
 
-    const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
+    const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(path.join(__dirname, '..'));
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const hasExecutionEngine = fs.existsSync(executionEngineTs);
+    const hasExecutionEngine = executionEngineEntrypoint.exists;
     const hasBashRunLoop = fs.existsSync(runLoopSh);
     const useExecutionEngine = hasExecutionEngine;
 
     if (!hasExecutionEngine && !hasBashRunLoop) {
-      throw new UnprocessableError(`No execution engine found — execution-engine.ts is missing`);
+      throw new UnprocessableError(`No execution engine found — expected execution-engine.js or execution-engine.ts`);
       return;
     }
 
