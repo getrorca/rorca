@@ -1,0 +1,17 @@
+{"type":"node","path":"cmd/server/main.go","role":"entrypoint","language":"go","contentHash":"abc123"}
+{"type":"node","path":"pkg/handlers/http.go","role":"source","language":"go","contentHash":"def456"}
+{"type":"node","path":"pkg/middleware/auth.go","role":"source","language":"go","contentHash":"ghi789"}
+{"type":"node","path":"pkg/models/user.go","role":"source","language":"go","contentHash":"jkl012"}
+{"type":"node","path":"internal/db/postgres.go","role":"source","language":"go","contentHash":"mno345"}
+{"type":"node","path":"src/server.py","role":"entrypoint","language":"python","contentHash":"pqr678"}
+{"type":"node","path":"src/utils/helpers.py","role":"source","language":"python","contentHash":"stu901"}
+{"type":"node","path":"src/models/base.py","role":"source","language":"python","contentHash":"vwx234"}
+{"type":"node","path":"src/services/auth_service.py","role":"source","language":"python","contentHash":"yz5678"}
+{"type":"edge","from":"cmd/server/main.go","to":"pkg/handlers/http.go","relation":"imports","weight":1}
+{"type":"edge","from":"cmd/server/main.go","to":"pkg/middleware/auth.go","relation":"imports","weight":1}
+{"type":"edge","from":"pkg/handlers/http.go","to":"pkg/models/user.go","relation":"imports","weight":1}
+{"type":"edge","from":"pkg/handlers/http.go","to":"internal/db/postgres.go","relation":"imports","weight":1}
+{"type":"edge","from":"src/server.py","to":"src/utils/helpers.py","relation":"imports","weight":1}
+{"type":"edge","from":"src/server.py","to":"src/models/base.py","relation":"imports","weight":1}
+{"type":"edge","from":"src/server.py","to":"src/services/auth_service.py","relation":"imports","weight":1}
+{"type":"edge","from":"src/services/auth_service.py","to":"src/models/base.py","relation":"imports","weight":1}
