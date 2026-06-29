@@ -32,6 +32,8 @@ import { estimateTokens } from '../lib/context-router';
 import { retrieveSeeds } from '../lib/memory-seed-retrieval';
 import { detectHydrationStaleness } from '../lib/hydration-staleness';
 import { persistRetrievalTrace } from '../lib/retrieval-trace';
+import { invalidateOnStaleness } from '../lib/context-cache';
+import { clampRetrievalLimits, getContextLimits, buildContextCacheKey } from '../lib/context-limits';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -480,7 +482,18 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
       throw new NotFoundError('Workspace not found');
     }
 
-    const maxTokens = budget ?? 32000;
+    // Clamp the requested token budget to the absolute retrieval ceiling
+    // (US-039) so a single request on a large external repo cannot demand an
+    // unbounded selection. Clamped fields are reported for honest UX.
+    const limits = getContextLimits();
+    const clampedLimits = clampRetrievalLimits({ maxTokens: budget ?? 32000 }, limits);
+    const maxTokens = clampedLimits.maxTokens;
+    if (clampedLimits.clamped.length > 0) {
+      logger.info(
+        { workspaceId, requested: budget, maxTokens, clamped: clampedLimits.clamped },
+        '[context/retrieve] retrieval limits clamped to ceiling',
+      );
+    }
     const includeGraphFlag = includeGraph ?? true;
 
     // ── Hydration Staleness Check ──────────────────────────────────────
@@ -489,6 +502,11 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
       hydrationFreshness.status === 'stale' ||
       hydrationFreshness.status === 'dirty' ||
       hydrationFreshness.status === 'missing';
+
+    // Evict any workspace context cached against a different git SHA so stale
+    // hydration can never serve a divergent commit's context (US-039 cache
+    // invalidation keyed by git SHA).
+    invalidateOnStaleness(workspaceId, hydrationFreshness.currentHead, hydrationFreshness.hydratedSha);
 
     // If freshness policy forbids stale data, reject early
     if (freshness && freshness.allowStale === false && staleHydration) {
@@ -537,6 +555,26 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
     const briefHash = crypto.createHash('sha256').update(brief).digest('hex').slice(0, 16);
     const traceId = `ctx-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
 
+    // ── Composite Cache Key (US-039) ──────────────────────────────────
+    // Unique per workspace + git SHA + brief + retrieval policy. Persisted as
+    // the trace `policy` so divergent commits/policies are never conflated.
+    const retrievalPolicy = {
+      maxTokens,
+      includeGraph: includeGraphFlag,
+      maxCandidates: limits.maxCandidates,
+      maxFiles: limits.maxFiles,
+      maxDepth: limits.maxTraversalDepth,
+      maxExcerpts: limits.maxExcerpts,
+      allowStale: freshness?.allowStale ?? true,
+    };
+    const cacheKey = buildContextCacheKey({
+      namespace: 'retrieve',
+      workspaceId,
+      gitSha: hydrationFreshness.currentHead,
+      briefHash,
+      policy: retrievalPolicy,
+    });
+
     // ── Degradation Flags ─────────────────────────────────────────────
     const degradationFlags = {
       graphDegraded: includeGraphFlag && retrieved.meta.graphHits === 0,
@@ -566,6 +604,7 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
       workspaceId,
       briefHash,
       gitSha: hydrationFreshness.currentHead ?? undefined,
+      policy: cacheKey,
       graphMode: includeGraphFlag ? (degradationFlags.graphLite ? 'lite' : 'full') : 'disabled',
       degraded: degradationFlags.staleHydration || degradationFlags.noSeeds || degradationFlags.graphDegraded,
       candidates: [],
@@ -605,6 +644,8 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
         graphHits: retrieved.meta.graphHits,
         needsMoreEvidence: retrieved.meta.needsMoreEvidence ?? false,
         matchedSkills: retrieved.meta.matchedSkills ?? [],
+        cacheKey,
+        limitsClamped: clampedLimits.clamped,
       },
     });
   } catch (err) {

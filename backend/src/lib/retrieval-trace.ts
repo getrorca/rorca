@@ -24,6 +24,12 @@ import { execute, query, queryOne } from '../db';
 import { logger } from './logger';
 import { NotFoundError, ValidationError } from './errors';
 import { retrievalTrace, type RetrievalTrace, type RetrievalCandidate } from './retrieval-contracts';
+import {
+  getContextLimits,
+  assertPayloadWithinCap,
+  assertCandidateWithinCap,
+  byteLength,
+} from './context-limits';
 
 // ════════════════════════════════════════════════════════════════════════════
 // Redaction constants
@@ -155,6 +161,22 @@ export async function persistRetrievalTrace(input: PersistRetrievalTraceInput): 
   const redacted = redactRetrievalTrace(parsed.data);
   const candidateCount = redacted.candidates.length;
 
+  // Enforce payload caps with actionable errors (US-039). Redaction already
+  // bounds candidate count and per-field length; here we additionally guard the
+  // per-candidate and whole-trace serialized byte sizes so a pathological large
+  // external repo cannot persist an unbounded JSONB blob.
+  const limits = getContextLimits();
+  for (const candidate of redacted.candidates) {
+    assertCandidateWithinCap(candidate, candidate.ref || candidate.id || 'unknown', limits);
+  }
+  const serialized = JSON.stringify(redacted);
+  assertPayloadWithinCap(
+    byteLength(serialized),
+    limits.maxTracePayloadBytes,
+    'Retrieval trace',
+    'Lower the candidate count or excerpt sizes (RORCA_RETRIEVAL_MAX_CANDIDATES / RORCA_TRACE_MAX_PAYLOAD_BYTES) and retry.',
+  );
+
   // Count selected candidates (those with a non-drop decision).
   // The retrievalTrace contract doesn't have a dedicated "selected" field per candidate,
   // so we count all candidates — in practice the trace captures the full candidate set
@@ -202,7 +224,7 @@ export async function persistRetrievalTrace(input: PersistRetrievalTraceInput): 
         candidateCount,
         selectedCount,
         redacted.tokenEstimate ?? null,
-        JSON.stringify(redacted),
+        serialized,
         redacted.createdAt,
       ],
     );

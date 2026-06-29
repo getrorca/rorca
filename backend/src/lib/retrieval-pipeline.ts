@@ -13,6 +13,7 @@ import {
   normalizeGraphFilePath,
 } from './knowledge-graph';
 import { logger } from './logger';
+import { getContextLimits, capCandidates } from './context-limits';
 import type { MemoryOntologyRelation, MemoryOntologyRelationType } from './memory-ontology';
 import type { RetrievalGuardrailsConfig } from './rorca-config';
 
@@ -1837,6 +1838,23 @@ export function rankRetrievalCandidates(input: {
   evaluationTimestamp?: string;
   guardrails?: Partial<RetrievalGuardrailsConfig>;
 }): RankRetrievalCandidatesResult {
+  const limits = getContextLimits();
+  // Hard-cap the candidate set before any O(n²) ranking work (US-039). A large
+  // external repo can produce tens of thousands of candidates; the MMR/diversity
+  // pass is quadratic, so an unbounded set would blow latency and memory. Excess
+  // candidates are dropped (lowest-priority tail) and the truncation is logged.
+  const capped = capCandidates(input.candidates, limits);
+  if (capped.droppedCount > 0) {
+    logger.warn(
+      { workspaceId: input.workspaceId, kept: capped.kept.length, dropped: capped.droppedCount, cap: limits.maxCandidates },
+      '[retrieval-pipeline] candidate set exceeded cap — truncated before ranking',
+    );
+  }
+  const candidatePool = capped.kept;
+  // Clamp the token budget to the absolute retrieval ceiling so a caller cannot
+  // request an unbounded selection on a huge repo.
+  const tokenBudget = Math.min(input.tokenBudget, limits.maxRetrievalTokens);
+
   const predictedPaths = input.predictedPaths ?? [];
   const predictedFileKeys = canonicalFileKeys(input.workspaceId, predictedPaths);
   const historicalUsefulness = input.historicalUsefulness ?? new Map<string, number>();
@@ -1846,9 +1864,9 @@ export function rankRetrievalCandidates(input: {
   const matchedSkills = matchSkillsToQuery(input.queryText, input.skills, predictedPaths);
   const contradictions: Array<[string, string]> = [];
   const guardrails = resolveGuardrailsConfig(input.guardrails);
-  const referenceTimestamp = inferReferenceTimestamp(input.evaluationTimestamp, input.candidates);
+  const referenceTimestamp = inferReferenceTimestamp(input.evaluationTimestamp, candidatePool);
 
-  const enriched: RankedRetrievalCandidate[] = input.candidates.map((candidate) => {
+  const enriched: RankedRetrievalCandidate[] = candidatePool.map((candidate) => {
     const invalidCanonicalKey = `invalid:memory:${input.workspaceId}::${candidate.id || 'missing-id'}`;
     const canonicalKey = resolveCanonicalKey(candidate, input.workspaceId) ?? invalidCanonicalKey;
     const relatedFileKeys = resolveRelatedFileKeys(candidate, input.workspaceId);
@@ -2157,7 +2175,7 @@ export function rankRetrievalCandidates(input: {
       continue;
     }
 
-    if (tokensUsed + candidate.tokenCount > input.tokenBudget) {
+    if (tokensUsed + candidate.tokenCount > tokenBudget) {
       candidate.decision = 'drop';
       candidate.reasons.push('Dropped for token budget');
       continue;

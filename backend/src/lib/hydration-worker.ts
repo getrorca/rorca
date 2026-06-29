@@ -36,6 +36,7 @@ import type { HiloConfig } from './hilo-config';
 import { loadHiloConfig } from './hilo-config';
 import { detectHilo } from './hilo-detector';
 import { runHiloHydration } from './hilo-hydration-runner';
+import { hydrationConcurrency } from './context-limits';
 import {
   getHydrationById,
   getLatestHydration,
@@ -215,10 +216,16 @@ async function handleHydrationJob(jobs: PgBoss.Job<unknown>[]): Promise<void> {
       '[hydration-worker] starting Hilo hydration',
     );
 
-    const result = await runHiloHydration({
-      hydration,
-      config: hiloConfig,
-    });
+    // Bound hydration concurrency globally and per-workspace (US-039). Large
+    // external repos can fan out heavy hydrations; the gate caps how many run
+    // at once and sheds excess work with TooManyRequestsError rather than
+    // exhausting memory/CPU. Per-workspace cap also reinforces coalescing.
+    const result = await hydrationConcurrency().run(hydration.workspaceId, () =>
+      runHiloHydration({
+        hydration,
+        config: hiloConfig,
+      }),
+    );
 
     // 8. Coalescing guard (post-execution): if a newer hydration row appeared
     //    while we were running, mark this row as cancelled (superseded).
