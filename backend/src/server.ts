@@ -111,6 +111,7 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
+import executionEnvironmentsRouter from './routes/execution-environments';
 import { initBoss } from './lib/pg-boss';
 import {
   ensureMcpToken,
@@ -370,6 +371,7 @@ app.use('/api/specs', specReviewRouter);
 app.use('/api/wal', walRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/pipeline', pipelineRouter);
+app.use('/api/execution-environments', executionEnvironmentsRouter);
 app.use('/api/pipeline/hooks', hooksRouter);
 app.use('/api/pipeline/schedules', schedulesRouter);
 app.use('/api/worktrees', worktreesRouter);

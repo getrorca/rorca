@@ -67,6 +67,10 @@ import {
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
+import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
+import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
+import { createRunnerJob } from '../lib/execution-runner-jobs';
+import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -1233,6 +1237,11 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                 nullable: true
  *                 default: ansi-html
  *                 description: "Run-level terminal renderer mode. null/missing resolves to ansi-html for backward compatibility."
+ *               executionEnvironment:
+ *                 type: string
+ *                 enum: [remote-rorca, local-user]
+ *                 default: remote-rorca
+ *                 description: "Where the implementation engine executes. local-user requires a configured local execution bridge and fails closed otherwise."
  *     responses:
  *       200:
  *         description: Pipeline started or conflict detected
@@ -1279,11 +1288,12 @@ const PipelineTriggerSchema = z.object({
   overrideReadinessGate: z.boolean().optional(),
   terminal_mode: z.string().nullable().optional(),
   terminalMode: z.string().nullable().optional(),
+  executionEnvironment: z.enum(['remote-rorca', 'local-user']).optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, executionEnvironment } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1296,6 +1306,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
     assertTerminalModeAvailable(resolvedTerminalMode);
+    const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
+    await assertExecutionEnvironmentReady(resolvedExecutionEnvironment);
 
     // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
 
@@ -1320,7 +1332,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
         : undefined;
       const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
-      res.json({ dryRun: true, estimate });
+      res.json({
+        dryRun: true,
+        executionEnvironment: resolvedExecutionEnvironment.effective,
+        terminalMode: resolvedTerminalMode,
+        terminal_mode: resolvedTerminalMode,
+        estimate,
+      });
       return;
     }
 
@@ -1430,7 +1448,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
-    if (resolvedAgentType === 'claude') {
+    if (resolvedExecutionEnvironment.effective === 'remote-rorca' && resolvedAgentType === 'claude') {
       const { getClaudeAuthState } = await import('../lib/claude-auth');
       const authState = getClaudeAuthState();
       if (!authState.connected) {
@@ -1440,7 +1458,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // OC-026: Block pipeline trigger if Codex is selected but not authenticated
-    if (resolvedAgentType === 'codex') {
+    if (resolvedExecutionEnvironment.effective === 'remote-rorca' && resolvedAgentType === 'codex') {
       const { getCodexAuthState } = await import('../lib/codex-auth');
       const authState = getCodexAuthState();
       if (!authState.connected) {
@@ -1450,18 +1468,20 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // OC-029: Scan per-story agent assignments and validate ALL required engines
+    const requiredEnginesForRun = new Set<AgentType>([resolvedAgentType]);
     const absSpecPathForScan = path.join(workspace.path, specPath);
     if (fs.existsSync(absSpecPathForScan)) {
       try {
         const specJsonForScan = JSON.parse(fs.readFileSync(absSpecPathForScan, 'utf8'));
         const specStories = (specJsonForScan.userStories ?? []) as EngineUserStory[];
         const requiredEngines = scanRequiredEngines(specStories, resolvedAgentType);
+        for (const engine of requiredEngines) requiredEnginesForRun.add(engine as AgentType);
         const engineCounts = countStoriesByEngine(specStories, resolvedAgentType);
 
         // Validate each required engine is authenticated
         const authErrors: string[] = [];
 
-        if (requiredEngines.has('claude')) {
+        if (resolvedExecutionEnvironment.effective === 'remote-rorca' && requiredEngines.has('claude')) {
           const { getClaudeAuthState } = await import('../lib/claude-auth');
           const authState = getClaudeAuthState();
           if (!authState.connected) {
@@ -1470,7 +1490,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           }
         }
 
-        if (requiredEngines.has('codex')) {
+        if (resolvedExecutionEnvironment.effective === 'remote-rorca' && requiredEngines.has('codex')) {
           const { getCodexAuthState } = await import('../lib/codex-auth');
           const authState = getCodexAuthState();
           if (!authState.connected) {
@@ -1479,7 +1499,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           }
         }
 
-        if (requiredEngines.has('opencode')) {
+        if (resolvedExecutionEnvironment.effective === 'remote-rorca' && requiredEngines.has('opencode')) {
           const { detectOpenCode } = await import('../lib/opencode-detector');
           const ocStatus = detectOpenCode();
           if (!ocStatus.opencodeInstalled) {
@@ -1495,6 +1515,15 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       } catch {
         // Spec parse error — non-fatal for auth scanning, let the trigger proceed
       }
+    }
+
+    for (const requiredAgent of requiredEnginesForRun) {
+      const executionReadiness = await assertExecutionEnvironmentReadyForRun({
+        environmentId: resolvedExecutionEnvironment.effective,
+        workspaceId,
+        agent: requiredAgent,
+      });
+      (req as any)._executionReadiness = executionReadiness;
     }
 
     // OC-031: Tool capability check — detect stories requiring tools the engine doesn't support
@@ -1596,14 +1625,14 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
     }
 
-    const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
+    const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(path.join(__dirname, '..'));
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const hasExecutionEngine = fs.existsSync(executionEngineTs);
+    const hasExecutionEngine = executionEngineEntrypoint.exists;
     const hasBashRunLoop = fs.existsSync(runLoopSh);
     const useExecutionEngine = hasExecutionEngine;
 
     if (!hasExecutionEngine && !hasBashRunLoop) {
-      throw new UnprocessableError(`No execution engine found — execution-engine.ts is missing`);
+      throw new UnprocessableError(`No execution engine found — expected execution-engine.js or execution-engine.ts`);
       return;
     }
 
@@ -1628,8 +1657,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode]);
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
@@ -1640,6 +1669,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           queuePosition: position,
           terminalMode: resolvedTerminalMode,
           terminal_mode: resolvedTerminalMode,
+          executionEnvironment: resolvedExecutionEnvironment.effective,
           ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
           ...(executionReadiness ? { executionReadiness } : {}),
           ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
@@ -1701,6 +1731,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           spec_id: specId,
           workspace_id: workspaceId,
           model: finalAgentModel ?? null,
+          execution_environment: resolvedExecutionEnvironment.effective,
         })],
       );
 
@@ -1711,6 +1742,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         status: 'pi_native',
         terminalMode: resolvedTerminalMode,
         terminal_mode: resolvedTerminalMode,
+        executionEnvironment: resolvedExecutionEnvironment.effective,
         expectsExternalOrchestration: true,
         specReadiness: (req as any)._specReadiness,
       });
@@ -1842,10 +1874,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy, resolvedTerminalMode]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective]);
       runId = runResult!.id;
     }
 
@@ -2007,6 +2039,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       worktreePath: worktreePath ?? null,
       branchName: branchName ?? null,
       terminalMode: resolvedTerminalMode,
+      executionEnvironment: resolvedExecutionEnvironment.effective,
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
@@ -2022,12 +2055,23 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
     };
 
-    await getBoss().send('pipeline:run', jobPayload, {
-      retryLimit: 0,
-      expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
-    });
+    let runnerJobId: string | undefined;
+    if (resolvedExecutionEnvironment.effective === 'local-user') {
+      const runnerJob = await createRunnerJob({
+        runId,
+        environmentId: resolvedExecutionEnvironment.effective,
+        payload: jobPayload,
+      });
+      runnerJobId = runnerJob.id;
+      logger.info(`[Pipeline] Enqueued local runner job for runId=${runId}`);
+    } else {
+      await getBoss().send('pipeline:run', jobPayload, {
+        retryLimit: 0,
+        expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
+      });
 
-    logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
+      logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
+    }
 
     // Determine queue position for response (count jobs queued before this one)
     const queuePos = (await queryOne<{ count: string }>(
@@ -2052,6 +2096,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       agentModel: finalAgentModel,
       terminalMode: resolvedTerminalMode,
       terminal_mode: resolvedTerminalMode,
+      executionEnvironment: resolvedExecutionEnvironment.effective,
+      ...(runnerJobId ? { runnerJobId } : {}),
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),

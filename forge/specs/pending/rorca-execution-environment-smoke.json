@@ -1,0 +1,29 @@
+{
+  "title": "Rorca Execution Environment Smoke Test",
+  "generatedAt": "2026-06-27T00:00:00.000Z",
+  "model": "claude-sonnet-4-5",
+  "agentOverride": "claude",
+  "autoWorktree": true,
+  "mergeStrategy": "branch-only",
+  "userStories": [
+    {
+      "id": "SMOKE-001",
+      "title": "Verify selected execution environment can perform a no-op repository-safe change",
+      "description": "Perform a minimal non-destructive smoke validation of the selected Rorca execution environment. The runner should inspect the repository, create or update only a smoke evidence file under .rorca/smoke/, and run a lightweight validation command. Do not modify product code, secrets, deployment configuration, database migrations, or remote services.",
+      "acceptanceCriteria": [
+        "The selected execution environment starts the configured agent without authentication or binary errors.",
+        "The agent writes a timestamped smoke evidence markdown file under .rorca/smoke/.",
+        "The evidence file records the environment name, agent name, current git branch, and validation command used.",
+        "No product source files, migrations, secrets, deployment files, or workspace configuration are changed.",
+        "A lightweight validation command such as git status --short completes successfully."
+      ],
+      "dependsOn": [],
+      "files": [
+        ".rorca/smoke/"
+      ],
+      "passes": false,
+      "excluded": false,
+      "notes": "Use this only after execution environment readiness and credentials are configured. This is the first gated smoke before real Hermes specs."
+    }
+  ]
+}
