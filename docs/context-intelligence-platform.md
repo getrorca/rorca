@@ -296,6 +296,9 @@ be staffed in parallel with the critical path from Wave 2 onward.
 
 ## 9. Related Docs
 
+- `docs/context-intelligence-operator-guide.md` — operator/security guide (US-041): Hilo setup & fork
+  strategy, hydration, preview, grounded spec creation, the `rorca-capture` sidecar (ingest/queue/hooks/
+  daemon), candidate review, redaction/ignores/limits, and troubleshooting.
 - `docs/context-injection.md` — how context layers are injected into each story subprocess today.
 - `docs/graph-rag-deep-dive.md` — current memory/RAG/graph stack and its known gaps (the motivation).
 - `docs/alexis-hermes-integration-addendum.md` — Hermes is a distribution channel (excluded here, §4).
