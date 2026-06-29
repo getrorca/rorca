@@ -950,18 +950,23 @@ const ExplicitDraftContextUsedSchema = z.object({
   meta: z.record(z.string(), z.unknown()),
 });
 
+const ExplicitDraftDirectionLayersSchema = z.object({
+  l1: z.boolean().default(false),
+  l2: z.object({
+    present: z.boolean().default(false),
+    domain: z.string().nullable().default(null),
+  }).passthrough().default({ present: false, domain: null }),
+  l3: z.boolean().default(false),
+  l1Title: z.string().nullable().optional(),
+  l2Title: z.string().nullable().optional(),
+  l3Title: z.string().nullable().optional(),
+  l1Tokens: z.number().nonnegative().optional(),
+  l2Tokens: z.number().nonnegative().optional(),
+  l3Tokens: z.number().nonnegative().optional(),
+}).passthrough();
+
 const ExplicitDraftContextSummarySchema = z.object({
-  directionLayers: z.object({
-    l1: z.boolean(),
-    l2: z.object({ present: z.boolean(), domain: z.string().nullable() }).passthrough(),
-    l3: z.boolean(),
-    l1Title: z.string().nullable().optional(),
-    l2Title: z.string().nullable().optional(),
-    l3Title: z.string().nullable().optional(),
-    l1Tokens: z.number().nonnegative().optional(),
-    l2Tokens: z.number().nonnegative().optional(),
-    l3Tokens: z.number().nonnegative().optional(),
-  }).passthrough().optional(),
+  directionLayers: ExplicitDraftDirectionLayersSchema.optional(),
   skills: z.array(z.string()).optional(),
   memoryEntries: z.number().int().nonnegative().optional(),
   agentsMd: z.boolean().optional(),
@@ -2416,6 +2421,50 @@ async function executeSkillFirstForge(options: ExecuteSkillFirstForgeOptions): P
  *           schema:
  *             type: object
  *             required: [workspaceId, brief]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to build the context bundle for
+ *               brief:
+ *                 type: string
+ *                 description: Plain-English description of the feature to draft
+ *               specBrief:
+ *                 type: string
+ *                 description: Alias for brief
+ *               title:
+ *                 type: string
+ *                 description: Optional spec title/slug seed
+ *               specName:
+ *                 type: string
+ *                 description: Alias for title
+ *               domain:
+ *                 type: string
+ *               diagramTypes:
+ *                 type: array
+ *                 items: { type: string }
+ *               storyAnnotations:
+ *                 type: object
+ *                 additionalProperties: true
+ *               templateId:
+ *                 type: string
+ *               storyCount:
+ *                 type: integer
+ *                 description: Target number of user stories for the caller-side draft
+ *               model:
+ *                 type: string
+ *                 description: Model override used for prompt sizing/context metadata
+ *               agentOverride:
+ *                 type: string
+ *                 enum: [claude, opencode, codex, pi]
+ *               storyPrefix:
+ *                 type: string
+ *               thinkingEnabled:
+ *                 type: boolean
+ *               thinkingBudget:
+ *                 type: integer
+ *               reasoning:
+ *                 type: object
+ *                 additionalProperties: true
  *     responses:
  *       200: { description: Forge context bundle }
  */
@@ -2489,6 +2538,51 @@ router.post('/generation-context', validateBody(SkillFirstForgeSchema), async (r
  *           schema:
  *             type: object
  *             required: [workspaceId, brief]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to run forge for
+ *               brief:
+ *                 type: string
+ *                 description: Plain-English description of the feature to draft
+ *               specBrief:
+ *                 type: string
+ *                 description: Alias for brief
+ *               title:
+ *                 type: string
+ *                 description: Optional spec title/slug seed
+ *               specName:
+ *                 type: string
+ *                 description: Alias for title
+ *               domain:
+ *                 type: string
+ *               diagramTypes:
+ *                 type: array
+ *                 items: { type: string }
+ *               storyAnnotations:
+ *                 type: object
+ *                 additionalProperties: true
+ *               templateId:
+ *                 type: string
+ *               storyCount:
+ *                 type: integer
+ *               model:
+ *                 type: string
+ *               agentOverride:
+ *                 type: string
+ *                 enum: [claude, opencode, codex, pi]
+ *               storyPrefix:
+ *                 type: string
+ *               thinkingEnabled:
+ *                 type: boolean
+ *               thinkingBudget:
+ *                 type: integer
+ *               reasoning:
+ *                 type: object
+ *                 additionalProperties: true
+ *               postSave:
+ *                 type: object
+ *                 additionalProperties: true
  *     responses:
  *       200: { description: Saved spec result }
  */

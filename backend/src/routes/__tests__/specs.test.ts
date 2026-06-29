@@ -1058,6 +1058,41 @@ describe('POST /api/specs/persist', () => {
     });
   });
 
+  test('normalizes caller contextSummary directionLayers when l2 is omitted', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Missing L2 Context Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        contextSummary: {
+          directionLayers: {
+            l1: true,
+            l3: true,
+          },
+          memoryEntries: 0,
+        },
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.contextSummary.directionLayers).toEqual({
+      l1: true,
+      l2: { present: false, domain: null },
+      l3: true,
+    });
+
+    const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'missing-l2-context-draft.json'), 'utf8'));
+    expect(saved.contextSummary.directionLayers).toEqual({
+      l1: true,
+      l2: { present: false, domain: null },
+      l3: true,
+    });
+  });
+
   test('enqueues persist post-save enrich durably and defers match-skills until enrich finishes', async () => {
     mockBossSend
       .mockResolvedValueOnce('22222222-2222-4222-8222-222222222222')
