@@ -273,7 +273,20 @@ describe('hilo — graph-only constraint (no FUSE / xattr / inotify)', () => {
       .join('\n')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/(^|[^:])\/\/.*$/gm, '$1');
-    for (const forbidden of [/\bfuse\b/i, /xattr/i, /inotify/i, /chokidar/i, /fs\.watch\b/i, /\.watch\(/]) {
+    // User-facing help strings (HILO_SETUP_GUIDANCE) document the *absence* of
+    // FUSE/xattr/inotify; that prose lives in string literals, so blank out
+    // string contents before the bare-word architectural checks to avoid a
+    // false positive on documentation that affirms the constraint.
+    const codeNoStrings = code
+      .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+      .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+      .replace(/`(?:[^`\\]|\\.)*`/g, '``');
+    for (const forbidden of [/\bfuse\b/i, /xattr/i, /inotify/i]) {
+      expect(codeNoStrings).not.toMatch(forbidden);
+    }
+    // Dependency / call patterns: check against code (string literals retained)
+    // since module imports name the package as a string and watcher usage is a call.
+    for (const forbidden of [/chokidar/i, /fs\.watch\b/i, /\.watch\(/]) {
       expect(code).not.toMatch(forbidden);
     }
   });

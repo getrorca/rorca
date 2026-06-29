@@ -47,17 +47,19 @@ const router = Router();
 
 const MemoryCandidateSchema = z.object({
   workspace_id: z.string().min(1).max(255),
-  source_system: z.string().min(1).max(255),
-  category: z.string().min(1).max(255),
-  title: z.string().min(1).max(1000),
-  rule: z.string().min(1),
+  // trim() so whitespace-only values are rejected at the boundary (422) to match
+  // the DB CHECK constraints (length(btrim(...)) > 0) rather than 500ing.
+  source_system: z.string().trim().min(1).max(255),
+  category: z.string().trim().min(1).max(255),
+  title: z.string().trim().min(1).max(1000),
+  rule: z.string().trim().min(1),
   context: z.string().max(5000).optional(),
   related_files: z.array(z.string()).default([]),
   confidence: z.enum(['high', 'medium', 'low']).default('medium'),
   trust_tier: z.enum(['authoritative', 'trusted', 'community', 'unverified']).default('unverified'),
   source_ref: z.string().max(1000).optional(),
   context_event_id: z.number().int().positive().optional(),
-  idempotency_key: z.string().min(1).max(500),
+  idempotency_key: z.string().trim().min(1).max(500),
   schema_version: z.number().int().positive().default(1),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
@@ -122,7 +124,7 @@ interface MemoryCandidateRow {
   updated_at: string;
 }
 
-async function persistCandidate(input: MemoryCandidateInput): Promise<MemoryCandidateRow> {
+async function persistCandidate(input: MemoryCandidateInput): Promise<{ row: MemoryCandidateRow; created: boolean }> {
   // Sanitize string fields that may contain secrets
   const { redacted: sanitizedRule } = redactSecrets(input.rule);
   const sanitizedContext = input.context ? redactSecrets(input.context).redacted : null;
@@ -164,7 +166,7 @@ async function persistCandidate(input: MemoryCandidateInput): Promise<MemoryCand
     if (!existing) {
       throw new Error('Idempotency conflict but record not found — this is a bug');
     }
-    return existing;
+    return { row: existing, created: false };
   }
 
   // Fetch the newly inserted row
@@ -176,7 +178,7 @@ async function persistCandidate(input: MemoryCandidateInput): Promise<MemoryCand
   if (!created) {
     throw new Error('Insert succeeded but record not found — this is a bug');
   }
-  return created;
+  return { row: created, created: true };
 }
 
 // ── POST /api/candidates ────────────────────────────────────────────────────
@@ -302,15 +304,13 @@ router.post('/', validateBody(MemoryCandidateSchema), async (req: Request, res: 
       await assertContextEventExists(input.context_event_id, input.workspace_id);
     }
 
-    // Persist with idempotency
-    const row = await persistCandidate(input);
+    // Persist with idempotency. persistCandidate reports whether the row was
+    // newly inserted (201) or returned on an idempotency hit (200); this is
+    // authoritative, unlike a created_at/updated_at timestamp heuristic which
+    // misfires when a duplicate arrives within the same second.
+    const { row, created } = await persistCandidate(input);
 
-    // Determine status: 201 if new (created_at ≈ updated_at), 200 if duplicate
-    const isNew = Math.abs(
-      new Date(row.updated_at).getTime() - new Date(row.created_at).getTime(),
-    ) < 1000;
-
-    res.status(isNew ? 201 : 200).json(row);
+    res.status(created ? 201 : 200).json(row);
   } catch (error) {
     handleRouteError(res, error, '[candidates] ingest');
   }
@@ -752,7 +752,9 @@ router.get('/:id', async (req: Request, res: Response) => {
       );
       if (event) {
         eventProvenance = {
-          id: event.id,
+          // context_events.id is BIGINT (pg returns it as a string); expose it as
+          // a number to match the numeric context_event_id callers link against.
+          id: Number(event.id),
           workspaceId: event.workspace_id,
           sourceSystem: event.source_system,
           sourceRef: event.source_ref,
@@ -816,6 +818,17 @@ const CandidateEditsSchema = z.object({
   related_files: z.array(z.string()).optional(),
   confidence: z.enum(['high', 'medium', 'low']).optional(),
   trust_tier: z.enum(['authoritative', 'trusted', 'community', 'unverified']).optional(),
+});
+
+/**
+ * Approve accepts the editable fields plus review metadata. reviewer/review_note
+ * must be declared here — validateBody replaces req.body with the parsed result,
+ * so any key not in the schema is stripped before resolveReviewer/buildReviewNote
+ * read it (the other review-action routes read the raw, unvalidated body).
+ */
+const CandidateApproveSchema = CandidateEditsSchema.extend({
+  reviewer: z.string().trim().min(1).max(255).optional(),
+  review_note: z.string().max(2000).optional(),
 });
 
 /** Validate a lifecycle transition, returning true if allowed (including idempotent). */
@@ -1019,7 +1032,7 @@ function buildReviewNote(body: Record<string, unknown>, autoPrefix: string): str
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post('/:id/approve', validateBody(CandidateEditsSchema.optional()), async (req: Request, res: Response) => {
+router.post('/:id/approve', validateBody(CandidateApproveSchema.optional()), async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id as string, 10);
     if (isNaN(id) || id <= 0) throw new ValidationError('Candidate ID must be a positive integer');
@@ -1270,8 +1283,10 @@ router.post('/:id/mark-duplicate', async (req: Request, res: Response) => {
     const id = parseInt(req.params.id as string, 10);
     if (isNaN(id) || id <= 0) throw new ValidationError('Candidate ID must be a positive integer');
 
-    const duplicateOf = req.body?.duplicate_of_candidate_id;
-    if (!duplicateOf || !Number.isInteger(duplicateOf) || duplicateOf <= 0) {
+    // Candidate ids are BIGSERIAL and serialize to JSON as strings, so accept the
+    // numeric-string form the API emits as well as a raw number.
+    const duplicateOf = Number(req.body?.duplicate_of_candidate_id);
+    if (!Number.isInteger(duplicateOf) || duplicateOf <= 0) {
       throw new ValidationError('duplicate_of_candidate_id must be a positive integer');
     }
     if (duplicateOf === id) {

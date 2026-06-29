@@ -1707,9 +1707,10 @@ describe('POST /api/specs/persist', () => {
 
     expect(logRes.status).toBe(200);
     const summary = parsePayload(logRes.body.context_summary_json);
-    expect(summary.contextCaptureStatus.status).toBe('provided');
-    expect(summary.contextCaptureStatus.contextUsed).toBe('provided');
-    expect(summary.contextCaptureStatus.contextSummary).toBe('provided');
+    const captureStatus = summary.contextCaptureStatus as Record<string, unknown>;
+    expect(captureStatus.status).toBe('provided');
+    expect(captureStatus.contextUsed).toBe('provided');
+    expect(captureStatus.contextSummary).toBe('provided');
 
     // Composer fields are preserved through to the generation log
     const logContextSummary = summary.contextSummary as Record<string, unknown>;
@@ -1746,10 +1747,11 @@ describe('POST /api/specs/persist', () => {
 
     expect(logRes.status).toBe(200);
     const summary = parsePayload(logRes.body.context_summary_json);
-    expect(summary.contextCaptureStatus.status).toBe('missing');
-    expect(summary.contextCaptureStatus.reason).toBe('caller_context_not_supplied');
-    expect(summary.contextCaptureStatus.contextUsed).toBe('missing');
-    expect(summary.contextCaptureStatus.contextSummary).toBe('missing');
+    const captureStatus = summary.contextCaptureStatus as Record<string, unknown>;
+    expect(captureStatus.status).toBe('missing');
+    expect(captureStatus.reason).toBe('caller_context_not_supplied');
+    expect(captureStatus.contextUsed).toBe('missing');
+    expect(captureStatus.contextSummary).toBe('missing');
     expect(summary.contextSummary).toBeUndefined();
   });
 

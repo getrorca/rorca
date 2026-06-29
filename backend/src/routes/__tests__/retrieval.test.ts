@@ -60,23 +60,13 @@ jest.mock('../../lib/context-cache', () => ({
   cacheStats: jest.fn().mockReturnValue({ hits: 0 }),
 }));
 
-function makeMockPinoLogger() {
-  const logger: any = {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    fatal: jest.fn(),
-    trace: jest.fn(),
-    level: 'info',
-    levels: { values: { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } },
-  };
-  logger.child = jest.fn().mockReturnValue(logger);
-  return logger;
-}
-jest.mock('../../lib/logger', () => ({
-  logger: makeMockPinoLogger(),
-}));
+// Use a real (silent) pino logger so pino-http's response serialization
+// (logger[stringifySym]) works; a hand-rolled fake omits pino's internal
+// symbols and throws on every response finish.
+jest.mock('../../lib/logger', () => {
+  const pino = require('pino');
+  return { logger: pino({ level: 'silent' }) };
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -123,24 +113,12 @@ beforeEach(async () => {
     getRecentMemory: jest.fn().mockResolvedValue([]),
     getInstalledSkills: jest.fn().mockResolvedValue([]),
     cacheStats: jest.fn().mockReturnValue({ hits: 0 }),
+    invalidateOnStaleness: jest.fn().mockReturnValue(false),
   }));
-  function makeMockPinoLogger() {
-    const logger: any = {
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-      fatal: jest.fn(),
-      trace: jest.fn(),
-      level: 'info',
-      levels: { values: { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } },
-    };
-    logger.child = jest.fn().mockReturnValue(logger);
-    return logger;
-  }
-  jest.mock('../../lib/logger', () => ({
-    logger: makeMockPinoLogger(),
-  }));
+  jest.mock('../../lib/logger', () => {
+    const pino = require('pino');
+    return { logger: pino({ level: 'silent' }) };
+  });
 
   process.env.NODE_ENV = 'test';
 

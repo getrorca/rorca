@@ -730,7 +730,7 @@ export default function ContextHealthPanel() {
             )}
 
             {/* All clear */}
-            {diag && diag.warnings.length === 0 && (
+            {diag && (diag.warnings?.length ?? 0) === 0 && (
               <div className="flex items-center gap-2 p-2 rounded border border-emerald-500/20 bg-emerald-500/5 text-xs text-emerald-500">
                 <CheckCircle size={12} className="shrink-0" />
                 <span>All diagnostics clear — no warnings or issues detected.</span>

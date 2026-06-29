@@ -41,6 +41,14 @@ beforeEach(async () => {
      ON CONFLICT (id) DO NOTHING`,
     [testWorkspaceId],
   );
+
+  // Isolate the shared CI workspace: clear rows accumulated by earlier tests
+  // or prior runs (the jest DB teardown is intentionally skipped, so the
+  // candidates/events/memories tables persist across files). Each test creates
+  // the data it needs, so starting from an empty workspace is the contract.
+  await execute(`DELETE FROM memory_candidates WHERE workspace_id = $1`, [testWorkspaceId]);
+  await execute(`DELETE FROM context_events WHERE workspace_id = $1`, [testWorkspaceId]);
+  await execute(`DELETE FROM memories WHERE workspace_id = $1`, [testWorkspaceId]);
 });
 
 afterEach(async () => {
@@ -397,7 +405,6 @@ describe('GET /api/candidates (list)', () => {
         related_files: ['src/routes/candidates.ts'],
         confidence: 'high',
         trust_tier: 'trusted',
-        idempotency_key: key,
         metadata: { test: true },
         ...overrides,
         // Ensure overrides don't override the key
@@ -749,7 +756,6 @@ describe('GET /api/candidates/:id (detail)', () => {
         related_files: ['src/routes/candidates.ts', 'src/lib/paginate.ts'],
         confidence: 'high',
         trust_tier: 'trusted',
-        idempotency_key: key,
         metadata: { source: 'test-suite' },
         ...rawOverrides,
         idempotency_key: key, // ensure override safety
@@ -978,7 +984,6 @@ describe('US-034: Review actions', () => {
         related_files: ['src/foo.ts'],
         confidence: 'high',
         trust_tier: 'trusted',
-        idempotency_key: key,
         ...overrides,
         idempotency_key: key,
       });
@@ -1576,7 +1581,6 @@ describe('US-035: Candidate retrieval gating', () => {
         related_files: ['src/lib/memory-router.ts'],
         confidence: 'high',
         trust_tier: 'trusted',
-        idempotency_key: key,
         ...overrides,
         idempotency_key: key,
       });
@@ -1585,12 +1589,14 @@ describe('US-035: Candidate retrieval gating', () => {
 
   /** Query the memories table for a specific content pattern. */
   async function findMemoryByContent(contentSubstring: string): Promise<{ id: number; content: string } | null> {
-    const row = await queryOne<{ id: number; content: string }>(
+    // queryOne is pulled in via require() above (untyped), so cast the result
+    // instead of passing a type argument (TS2347 on untyped calls).
+    const row = (await queryOne(
       `SELECT id, content FROM memories
        WHERE workspace_id = $1 AND content ILIKE $2 AND deleted_at IS NULL
        LIMIT 1`,
       [testWorkspaceId, `%${contentSubstring}%`],
-    );
+    )) as { id: number; content: string } | undefined;
     return row ?? null;
   }
 

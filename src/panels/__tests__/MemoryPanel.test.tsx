@@ -901,6 +901,9 @@ describe('MemoryPanel', () => {
     caps: { maxFiles: 20, maxMemories: 30, maxEdges: 80 },
     truncation: { filesTruncated: false, memoriesTruncated: false, edgesTruncated: false, totalCandidates: 1, returnedCandidates: 1 },
     fallback: { ageAvailable: true, telemetryAvailable: true, graphPathsAvailable: true, missingReasons: [] },
+    // The /api/spec-relevance-graph/by-spec route always returns a runtime
+    // descriptor (GraphRuntimeDescriptor) that SpecRelevanceGraph reads.
+    runtime: { graphMode: 'full', provider: 'age', ageAvailable: true, hint: '', message: '' },
   };
 
   function mockPanelDataWithSpecGraph(overrides?: {

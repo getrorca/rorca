@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../../test/helpers';
 import ContextHealthPanel from '../ContextHealthPanel';
@@ -198,7 +198,9 @@ describe('ContextHealthPanel', () => {
     renderWithProviders(<ContextHealthPanel />);
 
     const badge = await screen.findByTestId('context-health-state-badge');
-    expect(badge).toHaveTextContent('Ready');
+    // Badge first renders a transient "No data" state before the async hydration
+    // fetch resolves; wait for it to settle on the resolved state.
+    await waitFor(() => expect(badge).toHaveTextContent('Ready'));
     expect(badge.className).toContain('emerald');
 
     // Summary shows freshness as 'Current'.
@@ -213,7 +215,7 @@ describe('ContextHealthPanel', () => {
     renderWithProviders(<ContextHealthPanel />);
 
     const badge = await screen.findByTestId('context-health-state-badge');
-    expect(badge).toHaveTextContent('Stale');
+    await waitFor(() => expect(badge).toHaveTextContent('Stale'));
     expect(badge.className).toContain('amber');
 
     // Expand to see details.
@@ -236,7 +238,7 @@ describe('ContextHealthPanel', () => {
     renderWithProviders(<ContextHealthPanel />);
 
     const badge = await screen.findByTestId('context-health-state-badge');
-    expect(badge).toHaveTextContent('Running');
+    await waitFor(() => expect(badge).toHaveTextContent('Running'));
 
     const trigger = screen.getByTestId('context-health-trigger');
     expect(trigger).toBeDisabled();
@@ -251,7 +253,7 @@ describe('ContextHealthPanel', () => {
     renderWithProviders(<ContextHealthPanel />);
 
     const badge = await screen.findByTestId('context-health-state-badge');
-    expect(badge).toHaveTextContent('Failed');
+    await waitFor(() => expect(badge).toHaveTextContent('Failed'));
     expect(badge.className).toContain('rose');
 
     // Expand to see errors.
@@ -273,7 +275,7 @@ describe('ContextHealthPanel', () => {
     renderWithProviders(<ContextHealthPanel />);
 
     const badge = await screen.findByTestId('context-health-state-badge');
-    expect(badge).toHaveTextContent('No Hilo');
+    await waitFor(() => expect(badge).toHaveTextContent('No Hilo'));
 
     // No trigger button when disabled.
     expect(screen.queryByTestId('context-health-trigger')).toBeNull();
@@ -347,7 +349,9 @@ describe('ContextHealthPanel', () => {
 
     renderWithProviders(<ContextHealthPanel />);
 
-    await screen.findByTestId('context-health-state-badge');
+    const badge = await screen.findByTestId('context-health-state-badge');
+    // Wait for hydration data to resolve so counts are populated.
+    await waitFor(() => expect(badge).toHaveTextContent('Ready'));
 
     const toggle = screen.getByTestId('context-health-expand-toggle');
     await userEvent.click(toggle);

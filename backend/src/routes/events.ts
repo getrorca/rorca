@@ -36,14 +36,16 @@ const router = Router();
 
 const ContextEventSchema = z.object({
   workspace_id: z.string().min(1).max(255),
-  source_system: z.string().min(1).max(255),
-  event_type: z.string().min(1).max(255),
+  // trim() so whitespace-only values are rejected at the boundary (422) to
+  // match the DB CHECK constraints (length(btrim(...)) > 0) rather than 500ing.
+  source_system: z.string().trim().min(1).max(255),
+  event_type: z.string().trim().min(1).max(255),
   occurred_at: z.string().datetime({ message: 'occurred_at must be an ISO 8601 datetime string' }),
   summary: z.string().max(2000).optional(),
   payload: z.record(z.string(), z.unknown()).default({}),
   actor: z.string().max(255).optional(),
   source_ref: z.string().max(1000).optional(),
-  idempotency_key: z.string().min(1).max(500),
+  idempotency_key: z.string().trim().min(1).max(500),
   schema_version: z.number().int().positive().default(1),
 });
 
@@ -79,7 +81,7 @@ interface ContextEventRow {
   updated_at: string;
 }
 
-async function persistEvent(input: ContextEventInput): Promise<ContextEventRow> {
+async function persistEvent(input: ContextEventInput): Promise<{ row: ContextEventRow; created: boolean }> {
   // Sanitize payload before persisting
   const { value: sanitizedPayload } = redactObject(input.payload);
 
@@ -116,7 +118,7 @@ async function persistEvent(input: ContextEventInput): Promise<ContextEventRow> 
     if (!existing) {
       throw new Error('Idempotency conflict but record not found — this is a bug');
     }
-    return existing;
+    return { row: existing, created: false };
   }
 
   // Fetch the newly inserted row (ON CONFLICT DO NOTHING doesn't return it)
@@ -128,7 +130,7 @@ async function persistEvent(input: ContextEventInput): Promise<ContextEventRow> 
   if (!created) {
     throw new Error('Insert succeeded but record not found — this is a bug');
   }
-  return created;
+  return { row: created, created: true };
 }
 
 // ── POST /api/events ────────────────────────────────────────────────────────
@@ -235,15 +237,13 @@ router.post('/', validateBody(ContextEventSchema), async (req: Request, res: Res
     // Validate workspace exists
     await assertWorkspaceExists(input.workspace_id);
 
-    // Persist with idempotency
-    const row = await persistEvent(input);
+    // Persist with idempotency. persistEvent reports whether the row was newly
+    // inserted (201) or an existing record returned on an idempotency hit (200);
+    // this is authoritative, unlike a created_at/updated_at timestamp heuristic
+    // which misfires when a duplicate arrives within the same second.
+    const { row, created } = await persistEvent(input);
 
-    // Determine status: 201 if new (created_at ≈ updated_at), 200 if duplicate
-    const isNew = Math.abs(
-      new Date(row.updated_at).getTime() - new Date(row.created_at).getTime(),
-    ) < 1000;
-
-    res.status(isNew ? 201 : 200).json(row);
+    res.status(created ? 201 : 200).json(row);
   } catch (error) {
     handleRouteError(res, error, '[events] ingest');
   }

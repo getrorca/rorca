@@ -29,7 +29,7 @@ vi.mock('../../contexts/WorkspaceContext', () => ({
 }));
 
 function mockFullContextResponse() {
-  mockApiFetch.mockImplementation((url: string, _opts?: Record<string, unknown>) => {
+  mockApiFetch.mockImplementation((url: string, opts?: Record<string, unknown>) => {
     if (url === '/api/specs/generation-context') {
       return Promise.resolve({
         contextSummary: {
