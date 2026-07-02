@@ -155,14 +155,29 @@ Sentry ingestion — see contract doc §4).
 > only system of record; bypassing the ingestion routes bypasses validation, redaction, de-duplication,
 > and the governance gate. A PR that writes captured data straight to a table is a correctness bug.
 
-### 4.1 "Remember" — how knowledge gets captured
+### 4.1 "Remember" — manual note capture, still review-gated
 
-Capturing ("remembering") knowledge from outside a run happens through the ingest commands below, which
-extract structured evidence from git and submit it as a context event plus reviewable memory candidates.
-Everything captured lands as a **PENDING `memory_candidate`** — never as durable memory, and never visible
-to retrieval — until a human approves it (§6).
+"Remember" is the product verb for capturing knowledge from outside a Rorca run: a human note, a gotcha
+from a deployment, or structured evidence extracted from git. The rule is the same for every source:
+**remembered knowledge enters the capture plane as reviewable candidates, not durable memory**.
 
-### 4.2 Commands
+For a human-authored note, tool integrations should submit a context event and one or more memory
+candidates through the public ingestion APIs (`POST /api/context-events` and `POST /api/candidates`) with:
+
+- `source_system: "rorca-capture"` (or another explicit sidecar/tool name)
+- a stable `idempotency_key` so retries and offline flushes are safe
+- provenance fields for workspace, git SHA / branch, related files, and evidence text
+- redacted payload text before it leaves the repo, with ingestion redaction as a second line of defense
+
+For git evidence, use the ingest commands below; they perform the same API-backed candidate creation after
+extracting commit metadata. In both cases, everything captured lands as a **PENDING `memory_candidate`** —
+never as durable memory, and never visible to retrieval — until a human approves it (§6).
+
+> The installed sidecar may be referred to as `rorca-capture`; this repository's CLI spells the commands
+> `rorca capture ...`. Any alias or wrapper must call the same API client and offline queue. Do not bypass
+> candidate review with direct table writes or by appending to durable memory.
+
+### 4.2 Commands (`rorca capture` / `rorca-capture`)
 
 All commands accept `--backend-url` (default `http://localhost:3030`), `--api-key` (for auth-gated
 deployments), and `--json`.
