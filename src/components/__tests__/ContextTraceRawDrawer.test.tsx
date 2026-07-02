@@ -136,9 +136,36 @@ describe('ContextTraceRawDrawer', () => {
 
     expect(screen.getByTestId('trace-retrieval-view')).toBeInTheDocument();
     expect(screen.getByText(/Retrieval synthesis/i)).toBeInTheDocument();
-    expect(screen.getByText(/Keep MCP-first behavior/i)).toBeInTheDocument();
+    expect(screen.getByText(/Selected evidence/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Keep MCP-first behavior/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Graph connected/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Memory 3797$/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/"memorySection"/)).not.toBeInTheDocument();
+  });
+
+  it('explains selected evidence and graph misses without exposing memory ids as primary labels', () => {
+    renderDrawer({
+      event: { ...baseEvent, phase: 'memory', label: 'retrieval:US-002' },
+      record: {
+        rawRef: 'r42:0',
+        runId: 42,
+        seq: 0,
+        phase: 'memory',
+        ts: '',
+        payload: {
+          memorySection: '## Retrieved Memory Context\nUse these decisions as constraints.\n- Spec post-save processing should use stage fingerprints: enrichment should rerun only invalidated stages, not blindly rerun every edit.',
+          graphSection: '',
+          selections: [{ candidateKey: 'memory:rorca::3861', candidateKind: 'memory', score: 0.82 }],
+          meta: { candidateCount: 2, selectedCandidateKeys: ['memory:rorca::3861'], tier: 'search', graphHits: 0 },
+        },
+      },
+    });
+
+    expect(screen.getByText(/Selected evidence/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Spec post-save processing should use stage fingerprints/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Graph was not used for this story/i)).toBeInTheDocument();
+    expect(screen.getByText(/Retrieval source: Memory\/search/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Memory 3861$/i)).not.toBeInTheDocument();
   });
 
   it('renders arbiter traces as direction layer insight instead of raw JSON', () => {

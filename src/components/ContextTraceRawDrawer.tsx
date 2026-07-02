@@ -190,6 +190,17 @@ interface PromptSection {
   body: string;
 }
 
+interface SelectedEvidenceItem {
+  key: string;
+  kind: string;
+  title: string;
+  body: string;
+  skillName: string;
+  score: number | null;
+  source: string;
+  auditLabel: string;
+}
+
 function RetrievalTraceBody({ payload }: { payload: TracePayloadRecord }) {
   const memorySection = asString(payload.memorySection);
   const graphSection = asString(payload.graphSection);
@@ -199,7 +210,8 @@ function RetrievalTraceBody({ payload }: { payload: TracePayloadRecord }) {
   const memoryBullets = extractMarkdownBullets(memorySection);
   const selectedKeys = asStringArray(meta.selectedCandidateKeys);
   const matchedSkills = asStringArray(meta.matchedSkills);
-  const selectedCount = selections.length || selectedKeys.length || asNumber(meta.selectedCount) || memoryBullets.length;
+  const evidenceItems = buildSelectedEvidenceItems(selections, memoryBullets, selectedKeys);
+  const selectedCount = evidenceItems.length || selections.length || selectedKeys.length || asNumber(meta.selectedCount) || memoryBullets.length;
   const candidateCount = asNumber(meta.candidateCount) || asNumber(meta.totalCandidates) || selectedCount;
   const tier = asString(meta.retrievalTier) || asString(meta.tier) || 'execution retrieval';
   const latency = asNumber(meta.latencyMs);
@@ -269,10 +281,13 @@ function RetrievalTraceBody({ payload }: { payload: TracePayloadRecord }) {
         )}
       </InsightPanel>
 
-      {(selections.length > 0 || matchedSkills.length > 0) && (
-        <InsightPanel title="Why this context won" icon={<Sparkles size={14} />}>
+      {(evidenceItems.length > 0 || matchedSkills.length > 0) && (
+        <InsightPanel title="Selected evidence" icon={<Sparkles size={14} />}>
+          <p className="mb-3 text-xs leading-5 text-muted">
+            These are the memories that survived ranking and were sent to the agent. Audit IDs are tucked away so the useful lesson stays front-and-center.
+          </p>
           {matchedSkills.length > 0 && (
-            <div className="mb-3 flex flex-wrap gap-1.5">
+            <div className="mb-3 flex flex-wrap gap-1.5" aria-label="Matched retrieval skills">
               {matchedSkills.map((skill) => (
                 <span key={skill} className="rounded bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--accent)]">
                   {skill}
@@ -280,21 +295,14 @@ function RetrievalTraceBody({ payload }: { payload: TracePayloadRecord }) {
               ))}
             </div>
           )}
-          {selections.length > 0 ? (
-            <div className="grid gap-2 md:grid-cols-2">
-              {selections.slice(0, 8).map((selection, index) => {
-                const key = asString(selection.candidateKey) || asString(selection.key) || `candidate-${index + 1}`;
-                const kind = asString(selection.candidateKind) || asString(selection.kind) || 'memory';
-                const skillName = asString(selection.skillName);
-                return (
-                  <div key={`${key}-${index}`} className="rounded border border-border/60 bg-[var(--surface-100)] p-2.5">
-                    <p className="text-xs font-medium text-[var(--text)]">{humanizeCandidateKey(key)}</p>
-                    <p className="mt-1 text-[11px] text-muted">
-                      {humanizeValue(kind)}{skillName ? ` · matched ${skillName}` : ''}
-                    </p>
-                  </div>
-                );
-              })}
+          {evidenceItems.length > 0 ? (
+            <div className="grid gap-3 md:grid-cols-2">
+              {evidenceItems.slice(0, 8).map((item, index) => (
+                <SelectedEvidenceCard key={`${item.key}-${index}`} item={item} index={index} />
+              ))}
+              {evidenceItems.length > 8 && (
+                <p className="text-xs text-muted">+{evidenceItems.length - 8} more selected evidence item(s) were recorded for this trace.</p>
+              )}
             </div>
           ) : (
             <p className="text-sm text-muted">No explicit selection handles were recorded for this trace.</p>
@@ -306,7 +314,16 @@ function RetrievalTraceBody({ payload }: { payload: TracePayloadRecord }) {
         {graphSection ? (
           <ReadableTextBlock text={graphSection} maxChars={6000} />
         ) : (
-          <p className="text-sm text-muted">No graph context was added for this story, so retrieval relied on memory/search context.</p>
+          <div className="rounded border border-border/60 bg-[var(--surface-100)] p-3" data-testid="trace-graph-empty">
+            <p className="text-sm font-semibold text-[var(--text)]">Graph was not used for this story</p>
+            <p className="mt-1 text-sm leading-6 text-muted">
+              Rorca found enough signal from memory/search retrieval, and no graph hits were added to the final prompt.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              <span className="rounded-full bg-[var(--surface-300)] px-2 py-0.5 text-[10px] font-medium text-muted">Graph hits: {(graphHits ?? 0).toLocaleString()}</span>
+              <span className="rounded-full bg-[var(--surface-300)] px-2 py-0.5 text-[10px] font-medium text-muted">Retrieval source: Memory/search</span>
+            </div>
+          </div>
         )}
       </InsightPanel>
     </div>
@@ -511,6 +528,49 @@ function ReadableTextBlock({ text, maxChars, className = '' }: { text: string; m
   );
 }
 
+function SelectedEvidenceCard({ item, index }: { item: SelectedEvidenceItem; index: number }) {
+  return (
+    <article className="rounded border border-border/60 bg-[var(--surface-100)] p-3" data-testid="selected-evidence-card">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Evidence #{index + 1}</p>
+          <h4 className="mt-1 text-sm font-semibold leading-5 text-[var(--text)]">{item.title}</h4>
+        </div>
+        {item.score != null && (
+          <span className="shrink-0 rounded bg-emerald-500/10 px-2 py-1 font-mono text-xs font-semibold text-emerald-500" title="Selection relevance score">
+            {formatScorePercent(item.score)}%
+          </span>
+        )}
+      </div>
+
+      {item.body && <p className="mt-2 text-xs leading-5 text-muted">{item.body}</p>}
+
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <span className="rounded-full bg-[var(--surface-300)] px-2 py-0.5 text-[10px] font-medium text-muted">{humanizeValue(item.kind)}</span>
+        <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-500">Sent to prompt</span>
+        {item.skillName && <span className="rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--accent)]">Matched {item.skillName}</span>}
+        {item.source && <span className="rounded-full bg-[var(--surface-300)] px-2 py-0.5 text-[10px] font-medium text-muted">{humanizeValue(item.source)}</span>}
+      </div>
+
+      <details className="mt-3 rounded border border-border/60 bg-[var(--surface-200)]">
+        <summary className="cursor-pointer px-2.5 py-1.5 text-[11px] font-medium text-muted">Audit details</summary>
+        <dl className="space-y-1 border-t border-border/60 px-2.5 py-2 text-[11px]">
+          <div className="flex gap-2">
+            <dt className="w-20 shrink-0 text-muted">Handle</dt>
+            <dd className="min-w-0 break-all font-mono text-[var(--text)]">{item.auditLabel}</dd>
+          </div>
+          {item.score != null && (
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-muted">Score</dt>
+              <dd className="font-mono text-[var(--text)]">{item.score.toFixed(3)}</dd>
+            </div>
+          )}
+        </dl>
+      </details>
+    </article>
+  );
+}
+
 function isPlainRecord(value: unknown): value is TracePayloadRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -545,6 +605,74 @@ function asRecordArray(value: unknown): TracePayloadRecord[] {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function buildSelectedEvidenceItems(
+  selections: TracePayloadRecord[],
+  memoryBullets: string[],
+  selectedKeys: string[],
+): SelectedEvidenceItem[] {
+  const total = Math.max(selections.length, selectedKeys.length, memoryBullets.length);
+  return Array.from({ length: total }, (_, index) => {
+    const selection = selections[index] ?? {};
+    const key = asString(selection.candidateKey) || asString(selection.key) || selectedKeys[index] || `selected-evidence-${index + 1}`;
+    const kind = asString(selection.candidateKind) || asString(selection.kind) || 'memory';
+    const score = asNumber(selection.score) ?? asNumber(selection.relevanceScore) ?? asNumber(selection.finalScore);
+    const source = asString(selection.source) || asString(selection.sourceType);
+    const skillName = asString(selection.skillName);
+    const text = asString(selection.snippet)
+      || asString(selection.text)
+      || asString(selection.rule)
+      || memoryBullets[index]
+      || '';
+    const explicitTitle = asString(selection.title) || asString(selection.memoryTitle);
+    const { title, body } = splitEvidenceText(text, explicitTitle, index);
+
+    return {
+      key,
+      kind,
+      title,
+      body,
+      skillName,
+      score,
+      source,
+      auditLabel: key,
+    };
+  });
+}
+
+function splitEvidenceText(text: string, explicitTitle: string, index: number): { title: string; body: string } {
+  const normalized = normalizeWhitespace(text);
+  if (!normalized) {
+    return {
+      title: explicitTitle || `Retrieved memory #${index + 1}`,
+      body: 'This selected memory was sent to the prompt, but this older trace only recorded its audit handle.',
+    };
+  }
+
+  if (explicitTitle) {
+    const body = normalized.startsWith(explicitTitle)
+      ? normalizeWhitespace(normalized.slice(explicitTitle.length).replace(/^[:\-–—]\s*/, ''))
+      : normalized;
+    return { title: explicitTitle, body };
+  }
+
+  const colonIndex = normalized.indexOf(':');
+  if (colonIndex >= 4 && colonIndex <= 120) {
+    const title = normalized.slice(0, colonIndex).trim();
+    const body = normalized.slice(colonIndex + 1).trim();
+    if (title.length >= 4 && body.length > 0) return { title, body };
+  }
+
+  const sentenceMatch = normalized.match(/^(.{24,140}?[.!?])\s+(.+)$/);
+  if (sentenceMatch) {
+    return { title: sentenceMatch[1].trim(), body: sentenceMatch[2].trim() };
+  }
+
+  return {
+    title: excerpt(normalized, 110),
+    body: normalized.length > 110 ? normalized : '',
+  };
 }
 
 function truncatePlainText(value: string, maxChars: number): TruncatedJson {
@@ -653,10 +781,9 @@ function formatBytesish(chars: number): string {
   return `${(chars / 1000).toFixed(1)}k chars`;
 }
 
-function humanizeCandidateKey(key: string): string {
-  const memoryMatch = key.match(/memory:[^:]+::(.+)$/) ?? key.match(/^memory:(.+)$/);
-  if (memoryMatch?.[1]) return `Memory ${memoryMatch[1].replace(/^memory-/, '').replace(/[-_]/g, ' ')}`;
-  return key.replace(/[-_]/g, ' ');
+function formatScorePercent(score: number): number {
+  const normalized = score <= 1 ? score * 100 : score;
+  return Math.max(0, Math.min(100, Math.round(normalized)));
 }
 
 function humanizeValue(value: string): string {
