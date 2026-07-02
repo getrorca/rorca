@@ -4700,6 +4700,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *     operationId: resizePipelineRunPty
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Terminal resize is a local run-control operation for an already-running user-owned pipeline."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4767,6 +4768,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *     operationId: sendPipelineRunInput
  *     x-rorca-tier: public
  *     x-rorca-rationale: "PTY stdin is local interactive run control for an already-running user-owned pipeline in single-user mode."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4858,6 +4860,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     operationId: streamPipelineOutput
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
+ *     x-rorca-public-api: true
  *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store so late joiners can rebuild the terminal from byte 0.
  *     parameters:
  *       - in: path

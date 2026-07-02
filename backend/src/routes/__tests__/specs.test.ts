@@ -1826,6 +1826,156 @@ describe('POST /api/specs/persist', () => {
   });
 });
 
+// ─── US-042: Final contract preservation across Hilo configuration states ───
+
+describe('US-042 generate/persist/enrich/readiness contract preservation', () => {
+  async function useIsolatedWorkspace(config?: Record<string, unknown>): Promise<void> {
+    await execute(`UPDATE workspaces SET path = $1 WHERE id = 'ws-test'`, [tmpDir]);
+    if (!config) return;
+    const rorcaDir = path.join(tmpDir, '.rorca');
+    fs.mkdirSync(rorcaDir, { recursive: true });
+    fs.writeFileSync(path.join(rorcaDir, 'config.json'), JSON.stringify(config, null, 2), 'utf8');
+  }
+
+  function createFakeHiloBinary(): string {
+    const binPath = path.join(tmpDir, 'bin', 'hilo');
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    fs.writeFileSync(binPath, '#!/usr/bin/env sh\nif [ "$1" = "--version" ]; then echo "hilo 0.1.0"; exit 0; fi\nexit 0\n', 'utf8');
+    fs.chmodSync(binPath, 0o755);
+    return binPath;
+  }
+
+  const providedContextSummary = {
+    directionLayers: {
+      l1: true,
+      l2: { present: false, domain: null },
+      l3: true,
+    },
+    skills: [],
+    memoryEntries: 0,
+    agentsMd: false,
+    template: null,
+    schemaSnapshot: false,
+    gitMemory: false,
+    estimatedTokens: 120,
+    modelContextWindow: 200000,
+  };
+
+  test('legacy generate, readiness, and enrich remain stable when Hilo is configured', async () => {
+    const fakeHiloBin = createFakeHiloBinary();
+    await useIsolatedWorkspace({
+      version: 1,
+      hilo: {
+        enabled: true,
+        binaryPath: fakeHiloBin,
+        checkoutPath: '.',
+        outputDir: '.rorca/hilo',
+        timeoutMs: 1000,
+      },
+    });
+
+    mockChatComplete
+      .mockResolvedValueOnce({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } })
+      .mockResolvedValue({ text: '- Hilo-configured enrichment still uses the canonical ChatResult.text contract.', usage: { inputTokens: 10, outputTokens: 12 } });
+
+    const generated = await request(app)
+      .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        domain: 'backend',
+        title: 'Hilo Configured Contract',
+        brief: 'Keep generation compatible while a Hilo graph provider is configured',
+        storyCount: 2,
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(generated.status).toBe(200);
+    expect(generated.body.slug).toBe('hilo-configured-contract');
+    expect(generated.body.contextSummary.directionLayers).toBeDefined();
+    expect(generated.body.postSave).toEqual({ enrich: false, matchSkills: false, memorySynthesis: false });
+
+    const readiness = await request(app)
+      .get('/api/specs/hilo-configured-contract/readiness?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(readiness.status).toBe(200);
+    expect(readiness.body.executionGate.status).toBe('allowed');
+    expect(readiness.body.blockingReasons).toEqual([]);
+    expect(readiness.body.persistence.contextCapture.status).toBe('provided');
+
+    const enriched = await request(app)
+      .post('/api/specs/hilo-configured-contract/enrich')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(enriched.status).toBe(200);
+    expect(enriched.body.success).toBe(true);
+    expect(enriched.body.storiesEnriched).toBe(2);
+    expect(['cache', 'search', 'hybrid', 'none']).toContain(enriched.body.retrieval_method);
+
+    const saved = JSON.parse(fs.readFileSync(path.join(tmpDir, 'forge', 'specs', 'pending', 'hilo-configured-contract.json'), 'utf8'));
+    expect(saved.userStories[0].description).toContain('## Context');
+    expect(saved.userStories[0].description).not.toContain('[object Object]');
+  });
+
+  test('explicit persist, readiness, and enrich remain stable without Hilo configured', async () => {
+    await useIsolatedWorkspace();
+    mockChatComplete.mockResolvedValue({ text: '- No-Hilo enrichment still completes.', usage: { inputTokens: 5, outputTokens: 7 } });
+
+    const persisted = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'No Hilo Contract',
+        stories: [
+          { id: 'US-001', title: 'Persist without Hilo', description: 'Keep explicit persistence independent from Hilo configuration', acceptanceCriteria: ['Spec persists'], dependsOn: [] },
+        ],
+        contextUsed: {
+          text: 'SYNTHESIZED CONTEXT WITHOUT HILO',
+          meta: {
+            standards: true,
+            conventions: false,
+            project: true,
+            schema: false,
+            totalTokens: 120,
+            scopesMatched: [],
+          },
+        },
+        contextSummary: providedContextSummary,
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(persisted.status).toBe(200);
+    expect(persisted.body.slug).toBe('no-hilo-contract');
+    expect(persisted.body.contextSummary).toMatchObject(providedContextSummary);
+
+    const readiness = await request(app)
+      .get('/api/specs/no-hilo-contract/readiness?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(readiness.status).toBe(200);
+    expect(readiness.body.executionGate.status).toBe('allowed');
+    expect(readiness.body.blockingReasons).toEqual([]);
+    expect(readiness.body.persistence.contextCapture.status).toBe('provided');
+
+    const enriched = await request(app)
+      .post('/api/specs/no-hilo-contract/enrich')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(enriched.status).toBe(200);
+    expect(enriched.body.success).toBe(true);
+    expect(enriched.body.storiesEnriched).toBe(1);
+    expect(['cache', 'search', 'hybrid', 'none']).toContain(enriched.body.retrieval_method);
+
+    const saved = JSON.parse(fs.readFileSync(path.join(tmpDir, 'forge', 'specs', 'pending', 'no-hilo-contract.json'), 'utf8'));
+    expect(saved.contextSummary).toMatchObject(providedContextSummary);
+    expect(saved.userStories[0].description).toContain('No-Hilo enrichment still completes');
+  });
+});
+
 describe('GET /api/specs (list)', () => {
   test('returns pending and approved specs with correct status', async () => {
     // Clean dirs to avoid cross-suite contamination (batch tests share os.tmpdir())
