@@ -74,6 +74,12 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--workspace'])).toThrow(/Missing value/);
   });
 
+  test('rejects malformed numeric flags', () => {
+    expect(() => parseArgs(['--workspace', 'w', '--interval', 'abc'])).toThrow(/--interval/);
+    expect(() => parseArgs(['--workspace', 'w', '--max-commits', '0'])).toThrow(/--max-commits/);
+    expect(() => parseArgs(['--workspace', 'w', '--max-scans', '-1'])).toThrow(/--max-scans/);
+  });
+
   test('toDaemonOptions maps args through', () => {
     const opts = toDaemonOptions(parseArgs(['--workspace', 'ws-1', '--max-commits', '7']));
     expect(opts.workspaceId).toBe('ws-1');

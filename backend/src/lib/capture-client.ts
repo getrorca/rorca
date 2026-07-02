@@ -370,6 +370,10 @@ export class CaptureClient {
         const res = await this.request('POST', '/api/context-events/flush', {
           entries: flushEntries,
         });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({})) as { error?: string };
+          throw new Error(body?.error ?? `HTTP ${res.status}: ${res.statusText}`);
+        }
         const body = (await res.json()) as {
           succeeded: number;
           failed: Array<{ index: number; idempotencyKey: string; error: string }>;

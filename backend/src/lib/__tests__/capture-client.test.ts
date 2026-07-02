@@ -505,6 +505,28 @@ describe('CaptureClient', () => {
     }
   });
 
+  it('flushQueue preserves all entries when the server returns a non-2xx response', async () => {
+    const tmpDir = setupTempDir();
+    try {
+      const queue = new CaptureQueue(tmpDir);
+      const k1 = nextKey('http');
+      const k2 = nextKey('http');
+      queue.enqueueEvent(makeEventWithKey(k1));
+      queue.enqueueCandidate(makeCandidate({ idempotencyKey: k2 }));
+
+      const mockFetch = makeMockFetch(() => jsonResponse({ error: 'DB unavailable' }, 503));
+      const client = new CaptureClient({ baseUrl: 'http://test:3030', fetch: mockFetch });
+
+      const result = await client.flushQueue(queue);
+      expect(result.succeeded).toBe(0);
+      expect(result.failed).toBe(2);
+      expect(queue.length).toBe(2);
+      expect(queue.readAll().map((e) => e.lastError)).toEqual(['DB unavailable', 'DB unavailable']);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   // ── Duplicate keys in queue ─────────────────────────────────────────────
 
   it('flushQueue handles duplicate idempotency keys in same batch by deduplicating', async () => {

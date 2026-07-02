@@ -24,15 +24,33 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
-import { NotFoundError } from '../lib/errors';
+import { NotFoundError, UnprocessableError } from '../lib/errors';
 import { queryOne } from '../db';
-import { contextEventSchema, type ContextEvent, memoryCandidateSchema, type MemoryCandidate } from '../lib/capture-contracts';
+import { contextEventSchema, type ContextEvent, memoryCandidateSchema } from '../lib/capture-contracts';
 
 const router = Router();
 
 // ════════════════════════════════════════════════════════════════════════════
 // Validation schemas for the flush (batch) endpoint
 // ════════════════════════════════════════════════════════════════════════════
+
+const reviewStatusInput = z.enum(['pending', 'approved', 'rejected', 'duplicate', 'superseded', 'revisit']);
+const trustTierInput = z.enum(['authoritative', 'trusted', 'community', 'unverified']);
+const confidenceInput = z.union([z.number().min(0).max(1), z.enum(['low', 'medium', 'high'])]).optional();
+
+const ingestionMemoryCandidateSchema = memoryCandidateSchema
+  .omit({ status: true, trust: true, confidence: true, createdAt: true })
+  .extend({
+    // Ingestion always stores candidates as pending, but accepting an omitted
+    // status keeps older sidecars/tests compatible while still validating at
+    // the route boundary.
+    status: reviewStatusInput.optional().default('pending'),
+    trust: trustTierInput.optional().default('unverified'),
+    confidence: confidenceInput,
+    createdAt: z.string().optional().default(() => new Date().toISOString()),
+  });
+
+type IngestibleMemoryCandidate = z.infer<typeof ingestionMemoryCandidateSchema>;
 
 const flushEventEntry = z.object({
   type: z.literal('event'),
@@ -41,7 +59,7 @@ const flushEventEntry = z.object({
 
 const flushCandidateEntry = z.object({
   type: z.literal('candidate'),
-  payload: memoryCandidateSchema,
+  payload: ingestionMemoryCandidateSchema,
 });
 
 const flushEntry = z.discriminatedUnion('type', [flushEventEntry, flushCandidateEntry]);
@@ -53,6 +71,26 @@ const flushBody = z.object({
 // ════════════════════════════════════════════════════════════════════════════
 // Helpers
 // ════════════════════════════════════════════════════════════════════════════
+
+function schemaVersionNumber(version: string | undefined): number {
+  return version ? Number(version.replace(/^v/i, '')) : 1;
+}
+
+function toNumericId(id: number | string): number {
+  const parsed = typeof id === 'number' ? id : Number(id);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UnprocessableError('Persisted id is outside the safe JSON number range');
+  }
+  return parsed;
+}
+
+function confidenceLabel(score: IngestibleMemoryCandidate['confidence']): 'low' | 'medium' | 'high' {
+  if (score === undefined) return 'medium';
+  if (typeof score === 'string') return score;
+  if (score >= 0.75) return 'high';
+  if (score >= 0.4) return 'medium';
+  return 'low';
+}
 
 /**
  * Upsert a context event with idempotency-gated INSERT … ON CONFLICT.
@@ -68,14 +106,23 @@ async function upsertContextEvent(event: ContextEvent): Promise<{ id: number; cr
     throw new NotFoundError(`Workspace '${event.workspaceId}' not found`);
   }
 
-  const result = await queryOne<{ id: number; created_at: string }>(
-    `INSERT INTO context_events
-       (workspace_id, source_system, source_ref, event_type, actor,
-        occurred_at, summary, payload, idempotency_key, schema_version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-     ON CONFLICT (workspace_id, idempotency_key) DO UPDATE
-       SET updated_at = NOW()
-     RETURNING id, created_at`,
+  const result = await queryOne<{ id: number | string; created: boolean }>(
+    `WITH inserted AS (
+       INSERT INTO context_events
+         (workspace_id, source_system, source_ref, event_type, actor,
+          occurred_at, summary, payload, idempotency_key, schema_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+       RETURNING id
+     )
+     SELECT id, TRUE AS created FROM inserted
+     UNION ALL
+     SELECT id, FALSE AS created
+       FROM context_events
+      WHERE workspace_id = $1
+        AND idempotency_key = $9
+        AND NOT EXISTS (SELECT 1 FROM inserted)
+     LIMIT 1`,
     [
       event.workspaceId,
       event.source,
@@ -86,18 +133,15 @@ async function upsertContextEvent(event: ContextEvent): Promise<{ id: number; cr
       null, // summary — derived downstream
       JSON.stringify(event.payload),
       event.idempotencyKey,
-      event.schemaVersion ? Number((event.schemaVersion as string).replace('v', '')) : 1,
+      schemaVersionNumber(event.schemaVersion),
     ],
   );
 
   if (!result) {
-    throw new Error('Failed to upsert context event');
+    throw new UnprocessableError('Failed to upsert context event');
   }
 
-  // Determine if it was newly created: if created_at is within 1 second of now, it's new.
-  // This is a heuristic; the ON CONFLICT DO UPDATE path still returns a row.
-  const created = Date.now() - new Date(result.created_at).getTime() < 2000;
-  return { id: result.id, created };
+  return { id: toNumericId(result.id), created: result.created };
 }
 
 /**
@@ -105,7 +149,7 @@ async function upsertContextEvent(event: ContextEvent): Promise<{ id: number; cr
  * Returns the row (existing or newly inserted).
  */
 async function upsertMemoryCandidate(
-  candidate: MemoryCandidate,
+  candidate: IngestibleMemoryCandidate,
 ): Promise<{ id: number; created: boolean }> {
   const ws = await queryOne<{ id: string }>(
     'SELECT id FROM workspaces WHERE id = $1',
@@ -116,37 +160,45 @@ async function upsertMemoryCandidate(
   }
 
   const relatedFiles = candidate.relatedFiles ?? [];
-  const result = await queryOne<{ id: number; created_at: string }>(
-    `INSERT INTO memory_candidates
-       (workspace_id, source_system, source_ref, category, title, rule, context,
-        related_files, confidence, trust_tier, review_status,
-        idempotency_key, schema_version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
-     ON CONFLICT (workspace_id, idempotency_key) DO UPDATE
-       SET updated_at = NOW()
-     RETURNING id, created_at`,
+  const result = await queryOne<{ id: number | string; created: boolean }>(
+    `WITH inserted AS (
+       INSERT INTO memory_candidates
+         (workspace_id, source_system, source_ref, category, title, rule, context,
+          related_files, confidence, trust_tier, review_status,
+          idempotency_key, schema_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
+       ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+       RETURNING id
+     )
+     SELECT id, TRUE AS created FROM inserted
+     UNION ALL
+     SELECT id, FALSE AS created
+       FROM memory_candidates
+      WHERE workspace_id = $1
+        AND idempotency_key = $11
+        AND NOT EXISTS (SELECT 1 FROM inserted)
+     LIMIT 1`,
     [
       candidate.workspaceId,
       candidate.sourceEventKey ? 'rorca-capture' : 'manual',
       candidate.sourceEventKey ?? null,
-      (candidate as any).category ?? 'Uncategorised',
+      candidate.category ?? 'Uncategorised',
       candidate.title,
       candidate.body,
-      (candidate as any).context ?? null,
+      null, // context — optional review rationale can be added by governance actions later
       JSON.stringify(relatedFiles),
-      (candidate as any).confidence ?? 'medium',
-      (candidate as any).trust ?? 'unverified',
+      confidenceLabel(candidate.confidence),
+      candidate.trust ?? 'unverified',
       candidate.idempotencyKey,
-      candidate.schemaVersion ? Number((candidate.schemaVersion as string).replace('v', '')) : 1,
+      schemaVersionNumber(candidate.schemaVersion),
     ],
   );
 
   if (!result) {
-    throw new Error('Failed to upsert memory candidate');
+    throw new UnprocessableError('Failed to upsert memory candidate');
   }
 
-  const created = Date.now() - new Date(result.created_at).getTime() < 2000;
-  return { id: result.id, created };
+  return { id: toNumericId(result.id), created: result.created };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -233,7 +285,7 @@ router.post('/events', validateBody(submitEventBodySchema), async (req: Request,
 });
 
 const submitCandidateBodySchema = z.object({
-  candidate: memoryCandidateSchema,
+  candidate: ingestionMemoryCandidateSchema,
 });
 
 /**
@@ -261,7 +313,7 @@ const submitCandidateBodySchema = z.object({
  */
 router.post('/candidates', validateBody(submitCandidateBodySchema), async (req: Request, res: Response) => {
   try {
-    const { candidate } = req.body as { candidate: MemoryCandidate };
+    const { candidate } = req.body as { candidate: IngestibleMemoryCandidate };
     const result = await upsertMemoryCandidate(candidate);
     res.json(result);
   } catch (err) {
@@ -328,14 +380,7 @@ router.post('/flush', validateBody(flushBody), async (req: Request, res: Respons
           const result = await upsertContextEvent(entry.payload as ContextEvent);
           succeeded.push(result.id);
         } else {
-          const candidate = entry.payload as MemoryCandidate;
-          // Normalise memory candidate from flush format
-          const normalised: MemoryCandidate = {
-            ...candidate,
-            // If candidate lacks sourceEventKey from flush, use manual
-            sourceEventKey: (candidate as any).sourceEventKey ?? undefined,
-          };
-          const result = await upsertMemoryCandidate(normalised);
+          const result = await upsertMemoryCandidate(entry.payload);
           succeeded.push(result.id);
         }
       } catch (err: unknown) {

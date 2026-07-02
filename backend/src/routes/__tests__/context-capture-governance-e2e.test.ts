@@ -711,7 +711,7 @@ describe('US-040 Context Capture & Governance E2E', () => {
       });
       await request(app)
         .post('/api/context-events/candidates')
-        .send({ pendingCandidate });
+        .send({ candidate: pendingCandidate });
 
       // Submit and reject candidate
       const rejectedCandidate = makeCandidate({
@@ -722,7 +722,7 @@ describe('US-040 Context Capture & Governance E2E', () => {
       });
       const rejRes = await request(app)
         .post('/api/context-events/candidates')
-        .send({ rejectedCandidate });
+        .send({ candidate: rejectedCandidate });
       await pool.query(
         "UPDATE memory_candidates SET review_status = 'rejected', reviewed_at = NOW() WHERE id = $1",
         [rejRes.body.id],

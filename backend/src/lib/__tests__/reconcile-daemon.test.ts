@@ -217,6 +217,23 @@ describe('ReconcileDaemon — configuration', () => {
       cleanupRepo(repo);
     }
   });
+
+  test('rejects non-finite numeric options', () => {
+    const repo = initRepo();
+    try {
+      expect(
+        () => new ReconcileDaemon({ workspaceId: 'w', repoPath: repo, apiUrl: 'x', intervalMs: Number.NaN }),
+      ).toThrow(/intervalMs/);
+      expect(
+        () => new ReconcileDaemon({ workspaceId: 'w', repoPath: repo, apiUrl: 'x', maxCommits: Number.NaN }),
+      ).toThrow(/maxCommits/);
+      expect(
+        () => new ReconcileDaemon({ workspaceId: 'w', repoPath: repo, apiUrl: 'x', maxScans: Number.NaN }),
+      ).toThrow(/maxScans/);
+    } finally {
+      cleanupRepo(repo);
+    }
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -562,6 +579,9 @@ describe('ReconcileDaemon — lifecycle', () => {
       // Kick off a scan and immediately request shutdown.
       const scan = daemon.scanOnce();
       await daemon.stop();
+      // stop() now waits for direct scanOnce() calls too, so status is settled
+      // before the service manager sees shutdown complete.
+      expect(daemon.getStatus().scans).toBe(1);
       // The in-flight scan must have resolved (no dangling write).
       await expect(scan).resolves.toBeDefined();
     } finally {

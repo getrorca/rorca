@@ -66,6 +66,14 @@ export function parseSince(value: string): SincePolicy {
   throw new Error(`Invalid --since policy: ${value} (expected head|all|ref:<ref>|count:<n>)`);
 }
 
+function parsePositiveIntegerFlag(flag: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flag} requires a positive integer`);
+  }
+  return parsed;
+}
+
 /** Parse argv into structured CLI args. Exported for testing. */
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
@@ -91,10 +99,10 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--repo': args.repo = path.resolve(next()); break;
       case '--api-url': args.apiUrl = next(); break;
       case '--api-key': args.apiKey = next(); break;
-      case '--interval': args.intervalMs = Number(next()); break;
+      case '--interval': args.intervalMs = parsePositiveIntegerFlag('--interval', next()); break;
       case '--since': args.since = parseSince(next()); break;
-      case '--max-commits': args.maxCommits = Number(next()); break;
-      case '--max-scans': args.maxScans = Number(next()); break;
+      case '--max-commits': args.maxCommits = parsePositiveIntegerFlag('--max-commits', next()); break;
+      case '--max-scans': args.maxScans = parsePositiveIntegerFlag('--max-scans', next()); break;
       case '--once': args.once = true; break;
       case '--status': args.status = true; break;
       case '--help':

@@ -262,10 +262,12 @@ export class ReconcileDaemon {
     this.repoPath = options.repoPath;
     this.apiUrl = options.apiUrl;
     this.apiKey = options.apiKey;
-    this.intervalMs = Math.max(1_000, options.intervalMs ?? 60_000);
+    this.intervalMs = normalizePositiveInteger(options.intervalMs ?? 60_000, 'intervalMs', 1_000);
     this.since = options.since ?? { mode: 'head' };
-    this.maxCommits = Math.max(1, Math.floor(options.maxCommits ?? 100));
-    this.maxScans = options.maxScans;
+    this.maxCommits = normalizePositiveInteger(options.maxCommits ?? 100, 'maxCommits', 1);
+    this.maxScans = options.maxScans === undefined
+      ? undefined
+      : normalizePositiveInteger(options.maxScans, 'maxScans', 1);
     this.cursorPath = path.join(options.cursorDir ?? options.repoPath, CURSOR_FILENAME);
     this.ignoreMatcher = options.ignoreMatcher;
     this.log = options.logger ?? defaultDaemonLogger;
@@ -393,13 +395,7 @@ export class ReconcileDaemon {
 
   /** One interval tick: run a scan, track it, and honor `maxScans`. */
   private async tick(): Promise<void> {
-    const p = this.scanOnce();
-    this.scanInFlight = p;
-    try {
-      await p;
-    } finally {
-      this.scanInFlight = null;
-    }
+    await this.scanOnce();
     if (this.maxScans !== undefined && this.scansCompleted >= this.maxScans) {
       this.emit('info', 'daemon.bounded', 'maxScans reached; stopping', {
         maxScans: this.maxScans,
@@ -423,6 +419,23 @@ export class ReconcileDaemon {
    * directly (without {@link start}) for one-shot reconciliation or tests.
    */
   async scanOnce(): Promise<ScanResult> {
+    if (this.scanInFlight) {
+      this.emit('debug', 'scan.skip', 'scan already in flight; returning current scan', {});
+      return this.scanInFlight;
+    }
+
+    const scan = this.performScanOnce();
+    this.scanInFlight = scan;
+    try {
+      return await scan;
+    } finally {
+      if (this.scanInFlight === scan) {
+        this.scanInFlight = null;
+      }
+    }
+  }
+
+  private async performScanOnce(): Promise<ScanResult> {
     const errors: string[] = [];
     this.emit('debug', 'scan.start', 'scan starting', {});
 
@@ -546,11 +559,12 @@ export class ReconcileDaemon {
     this.totals.candidatesSubmitted += candidatesSubmitted;
     this.totals.queued += queued;
 
+    const processed = commits.length;
     const result: ScanResult = {
       since,
       apiHealthy,
       discovered: discovered.length,
-      processed: batch.length,
+      processed,
       truncated,
       eventsSubmitted,
       candidatesSubmitted,
@@ -565,7 +579,7 @@ export class ReconcileDaemon {
       since,
       apiHealthy,
       discovered: discovered.length,
-      processed: batch.length,
+      processed,
       truncated,
       eventsSubmitted,
       candidatesSubmitted,
@@ -771,6 +785,13 @@ export class ReconcileDaemon {
 // ════════════════════════════════════════════════════════════════════════════
 // Helpers
 // ════════════════════════════════════════════════════════════════════════════
+
+function normalizePositiveInteger(value: number, name: string, min: number): number {
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} must be a finite number`);
+  }
+  return Math.max(min, Math.floor(value));
+}
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

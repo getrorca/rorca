@@ -288,6 +288,10 @@ export class CaptureClient {
                 const res = await this.request('POST', '/api/context-events/flush', {
                     entries: flushEntries,
                 });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body?.error ?? `HTTP ${res.status}: ${res.statusText}`);
+                }
                 const body = (await res.json());
                 // Map server-side failures back to the original entries.
                 const failedKeys = new Map();
