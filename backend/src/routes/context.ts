@@ -33,7 +33,12 @@ import { retrieveSeeds } from '../lib/memory-seed-retrieval';
 import { detectHydrationStaleness } from '../lib/hydration-staleness';
 import { persistRetrievalTrace } from '../lib/retrieval-trace';
 import { invalidateOnStaleness } from '../lib/context-cache';
-import { clampRetrievalLimits, getContextLimits, buildContextCacheKey } from '../lib/context-limits';
+import {
+  clampRetrievalLimits,
+  getContextLimits,
+  buildContextCacheKey,
+  computeWorkspaceContentHash,
+} from '../lib/context-limits';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -370,6 +375,10 @@ const RetrieveContextSchema = z.object({
   workspaceId: z.string().min(1).max(200),
   brief: z.string().min(1).max(100000),
   budget: z.number().int().positive().max(200000).optional(),
+  maxCandidates: z.number().int().positive().optional(),
+  maxFiles: z.number().int().positive().optional(),
+  maxDepth: z.number().int().positive().optional(),
+  maxExcerpts: z.number().int().positive().optional(),
   includeGraph: z.boolean().optional(),
   freshness: z.object({
     maxAgeMs: z.number().int().positive().optional(),
@@ -404,6 +413,10 @@ const RetrieveContextSchema = z.object({
  *               workspaceId: { type: string }
  *               brief: { type: string, description: "The story brief or task description to retrieve context for" }
  *               budget: { type: integer, description: "Token budget for context retrieval (default 32000)" }
+ *               maxCandidates: { type: integer, description: "Requested candidate cap; clamped to RORCA_RETRIEVAL_MAX_CANDIDATES" }
+ *               maxFiles: { type: integer, description: "Requested distinct file cap; clamped to RORCA_RETRIEVAL_MAX_FILES" }
+ *               maxDepth: { type: integer, description: "Requested graph traversal depth; clamped to RORCA_RETRIEVAL_MAX_DEPTH" }
+ *               maxExcerpts: { type: integer, description: "Requested excerpt/context item cap; clamped to RORCA_RETRIEVAL_MAX_EXCERPTS" }
  *               includeGraph: { type: boolean, description: "Include knowledge graph context (default true)" }
  *               freshness:
  *                 type: object
@@ -471,7 +484,17 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
   const startedAt = Date.now();
   try {
     const body = req.body as z.infer<typeof RetrieveContextSchema>;
-    const { workspaceId, brief, budget, includeGraph, freshness } = body;
+    const {
+      workspaceId,
+      brief,
+      budget,
+      maxCandidates: requestedMaxCandidates,
+      maxFiles: requestedMaxFiles,
+      maxDepth: requestedMaxDepth,
+      maxExcerpts: requestedMaxExcerpts,
+      includeGraph,
+      freshness,
+    } = body;
 
     // Look up workspace path
     const workspace = await queryOne<{ path: string }>(
@@ -486,7 +509,13 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
     // (US-039) so a single request on a large external repo cannot demand an
     // unbounded selection. Clamped fields are reported for honest UX.
     const limits = getContextLimits();
-    const clampedLimits = clampRetrievalLimits({ maxTokens: budget ?? 32000 }, limits);
+    const clampedLimits = clampRetrievalLimits({
+      maxTokens: budget ?? 32000,
+      maxCandidates: requestedMaxCandidates,
+      maxFiles: requestedMaxFiles,
+      maxDepth: requestedMaxDepth,
+      maxExcerpts: requestedMaxExcerpts,
+    }, limits);
     const maxTokens = clampedLimits.maxTokens;
     if (clampedLimits.clamped.length > 0) {
       logger.info(
@@ -503,10 +532,15 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
       hydrationFreshness.status === 'dirty' ||
       hydrationFreshness.status === 'missing';
 
-    // Evict any workspace context cached against a different git SHA so stale
-    // hydration can never serve a divergent commit's context (US-039 cache
-    // invalidation keyed by git SHA).
-    invalidateOnStaleness(workspaceId, hydrationFreshness.currentHead, hydrationFreshness.hydratedSha);
+    // Evict any workspace context cached against a different git SHA or dirty
+    // working tree so stale hydration can never serve a divergent commit/file
+    // state (US-039 cache invalidation keyed by git SHA + file hash).
+    invalidateOnStaleness(
+      workspaceId,
+      hydrationFreshness.currentHead,
+      hydrationFreshness.hydratedSha,
+      hydrationFreshness.checks.dirtyTree,
+    );
 
     // If freshness policy forbids stale data, reject early
     if (freshness && freshness.allowStale === false && staleHydration) {
@@ -531,8 +565,8 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
     const seedResult = await retrieveSeeds(workspaceId, {
       brief,
       workspacePath: workspace.path,
-      maxMemorySeeds: 8,
-      maxSpecSeeds: 6,
+      maxMemorySeeds: Math.min(8, clampedLimits.maxCandidates),
+      maxSpecSeeds: Math.min(6, clampedLimits.maxCandidates),
       tokenBudget: Math.min(4000, Math.floor(maxTokens * 0.1)),
     });
 
@@ -546,6 +580,10 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
       brief,
       {
         maxTokens,
+        maxCandidates: clampedLimits.maxCandidates,
+        maxFiles: clampedLimits.maxFiles,
+        maxDepth: clampedLimits.maxDepth,
+        maxExcerpts: clampedLimits.maxExcerpts,
         includeGraph: includeGraphFlag,
         workspacePath: workspace.path,
       },
@@ -561,16 +599,23 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
     const retrievalPolicy = {
       maxTokens,
       includeGraph: includeGraphFlag,
-      maxCandidates: limits.maxCandidates,
-      maxFiles: limits.maxFiles,
-      maxDepth: limits.maxTraversalDepth,
-      maxExcerpts: limits.maxExcerpts,
+      maxCandidates: clampedLimits.maxCandidates,
+      maxFiles: clampedLimits.maxFiles,
+      maxDepth: clampedLimits.maxDepth,
+      maxExcerpts: clampedLimits.maxExcerpts,
       allowStale: freshness?.allowStale ?? true,
     };
+    const contentFingerprint = (hydrationFreshness.checks.dirtyTree || !hydrationFreshness.currentHead)
+      ? computeWorkspaceContentHash(workspace.path, {
+          maxFiles: clampedLimits.maxFiles,
+          maxDepth: clampedLimits.maxDepth,
+        })
+      : null;
     const cacheKey = buildContextCacheKey({
       namespace: 'retrieve',
       workspaceId,
       gitSha: hydrationFreshness.currentHead,
+      contentHash: contentFingerprint?.hash ?? null,
       briefHash,
       policy: retrievalPolicy,
     });
@@ -645,6 +690,20 @@ router.post('/retrieve', validateBody(RetrieveContextSchema), async (req: Reques
         needsMoreEvidence: retrieved.meta.needsMoreEvidence ?? false,
         matchedSkills: retrieved.meta.matchedSkills ?? [],
         cacheKey,
+        cacheContentHash: contentFingerprint
+          ? {
+              hash: contentFingerprint.hash.slice(0, 16),
+              fileCount: contentFingerprint.fileCount,
+              truncated: contentFingerprint.truncated,
+            }
+          : null,
+        limits: {
+          maxTokens: clampedLimits.maxTokens,
+          maxCandidates: clampedLimits.maxCandidates,
+          maxFiles: clampedLimits.maxFiles,
+          maxDepth: clampedLimits.maxDepth,
+          maxExcerpts: clampedLimits.maxExcerpts,
+        },
         limitsClamped: clampedLimits.clamped,
       },
     });

@@ -12,6 +12,10 @@
  * actionable errors, and composite cache-key construction.
  */
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
 import {
   getContextLimits,
   BoundedConcurrencyRunner,
@@ -19,6 +23,7 @@ import {
   capCandidates,
   assertPayloadWithinCap,
   assertCandidateWithinCap,
+  computeWorkspaceContentHash,
   buildContextCacheKey,
   hashRetrievalPolicy,
   byteLength,
@@ -232,6 +237,42 @@ describe('context-limits', () => {
     it('byteLength measures UTF-8 bytes', () => {
       expect(byteLength('abc')).toBe(3);
       expect(byteLength('é')).toBe(2);
+    });
+  });
+
+  describe('workspace content hash', () => {
+    function withTempWorkspace(): { dir: string; cleanup: () => void } {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-context-limits-'));
+      return { dir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+    }
+
+    it('changes when bounded workspace file content changes', () => {
+      const { dir, cleanup } = withTempWorkspace();
+      try {
+        fs.mkdirSync(path.join(dir, 'src'));
+        fs.writeFileSync(path.join(dir, 'src', 'app.ts'), 'export const value = 1;');
+        const first = computeWorkspaceContentHash(dir, { maxFiles: 10, maxDepth: 3 });
+        fs.writeFileSync(path.join(dir, 'src', 'app.ts'), 'export const value = 2;');
+        const second = computeWorkspaceContentHash(dir, { maxFiles: 10, maxDepth: 3 });
+        expect(first?.hash).toBeDefined();
+        expect(second?.hash).toBeDefined();
+        expect(first?.hash).not.toBe(second?.hash);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('marks the fingerprint truncated when maxFiles is reached', () => {
+      const { dir, cleanup } = withTempWorkspace();
+      try {
+        fs.writeFileSync(path.join(dir, 'a.ts'), 'a');
+        fs.writeFileSync(path.join(dir, 'b.ts'), 'b');
+        const result = computeWorkspaceContentHash(dir, { maxFiles: 1, maxDepth: 1 });
+        expect(result?.fileCount).toBe(1);
+        expect(result?.truncated).toBe(true);
+      } finally {
+        cleanup();
+      }
     });
   });
 

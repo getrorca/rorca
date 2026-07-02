@@ -22,8 +22,12 @@
  * mis-typed env var can never disable a bound entirely.
  */
 
+import { createHash } from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
+
 import { PayloadTooLargeError, TooManyRequestsError } from './errors';
-import { shortHash } from './context-safety';
+import { loadCaptureIgnore, shortHash } from './context-safety';
 
 // ════════════════════════════════════════════════════════════════════════════
 // Limit configuration
@@ -322,6 +326,147 @@ export function assertCandidateWithinCap(
     `Retrieval candidate '${identifier}'`,
     'Truncate the candidate excerpt/reason fields before persisting.',
   );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Workspace content fingerprints for dirty/non-git cache keys
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Max bytes read from each file while computing dirty/non-git content hashes. */
+export const MAX_CONTENT_HASH_BYTES_PER_FILE = 64 * 1024;
+
+export interface WorkspaceContentHashOptions {
+  /** File cap for the bounded fingerprint walk. Defaults to active retrieval maxFiles. */
+  maxFiles?: number;
+  /** Directory traversal cap. Defaults to active retrieval maxDepth. */
+  maxDepth?: number;
+}
+
+export interface WorkspaceContentHashResult {
+  /** SHA-256 digest over bounded file paths + metadata + content prefixes. */
+  hash: string;
+  /** Number of files included in the digest. */
+  fileCount: number;
+  /** True when maxFiles/maxDepth prevented a complete workspace walk. */
+  truncated: boolean;
+  maxFiles: number;
+  maxDepth: number;
+}
+
+function readFilePrefix(absPath: string, maxBytes: number): Buffer {
+  const fd = fs.openSync(absPath, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Compute a bounded workspace content fingerprint for cache keys when git SHA
+ * alone is insufficient (dirty working trees or non-git workspaces). The walk
+ * respects `.rorca-captureignore` + built-in excludes and is capped by the
+ * active retrieval maxFiles/maxDepth so large external repos cannot force an
+ * unbounded filesystem scan.
+ */
+export function computeWorkspaceContentHash(
+  workspacePath: string,
+  options: WorkspaceContentHashOptions = {},
+  limits: ContextLimits = getContextLimits(),
+): WorkspaceContentHashResult | null {
+  const root = path.resolve(workspacePath);
+  let rootStat: fs.Stats;
+  try {
+    rootStat = fs.statSync(root);
+  } catch {
+    return null;
+  }
+  if (!rootStat.isDirectory()) return null;
+
+  const maxFiles = Math.max(1, Math.min(Math.floor(options.maxFiles ?? limits.maxFiles), limits.maxFiles));
+  const maxDepth = Math.max(1, Math.min(Math.floor(options.maxDepth ?? limits.maxTraversalDepth), limits.maxTraversalDepth));
+  const ignore = loadCaptureIgnore(root);
+  const digest = createHash('sha256');
+  const dirs: Array<{ absPath: string; relPath: string; depth: number }> = [{ absPath: root, relPath: '', depth: 0 }];
+  const maxEntries = Math.max(maxFiles, maxFiles * 4);
+  let entryCount = 0;
+  let fileCount = 0;
+  let truncated = false;
+
+  digest.update(`root:${path.basename(root)}\nmaxFiles:${maxFiles}\nmaxDepth:${maxDepth}\nmaxEntries:${maxEntries}\n`);
+
+  while (dirs.length > 0 && fileCount < maxFiles) {
+    const current = dirs.shift()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current.absPath, { withFileTypes: true })
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const relPath = current.relPath ? `${current.relPath}/${entry.name}` : entry.name;
+      if (ignore.ignores(relPath) || (entry.isDirectory() && ignore.ignores(`${relPath}/`))) {
+        continue;
+      }
+      if (entryCount >= maxEntries) {
+        truncated = true;
+        digest.update(`entry-limit:${relPath}\n`);
+        dirs.length = 0;
+        break;
+      }
+      entryCount += 1;
+
+      const absPath = path.join(current.absPath, entry.name);
+      if (entry.isDirectory()) {
+        if (current.depth >= maxDepth) {
+          truncated = true;
+          digest.update(`depth-limit:${relPath}\n`);
+          continue;
+        }
+        dirs.push({ absPath, relPath, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile()) continue;
+
+      if (fileCount >= maxFiles) {
+        truncated = true;
+        digest.update(`file-limit:${relPath}\n`);
+        dirs.length = 0;
+        break;
+      }
+
+      try {
+        const stat = fs.statSync(absPath);
+        const prefix = readFilePrefix(absPath, MAX_CONTENT_HASH_BYTES_PER_FILE);
+        digest.update(`file:${relPath}\nsize:${stat.size}\nmtime:${Math.floor(stat.mtimeMs)}\nbytes:${prefix.length}\n`);
+        digest.update(prefix);
+        digest.update('\n');
+        fileCount += 1;
+        if (stat.size > prefix.length) {
+          digest.update(`prefix-only:${relPath}\n`);
+        }
+      } catch {
+        digest.update(`unreadable:${relPath}\n`);
+      }
+    }
+  }
+
+  if (dirs.length > 0 && fileCount >= maxFiles) {
+    truncated = true;
+    digest.update(`file-limit:queued:${dirs[0].relPath}\n`);
+  }
+
+  return {
+    hash: digest.digest('hex'),
+    fileCount,
+    truncated,
+    maxFiles,
+    maxDepth,
+  };
 }
 
 // ════════════════════════════════════════════════════════════════════════════

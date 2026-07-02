@@ -37,6 +37,7 @@ import { loadHiloConfig } from './hilo-config';
 import { detectHilo } from './hilo-detector';
 import { runHiloHydration } from './hilo-hydration-runner';
 import { hydrationConcurrency } from './context-limits';
+import { TooManyRequestsError } from './errors';
 import {
   getHydrationById,
   getLatestHydration,
@@ -133,7 +134,7 @@ function buildConfigFromPayload(payload: HydrationJobPayload): HiloConfig {
 // ════════════════════════════════════════════════════════════════════════════
 
 async function handleHydrationJob(jobs: PgBoss.Job<unknown>[]): Promise<void> {
-  await Promise.allSettled(jobs.map(async (job) => {
+  const results = await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
     logger.info({ jobId, data: job.data }, '[hydration-worker] workspace:hydrate received');
 
@@ -220,12 +221,35 @@ async function handleHydrationJob(jobs: PgBoss.Job<unknown>[]): Promise<void> {
     // external repos can fan out heavy hydrations; the gate caps how many run
     // at once and sheds excess work with TooManyRequestsError rather than
     // exhausting memory/CPU. Per-workspace cap also reinforces coalescing.
-    const result = await hydrationConcurrency().run(hydration.workspaceId, () =>
-      runHiloHydration({
-        hydration,
-        config: hiloConfig,
-      }),
-    );
+    let result: Awaited<ReturnType<typeof runHiloHydration>>;
+    try {
+      result = await hydrationConcurrency().run(hydration.workspaceId, () =>
+        runHiloHydration({
+          hydration,
+          config: hiloConfig,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof TooManyRequestsError) {
+        await updateHydration(hydration.id, {
+          status: 'failed',
+          errorJson: {
+            message: error.message,
+            code: 'HYDRATION_CONCURRENCY_LIMIT',
+            exitCode: null,
+            signal: null,
+            timedOut: false,
+            stderrTail: null,
+          } as unknown as import('../db/spec-jobs').JsonValue,
+          finishedAt: new Date(),
+        });
+        logger.warn(
+          { jobId, hydrationId: hydration.id, workspaceId: hydration.workspaceId, error: error.message },
+          '[hydration-worker] hydration concurrency queue full — failed hydration row with actionable retry error',
+        );
+      }
+      throw error;
+    }
 
     // 8. Coalescing guard (post-execution): if a newer hydration row appeared
     //    while we were running, mark this row as cancelled (superseded).
@@ -264,6 +288,11 @@ async function handleHydrationJob(jobs: PgBoss.Job<unknown>[]): Promise<void> {
       throw new Error(result.error.message);
     }
   }));
+
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failed) {
+    throw failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

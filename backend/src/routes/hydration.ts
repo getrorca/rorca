@@ -19,7 +19,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
-import { NotFoundError } from '../lib/errors';
+import { NotFoundError, TooManyRequestsError } from '../lib/errors';
 import { queryOne } from '../db';
 import {
   getLatestHydration,
@@ -33,6 +33,7 @@ import {
 import { loadHiloConfig } from '../lib/hilo-config';
 import { detectHilo, requireHilo } from '../lib/hilo-detector';
 import { getBoss } from '../lib/pg-boss';
+import { getContextLimits } from '../lib/context-limits';
 
 const router = Router();
 
@@ -328,6 +329,8 @@ router.get('/:workspaceId/hydration', async (req: Request, res: Response) => {
  *         description: Hilo unavailable or workspace not a valid directory
  *       409:
  *         description: Hydration already running (can be fetched and awaited)
+ *       429:
+ *         description: Global hydration queue is full; retry later or raise the configured queue depth
  */
 router.post('/:workspaceId/hydration', validateBody(TriggerHydrationBodySchema), async (req: Request, res: Response) => {
   try {
@@ -353,6 +356,22 @@ router.post('/:workspaceId/hydration', validateBody(TriggerHydrationBodySchema),
           : 'Hydration is already running. Await completion.',
       });
       return;
+    }
+
+    // ── Global queue cap: protect large external repos from unbounded fan-out ──
+    const hydrationLimits = getContextLimits();
+    const maxQueuedHydrations = hydrationLimits.hydrationGlobalConcurrency + hydrationLimits.hydrationQueueDepth;
+    const activeHydrationRow = await queryOne<{ count: number | string }>(
+      `SELECT COUNT(*)::int AS count
+       FROM workspace_hydration
+       WHERE status IN ('pending', 'running')`,
+    );
+    const activeHydrations = Number(activeHydrationRow?.count ?? 0);
+    if (activeHydrations >= maxQueuedHydrations) {
+      throw new TooManyRequestsError(
+        `Hydration queue is full (${activeHydrations}/${maxQueuedHydrations} pending/running). ` +
+          'Retry shortly or raise RORCA_HYDRATION_QUEUE_DEPTH.',
+      );
     }
 
     // ── Hilo availability check ──
@@ -390,7 +409,7 @@ router.post('/:workspaceId/hydration', validateBody(TriggerHydrationBodySchema),
         retryLimit: 0,
         retryDelay: 0,
       });
-    } catch (enqueueErr: any) {
+    } catch (_enqueueErr: any) {
       // If enqueuing fails, still return the created hydration row.
       // The background runtime or worker will pick it up on the next poll
       // when it scans for pending hydrations.

@@ -7,6 +7,12 @@
 
 import { execute, query } from '../db/index';
 import type { GraphRagCandidateExplainability, GraphRagScoreContract } from './retrieval-pipeline';
+import {
+  assertCandidateWithinCap,
+  assertPayloadWithinCap,
+  byteLength,
+  getContextLimits,
+} from './context-limits';
 import { logger } from './logger';
 
 export interface RetrievalTelemetryCandidate {
@@ -103,7 +109,68 @@ interface PersistedTelemetrySummaryRow {
 }
 
 const MAX_EVENTS = 100;
+const MAX_TELEMETRY_STRING_LENGTH = 1_000;
+const MAX_TELEMETRY_ARRAY_ITEMS = 250;
 const events: RetrievalTelemetryEvent[] = [];
+
+function truncateTelemetryString(value: string, maxLength = MAX_TELEMETRY_STRING_LENGTH): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 12)}…[truncated]` : value;
+}
+
+function boundStringArray(values: string[]): string[] {
+  return values.slice(0, MAX_TELEMETRY_ARRAY_ITEMS).map(value => truncateTelemetryString(value));
+}
+
+function boundTelemetryCandidate(candidate: RetrievalTelemetryCandidate): RetrievalTelemetryCandidate {
+  return {
+    ...candidate,
+    key: truncateTelemetryString(candidate.key),
+    origin: truncateTelemetryString(candidate.origin, 100),
+    sourceType: candidate.sourceType ? truncateTelemetryString(candidate.sourceType, 200) : undefined,
+    reasons: boundStringArray(candidate.reasons ?? []),
+    conflictsWith: boundStringArray(candidate.conflictsWith ?? []),
+    supersededBy: candidate.supersededBy ? truncateTelemetryString(candidate.supersededBy) : undefined,
+  };
+}
+
+/**
+ * Bound and validate retrieval telemetry before in-memory or durable storage.
+ * Throws PayloadTooLargeError with remediation details if a candidate or event
+ * still exceeds configured caps after cheap string/array truncation.
+ */
+export function boundRetrievalTelemetryEvent(event: RetrievalTelemetryEvent): RetrievalTelemetryEvent {
+  const limits = getContextLimits();
+  const bounded: RetrievalTelemetryEvent = {
+    ...event,
+    queryPreview: truncateTelemetryString(event.queryPreview, 240),
+    matchedSkills: boundStringArray(event.matchedSkills ?? []),
+    selectedCandidateKeys: boundStringArray(event.selectedCandidateKeys ?? []),
+    droppedCandidateKeys: boundStringArray(event.droppedCandidateKeys ?? []),
+    contradictions: (event.contradictions ?? [])
+      .slice(0, MAX_TELEMETRY_ARRAY_ITEMS)
+      .map(([left, right]) => [truncateTelemetryString(left), truncateTelemetryString(right)] as [string, string]),
+    candidates: (event.candidates ?? [])
+      .slice(0, limits.maxCandidates)
+      .map(boundTelemetryCandidate),
+  };
+
+  for (const candidate of bounded.candidates) {
+    assertCandidateWithinCap(candidate, candidate.key, limits);
+  }
+
+  const serialized = JSON.stringify({
+    ...bounded,
+    candidates: bounded.candidates,
+  });
+  assertPayloadWithinCap(
+    byteLength(serialized),
+    limits.maxTracePayloadBytes,
+    'Retrieval telemetry',
+    'Reduce RORCA_RETRIEVAL_MAX_CANDIDATES, disable retrieval explainability, or raise RORCA_TRACE_MAX_PAYLOAD_BYTES and retry.',
+  );
+
+  return bounded;
+}
 
 function normalizeStringArray(value: unknown): string[] {
   return Array.isArray(value)
@@ -186,11 +253,11 @@ function mapPersistedRowToEvent(row: PersistedTelemetryRow): RetrievalTelemetryE
 }
 
 export function recordRetrievalTelemetry(event: Omit<RetrievalTelemetryEvent, 'id' | 'createdAt'>): RetrievalTelemetryEvent {
-  const saved: RetrievalTelemetryEvent = {
+  const saved = boundRetrievalTelemetryEvent({
     ...event,
     id: `rt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     createdAt: new Date().toISOString(),
-  };
+  });
 
   events.unshift(saved);
   if (events.length > MAX_EVENTS) {
@@ -226,6 +293,7 @@ export function listRetrievalTelemetry(options: RetrievalTelemetryListOptions = 
 }
 
 export async function persistRetrievalTelemetry(event: RetrievalTelemetryEvent): Promise<void> {
+  const bounded = boundRetrievalTelemetryEvent(event);
   try {
     await execute(
       `INSERT INTO retrieval_telemetry_events (
@@ -267,22 +335,22 @@ export async function persistRetrievalTelemetry(event: RetrievalTelemetryEvent):
          payload = EXCLUDED.payload,
          created_at = EXCLUDED.created_at`,
       [
-        event.id,
-        event.workspaceId,
-        event.queryPreview,
-        JSON.stringify(event.matchedSkills),
-        JSON.stringify(event.selectedCandidateKeys),
-        JSON.stringify(event.droppedCandidateKeys),
-        event.needsMoreEvidence,
-        event.candidateCount,
-        event.selectedCount,
-        event.tokenBudget,
-        event.contradictions.length,
-        JSON.stringify(event.contradictions),
-        event.retrievalTier ?? null,
-        event.latencyMs ?? null,
-        JSON.stringify({ candidates: event.candidates }),
-        event.createdAt,
+        bounded.id,
+        bounded.workspaceId,
+        bounded.queryPreview,
+        JSON.stringify(bounded.matchedSkills),
+        JSON.stringify(bounded.selectedCandidateKeys),
+        JSON.stringify(bounded.droppedCandidateKeys),
+        bounded.needsMoreEvidence,
+        bounded.candidateCount,
+        bounded.selectedCount,
+        bounded.tokenBudget,
+        bounded.contradictions.length,
+        JSON.stringify(bounded.contradictions),
+        bounded.retrievalTier ?? null,
+        bounded.latencyMs ?? null,
+        JSON.stringify({ candidates: bounded.candidates }),
+        bounded.createdAt,
       ],
     );
   } catch (err: any) {
