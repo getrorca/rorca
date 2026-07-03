@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, Brain, DollarSign } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, DollarSign, Server } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
@@ -40,10 +40,33 @@ interface HealthBadge {
 }
 
 interface AgentConfigSummary {
-  agentType: 'claude' | 'opencode' | 'codex';
+  agentType: 'claude' | 'opencode' | 'codex' | 'pi';
   agentModel: string | null;
   modelDisplayName: string | null;
   hasApiKey: boolean;
+}
+
+
+interface ExecutionEnvironmentAgentReadiness {
+  agent: string;
+  installed: boolean;
+  credentialsReady: boolean;
+  ready: boolean;
+  version?: string;
+}
+
+interface ExecutionEnvironmentReadiness {
+  id: string;
+  label: string;
+  kind: 'remote-rorca' | 'local-runner' | 'ci-runner';
+  enabled: boolean;
+  ready: boolean;
+  reason?: string;
+  networkMode: string;
+  lastHeartbeatAt: string | null;
+  agents: Record<string, ExecutionEnvironmentAgentReadiness>;
+  supportedAgents: string[];
+  secretProfileId: string | null;
 }
 
 interface OrchestrationPreview {
@@ -177,6 +200,7 @@ export interface TriggerOptions {
   thinkingBudget?: number;
   /** Override reasoning config for this run without mutating spec JSON */
   reasoningOverride?: ReasoningConfig;
+  executionEnvironment?: string;
 }
 
 interface TriggerPopoverProps {
@@ -247,6 +271,8 @@ export default function TriggerPopover({
   const [reasoningSectionExpanded, setReasoningSectionExpanded] = useState(false);
   const [dryRunEstimate, setDryRunEstimate] = useState<DryRunCostEstimate | null>(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [executionEnvironments, setExecutionEnvironments] = useState<ExecutionEnvironmentReadiness[]>([]);
+  const [executionEnvironment, setExecutionEnvironment] = useState('remote-rorca');
   const ref = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -287,6 +313,19 @@ export default function TriggerPopover({
       .then(setHealthBadge)
       .catch(() => {});
   }, [workspaceId]);
+
+  // Fetch execution environments on mount
+  useEffect(() => {
+    apiFetch<{ environments: ExecutionEnvironmentReadiness[] }>('/api/execution-environments')
+      .then((data) => {
+        const environments = data.environments ?? [];
+        setExecutionEnvironments(environments);
+        if (!environments.some((env) => env.id === executionEnvironment)) {
+          setExecutionEnvironment(environments.find((env) => env.ready)?.id ?? environments[0]?.id ?? 'remote-rorca');
+        }
+      })
+      .catch(() => {});
+  }, [executionEnvironment]);
 
   // Fetch agent config on mount
   useEffect(() => {
@@ -385,7 +424,10 @@ export default function TriggerPopover({
   const isOpenCode = agentConfig?.agentType === 'opencode';
   const noModelConfigured = isOpenCode && !agentConfig?.agentModel;
   const noApiKey = isOpenCode && !noModelConfigured && !agentConfig?.hasApiKey;
-  const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey;
+  const selectedExecutionEnvironment = executionEnvironments.find((env) => env.id === executionEnvironment) ?? null;
+  const selectedAgentReadiness = agentConfig?.agentType && selectedExecutionEnvironment?.agents ? selectedExecutionEnvironment.agents[agentConfig.agentType] : null;
+  const executionEnvironmentBlocked = selectedExecutionEnvironment ? (!selectedExecutionEnvironment.ready || (selectedAgentReadiness ? !selectedAgentReadiness.ready : false)) : false;
+  const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey || executionEnvironmentBlocked;
 
   const isCodex = agentConfig?.agentType === 'codex';
   const isOpenRouterModel = isOpenCode && agentConfig?.agentModel?.startsWith('openrouter/');
@@ -429,6 +471,7 @@ export default function TriggerPopover({
             dryRun: true,
             thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
             reasoningEffort: thinkingApplies ? effortLevel : undefined,
+            executionEnvironment,
           }),
         }
       );
@@ -549,6 +592,37 @@ export default function TriggerPopover({
           )}
         </div>
       )}
+
+
+      {/* Execution environment selector */}
+      <div>
+        <label htmlFor="trigger-execution-environment" className="block text-xs text-muted mb-1.5">Execution environment</label>
+        <div className="flex items-center gap-2">
+          <Server size={13} className="text-muted shrink-0" />
+          <select
+            id="trigger-execution-environment"
+            value={executionEnvironment}
+            onChange={(event) => { setExecutionEnvironment(event.target.value); setDryRunEstimate(null); }}
+            className="min-w-0 flex-1 px-2.5 py-1.5 text-xs bg-[var(--bg-secondary,var(--bg))] border border-border rounded-md focus:border-accent outline-none text-[var(--text)]"
+          >
+            {executionEnvironments.length === 0 && <option value="remote-rorca">Remote Rorca worker</option>}
+            {executionEnvironments.map((env) => (
+              <option key={env.id} value={env.id}>
+                {env.label} {env.ready ? '✓' : '— not ready'}
+              </option>
+            ))}
+          </select>
+        </div>
+        {selectedExecutionEnvironment && (
+          <p className={`mt-1 text-[10px] leading-tight ${executionEnvironmentBlocked ? 'text-amber-500' : 'text-muted'}`}>
+            {selectedExecutionEnvironment.ready
+              ? selectedAgentReadiness && !selectedAgentReadiness.ready
+                ? `${agentConfig?.agentType} is not ready on ${selectedExecutionEnvironment.label}`
+                : `${selectedExecutionEnvironment.kind} · ${selectedExecutionEnvironment.networkMode}`
+              : selectedExecutionEnvironment.reason ?? 'execution environment is not ready'}
+          </p>
+        )}
+      </div>
 
       {/* OC-031: Capability warnings */}
       {capWarnings.length > 0 && (
@@ -952,6 +1026,7 @@ export default function TriggerPopover({
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
               reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+              executionEnvironment,
             });
           }}
           disabled={triggerDisabled}
@@ -981,6 +1056,7 @@ export default function TriggerPopover({
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
                 reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+                executionEnvironment,
               });
             }}
             disabled={triggerDisabled}
