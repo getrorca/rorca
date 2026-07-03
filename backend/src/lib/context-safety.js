@@ -459,6 +459,16 @@ const SECRET_PATTERNS = [
         replace: (m, placeholder) => `${m[1]}${m[2]}${m[3]}${placeholder}${m[3]}`,
         previewGroup: 4,
     },
+    // 13. Natural-language password disclosure: `password is hunter2`, `pwd was …`.
+    //     Narrowly scoped to password-family keywords plus an `is`/`was` linker
+    //     (the `:`/`=` form is already handled above) so spoken-form passwords are
+    //     redacted without broadly over-redacting unrelated prose.
+    {
+        type: 'password_phrase',
+        regex: /\b(password|passphrase|passwd|pwd)(\s+(?:is|was)\s+)(["']?)([^\s"'`]{6,})\3/gi,
+        replace: (m, placeholder) => `${m[1]}${m[2]}${m[3]}${placeholder}${m[3]}`,
+        previewGroup: 4,
+    },
 ];
 /**
  * Redact secrets (API keys, tokens, private keys, database / credentialed URLs)

@@ -87,6 +87,7 @@ export function useFocusTrap<T extends HTMLElement = HTMLElement>(active = true)
     // Slight delay to let the DOM render
     const timer = requestAnimationFrame(() => {
       if (!containerRef.current) return;
+      if (document.activeElement && containerRef.current.contains(document.activeElement)) return;
       const firstFocusable = containerRef.current.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
       if (firstFocusable) {
         firstFocusable.focus();

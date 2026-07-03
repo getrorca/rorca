@@ -30,7 +30,7 @@ import { estimateTokens } from '../../lib/context-composer';
 // HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 
-const FIXTURE_REPO = path.join(__dirname, '..', '..', '..', '..', '..', 'test', 'fixtures', 'external-repo');
+const FIXTURE_REPO = path.join(__dirname, '..', '..', '..', '..', 'test', 'fixtures', 'external-repo');
 
 function loadFixtureFile(relativePath: string): string {
   return fs.readFileSync(path.join(FIXTURE_REPO, relativePath), 'utf8');

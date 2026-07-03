@@ -10,6 +10,7 @@ import { BarChart3, Coins, DollarSign, TrendingUp, HeartPulse, Activity, Loader2
 
 /* ─── Lazy-loaded tab content ─────────────────────────────────────────────── */
 
+const AnalyticsOverviewPanel = lazy(() => import('./AnalyticsOverviewPanel'));
 const UsageDashboardPanel = lazy(() => import('./UsageDashboardPanel'));
 const CostBreakdownPanel = lazy(() => import('./CostBreakdownPanel'));
 const ModelComparisonPanel = lazy(() => import('./ModelComparisonPanel'));
@@ -49,12 +50,7 @@ function TabLoader() {
   );
 }
 
-/* ─── Overview Tab (key metrics + sparklines) ─────────────────────────────── */
-/*
- * Overview embeds the Usage panel (which already has summary cards + charts)
- * and the FinOps panel side by side. This gives the "6 metric cards + sparkline"
- * feel without duplicating API calls.
- */
+/* ─── Overview Tab (key metrics + recent costs/model snapshot) ────────────── */
 
 /* ─── Component ───────────────────────────────────────────────────────────── */
 
@@ -133,14 +129,9 @@ function TabContent({ tab }: { tab: AnalyticsTab }) {
 }
 
 /* ─── Overview Tab ────────────────────────────────────────────────────────── */
-/*
- * Embeds UsageDashboardPanel which has: 4 summary metric cards, bar chart by
- * grouping, line chart over time, and a cost breakdown table. This IS the
- * overview — total tokens, total cost, avg cost/story, I/O ratio + 30-day trends.
- */
 
 function OverviewTab() {
-  return <UsageDashboardPanel />;
+  return <AnalyticsOverviewPanel />;
 }
 
 /* ─── Costs Tab ───────────────────────────────────────────────────────────── */

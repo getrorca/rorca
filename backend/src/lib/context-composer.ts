@@ -730,13 +730,15 @@ export function composeContext(
 
   // ── 4. Handle degradation ───────────────────────────────────────────
 
-  if (!includeGraph || graphMode === 'lite' || graphMode === 'disabled') {
+  if (!includeGraph || graphMode === 'lite' || graphMode === 'disabled' || (includeGraph && !feed.graphStats)) {
     if (!includeGraph) {
       degradationReasons.push('Graph context excluded by caller (includeGraph=false)');
     } else if (graphMode === 'lite') {
       degradationReasons.push('Hilo graph unavailable — falling back to semantic-only retrieval');
     } else if (graphMode === 'disabled') {
       degradationReasons.push('Graph retrieval disabled');
+    } else {
+      degradationReasons.push('Hilo graph unavailable — falling back to semantic-only retrieval');
     }
   }
 

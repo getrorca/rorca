@@ -4949,11 +4949,20 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
   const cleanupOutputStream = () => {
+    if (streamClosed) return;
     streamClosed = true;
     clearInterval(hb);
     if (pollInterval) {
       clearInterval(pollInterval);
       pollInterval = null;
+    }
+    req.off('close', cleanupOutputStream);
+  };
+  const finishOutputStream = () => {
+    cleanupOutputStream();
+    if (!res.destroyed && !res.writableEnded) {
+      res.write('event: done\ndata: \n\n');
+      res.end();
     }
   };
   req.on('close', cleanupOutputStream);
@@ -5036,9 +5045,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
   // ── If the run is already terminal, close immediately ────────────────────
   if (runRow && terminalStatuses.includes(runRow.status)) {
-    clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
+    finishOutputStream();
     return;
   }
 
@@ -5073,14 +5080,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       ]);
       const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
       if (!statusRow || terminalStatuses.includes(statusRow.status) || ptyTerminal) {
-        cleanupOutputStream();
-        res.write('event: done\ndata: \n\n');
-        res.end();
+        finishOutputStream();
       }
     } catch {
-      cleanupOutputStream();
-      res.write('event: done\ndata: \n\n');
-      res.end();
+      finishOutputStream();
     }
   }, 200);
 

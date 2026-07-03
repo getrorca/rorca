@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validateBody } from '../lib/validate';
@@ -86,8 +93,6 @@ async function authenticateRunnerRequest(req: Request) {
  * /api/execution-environments:
  *   get:
  *     summary: List execution environments
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Read-only local automation surface for selecting where Rorca runs execute."
  *     responses:
  *       200: { description: OK }
  */
@@ -106,8 +111,6 @@ router.get('/', async (_req: Request, res: Response) => {
  * /api/execution-environments/{id}/readiness:
  *   get:
  *     summary: Get execution environment readiness
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Read-only readiness for a user-owned execution environment."
  *     responses:
  *       200: { description: OK }
  */
@@ -124,8 +127,6 @@ router.get('/:id/readiness', async (req: Request, res: Response) => {
  * /api/execution-environments/{id}:
  *   put:
  *     summary: Upsert an execution environment
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "User-owned local configuration for bounded execution routing."
  *     responses:
  *       200: { description: OK }
  */
@@ -143,8 +144,6 @@ router.put('/:id', validateBody(UpsertEnvironmentSchema), async (req: Request, r
  * /api/execution-environments/{id}/runner-token:
  *   post:
  *     summary: Set runner token for an execution environment
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Local operator action to pair a bounded runner with Rorca. Token value is never returned."
  *     responses:
  *       200: { description: OK }
  */
@@ -168,8 +167,6 @@ router.post('/:id/runner-token', validateBody(RunnerTokenSchema), async (req: Re
  * /api/execution-environments/{id}/runner/heartbeat:
  *   post:
  *     summary: Runner heartbeat and capability report
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Authenticated runner status update for bounded outbound execution."
  *     responses:
  *       200: { description: OK }
  */
@@ -189,8 +186,6 @@ router.post('/:id/runner/heartbeat', validateBody(RunnerHeartbeatSchema), async 
  * /api/execution-environments/{id}/runner/poll:
  *   post:
  *     summary: Claim next job for an outbound runner
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Authenticated runner-only job claim; normal Slack users never get raw arbitrary MCP access."
  *     responses:
  *       200: { description: OK }
  */
@@ -204,6 +199,14 @@ router.post('/:id/runner/poll', validateBody(RunnerPollSchema), async (req: Requ
   }
 });
 
+/**
+ * @swagger
+ * /api/execution-environments/{id}/runner/jobs/{jobId}/running:
+ *   post:
+ *     summary: Mark a claimed runner job as running
+ *     responses:
+ *       200: { description: OK }
+ */
 router.post('/:id/runner/jobs/:jobId/running', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
   try {
     await authenticateRunnerRequest(req);
@@ -214,6 +217,14 @@ router.post('/:id/runner/jobs/:jobId/running', validateBody(RunnerPollSchema), a
   }
 });
 
+/**
+ * @swagger
+ * /api/execution-environments/{id}/runner/jobs/{jobId}/complete:
+ *   post:
+ *     summary: Complete a runner job
+ *     responses:
+ *       200: { description: OK }
+ */
 router.post('/:id/runner/jobs/:jobId/complete', validateBody(CompleteJobSchema), async (req: Request, res: Response) => {
   try {
     await authenticateRunnerRequest(req);

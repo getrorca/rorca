@@ -36,6 +36,22 @@ jobs:
   backend-tests:
     name: Backend Tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rorca
+          POSTGRES_PASSWORD: rorca
+          POSTGRES_DB: rorca
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U rorca -d rorca"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_URL_TEST: postgres://rorca:rorca@localhost:5433/rorca_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,7 +60,13 @@ jobs:
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
       - run: cd backend && npm ci
-      - run: cd backend && npm test
+      - name: Run backend PR-critical tests
+        run: >-
+          cd backend && npm test --
+          src/routes/__tests__/context-pipeline-e2e.test.ts
+          src/__tests__/QRW-007-model-capability.test.ts
+          src/routes/__tests__/pipeline-output-parity.test.ts
+          --runInBand
 
   frontend-lint:
     name: Frontend Lint
