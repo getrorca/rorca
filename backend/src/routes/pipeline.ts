@@ -1657,8 +1657,32 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective]);
+        const queuedTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
+        const queuedTriggerOptions = Object.fromEntries(
+          Object.entries({
+            autoWorktree: !!autoWorktree,
+            autoMerge,
+            mergeStrategy,
+            triggerType: queuedTriggerType,
+            forceSequential,
+            agentOverride,
+            modelOverride,
+            storyId,
+            includeGraph,
+            thinkingEnabled,
+            thinkingBudget,
+            effortLevel,
+            reasoningEffort,
+            rerunFromScratch,
+            readinessOverride,
+            runAnywayOverride,
+            overrideReadinessGate,
+            terminal_mode: resolvedTerminalMode,
+            executionEnvironment: resolvedExecutionEnvironment.effective,
+          }).filter(([, value]) => value !== undefined)
+        );
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, auto_merge, include_graph, merge_strategy, agent, agent_type, agent_model, terminal_mode, execution_environment, trigger_options)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb) RETURNING id`, [specPath, workspaceId, queuedTriggerType, position, !!autoWorktree, autoMerge ?? true, includeGraph ?? false, mergeStrategy ?? null, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, JSON.stringify(queuedTriggerOptions)]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;

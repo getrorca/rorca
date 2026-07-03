@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -35,6 +36,34 @@ jest.mock('../../lib/pg-boss', () => ({
     stop: jest.fn().mockResolvedValue(undefined),
   }),
 }));
+
+jest.mock('../../lib/spec-readiness', () => {
+  const actual = jest.requireActual('../../lib/spec-readiness');
+  return {
+    ...actual,
+    getSpecReadiness: jest.fn().mockResolvedValue({
+      persistenceState: {
+        workspaceId: 'ws-queue-test',
+        specId: 'queue-test',
+        specPath: 'forge/specs/approved/queue-test.json',
+        location: 'approved',
+        exists: true,
+        latestGenerationLogId: 1,
+        latestGenerationLogStatus: 'completed',
+        saveGeneration: 1,
+        contextCapture: { status: 'provided' },
+      },
+      postSaveState: { mode: 'strict', source: 'workflow', latestWorkflowRunId: 1, latestWorkflowStatus: 'completed', stages: [] },
+      readinessState: { status: 'ready', reason: 'strict' },
+      executionGate: { status: 'allowed', overrideAllowed: false, overrideReasonCode: actual.SpecReadinessReasonCode.RunAnywayOverrideUsed },
+      blockingReasons: [],
+      warnings: [],
+      availableActions: ['run'],
+    }),
+    assertSpecReadinessAllowsMutation: jest.fn(),
+    recordSpecReadinessOverride: jest.fn().mockResolvedValue(undefined),
+  };
+});
 
 let app: Express;
 let tmpDir: string;
@@ -69,8 +98,14 @@ beforeEach(async () => {
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'pending'), { recursive: true });
-  // Git init so worktree creation doesn't fail
-  fs.mkdirSync(path.join(wsDir, '.git'), { recursive: true });
+  // Real git init so worktree creation and branch inspection do not fail.
+  fs.writeFileSync(path.join(wsDir, 'README.md'), '# Queue test workspace\n', 'utf8');
+  execFileSync('git', ['init'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['checkout', '-B', 'main'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'queue-test@rorca.local'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Queue Test'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['add', 'README.md'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'init'], { cwd: wsDir, stdio: 'ignore' });
 
   // Clean up DB state
   await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
@@ -498,7 +533,7 @@ describe('triggered_via Routing', () => {
       .send({
         specPath: 'forge/specs/approved/via-promoted.json',
         workspaceId: WS_ID,
-        queuedRunId,
+        queuedRunId: Number(queuedRunId),
       });
 
     expect(res.status).toBe(201);
@@ -531,12 +566,12 @@ describe('triggered_via Routing', () => {
       .send({
         specPath: 'forge/specs/approved/promo-no-conflict.json',
         workspaceId: WS_ID,
-        queuedRunId,
+        queuedRunId: Number(queuedRunId),
       });
 
     expect(res.status).toBe(201);
     expect(res.body.ok).toBe(true);
-    expect(res.body.runId).toBe(queuedRunId);
+    expect(res.body.runId).toBe(Number(queuedRunId));
   });
 });
 
@@ -718,7 +753,7 @@ describe('advanceQueue()', () => {
     const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toContain('/api/pipeline/trigger');
     const body = JSON.parse(options.body as string);
-    expect(body.queuedRunId).toBe(queuedIds[0]); // Oldest first
+    expect(body.queuedRunId).toBe(Number(queuedIds[0])); // Oldest first; pg BIGINT ids are serialized as strings by pg
     expect(body.specPath).toBe('forge/specs/approved/advance-test.json');
     expect(body.workspaceId).toBe(WS_ID);
 
@@ -728,7 +763,9 @@ describe('advanceQueue()', () => {
       [WS_ID]
     );
     expect(walEvents.length).toBe(1);
-    const walPayload = JSON.parse(walEvents[0].payload);
+    const walPayload = typeof walEvents[0].payload === 'string'
+      ? JSON.parse(walEvents[0].payload)
+      : walEvents[0].payload;
     expect(walPayload.runId).toBe(queuedIds[0]);
 
     fetchSpy.mockRestore();
@@ -839,7 +876,71 @@ describe('advanceQueue()', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const body = JSON.parse((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.autoWorktree).toBe(true);
-    expect(body.queuedRunId).toBe(queuedId);
+    expect(body.queuedRunId).toBe(Number(queuedId));
+
+    fetchSpy.mockRestore();
+  });
+
+  test('replays the full queued trigger contract when promoting a run', async () => {
+    seedSpec('advance-contract');
+
+    await execute(`UPDATE worker_settings SET value = '1' WHERE key = 'queue_max_concurrent'`);
+    const triggerOptions = {
+      autoWorktree: true,
+      autoMerge: false,
+      mergeStrategy: 'pr',
+      forceSequential: true,
+      agentOverride: 'pi',
+      modelOverride: 'openai-codex/gpt-5.5',
+      includeGraph: true,
+      effortLevel: 'xhigh',
+      reasoningEffort: 'xhigh',
+      terminal_mode: 'ansi-html',
+      executionEnvironment: 'local-user',
+      readinessOverride: true,
+    };
+    const queuedId = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (
+         spec_path, workspace_id, status, triggered_via, auto_worktree,
+         auto_merge, include_graph, parallelism, agent, agent_type, agent_model,
+         merge_strategy, terminal_mode, execution_environment, queue_position, trigger_options
+       ) VALUES ($1, $2, 'queued', 'queue', true, false, true, 1,
+         'pi', 'pi', 'openai-codex/gpt-5.5', 'pr', 'ansi-html', 'local-user', 1, $3::jsonb)
+       RETURNING id`,
+      ['forge/specs/approved/advance-contract.json', WS_ID, JSON.stringify(triggerOptions)],
+    );
+
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      return new Response(JSON.stringify({ ok: true, runId: queuedId!.id }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const { advanceQueue } = require('../../lib/run-queue');
+    await advanceQueue(WS_ID);
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(options.body as string);
+    expect(body).toEqual(expect.objectContaining({
+      specPath: 'forge/specs/approved/advance-contract.json',
+      workspaceId: WS_ID,
+      queuedRunId: Number(queuedId!.id),
+      autoWorktree: true,
+      autoMerge: false,
+      mergeStrategy: 'pr',
+      forceSequential: true,
+      agentOverride: 'pi',
+      modelOverride: 'openai-codex/gpt-5.5',
+      includeGraph: true,
+      effortLevel: 'xhigh',
+      reasoningEffort: 'xhigh',
+      terminal_mode: 'ansi-html',
+      executionEnvironment: 'local-user',
+      readinessOverride: true,
+    }));
 
     fetchSpy.mockRestore();
   });

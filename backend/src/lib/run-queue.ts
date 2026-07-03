@@ -10,12 +10,38 @@ import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 
 interface QueuedRunRow {
-  id: number;
+  id: number | string;
   spec_path: string;
   workspace_id: string;
   queued_at: string;
   queue_position: number;
   auto_worktree: boolean;
+  auto_merge: boolean | null;
+  include_graph: boolean | null;
+  parallelism: number | null;
+  agent_type: string | null;
+  agent_model: string | null;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
+  terminal_mode: string | null;
+  execution_environment: string | null;
+  trigger_options: Record<string, unknown> | string | null;
+}
+
+function parseTriggerOptions(raw: QueuedRunRow['trigger_options']): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+}
+
+function isKnownAgent(agent: string | null): agent is 'claude' | 'opencode' | 'codex' | 'pi' {
+  return agent === 'claude' || agent === 'opencode' || agent === 'codex' || agent === 'pi';
 }
 
 const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
@@ -66,9 +92,14 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
       return;
     }
 
-    // Find the next queued run (oldest first), including auto_worktree
+    // Find the next queued run (oldest first), including the stored trigger contract.
     const nextQueued = await queryOne<QueuedRunRow>(
-      `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree FROM pipeline_runs
+      `SELECT id, spec_path, workspace_id, queued_at, queue_position,
+              auto_worktree, auto_merge, include_graph, parallelism,
+              agent_type, agent_model, merge_strategy, terminal_mode,
+              execution_environment,
+              COALESCE(trigger_options, '{}'::jsonb) AS trigger_options
+       FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
        ORDER BY queued_at ASC LIMIT 1`,
       [workspaceId],
@@ -98,18 +129,33 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
     }
 
     // Trigger the run via internal HTTP call to reuse all spawn logic.
-    // US-005: Pass autoWorktree from the queued run row so worktree isolation is preserved.
+    // Replay the full queued trigger contract so queue promotion preserves
+    // agent/model, reasoning effort, merge strategy, terminal mode, graph mode,
+    // story scope, readiness override, and sequential execution intent.
     // triggered_via='queue' is derived by pipeline.ts from the presence of queuedRunId.
+    const triggerOptions = parseTriggerOptions(nextQueued.trigger_options);
+    const fallbackAgentOverride = isKnownAgent(nextQueued.agent_type) ? nextQueued.agent_type : undefined;
+    const replayBody = {
+      ...triggerOptions,
+      specPath: nextQueued.spec_path,
+      workspaceId: nextQueued.workspace_id,
+      queuedRunId: Number(nextQueued.id),
+      autoWorktree: Boolean(nextQueued.auto_worktree),
+      ...(nextQueued.auto_merge !== null ? { autoMerge: nextQueued.auto_merge } : {}),
+      ...(nextQueued.include_graph !== null ? { includeGraph: nextQueued.include_graph } : {}),
+      ...(nextQueued.merge_strategy ? { mergeStrategy: nextQueued.merge_strategy } : {}),
+      ...(nextQueued.terminal_mode ? { terminal_mode: nextQueued.terminal_mode } : {}),
+      ...(nextQueued.execution_environment ? { executionEnvironment: nextQueued.execution_environment } : {}),
+      ...(fallbackAgentOverride ? { agentOverride: fallbackAgentOverride } : {}),
+      ...(nextQueued.agent_model ? { modelOverride: nextQueued.agent_model } : {}),
+      ...(nextQueued.parallelism === 1 ? { forceSequential: true } : {}),
+    };
+
     const port = process.env.PORT || '3030';
     fetch(`http://localhost:${port}/api/pipeline/trigger`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        specPath: nextQueued.spec_path,
-        workspaceId: nextQueued.workspace_id,
-        queuedRunId: nextQueued.id,
-        autoWorktree: nextQueued.auto_worktree,
-      }),
+      body: JSON.stringify(replayBody),
     }).then(async (resp) => {
       if (!resp.ok) {
         const body = await resp.text();
