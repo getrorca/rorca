@@ -45,7 +45,6 @@ import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import { synthesizeRunMemory } from '../lib/auto-memory';
-import * as piDetector from '../lib/pi-detector';
 import { logger } from '../lib/logger';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
@@ -69,6 +68,12 @@ import {
 } from '../lib/spec-readiness';
 import { safeParseTaskManifest, type TaskManifest } from '../lib/task-manifest';
 import { writeTaskManifestExecutionEnvelope, type WriteTaskManifestExecutionEnvelopeResult } from '../lib/task-manifest-execution-envelope';
+import {
+  EXECUTION_AGENT_PRECEDENCE,
+  EXECUTION_MODEL_PRECEDENCE,
+  resolveExecutionOptions,
+  type ResolvedExecutionOptions,
+} from '../lib/resolve-execution-options';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -92,47 +97,6 @@ function buildCleanEnvForMerge(): Record<string, string> {
     }
   }
   return env;
-}
-
-const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
-
-function normalizePiModelId(provider: string, model: string): string {
-  return `${provider}/${model}`;
-}
-
-function resolvePreferredPiModel(requestedModel: string | null, models: piDetector.PiModel[]): string | null {
-  if (models.length === 0) {
-    if (requestedModel?.startsWith('openai-codex/')) return requestedModel;
-    return DEFAULT_PI_MODEL;
-  }
-
-  const normalized = new Map<string, string>();
-  for (const model of models) {
-    const id = normalizePiModelId(model.provider, model.model);
-    normalized.set(id, id);
-    normalized.set(model.model, id);
-  }
-
-  if (requestedModel) {
-    const exact = normalized.get(requestedModel);
-    if (exact) return exact;
-  }
-
-  const preferredIds = [
-    'openai-codex/gpt-5.4',
-    'openai-codex/gpt-5.4-mini',
-    'openai-codex/gpt-5.3-codex',
-    'openai-codex/gpt-5.2',
-  ];
-  for (const id of preferredIds) {
-    if (normalized.has(id)) return normalized.get(id)!;
-  }
-
-  const firstCodex = models.find((model) => model.provider === 'openai-codex');
-  if (firstCodex) return normalizePiModelId(firstCodex.provider, firstCodex.model);
-
-  const first = models[0];
-  return normalizePiModelId(first.provider, first.model);
 }
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
@@ -1291,7 +1255,7 @@ const PipelineTriggerSchema = z.object({
 
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, executionEnvironment, executionEnvironmentId } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1352,90 +1316,36 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
-    // 3. Resolve agent type and model.
-    //    Model: ONLY from spec JSON or per-story override. No hidden DB/env fallbacks.
-    //    Agent runtime: request agentOverride > spec agentOverride > in-memory active agent
+    // 3. Resolve agent type and model via the shared pipeline/task-manifest helper.
+    //    Agent precedence: request > manifest (when provided by caller) > spec/envelope > model auto-switch > workflow router > active fallback.
+    //    Model precedence: request > manifest (when provided by caller) > spec/envelope > workflow router > active fallback.
     const pipelineUser = await getEffectiveUser(req);
     const wfConfig = await resolveWorkflowConfig('pipeline_execution', pipelineUser?.id);
 
     const specModelPath = path.join(workspace.path, specPath);
     const specModelJson = fs.existsSync(specModelPath) ? JSON.parse(fs.readFileSync(specModelPath, 'utf8')) : {};
     const specLevelModel: string | null = specModelJson.model ?? null;
-    // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id)
+    // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id) or synthetic task-manifest envelope.
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
     // Read spec-level reasoning config — used as defaults when trigger request omits reasoning params
     const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
     const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
     const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
-    // Model comes from: request modelOverride > spec.model > null (no hidden DB/env fallbacks)
-    const resolvedAgentModel: string | null = modelOverride ?? specLevelModel;
 
-    // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
-    // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
-    const OPENCODE_PROVIDER_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/'];
-    // Note: 'anthropic/' prefix is intentionally excluded — anthropic/claude-* models must stay on Claude CLI.
-    // Only non-Claude provider prefixes trigger the OpenCode auto-switch.
-    const modelNeedsOpenCode = resolvedAgentModel != null && OPENCODE_PROVIDER_PREFIXES.some(p => resolvedAgentModel.startsWith(p));
-    // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models.
-    // Exclude anthropic/claude-* (OpenRouter format for Claude models — should still use Claude CLI).
-    const modelIsNonClaude = resolvedAgentModel != null
-      && resolvedAgentModel.includes('/')
-      && !resolvedAgentModel.startsWith('claude-')
-      && !resolvedAgentModel.startsWith('anthropic/claude-');
-    const runtimeAgent = activeAgent;
-    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && runtimeAgent === 'claude';
-    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > in-memory active agent
-    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : runtimeAgent);
-
-    // Translate model IDs for OpenCode execution.
-    // OpenCode expects "provider/org/model" format (e.g. "openrouter/anthropic/claude-opus-4.6").
-    // Rorca stores models as either:
-    //   - Claude-style IDs: "claude-opus-4-6" (Anthropic SDK format, dashes)
-    //   - OpenRouter catalog IDs: "z-ai/glm-5", "anthropic/claude-opus-4.6" (org/model)
-    //   - Already-prefixed: "openrouter/z-ai/glm-5", "openai/gpt-4o"
-    let finalAgentModel = resolvedAgentModel;
-    if (finalAgentModel && resolvedAgentType === 'opencode') {
-      // Already has a known provider prefix — pass through as-is
-      if (modelNeedsOpenCode) {
-        // e.g. "openrouter/z-ai/glm-5", "openai/gpt-4o" — already correct
-      }
-      // Claude SDK model IDs → OpenRouter format (dashes to dots, add anthropic/ prefix)
-      else if (/^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/')) {
-        // claude-opus-4-6 → anthropic/claude-opus-4.6
-        // claude-sonnet-4-6 → anthropic/claude-sonnet-4.6
-        // claude-haiku-4-5-20251001 → anthropic/claude-haiku-4.5 (strip date suffix)
-        const openRouterId = finalAgentModel
-          .replace(/-(\d+)-(\d+)(?:-\d{8})?$/, '-$1.$2')  // "4-6" → "4.6", strip date
-          .replace(/-(\d{8})$/, '');                         // catch remaining date suffixes
-        finalAgentModel = `openrouter/anthropic/${openRouterId}`;
-      }
-      // Bare org/model from OpenRouter catalog (e.g. "z-ai/glm-5", "anthropic/claude-opus-4.6")
-      else if (modelIsNonClaude) {
-        finalAgentModel = `openrouter/${finalAgentModel}`;
-      }
-    }
-
-    // When running with Claude CLI, only claude-* model IDs are valid.
-    // If the spec has an OpenRouter model (e.g. "z-ai/glm-5") but the user
-    // explicitly selected Claude CLI, clear the model so Claude uses its default.
-    if (resolvedAgentType === 'claude' && finalAgentModel) {
-      const isClaudeModel = /^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/');
-      if (!isClaudeModel) {
-        finalAgentModel = null;
-      }
-    }
-
-    if (resolvedAgentType === 'pi') {
-      const piStatus = piDetector.detectPi();
-      if (piStatus.piInstalled && piStatus.piBinPath) {
-        const availablePiModels = piDetector.listPiModels(piStatus.piBinPath);
-        const preferredPiModel = resolvePreferredPiModel(finalAgentModel, availablePiModels);
-        if (preferredPiModel !== finalAgentModel) {
-          logger.info({ requestedModel: finalAgentModel, preferredPiModel }, '[Pipeline] Adjusted Pi model to an available local Pi model');
-        }
-        finalAgentModel = preferredPiModel;
-      }
-    }
+    const executionOptions = resolveExecutionOptions({
+      requestAgentOverride: agentOverride,
+      manifestAgentOverride: manifestExecutionAgentOverride,
+      specAgentOverride: specLevelAgent,
+      requestModelOverride: modelOverride,
+      manifestModelOverride: manifestExecutionModelOverride,
+      specModel: specLevelModel,
+      workflowConfig: wfConfig,
+      activeAgentFallback: activeAgent,
+      activeModelFallback: activeModel,
+      log: logger,
+    });
+    const resolvedAgentType: AgentType = executionOptions.resolvedAgentType;
+    const finalAgentModel = executionOptions.finalAgentModel;
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedAgentType === 'claude') {
@@ -2261,6 +2171,8 @@ function buildTaskManifestEstimatedPlan(input: {
   terminalMode: TerminalMode;
   executionEnvironment?: string;
   executionEnvironmentId?: string;
+  executionEnvironmentSupported?: boolean;
+  executionOptions?: ResolvedExecutionOptions;
 }): Record<string, unknown> {
   return {
     willQueue: false,
@@ -2284,6 +2196,18 @@ function buildTaskManifestEstimatedPlan(input: {
     terminal_mode: input.terminalMode,
     executionEnvironment: input.executionEnvironment ?? input.manifest.execution.executionEnvironment ?? null,
     executionEnvironmentId: input.executionEnvironmentId ?? input.manifest.execution.executionEnvironmentId ?? null,
+    executionEnvironmentSupported: input.executionEnvironmentSupported ?? false,
+    executionOptionPrecedence: {
+      agent: EXECUTION_AGENT_PRECEDENCE,
+      model: EXECUTION_MODEL_PRECEDENCE,
+    },
+    ...(input.executionOptions ? {
+      resolvedAgentType: input.executionOptions.resolvedAgentType,
+      resolvedAgentModel: input.executionOptions.finalAgentModel,
+      agentSource: input.executionOptions.agentSource,
+      modelSource: input.executionOptions.modelSource,
+      autoSwitchedToOpenCode: input.executionOptions.autoSwitchedToOpenCode,
+    } : {}),
     storyCount: input.envelope.spec.userStories.length,
     tasks: input.envelope.spec.userStories.map((story) => ({
       storyId: story.id,
@@ -2330,6 +2254,32 @@ function resolveTaskManifestInput(body: TaskManifestTriggerRequestBody): unknown
     : body.manifest;
 }
 
+function hasExecutionEnvironmentSupport(): boolean {
+  return [
+    path.join(__dirname, '..', 'lib', 'execution-environment.ts'),
+    path.join(__dirname, '..', 'lib', 'execution-environment.js'),
+  ].some((candidate) => fs.existsSync(candidate));
+}
+
+function resolveTaskManifestExecutionEnvironment(
+  body: TaskManifestTriggerRequestBody,
+  manifest: TaskManifest,
+): { supported: boolean; executionEnvironment: string; executionEnvironmentId?: string } {
+  const supported = hasExecutionEnvironmentSupport();
+  const requestedEnvironment = body.executionEnvironment ?? manifest.execution.executionEnvironment ?? 'remote-rorca';
+  const requestedEnvironmentId = body.executionEnvironmentId ?? manifest.execution.executionEnvironmentId;
+
+  if (!supported) {
+    return { supported: false, executionEnvironment: 'remote-rorca' };
+  }
+
+  return {
+    supported: true,
+    executionEnvironment: requestedEnvironment,
+    ...(requestedEnvironmentId ? { executionEnvironmentId: requestedEnvironmentId } : {}),
+  };
+}
+
 /**
  * @swagger
  * /api/pipeline/task-manifests/trigger:
@@ -2343,7 +2293,9 @@ function resolveTaskManifestInput(body: TaskManifestTriggerRequestBody): unknown
  *     description: >
  *       Validates a Hermes task manifest, writes manifest.json/tasks.md plus an internal synthetic spec under
  *       forge/task-manifests/{manifestId}/, and queues the existing pipeline:run broker path. Generated MCP tool:
- *       rorca_pipeline_task_manifests_trigger. Friendly alias: rorca_trigger_task_manifest.
+ *       rorca_pipeline_task_manifests_trigger. Friendly alias: rorca_trigger_task_manifest. Execution precedence is
+ *       request overrides > manifest.execution overrides > synthetic envelope/spec metadata > provider/model auto-switch
+ *       > workflow router > active fallback (model uses the analogous request > manifest > spec > workflow > active chain).
  *     requestBody:
  *       required: true
  *       content:
@@ -2362,8 +2314,8 @@ function resolveTaskManifestInput(body: TaskManifestTriggerRequestBody): unknown
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi] }
  *               modelOverride: { type: string }
  *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh] }
- *               executionEnvironment: { type: string }
- *               executionEnvironmentId: { type: string }
+ *               executionEnvironment: { type: string, description: "Optional; carried to the broker only when local execution-environment support is installed, otherwise defaults to remote-rorca." }
+ *               executionEnvironmentId: { type: string, description: "Optional execution-environment identifier when supported." }
  *               terminal_mode: { type: string, enum: [ansi-html, pty], nullable: true }
  *               terminalMode: { type: string, enum: [ansi-html, pty], nullable: true }
  *     responses:
@@ -2426,11 +2378,27 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     const resolvedAgentOverride = requestBody.agentOverride ?? manifest.execution.agentOverride;
     const resolvedModelOverride = requestBody.modelOverride ?? manifest.execution.modelOverride;
     const resolvedEffortLevel = requestBody.effortLevel ?? manifest.execution.effortLevel;
-    const resolvedExecutionEnvironment = requestBody.executionEnvironment ?? manifest.execution.executionEnvironment;
-    const resolvedExecutionEnvironmentId = requestBody.executionEnvironmentId ?? manifest.execution.executionEnvironmentId;
+    const executionEnvironmentResolution = resolveTaskManifestExecutionEnvironment(requestBody, manifest);
+    const resolvedExecutionEnvironment = executionEnvironmentResolution.executionEnvironment;
+    const resolvedExecutionEnvironmentId = executionEnvironmentResolution.executionEnvironmentId;
+
+    const taskManifestUser = await getEffectiveUser(req);
+    const taskManifestWfConfig = await resolveWorkflowConfig('pipeline_execution', taskManifestUser?.id);
+    const taskManifestExecutionOptions = resolveExecutionOptions({
+      requestAgentOverride: requestBody.agentOverride,
+      manifestAgentOverride: manifest.execution.agentOverride,
+      specAgentOverride: envelope.spec.agentOverride,
+      requestModelOverride: requestBody.modelOverride,
+      manifestModelOverride: manifest.execution.modelOverride,
+      specModel: envelope.spec.model ?? null,
+      workflowConfig: taskManifestWfConfig,
+      activeAgentFallback: activeAgent,
+      activeModelFallback: activeModel,
+      log: logger,
+    });
 
     if (resolvedDryRun) {
-      const model = resolvedModelOverride ?? envelope.spec.model ?? DEFAULT_MODEL;
+      const model = taskManifestExecutionOptions.finalAgentModel ?? DEFAULT_MODEL;
       const estimate = await estimateDryRunCost(
         envelope.spec,
         requestWorkspaceId,
@@ -2457,6 +2425,8 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
           terminalMode: resolvedTerminalMode,
           executionEnvironment: resolvedExecutionEnvironment,
           executionEnvironmentId: resolvedExecutionEnvironmentId,
+          executionEnvironmentSupported: executionEnvironmentResolution.supported,
+          executionOptions: taskManifestExecutionOptions,
         }),
         estimate,
       });
@@ -2500,12 +2470,14 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       manifestId: manifest.manifestId,
       taskManifestArtifacts: artifacts,
       taskManifestArtifactRefs: artifactRefs,
-      ...(resolvedAgentOverride ? { agentOverride: resolvedAgentOverride } : {}),
-      ...(resolvedModelOverride ? { modelOverride: resolvedModelOverride } : {}),
+      ...(requestBody.agentOverride ? { agentOverride: requestBody.agentOverride } : {}),
+      ...(manifest.execution.agentOverride ? { manifestExecutionAgentOverride: manifest.execution.agentOverride } : {}),
+      ...(requestBody.modelOverride ? { modelOverride: requestBody.modelOverride } : {}),
+      ...(manifest.execution.modelOverride ? { manifestExecutionModelOverride: manifest.execution.modelOverride } : {}),
       ...(resolvedEffortLevel ? { effortLevel: resolvedEffortLevel } : {}),
       terminalMode: resolvedTerminalMode,
-      ...(resolvedExecutionEnvironment ? { executionEnvironment: resolvedExecutionEnvironment } : {}),
-      ...(resolvedExecutionEnvironmentId ? { executionEnvironmentId: resolvedExecutionEnvironmentId } : {}),
+      ...(executionEnvironmentResolution.supported ? { executionEnvironment: resolvedExecutionEnvironment } : {}),
+      ...(executionEnvironmentResolution.supported && resolvedExecutionEnvironmentId ? { executionEnvironmentId: resolvedExecutionEnvironmentId } : {}),
     };
 
     await handlePipelineTrigger(req, res);

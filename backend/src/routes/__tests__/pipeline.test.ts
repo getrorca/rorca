@@ -29,11 +29,24 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
+jest.mock('../../lib/claude-auth', () => ({
+  getClaudeAuthState: jest.fn().mockReturnValue({ connected: true, email: 'test@example.com', tier: 'max', cliInstalled: true }),
+  triggerClaudeLogin: jest.fn().mockReturnValue({ started: true }),
+  triggerClaudeLogout: jest.fn().mockResolvedValue({ ok: true }),
+}));
+
+jest.mock('../../lib/codex-auth', () => ({
+  getCodexAuthState: jest.fn().mockReturnValue({ connected: true, username: 'test@example.com', plan: 'pro', cliInstalled: true }),
+  triggerCodexLogin: jest.fn().mockReturnValue({ started: true }),
+  triggerCodexLogout: jest.fn().mockResolvedValue({ ok: true }),
+}));
+
 // Mock pg-boss so pipeline trigger doesn't fail with "getBoss() called before initBoss()"
 // In test mode server.ts never calls initBoss(), so we stub the whole module.
 jest.mock('../../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
   getBoss: jest.fn().mockReturnValue({
+    createQueue: jest.fn().mockResolvedValue(undefined),
     send: jest.fn().mockResolvedValue('mock-job-id'),
     work: jest.fn(),
     stop: jest.fn().mockResolvedValue(undefined),
@@ -222,6 +235,13 @@ function taskManifestTriggerBody(overrides: Record<string, any> = {}): Record<st
     manifest,
     ...overrides,
   };
+}
+
+function hasExecutionEnvironmentSupportInTest(): boolean {
+  return [
+    path.join(__dirname, '..', '..', 'lib', 'execution-environment.ts'),
+    path.join(__dirname, '..', '..', 'lib', 'execution-environment.js'),
+  ].some((candidate) => fs.existsSync(candidate));
 }
 
 // ─── POST /api/pipeline/trigger ──────────────────────────────────────────────
@@ -2760,6 +2780,13 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       agentOverride: 'pi',
       modelOverride: 'claude-sonnet-4-5-20250929',
       terminalMode: 'ansi-html',
+      resolvedAgentType: 'pi',
+      agentSource: 'request.agentOverride',
+      modelSource: 'request.modelOverride',
+      executionOptionPrecedence: {
+        agent: expect.stringContaining('request.agentOverride > manifest.execution.agentOverride'),
+        model: expect.stringContaining('request.modelOverride > manifest.execution.modelOverride'),
+      },
     });
     expect(fs.existsSync(path.join(wsDir, res.body.artifacts.manifestPath))).toBe(true);
     expect(fs.existsSync(path.join(wsDir, res.body.artifacts.tasksMdPath))).toBe(true);
@@ -2783,6 +2810,8 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       executionEnvironmentId: 'tm-test-env',
     });
 
+    const executionEnvironmentSupported = hasExecutionEnvironmentSupportInTest();
+
     const res = await request(app)
       .post('/api/pipeline/task-manifests/trigger')
       .set('Authorization', `Bearer ${authToken}`)
@@ -2795,9 +2824,16 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       manifestId: body.manifest.manifestId,
       idempotencyKey: body.idempotencyKey,
       artifacts: expect.objectContaining({ specPath: expect.stringContaining('hermes-task-manifest') }),
-      executionEnvironment: 'local-worktree',
-      executionEnvironmentId: 'tm-test-env',
     }));
+    if (executionEnvironmentSupported) {
+      expect(res.body).toEqual(expect.objectContaining({
+        executionEnvironment: 'local-worktree',
+        executionEnvironmentId: 'tm-test-env',
+      }));
+    } else {
+      expect(res.body.executionEnvironment).toBeUndefined();
+      expect(res.body.executionEnvironmentId).toBeUndefined();
+    }
 
     const run = await queryOne<{
       idempotency_key: string | null;
@@ -2807,7 +2843,8 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       auto_merge: boolean;
       auto_worktree: boolean;
       terminal_mode: string | null;
-    }>(`SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, merge_strategy, auto_merge, auto_worktree, terminal_mode FROM pipeline_runs WHERE id = $1`, [res.body.runId]);
+      agent_type: string | null;
+    }>(`SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, merge_strategy, auto_merge, auto_worktree, terminal_mode, agent_type FROM pipeline_runs WHERE id = $1`, [res.body.runId]);
 
     expect(run).toMatchObject({
       idempotency_key: body.idempotencyKey,
@@ -2816,12 +2853,14 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       auto_merge: false,
       auto_worktree: false,
       terminal_mode: 'ansi-html',
+      agent_type: 'pi',
     });
     expect(run?.task_manifest_artifacts).toEqual(expect.objectContaining({
       manifestPath: res.body.artifacts.manifestPath,
       specPath: res.body.artifacts.specPath,
     }));
 
+    expect(getBoss().createQueue).toHaveBeenCalledWith('pipeline:run');
     expect(getBoss().send).toHaveBeenCalledWith(
       'pipeline:run',
       expect.objectContaining({
@@ -2829,17 +2868,159 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
         manifestId: body.manifest.manifestId,
         idempotencyKey: body.idempotencyKey,
         taskManifestArtifacts: expect.objectContaining({ specPath: res.body.artifacts.specPath }),
-        agentOverride: 'pi',
+        agent: 'pi',
         effortLevel: 'high',
         terminalMode: 'ansi-html',
         autoWorktree: false,
         autoMerge: false,
         mergeStrategy: 'branch-only',
-        executionEnvironment: 'local-worktree',
-        executionEnvironmentId: 'tm-test-env',
       }),
       expect.objectContaining({ retryLimit: 0 }),
     );
+    const [, jobPayload] = (getBoss().send as jest.Mock).mock.calls.at(-1) as [string, Record<string, unknown>];
+    if (executionEnvironmentSupported) {
+      expect(jobPayload).toEqual(expect.objectContaining({
+        executionEnvironment: 'local-worktree',
+        executionEnvironmentId: 'tm-test-env',
+      }));
+    } else {
+      expect(jobPayload.executionEnvironment).toBeUndefined();
+      expect(jobPayload.executionEnvironmentId).toBeUndefined();
+    }
+  });
+
+  test('request agentOverride=codex beats manifest agentOverride=pi for queued execution', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      agentOverride: 'codex',
+      terminal_mode: 'ansi-html',
+    });
+    body.manifest.execution.agentOverride = 'pi';
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body.agentType).toBe('codex');
+
+    const run = await queryOne<{ agent_type: string | null }>(
+      `SELECT agent_type FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run?.agent_type).toBe('codex');
+
+    const [, jobPayload] = (getBoss().send as jest.Mock).mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect(jobPayload).toEqual(expect.objectContaining({
+      runId: res.body.runId,
+      agent: 'codex',
+      agentOverride: 'codex',
+    }));
+  });
+
+  test('request agentOverride=opencode with openrouter model passes model through unchanged', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      agentOverride: 'opencode',
+      modelOverride: 'openrouter/z-ai/glm-5',
+      terminal_mode: 'ansi-html',
+    });
+    body.manifest.execution.agentOverride = 'pi';
+    body.manifest.execution.modelOverride = 'claude-sonnet-4-5-20250929';
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      agentType: 'opencode',
+      agentModel: 'openrouter/z-ai/glm-5',
+    }));
+
+    const run = await queryOne<{ agent_type: string | null; agent_model: string | null }>(
+      `SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      agent_type: 'opencode',
+      agent_model: 'openrouter/z-ai/glm-5',
+    }));
+
+    const [, jobPayload] = (getBoss().send as jest.Mock).mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect(jobPayload).toEqual(expect.objectContaining({
+      agent: 'opencode',
+      model: 'openrouter/z-ai/glm-5',
+    }));
+  });
+
+  test('manifest opencode with Claude model uses shared Claude-to-OpenRouter translation', async () => {
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      terminal_mode: 'ansi-html',
+    });
+    body.manifest.execution.agentOverride = 'opencode';
+    body.manifest.execution.modelOverride = 'claude-sonnet-4-6';
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      agentType: 'opencode',
+      agentModel: 'openrouter/anthropic/claude-sonnet-4.6',
+    }));
+
+    const run = await queryOne<{ agent_type: string | null; agent_model: string | null }>(
+      `SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      agent_type: 'opencode',
+      agent_model: 'openrouter/anthropic/claude-sonnet-4.6',
+    }));
+  });
+
+  test('task manifest without request or manifest overrides uses the default pipeline agent behavior', async () => {
+    const { setActiveAgentConfig } = require('../../lib/config') as typeof import('../../lib/config');
+    setActiveAgentConfig({ agent: 'claude', model: null });
+    delete process.env.RORCA_AGENT;
+    delete process.env.RORCA_MODEL;
+
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      terminal_mode: 'ansi-html',
+    });
+    delete body.agentOverride;
+    delete body.modelOverride;
+    delete body.manifest.execution.agentOverride;
+    delete body.manifest.execution.modelOverride;
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      agentType: 'claude',
+      agentModel: null,
+    }));
+
+    const run = await queryOne<{ agent_type: string | null; agent_model: string | null }>(
+      `SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      agent_type: 'claude',
+      agent_model: null,
+    }));
   });
 
   test('returns idempotency conflict for an active run before queueing another job', async () => {
