@@ -12,11 +12,13 @@ The implementation owner is the `rorca-capture` binary. `rorca capture ...` is o
 ```sh
 rorca-capture --help
 rorca-capture status
-rorca-capture remember "Prefer API-only capture writes"
+rorca-capture remember "Prefer API-only capture writes" --category Decision --files docs/notes.md
 rorca-capture ingest-commit HEAD
 rorca-capture ingest-git
 rorca-capture install-hooks
 rorca-capture daemon
 ```
+
+`remember` creates a pending memory candidate through `POST /api/memory/candidates` by default. `--approve` only promotes after submission when `operatorAutoApprove` (or `RORCA_CAPTURE_OPERATOR_AUTO_APPROVE=true`) is explicitly enabled.
 
 All Rorca writes go through `POST /api/...` with `Authorization: Bearer $(cat ~/.rorca/mcp-token)`. This package must not read `DATABASE_URL` or connect directly to PostgreSQL.

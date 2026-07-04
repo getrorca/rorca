@@ -23,6 +23,7 @@ export type CaptureStatus = {
     patternCount: number;
     replacement: string;
   };
+  operatorAutoApprove: boolean;
   token: TokenStatus;
   commands: typeof MVP_COMMANDS[number][];
   safetyContract: string;
@@ -55,6 +56,7 @@ export function buildCaptureStatus(input: {
       patternCount: input.config.redaction.patterns.length,
       replacement: input.config.redaction.replacement,
     },
+    operatorAutoApprove: input.config.operatorAutoApprove,
     token: input.token,
     commands: [...MVP_COMMANDS],
     safetyContract: CONTEXT_SAFETY_CONTRACT_VERSION,
@@ -73,6 +75,7 @@ export function formatStatusText(status: CaptureStatus): string {
     `Queue path: ${status.queuePath}`,
     `Ignore: ${status.ignore.pathCount} paths, max file ${status.ignore.maxFileBytes} bytes, max event ${status.ignore.maxEventBytes} bytes`,
     `Redaction: ${status.redaction.enabled ? "enabled" : "disabled"} (${status.redaction.patternCount} patterns)`,
+    `Operator auto-approve: ${status.operatorAutoApprove ? "enabled" : "disabled"}`,
     `MCP token: ${status.token.exists ? status.token.path : "missing"}${status.token.mode ? ` (mode ${status.token.mode})` : ""}`,
     `API-only: ${status.apiOnly ? "yes — writes use POST /api/... with Authorization: Bearer ~/.rorca/mcp-token" : "no"}`,
     `Safety contract: ${status.safetyContract}`,

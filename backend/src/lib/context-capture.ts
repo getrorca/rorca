@@ -163,12 +163,24 @@ export function buildMemoryCandidateIdempotencyKey(input: {
     suggestedCategory: input.suggestedCategory,
     relatedFiles: input.relatedFiles,
   });
-  const sourceKey = input.contextEventId
-    ? `event:${input.contextEventId}`
-    : `${input.sourceSystem ?? 'unknown'}:${input.sourceRef ?? 'manual'}`;
+  if (input.contextEventId) {
+    return {
+      contentHash,
+      idempotencyKey: `memory-candidate:${input.workspaceId}:event:${input.contextEventId}:${contentHash}`,
+    };
+  }
+
+  const sourceRef = input.sourceRef?.trim();
+  if (sourceRef) {
+    const sourceHash = sha256Hex({ sourceSystem: input.sourceSystem ?? 'unknown', sourceRef });
+    return {
+      contentHash,
+      idempotencyKey: `memory-candidate:${input.workspaceId}:source:${sourceHash}`,
+    };
+  }
 
   return {
     contentHash,
-    idempotencyKey: `memory-candidate:${input.workspaceId}:${sourceKey}:${contentHash}`,
+    idempotencyKey: `memory-candidate:${input.workspaceId}:content:${contentHash}`,
   };
 }

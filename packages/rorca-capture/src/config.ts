@@ -26,6 +26,7 @@ export type CaptureConfigValues = {
   mode?: CaptureMode;
   ignore?: ContextIgnoreSettings;
   redaction?: ContextRedactionSettings;
+  operatorAutoApprove?: boolean;
 };
 
 export type CaptureConfigFile = CaptureConfigValues & {
@@ -46,6 +47,7 @@ export type CaptureConfig = {
     rorcaConfig?: string;
     captureConfig?: string;
   };
+  operatorAutoApprove: boolean;
   apiOnly: true;
 };
 
@@ -164,6 +166,7 @@ export function resolveCaptureConfig(options: ResolveCaptureConfigOptions = {}):
     mode: values.mode,
     ignore,
     redaction,
+    operatorAutoApprove: values.operatorAutoApprove === true,
     sources,
     configFiles: {
       ...(rorcaFile ? { rorcaConfig: rorcaConfigPath } : {}),
@@ -214,6 +217,7 @@ function applyCandidate(
   setIfPresent(values, sources, "repoPath", candidate.repoPath, source, options);
   setIfPresent(values, sources, "queuePath", candidate.queuePath, source, options);
   setIfPresent(values, sources, "mode", candidate.mode, source, options);
+  setIfPresent(values, sources, "operatorAutoApprove", candidate.operatorAutoApprove, source, options);
   mergeNested(values, sources, "ignore", candidate.ignore, source, options);
   mergeNested(values, sources, "redaction", candidate.redaction, source, options);
 }
@@ -272,6 +276,7 @@ function envConfig(env: NodeJS.ProcessEnv): CaptureConfigValues {
       enabled: parseBoolean(env.RORCA_CAPTURE_REDACTION_ENABLED),
       patterns: splitList(env.RORCA_CAPTURE_REDACTION_PATTERNS),
     },
+    operatorAutoApprove: parseBoolean(env.RORCA_CAPTURE_OPERATOR_AUTO_APPROVE),
   }) ?? {};
 }
 
@@ -286,6 +291,7 @@ function normalizeConfigInput(input: CaptureConfigFile | CaptureConfigValues | u
   const mode = normalizeMode(input.mode ?? nested.mode);
   const ignore = mergeDefined(input.ignore, nested.ignore);
   const redaction = mergeDefined(input.redaction, nested.redaction);
+  const operatorAutoApprove = input.operatorAutoApprove ?? nested.operatorAutoApprove;
 
   return {
     ...(apiUrl ? { apiUrl } : {}),
@@ -295,6 +301,7 @@ function normalizeConfigInput(input: CaptureConfigFile | CaptureConfigValues | u
     ...(mode ? { mode } : {}),
     ...(ignore ? { ignore } : {}),
     ...(redaction ? { redaction } : {}),
+    ...(operatorAutoApprove !== undefined ? { operatorAutoApprove } : {}),
   };
 }
 

@@ -502,6 +502,16 @@ async function approveFromRequest(req: Request, res: Response, requireEdits: boo
   res.json({ candidate: updated, memory: { id: promotion.memoryId, entry: promotion.entry, relatedFiles: promotion.relatedFiles }, approved: true, alreadyApproved: false });
 }
 
+async function findCandidateByIdempotencyKey(idempotencyKey: string, workspaceId: string): Promise<MemoryCandidateResponse | undefined> {
+  const candidate = await queryOne<MemoryCandidateResponse>(
+    `${CANDIDATE_SELECT}
+      WHERE idempotency_key = $1
+        AND workspace_id = $2`,
+    [idempotencyKey, workspaceId],
+  );
+  return candidate ? normalizeCandidateRow(candidate) : undefined;
+}
+
 function parseStatusFilter(value: unknown): MemoryCandidateStatus[] | 'all' {
   if (value == null || value === '') return ['pending'];
   const rawValues = Array.isArray(value) ? value.flatMap((item) => String(item).split(',')) : String(value).split(',');
@@ -546,45 +556,13 @@ function parseStatusFilter(value: unknown): MemoryCandidateStatus[] | 'all' {
  *               idempotencyKey: { type: string }
  *     responses:
  *       201: { description: Created memory candidate }
+ *       200: { description: Existing memory candidate returned for an idempotent duplicate submission }
  *       400: { description: Invalid payload }
  *       404: { description: Workspace or context event not found }
- *       409: { description: Duplicate candidate idempotency key }
- *   get:
- *     tags: [Context Capture]
- *     summary: List and filter memory candidates for review
- *     operationId: listContextCandidates
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only candidate review queue listing is safe for local automation and excludes durable memory promotion side effects."
- *     x-rorca-public-api: true
- *     parameters:
- *       - in: query
- *         name: workspaceId
- *         required: true
- *         schema: { type: string }
- *       - in: query
- *         name: status
- *         schema: { type: string, description: "pending by default; use all or a comma-separated status list to include reviewed candidates" }
- *       - in: query
- *         name: category
- *         schema: { type: string }
- *       - in: query
- *         name: eventType
- *         schema: { type: string }
- *       - in: query
- *         name: sourceSystem
- *         schema: { type: string }
- *       - in: query
- *         name: limit
- *         schema: { type: integer }
- *       - in: query
- *         name: cursor
- *         schema: { type: string }
- *     responses:
- *       200: { description: Paginated candidate list }
- *       400: { description: Invalid filter }
- *       404: { description: Workspace not found }
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', createCandidateFromRequest);
+
+export async function createCandidateFromRequest(req: Request, res: Response): Promise<void> {
   const body = parseWithSchema(CandidateCreateSchema, req.body, 'Invalid memory candidate payload') as CandidateCreateInput;
   const workspace = await assertWorkspace(body.workspaceId);
   void workspace;
@@ -616,12 +594,11 @@ router.post('/', async (req: Request, res: Response) => {
   });
   const idempotencyKey = body.idempotencyKey ?? derived.idempotencyKey;
 
-  const existing = await queryOne<{ id: string }>(
-    'SELECT id::text AS id FROM memory_candidates WHERE idempotency_key = $1',
-    [idempotencyKey],
-  );
+  const existing = await findCandidateByIdempotencyKey(idempotencyKey, body.workspaceId);
   if (existing) {
-    throw new ConflictError(`Memory candidate with idempotency key '${idempotencyKey}' already exists`);
+    await emitCandidateAudit('created', existing, { reviewer: body.actor ?? 'context-capture', duplicate: true });
+    res.status(200).json({ candidate: existing, created: false, idempotent: true });
+    return;
   }
 
   const candidate = await queryOne<MemoryCandidateResponse>(
@@ -688,14 +665,58 @@ router.post('/', async (req: Request, res: Response) => {
   );
 
   if (!candidate) {
+    const concurrentExisting = await findCandidateByIdempotencyKey(idempotencyKey, body.workspaceId);
+    if (concurrentExisting) {
+      await emitCandidateAudit('created', concurrentExisting, { reviewer: body.actor ?? 'context-capture', duplicate: true });
+      res.status(200).json({ candidate: concurrentExisting, created: false, idempotent: true });
+      return;
+    }
     throw new ConflictError(`Memory candidate with idempotency key '${idempotencyKey}' already exists`);
   }
 
   const normalized = normalizeCandidateRow(candidate);
   await emitCandidateAudit('created', normalized, { reviewer: body.actor ?? 'context-capture' });
-  res.status(201).json({ candidate: normalized, created: true });
-});
+  res.status(201).json({ candidate: normalized, created: true, idempotent: false });
+}
 
+/**
+ * @swagger
+ * /api/context-candidates:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: List and filter memory candidates for review
+ *     operationId: listContextCandidates
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only candidate review queue listing is safe for local automation and excludes durable memory promotion side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, description: "pending by default; use all or a comma-separated status list to include reviewed candidates" }
+ *       - in: query
+ *         name: category
+ *         schema: { type: string }
+ *       - in: query
+ *         name: eventType
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sourceSystem
+ *         schema: { type: string }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Paginated candidate list }
+ *       400: { description: Invalid filter }
+ *       404: { description: Workspace not found }
+ */
 router.get('/', async (req: Request, res: Response) => {
   const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
   if (!workspaceId) throw new ValidationError('workspaceId is required');
@@ -824,9 +845,11 @@ router.get('/:id', async (req: Request, res: Response) => {
  *       404: { description: Candidate not found }
  *       409: { description: Candidate cannot be approved }
  */
-router.post('/:id/approve', async (req: Request, res: Response) => {
+export async function approveCandidateFromRequest(req: Request, res: Response): Promise<void> {
   await approveFromRequest(req, res, false);
-});
+}
+
+router.post('/:id/approve', approveCandidateFromRequest);
 
 /**
  * @swagger

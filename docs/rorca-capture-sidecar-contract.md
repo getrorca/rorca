@@ -14,7 +14,7 @@ This contract implements the product requirements in [`docs/prds/rorca-context-c
 
 `rorca-capture --help` exposes the MVP surface:
 
-- `remember`
+- `remember` — submits a pending memory candidate to `POST /api/memory/candidates`; `--approve` follows with approval only when operator auto-approval is explicitly configured.
 - `ingest-commit`
 - `ingest-git`
 - `install-hooks`
@@ -50,7 +50,7 @@ The token file is expected at `~/.rorca/mcp-token` with POSIX mode `0600`.
 
 Discovery loads sources in this order while preserving explicit runtime/env values:
 
-1. Runtime flags and env vars (`RORCA_API_URL`, `RORCA_WORKSPACE_ID`, `RORCA_QUEUE_PATH`).
+1. Runtime flags and env vars (`RORCA_API_URL`, `RORCA_WORKSPACE_ID`, `RORCA_QUEUE_PATH`, `RORCA_CAPTURE_OPERATOR_AUTO_APPROVE`).
 2. `<git-root>/.rorca/config.json`.
 3. `<git-root>/.rorca/capture.json` as the sidecar-local override for generic config values.
 4. Auto defaults: detected repo path and `http://localhost:3030` outside CI.
@@ -73,11 +73,12 @@ Supported fields:
     "enabled": true,
     "replacement": "[REDACTED]",
     "patterns": ["SECRET=[^\\s]+"]
-  }
+  },
+  "operatorAutoApprove": false
 }
 ```
 
-Mode values are `local`, `vm`, and `ci`. `CI=true` or `--ci` forces CI mode. CI mode suppresses prompts and treats missing `RORCA_API_URL`/repo discovery as a hard error.
+Mode values are `local`, `vm`, and `ci`. `CI=true` or `--ci` forces CI mode. CI mode suppresses prompts and treats missing `RORCA_API_URL`/repo discovery as a hard error. `operatorAutoApprove` defaults to `false`; `rorca-capture remember --approve` is rejected unless this config (or `RORCA_CAPTURE_OPERATOR_AUTO_APPROVE=true`) is explicitly enabled for the workspace.
 
 ## Workspace/API resolution
 
@@ -105,6 +106,12 @@ Text and JSON status include:
 - command list
 - safety contract version
 - errors
+
+## Manual memory capture
+
+`rorca-capture remember <text>` accepts `--category`, `--title`, `--files`, `--source`, `--confidence`, `--trust`/`--trust-tier`, `--workspace`, `--api-url`, and `--approve`.
+
+Before any API submission it validates the category enum, validates related files stay inside the workspace and are not ignored/oversized by the context-safety contract, and redacts sensitive text. Explicit `--source` values generate source-key idempotency; omitted sources use content-hash idempotency. If the API is unreachable, the candidate is appended to the configured NDJSON queue path for later replay.
 
 ## Safety/redaction dependency
 

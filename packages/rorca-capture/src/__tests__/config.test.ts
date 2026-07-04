@@ -53,6 +53,15 @@ describe("rorca-capture config discovery", () => {
     expect(config.sources.queuePath).toBe("env");
   });
 
+  it("loads operator auto-approval only from explicit config or env", () => {
+    const repo = tempRepo();
+    expect(resolveCaptureConfig({ cwd: repo, gitRoot: repo, env: {} }).operatorAutoApprove).toBe(false);
+
+    writeFileSync(path.join(repo, ".rorca", "capture.json"), JSON.stringify({ operatorAutoApprove: true }), "utf8");
+    expect(resolveCaptureConfig({ cwd: repo, gitRoot: repo, env: {} }).operatorAutoApprove).toBe(true);
+    expect(resolveCaptureConfig({ cwd: repo, gitRoot: repo, env: { RORCA_CAPTURE_OPERATOR_AUTO_APPROVE: "false" } }).operatorAutoApprove).toBe(false);
+  });
+
   it("uses default API URL and queue path in local auto-detect mode", () => {
     const repo = tempRepo();
     const config = resolveCaptureConfig({ cwd: repo, gitRoot: repo, env: {} });

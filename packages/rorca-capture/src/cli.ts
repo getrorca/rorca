@@ -1,11 +1,28 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createApiClient, inspectMcpToken, resolveWorkspace, type CaptureFetch, type CaptureApiClient, type ResolvedWorkspace } from "./api.js";
+import {
+  CaptureApiError,
+  CaptureNotFoundError,
+  createApiClient,
+  inspectMcpToken,
+  resolveWorkspace,
+  type CaptureFetch,
+  type CaptureApiClient,
+  type ResolvedWorkspace,
+} from "./api.js";
 import { resolveCaptureConfig, type CaptureConfig, type CaptureConfigValues, type CaptureMode } from "./config.js";
 import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "./status.js";
+import {
+  CONTEXT_SAFETY_CONTRACT_VERSION,
+  enforceContextSizeLimit,
+  hashContextContent,
+  normalizeContextPath,
+  redactContextText,
+  shouldCapturePath,
+} from "./context-safety.js";
 
 export const HELP_TEXT = `rorca-capture — API-only context capture sidecar for Rorca
 
@@ -14,7 +31,7 @@ Usage:
   rorca capture <command> [options]   # thin alias that shells out to rorca-capture
 
 MVP commands:
-  remember <text>        Store a manual memory through POST /api/memory
+  remember <text>        Create a pending manual memory candidate through POST /api/memory/candidates
   ingest-commit [hash]   Send one commit ingestion request through the Rorca API
   ingest-git             Request git context ingestion through the Rorca API
   install-hooks          Install local git hooks that call rorca-capture
@@ -30,12 +47,22 @@ Configuration discovery order:
 Global options:
   --api-url <url>        Override Rorca API URL for this invocation
   --workspace-id <id>    Override workspace ID for this invocation
+  --workspace <id>       Alias for --workspace-id
   --repo-path <path>     Override repository path for this invocation
   --queue-path <path>    Override local queue path for this invocation
   --mode <local|vm|ci>   Set capture mode
+  --approve              For remember: approve after submit only when capture config permits operator auto-approval
   --ci                   Force CI mode; missing config is a hard error
   --json                 Emit JSON where supported
   -h, --help             Show this help
+
+Remember options:
+  --category <name>      Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha
+  --title <title>        Candidate title
+  --files <paths>        Comma-separated related workspace files (validated before API calls)
+  --source <ref>         Explicit source ref for source-key idempotency
+  --confidence <level>   high|medium|low
+  --trust <tier>         agent_observation|working_note|engineering_decision|approved_policy|verified_fact
 
 API/auth contract:
   rorca-capture never opens a PostgreSQL connection and never reads DATABASE_URL.
@@ -70,6 +97,76 @@ type Runtime = {
   client: CaptureApiClient;
   workspace: ResolvedWorkspace;
 };
+
+const REMEMBER_ENDPOINT = "/api/memory/candidates";
+const REMEMBER_SOURCE_SYSTEM = "rorca-capture";
+const MEMORY_CANDIDATE_CATEGORIES = ["Architecture", "Convention", "Bug Fix", "Decision", "Pattern", "Gotcha"] as const;
+const MEMORY_CANDIDATE_CONFIDENCES = ["high", "medium", "low"] as const;
+const CONTEXT_TRUST_TIERS = [
+  "agent_observation",
+  "working_note",
+  "engineering_decision",
+  "approved_policy",
+  "verified_fact",
+] as const;
+
+type MemoryCandidateCategory = typeof MEMORY_CANDIDATE_CATEGORIES[number];
+type MemoryCandidateConfidence = typeof MEMORY_CANDIDATE_CONFIDENCES[number];
+type ContextTrustTier = typeof CONTEXT_TRUST_TIERS[number];
+
+type RememberOptions = {
+  text: string;
+  title?: string;
+  category: MemoryCandidateCategory;
+  context: string;
+  rule: string;
+  files: string[];
+  sourceRef?: string;
+  confidence: MemoryCandidateConfidence;
+  trustTier: ContextTrustTier;
+  approve: boolean;
+};
+
+type RememberPayload = {
+  workspaceId: string;
+  eventType: "manual_cli_note";
+  sourceSystem: typeof REMEMBER_SOURCE_SYSTEM;
+  sourceRef?: string;
+  actor: "local-operator";
+  suggestedCategory: MemoryCandidateCategory;
+  title: string;
+  rule: string;
+  context: string;
+  relatedFiles: string[];
+  confidence: MemoryCandidateConfidence;
+  trustTier: ContextTrustTier;
+  idempotencyKey: string;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  requiresReview: true;
+};
+
+type RememberApiResponse = {
+  candidate?: {
+    id?: string;
+    reviewStatus?: string;
+  };
+  created?: boolean;
+  idempotent?: boolean;
+};
+
+type RememberApproveResponse = {
+  candidate?: {
+    id?: string;
+    reviewStatus?: string;
+  };
+  approved?: boolean;
+  alreadyApproved?: boolean;
+};
+
+type RememberResult =
+  | { status: "submitted"; candidateId: string | null; created: boolean; idempotent: boolean; approved: boolean; alreadyApproved: boolean }
+  | { status: "queued"; queuePath: string; idempotencyKey: string; approveRequested: boolean };
 
 export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): Promise<number> {
   const io = deps.io ?? { stdout: process.stdout, stderr: process.stderr };
@@ -109,13 +206,13 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
       return statusCode;
     }
 
-    const runtime = await resolveRuntime(parsed, deps);
-
     if (parsed.command === "remember") {
-      await runRemember(parsed.rest, runtime);
-      io.stdout.write("Memory captured through Rorca API.\n");
+      const result = await runRemember(parsed.rest, parsed, deps);
+      io.stdout.write(formatRememberResult(result));
       return 0;
     }
+
+    const runtime = await resolveRuntime(parsed, deps);
 
     if (parsed.command === "ingest-git") {
       await runtime.client.post(`/api/workspaces/${encodeURIComponent(runtime.workspace.id)}/hydrate`, {
@@ -171,7 +268,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       overrides.apiUrl = requireValue(argv, ++index, arg);
       continue;
     }
-    if (arg === "--workspace-id") {
+    if (arg === "--workspace-id" || arg === "--workspace") {
       overrides.workspaceId = requireValue(argv, ++index, arg);
       continue;
     }
@@ -241,27 +338,302 @@ async function resolveRuntime(parsed: ParsedArgs, deps: CliDeps): Promise<Runtim
   return { config, client, workspace };
 }
 
-async function runRemember(args: string[], runtime: Runtime): Promise<void> {
-  const title = readOption(args, "--title") ?? "Manual context capture";
-  const category = readOption(args, "--category") ?? "Decision";
-  const context = readOption(args, "--context") ?? "Captured by rorca-capture sidecar.";
-  const source = readOption(args, "--source") ?? "rorca-capture";
-  const text = positionalArgs(args).join(" ").trim();
-  const rule = readOption(args, "--rule") ?? text;
+async function runRemember(args: string[], parsed: ParsedArgs, deps: CliDeps): Promise<RememberResult> {
+  const options = parseRememberArgs(args);
+  const config = resolveCaptureConfig({
+    cwd: deps.cwd,
+    env: deps.env,
+    ci: parsed.ci,
+    overrides: parsed.overrides,
+    gitRoot: deps.gitRoot,
+  });
 
-  if (!rule) {
+  if (options.approve && !config.operatorAutoApprove) {
+    throw new Error("--approve requires operatorAutoApprove=true in .rorca/capture.json or RORCA_CAPTURE_OPERATOR_AUTO_APPROVE=true.");
+  }
+
+  const relatedFiles = validateRelatedFiles(options.files, config);
+  const client = createApiClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  const workspace = await resolveRememberWorkspace(config, client);
+  const payload = buildRememberPayload(options, config, workspace.id, relatedFiles);
+
+  let response: RememberApiResponse;
+  try {
+    response = await client.post<RememberApiResponse>(REMEMBER_ENDPOINT, payload);
+  } catch (error) {
+    if (!isOfflineError(error)) throw error;
+    enqueueRememberPayload(config, payload, options.approve);
+    return {
+      status: "queued",
+      queuePath: config.queuePath,
+      idempotencyKey: payload.idempotencyKey,
+      approveRequested: options.approve,
+    };
+  }
+
+  const candidateId = response.candidate?.id ?? null;
+  let approved = false;
+  let alreadyApproved = false;
+  if (options.approve) {
+    if (!candidateId) {
+      throw new Error("Rorca API did not return a candidate id to approve.");
+    }
+    const approval = await client.post<RememberApproveResponse>(`${REMEMBER_ENDPOINT}/${encodeURIComponent(candidateId)}/approve`, {
+      workspaceId: workspace.id,
+      reviewer: "local-operator",
+      source: options.sourceRef ?? `rorca-capture:${candidateId}`,
+    });
+    approved = approval.approved === true;
+    alreadyApproved = approval.alreadyApproved === true;
+  }
+
+  return {
+    status: "submitted",
+    candidateId,
+    created: response.created !== false,
+    idempotent: response.idempotent === true,
+    approved,
+    alreadyApproved,
+  };
+}
+
+async function resolveRememberWorkspace(config: CaptureConfig, client: CaptureApiClient): Promise<ResolvedWorkspace> {
+  try {
+    return await resolveWorkspace(config, client);
+  } catch (error) {
+    if (isOfflineError(error) && config.workspaceId) {
+      return {
+        id: config.workspaceId,
+        path: config.repoPath,
+        resolvedBy: "config",
+      };
+    }
+    if (isOfflineError(error)) {
+      throw new Error("Rorca API is unreachable and no workspace ID is configured; pass --workspace <id> to queue offline.");
+    }
+    throw error;
+  }
+}
+
+function parseRememberArgs(args: string[]): RememberOptions {
+  const textParts: string[] = [];
+  const files: string[] = [];
+  let title: string | undefined;
+  let category = "Decision";
+  let context = "Captured by rorca-capture sidecar.";
+  let rule: string | undefined;
+  let sourceRef: string | undefined;
+  let confidence = "low";
+  let trustTier = "agent_observation";
+  let approve = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--approve") {
+      approve = true;
+      continue;
+    }
+    if (arg === "--title") {
+      title = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--category") {
+      category = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--context") {
+      context = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--rule") {
+      rule = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--source" || arg === "--source-ref") {
+      sourceRef = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--confidence") {
+      confidence = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--trust" || arg === "--trust-tier") {
+      trustTier = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--files" || arg === "--related-files" || arg === "--file") {
+      files.push(...splitFiles(requireValue(args, ++index, arg)));
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      throw new Error(`Unknown remember option: ${arg}`);
+    }
+    textParts.push(arg);
+  }
+
+  const text = textParts.join(" ").trim();
+  const resolvedRule = (rule ?? text).trim();
+  if (!resolvedRule) {
     throw new Error("remember requires text or --rule.");
   }
 
-  await runtime.client.post("/api/memory", {
-    workspaceId: runtime.workspace.id,
-    category,
+  return {
+    text,
+    ...(title?.trim() ? { title: title.trim() } : {}),
+    category: validateEnum(category, MEMORY_CANDIDATE_CATEGORIES, "category"),
+    context,
+    rule: resolvedRule,
+    files,
+    ...(sourceRef?.trim() ? { sourceRef: sourceRef.trim() } : {}),
+    confidence: validateEnum(confidence, MEMORY_CANDIDATE_CONFIDENCES, "confidence"),
+    trustTier: validateEnum(trustTier, CONTEXT_TRUST_TIERS, "trust tier"),
+    approve,
+  };
+}
+
+function buildRememberPayload(options: RememberOptions, config: CaptureConfig, workspaceId: string, relatedFiles: string[]): RememberPayload {
+  const rule = redactContextText(options.rule, config.redaction).trim();
+  const context = redactContextText(options.context, config.redaction).trim();
+  const title = redactContextText(options.title ?? deriveRememberTitle(rule), config.redaction).trim();
+  const eventBytes = Buffer.byteLength(JSON.stringify({ title, rule, context, relatedFiles }), "utf8");
+  if (!enforceContextSizeLimit(eventBytes, config.ignore, "event")) {
+    throw new Error("Remember payload exceeds capture event size limit.");
+  }
+  const contentHash = hashStable({
+    suggestedCategory: options.category,
     title,
     rule,
     context,
-    source,
-    sourceType: "mcp",
+    relatedFiles,
   });
+  const sourceHash = options.sourceRef
+    ? hashStable({ sourceSystem: REMEMBER_SOURCE_SYSTEM, sourceRef: options.sourceRef })
+    : undefined;
+  const idempotencyMode = options.sourceRef ? "source" : "content";
+  const idempotencyKey = options.sourceRef
+    ? `memory-candidate:${workspaceId}:source:${sourceHash}`
+    : `memory-candidate:${workspaceId}:content:${contentHash}`;
+
+  return {
+    workspaceId,
+    eventType: "manual_cli_note",
+    sourceSystem: REMEMBER_SOURCE_SYSTEM,
+    ...(options.sourceRef ? { sourceRef: options.sourceRef } : {}),
+    actor: "local-operator",
+    suggestedCategory: options.category,
+    title,
+    rule,
+    context,
+    relatedFiles,
+    confidence: options.confidence,
+    trustTier: options.trustTier,
+    idempotencyKey,
+    provenance: {
+      command: "rorca-capture remember",
+      sourceSystem: REMEMBER_SOURCE_SYSTEM,
+      safetyContract: CONTEXT_SAFETY_CONTRACT_VERSION,
+      redactionEnabled: config.redaction.enabled,
+      relatedFileValidation: "context-safety",
+    },
+    metadata: {
+      contentHash,
+      idempotencyMode,
+      approveRequested: options.approve,
+      operatorAutoApprove: config.operatorAutoApprove,
+      ...(sourceHash ? { sourceHash } : {}),
+      textBytes: Buffer.byteLength(options.text || options.rule, "utf8"),
+    },
+    requiresReview: true,
+  };
+}
+
+function validateRelatedFiles(files: string[], config: CaptureConfig): string[] {
+  const unique = new Set<string>();
+  for (const file of files) {
+    const raw = file.trim();
+    if (!raw) continue;
+    const absolute = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(config.repoPath, raw);
+    const repoRoot = path.resolve(config.repoPath);
+    const relative = path.relative(repoRoot, absolute);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`Related file must stay inside workspace: ${raw}`);
+    }
+    if (!existsSync(absolute)) {
+      throw new Error(`Related file not found: ${raw}`);
+    }
+    const stats = statSync(absolute);
+    if (!stats.isFile()) {
+      throw new Error(`Related path is not a file: ${raw}`);
+    }
+    const normalized = normalizeContextPath(relative);
+    if (!shouldCapturePath(normalized, config.ignore)) {
+      throw new Error(`Related file is ignored by capture safety rules: ${normalized}`);
+    }
+    if (!enforceContextSizeLimit(stats.size, config.ignore, "file")) {
+      throw new Error(`Related file exceeds capture size limit: ${normalized}`);
+    }
+    unique.add(normalized);
+  }
+  return [...unique];
+}
+
+function enqueueRememberPayload(config: CaptureConfig, payload: RememberPayload, approveRequested: boolean): void {
+  mkdirSync(path.dirname(config.queuePath), { recursive: true });
+  appendFileSync(config.queuePath, `${JSON.stringify({
+    version: 1,
+    queuedAt: new Date().toISOString(),
+    command: "remember",
+    method: "POST",
+    apiUrl: config.apiUrl,
+    endpoint: REMEMBER_ENDPOINT,
+    approveRequested,
+    idempotencyKey: payload.idempotencyKey,
+    payload,
+  })}\n`, "utf8");
+}
+
+function formatRememberResult(result: RememberResult): string {
+  if (result.status === "queued") {
+    return `Rorca API unreachable; queued memory candidate at ${result.queuePath} (${result.idempotencyKey}).\n`;
+  }
+  const pieces = [
+    result.idempotent ? "Memory candidate already captured" : "Memory candidate submitted",
+    result.candidateId ? `id=${result.candidateId}` : null,
+    result.approved ? (result.alreadyApproved ? "already approved" : "approved") : "pending",
+  ].filter(Boolean);
+  return `${pieces.join("; ")}\n`;
+}
+
+function splitFiles(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function validateEnum<T extends readonly string[]>(value: string, allowed: T, label: string): T[number] {
+  if (allowed.includes(value)) return value as T[number];
+  throw new Error(`${label} must be one of: ${allowed.join(", ")}`);
+}
+
+function deriveRememberTitle(rule: string): string {
+  const normalized = rule.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 80) return normalized || "Manual context capture";
+  return `${normalized.slice(0, 77).trim()}...`;
+}
+
+function hashStable(value: unknown): string {
+  return hashContextContent(stableStringify(value));
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function isOfflineError(error: unknown): boolean {
+  return !(error instanceof CaptureApiError) && !(error instanceof CaptureNotFoundError);
 }
 
 function installHooks(config: CaptureConfig): void {

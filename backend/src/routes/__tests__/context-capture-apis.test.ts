@@ -10,9 +10,11 @@ import express from 'express';
 import request from 'supertest';
 import contextEventsRouter from '../context-events';
 import contextCandidatesRouter from '../context-candidates';
+import memoryCandidatesRouter from '../memory-candidates';
 import { errorHandler } from '../../lib/error-handler';
 import { query, queryOne } from '../../db/index';
 import { promoteMemory } from '../../lib/memory-promotion';
+import { buildMemoryCandidateIdempotencyKey } from '../../lib/context-capture';
 
 jest.mock('../../db/index', () => ({
   query: jest.fn(),
@@ -36,6 +38,7 @@ function buildApp() {
   app.use(express.json());
   app.use('/api/context-events', contextEventsRouter);
   app.use('/api/context-candidates', contextCandidatesRouter);
+  app.use('/api/memory/candidates', memoryCandidatesRouter);
   app.use(errorHandler);
   return app;
 }
@@ -140,7 +143,7 @@ beforeEach(() => {
     if (sql.includes('FROM memories')) return { id: Number(params?.[0] ?? 1) } as any;
     if (sql.includes('FROM context_events') && sql.includes('idempotency_key')) return state.existingEvent;
     if (sql.includes('FROM context_events') && sql.includes('WHERE id = $1')) return state.contextEvent;
-    if (sql.includes('SELECT id::text AS id FROM memory_candidates WHERE idempotency_key')) return state.existingCandidateByKey;
+    if (sql.includes('FROM memory_candidates') && sql.includes('WHERE idempotency_key')) return state.existingCandidateByKey;
     if (sql.includes('FROM memory_candidates') && sql.includes('WHERE id = $1')) return state.candidateById;
 
     return undefined as any;
@@ -158,6 +161,29 @@ beforeEach(() => {
       source: 'context-candidate:201',
     },
     relatedFiles: ['backend/src/routes/context-candidates.ts'],
+  });
+});
+
+describe('memory candidate idempotency keys', () => {
+  it('deduplicates explicit source refs by source and omitted sources by content hash', () => {
+    const base = {
+      workspaceId: 'ws-ccs-003',
+      sourceSystem: 'rorca-capture',
+      title: 'Remember me',
+      context: 'Manual capture',
+      suggestedCategory: 'Decision',
+      relatedFiles: [] as string[],
+    };
+
+    const sourceA = buildMemoryCandidateIdempotencyKey({ ...base, sourceRef: 'story:1', rule: 'first' });
+    const sourceB = buildMemoryCandidateIdempotencyKey({ ...base, sourceRef: 'story:1', rule: 'second' });
+    const contentA = buildMemoryCandidateIdempotencyKey({ ...base, sourceRef: null, rule: 'same' });
+    const contentB = buildMemoryCandidateIdempotencyKey({ ...base, sourceRef: null, rule: 'same' });
+
+    expect(sourceA.idempotencyKey).toBe(sourceB.idempotencyKey);
+    expect(sourceA.idempotencyKey).toMatch(/^memory-candidate:ws-ccs-003:source:/);
+    expect(contentA.idempotencyKey).toBe(contentB.idempotencyKey);
+    expect(contentA.idempotencyKey).toMatch(/^memory-candidate:ws-ccs-003:content:/);
   });
 });
 
@@ -214,8 +240,8 @@ describe('context candidate creation/list/detail', () => {
     expect(res.body.candidate.contextEventId).toBe('101');
   });
 
-  it('returns ConflictError for duplicate candidate submissions', async () => {
-    state.existingCandidateByKey = { id: 'already-there' };
+  it('returns the existing candidate for an idempotent sidecar retry', async () => {
+    state.existingCandidateByKey = candidateRow({ id: 'already-there', idempotencyKey: 'candidate:dupe' });
 
     const res = await request(buildApp())
       .post('/api/context-candidates')
@@ -227,8 +253,26 @@ describe('context candidate creation/list/detail', () => {
         idempotencyKey: 'candidate:dupe',
       });
 
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('CONFLICT');
+    expect(res.status).toBe(200);
+    expect(res.body.created).toBe(false);
+    expect(res.body.idempotent).toBe(true);
+    expect(res.body.candidate.id).toBe('already-there');
+  });
+
+  it('supports the /api/memory/candidates alias for manual sidecar submissions', async () => {
+    const res = await request(buildApp())
+      .post('/api/memory/candidates')
+      .send({
+        workspaceId: 'ws-ccs-003',
+        sourceSystem: 'rorca-capture',
+        sourceRef: 'manual:1',
+        suggestedCategory: 'Pattern',
+        title: 'Capture manual sidecar memory',
+        rule: 'Manual memory capture should use pending candidates.',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.candidate.reviewStatus).toBe('pending');
   });
 
   it('lists pending candidates by default through the pagination helper query shape', async () => {
