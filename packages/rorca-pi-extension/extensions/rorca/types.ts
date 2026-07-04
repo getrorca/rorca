@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 export type JsonSchema = {
   type?: string;
   description?: string;
@@ -204,4 +211,25 @@ export type RetryOptions = {
 export type StatusOptions = {
   runId?: number;
   workspaceId?: string;
+};
+
+export type CaptureOptions = {
+  /** The body text of the memory entry (first positional arg or --text) */
+  text: string;
+  /** Short summary title */
+  title: string;
+  /** Knowledge category (must be a valid MEMORY_CATEGORIES value) */
+  category: string;
+  /** Workspace-relative file paths this memory touches */
+  files: string[];
+  /** Provenance source ref (e.g., story ID, commit SHA, note ID) */
+  source?: string;
+  /** Confidence level */
+  confidence: 'high' | 'medium' | 'low';
+  /** Trust tier */
+  trust: 'authoritative' | 'trusted' | 'community' | 'unverified';
+  /** Workspace ID */
+  workspaceId?: string;
+  /** If true, submit directly as approved memory; otherwise submit as pending candidate */
+  approve: boolean;
 };

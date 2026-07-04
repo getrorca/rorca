@@ -1,6 +1,6 @@
 {
   "name": "rorca",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "AI spec orchestration pipeline — turn plain-English briefs into validated, executed code",
   "type": "module",
   "workspaces": [
@@ -33,6 +33,7 @@
     "changelog": "npx tsx scripts/generate-changelog.ts",
     "self-register": "npx tsx forge/self-register.ts",
     "start": "node cli.js start",
+    "reconcile": "npm --prefix backend run reconcile --",
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build",
@@ -87,6 +88,7 @@
     "mermaid": "^11.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
+    "react-is": "^19.2.7",
     "react-router-dom": "^7.14.2",
     "recharts": "^3.8.1"
   },

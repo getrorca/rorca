@@ -6,7 +6,23 @@
  */
 
 import swaggerJsdoc from 'swagger-jsdoc';
+import fs from 'fs';
 import path from 'path';
+
+function resolveSwaggerDirname(): string {
+  const candidates = [
+    path.join(process.cwd(), 'backend/src/lib'),
+    path.join(process.cwd(), 'src/lib'),
+    path.join(process.cwd(), 'backend/dist/lib'),
+    path.join(process.cwd(), 'dist/lib'),
+  ];
+
+  return candidates.find((candidate) => (
+    fs.existsSync(path.join(candidate, 'swagger.ts')) || fs.existsSync(path.join(candidate, 'swagger.js'))
+  )) ?? path.join(process.cwd(), 'backend/src/lib');
+}
+
+const swaggerDirname = resolveSwaggerDirname();
 
 const options: swaggerJsdoc.Options = {
   definition: {
@@ -229,10 +245,10 @@ const options: swaggerJsdoc.Options = {
     ],
   },
   apis: [
-    path.join(__dirname, '../routes/*.ts'),
-    path.join(__dirname, '../routes/*.js'),
-    path.join(__dirname, './swagger.ts'),
-    path.join(__dirname, './swagger.js'),
+    path.join(swaggerDirname, '../routes/*.ts'),
+    path.join(swaggerDirname, '../routes/*.js'),
+    path.join(swaggerDirname, './swagger.ts'),
+    path.join(swaggerDirname, './swagger.js'),
   ],
 };
 

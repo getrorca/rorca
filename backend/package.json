@@ -14,6 +14,8 @@
     "mcp": "npx tsx src/mcp/server.ts",
     "lint": "npx eslint src/",
     "worker": "npx tsx src/worker-supervisor.ts",
+    "reconcile": "npx tsx src/reconcile-daemon-cli.ts",
+    "runner:local": "npx tsx src/runner/local-runner.ts",
     "postinstall": "node -e \"try{require('node-pty')}catch(e){console.warn('⚠️  node-pty native module not built. Run: npm rebuild node-pty')}\""
   },
   "dependencies": {

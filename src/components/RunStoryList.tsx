@@ -204,6 +204,7 @@ interface MergedStory {
   storyId: string;
   title: string;
   status: DerivedStatus;
+  recentlyPassed: boolean;
   elapsed: number | null;
   retries: number | null;
   startedAt: number | null; // epoch ms for live timer
@@ -298,11 +299,12 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   // Track status transitions — animate only when status *changes* to pass
   const prevStatusRef = useRef<DerivedStatus>(story.status);
   const [justPassed, setJustPassed] = useState(false);
+  const showPassAnimation = justPassed || story.recentlyPassed;
 
   useEffect(() => {
     if (story.status === 'pass' && prevStatusRef.current !== 'pass') {
       setJustPassed(true);
-      const timer = setTimeout(() => setJustPassed(false), 600);
+      const timer = setTimeout(() => setJustPassed(false), 1500);
       return () => clearTimeout(timer);
     }
     prevStatusRef.current = story.status;
@@ -338,7 +340,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   const canRetry = retriesUsed < MAX_RETRIES;
 
   return (
-    <div className={`${cfg.rowClass || ''} ${justPassed ? 'animate-story-pass' : ''}`}>
+    <div className={`${cfg.rowClass || ''} ${showPassAnimation ? 'animate-story-pass' : ''}`}>
       {/* Main row — fixed 48px height */}
       <div
         onClick={isExpandable ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
@@ -359,7 +361,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         ) : null}
         <Icon
           size={14}
-          className={`shrink-0 ${cfg.color} ${isRunning ? 'animate-pulse' : isRetrying ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
+          className={`shrink-0 ${cfg.color} ${isRunning ? 'animate-pulse' : isRetrying ? 'animate-spin' : ''} ${showPassAnimation ? 'animate-checkmark-pop' : ''}`}
         />
         <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
           story.status === 'running' ? 'bg-emerald-500/10 text-emerald-500' :
@@ -1039,6 +1041,17 @@ export default function RunStoryList({
     return map;
   }, [storyContext, eventContextFilesMap]);
 
+  const recentlyPassedStoryIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const evt of effectiveWalEvents) {
+      if (evt.event_type !== 'story_passed' || !evt.story_id) continue;
+      const p = parsePayload(evt.payload);
+      if (p?.run_id !== undefined && p.run_id !== runId) continue;
+      set.add(evt.story_id);
+    }
+    return set;
+  }, [effectiveWalEvents, runId]);
+
   // Merge spec stories with results to derive status
   const mergedStories = useMemo(() => {
     const source: SpecStory[] = specStories.length > 0
@@ -1131,6 +1144,7 @@ export default function RunStoryList({
         storyId: spec.id,
         title: spec.title,
         status,
+        recentlyPassed: recentlyPassedStoryIds.has(spec.id),
         elapsed: result?.elapsed_seconds ?? (carriedPass?.elapsedMs != null ? Math.round(carriedPass.elapsedMs / 1000) : carriedFail?.elapsedMs != null ? Math.round(carriedFail.elapsedMs / 1000) : carriedSkip?.elapsedMs != null ? Math.round(carriedSkip.elapsedMs / 1000) : null),
         retries: result?.retries ?? carriedFail?.retries ?? carriedSkip?.retries ?? null,
         startedAt: storyStartTimes.get(spec.id) ?? (runState?.currentStory === spec.id ? Date.parse(runState.lastUpdatedAt) : null),
@@ -1144,7 +1158,7 @@ export default function RunStoryList({
         retrieval: retrievalMap.get(spec.id) ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, effectiveWalEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, effectiveWalEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState, recentlyPassedStoryIds]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {

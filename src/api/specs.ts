@@ -302,6 +302,73 @@ export function getSpecGenerationContext(p: SpecGenerationContextParams): Promis
   });
 }
 
+// ─── Context Preview (US-023) ────────────────────────────────────────────────
+
+export interface ContextPreviewParams extends ApiOptions {
+  brief: string;
+  workspaceId: string;
+  model?: string;
+  templateId?: string;
+}
+
+export interface ContextPreviewSection {
+  key: string;
+  section: string;
+  label: string;
+  reason: string;
+  tokenEstimate: number;
+  present: boolean;
+  details?: string[];
+}
+
+export interface ContextPreviewGraphInfo {
+  available: boolean;
+  vertexCount: number;
+  edgeCount: number;
+  isStale: boolean;
+  staleReason: string | null;
+  gitSha: string | null;
+  hydratedAt: string | null;
+}
+
+export interface ContextPreviewHydrationInfo {
+  hint: 'hydrate' | 'rehydrate' | 'wait' | 'configure_hilo' | 'none';
+  message: string | null;
+  currentStatus: string | null;
+}
+
+export interface ContextPreviewResult {
+  workspaceId: string;
+  brief: string;
+  sections: Record<string, ContextPreviewSection[]>;
+  totalTokens: number;
+  tokenBudget: number;
+  modelContextWindow: number;
+  warnings: string[];
+  graphFreshness: ContextPreviewGraphInfo;
+  hydrationAction: ContextPreviewHydrationInfo;
+  loadedAt: string;
+}
+
+/**
+ * Fetch a context preview for a spec brief before generation.
+ * Calls the generation-context endpoint to get direction layers, skills,
+ * memory, graph, and file information, then enriches it with hydration status.
+ */
+export function getContextPreview(p: ContextPreviewParams): Promise<ContextPreviewResult> {
+  return apiFetch<ContextPreviewResult>('/api/specs/context-preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      brief: p.brief,
+      workspaceId: p.workspaceId,
+      model: p.model,
+      templateId: p.templateId,
+    }),
+    signal: p.signal,
+  });
+}
+
 export function forgeSpecBatch(items: ForgeBatchSpecItem[], opts?: ApiOptions): Promise<ForgeBatchSpecResult> {
   return apiFetch('/api/specs/forge/batch', {
     method: 'POST',

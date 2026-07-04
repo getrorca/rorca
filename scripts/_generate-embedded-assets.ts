@@ -1,4 +1,11 @@
 #!/usr/bin/env bun
+/*
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 /**
  * Generate the embedded assets module for bun build --compile.
  * Extracted from bin/build-binary.ts for use by scripts/build-binaries.sh.

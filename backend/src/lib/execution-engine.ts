@@ -960,6 +960,24 @@ function setFallbackContext(cwd: string, runId: number): void {
   _fallbackRunId = runId;
 }
 
+
+function engineApiEndpoint(port: number, apiPath: string): string {
+  const rawBase = process.env.RORCA_ENGINE_API_BASE_URL?.trim();
+  const base = (rawBase && rawBase.length > 0 ? rawBase : `http://localhost:${port}`).replace(/\/+$/, '');
+  const path = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+  if (base.endsWith('/api') && path.startsWith('/api/')) {
+    return `${base}${path.slice('/api'.length)}`;
+  }
+  return `${base}${path}`;
+}
+
+function engineMcpEndpoint(port: number): string {
+  const rawBase = process.env.RORCA_ENGINE_API_BASE_URL?.trim();
+  const base = (rawBase && rawBase.length > 0 ? rawBase : `http://127.0.0.1:${port}`).replace(/\/+$/, '');
+  const root = base.endsWith('/api') ? base.slice(0, -'/api'.length) : base;
+  return `${root}/mcp`;
+}
+
 async function emitWalEvent(
   port: number,
   eventType: string,
@@ -977,7 +995,7 @@ async function emitWalEvent(
   };
 
   const ok = await retryPost(
-    `http://localhost:${port}/api/wal`,
+    engineApiEndpoint(port, '/api/wal'),
     body,
     `WAL:${eventType}`,
   );
@@ -1049,7 +1067,7 @@ async function postStoryResult(
   body: Record<string, unknown>,
 ): Promise<void> {
   const ok = await retryPost(
-    `http://localhost:${port}/api/pipeline/story-result`,
+    engineApiEndpoint(port, '/api/pipeline/story-result'),
     body,
     `story-result:${body.storyId ?? 'unknown'}`,
   );
@@ -1821,6 +1839,28 @@ interface AgentResult {
   piSessionId?: string;
 }
 
+const PROMPT_DELIVERY_FAILURE_CATEGORY = 'prompt_delivery_failed' as const;
+const EMPTY_PROMPT_FAILURE_MESSAGE = `${PROMPT_DELIVERY_FAILURE_CATEGORY}: Refusing to launch agent with an empty prompt.`;
+
+function isEmptyPrompt(prompt: string): boolean {
+  return prompt.trim().length === 0;
+}
+
+function buildPromptDeliveryFailureResult(startTime: number = Date.now(), detail = EMPTY_PROMPT_FAILURE_MESSAGE): AgentResult {
+  return {
+    exitCode: 1,
+    stderrTail: detail,
+    elapsedMs: Math.max(0, Date.now() - startTime),
+  };
+}
+
+export function isPromptDeliveryFailureOutput(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes(PROMPT_DELIVERY_FAILURE_CATEGORY)
+    || lower.includes('no prompt provided')
+    || lower.includes('either specify one as an argument or pipe the prompt into stdin');
+}
+
 interface PiRetryContext {
   isRetry: boolean;
   attempt: number;
@@ -1857,6 +1897,8 @@ interface PtyRunOptions {
   agentType: AgentType;
   cols: number;
   rows: number;
+  port?: number;
+  storyId?: string;
 }
 
 interface PtyProcessLike {
@@ -1888,6 +1930,7 @@ interface PtyCommand {
   args: string[];
   env: Record<string, string>;
   prompt: string;
+  writePromptToStdin?: boolean;
   cleanup?: () => void;
 }
 
@@ -1916,7 +1959,7 @@ function killProcessGroup(pid: number | null | undefined, signal: NodeJS.Signals
   }
 }
 
-function buildPtyCommand(
+export function buildPtyCommand(
   agentType: AgentType,
   prompt: string,
   cwd: string,
@@ -2060,6 +2103,7 @@ function buildPtyCommand(
         ],
         env: buildGuardedAgentEnv(cwd),
         prompt,
+        writePromptToStdin: true,
       };
     }
   }
@@ -2092,6 +2136,7 @@ async function spawnAgentViaPty(
     let finishedWrites = Promise.resolve();
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let runTimer: ReturnType<typeof setTimeout> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2111,6 +2156,7 @@ async function spawnAgentViaPty(
       unregisterPtyCleanupTask = null;
       if (resizeTimer) clearInterval(resizeTimer);
       if (inputTimer) clearInterval(inputTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
@@ -2198,6 +2244,16 @@ async function spawnAgentViaPty(
       }, LLM_IDLE_TIMEOUT_MS);
     };
 
+    const writePtySystemMessage = (message: string): void => {
+      const buf = Buffer.from(message);
+      logStream.write(buf);
+      if (!sequenceRef) return;
+      const activeSequenceRef = sequenceRef;
+      finishedWrites = finishedWrites
+        .then(() => appendRunPtyOutput(ptyOptions.runId, buf, activeSequenceRef))
+        .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY system message', ptyOptions.runId, err));
+    };
+
     let sequenceRef: { value: number } | null = null;
 
     try {
@@ -2234,6 +2290,23 @@ async function spawnAgentViaPty(
       });
       unregisterPtyCleanupTask = registerPtyCleanupTask(`run-${ptyOptions.runId}`, () => requestPtyShutdown('SIGTERM'));
       resetInactivity();
+      heartbeatTimer = setInterval(() => {
+        const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
+        const msg = `[System] PTY heartbeat: ${ptyOptions.agentType} still running after ${elapsedSeconds}s; waiting for output...\n`;
+        writePtySystemMessage(msg);
+        recordStderr(Buffer.from(msg));
+        if (ptyOptions.port && ptyOptions.storyId) {
+          void emitWalEvent(ptyOptions.port, 'story_heartbeat', ptyOptions.workspaceId, {
+            run_id: ptyOptions.runId,
+            story_id: ptyOptions.storyId,
+            agent_type: ptyOptions.agentType,
+            terminal_mode: 'pty',
+            elapsed_seconds: elapsedSeconds,
+            message: 'Agent process is still running; no PTY output received since previous heartbeat.',
+          }, ptyOptions.storyId).catch(() => { /* emitWalEvent is already best-effort */ });
+        }
+      }, 30_000);
+      heartbeatTimer.unref?.();
       resizeTimer = setInterval(() => {
         void (async () => {
           if (!pty) return;
@@ -2404,6 +2477,15 @@ function runAgent(
   piSessionOptions?: PiSessionOptions,
   ptyOptions?: PtyRunOptions,
 ): Promise<AgentResult> {
+  const startTime = Date.now();
+  if (isEmptyPrompt(prompt)) {
+    try {
+      fs.appendFileSync(logFile, `[System] ${EMPTY_PROMPT_FAILURE_MESSAGE}\n`, 'utf8');
+    } catch { /* best effort */ }
+    logger.error(`[engine] ${agentType} prompt preflight failed: empty prompt`);
+    return Promise.resolve(buildPromptDeliveryFailureResult(startTime));
+  }
+
   if (ptyOptions?.enabled) {
     return spawnAgentViaPty(
       ptyOptions,
@@ -3255,6 +3337,7 @@ type OpenCodeErrorCategory =
   | 'server_crashed'
   | 'malformed_output'
   | 'timeout'
+  | typeof PROMPT_DELIVERY_FAILURE_CATEGORY
   | 'unknown';
 
 interface ClassifiedError {
@@ -3350,6 +3433,14 @@ function classifyOpenCodeError(result: AgentResult): ClassifiedError {
 function classifyPiError(result: AgentResult): ClassifiedError {
   const lower = result.stderrTail.toLowerCase();
   const raw = result.stderrTail;
+
+  if (isPromptDeliveryFailureOutput(raw)) {
+    return {
+      category: PROMPT_DELIVERY_FAILURE_CATEGORY,
+      message: raw.trim().slice(0, 300) || 'Pi prompt was not delivered to the CLI',
+      retryable: false,
+    };
+  }
 
   if (lower.includes('no api key found') || lower.includes('use /login') || lower.includes('invalid api key')
       || lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('forbidden')) {
@@ -4385,7 +4476,7 @@ async function postReviewComment(
   };
 
   await retryPost(
-    `http://localhost:${port}/api/review/comment`,
+    engineApiEndpoint(port, '/api/review/comment'),
     body,
     `review:${review.reviewerName}:${storyId}`,
   );
@@ -4956,7 +5047,7 @@ async function executeStory(
       // Build the MCP servers map.
       // Rorca MCP is the preferred direct memory/control-plane path for agents that support remote MCP.
       const mcpServers: Record<string, string> = {
-        rorca: `http://127.0.0.1:${config.port}/mcp`,
+        rorca: engineMcpEndpoint(config.port),
       };
       if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
       if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
@@ -4987,6 +5078,8 @@ async function executeStory(
             agentType: effectiveAgent,
             cols: DEFAULT_PTY_COLS,
             rows: DEFAULT_PTY_ROWS,
+            port: config.port,
+            storyId: story.id,
           } satisfies PtyRunOptions
         : undefined;
       const result = await runAgent(
@@ -5305,7 +5398,7 @@ async function executeStory(
               if (entry && typeof entry === 'object') {
                 const e = entry as Record<string, unknown>;
                 try {
-                  await fetch(`http://localhost:${config.port}/api/memory`, {
+                  await fetch(engineApiEndpoint(config.port, '/api/memory'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -5571,11 +5664,68 @@ async function executeStory(
     }
 
     // ── Non-zero exit: classify error and retry ────────────────────────
-    const classified = effectiveAgent === 'opencode'
-      ? classifyOpenCodeError(result)
-      : effectiveAgent === 'pi'
-        ? classifyPiError(result)
-        : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
+    const classified = isPromptDeliveryFailureOutput(result.stderrTail)
+      ? {
+          category: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          message: result.stderrTail.trim().slice(0, 300) || 'Agent prompt was not delivered to the CLI',
+          retryable: false,
+        } as ClassifiedError
+      : effectiveAgent === 'opencode'
+        ? classifyOpenCodeError(result)
+        : effectiveAgent === 'pi'
+          ? classifyPiError(result)
+          : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
+
+    // Empty/undelivered prompt is an infrastructure failure. Do not mark the
+    // spec story as skipped/passed, and do not consume story retry attempts;
+    // the next retry/continuation should see the story as still unpassed.
+    if (classified.category === PROMPT_DELIVERY_FAILURE_CATEGORY) {
+      logger.info(`${story.id} failed due to prompt delivery infrastructure error — ${classified.message}`);
+      logger.info(`   Log: ${storyLogFile}`);
+      recordPiProgress({
+        knownIssues: [`Infrastructure failure: ${PROMPT_DELIVERY_FAILURE_CATEGORY}.`],
+        validationResults: [`Attempt failed before agent work began: ${classified.message}`],
+        remainingWork: ['Fix prompt construction/delivery and rerun this story; no story implementation retry was consumed.'],
+      });
+      rsMarkStoryFailed(effectiveCwd, {
+        storyId: story.id,
+        title: story.title,
+        status: 'failed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: effectiveAgent,
+        failReason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
+
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          error_message: classified.message,
+          infra_error: true,
+          retry_consumed: false,
+          agent_type: effectiveAgent,
+          exit_code: result.exitCode,
+          log_file: storyLogFile,
+          ...(graphHits != null ? { graph_hits: graphHits } : {}),
+        }, story.id);
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+        });
+      }
+      await persistRetrievalOutcome(false);
+      return 'failed';
+    }
 
     // Non-retryable errors (wrong API key, model not found, not installed) — fail immediately
     if (!classified.retryable) {
@@ -6333,7 +6483,7 @@ async function runParallel(
 
 async function resolveWorkspaceId(port: number, cwd: string): Promise<string | null> {
   try {
-    const res = await fetch(`http://localhost:${port}/api/workspaces`);
+    const res = await fetch(engineApiEndpoint(port, '/api/workspaces'));
     if (!res.ok) return null;
     const data = await res.json() as { items?: Array<{ id: string; path: string }>; workspaces?: Array<{ id: string; path: string }> };
     // API returns `items` (paginated format), fallback to `workspaces` for compat

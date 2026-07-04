@@ -1,8 +1,15 @@
+/*
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, resolveBriefInput, tokenizeArgs } from "../args.js";
+import { generateCaptureIdempotencyKey, parseCaptureCommand, parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, resolveBriefInput, tokenizeArgs } from "../args.js";
 
 describe("rorca pi extension args", () => {
   it("tokenizes quoted values", () => {
@@ -76,5 +83,124 @@ describe("rorca pi extension args", () => {
       brief: "Build OAuth login",
       sourceLabel: filePath,
     });
+  });
+});
+
+describe("rorca pi extension capture args", () => {
+  it("parses capture command with all flags", () => {
+    expect(parseCaptureCommand(
+      "Always use async/await for DB calls --title 'pg async pattern' --category Pattern --files src/db/helpers.ts src/db/index.ts --source US-027 --confidence high --trust trusted --workspace rorca",
+    )).toEqual({
+      text: "Always use async/await for DB calls",
+      title: "pg async pattern",
+      category: "Pattern",
+      files: ["src/db/helpers.ts", "src/db/index.ts"],
+      source: "US-027",
+      confidence: "high",
+      trust: "trusted",
+      workspaceId: "rorca",
+      approve: false,
+    });
+  });
+
+  it("parses capture with --approve flag", () => {
+    expect(parseCaptureCommand(
+      "Fix N+1 query --title 'N+1 query fix' --category 'Bug Fix' --approve",
+    )).toEqual({
+      text: "Fix N+1 query",
+      title: "N+1 query fix",
+      category: "Bug Fix",
+      files: [],
+      source: undefined,
+      confidence: "medium",
+      trust: "unverified",
+      workspaceId: undefined,
+      approve: true,
+    });
+  });
+
+  it("defaults confidence to medium and trust to unverified", () => {
+    expect(parseCaptureCommand(
+      "Cache with Redis --title 'Redis caching' --category Architecture",
+    )).toEqual({
+      text: "Cache with Redis",
+      title: "Redis caching",
+      category: "Architecture",
+      files: [],
+      source: undefined,
+      confidence: "medium",
+      trust: "unverified",
+      workspaceId: undefined,
+      approve: false,
+    });
+  });
+
+  it("rejects invalid category", () => {
+    expect(() => parseCaptureCommand(
+      "Some text --title Test --category InvalidCat",
+    )).toThrow(/Invalid category/);
+  });
+
+  it("rejects invalid confidence", () => {
+    expect(() => parseCaptureCommand(
+      "Some text --title Test --category Pattern --confidence super-high",
+    )).toThrow(/Invalid confidence/);
+  });
+
+  it("rejects invalid trust tier", () => {
+    expect(() => parseCaptureCommand(
+      "Some text --title Test --category Pattern --trust mega",
+    )).toThrow(/Invalid trust tier/);
+  });
+
+  it("throws without title", () => {
+    expect(() => parseCaptureCommand(
+      "Some text --category Pattern",
+    )).toThrow(/Missing required flag: --title/);
+  });
+
+  it("throws without category", () => {
+    expect(() => parseCaptureCommand(
+      "Some text --title Test",
+    )).toThrow(/Missing required flag: --category/);
+  });
+
+  it("throws without body text", () => {
+    expect(() => parseCaptureCommand(
+      "",
+    )).toThrow(/Usage: \/rorca-capture/);
+  });
+
+  it("generates deterministic idempotency key from source ref", () => {
+    const key1 = generateCaptureIdempotencyKey(
+      "rorca", "US-027", "pg async pattern", "Always use async/await for DB calls",
+    );
+    const key2 = generateCaptureIdempotencyKey(
+      "rorca", "US-027", "pg async pattern", "Always use async/await for DB calls",
+    );
+    // Same inputs produce same key (deterministic)
+    expect(key1).toBe(key2);
+    expect(key1.length).toBe(32);
+  });
+
+  it("generates different idempotency keys for different source refs", () => {
+    const key1 = generateCaptureIdempotencyKey(
+      "rorca", "US-027", "title", "rule",
+    );
+    const key2 = generateCaptureIdempotencyKey(
+      "rorca", "US-028", "title", "rule",
+    );
+    expect(key1).not.toBe(key2);
+  });
+
+  it("generates content-based key when source ref is omitted", () => {
+    const key1 = generateCaptureIdempotencyKey(
+      "rorca", undefined, "title", "rule",
+    );
+    const key2 = generateCaptureIdempotencyKey(
+      "rorca", undefined, "title", "rule",
+    );
+    expect(key1).toBe(key2);
+    expect(key1.length).toBe(32);
   });
 });

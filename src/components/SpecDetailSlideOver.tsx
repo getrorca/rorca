@@ -609,7 +609,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean; rerunFromScratch?: boolean; readinessOverride?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; executionEnvironment?: string; forceRerun?: boolean; rerunFromScratch?: boolean; readinessOverride?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -628,6 +628,7 @@ function SpecDetailContent({
           ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
           ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
           ...(options?.reasoningOverride !== undefined ? { reasoning: options.reasoningOverride } : {}),
+          ...(options?.executionEnvironment ? { executionEnvironment: options.executionEnvironment } : {}),
           ...(options?.forceRerun ? { forceRerun: true } : {}),
           ...(options?.rerunFromScratch ? { rerunFromScratch: true } : {}),
           ...(options?.readinessOverride ? { readinessOverride: true } : {}),

@@ -27,7 +27,29 @@ RUN cd backend && npm prune --omit=dev
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────────
 FROM node:20-alpine
-RUN apk add --no-cache postgresql16-client
+
+# Runtime tools needed by the execution engine. git/ssh are required for
+# branch/worktree runs, and all supported agent CLIs are installed so Rorca can
+# switch between claude, codex, opencode, and pi without rebuilding per-agent.
+ARG INSTALL_AGENT_CLIS=true
+ARG CLAUDE_CODE_NPM_PACKAGE=@anthropic-ai/claude-code@latest
+ARG CODEX_NPM_PACKAGE=@openai/codex@latest
+ARG OPENCODE_NPM_PACKAGE=opencode-ai@latest
+ARG PI_NPM_PACKAGE=@mariozechner/pi-coding-agent@latest
+RUN apk add --no-cache \
+    bash \
+    git \
+    openssh-client \
+    postgresql16-client \
+    ripgrep \
+  && if [ "$INSTALL_AGENT_CLIS" = "true" ]; then \
+    npm install -g \
+      "$CLAUDE_CODE_NPM_PACKAGE" \
+      "$CODEX_NPM_PACKAGE" \
+      "$OPENCODE_NPM_PACKAGE" \
+      "$PI_NPM_PACKAGE"; \
+  fi \
+  && npm cache clean --force
 WORKDIR /app
 
 # Copy pruned production node_modules (includes native addons built in stage 1)

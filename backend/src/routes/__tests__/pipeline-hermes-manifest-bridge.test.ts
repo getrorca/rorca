@@ -43,6 +43,7 @@ const mockBoss = {
 };
 const mockSimpleGitRaw = jest.fn();
 const mockSimpleGitBranchLocal = jest.fn();
+const mockAssertExecutionEnvironmentReadyForRun = jest.fn();
 
 jest.mock('../../db/index', () => ({
   initDb: jest.fn().mockResolvedValue(undefined),
@@ -184,6 +185,10 @@ jest.mock('../../lib/worktree-runtime', () => ({
 jest.mock('../../lib/worktree-freshness', () => ({
   validateReusableBranch: jest.fn().mockReturnValue({ ok: true }),
   validateReusableWorktree: jest.fn().mockReturnValue({ ok: true }),
+}));
+
+jest.mock('../../lib/execution-environment-registry', () => ({
+  assertExecutionEnvironmentReadyForRun: (...args: unknown[]) => mockAssertExecutionEnvironmentReadyForRun(...args),
 }));
 
 jest.mock('../../lib/run-queue', () => ({
@@ -337,6 +342,18 @@ beforeEach(() => {
   mockSimpleGitBranchLocal.mockResolvedValue({ all: [] });
   mockSimpleGitRaw.mockResolvedValue('');
   mockExecute.mockResolvedValue({ rowCount: 1 });
+  mockAssertExecutionEnvironmentReadyForRun.mockResolvedValue({
+    id: 'remote-rorca',
+    label: 'Remote Rorca worker',
+    kind: 'remote-rorca',
+    enabled: true,
+    ready: true,
+    networkMode: 'local',
+    lastHeartbeatAt: null,
+    supportedAgents: ['claude', 'codex', 'opencode', 'pi'],
+    secretProfileId: null,
+    agents: {},
+  });
   mockQuery.mockImplementation(async (sql: unknown) => {
     const text = sqlText(sql);
     if (text.includes("FROM worker_settings WHERE key = 'run_now_max_concurrent'")) {
@@ -391,10 +408,11 @@ beforeEach(() => {
         includeGraph: params[12],
         mergeStrategy: params[13],
         terminalMode: params[14],
-        idempotencyKey: params[15],
-        manifestId: params[16],
-        artifacts: params[17] ? jsonParam(params[17]) : null,
-        triggerOptions: params[18] ? jsonParam(params[18]) : null,
+        executionEnvironment: params[15],
+        idempotencyKey: params[16],
+        manifestId: params[17],
+        artifacts: params[18] ? jsonParam(params[18]) : null,
+        triggerOptions: params[19] ? jsonParam(params[19]) : null,
       };
       pipelineRunInserts.push(row);
       return { id: row.id };
@@ -451,7 +469,7 @@ describe('Hermes HRC task-manifest bridge fixtures', () => {
 });
 
 describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () => {
-  test('queues a Hermes HRC manifest and preserves bridge metadata while execution-environment support is absent', async () => {
+  test('queues a Hermes HRC manifest and preserves bridge metadata while normalizing unsupported execution-environment labels', async () => {
     const app = makeApp();
     const manifest = clone(hermesHrcTaskManifestWithExecutionEnvironment) as JsonRecord;
 
@@ -530,7 +548,7 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       idempotencyKey: manifest.idempotencyKey,
       estimatedExecutionPlan: expect.objectContaining({
         mergeStrategy: 'branch-only',
-        executionEnvironmentSupported: false,
+        executionEnvironmentSupported: true,
         executionEnvironmentId: null,
       }),
     }));

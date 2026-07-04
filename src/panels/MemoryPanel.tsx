@@ -61,6 +61,7 @@ interface MemoryReviewReason {
 
 interface MemoryReviewItem extends MemoryItem {
   source: string | null;
+  sourceRef: string | null;
   updatedAt: string;
   deletedAt: string | null;
   staleScore: number;
@@ -69,6 +70,7 @@ interface MemoryReviewItem extends MemoryItem {
   lastAction: {
     action: MemoryReviewAction;
     at: string;
+    actor: string | null;
     previousStatus: string | null;
     nextStatus: MemoryReviewStatus | null;
   } | null;
@@ -1096,6 +1098,10 @@ function ReviewWorkflowSection({
   onFocusMemory: (memoryId: string) => void;
 }) {
   const [reviewExpanded, setReviewExpanded] = useState(false);
+  const [filterReviewStatus, setFilterReviewStatus] = useState<string>('');
+  const [filterReviewCategory, setFilterReviewCategory] = useState<string>('');
+  const [filterReviewSourceType, setFilterReviewSourceType] = useState<string>('');
+  const [expandedContentIds, setExpandedContentIds] = useState<Set<number>>(new Set());
 
   if (loading) {
     return (
@@ -1135,9 +1141,15 @@ function ReviewWorkflowSection({
     mode: 'bounded-sql',
     reason: null,
   };
-  const queueItems = data.staleCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted');
-  const provenanceItems = provenanceCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted');
-  const recoverableItems = data.staleCandidates.items.filter((item) => item.status === 'archived' || item.status === 'deleted');
+  const applyReviewFilters = (items: MemoryReviewItem[]) => items.filter((item) => {
+    if (filterReviewStatus && item.status !== filterReviewStatus) return false;
+    if (filterReviewCategory && item.category !== filterReviewCategory) return false;
+    if (filterReviewSourceType && (item.sourceType ?? '') !== filterReviewSourceType) return false;
+    return true;
+  });
+  const queueItems = applyReviewFilters(data.staleCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted'));
+  const provenanceItems = applyReviewFilters(provenanceCandidates.items.filter((item) => item.status !== 'archived' && item.status !== 'deleted'));
+  const recoverableItems = applyReviewFilters(data.staleCandidates.items.filter((item) => item.status === 'archived' || item.status === 'deleted'));
   const boundedCopy = `Review queue is intentionally bounded to ${data.staleCandidates.heuristics.scanLimit} low-recency memories and ${data.hotspots.windowSize} recent active memories. Provenance cleanup is separately bounded to ${provenanceCandidates.heuristics.scanLimit} provenance-poor memories.`;
   const statusClass: Record<MemoryReviewStatus, string> = {
     candidate: 'border-amber-500/20 bg-amber-500/10 text-amber-400',
@@ -1153,6 +1165,12 @@ function ReviewWorkflowSection({
     archived: 'Archived',
     deleted: 'Deleted',
   };
+  const trustLabel = (score: number): { label: string; color: string } => {
+    if (score >= 70) return { label: 'Critical', color: 'text-red-400' };
+    if (score >= 40) return { label: 'Needs review', color: 'text-amber-400' };
+    return { label: 'Healthy', color: 'text-emerald-400' };
+  };
+  const isPromoted = (item: MemoryReviewItem) => item.status === 'kept' && item.lastAction?.action === 'keep';
   const filesHot = data.hotspots.files;
   const specsHot = data.hotspots.specs;
   const hotspotCount = filesHot.length + specsHot.length;
@@ -1160,10 +1178,29 @@ function ReviewWorkflowSection({
   const hasActiveReviewWork = queueItems.length > 0 || provenanceItems.length > 0 || recoverableItems.length > 0 || hotspotCount > 0;
   const showExpandedReview = hasActiveReviewWork || reviewExpanded;
 
-  const renderReviewItems = (items: MemoryReviewItem[], listAriaLabel: string) => (
+  const renderReviewItems = (items: MemoryReviewItem[], listAriaLabel: string) => {
+    const CONTENT_LIMIT = 300;
+    const RELATED_FILES_SHOWN = 5;
+    return (
     <ul className="space-y-3" role="list" aria-label={listAriaLabel}>
       {items.map((item) => {
         const lastActionAt = item.lastAction?.at ? new Date(item.lastAction.at).toLocaleString() : null;
+        const occurredAt = new Date(item.createdAt).toLocaleString();
+        const contentOverflow = item.content.length > CONTENT_LIMIT;
+        const expanded = expandedContentIds.has(item.id);
+        const toggleExpanded = () => {
+          setExpandedContentIds(prev => {
+            const next = new Set(prev);
+            if (next.has(item.id)) next.delete(item.id); else next.add(item.id);
+            return next;
+          });
+        };
+        const relatedFiles = item.relatedFiles ?? [];
+        const shownFiles = relatedFiles.slice(0, RELATED_FILES_SHOWN);
+        const hiddenCount = relatedFiles.length - RELATED_FILES_SHOWN;
+        const displayContent = contentOverflow && !expanded
+          ? item.content.slice(0, CONTENT_LIMIT)
+          : item.content;
         return (
           <li key={item.id} className="rounded-lg border border-border bg-bg px-3 py-3 text-[11px] text-muted">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1171,25 +1208,90 @@ function ReviewWorkflowSection({
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusClass[item.status]}`}>{statusLabel[item.status]}</span>
                   <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${CATEGORY_COLORS[item.category] ?? 'bg-gray-500/10 text-gray-500'}`}>{item.category}</span>
-                  <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">score {item.staleScore}</span>
+                  <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${trustLabel(item.staleScore).color} bg-surface-200`} title={`Stale score: ${item.staleScore} — ${trustLabel(item.staleScore).label}`}>
+                    <span className={`h-1.5 w-1.5 rounded-full ${trustLabel(item.staleScore).color.replace('text-', 'bg-')}`} />
+                    {trustLabel(item.staleScore).label}
+                  </span>
                   {item.sourceType && <span className={`rounded px-1.5 py-0.5 text-[10px] ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>{SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}</span>}
+                  {isPromoted(item) && (
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-500" title="Promoted to live memory">
+                      <Check size={9} />
+                      Promoted
+                    </span>
+                  )}
                 </div>
-                <p className="mt-2 text-xs leading-relaxed text-[var(--text)]/85">{item.content}</p>
+                {/* Occurred at (createdAt) — provenance timestamp */}
+                <p className="mt-2 text-[10px] text-muted/70">
+                  <span className="font-medium text-muted">Occurred:</span> {occurredAt}
+                </p>
+                {/* Source ref — provenance reference */}
+                {item.sourceRef && (
+                  <p className="mt-1 text-[10px] text-muted/70">
+                    <span className="font-medium text-muted">Source ref:</span>{' '}
+                    <span className="font-mono text-[10px] rounded bg-surface-200 px-1 py-0.5">{item.sourceRef}</span>
+                  </p>
+                )}
+                {/* Content with collapse for large payloads */}
+                <div className="mt-2">
+                  <p className="text-xs leading-relaxed text-[var(--text)]/85 break-words">
+                    {displayContent}
+                  </p>
+                  {contentOverflow && (
+                    <div className="mt-1">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); toggleExpanded(); }}
+                        className="text-[10px] font-medium text-accent hover:underline"
+                      >
+                        {expanded ? 'Show less' : `Show all (${item.content.length} chars)`}
+                      </button>
+                      {!expanded && (
+                        <span className="ml-2 inline-flex items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 text-[9px] font-medium text-warning" title={`Content truncated at ${CONTENT_LIMIT} character limit`}>
+                          <AlertTriangle size={9} />
+                          Truncated at {CONTENT_LIMIT} chars
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {/* Changed/related files — with provenance file list */}
+                {relatedFiles.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-[10px] font-medium text-muted mb-1">
+                      Changed files ({relatedFiles.length}):
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {shownFiles.map((file) => (
+                        <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
+                      ))}
+                      {hiddenCount > 0 && (
+                        <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted/60">+{hiddenCount} more</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {/* Provenance source badges */}
                 <div className="mt-2 flex flex-wrap gap-1">
                   {item.sourceStoryId && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-500">Story {item.sourceStoryId}</span>}
                   {item.sourceSpecId && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-400">Spec {item.sourceSpecId}</span>}
                   {item.sourceRunId && <span className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">Run #{item.sourceRunId}</span>}
-                  {(item.relatedFiles ?? []).slice(0, 2).map((file) => (
-                    <span key={file} className="rounded bg-surface-200 px-1.5 py-0.5 font-mono text-[10px] text-muted">{file}</span>
-                  ))}
                 </div>
+                {/* Redaction marker — for items with missing provenance */}
+                {!item.sourceStoryId && !item.sourceSpecId && !item.sourceRef && relatedFiles.length === 0 && (
+                  <span className="mt-1.5 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[9px] font-medium text-red-400" title="No provenance or file context available for this memory">
+                    <AlertTriangle size={9} />
+                    No provenance
+                  </span>
+                )}
                 <div className="mt-2 flex flex-wrap gap-1">
                   {item.reasons.map((reason) => (
                     <span key={reason.code} className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{reason.label}</span>
                   ))}
                 </div>
                 {lastActionAt && (
-                  <p className="mt-2 text-[10px] text-muted">Last review action: {item.lastAction?.action} · {lastActionAt}</p>
+                  <p className="mt-2 text-[10px] text-muted">
+                    Last review action: {item.lastAction?.action}{item.lastAction?.actor ? ` by ${item.lastAction.actor}` : ''} · {lastActionAt}
+                  </p>
                 )}
               </div>
               <div className="flex shrink-0 flex-col gap-2">
@@ -1238,7 +1340,8 @@ function ReviewWorkflowSection({
         );
       })}
     </ul>
-  );
+    );
+  };
 
   if (!showExpandedReview) {
     return (
@@ -1253,6 +1356,11 @@ function ReviewWorkflowSection({
             {ageFallbackReason && (
               <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300" title={ageFallbackReason}>
                 <AlertTriangle size={10} /> SQL fallback
+              </span>
+            )}
+            {(filterReviewStatus || filterReviewCategory || filterReviewSourceType) && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent" title="Review filters active">
+                Filtered
               </span>
             )}
           </div>
@@ -1293,6 +1401,55 @@ function ReviewWorkflowSection({
 
       <div className="mt-3 space-y-2">
         <div className="rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">{boundedCopy}</div>
+      </div>
+
+      {/* Review candidate filters */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <select
+          value={filterReviewStatus}
+          onChange={(e) => setFilterReviewStatus(e.target.value)}
+          aria-label="Filter review items by status"
+          className="rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+        >
+          <option value="">All statuses</option>
+          {(['candidate', 'kept', 'revisit', 'archived', 'deleted'] as const).map((status) => (
+            <option key={status} value={status}>{statusLabel[status]}</option>
+          ))}
+        </select>
+
+        <select
+          value={filterReviewCategory}
+          onChange={(e) => setFilterReviewCategory(e.target.value)}
+          aria-label="Filter review items by category"
+          className="rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+        >
+          <option value="">All categories</option>
+          {CATEGORIES.map((category) => (
+            <option key={category} value={category}>{category}</option>
+          ))}
+        </select>
+
+        <select
+          value={filterReviewSourceType}
+          onChange={(e) => setFilterReviewSourceType(e.target.value)}
+          aria-label="Filter review items by source type"
+          className="rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+        >
+          <option value="">All sources</option>
+          {SOURCE_TYPES.map((sourceType) => (
+            <option key={sourceType} value={sourceType}>{SOURCE_TYPE_LABELS[sourceType]}</option>
+          ))}
+        </select>
+
+        {(filterReviewStatus || filterReviewCategory || filterReviewSourceType) && (
+          <button
+            type="button"
+            onClick={() => { setFilterReviewStatus(''); setFilterReviewCategory(''); setFilterReviewSourceType(''); }}
+            className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-surface-200"
+          >
+            Clear filters
+          </button>
+        )}
       </div>
 
       <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">

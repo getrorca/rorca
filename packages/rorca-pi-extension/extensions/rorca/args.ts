@@ -1,6 +1,14 @@
+/*
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ForgeOptions, RetryOptions, RunOptions, StatusOptions } from "./types.js";
+import type { CaptureOptions, ForgeOptions, RetryOptions, RunOptions, StatusOptions } from "./types.js";
 
 export function tokenizeArgs(input: string): string[] {
   const tokens: string[] = [];
@@ -273,6 +281,168 @@ export function parseEnrichCommand(input: string, fallbackSpecSlug?: string): { 
   }
 
   return options;
+}
+
+/** Valid memory categories shared with the backend memory-ledger. */
+export const VALID_MEMORY_CATEGORIES = [
+  'Architecture',
+  'Convention',
+  'Bug Fix',
+  'Decision',
+  'Pattern',
+  'Gotcha',
+  'Run Synthesis',
+] as const;
+
+const VALID_CONFIDENCE = ['high', 'medium', 'low'] as const;
+const VALID_TRUST = ['authoritative', 'trusted', 'community', 'unverified'] as const;
+
+/**
+ * Generate a deterministic idempotency key from source ref + workspace + content.
+ * When source_ref is supplied, the key is fully deterministic — resubmitting the
+ * same capture with the same source will hit the idempotency gate.
+ */
+export function generateCaptureIdempotencyKey(
+  workspaceId: string,
+  sourceRef: string | undefined,
+  title: string,
+  rule: string,
+): string {
+  const seed = sourceRef
+    ? `pi-capture:${workspaceId}:ref:${sourceRef}`
+    : `pi-capture:${workspaceId}:content:${title}:${rule}`;
+  return crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32);
+}
+
+export function parseCaptureCommand(input: string): CaptureOptions {
+  const tokens = tokenizeArgs(input);
+  if (tokens.length === 0) {
+    throw new Error(
+      "Usage: /rorca-capture <text> --title <title> --category <category> [--files <path>...] [--source <ref>] [--confidence high|medium|low] [--trust tier] [--workspace <id>] [--approve]",
+    );
+  }
+
+  const bodyParts: string[] = [];
+  const fileParts: string[] = [];
+  const options: {
+    title?: string;
+    category?: string;
+    files?: string[];
+    source?: string;
+    confidence?: 'high' | 'medium' | 'low';
+    trust?: 'authoritative' | 'trusted' | 'community' | 'unverified';
+    workspaceId?: string;
+    approve?: boolean;
+  } = {};
+
+  for (let i = 0; i < tokens.length;) {
+    const token = tokens[i];
+    switch (token) {
+      case '--title': {
+        const parsed = parseFlagValue(tokens, i, token);
+        options.title = parsed.value;
+        i = parsed.nextIndex;
+        break;
+      }
+      case '--category': {
+        const parsed = parseFlagValue(tokens, i, token);
+        const category = parsed.value;
+        if (!(VALID_MEMORY_CATEGORIES as readonly string[]).includes(category)) {
+          throw new Error(
+            `Invalid category: ${category}. Valid categories: ${VALID_MEMORY_CATEGORIES.join(', ')}`,
+          );
+        }
+        options.category = category;
+        i = parsed.nextIndex;
+        break;
+      }
+      case '--files': {
+        // Collect all non-flag tokens until the next flag
+        const parsed = parseFlagValue(tokens, i, token);
+        fileParts.push(parsed.value);
+        let nextI = parsed.nextIndex;
+        // Support space-separated file paths: collect tokens until next --flag or end
+        while (nextI < tokens.length && !tokens[nextI].startsWith('--')) {
+          fileParts.push(tokens[nextI]);
+          nextI += 1;
+        }
+        i = nextI;
+        break;
+      }
+      case '--source': {
+        const parsed = parseFlagValue(tokens, i, token);
+        options.source = parsed.value;
+        i = parsed.nextIndex;
+        break;
+      }
+      case '--confidence': {
+        const parsed = parseFlagValue(tokens, i, token);
+        const confidence = parsed.value;
+        if (!(VALID_CONFIDENCE as readonly string[]).includes(confidence)) {
+          throw new Error(
+            `Invalid confidence: ${confidence}. Must be: ${VALID_CONFIDENCE.join(' | ')}`,
+          );
+        }
+        options.confidence = confidence as 'high' | 'medium' | 'low';
+        i = parsed.nextIndex;
+        break;
+      }
+      case '--trust': {
+        const parsed = parseFlagValue(tokens, i, token);
+        const trust = parsed.value;
+        if (!(VALID_TRUST as readonly string[]).includes(trust)) {
+          throw new Error(
+            `Invalid trust tier: ${trust}. Must be: ${VALID_TRUST.join(' | ')}`,
+          );
+        }
+        options.trust = trust as 'authoritative' | 'trusted' | 'community' | 'unverified';
+        i = parsed.nextIndex;
+        break;
+      }
+      case '--workspace': {
+        const parsed = parseFlagValue(tokens, i, token);
+        options.workspaceId = parsed.value;
+        i = parsed.nextIndex;
+        break;
+      }
+      case '--approve':
+        options.approve = true;
+        i += 1;
+        break;
+      default:
+        // First non-flag token is the body text; subsequent ones appended
+        bodyParts.push(token);
+        i += 1;
+        break;
+    }
+  }
+
+  const text = bodyParts.join(' ').trim();
+  if (!text) {
+    throw new Error(
+      "Usage: /rorca-capture <text> --title <title> --category <category> [--files <path>...] [--source <ref>] [--confidence high|medium|low] [--trust tier] [--workspace <id>] [--approve]",
+    );
+  }
+
+  if (!options.title) {
+    throw new Error('Missing required flag: --title');
+  }
+
+  if (!options.category) {
+    throw new Error('Missing required flag: --category');
+  }
+
+  return {
+    text,
+    title: options.title,
+    category: options.category,
+    files: fileParts,
+    source: options.source,
+    confidence: options.confidence ?? 'medium',
+    trust: options.trust ?? 'unverified',
+    workspaceId: options.workspaceId,
+    approve: options.approve ?? false,
+  };
 }
 
 export function resolveBriefInput(rawBrief: string, cwd: string = process.cwd()): { brief: string; sourceLabel: string } {

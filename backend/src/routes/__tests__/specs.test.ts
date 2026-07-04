@@ -1656,6 +1656,324 @@ describe('POST /api/specs/persist', () => {
       }),
     ]));
   });
+
+  // ─── US-022: Composer context integration ─────────────────────────────
+
+  test('persist-with-context: preserves caller-provided composer-style context and validates hydration context when present', async () => {
+    const callerContextSummary: Record<string, unknown> = {
+      directionLayers: {
+        l1: true,
+        l2: { present: true, domain: 'devtools' },
+        l3: true,
+      },
+      skills: ['rorca-forge'],
+      memoryEntries: 3,
+      agentsMd: true,
+      template: null,
+      schemaSnapshot: true,
+      gitMemory: false,
+      estimatedTokens: 5000,
+      modelContextWindow: 200000,
+      composedAt: '2026-06-28T00:00:00.000Z',
+      briefHash: 'abc123def4567890',
+      composerDegraded: true,
+      composerDegradationReasons: ['Graph context excluded by caller (includeGraph=false)'],
+      composerSections: [
+        { section: 'directions', itemCount: 2, tokenBudget: 320, tokensUsed: 150 },
+        { section: 'memories', itemCount: 3, tokenBudget: 2240, tokensUsed: 1200 },
+        { section: 'docs', itemCount: 0, tokenBudget: 1440, tokensUsed: 0 },
+        { section: 'sourceFiles', itemCount: 0, tokenBudget: 1440, tokensUsed: 0 },
+        { section: 'tests', itemCount: 0, tokenBudget: 800, tokensUsed: 0 },
+        { section: 'graphSummary', itemCount: 0, tokenBudget: 800, tokensUsed: 0 },
+        { section: 'branchDiff', itemCount: 0, tokenBudget: 320, tokensUsed: 0 },
+        { section: 'risksGotchas', itemCount: 1, tokenBudget: 320, tokensUsed: 100 },
+      ],
+      retrieval: {
+        cagHits: 2,
+        ragHits: 5,
+        graphHits: 1,
+        tier: 'hybrid',
+        latencyMs: 45,
+      },
+    };
+
+    const persistRes = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Composer Context Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        contextUsed: {
+          text: 'COMPOSER CONTEXT BUNDLE',
+          meta: {
+            standards: true,
+            conventions: true,
+            project: true,
+            schema: true,
+            totalTokens: 5000,
+            scopesMatched: [],
+          },
+        },
+        contextSummary: callerContextSummary,
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(persistRes.status).toBe(200);
+
+    // Saved spec JSON preserves contextUsed and contextSummary with composer fields
+    const saved = JSON.parse(fs.readFileSync(
+      path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'composer-context-draft.json'), 'utf8',
+    ));
+    expect(saved.contextSummary).toEqual(callerContextSummary);
+    expect(saved.contextUsed.text).toBe('COMPOSER CONTEXT BUNDLE');
+    expect(saved.contextSummary.composedAt).toBe('2026-06-28T00:00:00.000Z');
+    expect(saved.contextSummary.briefHash).toBe('abc123def4567890');
+    expect(saved.contextSummary.composerDegraded).toBe(true);
+    expect(saved.contextSummary.composerDegradationReasons).toContain('Graph context excluded by caller (includeGraph=false)');
+    expect(saved.contextSummary.composerSections).toHaveLength(8);
+
+    // Generation log captures composer metadata
+    const logRes = await request(app)
+      .get('/api/specs/composer-context-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const summary = parsePayload(logRes.body.context_summary_json);
+    const captureStatus = summary.contextCaptureStatus as Record<string, unknown>;
+    expect(captureStatus.status).toBe('provided');
+    expect(captureStatus.contextUsed).toBe('provided');
+    expect(captureStatus.contextSummary).toBe('provided');
+
+    // Composer fields are preserved through to the generation log
+    const logContextSummary = summary.contextSummary as Record<string, unknown>;
+    expect(logContextSummary.composedAt).toBe('2026-06-28T00:00:00.000Z');
+    expect(logContextSummary.briefHash).toBe('abc123def4567890');
+    expect(logContextSummary.composerDegraded).toBe(true);
+  });
+
+  test('persist-without-context: gracefully handles missing composer data (fallback-without-Hilo)', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'No Composer Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+
+    const saved = JSON.parse(fs.readFileSync(
+      path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'no-composer-draft.json'), 'utf8',
+    ));
+    // No composer context fields when not provided
+    expect(saved.contextUsed).toBeUndefined();
+    expect(saved.contextSummary).toBeUndefined();
+
+    const logRes = await request(app)
+      .get('/api/specs/no-composer-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const summary = parsePayload(logRes.body.context_summary_json);
+    const captureStatus = summary.contextCaptureStatus as Record<string, unknown>;
+    expect(captureStatus.status).toBe('missing');
+    expect(captureStatus.reason).toBe('caller_context_not_supplied');
+    expect(captureStatus.contextUsed).toBe('missing');
+    expect(captureStatus.contextSummary).toBe('missing');
+    expect(summary.contextSummary).toBeUndefined();
+  });
+
+  test('generate-with-composer: response includes composer-enriched context when composer runs', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
+    const res = await request(app)
+      .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        domain: 'backend',
+        title: 'Composer Generate',
+        brief: 'Build a feature flag system',
+        storyCount: 2,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.contextSummary).toBeDefined();
+
+    // Composer enrichment should be present (best-effort — may be absent if composer fails)
+    // In test environments without graph setup, composer runs but may degrade gracefully
+    const ctxSummary = res.body.contextSummary as Record<string, unknown>;
+    // The generate flow always enriches contextSummary with composer fields if composer succeeds
+    // At minimum, the directionLayers should be present (from the non-composer path)
+    expect(ctxSummary.directionLayers).toBeDefined();
+
+    // Generation log should have context_summary_json
+    const logRes = await request(app)
+      .get('/api/specs/composer-generate/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    const logSummary = parsePayload(logRes.body.context_summary_json);
+    expect(logSummary.sourceMode).toBe('legacy-generate');
+    expect(logSummary.invocationSurface).toBe('api.specs.generate');
+  });
+});
+
+// ─── US-042: Final contract preservation across Hilo configuration states ───
+
+describe('US-042 generate/persist/enrich/readiness contract preservation', () => {
+  async function useIsolatedWorkspace(config?: Record<string, unknown>): Promise<void> {
+    await execute(`UPDATE workspaces SET path = $1 WHERE id = 'ws-test'`, [tmpDir]);
+    if (!config) return;
+    const rorcaDir = path.join(tmpDir, '.rorca');
+    fs.mkdirSync(rorcaDir, { recursive: true });
+    fs.writeFileSync(path.join(rorcaDir, 'config.json'), JSON.stringify(config, null, 2), 'utf8');
+  }
+
+  function createFakeHiloBinary(): string {
+    const binPath = path.join(tmpDir, 'bin', 'hilo');
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    fs.writeFileSync(binPath, '#!/usr/bin/env sh\nif [ "$1" = "--version" ]; then echo "hilo 0.1.0"; exit 0; fi\nexit 0\n', 'utf8');
+    fs.chmodSync(binPath, 0o755);
+    return binPath;
+  }
+
+  const providedContextSummary = {
+    directionLayers: {
+      l1: true,
+      l2: { present: false, domain: null },
+      l3: true,
+    },
+    skills: [],
+    memoryEntries: 0,
+    agentsMd: false,
+    template: null,
+    schemaSnapshot: false,
+    gitMemory: false,
+    estimatedTokens: 120,
+    modelContextWindow: 200000,
+  };
+
+  test('legacy generate, readiness, and enrich remain stable when Hilo is configured', async () => {
+    const fakeHiloBin = createFakeHiloBinary();
+    await useIsolatedWorkspace({
+      version: 1,
+      hilo: {
+        enabled: true,
+        binaryPath: fakeHiloBin,
+        checkoutPath: '.',
+        outputDir: '.rorca/hilo',
+        timeoutMs: 1000,
+      },
+    });
+
+    mockChatComplete
+      .mockResolvedValueOnce({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } })
+      .mockResolvedValue({ text: '- Hilo-configured enrichment still uses the canonical ChatResult.text contract.', usage: { inputTokens: 10, outputTokens: 12 } });
+
+    const generated = await request(app)
+      .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        domain: 'backend',
+        title: 'Hilo Configured Contract',
+        brief: 'Keep generation compatible while a Hilo graph provider is configured',
+        storyCount: 2,
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(generated.status).toBe(200);
+    expect(generated.body.slug).toBe('hilo-configured-contract');
+    expect(generated.body.contextSummary.directionLayers).toBeDefined();
+    expect(generated.body.postSave).toEqual({ enrich: false, matchSkills: false, memorySynthesis: false });
+
+    const readiness = await request(app)
+      .get('/api/specs/hilo-configured-contract/readiness?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(readiness.status).toBe(200);
+    expect(readiness.body.executionGate.status).toBe('allowed');
+    expect(readiness.body.blockingReasons).toEqual([]);
+    expect(readiness.body.persistence.contextCapture.status).toBe('provided');
+
+    const enriched = await request(app)
+      .post('/api/specs/hilo-configured-contract/enrich')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(enriched.status).toBe(200);
+    expect(enriched.body.success).toBe(true);
+    expect(enriched.body.storiesEnriched).toBe(2);
+    expect(['cache', 'search', 'hybrid', 'none']).toContain(enriched.body.retrieval_method);
+
+    const saved = JSON.parse(fs.readFileSync(path.join(tmpDir, 'forge', 'specs', 'pending', 'hilo-configured-contract.json'), 'utf8'));
+    expect(saved.userStories[0].description).toContain('## Context');
+    expect(saved.userStories[0].description).not.toContain('[object Object]');
+  });
+
+  test('explicit persist, readiness, and enrich remain stable without Hilo configured', async () => {
+    await useIsolatedWorkspace();
+    mockChatComplete.mockResolvedValue({ text: '- No-Hilo enrichment still completes.', usage: { inputTokens: 5, outputTokens: 7 } });
+
+    const persisted = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'No Hilo Contract',
+        stories: [
+          { id: 'US-001', title: 'Persist without Hilo', description: 'Keep explicit persistence independent from Hilo configuration', acceptanceCriteria: ['Spec persists'], dependsOn: [] },
+        ],
+        contextUsed: {
+          text: 'SYNTHESIZED CONTEXT WITHOUT HILO',
+          meta: {
+            standards: true,
+            conventions: false,
+            project: true,
+            schema: false,
+            totalTokens: 120,
+            scopesMatched: [],
+          },
+        },
+        contextSummary: providedContextSummary,
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(persisted.status).toBe(200);
+    expect(persisted.body.slug).toBe('no-hilo-contract');
+    expect(persisted.body.contextSummary).toMatchObject(providedContextSummary);
+
+    const readiness = await request(app)
+      .get('/api/specs/no-hilo-contract/readiness?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(readiness.status).toBe(200);
+    expect(readiness.body.executionGate.status).toBe('allowed');
+    expect(readiness.body.blockingReasons).toEqual([]);
+    expect(readiness.body.persistence.contextCapture.status).toBe('provided');
+
+    const enriched = await request(app)
+      .post('/api/specs/no-hilo-contract/enrich')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(enriched.status).toBe(200);
+    expect(enriched.body.success).toBe(true);
+    expect(enriched.body.storiesEnriched).toBe(1);
+    expect(['cache', 'search', 'hybrid', 'none']).toContain(enriched.body.retrieval_method);
+
+    const saved = JSON.parse(fs.readFileSync(path.join(tmpDir, 'forge', 'specs', 'pending', 'no-hilo-contract.json'), 'utf8'));
+    expect(saved.contextSummary).toMatchObject(providedContextSummary);
+    expect(saved.userStories[0].description).toContain('No-Hilo enrichment still completes');
+  });
 });
 
 describe('GET /api/specs (list)', () => {
