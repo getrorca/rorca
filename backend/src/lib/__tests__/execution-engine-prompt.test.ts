@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Regression coverage for fail-closed prompt delivery in execution-engine.
  */
