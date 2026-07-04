@@ -516,7 +516,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
-  const resolvedMode = terminalMode === 'pty' ? 'raw' : mode;
+  const resolvedMode = mode;
 
   // Recreate ansi-to-html converters when theme changes.
   // ansiConverter: escapeXML=true for raw terminal lines (ANSI codes, plain text).
@@ -824,15 +824,17 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
         const bytes = decodeBase64Chunk(e.data);
+        const isPtyChunk = terminalModeRef.current === 'pty';
 
-        if (terminalModeRef.current === 'pty') {
+        if (isPtyChunk) {
           writePtyChunk(bytes);
-          return;
         }
 
         const text = new TextDecoder().decode(bytes);
 
-        // Split into lines for semantic parsing and stream-json formatting
+        // Split into lines for semantic parsing and stream-json formatting.
+        // PTY chunks still flow through this parser so the Semantic view remains
+        // available even when the primary surface is a real xterm.js terminal.
         lineBufferRef.current += text;
         const parts = lineBufferRef.current.split('\n');
         lineBufferRef.current = parts.pop() ?? '';
@@ -844,13 +846,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           const step = parseVerboseLine(part);
           if (step) newSteps.push(step);
 
-          const formatted = formatStreamJsonForDisplay(part);
-          if (formatted !== null) {
-            displayLines.push(formatted);
+          if (!isPtyChunk) {
+            const formatted = formatStreamJsonForDisplay(part);
+            if (formatted !== null) {
+              displayLines.push(formatted);
+            }
           }
         }
 
-        if (displayLines.length > 0) {
+        if (!isPtyChunk && displayLines.length > 0) {
           pendingTextRef.current += displayLines.join('\n') + '\n';
           scheduleFlush();
         }
@@ -870,22 +874,25 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     });
 
     es.addEventListener('done', () => {
-      if (terminalModeRef.current !== 'pty') {
-        if (flushTimerRef.current !== null) {
-          clearTimeout(flushTimerRef.current);
-          flushTimerRef.current = null;
+      const isPtyStream = terminalModeRef.current === 'pty';
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      if (lineBufferRef.current) {
+        const finalStep = parseVerboseLine(lineBufferRef.current);
+        if (finalStep) {
+          setSteps(prev => [...prev, finalStep]);
         }
-        if (lineBufferRef.current) {
-          const finalStep = parseVerboseLine(lineBufferRef.current);
-          if (finalStep) {
-            setSteps(prev => [...prev, finalStep]);
-          }
+        if (!isPtyStream) {
           const formatted = formatStreamJsonForDisplay(lineBufferRef.current);
           if (formatted !== null) {
             pendingTextRef.current += formatted + '\n';
           }
-          lineBufferRef.current = '';
         }
+        lineBufferRef.current = '';
+      }
+      if (!isPtyStream) {
         const pending = pendingTextRef.current;
         if (pending) {
           pendingTextRef.current = '';
@@ -970,18 +977,20 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const ptyFallbackHint = terminalMeta.ptyUnavailableHint?.trim();
   const streamEnded = streamDone || isTerminalRunStatus(runStatus);
   const resolvingEffectiveMode = terminalMeta.requestedTerminalMode === 'pty' && !runMetaResolved;
-  const ansiSurfaceKind = resolvedMode === 'semantic' ? 'ANSI summary' : 'ANSI log';
+  const ansiSurfaceKind = resolvedMode === 'semantic' ? 'Semantic summary' : 'ANSI log';
   const fallbackAnsiState = streamEnded ? 'ANSI replay' : 'ANSI live';
   const surfaceLabel = resolvingEffectiveMode
     ? 'Checking PTY support'
     : terminalMode === 'pty'
-      ? streamEnded
-        ? 'PTY replay • detached'
-        : !ptyInputHealthy
-          ? 'Full PTY • input issue'
-          : ptyFocused
-            ? 'Full PTY • focused'
-            : 'Full PTY • click to focus'
+      ? resolvedMode === 'semantic'
+        ? `Semantic • ${streamEnded ? 'replay' : 'live'}`
+        : streamEnded
+          ? 'PTY replay • detached'
+          : !ptyInputHealthy
+            ? 'Full PTY • input issue'
+            : ptyFocused
+              ? 'Full PTY • focused'
+              : 'Full PTY • click to focus'
       : ptyFallbackActive
         ? `PTY fallback • ${fallbackAnsiState}`
         : `${ansiSurfaceKind} • ${streamEnded ? 'replay' : 'live'}`;
@@ -993,29 +1002,33 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const surfaceTitle = resolvingEffectiveMode
     ? 'Waiting for backend metadata before choosing full PTY attachment or ANSI fallback.'
     : terminalMode === 'pty'
-      ? streamEnded
-        ? 'The PTY session has ended; this xterm.js pane is replaying captured PTY output and keyboard input is disabled.'
-        : ptyInputHealthy
-          ? 'Real xterm.js PTY attachment. Focus the pane to send keyboard input.'
-          : 'PTY output is visible, but input delivery failed; this may be output-only until the connection recovers.'
+      ? resolvedMode === 'semantic'
+        ? 'Semantic execution summary parsed from the same PTY output stream.'
+        : streamEnded
+          ? 'The PTY session has ended; this xterm.js pane is replaying captured PTY output and keyboard input is disabled.'
+          : ptyInputHealthy
+            ? 'Real xterm.js PTY attachment. Focus the pane to send keyboard input.'
+            : 'PTY output is visible, but input delivery failed; this may be output-only until the connection recovers.'
       : ptyFallbackActive
         ? `Requested full PTY, but ${ptyFallbackReason} Showing ${streamEnded ? 'ANSI replay' : 'a live ANSI log stream'} without terminal input.`
         : `${ansiSurfaceKind} ${streamEnded ? 'replay from saved chunks' : 'live stream'}; this is not a PTY attachment.`;
   const modeHelpText = resolvingEffectiveMode
     ? 'Checking whether a real xterm.js PTY is available. Rorca will attach to the PTY when supported, or degrade to ANSI output when it is not.'
     : terminalMode === 'pty'
-      ? streamEnded
-        ? 'This run used a real xterm.js PTY while active. The session is now detached or exited, so this view is replay-only.'
-        : 'Full PTY attachment: Rorca is using a real xterm.js terminal with stdin/stdout when supported. If the PTY cannot start, this view degrades to ANSI output.'
+      ? resolvedMode === 'semantic'
+        ? 'Semantic view: parsed read/write/edit/bash/search/test steps from the same PTY output stream. Switch to Terminal for the full xterm.js session.'
+        : streamEnded
+          ? 'This run used a real xterm.js PTY while active. The session is now detached or exited, so this view is replay-only.'
+          : 'Terminal view: full PTY attachment with stdin/stdout when supported. Switch to Semantic for the parsed execution summary.'
       : ptyFallbackActive
         ? `Requested full PTY, but Rorca degraded to ${streamEnded ? 'ANSI replay' : 'a live ANSI log stream'} because ${ptyFallbackReason.toLowerCase()} Keyboard input is not attached.${ptyFallbackHint ? ` PTY prerequisite: ${ptyFallbackHint}` : ''}`
-        : `${ansiSurfaceKind} ${streamEnded ? 'replay' : 'stream'}: captured output only, not a live PTY. Raw/Semantic controls are available only in ANSI mode; PTY-capable runs use xterm.js when supported and degrade here when not.`;
+        : `${ansiSurfaceKind} ${streamEnded ? 'replay' : 'stream'}: captured output only, not a live PTY.`;
 
   return (
     <div className="h-full w-full flex flex-col">
       {/* ─── Toolbar ─────────────────────────────────────────────────────── */}
       <div className="shrink-0 px-3 py-1.5 border-b border-border bg-panel flex items-center gap-1">
-        {terminalMode !== 'pty' && !resolvingEffectiveMode && (
+        {!resolvingEffectiveMode && (
           <>
             <button
               onClick={() => handleSetMode('raw')}
@@ -1027,7 +1040,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
             >
               <span className="flex items-center gap-1">
                 <TerminalIcon size={11} />
-                Raw
+                {terminalMode === 'pty' ? 'Terminal' : 'Raw'}
               </span>
             </button>
             <button
@@ -1105,7 +1118,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
             className="h-full w-full overflow-hidden outline-none"
             data-terminal-input="true"
             onMouseDown={() => xtermRef.current?.focus()}
-            style={{ background: 'var(--terminal-bg)' }}
+            style={{
+              background: 'var(--terminal-bg)',
+              display: resolvedMode === 'raw' ? 'block' : 'none',
+            }}
           />
         ) : (
           <pre
@@ -1125,7 +1141,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         )}
 
         {/* Semantic step list */}
-        {terminalMode !== 'pty' && resolvedMode === 'semantic' && (
+        {resolvedMode === 'semantic' && (
           <div className="h-full flex flex-col">
             {steps.length === 0 ? (
               <div className="flex-1 flex items-center justify-center text-muted text-sm">
