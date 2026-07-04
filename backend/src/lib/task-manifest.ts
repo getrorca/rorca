@@ -293,6 +293,7 @@ export type TaskManifestSource = z.infer<typeof TaskManifestSourceSchema>;
 export type TaskManifestPolicy = z.infer<typeof TaskManifestPolicySchema>;
 export type TaskManifestExecution = z.infer<typeof TaskManifestExecutionSchema>;
 export type TaskManifestTask = z.infer<typeof TaskManifestTaskSchema>;
+export type TaskManifestContextRef = z.infer<typeof TaskManifestContextRefSchema>;
 
 export function parseTaskManifest(input: unknown): TaskManifest {
   return TaskManifestSchema.parse(input);

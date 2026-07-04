@@ -67,6 +67,8 @@ import {
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
+import { safeParseTaskManifest } from '../lib/task-manifest';
+import { writeTaskManifestExecutionEnvelope } from '../lib/task-manifest-execution-envelope';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -1281,7 +1283,7 @@ const PipelineTriggerSchema = z.object({
   terminalMode: z.string().nullable().optional(),
 });
 
-router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
+async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
@@ -2059,6 +2061,88 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Trigger');
+  }
+}
+
+router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigger);
+
+/**
+ * @swagger
+ * /api/pipeline/task-manifest/trigger:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Adapt a Hermes task manifest into an internal execution envelope and trigger the existing pipeline
+ *     operationId: triggerTaskManifestPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Starts a bounded local task-manifest run by reusing the existing public pipeline trigger and provider routing; no separate provider invocation surface is exposed."
+ *     description: >
+ *       Validates a Hermes task manifest, writes an internal synthetic spec under
+ *       forge/task-manifests/{manifestId}/, then delegates to POST /api/pipeline/trigger
+ *       so Claude, OpenCode, Codex, and Pi execution paths remain shared.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             oneOf:
+ *               - type: object
+ *                 description: TaskManifest payload
+ *               - type: object
+ *                 required: [manifest]
+ *                 properties:
+ *                   manifest: { type: object }
+ *                   queue: { type: boolean }
+ *                   includeGraph: { type: boolean }
+ *                   forceSequential: { type: boolean }
+ *     responses:
+ *       201: { description: Pipeline run queued }
+ *       400: { description: Invalid or direct-execution-ineligible task manifest }
+ *       404: { description: Workspace not found }
+ */
+router.post('/task-manifest/trigger', async (req: Request, res: Response) => {
+  try {
+    const requestBody = req.body as Record<string, unknown>;
+    const manifestInput = requestBody && requestBody.manifestVersion === 1
+      ? requestBody
+      : requestBody?.manifest;
+    const parsed = safeParseTaskManifest(manifestInput);
+    if (!parsed.success) {
+      throw new ValidationError(`Invalid task manifest: ${parsed.error.issues.map(issue => issue.message).join('; ')}`);
+    }
+    const manifest = parsed.data;
+
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [manifest.workspaceId]) as
+      { id: string; label: string; path: string; domain?: string } | undefined;
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const envelope = await writeTaskManifestExecutionEnvelope({
+      workspacePath: workspace.path,
+      manifest,
+    });
+
+    req.body = {
+      specPath: envelope.relativeSpecPath,
+      workspaceId: manifest.workspaceId,
+      autoWorktree: true,
+      autoMerge: false,
+      mergeStrategy: manifest.execution.mergeStrategy,
+      dryRun: manifest.policy.dryRun === true,
+      triggerType: 'manual',
+      queue: requestBody?.queue === true,
+      forceSequential: requestBody?.forceSequential === true,
+      includeGraph: requestBody?.includeGraph === true,
+      readinessOverride: true,
+      ...(manifest.execution.agentOverride ? { agentOverride: manifest.execution.agentOverride } : {}),
+      ...(manifest.execution.modelOverride ? { modelOverride: manifest.execution.modelOverride } : {}),
+      ...(manifest.execution.effortLevel ? { effortLevel: manifest.execution.effortLevel } : {}),
+      ...(manifest.execution.terminalMode ? { terminalMode: manifest.execution.terminalMode } : {}),
+    };
+
+    await handlePipelineTrigger(req, res);
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Task manifest trigger');
   }
 });
 
