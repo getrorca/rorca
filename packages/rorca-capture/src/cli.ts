@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, sta
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CaptureApiError,
   CaptureNetworkError,
   createApiClient,
   createCaptureClient,
@@ -46,6 +47,12 @@ import {
   type BuiltGitCommitEvent,
   type LastRorcaRunPointer,
 } from "./git-ingest.js";
+import {
+  PR_INGEST_ENDPOINT,
+  buildPrMemoryCandidatePayload,
+  isPrIngestDuplicateResponse,
+  parsePrIngestInput,
+} from "./pr-ingest.js";
 
 export const HELP_TEXT = `rorca-capture — API-only context capture sidecar for Rorca
 
@@ -55,6 +62,7 @@ Usage:
 
 MVP commands:
   remember <text>        Create a pending manual memory candidate through POST /api/memory/candidates
+  ingest-pr              CI mode: submit a pending PR merge/release/hotfix memory candidate
   ingest-commit [hash]   Send one commit ingestion request through the Rorca API
   ingest-git             Request git context ingestion through the Rorca API
   install-hooks          Install/update local git hooks that call rorca-capture; pass --uninstall to remove them
@@ -92,6 +100,24 @@ Daemon options:
   --interval-ms <ms>     Scan interval in milliseconds
   --max-commits-per-scan <n>  Bound commits scanned per interval (default 50)
   --max-concurrency <n>  Bound concurrent API submissions (default 2)
+
+PR ingest options (input precedence: flags > JSON file > environment variables):
+  --input <path>         Read PR metadata JSON (alias: --json-file, --metadata-file)
+  --provider <name>      VCS provider (e.g. github, gitlab)
+  --repo <owner/name>    Repository identifier
+  --pr-number <number>   Pull request number
+  --pr-url <url>         Pull request URL
+  --merge-sha <sha>      Merge commit SHA (used with CI run id for UUIDv5 idempotency)
+  --author <name>        PR author/login
+  --title <title>        PR title
+  --body <text>          PR body/description (redacted before submission)
+  --changed-files <csv>  Comma- or newline-separated changed files validated by context-safety
+  --ci-run-id <id>       CI run id (required; used with merge SHA for deterministic UUIDv5 idempotency)
+  --ci-run-url <url>     CI run URL
+  --ci-provider <name>   CI provider (defaults from provider/env when omitted)
+  --ci-workflow <name>   CI workflow/pipeline name
+  --ci-job <name>        CI job name
+  --event-kind <kind>    pr_merge|release|hotfix (stored in metadata; candidate eventType remains pr_merge)
 
 Git ingest options:
   --commit <sha>         For ingest-commit: explicit commit ref (default positional or HEAD)
@@ -220,6 +246,52 @@ type RememberResult =
   | { status: "submitted"; candidateId: string | null; created: boolean; idempotent: boolean; approved: boolean; alreadyApproved: boolean; approvalQueued: boolean }
   | { status: "queued"; queuePath: string; idempotencyKey: string; approveRequested: boolean; duplicate: boolean };
 
+type PrIngestApiResponse = {
+  candidate?: {
+    id?: string | number;
+    reviewStatus?: string;
+  };
+  created?: boolean;
+  idempotent?: boolean;
+};
+
+type PrIngestStatus = "submitted" | "queued" | "duplicate" | "dry-run";
+
+type PrIngestResult = {
+  command: "ingest-pr";
+  workspaceId: string;
+  repoPath: string;
+  dryRun: boolean;
+  status: PrIngestStatus;
+  candidateId?: string | null;
+  created?: boolean;
+  idempotent?: boolean;
+  queuePath?: string;
+  idempotencyKey: string;
+  sourceRef: string;
+  pr: {
+    provider: string;
+    repo: string;
+    number: number;
+    mergeSha: string;
+    url?: string;
+  };
+  ci: {
+    provider: string;
+    runId: string;
+    runUrl?: string;
+    workflow?: string;
+    job?: string;
+  };
+  relatedFiles: string[];
+  ignoredFiles: Array<{ path: string; reason: string }>;
+  contentHash: string;
+  securitySensitive: boolean;
+  regulatedDomain: boolean;
+  pendingReview: true;
+  requiresReview: true;
+};
+
 type GitIngestItemStatus = "submitted" | "queued" | "duplicate" | "skipped-noise" | "dry-run";
 
 type GitIngestItemResult = {
@@ -312,6 +384,12 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
       return 0;
     }
 
+    if (parsed.command === "ingest-pr") {
+      const result = await runIngestPr(parsed, deps);
+      io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : formatPrIngestResult(result));
+      return result.status === "duplicate" ? 2 : 0;
+    }
+
     if (parsed.command === "ingest-git") {
       const result = await runIngestGit(parsed, deps);
       io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : formatGitIngestResult(result));
@@ -381,7 +459,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       overrides.workspaceId = requireValue(argv, ++index, arg);
       continue;
     }
-    if (arg === "--repo-path" || arg === "--repo") {
+    if (arg === "--repo-path") {
       overrides.repoPath = requireValue(argv, ++index, arg);
       continue;
     }
@@ -652,6 +730,122 @@ function parsePositiveInt(value: string, flag: string): number {
     throw new Error(`${flag} requires a positive integer.`);
   }
   return parsed;
+}
+
+async function runIngestPr(parsed: ParsedArgs, deps: CliDeps): Promise<PrIngestResult> {
+  const input = parsePrIngestInput(parsed.rest, deps.env ?? process.env);
+  const runtime = await resolveIngestRuntime(parsed, deps, { allowDryRunWithoutApi: true });
+  const built = buildPrMemoryCandidatePayload(input, runtime.config, runtime.workspace.id);
+  const base = buildPrIngestResultBase(runtime, built, parsed.dryRun);
+
+  if (parsed.dryRun) {
+    return { ...base, status: "dry-run" };
+  }
+
+  try {
+    const submission = await runtime.client.submitCandidate<PrIngestApiResponse>(built.payload, {
+      endpoint: PR_INGEST_ENDPOINT,
+      eventType: built.payload.eventType,
+      contentFingerprint: built.contentHash,
+    });
+
+    if (submission.status === "queued") {
+      return {
+        ...base,
+        status: submission.duplicate ? "duplicate" : "queued",
+        queuePath: submission.queuePath,
+        idempotent: submission.duplicate,
+      };
+    }
+
+    const response = submission.response;
+    if (isPrIngestDuplicateResponse(response)) {
+      return {
+        ...base,
+        status: "duplicate",
+        candidateId: extractPrCandidateId(response),
+        created: response.created !== false,
+        idempotent: true,
+      };
+    }
+
+    return {
+      ...base,
+      status: "submitted",
+      candidateId: extractPrCandidateId(response),
+      created: response.created !== false,
+      idempotent: response.idempotent === true,
+    };
+  } catch (error) {
+    if (error instanceof CaptureApiError && error.statusCode === 409) {
+      return {
+        ...base,
+        status: "duplicate",
+        created: false,
+        idempotent: true,
+      };
+    }
+    throw error;
+  }
+}
+
+function buildPrIngestResultBase(
+  runtime: IngestRuntime,
+  built: ReturnType<typeof buildPrMemoryCandidatePayload>,
+  dryRun: boolean,
+): Omit<PrIngestResult, "status" | "candidateId" | "created" | "idempotent" | "queuePath"> {
+  return {
+    command: "ingest-pr",
+    workspaceId: runtime.workspace.id,
+    repoPath: runtime.config.repoPath,
+    dryRun,
+    idempotencyKey: built.idempotencyKey,
+    sourceRef: built.payload.sourceRef,
+    pr: {
+      provider: built.input.provider,
+      repo: built.input.repo,
+      number: built.input.prNumber,
+      mergeSha: built.input.mergeSha,
+      ...(built.input.prUrl ? { url: built.input.prUrl } : {}),
+    },
+    ci: {
+      provider: built.input.ci.provider,
+      runId: built.input.ci.runId,
+      ...(built.input.ci.runUrl ? { runUrl: built.input.ci.runUrl } : {}),
+      ...(built.input.ci.workflow ? { workflow: built.input.ci.workflow } : {}),
+      ...(built.input.ci.job ? { job: built.input.ci.job } : {}),
+    },
+    relatedFiles: built.relatedFiles,
+    ignoredFiles: built.changedFiles
+      .filter((file) => !file.captured)
+      .map((file) => ({ path: file.path, reason: file.ignoredReason ?? "path-ignored" })),
+    contentHash: built.contentHash,
+    securitySensitive: built.payload.securitySensitive,
+    regulatedDomain: built.payload.regulatedDomain,
+    pendingReview: true,
+    requiresReview: true,
+  };
+}
+
+function extractPrCandidateId(response: unknown): string | null {
+  if (!response || typeof response !== "object") return null;
+  const candidate = (response as { candidate?: unknown }).candidate;
+  if (!candidate || typeof candidate !== "object") return null;
+  const id = (candidate as { id?: unknown }).id;
+  return typeof id === "string" || typeof id === "number" ? String(id) : null;
+}
+
+function formatPrIngestResult(result: PrIngestResult): string {
+  const prefix = result.status === "dry-run"
+    ? "Dry-run PR ingestion"
+    : result.status === "queued"
+      ? "Queued PR ingestion"
+      : result.status === "duplicate"
+        ? "Duplicate PR ingestion"
+        : "PR ingestion";
+  const candidate = result.candidateId ? `, candidate=${result.candidateId}` : "";
+  const queue = result.queuePath ? `, queue=${result.queuePath}` : "";
+  return `${prefix}: status=${result.status}, workspace=${result.workspaceId}, pr=${result.pr.provider}/${result.pr.repo}#${result.pr.number}, merge=${result.pr.mergeSha}, ci=${result.ci.provider}/${result.ci.runId}, related-files=${result.relatedFiles.length}, ignored-files=${result.ignoredFiles.length}, pending-review=yes, idempotency=${result.idempotencyKey}${candidate}${queue}\n`;
 }
 
 async function runIngestCommit(parsed: ParsedArgs, deps: CliDeps): Promise<GitIngestResult> {

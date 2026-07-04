@@ -84,7 +84,7 @@ function captureIO() {
 
 describe("rorca-capture CLI", () => {
   it("exposes MVP commands in help", async () => {
-    for (const command of ["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]) {
+    for (const command of ["remember", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]) {
       expect(HELP_TEXT).toContain(command);
     }
     expect(HELP_TEXT).toContain("rorca capture <command>");
@@ -120,7 +120,7 @@ describe("rorca-capture CLI", () => {
     expect(output.stdout).toContain("Queue path:");
     expect(output.stdout).toContain("Capture ignore:");
     expect(output.stdout).toContain("API-only: yes");
-    expect(output.stdout).toContain("Commands: remember, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
+    expect(output.stdout).toContain("Commands: remember, ingest-pr, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
   });
 
   it("runs daemon scan/status/stop through the CLI with configurable bounds", async () => {
@@ -216,7 +216,7 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(output.stdout) as { ok: boolean; workspaceId: string; apiOnly: boolean; commands: string[] };
     expect(parsed).toMatchObject({ ok: true, workspaceId: "ws-2", apiOnly: true });
-    expect(parsed.commands).toEqual(["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]);
+    expect(parsed.commands).toEqual(["remember", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]);
   });
 
   it("formats status text without invoking the API", () => {
@@ -229,6 +229,198 @@ describe("rorca-capture CLI", () => {
     });
 
     expect(formatStatusText(status)).toContain("Safety contract: rorca-context-safety/v1");
+  });
+
+  it("submits ingest-pr metadata from flags as a pending memory candidate", async () => {
+    const repo = tempRepo();
+    mkdirSync(path.join(repo, "src"), { recursive: true });
+    writeFileSync(path.join(repo, "src", "app.ts"), "export const app = true;\n", "utf8");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    let endpoint = "";
+    let posted: any;
+
+    const code = await runCli([
+      "ingest-pr",
+      "--workspace", "ws-pr",
+      "--api-url", "http://api.test",
+      "--json",
+      "--provider", "github",
+      "--repo", "owner/repo",
+      "--pr-number", "42",
+      "--pr-url", "https://github.com/owner/repo/pull/42",
+      "--merge-sha", "abc1234",
+      "--author", "alice",
+      "--title", "Ship capture",
+      "--body", "No secrets here",
+      "--changed-files", "src/app.ts",
+      "--ci-run-id", "run-42",
+      "--ci-workflow", "ci",
+    ], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-pr", (url, body) => {
+        endpoint = url;
+        posted = body;
+        return new Response(JSON.stringify({ candidate: { id: "pr-1", reviewStatus: "pending" }, created: true }), { status: 201 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(endpoint).toBe("http://api.test/api/memory/candidates");
+    expect(posted).toMatchObject({
+      workspaceId: "ws-pr",
+      eventType: "pr_merge",
+      sourceSystem: "rorca-capture",
+      suggestedCategory: "Decision",
+      confidence: "low",
+      trustTier: "agent_observation",
+      relatedFiles: ["src/app.ts"],
+      requiresReview: true,
+    });
+    expect(posted.metadata.review).toMatchObject({ pendingByDefault: true, autoApproved: false });
+    expect(posted.metadata.pr).toMatchObject({ provider: "github", repo: "owner/repo", number: 42, mergeSha: "abc1234" });
+    expect(posted.metadata.ci).toMatchObject({ provider: "github", runId: "run-42", workflow: "ci" });
+    expect(posted.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    const parsed = JSON.parse(output.stdout) as { status: string; candidateId: string; pendingReview: boolean; relatedFiles: string[] };
+    expect(parsed).toMatchObject({ status: "submitted", candidateId: "pr-1", pendingReview: true, relatedFiles: ["src/app.ts"] });
+  });
+
+  it("loads ingest-pr metadata from a JSON file", async () => {
+    const repo = tempRepo();
+    mkdirSync(path.join(repo, "src"), { recursive: true });
+    writeFileSync(path.join(repo, "src", "json.ts"), "export const json = true;\n", "utf8");
+    const inputPath = path.join(repo, "pr.json");
+    writeFileSync(inputPath, JSON.stringify({
+      provider: "gitlab",
+      repo: "group/project",
+      prNumber: 7,
+      prUrl: "https://gitlab.example/group/project/-/merge_requests/7",
+      mergeSha: "feedbee",
+      author: "json-author",
+      title: "JSON supplied PR",
+      body: "JSON body",
+      changedFiles: ["src/json.ts"],
+      ci: { provider: "gitlab", runId: "pipeline-7", runUrl: "https://ci.example/7" },
+    }), "utf8");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    let posted: any;
+
+    const code = await runCli(["ingest-pr", "--workspace", "ws-json", "--api-url", "http://api.test", "--json", "--input", inputPath], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-json", (_url, body) => {
+        posted = body;
+        return new Response(JSON.stringify({ candidate: { id: "json-7" }, created: true }), { status: 201 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(posted.metadata.pr).toMatchObject({ provider: "gitlab", repo: "group/project", number: 7, mergeSha: "feedbee" });
+    expect(posted.metadata.ci).toMatchObject({ provider: "gitlab", runId: "pipeline-7", runUrl: "https://ci.example/7" });
+    expect(posted.provenance.jsonFile).toBe("[WORKSPACE]/pr.json");
+  });
+
+  it("loads ingest-pr metadata from CI environment variables", async () => {
+    const repo = tempRepo();
+    mkdirSync(path.join(repo, "src"), { recursive: true });
+    writeFileSync(path.join(repo, "src", "env.ts"), "export const env = true;\n", "utf8");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    let posted: any;
+
+    const code = await runCli(["ingest-pr", "--ci", "--json"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {
+        RORCA_API_URL: "http://api.test",
+        RORCA_WORKSPACE_ID: "ws-env",
+        RORCA_PR_PROVIDER: "github",
+        RORCA_PR_REPO: "env/repo",
+        RORCA_PR_NUMBER: "9",
+        RORCA_PR_MERGE_SHA: "decaf00",
+        RORCA_PR_AUTHOR: "envbot",
+        RORCA_PR_TITLE: "Env supplied PR",
+        RORCA_PR_BODY: "Env body",
+        RORCA_PR_CHANGED_FILES: "src/env.ts",
+        RORCA_CI_RUN_ID: "run-env-9",
+        GITHUB_ACTIONS: "true",
+      },
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-env", (_url, body) => {
+        posted = body;
+        return new Response(JSON.stringify({ candidate: { id: "env-9" }, created: true }), { status: 201 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(posted.metadata.pr).toMatchObject({ provider: "github", repo: "env/repo", number: 9, mergeSha: "decaf00" });
+    expect(posted.metadata.ci).toMatchObject({ provider: "github", runId: "run-env-9" });
+  });
+
+  it("returns a clear nonzero error for missing ingest-pr metadata", async () => {
+    const repo = tempRepo();
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+
+    const code = await runCli(["ingest-pr", "--workspace", "ws-missing", "--api-url", "http://api.test", "--provider", "github", "--repo", "owner/repo"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-missing"),
+    });
+
+    expect(code).toBe(1);
+    expect(output.stderr).toContain("PR_REQUIRED_FIELD_MISSING");
+    expect(output.stderr).toContain("prNumber");
+  });
+
+  it("returns exit code 2 for duplicate ingest-pr submissions", async () => {
+    const repo = tempRepo();
+    mkdirSync(path.join(repo, "src"), { recursive: true });
+    writeFileSync(path.join(repo, "src", "dupe.ts"), "export const dupe = true;\n", "utf8");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+
+    const code = await runCli([
+      "ingest-pr",
+      "--workspace", "ws-dupe-pr",
+      "--api-url", "http://api.test",
+      "--json",
+      "--provider", "github",
+      "--repo", "owner/repo",
+      "--pr-number", "42",
+      "--merge-sha", "abc1234",
+      "--author", "alice",
+      "--title", "Duplicate capture",
+      "--changed-files", "src/dupe.ts",
+      "--ci-run-id", "run-42",
+    ], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-dupe-pr", () => new Response(JSON.stringify({
+        candidate: { id: "dupe-pr", reviewStatus: "pending" },
+        created: false,
+        idempotent: true,
+      }), { status: 200 })),
+    });
+
+    expect(code).toBe(2);
+    const parsed = JSON.parse(output.stdout) as { status: string; candidateId: string; idempotent: boolean };
+    expect(parsed).toMatchObject({ status: "duplicate", candidateId: "dupe-pr", idempotent: true });
   });
 
   it("installs a managed best-effort hook in the resolved workspace path", async () => {
