@@ -433,7 +433,7 @@ describe('context candidate review lifecycle', () => {
     expect(mockPromoteMemory).not.toHaveBeenCalled();
   });
 
-  it('supports duplicate, supersede, and defer lifecycle actions', async () => {
+  it('supports duplicate, supersede, conflict, and defer lifecycle actions', async () => {
     state.nextCandidateById = candidateRow({ reviewStatus: 'duplicate' });
     let res = await request(buildApp())
       .post('/api/context-candidates/201/duplicate')
@@ -448,6 +448,14 @@ describe('context candidate review lifecycle', () => {
       .send({ supersededByMemoryId: '777', reason: 'Promoted memory is newer' });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('superseded');
+
+    state.candidateById = candidateRow();
+    state.nextCandidateById = candidateRow({ reviewStatus: 'conflict' });
+    res = await request(buildApp())
+      .post('/api/context-candidates/201/conflict')
+      .send({ conflictingMemoryId: '777', reason: 'Contradicts existing policy' });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('conflict');
 
     state.candidateById = candidateRow();
     state.nextCandidateById = candidateRow({ reviewStatus: 'deferred' });

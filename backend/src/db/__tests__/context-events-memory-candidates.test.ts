@@ -416,6 +416,9 @@ describe('memory_candidates schema', () => {
     expect(definitions).toContain('approved');
     expect(definitions).toContain('rejected');
     expect(definitions).toContain('superseded');
+    expect(definitions).toContain('duplicate');
+    expect(definitions).toContain('conflict');
+    expect(definitions).toContain('deferred');
     expect(definitions).toContain('FOREIGN KEY (context_event_id)');
     expect(definitions).toContain('FOREIGN KEY (promoted_memory_id)');
     expect(definitions).toContain('jsonb_typeof(related_files)');

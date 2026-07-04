@@ -5,13 +5,15 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useState, useEffect, useCallback, useRef, useMemo, type ReactNode } from 'react';
-import { AlertTriangle, BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2, Network } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef, useMemo, type CSSProperties, type ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { AlertTriangle, BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2, Network, ShieldCheck } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, type MemoryAnalyticsDrilldown } from '../lib/memoryAnalyticsDrilldown';
 import SpecRelevanceGraph from '../components/SpecRelevanceGraph';
 import { useSpecRelevanceGraph } from '../hooks/useSpecRelevanceGraph';
+import { CONTEXT_TRUST_TIERS, CONTEXT_TRUST_TIER_LABELS, type ContextTrustTier } from '../../shared/contracts/trust';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -127,6 +129,84 @@ interface MemoryReviewResponse {
   };
 }
 
+type MemoryPanelSubTab = 'ledger' | 'candidates';
+type MemoryCandidateConfidence = 'high' | 'medium' | 'low';
+type MemoryCandidateCategory = 'Architecture' | 'Convention' | 'Bug Fix' | 'Decision' | 'Pattern' | 'Gotcha';
+type CandidateReviewStatus = 'pending' | 'approved' | 'rejected' | 'superseded' | 'duplicate' | 'conflict' | 'deferred';
+type CandidateTargetKind = 'candidate' | 'memory';
+type CandidateAction = 'approve' | 'reject' | 'edit-and-approve' | 'duplicate' | 'supersede' | 'conflict' | 'defer';
+
+interface MemoryCandidate {
+  id: string;
+  workspaceId: string;
+  contextEventId: string | null;
+  eventType: string | null;
+  sourceSystem: string | null;
+  sourceRef: string | null;
+  actor: string | null;
+  occurredAt: string | null;
+  suggestedCategory: MemoryCandidateCategory;
+  title: string;
+  rule: string;
+  context: string;
+  relatedFiles: string[];
+  confidence: MemoryCandidateConfidence;
+  trustTier: ContextTrustTier;
+  reviewStatus: CandidateReviewStatus;
+  reviewer: string | null;
+  reviewedAt: string | null;
+  promotedMemoryId: number | null;
+  promotedAt: string | null;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  securitySensitive: boolean;
+  regulatedDomain: boolean;
+  requiresReview: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface MemoryCandidateListResponse {
+  items: MemoryCandidate[];
+  total: number;
+  hasMore?: boolean;
+  nextCursor?: string | null;
+}
+
+interface CandidateFilePreview {
+  path: string;
+  fileName: string;
+  exists: boolean;
+  text: string;
+  truncated: boolean;
+  byteLength: number;
+  maxPreviewBytes: number;
+  withinCaptureLimit: boolean;
+  redactionApplied: boolean;
+  sha256: string | null;
+  safety: {
+    securitySensitive: boolean;
+    regulatedDomain: boolean;
+    requiresReview: boolean;
+    findings: Array<{ category: string; name: string }>;
+  };
+}
+
+interface CandidateFilePreviewResponse {
+  candidateId: string;
+  workspaceId: string;
+  preview: CandidateFilePreview;
+}
+
+interface CandidateEditDraft {
+  suggestedCategory: MemoryCandidateCategory;
+  confidence: MemoryCandidateConfidence;
+  title: string;
+  rule: string;
+  context: string;
+  relatedFiles: string;
+}
+
 interface MemoryOntologyExplanation {
   tone: 'active' | 'suppressed' | 'conflict';
   label: string;
@@ -230,6 +310,8 @@ interface MemoryGraphLayout {
   edges: Array<MemoryGraphEdge & { sourceNode: PositionedMemoryGraphNode; targetNode: PositionedMemoryGraphNode }>;
 }
 
+type TokenTone = 'success' | 'warning' | 'error' | 'accent' | 'muted';
+
 const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha', 'Run Synthesis'] as const;
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -264,6 +346,43 @@ const SOURCE_TYPE_COLORS: Record<string, string> = {
   mcp: 'bg-indigo-500/10 text-indigo-500',
   'auto-extracted': 'bg-teal-500/10 text-teal-500',
   import: 'bg-pink-500/10 text-pink-500',
+};
+
+const MEMORY_PANEL_TABS: Array<{ id: MemoryPanelSubTab; label: string; description: string }> = [
+  { id: 'ledger', label: 'Memories', description: 'Durable approved memory ledger' },
+  { id: 'candidates', label: 'Candidates', description: 'Review sidecar-generated memory candidates' },
+];
+
+const MEMORY_CANDIDATE_CATEGORIES: MemoryCandidateCategory[] = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha'];
+const MEMORY_CANDIDATE_CONFIDENCES: MemoryCandidateConfidence[] = ['high', 'medium', 'low'];
+const CANDIDATE_REVIEW_STATUSES: CandidateReviewStatus[] = ['pending', 'approved', 'rejected', 'duplicate', 'superseded', 'conflict', 'deferred'];
+
+const CANDIDATE_STATUS_LABELS: Record<CandidateReviewStatus, string> = {
+  pending: 'Pending',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  duplicate: 'Duplicate',
+  superseded: 'Superseded',
+  conflict: 'Conflict',
+  deferred: 'Deferred',
+};
+
+const CANDIDATE_STATUS_TONES: Record<CandidateReviewStatus, TokenTone> = {
+  pending: 'warning',
+  approved: 'success',
+  rejected: 'error',
+  duplicate: 'muted',
+  superseded: 'accent',
+  conflict: 'error',
+  deferred: 'warning',
+};
+
+const CANDIDATE_TRUST_TONES: Record<ContextTrustTier, TokenTone> = {
+  agent_observation: 'muted',
+  working_note: 'warning',
+  engineering_decision: 'accent',
+  approved_policy: 'success',
+  verified_fact: 'success',
 };
 
 const VIEW_MODES: Array<{ id: MemoryViewMode; label: string; description: string }> = [
@@ -338,6 +457,89 @@ function basename(path: string): string {
 
 function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
+}
+
+function tokenBadgeStyle(tone: TokenTone): CSSProperties {
+  const token = {
+    success: '--color-success',
+    warning: '--color-warning',
+    error: '--color-error',
+    accent: '--accent',
+    muted: '--text-muted',
+  }[tone];
+  const color = `var(${token})`;
+  return {
+    color,
+    borderColor: `color-mix(in srgb, ${color} 32%, transparent)`,
+    backgroundColor: `color-mix(in srgb, ${color} 12%, transparent)`,
+  };
+}
+
+const DISPLAY_SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[REDACTED]'],
+  [/\b(AKIA[0-9A-Z]{16})\b/g, '[REDACTED]'],
+  [/\b(gh[pousr]_[A-Za-z0-9_]{20,})\b/g, '[REDACTED]'],
+  [/((?:api|access|secret|private|auth|refresh)[_-]?(?:key|token|secret|password)\s*[:=]\s*)["']?[^"'\s,;}]+/gi, '$1[REDACTED]'],
+];
+const DISPLAY_SECRET_KEY_PATTERN = /(api[-_]?key|token|secret|password|credential|authorization|auth)/iu;
+
+function redactDisplayText(value: string): string {
+  return DISPLAY_SECRET_PATTERNS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value);
+}
+
+function redactDisplayValue(value: unknown): unknown {
+  if (typeof value === 'string') return redactDisplayText(value);
+  if (Array.isArray(value)) return value.map(redactDisplayValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        DISPLAY_SECRET_KEY_PATTERN.test(key) && typeof item === 'string' ? '[REDACTED]' : redactDisplayValue(item),
+      ]),
+    );
+  }
+  return value;
+}
+
+function displayCandidateText(value: string | null | undefined, fallback = 'Unknown'): string {
+  const normalized = value?.trim();
+  return normalized ? redactDisplayText(normalized) : fallback;
+}
+
+function formatJson(value: unknown): string {
+  if (value == null) return '{}';
+  try {
+    return JSON.stringify(redactDisplayValue(value), null, 2);
+  } catch {
+    return String(redactDisplayValue(value));
+  }
+}
+
+function candidateReviewTime(candidate: MemoryCandidate): string {
+  if (candidate.reviewedAt) return new Date(candidate.reviewedAt).toLocaleString();
+  return 'Not reviewed yet';
+}
+
+function candidateSourceLabel(candidate: MemoryCandidate): string {
+  return [candidate.sourceSystem, candidate.sourceRef]
+    .map((item) => displayCandidateText(item, ''))
+    .filter(Boolean)
+    .join(' / ') || 'Unknown source';
+}
+
+function createCandidateEditDraft(candidate: MemoryCandidate): CandidateEditDraft {
+  return {
+    suggestedCategory: candidate.suggestedCategory,
+    confidence: candidate.confidence,
+    title: redactDisplayText(candidate.title),
+    rule: redactDisplayText(candidate.rule),
+    context: redactDisplayText(candidate.context),
+    relatedFiles: candidate.relatedFiles.join('\n'),
+  };
+}
+
+function relatedFilesFromDraft(value: string): string[] {
+  return unique(value.split(/[\n,]/u).map((item) => item.trim()).filter(Boolean));
 }
 
 function formatMemoryOptionLabel(item: MemoryItem): string {
@@ -1077,6 +1279,489 @@ function OntologyCurationDrawer({
         </div>
       </div>
     </div>
+  );
+}
+
+function MemoryPanelTabs({ value, onChange }: { value: MemoryPanelSubTab; onChange: (tab: MemoryPanelSubTab) => void }) {
+  return (
+    <div className="rounded-xl border border-border bg-surface-100/70 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--text)]">Memory workspace</h2>
+          <p className="mt-0.5 text-[11px] text-muted">Review durable memories or inspect sidecar-generated candidates before promotion.</p>
+        </div>
+        <div role="tablist" aria-label="Memory workspace tabs" className="inline-flex rounded-lg border border-border bg-bg p-1">
+          {MEMORY_PANEL_TABS.map((tab) => {
+            const active = value === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                aria-controls={`memory-panel-${tab.id}`}
+                id={`memory-panel-tab-${tab.id}`}
+                title={tab.description}
+                onClick={() => onChange(tab.id)}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  active ? 'bg-accent text-white shadow-sm' : 'text-muted hover:bg-surface-200 hover:text-[var(--text)]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CandidateBadge({ children, tone }: { children: ReactNode; tone: TokenTone }) {
+  return (
+    <span className="rounded-full border px-2 py-0.5 text-[10px] font-medium" style={tokenBadgeStyle(tone)}>
+      {children}
+    </span>
+  );
+}
+
+function MemoryCandidateReviewSection({
+  filters,
+  candidates,
+  total,
+  loading,
+  error,
+  selectedCandidate,
+  selectedCandidateId,
+  previewPath,
+  preview,
+  previewLoading,
+  previewError,
+  editDraft,
+  actionNote,
+  targetKind,
+  targetId,
+  deferUntil,
+  actionBusy,
+  actionNotice,
+  onFilterChange,
+  onSelectCandidate,
+  onPreviewPathChange,
+  onEditDraftChange,
+  onActionNoteChange,
+  onTargetKindChange,
+  onTargetIdChange,
+  onDeferUntilChange,
+  onAction,
+  onRetry,
+}: {
+  filters: { source: string; category: string; confidence: string; trustTier: string; status: string; q: string };
+  candidates: MemoryCandidate[];
+  total: number;
+  loading: boolean;
+  error: string | null;
+  selectedCandidate: MemoryCandidate | null;
+  selectedCandidateId: string | null;
+  previewPath: string;
+  preview: CandidateFilePreview | null;
+  previewLoading: boolean;
+  previewError: string | null;
+  editDraft: CandidateEditDraft | null;
+  actionNote: string;
+  targetKind: CandidateTargetKind;
+  targetId: string;
+  deferUntil: string;
+  actionBusy: CandidateAction | null;
+  actionNotice: { tone: 'success' | 'error'; message: string } | null;
+  onFilterChange: (key: string, value: string) => void;
+  onSelectCandidate: (candidateId: string) => void;
+  onPreviewPathChange: (path: string) => void;
+  onEditDraftChange: (draft: CandidateEditDraft) => void;
+  onActionNoteChange: (value: string) => void;
+  onTargetKindChange: (value: CandidateTargetKind) => void;
+  onTargetIdChange: (value: string) => void;
+  onDeferUntilChange: (value: string) => void;
+  onAction: (action: CandidateAction) => void;
+  onRetry: () => void;
+}) {
+  const selectedIsApproved = selectedCandidate?.reviewStatus === 'approved';
+  const requiresTarget = targetId.trim().length === 0;
+  const editDisabled = !editDraft?.title.trim() || !editDraft?.rule.trim() || selectedIsApproved || Boolean(actionBusy);
+  const transitionDisabled = !selectedCandidate || selectedIsApproved || Boolean(actionBusy);
+  const filteredDescription = `${total} candidate${total === 1 ? '' : 's'} across the current workspace filter`;
+
+  return (
+    <section
+      id="memory-panel-candidates"
+      role="tabpanel"
+      aria-labelledby="memory-panel-tab-candidates"
+      className="space-y-4"
+      aria-label="Memory candidate review"
+    >
+      <div className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--text)]">Candidate review</h2>
+            <p className="mt-0.5 max-w-3xl text-[11px] leading-relaxed text-muted">
+              Review sidecar-generated memory candidates with provenance, source metadata, safety flags, and redacted related-file previews before promotion.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5">{filteredDescription}</span>
+            <span className="rounded-full border border-border bg-bg px-2 py-0.5">status: {filters.status || 'all'}</span>
+          </div>
+        </div>
+
+        <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-6" role="search" aria-label="Candidate filters">
+          <label className="space-y-1 text-[11px] font-medium text-[var(--text)] xl:col-span-2">
+            <span>Source</span>
+            <input
+              value={filters.source}
+              onChange={(event) => onFilterChange('candidateSource', event.target.value)}
+              placeholder="source system"
+              aria-label="Filter candidates by source"
+              className="w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
+            />
+          </label>
+          <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+            <span>Category</span>
+            <select
+              value={filters.category}
+              onChange={(event) => onFilterChange('candidateCategory', event.target.value)}
+              aria-label="Filter candidates by category"
+              className="w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+            >
+              <option value="">All categories</option>
+              {MEMORY_CANDIDATE_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+            <span>Confidence</span>
+            <select
+              value={filters.confidence}
+              onChange={(event) => onFilterChange('candidateConfidence', event.target.value)}
+              aria-label="Filter candidates by confidence"
+              className="w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+            >
+              <option value="">All confidence</option>
+              {MEMORY_CANDIDATE_CONFIDENCES.map((confidence) => <option key={confidence} value={confidence}>{confidence}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+            <span>Trust tier</span>
+            <select
+              value={filters.trustTier}
+              onChange={(event) => onFilterChange('candidateTrustTier', event.target.value)}
+              aria-label="Filter candidates by trust tier"
+              className="w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+            >
+              <option value="">All trust tiers</option>
+              {CONTEXT_TRUST_TIERS.map((tier) => <option key={tier} value={tier}>{CONTEXT_TRUST_TIER_LABELS[tier]}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+            <span>Review status</span>
+            <select
+              value={filters.status}
+              onChange={(event) => onFilterChange('candidateStatus', event.target.value)}
+              aria-label="Filter candidates by review status"
+              className="w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+            >
+              <option value="all">All statuses</option>
+              {CANDIDATE_REVIEW_STATUSES.map((status) => <option key={status} value={status}>{CANDIDATE_STATUS_LABELS[status]}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1 text-[11px] font-medium text-[var(--text)] md:col-span-2 xl:col-span-2">
+            <span>Search</span>
+            <input
+              value={filters.q}
+              onChange={(event) => onFilterChange('candidateQ', event.target.value)}
+              placeholder="title, rule, or context"
+              aria-label="Search candidates"
+              className="w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
+            />
+          </label>
+        </div>
+      </div>
+
+      {loading && candidates.length === 0 ? (
+        <section className="rounded-xl border border-border bg-surface-100/70 p-4" aria-label="Candidate loading state">
+          <div className="flex items-center gap-3 text-xs text-muted">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+            <span>Loading memory candidates…</span>
+          </div>
+        </section>
+      ) : null}
+
+      {error ? (
+        <section className="rounded-xl border border-border bg-surface-100/70 p-4" aria-label="Candidate error state">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-[var(--text)]">Candidates unavailable</p>
+            <button type="button" onClick={onRetry} className="rounded-md border border-border px-2 py-1 text-xs text-muted hover:bg-surface-200">Retry</button>
+          </div>
+          <p className="mt-2 rounded-lg border border-border bg-bg px-3 py-2 text-xs text-muted">{error}</p>
+        </section>
+      ) : null}
+
+      {!loading && !error && candidates.length === 0 ? (
+        <section className="rounded-xl border border-dashed border-border bg-surface-100/70 p-8 text-center" aria-label="Candidate empty state">
+          <BookOpen size={24} className="mx-auto mb-3 text-muted" />
+          <p className="text-sm font-semibold text-[var(--text)]">No memory candidates match the current filters</p>
+          <p className="mt-1 text-xs text-muted">Rejected and deferred candidates remain visible when the status filter is set to all statuses.</p>
+        </section>
+      ) : null}
+
+      {candidates.length > 0 ? (
+        <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.85fr)_minmax(0,1.15fr)] xl:items-start">
+          <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Candidate list">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--text)]">Review queue</h3>
+                <p className="mt-0.5 text-[11px] text-muted">Default view includes reviewed candidates for auditability.</p>
+              </div>
+              {loading && <span className="text-[10px] text-muted">Refreshing…</span>}
+            </div>
+            <ul role="list" aria-label="Memory candidate review queue" className="space-y-2">
+              {candidates.map((candidate) => {
+                const selected = candidate.id === selectedCandidateId;
+                return (
+                  <li key={candidate.id}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectCandidate(candidate.id)}
+                      aria-pressed={selected}
+                      className={`w-full rounded-lg border p-3 text-left transition-colors ${selected ? 'border-accent bg-accent/5' : 'border-border bg-bg hover:bg-surface-200'}`}
+                    >
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <CandidateBadge tone={CANDIDATE_STATUS_TONES[candidate.reviewStatus]}>{CANDIDATE_STATUS_LABELS[candidate.reviewStatus]}</CandidateBadge>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${CATEGORY_COLORS[candidate.suggestedCategory] ?? 'bg-surface-200 text-muted'}`}>{candidate.suggestedCategory}</span>
+                        <CandidateBadge tone={candidate.confidence === 'high' ? 'success' : candidate.confidence === 'medium' ? 'warning' : 'error'}>{candidate.confidence}</CandidateBadge>
+                        <CandidateBadge tone={CANDIDATE_TRUST_TONES[candidate.trustTier]}>{CONTEXT_TRUST_TIER_LABELS[candidate.trustTier]}</CandidateBadge>
+                      </div>
+                      <p className="mt-2 text-xs font-semibold text-[var(--text)]">{redactDisplayText(candidate.title)}</p>
+                      <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted">{redactDisplayText(candidate.rule)}</p>
+                      <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-muted">
+                        <span className="rounded bg-surface-200 px-1.5 py-0.5">#{candidate.id}</span>
+                        <span className="rounded bg-surface-200 px-1.5 py-0.5">{candidateSourceLabel(candidate)}</span>
+                        {candidate.promotedMemoryId && <span className="rounded bg-surface-200 px-1.5 py-0.5">Memory #{candidate.promotedMemoryId}</span>}
+                        {(candidate.securitySensitive || candidate.regulatedDomain || candidate.requiresReview) && (
+                          <span className="inline-flex items-center gap-1 rounded bg-surface-200 px-1.5 py-0.5"><ShieldCheck size={10} /> review flags</span>
+                        )}
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+
+          <section className="rounded-xl border border-border bg-surface-100/70 p-3 sm:p-4" aria-label="Memory candidate detail">
+            {selectedCandidate && editDraft ? (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <CandidateBadge tone={CANDIDATE_STATUS_TONES[selectedCandidate.reviewStatus]}>{CANDIDATE_STATUS_LABELS[selectedCandidate.reviewStatus]}</CandidateBadge>
+                      <CandidateBadge tone={selectedCandidate.confidence === 'high' ? 'success' : selectedCandidate.confidence === 'medium' ? 'warning' : 'error'}>confidence {selectedCandidate.confidence}</CandidateBadge>
+                      <CandidateBadge tone={CANDIDATE_TRUST_TONES[selectedCandidate.trustTier]}>{CONTEXT_TRUST_TIER_LABELS[selectedCandidate.trustTier]}</CandidateBadge>
+                      {selectedCandidate.promotedMemoryId && <CandidateBadge tone="success">Promoted memory #{selectedCandidate.promotedMemoryId}</CandidateBadge>}
+                    </div>
+                    <h3 className="mt-2 text-base font-semibold text-[var(--text)]">{redactDisplayText(selectedCandidate.title)}</h3>
+                    <p className="mt-1 text-[11px] text-muted">Candidate #{selectedCandidate.id} · {candidateReviewTime(selectedCandidate)}</p>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <div className="rounded-lg border border-border bg-bg p-3">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted">Rule</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-[var(--text)]">{redactDisplayText(selectedCandidate.rule)}</p>
+                  </div>
+                  <div className="rounded-lg border border-border bg-bg p-3">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted">Context</p>
+                    <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-[var(--text)]/85">{displayCandidateText(selectedCandidate.context, 'No additional context provided.')}</p>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 lg:grid-cols-3">
+                  <div className="rounded-lg border border-border bg-bg p-3 text-[11px] text-muted">
+                    <p className="font-medium text-[var(--text)]">Source metadata</p>
+                    <dl className="mt-2 space-y-1">
+                      <div><dt className="inline text-muted">System:</dt> <dd className="inline text-[var(--text)]">{displayCandidateText(selectedCandidate.sourceSystem)}</dd></div>
+                      <div><dt className="inline text-muted">Ref:</dt> <dd className="inline break-all text-[var(--text)]">{displayCandidateText(selectedCandidate.sourceRef)}</dd></div>
+                      <div><dt className="inline text-muted">Event:</dt> <dd className="inline text-[var(--text)]">{displayCandidateText(selectedCandidate.eventType, 'None')}</dd></div>
+                      <div><dt className="inline text-muted">Actor:</dt> <dd className="inline text-[var(--text)]">{displayCandidateText(selectedCandidate.actor)}</dd></div>
+                      <div><dt className="inline text-muted">Occurred:</dt> <dd className="inline text-[var(--text)]">{selectedCandidate.occurredAt ? new Date(selectedCandidate.occurredAt).toLocaleString() : 'Unknown'}</dd></div>
+                    </dl>
+                  </div>
+                  <div className="rounded-lg border border-border bg-bg p-3 text-[11px] text-muted">
+                    <p className="font-medium text-[var(--text)]">Safety flags</p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      <CandidateBadge tone={selectedCandidate.securitySensitive ? 'error' : 'success'}>{selectedCandidate.securitySensitive ? 'Security sensitive' : 'No secret flag'}</CandidateBadge>
+                      <CandidateBadge tone={selectedCandidate.regulatedDomain ? 'warning' : 'success'}>{selectedCandidate.regulatedDomain ? 'Regulated domain' : 'No regulated flag'}</CandidateBadge>
+                      <CandidateBadge tone={selectedCandidate.requiresReview ? 'warning' : 'success'}>{selectedCandidate.requiresReview ? 'Review required' : 'Review optional'}</CandidateBadge>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-border bg-bg p-3 text-[11px] text-muted">
+                    <p className="font-medium text-[var(--text)]">Review audit</p>
+                    <p className="mt-2">Reviewer: <span className="text-[var(--text)]">{selectedCandidate.reviewer ?? 'Not reviewed'}</span></p>
+                    <p className="mt-1">Reviewed: <span className="text-[var(--text)]">{candidateReviewTime(selectedCandidate)}</span></p>
+                    {selectedCandidate.promotedAt && <p className="mt-1">Promoted: <span className="text-[var(--text)]">{new Date(selectedCandidate.promotedAt).toLocaleString()}</span></p>}
+                  </div>
+                </div>
+
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <div className="rounded-lg border border-border bg-bg p-3">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted">Provenance</p>
+                    <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-surface-200 p-2 text-[10px] leading-relaxed text-[var(--text)]/85">{formatJson(selectedCandidate.provenance)}</pre>
+                  </div>
+                  <div className="rounded-lg border border-border bg-bg p-3">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted">Candidate metadata</p>
+                    <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-surface-200 p-2 text-[10px] leading-relaxed text-[var(--text)]/85">{formatJson(selectedCandidate.metadata)}</pre>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-border bg-bg p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-[var(--text)]">Related file previews</p>
+                      <p className="mt-0.5 text-[11px] text-muted">Previews are served by the backend and redacted with context-safety before display.</p>
+                    </div>
+                    <span className="rounded-full border border-border bg-surface-100 px-2 py-0.5 text-[10px] text-muted">{selectedCandidate.relatedFiles.length} files</span>
+                  </div>
+                  {selectedCandidate.relatedFiles.length === 0 ? (
+                    <p className="mt-3 rounded-lg border border-dashed border-border bg-surface-100 px-3 py-2 text-xs text-muted">No related files were attached to this candidate.</p>
+                  ) : (
+                    <>
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {selectedCandidate.relatedFiles.map((file) => (
+                          <button
+                            key={file}
+                            type="button"
+                            onClick={() => onPreviewPathChange(file)}
+                            className={`rounded border px-2 py-1 font-mono text-[10px] transition-colors ${previewPath === file ? 'border-accent bg-accent/10 text-accent' : 'border-border text-muted hover:bg-surface-200'}`}
+                          >
+                            Preview {file}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mt-3 rounded-lg border border-border bg-surface-100 p-3">
+                        {previewLoading ? <p className="text-xs text-muted">Loading safe preview…</p> : null}
+                        {previewError ? <p className="text-xs text-error">{previewError}</p> : null}
+                        {preview && !previewLoading ? (
+                          <div className="space-y-2">
+                            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+                              <span className="font-mono text-[var(--text)]">{preview.path}</span>
+                              <CandidateBadge tone={preview.redactionApplied ? 'warning' : 'success'}>{preview.redactionApplied ? 'Redaction applied' : 'No redactions reported'}</CandidateBadge>
+                              <CandidateBadge tone={preview.safety.securitySensitive ? 'error' : 'success'}>{preview.safety.securitySensitive ? 'Sensitive findings' : 'No sensitive findings'}</CandidateBadge>
+                              {preview.truncated && <CandidateBadge tone="warning">Truncated</CandidateBadge>}
+                              {!preview.withinCaptureLimit && <CandidateBadge tone="warning">Above capture limit</CandidateBadge>}
+                            </div>
+                            {preview.safety.findings.length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {preview.safety.findings.map((finding) => (
+                                  <span key={`${finding.category}:${finding.name}`} className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">{finding.category}: {finding.name}</span>
+                                ))}
+                              </div>
+                            )}
+                            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-bg p-3 text-[11px] leading-relaxed text-[var(--text)]/85">{preview.exists ? preview.text : 'File does not exist in the workspace.'}</pre>
+                          </div>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="rounded-lg border border-border bg-bg p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-[var(--text)]">Operator actions</p>
+                      <p className="mt-0.5 text-[11px] text-muted">All mutations use context-candidate backend APIs through apiFetch and keep reviewed candidates auditable.</p>
+                    </div>
+                    {actionNotice && (
+                      <span className="rounded-full border px-2 py-0.5 text-[10px]" style={tokenBadgeStyle(actionNotice.tone === 'success' ? 'success' : 'error')}>{actionNotice.message}</span>
+                    )}
+                  </div>
+
+                  <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                        <span>Edit title</span>
+                        <input value={editDraft.title} onChange={(event) => onEditDraftChange({ ...editDraft, title: event.target.value })} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent" />
+                      </label>
+                      <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                        <span>Edit rule</span>
+                        <textarea value={editDraft.rule} onChange={(event) => onEditDraftChange({ ...editDraft, rule: event.target.value })} rows={3} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent" />
+                      </label>
+                      <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                        <span>Edit context</span>
+                        <textarea value={editDraft.context} onChange={(event) => onEditDraftChange({ ...editDraft, context: event.target.value })} rows={3} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent" />
+                      </label>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                          <span>Category</span>
+                          <select value={editDraft.suggestedCategory} onChange={(event) => onEditDraftChange({ ...editDraft, suggestedCategory: event.target.value as MemoryCandidateCategory })} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent">
+                            {MEMORY_CANDIDATE_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                          </select>
+                        </label>
+                        <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                          <span>Confidence</span>
+                          <select value={editDraft.confidence} onChange={(event) => onEditDraftChange({ ...editDraft, confidence: event.target.value as MemoryCandidateConfidence })} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent">
+                            {MEMORY_CANDIDATE_CONFIDENCES.map((confidence) => <option key={confidence} value={confidence}>{confidence}</option>)}
+                          </select>
+                        </label>
+                      </div>
+                      <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                        <span>Related files (one per line)</span>
+                        <textarea value={editDraft.relatedFiles} onChange={(event) => onEditDraftChange({ ...editDraft, relatedFiles: event.target.value })} rows={3} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 font-mono text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent" />
+                      </label>
+                      <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                        <span>Review reason / note</span>
+                        <textarea value={actionNote} onChange={(event) => onActionNoteChange(event.target.value)} rows={2} placeholder="Required for reject; stored for audit actions" className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent" />
+                      </label>
+                      <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-2">
+                        <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                          <span>Target kind</span>
+                          <select value={targetKind} onChange={(event) => onTargetKindChange(event.target.value as CandidateTargetKind)} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent">
+                            <option value="candidate">Candidate</option>
+                            <option value="memory">Memory</option>
+                          </select>
+                        </label>
+                        <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                          <span>Target ID</span>
+                          <input value={targetId} onChange={(event) => onTargetIdChange(event.target.value)} placeholder="Required for duplicate/supersede/conflict" className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent" />
+                        </label>
+                      </div>
+                      <label className="space-y-1 text-[11px] font-medium text-[var(--text)]">
+                        <span>Defer until</span>
+                        <input type="datetime-local" value={deferUntil} onChange={(event) => onDeferUntilChange(event.target.value)} className="w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent" />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" onClick={() => onAction('approve')} disabled={transitionDisabled} className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60">Approve</button>
+                    <button type="button" onClick={() => onAction('edit-and-approve')} disabled={editDisabled} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-[var(--text)] hover:bg-surface-200 disabled:cursor-not-allowed disabled:opacity-60">Edit and approve</button>
+                    <button type="button" onClick={() => onAction('reject')} disabled={transitionDisabled || !actionNote.trim()} className="rounded-md border px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60" style={tokenBadgeStyle('error')}>Reject</button>
+                    <button type="button" onClick={() => onAction('duplicate')} disabled={transitionDisabled || requiresTarget} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted hover:bg-surface-200 disabled:cursor-not-allowed disabled:opacity-60">Mark duplicate</button>
+                    <button type="button" onClick={() => onAction('supersede')} disabled={transitionDisabled || requiresTarget} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted hover:bg-surface-200 disabled:cursor-not-allowed disabled:opacity-60">Mark superseded</button>
+                    <button type="button" onClick={() => onAction('conflict')} disabled={transitionDisabled || requiresTarget} className="rounded-md border px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60" style={tokenBadgeStyle('warning')}>Mark conflict</button>
+                    <button type="button" onClick={() => onAction('defer')} disabled={transitionDisabled} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted hover:bg-surface-200 disabled:cursor-not-allowed disabled:opacity-60">Defer</button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex min-h-[320px] flex-col items-center justify-center text-center">
+                <BookOpen size={24} className="mb-3 text-muted" />
+                <p className="text-sm font-medium text-[var(--text)]">Select a candidate to inspect provenance and safe previews</p>
+                <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted">Candidate details include title, rule, context, source metadata, review flags, and server-redacted related-file previews.</p>
+              </div>
+            )}
+          </section>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -2215,13 +2900,11 @@ function SpecRelevanceGraphPane({
   state,
   error,
   onNodeClick,
-  onOpenCuration,
 }: {
   data: import('../types/spec-relevance-graph').SpecRelevanceGraphResponse | null;
   state: import('../types/spec-relevance-graph').GraphLoadingState;
   error: string | null;
   onNodeClick: (memoryEntityId: string) => void;
-  onOpenCuration: (memoryId: string) => void;
 }) {
   const handleNodeAction = useCallback((node: import('../types/spec-relevance-graph').PositionedNode) => {
     if (node.type === 'memory') {
@@ -2266,11 +2949,30 @@ function SpecRelevanceGraphPane({
 
 export default function MemoryPanel() {
   const { workspaceId } = useWorkspace();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activePanelTab: MemoryPanelSubTab = searchParams.get('memoryTab') === 'candidates' ? 'candidates' : 'ledger';
   const [items, setItems] = useState<MemoryItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [pinnedCount, setPinnedCount] = useState(0);
   const [recentRunIds, setRecentRunIds] = useState<number[]>([]);
   const [loaded, setLoaded] = useState(false);
+
+  // Candidate review
+  const [candidateItems, setCandidateItems] = useState<MemoryCandidate[]>([]);
+  const [candidateTotal, setCandidateTotal] = useState(0);
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  const [candidateError, setCandidateError] = useState<string | null>(null);
+  const [candidatePreviewPath, setCandidatePreviewPath] = useState('');
+  const [candidatePreview, setCandidatePreview] = useState<CandidateFilePreview | null>(null);
+  const [candidatePreviewLoading, setCandidatePreviewLoading] = useState(false);
+  const [candidatePreviewError, setCandidatePreviewError] = useState<string | null>(null);
+  const [candidateEditDraft, setCandidateEditDraft] = useState<CandidateEditDraft | null>(null);
+  const [candidateActionNote, setCandidateActionNote] = useState('');
+  const [candidateTargetKind, setCandidateTargetKind] = useState<CandidateTargetKind>('candidate');
+  const [candidateTargetId, setCandidateTargetId] = useState('');
+  const [candidateDeferUntil, setCandidateDeferUntil] = useState('');
+  const [candidateActionBusy, setCandidateActionBusy] = useState<CandidateAction | null>(null);
+  const [candidateActionNotice, setCandidateActionNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
 
   // Filters
   const [filterCategory, setFilterCategory] = useState<string>('');
@@ -2349,7 +3051,54 @@ export default function MemoryPanel() {
     setReviewBusyKey(null);
     setAnalyticsDrilldown(null);
     setAnalyticsDrilldownActive(false);
+    setCandidateItems([]);
+    setCandidateTotal(0);
+    setCandidateLoading(false);
+    setCandidateError(null);
+    setCandidatePreviewPath('');
+    setCandidatePreview(null);
+    setCandidatePreviewLoading(false);
+    setCandidatePreviewError(null);
+    setCandidateEditDraft(null);
+    setCandidateActionNote('');
+    setCandidateTargetKind('candidate');
+    setCandidateTargetId('');
+    setCandidateDeferUntil('');
+    setCandidateActionBusy(null);
+    setCandidateActionNotice(null);
   }, [workspaceId]);
+
+  const candidateFilters = useMemo(() => ({
+    source: searchParams.get('candidateSource') ?? '',
+    category: searchParams.get('candidateCategory') ?? '',
+    confidence: searchParams.get('candidateConfidence') ?? '',
+    trustTier: searchParams.get('candidateTrustTier') ?? '',
+    status: searchParams.get('candidateStatus') ?? 'all',
+    q: searchParams.get('candidateQ') ?? '',
+  }), [searchParams]);
+
+  const selectedCandidateIdFromParams = searchParams.get('candidateId');
+
+  const updateSearch = useCallback((updates: Record<string, string | null>, replace = true) => {
+    const next = new URLSearchParams(searchParams);
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === null || value === '') next.delete(key);
+      else next.set(key, value);
+    }
+    setSearchParams(next, { replace });
+  }, [searchParams, setSearchParams]);
+
+  const handlePanelTabChange = useCallback((tab: MemoryPanelSubTab) => {
+    updateSearch({ memoryTab: tab === 'candidates' ? 'candidates' : null });
+  }, [updateSearch]);
+
+  const handleCandidateFilterChange = useCallback((key: string, value: string) => {
+    updateSearch({ memoryTab: 'candidates', [key]: value || null, candidateId: null });
+  }, [updateSearch]);
+
+  const handleSelectCandidate = useCallback((candidateId: string) => {
+    updateSearch({ memoryTab: 'candidates', candidateId });
+  }, [updateSearch]);
 
   useEffect(() => {
     if (!workspaceId) {
@@ -2429,6 +3178,95 @@ export default function MemoryPanel() {
   useEffect(() => {
     void fetchReviewData();
   }, [fetchReviewData]);
+
+  const fetchCandidates = useCallback(async () => {
+    if (!workspaceId || activePanelTab !== 'candidates') return;
+
+    const params = new URLSearchParams({ workspaceId, limit: '100', status: candidateFilters.status || 'all' });
+    if (candidateFilters.source) params.set('sourceSystem', candidateFilters.source);
+    if (candidateFilters.category) params.set('category', candidateFilters.category);
+    if (candidateFilters.confidence) params.set('confidence', candidateFilters.confidence);
+    if (candidateFilters.trustTier) params.set('trustTier', candidateFilters.trustTier);
+    if (candidateFilters.q) params.set('q', candidateFilters.q);
+
+    setCandidateLoading(true);
+    setCandidateError(null);
+    try {
+      const data = await apiFetch<MemoryCandidateListResponse>(`/api/context-candidates?${params.toString()}`);
+      const nextItems = Array.isArray(data?.items) ? data.items : [];
+      setCandidateItems(nextItems);
+      setCandidateTotal(Number(data?.total ?? nextItems.length));
+    } catch (error) {
+      setCandidateItems([]);
+      setCandidateTotal(0);
+      setCandidateError(error instanceof Error ? error.message : 'Unable to load memory candidates right now.');
+    } finally {
+      setCandidateLoading(false);
+    }
+  }, [activePanelTab, candidateFilters.category, candidateFilters.confidence, candidateFilters.q, candidateFilters.source, candidateFilters.status, candidateFilters.trustTier, workspaceId]);
+
+  useEffect(() => {
+    if (activePanelTab !== 'candidates') return;
+    void fetchCandidates();
+  }, [activePanelTab, fetchCandidates]);
+
+  const selectedCandidate = useMemo(() => {
+    if (candidateItems.length === 0) return null;
+    if (selectedCandidateIdFromParams) {
+      return candidateItems.find((candidate) => candidate.id === selectedCandidateIdFromParams) ?? candidateItems[0];
+    }
+    return candidateItems[0];
+  }, [candidateItems, selectedCandidateIdFromParams]);
+  const selectedCandidateId = selectedCandidate?.id ?? null;
+
+  useEffect(() => {
+    if (!selectedCandidate) {
+      setCandidateEditDraft(null);
+      setCandidatePreviewPath('');
+      setCandidatePreview(null);
+      return;
+    }
+
+    setCandidateEditDraft(createCandidateEditDraft(selectedCandidate));
+    setCandidateActionNote('');
+    setCandidateTargetId('');
+    setCandidateDeferUntil('');
+    setCandidateActionNotice(null);
+    setCandidatePreviewPath(selectedCandidate.relatedFiles[0] ?? '');
+    setCandidatePreview(null);
+    setCandidatePreviewError(null);
+  }, [selectedCandidate]);
+
+  useEffect(() => {
+    if (activePanelTab !== 'candidates' || !workspaceId || !selectedCandidate || !candidatePreviewPath) {
+      setCandidatePreview(null);
+      setCandidatePreviewLoading(false);
+      setCandidatePreviewError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const params = new URLSearchParams({ workspaceId, path: candidatePreviewPath });
+    setCandidatePreviewLoading(true);
+    setCandidatePreviewError(null);
+    void apiFetch<CandidateFilePreviewResponse>(`/api/context-candidates/${selectedCandidate.id}/file-preview?${params.toString()}`)
+      .then((data) => {
+        if (cancelled) return;
+        setCandidatePreview(data.preview);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setCandidatePreview(null);
+        setCandidatePreviewError(error instanceof Error ? error.message : 'Unable to load the safe file preview.');
+      })
+      .finally(() => {
+        if (!cancelled) setCandidatePreviewLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activePanelTab, candidatePreviewPath, selectedCandidate, workspaceId]);
 
   const fetchRelations = useCallback(async () => {
     if (!workspaceId) return;
@@ -2565,6 +3403,85 @@ export default function MemoryPanel() {
       setReviewError(error instanceof Error ? error.message : 'Unable to apply the memory review action right now.');
     } finally {
       setReviewBusyKey(null);
+    }
+  };
+
+  const handleCandidateAction = async (action: CandidateAction) => {
+    if (!workspaceId || !selectedCandidate) return;
+
+    const base = {
+      workspaceId,
+      reviewer: 'local-user',
+      ...(candidateActionNote.trim() ? { reason: candidateActionNote.trim() } : {}),
+    };
+    const targetId = candidateTargetId.trim();
+    let endpoint = `/api/context-candidates/${selectedCandidate.id}/${action}`;
+    let payload: Record<string, unknown> = base;
+
+    if (action === 'approve') {
+      payload = {
+        workspaceId,
+        reviewer: 'local-user',
+        ...(selectedCandidate.regulatedDomain ? { regulatedReviewConfirmed: true } : {}),
+      };
+    } else if (action === 'edit-and-approve') {
+      if (!candidateEditDraft) return;
+      payload = {
+        workspaceId,
+        reviewer: 'local-user',
+        ...(selectedCandidate.regulatedDomain ? { regulatedReviewConfirmed: true } : {}),
+        edits: {
+          suggestedCategory: candidateEditDraft.suggestedCategory,
+          title: candidateEditDraft.title,
+          rule: candidateEditDraft.rule,
+          context: candidateEditDraft.context,
+          confidence: candidateEditDraft.confidence,
+          relatedFiles: relatedFilesFromDraft(candidateEditDraft.relatedFiles),
+        },
+      };
+    } else if (action === 'duplicate') {
+      payload = {
+        ...base,
+        [candidateTargetKind === 'candidate' ? 'duplicateOfCandidateId' : 'duplicateOfMemoryId']: targetId,
+      };
+    } else if (action === 'supersede') {
+      endpoint = `/api/context-candidates/${selectedCandidate.id}/supersede`;
+      payload = {
+        ...base,
+        [candidateTargetKind === 'candidate' ? 'supersededByCandidateId' : 'supersededByMemoryId']: targetId,
+      };
+    } else if (action === 'conflict') {
+      payload = {
+        ...base,
+        [candidateTargetKind === 'candidate' ? 'conflictingCandidateId' : 'conflictingMemoryId']: targetId,
+      };
+    } else if (action === 'defer') {
+      payload = {
+        ...base,
+        ...(candidateDeferUntil ? { deferUntil: new Date(candidateDeferUntil).toISOString() } : {}),
+      };
+    }
+
+    try {
+      setCandidateActionBusy(action);
+      setCandidateActionNotice(null);
+      await apiFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      setCandidateActionNotice({
+        tone: 'success',
+        message: action === 'edit-and-approve' ? 'Candidate edited and approved.' : `Candidate ${action.replaceAll('-', ' ')} saved.`,
+      });
+      await Promise.all([fetchCandidates(), fetchItems()]);
+    } catch (error) {
+      setCandidateActionNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : `Unable to ${action.replaceAll('-', ' ')} candidate.`,
+      });
+    } finally {
+      setCandidateActionBusy(null);
     }
   };
 
@@ -2859,7 +3776,42 @@ export default function MemoryPanel() {
   return (
     <div role="main" aria-label="Memory Ledger" className="flex h-full flex-col overflow-hidden bg-bg">
       <div className="h-full overflow-y-auto">
-        <div className={`mx-auto space-y-4 px-4 py-6 sm:px-6 ${viewMode === 'list' ? 'max-w-3xl' : 'max-w-7xl'}`}>
+        <div className={`mx-auto space-y-4 px-4 py-6 sm:px-6 ${activePanelTab === 'candidates' || viewMode !== 'list' ? 'max-w-7xl' : 'max-w-3xl'}`}>
+          <MemoryPanelTabs value={activePanelTab} onChange={handlePanelTabChange} />
+
+          {activePanelTab === 'candidates' ? (
+            <MemoryCandidateReviewSection
+              filters={candidateFilters}
+              candidates={candidateItems}
+              total={candidateTotal}
+              loading={candidateLoading}
+              error={candidateError}
+              selectedCandidate={selectedCandidate}
+              selectedCandidateId={selectedCandidateId}
+              previewPath={candidatePreviewPath}
+              preview={candidatePreview}
+              previewLoading={candidatePreviewLoading}
+              previewError={candidatePreviewError}
+              editDraft={candidateEditDraft}
+              actionNote={candidateActionNote}
+              targetKind={candidateTargetKind}
+              targetId={candidateTargetId}
+              deferUntil={candidateDeferUntil}
+              actionBusy={candidateActionBusy}
+              actionNotice={candidateActionNotice}
+              onFilterChange={handleCandidateFilterChange}
+              onSelectCandidate={handleSelectCandidate}
+              onPreviewPathChange={setCandidatePreviewPath}
+              onEditDraftChange={setCandidateEditDraft}
+              onActionNoteChange={setCandidateActionNote}
+              onTargetKindChange={setCandidateTargetKind}
+              onTargetIdChange={setCandidateTargetId}
+              onDeferUntilChange={setCandidateDeferUntil}
+              onAction={handleCandidateAction}
+              onRetry={fetchCandidates}
+            />
+          ) : (
+            <div id="memory-panel-ledger" role="tabpanel" aria-labelledby="memory-panel-tab-ledger" className="space-y-4">
           <div className="flex flex-wrap items-center gap-3 text-[11px]">
             <span className="font-medium text-[var(--text)]">{totalCount} memories</span>
             {pinnedCount > 0 && (
@@ -3087,7 +4039,6 @@ export default function MemoryPanel() {
                       state={specRelevanceGraph.status}
                       error={specRelevanceGraph.error}
                       onNodeClick={handleSpecGraphNodeClick}
-                      onOpenCuration={handleOpenCuration}
                     />
                   ) : (
                     graphSection
@@ -3096,6 +4047,8 @@ export default function MemoryPanel() {
               </div>
             )}
           </div>
+            </div>
+          )}
         </div>
       </div>
 

@@ -5,6 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { queryOne } from '../db/index';
@@ -15,6 +17,8 @@ import { broadcastAll } from '../lib/sse-hub';
 import {
   CONTEXT_SAFETY_CONTRACT_VERSION,
   analyzeContextSafety,
+  enforceContextSizeLimit,
+  hashContextContent,
   loadContextCaptureIgnoreFile,
   redactContextPayload,
   redactContextText,
@@ -108,6 +112,8 @@ const LifecycleBodySchema = z.object({
   duplicateOfMemoryId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
   supersededByCandidateId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
   supersededByMemoryId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
+  conflictingCandidateId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
+  conflictingMemoryId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
   deferUntil: z.string().trim().min(1).optional(),
   metadata: z.unknown().optional(),
 });
@@ -263,6 +269,87 @@ function normalizeCaptureRelatedFiles(value: unknown, workspacePath: string): st
     }
     return normalized;
   });
+}
+
+const CONTEXT_FILE_PREVIEW_MAX_BYTES = 16 * 1024;
+
+async function buildRelatedFilePreview(candidate: MemoryCandidateResponse, workspace: WorkspaceRow, requestedPath: string) {
+  const normalizedPath = safeNormalizeWorkspaceRelativePath(workspace.path, requestedPath);
+  const ignore = workspaceIgnoreSettings(workspace.path);
+
+  if (!candidate.relatedFiles.includes(normalizedPath)) {
+    throw new ValidationError('File preview is limited to files attached to this memory candidate');
+  }
+  if (!shouldCapturePath(normalizedPath, ignore)) {
+    throw new ValidationError(`Related file is ignored by capture safety rules: ${normalizedPath}`);
+  }
+
+  const absolutePath = path.join(workspace.path, normalizedPath);
+
+  try {
+    const stat = await fs.stat(absolutePath);
+    if (!stat.isFile()) {
+      return {
+        path: normalizedPath,
+        fileName: path.basename(normalizedPath),
+        exists: false,
+        text: '',
+        truncated: false,
+        byteLength: stat.size,
+        maxPreviewBytes: CONTEXT_FILE_PREVIEW_MAX_BYTES,
+        withinCaptureLimit: false,
+        redactionApplied: false,
+        sha256: null,
+        safety: analyzeContextSafety('', {}),
+      };
+    }
+
+    const bytesToRead = Math.min(stat.size, CONTEXT_FILE_PREVIEW_MAX_BYTES);
+    const buffer = Buffer.alloc(bytesToRead);
+    const handle = await fs.open(absolutePath, 'r');
+    let bytesRead = 0;
+    try {
+      const result = await handle.read(buffer, 0, bytesToRead, 0);
+      bytesRead = result.bytesRead;
+    } finally {
+      await handle.close();
+    }
+
+    const rawText = buffer.subarray(0, bytesRead).toString('utf8');
+    const redactedText = String(redactContextPayload(rawText, {}, { repoPath: workspace.path }));
+    const safety = analyzeContextSafety(rawText, {});
+
+    return {
+      path: normalizedPath,
+      fileName: path.basename(normalizedPath),
+      exists: true,
+      text: redactedText,
+      truncated: stat.size > bytesRead,
+      byteLength: stat.size,
+      maxPreviewBytes: CONTEXT_FILE_PREVIEW_MAX_BYTES,
+      withinCaptureLimit: enforceContextSizeLimit(stat.size, ignore, 'file'),
+      redactionApplied: rawText !== redactedText,
+      sha256: hashContextContent(redactedText),
+      safety,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {
+        path: normalizedPath,
+        fileName: path.basename(normalizedPath),
+        exists: false,
+        text: '',
+        truncated: false,
+        byteLength: 0,
+        maxPreviewBytes: CONTEXT_FILE_PREVIEW_MAX_BYTES,
+        withinCaptureLimit: false,
+        redactionApplied: false,
+        sha256: null,
+        safety: analyzeContextSafety('', {}),
+      };
+    }
+    throw error;
+  }
 }
 
 function redactJsonObject(value: unknown, fieldName: string, workspacePath: string): JsonObject {
@@ -827,6 +914,12 @@ export async function createCandidateFromRequest(req: Request, res: Response): P
  *         name: category
  *         schema: { type: string }
  *       - in: query
+ *         name: confidence
+ *         schema: { type: string, enum: [high, medium, low] }
+ *       - in: query
+ *         name: trustTier
+ *         schema: { type: string, enum: [agent_observation, working_note, engineering_decision, approved_policy, verified_fact] }
+ *       - in: query
  *         name: eventType
  *         schema: { type: string }
  *       - in: query
@@ -866,6 +959,16 @@ router.get('/', async (req: Request, res: Response) => {
     }
     params.push(category);
     conditions.push(`suggested_category = $${paramIndex}`);
+    paramIndex++;
+  }
+
+  const confidence = typeof req.query.confidence === 'string' ? req.query.confidence.trim() : '';
+  if (confidence) {
+    if (!MEMORY_CANDIDATE_CONFIDENCES.includes(confidence as MemoryCandidateConfidence)) {
+      throw new ValidationError(`confidence must be one of: ${MEMORY_CANDIDATE_CONFIDENCES.join(', ')}`);
+    }
+    params.push(confidence);
+    conditions.push(`confidence = $${paramIndex}`);
     paramIndex++;
   }
 
@@ -991,6 +1094,46 @@ router.get('/retrieval', async (req: Request, res: Response) => {
       defaultPredicate: "review_status NOT IN ('pending', 'rejected') AND confidence >= minConfidence AND (regulated_domain = false OR review_status = 'approved')",
     },
   });
+});
+
+/**
+ * @swagger
+ * /api/context-candidates/{id}/file-preview:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: Preview a candidate related file through context-safety redaction
+ *     operationId: previewContextCandidateRelatedFile
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only bounded related-file previews are restricted to candidate provenance files and redacted server-side before returning."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: workspaceId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Redacted bounded file preview }
+ *       400: { description: Invalid path }
+ *       404: { description: Candidate or workspace not found }
+ */
+router.get('/:id/file-preview', async (req: Request, res: Response) => {
+  const candidateId = parsePositiveId(req.params.id, 'candidateId');
+  const workspaceId = typeof req.query.workspaceId === 'string' && req.query.workspaceId.trim()
+    ? req.query.workspaceId.trim()
+    : undefined;
+  const requestedPath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+  if (!requestedPath) throw new ValidationError('path is required');
+
+  const candidate = await loadCandidate(candidateId, workspaceId);
+  const workspace = await assertWorkspace(candidate.workspaceId);
+  const preview = await buildRelatedFilePreview(candidate, workspace, requestedPath);
+  res.json({ candidateId: candidate.id, workspaceId: candidate.workspaceId, preview });
 });
 
 /**
@@ -1233,6 +1376,63 @@ router.post('/:id/supersede', async (req: Request, res: Response) => {
   });
   await emitCandidateAudit('superseded', updated, { reviewer, reason: body.reason ?? null });
   res.json({ candidate: updated, status: 'superseded' });
+});
+
+/**
+ * @swagger
+ * /api/context-candidates/{id}/conflict:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Mark a memory candidate as conflicting with another candidate or memory
+ *     operationId: conflictContextCandidate
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Conflict marking changes a user-owned review lifecycle decision and preserves the conflicting target for auditability."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Candidate marked conflicting }
+ *       400: { description: Invalid payload }
+ *       404: { description: Candidate or conflicting target not found }
+ *       409: { description: Approved candidates cannot be marked conflicting }
+ */
+router.post('/:id/conflict', async (req: Request, res: Response) => {
+  const candidateId = parsePositiveId(req.params.id, 'candidateId');
+  const body = parseWithSchema(LifecycleBodySchema, req.body, 'Invalid conflict payload') as LifecycleBody;
+  const candidate = await loadCandidate(candidateId, body.workspaceId);
+  ensureCandidateCanTransition(candidate, 'marked conflicting');
+
+  if (!body.conflictingCandidateId && !body.conflictingMemoryId) {
+    throw new ValidationError('conflictingCandidateId or conflictingMemoryId is required');
+  }
+  if (body.conflictingCandidateId) {
+    await loadCandidate(parsePositiveId(body.conflictingCandidateId, 'conflictingCandidateId'), candidate.workspaceId);
+  }
+  if (body.conflictingMemoryId) {
+    await assertMemory(candidate.workspaceId, parsePositiveId(body.conflictingMemoryId, 'conflictingMemoryId'));
+  }
+
+  const reviewer = body.reviewer ?? 'local-user';
+  const updated = await markCandidateStatus({
+    candidate,
+    status: 'conflict',
+    reviewer,
+    metadataPatch: {
+      ...normalizeJsonObject(body.metadata, 'metadata'),
+      review: {
+        action: 'conflict',
+        reason: body.reason ?? null,
+        reviewer,
+        reviewedAt: new Date().toISOString(),
+        conflictingCandidateId: body.conflictingCandidateId ? String(body.conflictingCandidateId) : null,
+        conflictingMemoryId: body.conflictingMemoryId ? String(body.conflictingMemoryId) : null,
+      },
+    },
+  });
+  await emitCandidateAudit('conflict', updated, { reviewer, reason: body.reason ?? null });
+  res.json({ candidate: updated, status: 'conflict' });
 });
 
 /**

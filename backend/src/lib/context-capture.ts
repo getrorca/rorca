@@ -54,6 +54,7 @@ export const MEMORY_CANDIDATE_STATUSES = [
   'rejected',
   'superseded',
   'duplicate',
+  'conflict',
   'deferred',
 ] as const;
 
