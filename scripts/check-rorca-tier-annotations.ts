@@ -59,6 +59,7 @@ const EXPECTED: Record<RorcaTier, string[]> = {
     'GET /api/pipeline/runs/{runId}',
     'GET /api/pipeline/runs/{runId}/log',
     'POST /api/pipeline/trigger',
+    'POST /api/pipeline/task-manifests/trigger',
     'POST /api/pipeline/runs/{runId}/cancel',
     'POST /api/pipeline/runs/{runId}/retry',
     'GET /api/direction',

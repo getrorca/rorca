@@ -39,6 +39,8 @@ describe('GET /api/mcp/tools', () => {
     expect(names).toContain('rorca_save_memory');
     expect(names).toContain('rorca_get_memories');
     expect(names).toContain('rorca_trigger_run');
+    expect(names).toContain('rorca_pipeline_task_manifests_trigger');
+    expect(names).toContain('rorca_trigger_task_manifest');
     expect(names).toContain('rorca_retry_story');
     expect(names).toContain('rorca_create_spec');
     expect(names).toContain('rorca_persist_spec');
@@ -59,6 +61,12 @@ describe('GET /api/mcp/tools', () => {
     expect(triggerRun).toMatchObject({
       category: 'Specs & Pipeline',
     });
+
+    const taskManifestTrigger = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_trigger_task_manifest');
+    expect(taskManifestTrigger).toMatchObject({
+      category: 'Specs & Pipeline',
+    });
+    expect(taskManifestTrigger.requiredParams).toEqual(expect.arrayContaining(['workspaceId', 'manifest', 'idempotencyKey']));
 
     const createSpec = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_create_spec');
     const persistSpec = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_persist_spec');

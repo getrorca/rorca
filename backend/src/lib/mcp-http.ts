@@ -209,6 +209,7 @@ const PUBLIC_TOOL_RULES: Array<{ method: string; pattern: RegExp }> = [
   { method: 'GET', pattern: /^\/api\/pipeline\/worker\/health$/ },
   { method: 'GET', pattern: /^\/api\/pipeline\/runs\/[^/]+\/log$/ },
   { method: 'POST', pattern: /^\/api\/pipeline\/trigger$/ },
+  { method: 'POST', pattern: /^\/api\/pipeline\/task-manifests\/trigger$/ },
   { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/cancel$/ },
   { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/retry$/ },
   { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/pause$/ },
@@ -579,6 +580,12 @@ export const MCP_FRIENDLY_ALIASES: readonly McpFriendlyAlias[] = [
     description: 'Friendly alias for triggering a pipeline run from an approved spec.',
     method: 'POST',
     path: '/api/pipeline/trigger',
+  },
+  {
+    toolName: 'rorca_trigger_task_manifest',
+    description: 'Friendly alias for triggering bounded Hermes task-manifest execution through the Rorca pipeline broker.',
+    method: 'POST',
+    path: '/api/pipeline/task-manifests/trigger',
   },
   {
     toolName: 'rorca_run_status',

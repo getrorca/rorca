@@ -61,6 +61,8 @@ describe('mcp-http transport compatibility', () => {
     const toolNames = res.body.result.tools.map((tool: { name: string }) => tool.name);
     expect(toolNames).toContain('rorca_list_workspaces');
     expect(toolNames).toContain('rorca_get_context');
+    expect(toolNames).toContain('rorca_pipeline_task_manifests_trigger');
+    expect(toolNames).toContain('rorca_trigger_task_manifest');
   });
 
   it('serves tools/call over stateless POST without mcp-session-id', async () => {
@@ -119,5 +121,7 @@ describe('mcp-http transport compatibility', () => {
 
     expect(resolver('rorca_list_workspaces')).toBe('public');
     expect(resolver('rorca_get_context')).toBe('public');
+    expect(resolver('rorca_pipeline_task_manifests_trigger')).toBe('public');
+    expect(resolver('rorca_trigger_task_manifest')).toBe('public');
   });
 });

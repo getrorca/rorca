@@ -56,8 +56,14 @@ export const PipelineRunJobPayload = z.object({
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
-  effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
+  idempotencyKey: z.string().optional(),
+  manifestId: z.string().optional(),
+  taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
+  taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  executionEnvironment: z.string().optional(),
+  executionEnvironmentId: z.string().optional(),
 }).strict();
 
 export type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;

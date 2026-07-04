@@ -203,6 +203,27 @@ async function seedRun(overrides: Partial<{ status: string; workspace_id: string
   return result!.id;
 }
 
+function cloneTaskManifestFixture(): Record<string, any> {
+  const fixturePath = path.join(__dirname, '..', '..', 'lib', '__tests__', 'fixtures', 'hermes-task-manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Record<string, any>;
+  manifest.workspaceId = 'ws-pipe';
+  manifest.source.rorca.specPath = 'forge/specs/approved/source-spec.json';
+  manifest.execution.agentOverride = 'pi';
+  manifest.execution.modelOverride = 'claude-sonnet-4-5-20250929';
+  manifest.execution.terminalMode = 'ansi-html';
+  return manifest;
+}
+
+function taskManifestTriggerBody(overrides: Record<string, any> = {}): Record<string, any> {
+  const manifest = cloneTaskManifestFixture();
+  return {
+    workspaceId: 'ws-pipe',
+    idempotencyKey: manifest.idempotencyKey,
+    manifest,
+    ...overrides,
+  };
+}
+
 // ─── POST /api/pipeline/trigger ──────────────────────────────────────────────
 
 describe('POST /api/pipeline/trigger', () => {
@@ -2691,5 +2712,212 @@ describe('GET /api/pipeline/runs/:runId/context-inspector-events — retrievalTe
     for (const event of res.body.events) {
       expect(event.retrievalTelemetryId).toBeUndefined();
     }
+  });
+});
+
+// ─── POST /api/pipeline/task-manifests/trigger ───────────────────────────────
+
+describe('POST /api/pipeline/task-manifests/trigger', () => {
+  test('dry-run validates, writes artifacts, returns estimated plan, and does not enqueue', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      dryRun: true,
+      agentOverride: 'pi',
+      modelOverride: 'claude-sonnet-4-5-20250929',
+      effortLevel: 'high',
+      mergeStrategy: 'draft-pr',
+      terminalMode: 'ansi-html',
+    });
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      dryRun: true,
+      queued: false,
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+    });
+    expect(res.body.artifacts).toEqual(expect.objectContaining({
+      manifestPath: expect.stringContaining('manifest.json'),
+      tasksMdPath: expect.stringContaining('tasks.md'),
+      specPath: expect.stringContaining(`hermes-task-manifest-${body.manifest.manifestId}.json`),
+      manifestHash: expect.stringMatching(/^sha256:/),
+    }));
+    expect(res.body.artifactRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'manifest-json', path: res.body.artifacts.manifestPath }),
+      expect.objectContaining({ role: 'synthetic-spec', path: res.body.artifacts.specPath }),
+    ]));
+    expect(res.body.estimatedExecutionPlan).toMatchObject({
+      willQueue: false,
+      willSpawnSubprocess: false,
+      autoMerge: false,
+      mergeStrategy: 'draft-pr',
+      agentOverride: 'pi',
+      modelOverride: 'claude-sonnet-4-5-20250929',
+      terminalMode: 'ansi-html',
+    });
+    expect(fs.existsSync(path.join(wsDir, res.body.artifacts.manifestPath))).toBe(true);
+    expect(fs.existsSync(path.join(wsDir, res.body.artifacts.tasksMdPath))).toBe(true);
+    expect(fs.existsSync(path.join(wsDir, res.body.artifacts.specPath))).toBe(true);
+
+    const runCount = await queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM pipeline_runs`);
+    expect(Number(runCount?.count ?? '0')).toBe(0);
+    expect(getBoss().send).not.toHaveBeenCalled();
+  });
+
+  test('queues through pipeline broker with manifest correlation metadata and option pass-through', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      mergeStrategy: 'branch-only',
+      agentOverride: 'pi',
+      modelOverride: 'claude-sonnet-4-5-20250929',
+      effortLevel: 'high',
+      terminal_mode: 'ansi-html',
+      executionEnvironment: 'local-worktree',
+      executionEnvironmentId: 'tm-test-env',
+    });
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      ok: true,
+      queued: true,
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      artifacts: expect.objectContaining({ specPath: expect.stringContaining('hermes-task-manifest') }),
+      executionEnvironment: 'local-worktree',
+      executionEnvironmentId: 'tm-test-env',
+    }));
+
+    const run = await queryOne<{
+      idempotency_key: string | null;
+      task_manifest_id: string | null;
+      task_manifest_artifacts: any;
+      merge_strategy: string | null;
+      auto_merge: boolean;
+      auto_worktree: boolean;
+      terminal_mode: string | null;
+    }>(`SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, merge_strategy, auto_merge, auto_worktree, terminal_mode FROM pipeline_runs WHERE id = $1`, [res.body.runId]);
+
+    expect(run).toMatchObject({
+      idempotency_key: body.idempotencyKey,
+      task_manifest_id: body.manifest.manifestId,
+      merge_strategy: 'branch-only',
+      auto_merge: false,
+      auto_worktree: false,
+      terminal_mode: 'ansi-html',
+    });
+    expect(run?.task_manifest_artifacts).toEqual(expect.objectContaining({
+      manifestPath: res.body.artifacts.manifestPath,
+      specPath: res.body.artifacts.specPath,
+    }));
+
+    expect(getBoss().send).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({
+        runId: res.body.runId,
+        manifestId: body.manifest.manifestId,
+        idempotencyKey: body.idempotencyKey,
+        taskManifestArtifacts: expect.objectContaining({ specPath: res.body.artifacts.specPath }),
+        agentOverride: 'pi',
+        effortLevel: 'high',
+        terminalMode: 'ansi-html',
+        autoWorktree: false,
+        autoMerge: false,
+        mergeStrategy: 'branch-only',
+        executionEnvironment: 'local-worktree',
+        executionEnvironmentId: 'tm-test-env',
+      }),
+      expect.objectContaining({ retryLimit: 0 }),
+    );
+  });
+
+  test('returns idempotency conflict for an active run before queueing another job', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody();
+    const activeRun = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, idempotency_key, task_manifest_id)
+       VALUES ('forge/specs/approved/existing.json', 'ws-pipe', 'running', $1, $2)
+       RETURNING id`,
+      [body.idempotencyKey, body.manifest.manifestId],
+    );
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({
+      ok: false,
+      conflict: true,
+      activeRunId: activeRun!.id,
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+    }));
+    expect(getBoss().send).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['missing workspaceId', (body: Record<string, any>) => { delete body.workspaceId; }, 400],
+    ['missing idempotencyKey', (body: Record<string, any>) => { delete body.idempotencyKey; }, 400],
+    ['autoMerge=true', (body: Record<string, any>) => { body.autoMerge = true; }, 422],
+    ['mergeStrategy=direct', (body: Record<string, any>) => { body.mergeStrategy = 'direct'; }, 422],
+    ['invalid source authority', (body: Record<string, any>) => { body.workspaceId = 'other-workspace'; }, 400],
+    ['direct-repair-ineligible route decision', (body: Record<string, any>) => { body.manifest.routeDecision = { route: 'rorca.spec.run', reason: 'Route through normal spec run.' }; }, 400],
+  ])('rejects %s', async (_caseName, mutate, expectedStatus) => {
+    const body = taskManifestTriggerBody();
+    mutate(body);
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(expectedStatus);
+  });
+
+  test('openapi and MCP catalog expose the stable public task-manifest trigger schema', async () => {
+    const docsRes = await request(app)
+      .get('/api/docs/openapi.json')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(docsRes.status).toBe(200);
+    const operation = docsRes.body.paths?.['/api/pipeline/task-manifests/trigger']?.post;
+    expect(operation).toEqual(expect.objectContaining({
+      operationId: 'triggerTaskManifestPipelineRun',
+      'x-rorca-tier': 'public',
+      'x-rorca-public-api': true,
+    }));
+    expect(operation['x-rorca-rationale']).toContain('rejects autoMerge=true');
+    expect(operation.requestBody.content['application/json'].schema.required).toEqual(expect.arrayContaining(['workspaceId', 'manifest', 'idempotencyKey']));
+
+    const toolsRes = await request(app)
+      .get('/api/mcp/tools')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(toolsRes.status).toBe(200);
+    const names = toolsRes.body.tools.map((tool: { name: string }) => tool.name);
+    expect(names).toContain('rorca_pipeline_task_manifests_trigger');
+    expect(names).toContain('rorca_trigger_task_manifest');
+    const tool = toolsRes.body.tools.find((item: { name: string }) => item.name === 'rorca_pipeline_task_manifests_trigger');
+    expect(tool.requiredParams).toEqual(expect.arrayContaining(['workspaceId', 'manifest', 'idempotencyKey']));
+    expect(tool.inputSchema).toEqual(expect.objectContaining({
+      workspaceId: expect.any(Object),
+      manifest: expect.any(Object),
+      idempotencyKey: expect.any(Object),
+      mergeStrategy: expect.any(Object),
+      terminal_mode: expect.any(Object),
+    }));
   });
 });
