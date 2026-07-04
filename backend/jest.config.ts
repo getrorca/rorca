@@ -49,6 +49,9 @@ const config: Config = {
   forceExit: true,
   // Run test files serially to prevent DB conflicts between test files sharing the same test DB
   maxWorkers: 1,
+  // Recycle the lone worker when DB-backed integration tests retain large module graphs/buffers.
+  // This keeps plain `npm test` stable in CI without changing test semantics.
+  workerIdleMemoryLimit: '1024MB',
 };
 
 export default config;

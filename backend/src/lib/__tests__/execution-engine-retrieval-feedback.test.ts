@@ -67,6 +67,43 @@ describe('execution-engine retrieval feedback helpers', () => {
     expect(section).not.toContain('Memory 10');
   });
 
+  test('buildStoryRetrievalSelections carries readable memory details when available', () => {
+    const retrieved = makeRetrievedContext({
+      memory: [{
+        id: '3861',
+        canonicalKey: 'memory:rorca::3861',
+        text: 'Stage fingerprints: Post-save enrichment should rerun only invalidated stages.',
+        score: 0.82,
+        source: 'search',
+        sourceType: 'manual',
+      }],
+      meta: {
+        cagHits: 1,
+        ragHits: 2,
+        graphHits: 0,
+        totalTokens: 123,
+        latencyMs: 9,
+        tier: 'hybrid',
+        needsMoreEvidence: false,
+        matchedSkills: ['Spec Workflow'],
+        selectedCandidateKeys: ['memory:rorca::3861'],
+        selectedCandidateIds: ['3861'],
+        telemetryId: 'rt_457',
+      },
+    });
+
+    expect(buildStoryRetrievalSelections(retrieved)).toEqual([{
+      candidateKey: 'memory:rorca::3861',
+      candidateKind: 'memory',
+      skillName: 'Spec Workflow',
+      title: 'Stage fingerprints',
+      snippet: 'Stage fingerprints: Post-save enrichment should rerun only invalidated stages.',
+      score: 0.82,
+      source: 'search',
+      sourceType: 'manual',
+    }]);
+  });
+
   test('buildStoryRetrievalSelections prefixes memory ids and carries first matched skill', () => {
     const retrieved = makeRetrievedContext({
       meta: {

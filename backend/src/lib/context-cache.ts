@@ -448,3 +448,39 @@ export function invalidateConfig(workspaceId: string): void {
 export function invalidateSkills(workspaceId: string): void {
   invalidatePattern(`workspace:${workspaceId}:skills:*`);
 }
+
+/**
+ * Invalidate ALL cached context for a workspace (direction, memory, skills,
+ * config, agent profile, and any composite retrieval keys). Used when the
+ * workspace's underlying state has shifted out from under the cache.
+ */
+export function invalidateWorkspaceContext(workspaceId: string): void {
+  invalidatePattern(`workspace:${workspaceId}:*`);
+  invalidatePattern(`ctx:*:ws=${workspaceId}:*`);
+}
+
+/**
+ * US-039: Evict a workspace's cached context when hydration is stale relative
+ * to the working tree. Stale = dirty working tree, current git SHA differs
+ * from the hydrated SHA, or there is no hydrated SHA at all. Returns true if
+ * the cache was invalidated. Keeps cached context honestly keyed by git SHA and
+ * file/content fingerprints without requiring every reader to thread those
+ * dimensions through its key.
+ */
+export function invalidateOnStaleness(
+  workspaceId: string,
+  currentSha: string | null | undefined,
+  hydratedSha: string | null | undefined,
+  dirtyTree = false,
+): boolean {
+  const stale = dirtyTree || !hydratedSha || (!!currentSha && currentSha !== hydratedSha);
+  if (stale) {
+    invalidateWorkspaceContext(workspaceId);
+    logger.debug(
+      { workspaceId, currentSha, hydratedSha, dirtyTree },
+      '[context-cache] invalidated workspace context — hydration stale',
+    );
+    return true;
+  }
+  return false;
+}

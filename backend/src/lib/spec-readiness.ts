@@ -382,12 +382,38 @@ export async function getSpecReadiness(input: {
     context_summary_json: unknown;
     save_generation: number | string | null;
   }>(
-    `SELECT id, status, context_summary_json, COALESCE(save_generation, id::bigint) AS save_generation
+    `SELECT id, status, context_summary_json,
+        COALESCE(
+          save_generation,
+          CASE
+            WHEN context_summary_json->>'saveGeneration' ~ '^\\d+$'
+            THEN (context_summary_json->>'saveGeneration')::bigint
+            ELSE NULL
+          END,
+          id::bigint
+        ) AS save_generation
      FROM spec_generation_logs
      WHERE spec_slug = $1
-     ORDER BY COALESCE(save_generation, id::bigint) DESC, created_at DESC, id DESC
+       AND (context_summary_json->>'workspaceId' IS NULL OR context_summary_json->>'workspaceId' = $2)
+     ORDER BY
+      CASE
+        WHEN context_summary_json->>'workspaceId' = $2
+          OR save_generation IS NOT NULL
+          OR context_summary_json->>'saveGeneration' ~ '^\\d+$'
+        THEN 0
+        ELSE 1
+      END,
+      COALESCE(
+        save_generation,
+        CASE
+          WHEN context_summary_json->>'saveGeneration' ~ '^\\d+$'
+          THEN (context_summary_json->>'saveGeneration')::bigint
+          ELSE NULL
+        END,
+        id::bigint
+      ) DESC, created_at DESC, id DESC
      LIMIT 1`,
-    [input.specId],
+    [input.specId, input.workspaceId],
   );
 
   const workflowRun = await queryOne<{
@@ -396,10 +422,12 @@ export async function getSpecReadiness(input: {
   }>(
     `SELECT id, status
      FROM spec_post_save_workflow_runs
-     WHERE workspace_id = $1 AND spec_id = $2
+     WHERE workspace_id = $1
+       AND spec_id = $2
+       AND ($3::bigint IS NULL OR save_generation = $3::bigint)
      ORDER BY save_generation DESC NULLS LAST, created_at DESC, id DESC
      LIMIT 1`,
-    [input.workspaceId, input.specId],
+    [input.workspaceId, input.specId, generationLog?.save_generation ?? null],
   );
 
   const workflowStages = workflowRun ? normalizeWorkflowStages(await listStagesByRun(Number(workflowRun.id))) : [];

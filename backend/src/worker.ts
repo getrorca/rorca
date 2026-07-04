@@ -56,6 +56,7 @@ import { initDb, query, queryOne, execute, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
+import { registerHydrationWorker } from './lib/hydration-worker';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { advanceQueue } from './lib/run-queue';
@@ -2699,6 +2700,7 @@ async function start(): Promise<void> {
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
   await registerSpecJobHandlers(boss);
+  await registerHydrationWorker(boss);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
   // If concurrency settings changed, hot-reload the pipeline:run and pipeline:retry subscriptions.

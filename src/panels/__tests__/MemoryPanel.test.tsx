@@ -93,6 +93,7 @@ const MEMORY_REVIEW_RESPONSE: any = {
         pinned: false,
         sourceType: 'manual',
         source: 'MOG-001',
+        sourceRef: 'MOG-001',
         createdAt: '2026-06-02T10:00:00.000Z',
         updatedAt: '2026-04-02T10:00:00.000Z',
         deletedAt: null,
@@ -117,13 +118,14 @@ const MEMORY_REVIEW_RESPONSE: any = {
         pinned: false,
         sourceType: 'synthesis',
         source: 'MOG-002',
+        sourceRef: 'MOG-002',
         createdAt: '2026-05-10T10:00:00.000Z',
         updatedAt: '2026-05-12T10:00:00.000Z',
         deletedAt: '2026-05-15T10:00:00.000Z',
         staleScore: 0,
         reasons: [],
         status: 'archived',
-        lastAction: { action: 'archive', at: '2026-05-15T10:00:00.000Z', previousStatus: 'candidate', nextStatus: 'archived' },
+        lastAction: { action: 'archive', at: '2026-05-15T10:00:00.000Z', actor: null, previousStatus: 'candidate', nextStatus: 'archived' },
       },
     ],
     total: 2,
@@ -899,6 +901,9 @@ describe('MemoryPanel', () => {
     caps: { maxFiles: 20, maxMemories: 30, maxEdges: 80 },
     truncation: { filesTruncated: false, memoriesTruncated: false, edgesTruncated: false, totalCandidates: 1, returnedCandidates: 1 },
     fallback: { ageAvailable: true, telemetryAvailable: true, graphPathsAvailable: true, missingReasons: [] },
+    // The /api/spec-relevance-graph/by-spec route always returns a runtime
+    // descriptor (GraphRuntimeDescriptor) that SpecRelevanceGraph reads.
+    runtime: { graphMode: 'full', provider: 'age', ageAvailable: true, hint: '', message: '' },
   };
 
   function mockPanelDataWithSpecGraph(overrides?: {
@@ -1031,5 +1036,341 @@ describe('MemoryPanel', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('spec-context-selector')).toBeNull();
     });
+  });
+
+  // ─── US-036: Memory candidate review UI ──────────────────────────────────
+
+  it('filters review candidates by status in the review workflow section', async () => {
+    const user = userEvent.setup();
+    mockPanelData();
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    // Initially shows the candidate and archived items
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+    const recoverableList = screen.getByRole('list', { name: 'Recoverable memory decisions' });
+    expect(within(reviewQueue).getByText(/Direction Stack layers cascade/)).toBeTruthy();
+    expect(within(recoverableList).getByText(/Archived memory for restore drills/)).toBeTruthy();
+
+    // Filter by status: Candidate only
+    await user.selectOptions(screen.getByLabelText('Filter review items by status'), 'candidate');
+
+    // Should still show candidate in review queue
+    expect(within(screen.getByRole('list', { name: 'Stale memory review queue' })).getByText(/Direction Stack layers cascade/)).toBeTruthy();
+    // Recoverable list should be empty now (no items match both archived/deleted AND candidate status)
+    await waitFor(() => {
+      expect(screen.queryByRole('list', { name: 'Recoverable memory decisions' })).toBeNull();
+    });
+
+    // Clear filters and filter by status: Archived
+    await user.selectOptions(screen.getByLabelText('Filter review items by status'), 'archived');
+
+    // Should show archived in recoverable, hide review queue
+    expect(await screen.findByText(/Archived memory for restore drills/)).toBeTruthy();
+    expect(screen.queryByRole('list', { name: 'Stale memory review queue' })).toBeNull();
+
+    // Clear filters
+    await user.selectOptions(screen.getByLabelText('Filter review items by status'), '');
+    expect(await screen.findByRole('list', { name: 'Stale memory review queue' })).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Recoverable memory decisions' })).toBeTruthy();
+  });
+
+  it('filters review candidates by category in the review workflow section', async () => {
+    const user = userEvent.setup();
+    mockPanelData();
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    // Filter by category: Decision
+    await user.selectOptions(screen.getByLabelText('Filter review items by category'), 'Decision');
+
+    // Should show the Decision item (Archived memory for restore drills is Decision in recoverable)
+    const recoverableList = screen.getByRole('list', { name: 'Recoverable memory decisions' });
+    expect(within(recoverableList).getByText(/Archived memory for restore drills/)).toBeTruthy();
+    // The Architecture candidate should be hidden from review queue
+    await waitFor(() => {
+      expect(screen.queryByRole('list', { name: 'Stale memory review queue' })).toBeNull();
+    });
+  });
+
+  it('filters review candidates by source type in the review workflow section', async () => {
+    const user = userEvent.setup();
+    mockPanelData();
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    // Filter by source type: manual
+    await user.selectOptions(screen.getByLabelText('Filter review items by source type'), 'manual');
+
+    // The manual source item (Direction Stack layers) should be visible in review queue
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+    expect(within(reviewQueue).getByText(/Direction Stack layers cascade/)).toBeTruthy();
+    // The synthesis item (Archived memory) should be hidden from recoverable
+    await waitFor(() => {
+      expect(screen.queryByRole('list', { name: 'Recoverable memory decisions' })).toBeNull();
+    });
+  });
+
+  it('displays trust score indicators in the review workflow section', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [
+            {
+              ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+              staleScore: 75,
+              status: 'candidate' as const,
+            },
+            {
+              ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+              id: 5,
+              staleScore: 30,
+              status: 'candidate' as const,
+              content: 'A low-scoring healthy memory.',
+            },
+          ],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    // Score 75 should show "Critical" (red) in the review queue
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+    expect(within(reviewQueue).getByTitle('Stale score: 75 — Critical')).toBeTruthy();
+    // Score 30 should show "Healthy" (green)
+    expect(within(reviewQueue).getByTitle('Stale score: 30 — Healthy')).toBeTruthy();
+  });
+
+  it('shows promoted memory badge when review item has been kept', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [
+            {
+              ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+              status: 'kept' as const,
+              staleScore: 30,
+              lastAction: { action: 'keep' as const, at: '2026-06-03T10:00:00.000Z', previousStatus: 'candidate', nextStatus: 'kept' as const },
+            },
+          ],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    // Should show Promoted badge in the review queue
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+    expect(within(reviewQueue).getByTitle('Promoted to live memory')).toBeTruthy();
+    expect(within(reviewQueue).getByText('Promoted')).toBeTruthy();
+  });
+
+  it('shows clear filters button when review filters are active', async () => {
+    const user = userEvent.setup();
+    mockPanelData();
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    // Select a status filter
+    await user.selectOptions(screen.getByLabelText('Filter review items by status'), 'candidate');
+
+    // Clear filters button should appear
+    const clearBtn = await screen.findByRole('button', { name: 'Clear filters' });
+    expect(clearBtn).toBeTruthy();
+
+    // Click clear and verify both items are shown again
+    await user.click(clearBtn);
+    expect(await screen.findAllByText(/Stale memory review/)).toBeTruthy();
+  });
+
+  // ─── US-037: Candidate provenance and related-file previews ──────────────
+
+  it('displays sourceRef, occurredAt, and actor in review item detail', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            sourceRef: 'abc123def',
+            createdAt: '2026-06-15T14:30:00.000Z',
+            lastAction: {
+              action: 'keep' as const,
+              at: '2026-06-16T10:00:00.000Z',
+              actor: 'operator@rorca.local',
+              previousStatus: 'candidate',
+              nextStatus: 'kept' as const,
+            },
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Source ref should be displayed
+    expect(within(reviewQueue).getByText(/Source ref:/)).toBeTruthy();
+    expect(within(reviewQueue).getByText('abc123def')).toBeTruthy();
+
+    // Occurred timestamp should be displayed
+    expect(within(reviewQueue).getByText(/Occurred:/)).toBeTruthy();
+
+    // Actor should be shown in the review action text
+    expect(within(reviewQueue).getByText(/by operator@rorca\.local/)).toBeTruthy();
+  });
+
+  it('shows redaction marker when provenance is missing', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            sourceStoryId: null,
+            sourceSpecId: null,
+            sourceRunId: null,
+            sourceRef: null,
+            relatedFiles: [],
+            content: 'A memory with no provenance attached.',
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Should display the "No provenance" redaction marker
+    expect(within(reviewQueue).getByText('No provenance')).toBeTruthy();
+    expect(within(reviewQueue).getByTitle('No provenance or file context available for this memory')).toBeTruthy();
+  });
+
+  it('collapses large payloads with truncation limit and redacted marker', async () => {
+    const longContent = 'A'.repeat(500) + ' end';
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            content: longContent,
+            relatedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'src/f.ts', 'src/g.ts'],
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Content should be truncated (only first 300 chars shown by default)
+    const displayedContent = within(reviewQueue).getByText(/^A{300}$/);
+    expect(displayedContent).toBeTruthy();
+
+    // Should show truncated badge
+    expect(within(reviewQueue).getByText(/Truncated at 300 chars/)).toBeTruthy();
+
+    // Should show "Show all" button with character count
+    expect(within(reviewQueue).getByText(/Show all \(504 chars\)/)).toBeTruthy();
+
+    // Related files should show first 5 with "+N more" indicator
+    expect(within(reviewQueue).getByText('Changed files (7):')).toBeTruthy();
+    expect(within(reviewQueue).getByText('src/a.ts')).toBeTruthy();
+    expect(within(reviewQueue).getByText('src/e.ts')).toBeTruthy();
+    expect(within(reviewQueue).getByText('+2 more')).toBeTruthy();
+  });
+
+  it('expands collapsed content on toggle', async () => {
+    const user = userEvent.setup();
+    const longContent = 'A'.repeat(500) + ' end';
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            content: longContent,
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Click "Show all" to expand
+    const showAllBtn = within(reviewQueue).getByText(/Show all \(504 chars\)/);
+    await user.click(showAllBtn);
+
+    // Full content should now be displayed
+    expect(within(reviewQueue).getByText(longContent)).toBeTruthy();
+
+    // Truncation badge should disappear
+    expect(within(reviewQueue).queryByText(/Truncated at 300 chars/)).toBeNull();
+
+    // Button should now say "Show less"
+    expect(within(reviewQueue).getByText('Show less')).toBeTruthy();
+  });
+
+  it('does not display sourceRef or occurredAt labels when values are absent', async () => {
+    mockPanelData({
+      reviewData: {
+        ...MEMORY_REVIEW_RESPONSE,
+        staleCandidates: {
+          ...MEMORY_REVIEW_RESPONSE.staleCandidates,
+          items: [{
+            ...MEMORY_REVIEW_RESPONSE.staleCandidates.items[0],
+            sourceRef: null,
+            source: null,
+          }],
+        },
+      },
+    });
+
+    renderWithProviders(<MemoryPanel />);
+
+    expect(await screen.findByText('Stale memory review')).toBeTruthy();
+
+    const reviewQueue = screen.getByRole('list', { name: 'Stale memory review queue' });
+
+    // Source ref label should not appear when sourceRef is null
+    expect(within(reviewQueue).queryByText(/Source ref:/)).toBeNull();
+
+    // Occurred should still be shown (createdAt always present)
+    expect(within(reviewQueue).getByText(/Occurred:/)).toBeTruthy();
   });
 });

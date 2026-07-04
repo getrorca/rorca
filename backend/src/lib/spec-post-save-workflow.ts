@@ -238,11 +238,27 @@ async function isJobStale(job: SpecJob, metadata: SpecPostSaveWorkflowJobMetadat
   const generation = metadata.saveGeneration ?? job.saveGeneration;
   if (generation == null) return false;
   const latest = await queryOne<{ save_generation: number | string | null }>(
-    `SELECT COALESCE(save_generation, id::bigint) AS save_generation
+    `SELECT COALESCE(
+        save_generation,
+        CASE
+          WHEN context_summary_json->>'saveGeneration' ~ '^\\d+$'
+          THEN (context_summary_json->>'saveGeneration')::bigint
+          ELSE NULL
+        END,
+        id::bigint
+      ) AS save_generation
      FROM spec_generation_logs
      WHERE spec_slug = $1
        AND context_summary_json ? 'postSaveStages'
-     ORDER BY COALESCE(save_generation, id::bigint) DESC, created_at DESC, id DESC
+     ORDER BY COALESCE(
+        save_generation,
+        CASE
+          WHEN context_summary_json->>'saveGeneration' ~ '^\\d+$'
+          THEN (context_summary_json->>'saveGeneration')::bigint
+          ELSE NULL
+        END,
+        id::bigint
+      ) DESC, created_at DESC, id DESC
      LIMIT 1`,
     [job.specId],
   );

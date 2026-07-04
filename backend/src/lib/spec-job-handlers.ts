@@ -222,6 +222,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function readOptionalInteger(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value);
+  return null;
+}
+
+function readPostSaveSaveGeneration(job: Awaited<ReturnType<typeof getJob>>): number | null {
+  const requestPayload = isRecord(job?.requestPayload) ? job.requestPayload : null;
+  return readOptionalInteger(job?.saveGeneration) ?? readOptionalInteger(requestPayload?.saveGeneration);
+}
+
+function mergeRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
 function parseJsonFile<T>(filePath: string): T {
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
@@ -621,6 +636,7 @@ export async function runEnrichJob(
   workspaceId: string,
   specId: string,
   onProgress?: ProgressCallback,
+  options: { jobId?: string } = {},
 ): Promise<EnrichResult> {
   const start = Date.now();
   const workspace = await getWorkspace(workspaceId);
@@ -802,7 +818,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
   fs.writeFileSync(specFile, JSON.stringify(specContent, null, 2), 'utf8');
 
   const durationMs = Date.now() - start;
-  const contextSummaryJson = {
+  const enrichmentSummaryJson = {
     directionLayers: [
       { layer: 'L1', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
       { layer: 'L2', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
@@ -829,9 +845,36 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     },
   };
 
+  const postSaveJob = options.jobId ? await getJob(options.jobId) : null;
+  const postSaveSaveGeneration = readPostSaveSaveGeneration(postSaveJob);
+  const priorSummary = postSaveSaveGeneration !== null
+    ? await queryOne<{ context_summary_json: unknown }>(
+      `SELECT context_summary_json
+       FROM spec_generation_logs
+       WHERE spec_slug = $1
+         AND COALESCE(
+           save_generation,
+           CASE
+             WHEN context_summary_json->>'saveGeneration' ~ '^\\d+$'
+             THEN (context_summary_json->>'saveGeneration')::bigint
+             ELSE NULL
+           END,
+           id::bigint
+         ) = $2::bigint
+       ORDER BY CASE WHEN context_summary_json ? 'postSaveStages' THEN 0 ELSE 1 END, created_at DESC, id DESC
+       LIMIT 1`,
+      [specId, postSaveSaveGeneration],
+    )
+    : null;
+  const contextSummaryJson = {
+    ...mergeRecord(priorSummary?.context_summary_json),
+    ...enrichmentSummaryJson,
+    ...(postSaveSaveGeneration !== null ? { saveGeneration: postSaveSaveGeneration } : {}),
+  };
+
   await execute(
-    `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, enriched, retrieval_method, context_summary_json, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, 'completed')`,
+    `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, enriched, retrieval_method, context_summary_json, status, save_generation)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, 'completed', $10)`,
     [
       specId,
       annotationModel,
@@ -842,6 +885,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
       `Enriched ${storiesEnriched}/${userStories.length} stories via ${highestTier}`,
       highestTier,
       JSON.stringify(contextSummaryJson),
+      postSaveSaveGeneration,
     ],
   );
 

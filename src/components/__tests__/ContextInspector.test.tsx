@@ -844,6 +844,9 @@ describe('ContextInspector — Relevance Graph view', () => {
     caps: { maxFiles: 20, maxMemories: 30, maxEdges: 80 },
     truncation: { filesTruncated: false, memoriesTruncated: false, edgesTruncated: false, totalCandidates: 1, returnedCandidates: 1 },
     fallback: { ageAvailable: false, telemetryAvailable: true, graphPathsAvailable: false, missingReasons: [] },
+    // The /api/spec-relevance-graph route always returns a runtime descriptor
+    // (GraphRuntimeDescriptor) that RelevanceGraphView reads to gate capability notices.
+    runtime: { graphMode: 'lite', provider: 'semantic', ageAvailable: false, hint: 'semantic-only', message: 'Semantic retrieval telemetry available.' },
   };
 
   const unavailableGraphResponse = {

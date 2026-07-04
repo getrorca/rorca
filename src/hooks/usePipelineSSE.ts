@@ -27,7 +27,7 @@ export function usePipelineSSE(runId: string | null, _workspaceId?: string | nul
   // This avoids the 5-minute delay caused by /api/pipeline/stream replaying
   // thousands of old events at 50/tick from id=0 before reaching this run's events.
   useEffect(() => {
-    if (!runId) return;
+    if (!runId || runId === 'all') return;
 
     let cancelled = false;
 

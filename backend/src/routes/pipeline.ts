@@ -4746,6 +4746,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *     operationId: resizePipelineRunPty
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Terminal resize is a local run-control operation for an already-running user-owned pipeline."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4813,6 +4814,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *     operationId: sendPipelineRunInput
  *     x-rorca-tier: public
  *     x-rorca-rationale: "PTY stdin is local interactive run control for an already-running user-owned pipeline in single-user mode."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4904,6 +4906,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     operationId: streamPipelineOutput
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
+ *     x-rorca-public-api: true
  *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store so late joiners can rebuild the terminal from byte 0.
  *     parameters:
  *       - in: path
@@ -4946,11 +4949,20 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
   const cleanupOutputStream = () => {
+    if (streamClosed) return;
     streamClosed = true;
     clearInterval(hb);
     if (pollInterval) {
       clearInterval(pollInterval);
       pollInterval = null;
+    }
+    req.off('close', cleanupOutputStream);
+  };
+  const finishOutputStream = () => {
+    cleanupOutputStream();
+    if (!res.destroyed && !res.writableEnded) {
+      res.write('event: done\ndata: \n\n');
+      res.end();
     }
   };
   req.on('close', cleanupOutputStream);
@@ -5033,9 +5045,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
   // ── If the run is already terminal, close immediately ────────────────────
   if (runRow && terminalStatuses.includes(runRow.status)) {
-    clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
+    finishOutputStream();
     return;
   }
 
@@ -5070,14 +5080,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       ]);
       const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
       if (!statusRow || terminalStatuses.includes(statusRow.status) || ptyTerminal) {
-        cleanupOutputStream();
-        res.write('event: done\ndata: \n\n');
-        res.end();
+        finishOutputStream();
       }
     } catch {
-      cleanupOutputStream();
-      res.write('event: done\ndata: \n\n');
-      res.end();
+      finishOutputStream();
     }
   }, 200);
 

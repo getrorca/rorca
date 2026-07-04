@@ -13,6 +13,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAppNavigate } from '../routes';
 import type { DatabaseCapability } from '../contexts/CapabilitiesContext';
 import { GraphCapabilityNotice, dbModeLabel, graphModeLabel } from '../components/GraphCapabilityNotice';
+import ContextHealthPanel from './ContextHealthPanel';
 import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, type MemoryAnalyticsDrilldown, type MemoryAnalyticsDrilldownMetric } from '../lib/memoryAnalyticsDrilldown';
 
 interface HealthBasic {
@@ -714,6 +715,9 @@ export default function HealthDashboardPanel() {
               </div>
             </div>
           )}
+
+          {/* US-012: Context Health (Hilo hydration) */}
+          <ContextHealthPanel />
 
           {workspaceId && (
             <div className="bg-panel border border-border rounded-lg p-4">

@@ -204,6 +204,7 @@ interface MergedStory {
   storyId: string;
   title: string;
   status: DerivedStatus;
+  recentlyPassed: boolean;
   elapsed: number | null;
   retries: number | null;
   startedAt: number | null; // epoch ms for live timer
@@ -298,11 +299,12 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   // Track status transitions — animate only when status *changes* to pass
   const prevStatusRef = useRef<DerivedStatus>(story.status);
   const [justPassed, setJustPassed] = useState(false);
+  const showPassAnimation = justPassed || story.recentlyPassed;
 
   useEffect(() => {
     if (story.status === 'pass' && prevStatusRef.current !== 'pass') {
       setJustPassed(true);
-      const timer = setTimeout(() => setJustPassed(false), 600);
+      const timer = setTimeout(() => setJustPassed(false), 1500);
       return () => clearTimeout(timer);
     }
     prevStatusRef.current = story.status;
@@ -338,7 +340,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   const canRetry = retriesUsed < MAX_RETRIES;
 
   return (
-    <div className={`${cfg.rowClass || ''} ${justPassed ? 'animate-story-pass' : ''}`}>
+    <div className={`${cfg.rowClass || ''} ${showPassAnimation ? 'animate-story-pass' : ''}`}>
       {/* Main row — fixed 48px height */}
       <div
         onClick={isExpandable ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
@@ -359,7 +361,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         ) : null}
         <Icon
           size={14}
-          className={`shrink-0 ${cfg.color} ${isRunning ? 'animate-pulse' : isRetrying ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
+          className={`shrink-0 ${cfg.color} ${isRunning ? 'animate-pulse' : isRetrying ? 'animate-spin' : ''} ${showPassAnimation ? 'animate-checkmark-pop' : ''}`}
         />
         <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
           story.status === 'running' ? 'bg-emerald-500/10 text-emerald-500' :
@@ -755,6 +757,36 @@ export default function RunStoryList({
 
   const isWaveMode = (parallelism ?? 1) > 1;
 
+  // Historical WAL events are the source of truth for run context badges.
+  // The parent subscribes to SSE, but completed runs can be opened after the
+  // stream has ended; seed this component directly as a defensive fallback so
+  // per-story RAG/context/graph metadata does not disappear from the side panel.
+  const [historicalWalEvents, setHistoricalWalEvents] = useState<WalEvent[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setHistoricalWalEvents([]);
+
+    async function fetchHistoricalWalEvents() {
+      try {
+        const data = await apiFetch<{ events: WalEvent[] }>(`/api/pipeline/runs/${runId}/wal-events`);
+        if (!cancelled && Array.isArray(data.events)) setHistoricalWalEvents(data.events);
+      } catch {
+        // Non-fatal: live SSE and DB story rows still render the run.
+      }
+    }
+
+    fetchHistoricalWalEvents();
+    return () => { cancelled = true; };
+  }, [runId]);
+
+  const effectiveWalEvents = useMemo(() => {
+    const byId = new Map<number, WalEvent>();
+    for (const evt of historicalWalEvents) byId.set(evt.id, evt);
+    for (const evt of walEvents) byId.set(evt.id, evt);
+    return Array.from(byId.values()).sort((a, b) => a.id - b.id);
+  }, [historicalWalEvents, walEvents]);
+
   // Handle individual story retry
   const handleRetryStory = useCallback(async (storyId: string) => {
     // Immediately show as running in UI
@@ -794,7 +826,7 @@ export default function RunStoryList({
 
   // Re-fetch when story-level or wave-level WAL events arrive
   useEffect(() => {
-    const relevant = walEvents.filter(e =>
+    const relevant = effectiveWalEvents.filter(e =>
       e.event_type === 'story_started' ||
       e.event_type === 'story_passed' ||
       e.event_type === 'story_failed' ||
@@ -803,7 +835,7 @@ export default function RunStoryList({
       e.event_type === 'wave_merged'
     );
     if (relevant.length > 0) fetchData();
-  }, [walEvents, fetchData]);
+  }, [effectiveWalEvents, fetchData]);
 
   // Build result lookup: story_id -> StoryResult
   const resultMap = useMemo(() => {
@@ -817,7 +849,7 @@ export default function RunStoryList({
   // previous runs for the same story_id would otherwise show stale timers.
   const runningStoryIds = useMemo(() => {
     const running = new Set<string>();
-    for (const evt of walEvents) {
+    for (const evt of effectiveWalEvents) {
       if (!evt.story_id) continue;
       const p = parsePayload(evt.payload);
       if (p?.run_id !== undefined && p.run_id !== runId) continue;
@@ -833,13 +865,13 @@ export default function RunStoryList({
       }
     }
     return running;
-  }, [walEvents, runId]);
+  }, [effectiveWalEvents, runId]);
 
   // Build SSE-derived started-at timestamps for live elapsed
   // Filter by current runId so stale timestamps from prior runs don't bleed through.
   const storyStartTimes = useMemo(() => {
     const map = new Map<string, number>();
-    for (const evt of walEvents) {
+    for (const evt of effectiveWalEvents) {
       if (evt.event_type === 'story_started' && evt.story_id) {
         const p = parsePayload(evt.payload);
         if (p?.run_id !== undefined && p.run_id !== runId) continue;
@@ -847,12 +879,12 @@ export default function RunStoryList({
       }
     }
     return map;
-  }, [walEvents, runId]);
+  }, [effectiveWalEvents, runId]);
 
   // Track rate-limited stories: storyId -> { retryAt (epoch ms), attempt }
   const rateLimitedStories = useMemo(() => {
     const map = new Map<string, { retryAt: number; attempt: number }>();
-    for (const evt of walEvents) {
+    for (const evt of effectiveWalEvents) {
       if (!evt.story_id) continue;
       if (evt.event_type === 'story_rate_limited' && evt.payload) {
         try {
@@ -869,12 +901,12 @@ export default function RunStoryList({
       }
     }
     return map;
-  }, [walEvents]);
+  }, [effectiveWalEvents]);
 
   // US-034: Track pr_body_updated events — show transient "Syncing to GitHub PR..." indicator
   const prSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    const hasPrUpdate = walEvents.some(e => e.event_type === 'pr_body_updated');
+    const hasPrUpdate = effectiveWalEvents.some(e => e.event_type === 'pr_body_updated');
     if (hasPrUpdate) {
       setPrSyncActive(true);
       if (prSyncTimerRef.current) clearTimeout(prSyncTimerRef.current);
@@ -883,12 +915,12 @@ export default function RunStoryList({
     return () => {
       if (prSyncTimerRef.current) clearTimeout(prSyncTimerRef.current);
     };
-  }, [walEvents]);
+  }, [effectiveWalEvents]);
 
   // Track which waves have been merged (from wave_merged WAL events)
   const mergedWaveIndices = useMemo(() => {
     const set = new Set<number>();
-    for (const evt of walEvents) {
+    for (const evt of effectiveWalEvents) {
       if (evt.event_type === 'wave_merged' && evt.payload) {
         try {
           const payload = JSON.parse(evt.payload);
@@ -897,13 +929,13 @@ export default function RunStoryList({
       }
     }
     return set;
-  }, [walEvents]);
+  }, [effectiveWalEvents]);
 
   // US-007: Extract graph_hits per story from WAL event payloads
   const graphHitsMap = useMemo(() => {
     if (!includeGraph) return new Map<string, number>();
     const map = new Map<string, number>();
-    for (const evt of walEvents) {
+    for (const evt of effectiveWalEvents) {
       if (!evt.story_id) continue;
       if (evt.event_type === 'story_started' || evt.event_type === 'story_passed' || evt.event_type === 'story_failed') {
         if (evt.payload) {
@@ -917,12 +949,12 @@ export default function RunStoryList({
       }
     }
     return map;
-  }, [walEvents, includeGraph]);
+  }, [effectiveWalEvents, includeGraph]);
 
   // BMC-005: Extract browser_mcp flag per story from story_started WAL event payloads
   const browserMcpStoryIds = useMemo(() => {
     const set = new Set<string>();
-    for (const evt of walEvents) {
+    for (const evt of effectiveWalEvents) {
       if (!evt.story_id) continue;
       if (evt.event_type === 'story_started' && evt.payload) {
         const payload = parsePayload(evt.payload);
@@ -932,31 +964,93 @@ export default function RunStoryList({
       }
     }
     return set;
-  }, [walEvents]);
+  }, [effectiveWalEvents]);
 
   // CTM/MOG: Extract per-story RAG/memory retrieval telemetry from story_started WAL payloads.
+  // Fall back to context_trace memory events so older traces still show that retrieval ran.
   const retrievalMap = useMemo(() => {
     const map = new Map<string, StoryRetrievalInfo>();
-    for (const evt of walEvents) {
-      if (!evt.story_id || evt.event_type !== 'story_started' || !evt.payload) continue;
+    for (const evt of effectiveWalEvents) {
+      if (!evt.story_id || !evt.payload) continue;
       const payload = parsePayload(evt.payload);
       if (!payload) continue;
-      const matchedSkills = Array.isArray(payload.retrieval_matched_skills)
-        ? payload.retrieval_matched_skills.filter((value): value is string => typeof value === 'string')
-        : [];
-      const selectedCount = typeof payload.retrieval_selected_count === 'number'
-        ? payload.retrieval_selected_count
-        : null;
-      const telemetryId = typeof payload.retrieval_telemetry_id === 'string'
-        ? payload.retrieval_telemetry_id
-        : null;
-      const needsMoreEvidence = payload.retrieval_needs_more_evidence === true;
-      if (selectedCount != null || telemetryId || needsMoreEvidence || matchedSkills.length > 0) {
-        map.set(evt.story_id, { selectedCount, telemetryId, needsMoreEvidence, matchedSkills });
+
+      if (evt.event_type === 'story_started') {
+        const matchedSkills = Array.isArray(payload.retrieval_matched_skills)
+          ? payload.retrieval_matched_skills.filter((value): value is string => typeof value === 'string')
+          : [];
+        const selectedCount = typeof payload.retrieval_selected_count === 'number'
+          ? payload.retrieval_selected_count
+          : null;
+        const telemetryId = typeof payload.retrieval_telemetry_id === 'string'
+          ? payload.retrieval_telemetry_id
+          : null;
+        const needsMoreEvidence = payload.retrieval_needs_more_evidence === true;
+        if (selectedCount != null || telemetryId || needsMoreEvidence || matchedSkills.length > 0) {
+          map.set(evt.story_id, { selectedCount, telemetryId, needsMoreEvidence, matchedSkills });
+        }
+      } else if (evt.event_type === 'context_trace' && payload.phase === 'memory' && !map.has(evt.story_id)) {
+        const metrics = payload.metrics && typeof payload.metrics === 'object'
+          ? payload.metrics as Record<string, unknown>
+          : null;
+        const selectedCount = typeof metrics?.fileCount === 'number' ? metrics.fileCount : null;
+        map.set(evt.story_id, {
+          selectedCount,
+          telemetryId: null,
+          needsMoreEvidence: false,
+          matchedSkills: [],
+        });
       }
     }
     return map;
-  }, [walEvents]);
+  }, [effectiveWalEvents]);
+
+  // Context files are also present in story_started WAL payloads. Merge them with
+  // the parent-provided contextComparison data so the side panel stays truthful
+  // even when the parent view loads before contextComparison settles.
+  const eventContextFilesMap = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const evt of effectiveWalEvents) {
+      if (!evt.story_id || evt.event_type !== 'story_started' || !evt.payload) continue;
+      const payload = parsePayload(evt.payload);
+      const files = Array.isArray(payload?.context_files)
+        ? payload.context_files.filter((value): value is string => typeof value === 'string')
+        : [];
+      if (files.length > 0) map.set(evt.story_id, files);
+    }
+    return map;
+  }, [effectiveWalEvents]);
+
+  const effectiveStoryContext = useMemo(() => {
+    const map = new Map<string, StoryContextInfo>();
+    if (storyContext) {
+      for (const [storyId, info] of storyContext.entries()) {
+        map.set(storyId, { ...info, contextFiles: [...info.contextFiles] });
+      }
+    }
+    for (const [storyId, eventFiles] of eventContextFilesMap.entries()) {
+      const existing = map.get(storyId);
+      const contextFiles = Array.from(new Set([...(existing?.contextFiles ?? []), ...eventFiles]));
+      map.set(storyId, {
+        skills: existing?.skills ?? [],
+        contextFiles,
+        inputTokens: existing?.inputTokens ?? 0,
+        outputTokens: existing?.outputTokens ?? 0,
+      });
+    }
+    return map;
+  }, [storyContext, eventContextFilesMap]);
+
+  const recentlyPassedStoryIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const evt of effectiveWalEvents) {
+      if (evt.event_type !== 'story_passed' || !evt.story_id) continue;
+      const p = parsePayload(evt.payload);
+      if (p?.run_id !== undefined && p.run_id !== runId) continue;
+      set.add(evt.story_id);
+    }
+    return set;
+  }, [effectiveWalEvents, runId]);
 
   // Merge spec stories with results to derive status
   const mergedStories = useMemo(() => {
@@ -1014,7 +1108,7 @@ export default function RunStoryList({
 
       // Also check WAL events for blocked_by info if not in story_results
       if (!blockedBy && (status === 'skip' || status === 'fail')) {
-        for (const evt of walEvents) {
+        for (const evt of effectiveWalEvents) {
           if (evt.story_id === spec.id && evt.event_type === 'story_failed' && evt.payload) {
             try {
               const payload = JSON.parse(evt.payload);
@@ -1050,6 +1144,7 @@ export default function RunStoryList({
         storyId: spec.id,
         title: spec.title,
         status,
+        recentlyPassed: recentlyPassedStoryIds.has(spec.id),
         elapsed: result?.elapsed_seconds ?? (carriedPass?.elapsedMs != null ? Math.round(carriedPass.elapsedMs / 1000) : carriedFail?.elapsedMs != null ? Math.round(carriedFail.elapsedMs / 1000) : carriedSkip?.elapsedMs != null ? Math.round(carriedSkip.elapsedMs / 1000) : null),
         retries: result?.retries ?? carriedFail?.retries ?? carriedSkip?.retries ?? null,
         startedAt: storyStartTimes.get(spec.id) ?? (runState?.currentStory === spec.id ? Date.parse(runState.lastUpdatedAt) : null),
@@ -1063,7 +1158,7 @@ export default function RunStoryList({
         retrieval: retrievalMap.get(spec.id) ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, effectiveWalEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState, recentlyPassedStoryIds]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -1148,12 +1243,12 @@ export default function RunStoryList({
 
   // CTM-004: Aggregate context usage across stories for the header summary bar.
   const contextSummary = useMemo(() => {
-    if (!storyContext || storyContext.size === 0) return null;
+    if (effectiveStoryContext.size === 0) return null;
     const skills = new Set<string>();
     const files = new Set<string>();
     let tokenSum = 0;
     let tokenStories = 0;
-    for (const info of storyContext.values()) {
+    for (const info of effectiveStoryContext.values()) {
       for (const sk of info.skills) skills.add(sk.name);
       for (const f of info.contextFiles) files.add(f);
       if (info.inputTokens > 0) { tokenSum += info.inputTokens; tokenStories++; }
@@ -1161,7 +1256,7 @@ export default function RunStoryList({
     const avgTokens = tokenStories > 0 ? tokenSum / tokenStories : 0;
     if (skills.size === 0 && files.size === 0 && avgTokens === 0) return null;
     return { skillCount: skills.size, fileCount: files.size, avgTokens };
-  }, [storyContext]);
+  }, [effectiveStoryContext]);
 
   // ─── Build flat virtual items list ─────────────────────────────────────────
 
@@ -1214,6 +1309,13 @@ export default function RunStoryList({
     count: virtualItems.length,
     getScrollElement: () => scrollContainerRef.current,
     estimateSize: () => ROW_HEIGHT,
+    getItemKey: (index) => {
+      const item = virtualItems[index];
+      if (!item) return index;
+      if (item.type === 'story') return `story:${item.story.storyId}:${index}`;
+      if (item.type === 'wave-header') return `wave:${item.waveIndex}:${index}`;
+      return `excluded:${item.count}:${index}`;
+    },
     overscan: 10,
     initialOffset: scrollOffsetRef.current,
   });
@@ -1415,7 +1517,7 @@ export default function RunStoryList({
                     indented={item.indented}
                     isFocused={isFocused}
                     includeGraph={includeGraph}
-                    context={storyContext?.get(item.story.storyId)}
+                    context={effectiveStoryContext.get(item.story.storyId)}
                   />
                 ) : item.type === 'wave-header' ? (
                   <WaveHeader

@@ -219,7 +219,7 @@ async function handleSpecJobs(
 export async function registerSpecJobHandlers(boss: PgBoss): Promise<void> {
   await boss.work(SPEC_ENRICH_QUEUE, { batchSize: 1 }, (jobs) =>
     handleSpecJobs(jobs, SPEC_ENRICH_QUEUE, (payload, onProgress) =>
-      runEnrichJob(payload.workspaceId, payload.specId, onProgress),
+      runEnrichJob(payload.workspaceId, payload.specId, onProgress, { jobId: payload.jobId }),
     ),
   );
   await boss.work(CONTEXT_ENRICH_QUEUE, { batchSize: 1 }, (jobs) =>

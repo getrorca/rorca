@@ -642,6 +642,7 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
  *     operationId: getHealthDetailed
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Detailed health diagnostics remain read-only and are safe for local tooling that needs richer readiness and environment context before invoking workflows."
+ *     x-rorca-public-api: true
  *     description: Returns extended health metrics including pending spec count, memory usage, last backup timestamp, database mode, graph mode, and execution engine status.
  *     responses:
  *       200:

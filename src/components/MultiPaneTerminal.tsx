@@ -105,8 +105,8 @@ export default function MultiPaneTerminal({ runId, walEvents }: MultiPaneTermina
 
           {/* Responsive grid: 2 columns on wide screens, 1 on narrow */}
           <div className="grid grid-cols-1 min-[900px]:grid-cols-2 gap-3">
-            {waveStories.map(story => (
-              <div key={story.storyId} className="h-[300px]">
+            {waveStories.map((story, index) => (
+              <div key={`${story.waveIndex}:${story.storyId}:${index}`} className="h-[300px]">
                 <MiniTerminalPane
                   runId={runId}
                   storyId={story.storyId}

@@ -72,5 +72,14 @@ describe('GET /api/mcp/tools', () => {
       postSavePolicy: expect.any(Object),
       postSave: expect.any(Object),
     }));
+
+    const generationContext = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_specs_generation_context');
+    expect(generationContext.requiredParams).toEqual(expect.arrayContaining(['workspaceId', 'brief']));
+    expect(generationContext.inputSchema).toEqual(expect.objectContaining({
+      workspaceId: expect.any(Object),
+      brief: expect.any(Object),
+      title: expect.any(Object),
+      agentOverride: expect.any(Object),
+    }));
   });
 });

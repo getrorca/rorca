@@ -42,6 +42,7 @@ import { maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
+import { composeContext, type ComposeContextResult, type ComposerFeed } from '../lib/context-composer';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { completeMatchSkillsPrompt } from '../lib/match-skills-llm';
 import { heuristicMatchSkills } from '../lib/match-skills-heuristic';
@@ -950,18 +951,23 @@ const ExplicitDraftContextUsedSchema = z.object({
   meta: z.record(z.string(), z.unknown()),
 });
 
+const ExplicitDraftDirectionLayersSchema = z.object({
+  l1: z.boolean().default(false),
+  l2: z.object({
+    present: z.boolean().default(false),
+    domain: z.string().nullable().default(null),
+  }).passthrough().default({ present: false, domain: null }),
+  l3: z.boolean().default(false),
+  l1Title: z.string().nullable().optional(),
+  l2Title: z.string().nullable().optional(),
+  l3Title: z.string().nullable().optional(),
+  l1Tokens: z.number().nonnegative().optional(),
+  l2Tokens: z.number().nonnegative().optional(),
+  l3Tokens: z.number().nonnegative().optional(),
+}).passthrough();
+
 const ExplicitDraftContextSummarySchema = z.object({
-  directionLayers: z.object({
-    l1: z.boolean(),
-    l2: z.object({ present: z.boolean(), domain: z.string().nullable() }).passthrough(),
-    l3: z.boolean(),
-    l1Title: z.string().nullable().optional(),
-    l2Title: z.string().nullable().optional(),
-    l3Title: z.string().nullable().optional(),
-    l1Tokens: z.number().nonnegative().optional(),
-    l2Tokens: z.number().nonnegative().optional(),
-    l3Tokens: z.number().nonnegative().optional(),
-  }).passthrough().optional(),
+  directionLayers: ExplicitDraftDirectionLayersSchema.optional(),
   skills: z.array(z.string()).optional(),
   memoryEntries: z.number().int().nonnegative().optional(),
   agentsMd: z.boolean().optional(),
@@ -2416,6 +2422,50 @@ async function executeSkillFirstForge(options: ExecuteSkillFirstForgeOptions): P
  *           schema:
  *             type: object
  *             required: [workspaceId, brief]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to build the context bundle for
+ *               brief:
+ *                 type: string
+ *                 description: Plain-English description of the feature to draft
+ *               specBrief:
+ *                 type: string
+ *                 description: Alias for brief
+ *               title:
+ *                 type: string
+ *                 description: Optional spec title/slug seed
+ *               specName:
+ *                 type: string
+ *                 description: Alias for title
+ *               domain:
+ *                 type: string
+ *               diagramTypes:
+ *                 type: array
+ *                 items: { type: string }
+ *               storyAnnotations:
+ *                 type: object
+ *                 additionalProperties: true
+ *               templateId:
+ *                 type: string
+ *               storyCount:
+ *                 type: integer
+ *                 description: Target number of user stories for the caller-side draft
+ *               model:
+ *                 type: string
+ *                 description: Model override used for prompt sizing/context metadata
+ *               agentOverride:
+ *                 type: string
+ *                 enum: [claude, opencode, codex, pi]
+ *               storyPrefix:
+ *                 type: string
+ *               thinkingEnabled:
+ *                 type: boolean
+ *               thinkingBudget:
+ *                 type: integer
+ *               reasoning:
+ *                 type: object
+ *                 additionalProperties: true
  *     responses:
  *       200: { description: Forge context bundle }
  */
@@ -2470,6 +2520,206 @@ router.post('/generation-context', validateBody(SkillFirstForgeSchema), async (r
 
 /**
  * @swagger
+ * /api/specs/context-preview:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Preview context sources before spec creation
+ *     operationId: getSpecContextPreview
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only context preview is part of the open-source spec authoring flow — shows users what direction layers, skills, memory, graph, and files will be injected before generation."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Returns a structured context preview for a spec brief, grouping selected
+ *       sources by section (direction, skills, memory, graph, files, schema, template,
+ *       routing) with reasons and token estimates. Also includes graph freshness
+ *       and hydration action hints. Does not persist anything.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, brief]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               brief: { type: string }
+ *               model: { type: string }
+ *               templateId: { type: string }
+ *     responses:
+ *       200: { description: Context preview payload }
+ */
+router.post('/context-preview', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, brief, model, templateId } = req.body;
+    if (!workspaceId || !brief) {
+      throw new ValidationError('Missing required fields: workspaceId, brief');
+    }
+
+    // Use the same forge context bundle builder for consistency
+    const parsedBody = SkillFirstForgeSchema.parse({ workspaceId, brief, model, templateId, agentOverride: 'pi' });
+    const resolvedModel = await resolveSpecGenerationModel(req, workspaceId, (model as string)?.trim() || undefined);
+    const selectedAgent = resolveDraftingAgent('pi', resolvedModel);
+
+    const bundle = await buildForgeContextBundle({
+      workspaceId: String(workspaceId),
+      brief: String(brief),
+      templateId: templateId ? String(templateId) : undefined,
+      storyCount: 8,
+      resolvedModel,
+      selectedAgent,
+    });
+
+    const ctxSummary = bundle.contextSummary as Record<string, unknown> ?? {};
+
+    // Build structured sections
+    const sections: Record<string, unknown[]> = {};
+    const dirLayers = (ctxSummary.directionLayers as Record<string, unknown>) ?? {};
+    const l1Present = dirLayers.l1 === true;
+    const l2Present = (dirLayers.l2 as Record<string, unknown>)?.present === true;
+    const l3Present = dirLayers.l3 === true;
+
+    sections.direction = [
+      { key: 'direction-l1', section: 'direction', label: `L1 ${dirLayers.l1Title ?? 'Standards'}`, reason: l1Present ? 'Global engineering standards' : 'No L1 layer configured', tokenEstimate: l1Present ? (dirLayers.l1Tokens as number) ?? 0 : 0, present: l1Present },
+      { key: 'direction-l2', section: 'direction', label: `L2 ${dirLayers.l2Title ?? 'Conventions'}`, reason: l2Present ? 'Domain conventions' : 'No L2 layer configured', tokenEstimate: l2Present ? (dirLayers.l2Tokens as number) ?? 0 : 0, present: l2Present },
+      { key: 'direction-l3', section: 'direction', label: `L3 ${dirLayers.l3Title ?? 'Project'}`, reason: l3Present ? 'Project-specific context' : 'No L3 layer configured', tokenEstimate: l3Present ? (dirLayers.l3Tokens as number) ?? 0 : 0, present: l3Present },
+    ];
+
+    const skillNames = (ctxSummary.skills as string[]) ?? [];
+    sections.skills = skillNames.length > 0
+      ? skillNames.map(name => ({ key: `skill-${name}`, section: 'skills', label: name, reason: 'Matched skill relevant to spec brief', tokenEstimate: Math.ceil(500 / skillNames.length), present: true }))
+      : [{ key: 'skills-none', section: 'skills', label: 'No skills matched', reason: 'No skills were matched for this brief', tokenEstimate: 0, present: false }];
+
+    const retrieval = (ctxSummary.retrieval as Record<string, unknown>) ?? {};
+    const cagHits = (retrieval.cagHits as number) ?? 0;
+    const ragHits = (retrieval.ragHits as number) ?? 0;
+    const memoryCount = (ctxSummary.memoryEntries as number) ?? 0;
+    const memoryEntries: Record<string, unknown>[] = [];
+    if (cagHits > 0) memoryEntries.push({ key: 'memory-cag', section: 'memory', label: `Cache (CAG) — ${cagHits} hits`, reason: 'Direction layers, memory, and skills resolved from in-memory cache', tokenEstimate: Math.ceil(cagHits * 200), present: true });
+    if (ragHits > 0) memoryEntries.push({ key: 'memory-rag', section: 'memory', label: `Vector (RAG) — ${ragHits} hits`, reason: 'Hybrid vector+keyword search for relevant memories', tokenEstimate: Math.ceil(ragHits * 300), present: true });
+    if (memoryCount > 0) memoryEntries.push({ key: 'memory-count', section: 'memory', label: `${memoryCount} memory entries`, reason: 'Stored project memories available for context injection', tokenEstimate: Math.ceil(memoryCount * 150), present: true });
+    if (memoryEntries.length === 0) memoryEntries.push({ key: 'memory-none', section: 'memory', label: 'No memory data', reason: 'No memory entries or retrieval hits available', tokenEstimate: 0, present: false });
+    sections.memory = memoryEntries;
+
+    const graphHits = (retrieval.graphHits as number) ?? 0;
+    sections.graph = graphHits > 0
+      ? [{ key: 'graph-hits', section: 'graph', label: `${graphHits} graph node${graphHits !== 1 ? 's' : ''}`, reason: 'Knowledge graph nodes relevant to brief retrieved via Apache AGE', tokenEstimate: Math.ceil(graphHits * 250), present: true }]
+      : [{ key: 'graph-none', section: 'graph', label: 'No graph hits', reason: 'No relevant knowledge graph nodes found — consider hydrating the graph', tokenEstimate: 0, present: false }];
+
+    const filesEntries: Record<string, unknown>[] = [];
+    if (ctxSummary.agentsMd) filesEntries.push({ key: 'file-agents-md', section: 'files', label: 'AGENTS.md', reason: 'Project governance file with coding conventions and rules', tokenEstimate: 2000, present: true });
+    if (ctxSummary.schemaSnapshot) filesEntries.push({ key: 'file-schema', section: 'files', label: 'Schema snapshot', reason: 'Database schema used for data-aware generation', tokenEstimate: 1500, present: true });
+    const predictedFiles = (ctxSummary.predictedFiles as string[]) ?? [];
+    if (predictedFiles.length > 0) filesEntries.push({ key: 'file-predicted', section: 'files', label: `${predictedFiles.length} predicted files`, reason: 'Files likely relevant to the spec based on context routing', tokenEstimate: Math.ceil(predictedFiles.length * 800), present: true, details: predictedFiles.slice(0, 5) });
+    const wr = (ctxSummary.workspaceRouting as Record<string, unknown>) ?? {};
+    const stack = (wr.stack as string[]) ?? [];
+    if (stack.length > 0) filesEntries.push({ key: 'file-stack', section: 'files', label: `Stack detected: ${stack.join(', ')}`, reason: 'Technology stack identified from workspace layout', tokenEstimate: 0, present: true });
+    const missingFiles = (wr.missingContextFiles as string[]) ?? [];
+    if (missingFiles.length > 0) filesEntries.push({ key: 'files-missing', section: 'files', label: `${missingFiles.length} missing context files`, reason: `Recommended files not found: ${missingFiles.join(', ')}`, tokenEstimate: 0, present: false });
+    if (filesEntries.length === 0) filesEntries.push({ key: 'files-none', section: 'files', label: 'No relevant files detected', reason: 'No project files matched the brief context', tokenEstimate: 0, present: false });
+    sections.files = filesEntries;
+
+    sections.schema = [{ key: 'schema-entry', section: 'schema', label: ctxSummary.schemaSnapshot ? 'Schema snapshot available' : 'No schema snapshot', reason: ctxSummary.schemaSnapshot ? 'Database schema will be injected for data-aware spec generation' : 'No schema snapshot configured', tokenEstimate: ctxSummary.schemaSnapshot ? 1500 : 0, present: !!ctxSummary.schemaSnapshot }];
+    const tpl = ctxSummary.template as string | null | undefined;
+    sections.template = [{ key: 'template-entry', section: 'template', label: tpl ? `Template: ${tpl}` : 'No template', reason: tpl ? 'Story structure will follow the selected template pattern' : 'No template selected — stories will use default structure', tokenEstimate: tpl ? 1000 : 0, present: !!tpl }];
+
+    const routingEntries: Record<string, unknown>[] = [];
+    const richnessScore = wr.richnessScore as number | undefined;
+    if (richnessScore != null) {
+      const level = richnessScore >= 7 ? 'good' : richnessScore >= 4 ? 'moderate' : 'low';
+      routingEntries.push({ key: 'routing-richness', section: 'routing', label: `Context richness: ${level} (${richnessScore}/10)`, reason: richnessScore >= 7 ? 'Workspace has good context coverage' : richnessScore >= 4 ? 'Workspace has moderate context' : 'Low context richness', tokenEstimate: 0, present: true });
+    }
+    sections.routing = routingEntries;
+
+    // Warnings
+    const totalTokens = (ctxSummary.estimatedTokens as number) ?? 0;
+    const budget = (ctxSummary.modelContextWindow as number) ?? 200000;
+    const warnings: string[] = [];
+    if (totalTokens > budget * 0.8) warnings.push(`Context is at ${Math.round((totalTokens / budget) * 100)}% of model window — generation quality may degrade`);
+    if (!l1Present && !l2Present && !l3Present) warnings.push('No direction layers configured — spec quality may be reduced');
+    if (graphHits === 0) warnings.push('Knowledge graph returned no hits — code relationships won\'t inform the spec');
+
+    // Fetch hydration status for graph freshness
+    const hydration = await buildHydrationPreview(workspaceId);
+
+    res.json({
+      workspaceId: String(workspaceId),
+      brief: String(brief),
+      sections,
+      totalTokens,
+      tokenBudget: budget,
+      modelContextWindow: budget,
+      warnings,
+      graphFreshness: hydration.graphFreshness,
+      hydrationAction: hydration.hydrationAction,
+      loadedAt: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Context preview');
+  }
+});
+
+/**
+ * Build hydration preview data for the context preview endpoint.
+ */
+async function buildHydrationPreview(workspaceId: string): Promise<{
+  graphFreshness: Record<string, unknown>;
+  hydrationAction: Record<string, unknown>;
+}> {
+  try {
+    const hydration = await queryOne(
+      `SELECT h.*, wf.head_sha
+       FROM hydration_jobs h
+       LEFT JOIN workspace_freshness wf ON wf.workspace_id = h.workspace_id
+       WHERE h.workspace_id = $1 AND h.status != 'cancelled'
+       ORDER BY h.created_at DESC LIMIT 1`,
+      [workspaceId],
+    ) as Record<string, unknown> | undefined;
+
+    if (!hydration) {
+      return {
+        graphFreshness: { available: false, vertexCount: 0, edgeCount: 0, isStale: true, staleReason: 'No hydration attempted yet', gitSha: null, hydratedAt: null },
+        hydrationAction: { hint: 'hydrate', message: 'No hydration has been attempted. Click Hydrate to build the codegraph.', currentStatus: null },
+      };
+    }
+
+    const status = hydration.status as string;
+    const counts = (hydration.counts as Record<string, number>) ?? {};
+    const headSha = hydration.head_sha as string | null;
+    const gitShaDeprecated = hydration.git_sha as string | null;
+    const finishedAt = hydration.finished_at as string | null;
+
+    const isStale = status === 'succeeded' && headSha != null && gitShaDeprecated != null && headSha !== gitShaDeprecated;
+    const staleReason = isStale ? `Graph was hydrated at ${gitShaDeprecated?.slice(0, 7) ?? 'unknown'} but HEAD is at ${headSha?.slice(0, 7) ?? 'unknown'}` : null;
+
+    let hint: string = 'none';
+    let message: string | null = null;
+    if (status === 'failed') { hint = 'rehydrate'; message = 'Last hydration failed. Click to retry.'; }
+    else if (status === 'running' || status === 'pending') { hint = 'wait'; message = 'Hydration is currently running.'; }
+    else if (!hydration) { hint = 'hydrate'; message = 'No hydration attempted yet.'; }
+    else if (isStale) { hint = 'rehydrate'; message = staleReason; }
+
+    return {
+      graphFreshness: {
+        available: status === 'succeeded',
+        vertexCount: counts.nodes ?? 0,
+        edgeCount: counts.edges ?? 0,
+        isStale,
+        staleReason,
+        gitSha: gitShaDeprecated,
+        hydratedAt: finishedAt,
+      },
+      hydrationAction: { hint, message, currentStatus: status === 'running' || status === 'pending' ? status : null },
+    };
+  } catch {
+    return {
+      graphFreshness: { available: false, vertexCount: 0, edgeCount: 0, isStale: true, staleReason: 'Unable to fetch hydration status', gitSha: null, hydratedAt: null },
+      hydrationAction: { hint: 'none', message: null, currentStatus: null },
+    };
+  }
+}
+
+/**
+ * @swagger
  * /api/specs/forge:
  *   post:
  *     tags: [Specs]
@@ -2489,6 +2739,51 @@ router.post('/generation-context', validateBody(SkillFirstForgeSchema), async (r
  *           schema:
  *             type: object
  *             required: [workspaceId, brief]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to run forge for
+ *               brief:
+ *                 type: string
+ *                 description: Plain-English description of the feature to draft
+ *               specBrief:
+ *                 type: string
+ *                 description: Alias for brief
+ *               title:
+ *                 type: string
+ *                 description: Optional spec title/slug seed
+ *               specName:
+ *                 type: string
+ *                 description: Alias for title
+ *               domain:
+ *                 type: string
+ *               diagramTypes:
+ *                 type: array
+ *                 items: { type: string }
+ *               storyAnnotations:
+ *                 type: object
+ *                 additionalProperties: true
+ *               templateId:
+ *                 type: string
+ *               storyCount:
+ *                 type: integer
+ *               model:
+ *                 type: string
+ *               agentOverride:
+ *                 type: string
+ *                 enum: [claude, opencode, codex, pi]
+ *               storyPrefix:
+ *                 type: string
+ *               thinkingEnabled:
+ *                 type: boolean
+ *               thinkingBudget:
+ *                 type: integer
+ *               reasoning:
+ *                 type: object
+ *                 additionalProperties: true
+ *               postSave:
+ *                 type: object
+ *                 additionalProperties: true
  *     responses:
  *       200: { description: Saved spec result }
  */
@@ -4043,6 +4338,67 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     };
     const contextSummary = precomputedContextSummary;
 
+    // US-022: Compose structured context via the context-composer for rich
+    // provenance, trace IDs, and degradation tracking. Nonfatal — never blocks.
+    let composerResult: ComposeContextResult | undefined;
+    try {
+      const graphCap = await getRuntimeGraphCapability(workspaceId);
+      const graphMode = graphCap.graphMode;
+      const graphStats = retrievalMeta?.graphHits != null ? {
+        nodeCount: retrievalMeta.graphHits,
+        lastHydrated: undefined as string | undefined,
+      } : undefined;
+
+      const composerFeed: ComposerFeed = {
+        memories: (specGenerationRetrievedContext?.memory ?? []).map((m) => ({
+          text: m.text,
+          id: m.id,
+          confidence: m.score,
+        })),
+        docs: [],
+        sourceFiles: [],
+        tests: [],
+        graphStats,
+        diff: undefined,
+        risks: [],
+      };
+
+      composerResult = composeContext(
+        {
+          workspaceId,
+          brief,
+          annotations: domain ? [domain] : undefined,
+          includeGraph: graphMode !== 'disabled' && retrievalMeta != null,
+          graphMode,
+          gitSha: undefined,
+          freshnessPolicy: 'relaxed',
+        },
+        composerFeed,
+      );
+    } catch (_composerErr) {
+      // Nonfatal — proceed without composer enrichment
+    }
+
+    // Enrich contextSummary with composer metadata when available
+    const enrichedContextSummary = composerResult
+      ? {
+          ...(contextSummary ?? {}),
+          composedAt: composerResult.contextSummary.composedAt,
+          briefHash: composerResult.contextSummary.briefHash,
+          ...(composerResult.degraded ? {
+            composerDegraded: true,
+            composerDegradationReasons: composerResult.degradationReasons,
+          } : {}),
+          composerTraceIds: composerResult.bundle.traceIds,
+          composerSections: composerResult.bundle.sections.map((s) => ({
+            section: s.section,
+            itemCount: s.items.length,
+            tokenBudget: s.tokenBudget,
+            tokensUsed: s.tokensUsed,
+          })),
+        }
+      : contextSummary;
+
     const persistResult = await persistExplicitDraftInternal(req, {
       workspaceId,
       title: effectiveTitle,
@@ -4055,7 +4411,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       mermaidDiagram,
       model: resolvedModel,
       contextUsed,
-      ...(contextSummary ? { contextSummary } : {}),
+      ...(enrichedContextSummary ? { contextSummary: enrichedContextSummary } : {}),
       ...(thinkingEnabled ? { reasoning: { enabled: true, ...(reasoningEffort ? { effort: reasoningEffort } : {}) } } : {}),
       overwrite: true,
       source: 'generate',
@@ -4093,7 +4449,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       specPath: persistResult.specPath,
       diagramsPath: persistResult.diagramsPath,
       contextUsed,
-      contextSummary,
+      contextSummary: enrichedContextSummary,
       postSave: persistResult.postSave,
       postSavePolicy: persistResult.postSavePolicy,
       workflow: persistResult.workflow,

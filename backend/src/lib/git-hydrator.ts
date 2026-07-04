@@ -7,6 +7,7 @@
 
 import simpleGit from 'simple-git';
 import { chatComplete } from './llm-client';
+import { getContextLimits } from './context-limits';
 
 export interface GitChunkSummary {
   fromHash: string;
@@ -44,7 +45,9 @@ export async function gitMapStep(
     fromHash,
     maxCommits = 1000,
     chunkSize = 50,
-    concurrency = 5,
+    // Bound parallel LLM chunk summarization globally so a large external repo
+    // cannot fan out hundreds of concurrent model calls (US-039).
+    concurrency = getContextLimits().gitMapConcurrency,
   } = options;
 
   const git = simpleGit(workspacePath);

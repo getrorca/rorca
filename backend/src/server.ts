@@ -91,6 +91,8 @@ import personasRouter from './routes/personas';
 import marketplaceRouter from './routes/marketplace';
 import searchRouter from './routes/search';
 import recallRouter from './routes/recall';
+import eventsRouter from './routes/events';
+import candidatesRouter from './routes/candidates';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { buildMcpToolTierResolver, createMcpRequestHandler, getMcpToolDefinitions } from './lib/mcp-http';
@@ -110,6 +112,10 @@ import { StoryLogFollower } from './lib/story-log-follower';
 import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
+import contextEventsRouter from './routes/context-events';
+import retrievalTracesRouter from './routes/retrieval-traces';
+import hydrationRouter from './routes/hydration';
+import diagnosticsRouter from './routes/diagnostics';
 import mcpToolsRouter from './routes/mcp-tools';
 import executionEnvironmentsRouter from './routes/execution-environments';
 import { initBoss } from './lib/pg-boss';
@@ -122,6 +128,7 @@ import {
 } from './lib/mcp-auth';
 import { summarizeRorcaTiers } from './lib/tier-auth';
 import { planGate } from './lib/plan-gate';
+import { randomUUID } from 'crypto';
 
 
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
@@ -136,6 +143,34 @@ const BACKGROUND_RUNTIME_ENABLED =
   process.env.RORCA_DISABLE_BACKGROUND_RUNTIME !== 'true';
 const MCP_HTTP_ENABLED = process.env.RORCA_SERVE_MCP !== 'false';
 
+// US-038: Request ID middleware — injects trace/correlation ID for every request.
+// Uses the X-Request-Id header if present, otherwise generates a short UUID.
+app.use((req, _res, next) => {
+  (req as any).requestId = (req.headers['x-request-id'] as string) || `req-${randomUUID().slice(0, 8)}`;
+  next();
+});
+
+// US-038: pino-http logger with request ID on every request
+app.use(
+  pinoHttp({
+    logger,
+    genReqId: (req) => (req.headers['x-request-id'] as string) || `req-${randomUUID().slice(0, 8)}`,
+    autoLogging: {
+      ignore: (req) => req.url === '/api/health',
+    },
+    customProps: (req) => ({
+      requestId: (req as any).requestId,
+    }),
+    serializers: {
+      req: (req) => ({
+        method: req.method,
+        url: req.url,
+        requestId: (req as any).requestId,
+      }),
+    },
+  }),
+);
+
 // Disable ETags on API responses — prevents browsers from caching 404s and replaying
 // stale error responses after backend state changes (workspace renames, schema fixes, etc.).
 app.set('etag', false);
@@ -143,9 +178,6 @@ app.use((_req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
-
-// PR-008: Structured request/response logging — method, url, statusCode, responseTime
-app.use(pinoHttp({ logger }));
 
 // CORS configuration — explicit origin required; no wildcards in production.
 // CORS_ORIGIN defaults to http://localhost:5210 for development.
@@ -399,6 +431,7 @@ app.use('/api/memory/cross-workspace', crossWorkspaceMemoryRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/workspaces', contextRoutingRouter);
 app.use('/api/workspaces', contextFilesRouter);
+app.use('/api/workspaces', hydrationRouter);
 app.use('/api/conventions', conventionsRouter);
 app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
@@ -407,9 +440,14 @@ app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
+app.use('/api/events', eventsRouter);
+app.use('/api/candidates', candidatesRouter);
 app.use('/api/graph', graphRouter);
 app.use('/api/spec-relevance-graph', specRelevanceGraphRouter);
 app.use('/api/workflow-router', workflowRouterRouter);
+app.use('/api/context-events', contextEventsRouter);
+app.use('/api/retrieval-traces', retrievalTracesRouter);
+app.use('/api/diagnostics', diagnosticsRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);

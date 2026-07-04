@@ -81,8 +81,6 @@ function parseWorkspace(row: WorkspaceRow) {
  *     tags: [Workspaces]
  *     summary: Register a new workspace
  *     operationId: createWorkspace
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workspace creation mutates user-owned project configuration and should require authenticated access."
  *     description: >
  *       Registers a new workspace by path. Validates the filesystem path exists,
  *       optionally persists a database mode selection (including hosted BYOP

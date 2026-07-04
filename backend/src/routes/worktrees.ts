@@ -7,6 +7,7 @@
 
 import { Router, Request, Response } from 'express';
 import simpleGit from 'simple-git';
+import fs from 'fs';
 import path from 'path';
 import { queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
@@ -58,6 +59,10 @@ async function emitWalEvent(eventType: string, workspaceId: string, payload: Rec
  *   branch refs/heads/main
  *   <blank line>
  */
+function isExistingGitWorktree(wtPath: string): boolean {
+  return fs.existsSync(path.join(wtPath, '.git'));
+}
+
 function parsePorcelain(output: string): GitWorktree[] {
   const worktrees: GitWorktree[] = [];
   const blocks = output.trim().split('\n\n');
@@ -166,8 +171,13 @@ router.get('/', async (req: Request, res: Response) => {
     }
 
     const git = simpleGit(workspace.path);
+    try {
+      await git.raw(['worktree', 'prune']);
+    } catch {
+      // Non-fatal: list can still be parsed and stale paths filtered below.
+    }
     const output = await git.raw(['worktree', 'list', '--porcelain']);
-    const worktrees = parsePorcelain(output);
+    const worktrees = parsePorcelain(output).filter((wt) => isExistingGitWorktree(wt.path));
 
     res.json({ worktrees });
   } catch (error: any) {
@@ -692,7 +702,22 @@ router.get('/status', async (req: Request, res: Response) => {
       return;
     }
 
-    const git = simpleGit(worktreePath);
+    const workspaceGit = simpleGit(workspace.path);
+    try {
+      await workspaceGit.raw(['worktree', 'prune']);
+    } catch {
+      // Non-fatal: validation below still protects callers from stale paths.
+    }
+
+    const listed = parsePorcelain(await workspaceGit.raw(['worktree', 'list', '--porcelain']));
+    const normalizedRequested = path.resolve(worktreePath);
+    const listedWorktree = listed.find((wt) => path.resolve(wt.path) === normalizedRequested);
+
+    if (!listedWorktree || !isExistingGitWorktree(listedWorktree.path)) {
+      throw new NotFoundError('Worktree path is stale or no longer exists');
+    }
+
+    const git = simpleGit(listedWorktree.path);
     const status = await git.status();
 
     res.json({
@@ -703,6 +728,10 @@ router.get('/status', async (req: Request, res: Response) => {
       modifiedFiles: status.modified,
     });
   } catch (error: any) {
+    if (error.message?.includes('not a git repository')) {
+      handleRouteError(res, new NotFoundError('Worktree path is stale or no longer a git repository'), '[Worktrees] Status');
+      return;
+    }
     handleRouteError(res, error, '[Worktrees] Status');
   }
 });
