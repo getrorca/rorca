@@ -426,14 +426,29 @@ async function submitCandidateWithOptionalApproval<T>(
 }
 
 async function submitQueueEntry(client: CaptureApiClient, entry: CaptureQueueEntry): Promise<void> {
-  const response = await client.post(entry.endpoint, entry.payload);
+  let response: unknown;
+  try {
+    response = await client.post(entry.endpoint, entry.payload);
+  } catch (error) {
+    if (error instanceof CaptureApiError && error.statusCode === 409) {
+      return;
+    }
+    throw error;
+  }
   if (!entry.approval) return;
 
   const candidateId = extractCandidateId(response);
   if (!candidateId) {
     throw new CaptureApiError("Rorca API did not return a candidate id to approve.", 502, "MISSING_CANDIDATE_ID");
   }
-  await client.post(`${entry.approval.endpointBase}/${encodeURIComponent(candidateId)}/approve`, entry.approval.payload ?? {});
+  try {
+    await client.post(`${entry.approval.endpointBase}/${encodeURIComponent(candidateId)}/approve`, entry.approval.payload ?? {});
+  } catch (error) {
+    if (error instanceof CaptureApiError && error.statusCode === 409) {
+      return;
+    }
+    throw error;
+  }
 }
 
 function shouldQueueOnSubmitError(error: unknown, options: CaptureSubmitOptions): boolean {

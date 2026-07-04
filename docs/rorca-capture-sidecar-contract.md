@@ -18,7 +18,7 @@ This contract implements the product requirements in [`docs/prds/rorca-context-c
 - `ingest-commit`
 - `ingest-git`
 - `install-hooks` — installs/updates a managed post-commit hook; `--strict` opts into blocking capture failures and `--uninstall` restores prior hook state.
-- `daemon`
+- `daemon` — reconciles local git commits from the last persisted cursor; supports `--scan-once`, `--status`, `--stop`, `--interval`, `--max-commits-per-scan`, `--queue-path`, `--repo-path`, `--workspace`, `--api-url`, and `--dry-run`.
 - `status`
 - `flush` — replays `.rorca-capture-queue.jsonl` through the same API client, draining only successfully submitted entries.
 
@@ -108,7 +108,19 @@ Text and JSON status include:
 - MCP token path/mode state
 - command list
 - safety contract version
+- operational status: API reachability from `GET /api/health`, queue depth, cursor, hook state, daemon PID/running state, daemon `worker_id`/`last_seen`/`last_error`, last scan, last flush, consecutive error count, and backoff state
 - errors
+
+## Daemon reconciliation mode
+
+`rorca-capture daemon` is for repos on the same VM/server where Rorca runs. It scans git history oldest-first from the persisted cursor, submits or locally queues missing commit context idempotently, and advances the cursor only after each commit is accounted for by the API, the local queue, duplicate detection, or a noise skip.
+
+- Cursor file: `$HOME/.rorca/capture-cursor-<workspaceId>.json`, written atomically with mode `0600`.
+- Status/PID files: `$HOME/.rorca/capture-daemon-<workspaceId>.json` and `.pid`, also `0600`; the status mirrors worker heartbeat fields with `worker_id`, `pid`, `hostname`, `last_seen`, and `last_error`.
+- Flush gate: the daemon checks `GET /api/health` before flushing or submitting to avoid hammering data endpoints during outages.
+- Backoff: repeated API/health errors use exponential backoff with jitter (base 2s, max 5m) and persist consecutive error count in the status file.
+- Queueing: when health is unavailable and `workspaceId` is configured, commits are written to the JSONL queue in sequence order and flushed when connectivity returns.
+- Dry run: `--dry-run` does not cross the network boundary, write the queue, or advance the cursor.
 
 ## Manual memory capture
 

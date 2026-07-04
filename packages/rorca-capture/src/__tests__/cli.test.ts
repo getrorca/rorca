@@ -123,6 +123,80 @@ describe("rorca-capture CLI", () => {
     expect(output.stdout).toContain("Commands: remember, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
   });
 
+  it("runs daemon scan/status/stop through the CLI with configurable bounds", async () => {
+    const repo = tempRepo();
+    const homeDir = mkdtempSync(path.join(tmpdir(), "rorca-capture-cli-home-"));
+    initGitRepo(repo);
+    const sha = commitFile(repo, "src/daemon.ts", "export const daemon = true;\n", "feat: daemon cli");
+    const tokenPath = tokenFile(repo);
+    const queuePath = path.join(repo, ".rorca", "cli-daemon-queue.jsonl");
+    const scanOutput = captureIO();
+    const posted: string[] = [];
+    const fetchImpl: CaptureFetchMock = async (url, init) => {
+      const textUrl = String(url);
+      if (textUrl.endsWith("/api/health")) return new Response(JSON.stringify({ status: "healthy" }), { status: 200 });
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        posted.push(body.metadata.gitSha);
+        return new Response(JSON.stringify({ event: { id: "evt-cli" }, created: true }), { status: 201 });
+      }
+      return new Response(JSON.stringify({ error: `Unexpected ${textUrl}` }), { status: 500 });
+    };
+
+    const scanCode = await runCli([
+      "daemon",
+      "--scan-once",
+      "--workspace",
+      "ws-cli-daemon",
+      "--queue-path",
+      queuePath,
+      "--interval",
+      "1",
+      "--max-commits-per-scan",
+      "1",
+      "--max-concurrency",
+      "1",
+      "--json",
+    ], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: { HOME: homeDir, RORCA_API_URL: "http://api.test" },
+      io: scanOutput.io,
+      fetchImpl,
+    });
+
+    expect(scanCode).toBe(0);
+    expect(posted).toEqual([sha]);
+    const scan = JSON.parse(scanOutput.stdout) as { scan: { planned: number; submitted: number }; queuePath: string };
+    expect(scan.scan).toMatchObject({ planned: 1, submitted: 1 });
+    expect(scan.queuePath).toBe(queuePath);
+
+    const statusOutput = captureIO();
+    const statusCode = await runCli(["daemon", "--status", "--workspace", "ws-cli-daemon", "--queue-path", queuePath, "--json"], {
+      cwd: repo,
+      gitRoot: repo,
+      env: { HOME: homeDir, RORCA_API_URL: "http://api.test" },
+      io: statusOutput.io,
+      fetchImpl,
+    });
+    expect(statusCode).toBe(0);
+    const status = JSON.parse(statusOutput.stdout) as { queue: { depth: number }; daemon: { running: boolean; pid: number | null } };
+    expect(status.queue.depth).toBe(0);
+    expect(status.daemon.running).toBe(true);
+    expect(status.daemon.pid).toBe(process.pid);
+
+    const stopOutput = captureIO();
+    const stopCode = await runCli(["daemon", "--stop", "--workspace", "ws-cli-daemon", "--queue-path", queuePath], {
+      cwd: repo,
+      gitRoot: repo,
+      env: { HOME: homeDir, RORCA_API_URL: "http://api.test" },
+      io: stopOutput.io,
+    });
+    expect(stopCode).toBe(0);
+    expect(stopOutput.stdout).toContain("Stopped daemon pid");
+  });
+
   it("supports JSON status output shape", async () => {
     const repo = tempRepo();
     const tokenPath = tokenFile(repo);

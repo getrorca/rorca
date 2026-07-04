@@ -27,6 +27,7 @@ export type CaptureQueueApproval = {
 
 export type CaptureQueueEntry = {
   version: typeof CAPTURE_QUEUE_VERSION;
+  sequence: number;
   key: string;
   operation: CaptureQueueOperation;
   eventType: string;
@@ -51,6 +52,7 @@ export type BuildCaptureQueueEntryInput = {
   contentFingerprint?: string;
   approval?: CaptureQueueApproval;
   now?: Date;
+  sequence?: number;
 };
 
 export type EnqueueCaptureQueueResult = {
@@ -87,6 +89,7 @@ export function buildCaptureQueueEntry(config: CaptureConfig, input: BuildCaptur
 
   return {
     version: CAPTURE_QUEUE_VERSION,
+    sequence: input.sequence ?? 0,
     key: buildCaptureQueueKey(eventType, contentFingerprint),
     operation: input.operation,
     eventType,
@@ -117,8 +120,11 @@ export function enqueueCaptureQueueEntry(
   config: CaptureConfig,
   input: BuildCaptureQueueEntryInput,
 ): EnqueueCaptureQueueResult {
-  const entry = buildCaptureQueueEntry(config, input);
   const existing = readCaptureQueue(queuePath);
+  const entry = buildCaptureQueueEntry(config, {
+    ...input,
+    sequence: input.sequence ?? nextCaptureQueueSequence(existing),
+  });
   const duplicate = existing.find((item) => item.key === entry.key);
   if (duplicate) {
     return { entry: duplicate, queued: false, duplicate: true };
@@ -135,18 +141,19 @@ export function readCaptureQueue(queuePath: string): CaptureQueueEntry[] {
 
   return text.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line, index) => {
     try {
-      return normalizeCaptureQueueEntry(JSON.parse(line));
+      return normalizeCaptureQueueEntry(JSON.parse(line), index + 1);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new CaptureQueueError(`Invalid capture queue entry at line ${index + 1}: ${sanitizeCaptureErrorMessage(message)}`);
     }
-  });
+  }).sort((left, right) => left.sequence - right.sequence);
 }
 
 export function writeCaptureQueueAtomic(queuePath: string, entries: CaptureQueueEntry[]): void {
   mkdirSync(path.dirname(queuePath), { recursive: true });
   const tmpPath = `${queuePath}.tmp`;
-  const content = entries.length > 0 ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "";
+  const ordered = [...entries].sort((left, right) => left.sequence - right.sequence);
+  const content = ordered.length > 0 ? `${ordered.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "";
   writeFileSync(tmpPath, content, { encoding: "utf8", mode: 0o600 });
   try {
     chmodSync(tmpPath, 0o600);
@@ -193,7 +200,7 @@ export function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function normalizeCaptureQueueEntry(value: unknown): CaptureQueueEntry {
+function normalizeCaptureQueueEntry(value: unknown, fallbackSequence: number): CaptureQueueEntry {
   if (!isPlainObject(value)) throw new Error("entry must be an object");
   if (value.version !== CAPTURE_QUEUE_VERSION) throw new Error("unsupported queue entry version");
   if (typeof value.key !== "string" || !value.key) throw new Error("entry key is required");
@@ -206,6 +213,7 @@ function normalizeCaptureQueueEntry(value: unknown): CaptureQueueEntry {
 
   return {
     version: CAPTURE_QUEUE_VERSION,
+    sequence: typeof value.sequence === "number" && Number.isInteger(value.sequence) && value.sequence > 0 ? value.sequence : fallbackSequence,
     key: value.key,
     operation: value.operation,
     eventType: value.eventType,
@@ -221,6 +229,10 @@ function normalizeCaptureQueueEntry(value: unknown): CaptureQueueEntry {
     ...(typeof value.lastError === "string" ? { lastError: sanitizeCaptureErrorMessage(value.lastError) } : {}),
     ...(typeof value.nextRetryAt === "string" ? { nextRetryAt: value.nextRetryAt } : {}),
   };
+}
+
+function nextCaptureQueueSequence(entries: CaptureQueueEntry[]): number {
+  return entries.reduce((max, entry) => Math.max(max, entry.sequence), 0) + 1;
 }
 
 function inferQueueEventType(operation: CaptureQueueOperation, payload: JsonValue): string {

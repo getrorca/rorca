@@ -19,6 +19,9 @@ rorca-capture ingest-git --since last-rorca-run --json
 rorca-capture install-hooks
 rorca-capture install-hooks --strict       # explicit blocking mode
 rorca-capture install-hooks --uninstall    # restore any preserved prior hook
+rorca-capture daemon --scan-once --workspace rorca --max-commits-per-scan 25
+rorca-capture daemon --status --workspace rorca --json
+rorca-capture daemon --stop --workspace rorca
 rorca-capture daemon
 ```
 
@@ -27,5 +30,7 @@ rorca-capture daemon
 `ingest-commit` normalizes one git commit into a `git_commit` context event. `ingest-git --since <ref>` scans `<ref>..HEAD` oldest-first; `--since last-rorca-run` resolves the latest completed Rorca pipeline run pointer from the API. Add `--dry-run` to inspect without API writes or queue changes.
 
 `install-hooks` installs a managed `.git/hooks/post-commit` wrapper in the resolved Rorca workspace path. It preserves an existing hook as `post-commit.pre-rorca`, chains it before capture, and marks the wrapper with `# RORCA MANAGED HOOK` plus `# RORCA_PREV_HOOK:` metadata. Default hooks are best-effort and append `|| true` to the capture command so Rorca outages never block commits. `--strict` removes that fallback and prints an install-time warning. `--uninstall` removes the managed wrapper and restores the preserved prior hook when present.
+
+`daemon` reconciles local git commits from `$HOME/.rorca/capture-cursor-<workspaceId>.json`, writes status/PID heartbeats under `$HOME/.rorca/`, flushes the JSONL queue after `GET /api/health` succeeds, and backs off exponentially on repeated API errors. Use `--dry-run` to scan without network calls, queue writes, or cursor advancement.
 
 All Rorca writes go through `POST /api/...` with `Authorization: Bearer $(cat ~/.rorca/mcp-token)`. Hook files reference the token path at runtime and never embed token values. This package must not read `DATABASE_URL` or connect directly to PostgreSQL.

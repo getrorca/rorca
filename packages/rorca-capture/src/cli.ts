@@ -19,6 +19,16 @@ import {
 import { resolveCaptureConfig, type CaptureConfig, type CaptureConfigValues, type CaptureMode } from "./config.js";
 import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "./status.js";
 import {
+  DEFAULT_DAEMON_INTERVAL_MS,
+  DEFAULT_DAEMON_MAX_COMMITS_PER_SCAN,
+  DEFAULT_DAEMON_MAX_CONCURRENT_SUBMISSIONS,
+  buildOperationalStatus,
+  runCaptureDaemon,
+  runDaemonScanOnce,
+  stopCaptureDaemon,
+  type CaptureDaemonAction,
+} from "./daemon.js";
+import {
   CONTEXT_SAFETY_CONTRACT_VERSION,
   analyzeContextSafety,
   enforceContextSizeLimit,
@@ -48,8 +58,8 @@ MVP commands:
   ingest-commit [hash]   Send one commit ingestion request through the Rorca API
   ingest-git             Request git context ingestion through the Rorca API
   install-hooks          Install/update local git hooks that call rorca-capture; pass --uninstall to remove them
-  daemon                 Run the sidecar daemon contract (MVP status heartbeat)
-  status                 Print resolved config, workspace, queue, token, and safety state
+  daemon                 Reconcile git commits in daemon mode; use --scan-once, --status, or --stop for operator control
+  status                 Print resolved config, workspace, queue, daemon, API reachability, token, and safety state
   flush                  Replay the local .rorca-capture-queue.jsonl queue safely
 
 Configuration discovery order:
@@ -69,10 +79,19 @@ Global options:
   --force                For flush: retry entries even when nextRetryAt is in the future or retryable=false
   --strict               For install-hooks: fail the hook when Rorca capture cannot complete
   --uninstall            For install-hooks: remove the managed hook and restore any prior hook
-  --dry-run              For ingest commands: inspect git commits without API writes or queue changes
+  --dry-run              For ingest/daemon commands: inspect git commits without API writes, queue changes, or cursor advancement
   --ci                   Force CI mode; missing config is a hard error
   --json                 Emit JSON where supported
   -h, --help             Show this help
+
+Daemon options:
+  --scan-once            Run one reconciliation scan and exit
+  --status               Print daemon status without starting the daemon
+  --stop                 Stop the recorded daemon PID and mark status stopped
+  --interval <seconds>   Scan interval for foreground daemon mode (default 30)
+  --interval-ms <ms>     Scan interval in milliseconds
+  --max-commits-per-scan <n>  Bound commits scanned per interval (default 50)
+  --max-concurrency <n>  Bound concurrent API submissions (default 2)
 
 Git ingest options:
   --commit <sha>         For ingest-commit: explicit commit ref (default positional or HEAD)
@@ -239,6 +258,13 @@ type GitIngestOptions = {
   dryRun: boolean;
 };
 
+type DaemonCliOptions = {
+  action: CaptureDaemonAction;
+  intervalMs: number;
+  maxCommitsPerScan: number;
+  maxConcurrentSubmissions: number;
+};
+
 type ContextEventApiResponse = {
   event?: {
     id?: string | number;
@@ -271,9 +297,7 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
     }
 
     if (parsed.command === "daemon") {
-      const statusCode = await runStatus(parsed, deps, io);
-      io.stdout.write("Daemon MVP: status heartbeat complete; long-running watcher is reserved for the next implementation slice.\n");
-      return statusCode;
+      return await runDaemonCommand(parsed, deps, io);
     }
 
     if (parsed.command === "flush") {
@@ -385,6 +409,10 @@ function resolveCliTokenPath(deps: CliDeps): string | undefined {
   return deps.tokenPath ?? env.RORCA_MCP_TOKEN_PATH;
 }
 
+function resolveCliHomeDir(deps: CliDeps): string | undefined {
+  return (deps.env ?? process.env).HOME;
+}
+
 async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
   const errors: string[] = [];
   const config = resolveCaptureConfig({
@@ -411,7 +439,14 @@ async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<
     }
   }
 
-  const status = buildCaptureStatus({ config, workspace, token, errors });
+  const operational = await buildOperationalStatus({
+    config,
+    workspaceId: workspace?.id ?? config.workspaceId ?? null,
+    fetchImpl: deps.fetchImpl,
+    dryRun: parsed.dryRun,
+    homeDir: resolveCliHomeDir(deps),
+  });
+  const status = buildCaptureStatus({ config, workspace, token, operational, errors });
   io.stdout.write(parsed.json ? `${JSON.stringify(status, null, 2)}\n` : formatStatusText(status));
   return status.ok ? 0 : 1;
 }
@@ -457,6 +492,166 @@ async function runFlush(parsed: ParsedArgs, deps: CliDeps): Promise<CaptureFlush
   });
   const client = createCaptureClient(config, { tokenPath: resolveCliTokenPath(deps), fetchImpl: deps.fetchImpl });
   return await client.flushQueue({ force: parsed.rest.includes("--force") });
+}
+
+async function runDaemonCommand(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
+  const daemonOptions = parseDaemonArgs(parsed.rest);
+  const config = resolveCaptureConfig({
+    cwd: deps.cwd,
+    env: deps.env,
+    ci: parsed.ci,
+    overrides: parsed.overrides,
+    gitRoot: deps.gitRoot,
+  });
+  const homeDir = resolveCliHomeDir(deps);
+
+  if (daemonOptions.action === "status") {
+    const operational = await buildOperationalStatus({
+      config,
+      workspaceId: config.workspaceId ?? null,
+      fetchImpl: deps.fetchImpl,
+      dryRun: parsed.dryRun,
+      homeDir,
+    });
+    io.stdout.write(parsed.json ? `${JSON.stringify(operational, null, 2)}\n` : formatDaemonStatusText(config, operational));
+    return 0;
+  }
+
+  if (daemonOptions.action === "stop") {
+    const workspaceId = config.workspaceId;
+    if (!workspaceId) {
+      throw new Error("daemon --stop requires --workspace <id> or RORCA_WORKSPACE_ID so the PID file can be located.");
+    }
+    const result = stopCaptureDaemon(workspaceId, homeDir);
+    io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : `${result.message}\nStatus path: ${result.statusPath}\n`);
+    return 0;
+  }
+
+  if (daemonOptions.action === "scan-once") {
+    const result = await runDaemonScanOnce({
+      config,
+      tokenPath: resolveCliTokenPath(deps),
+      fetchImpl: deps.fetchImpl,
+      dryRun: parsed.dryRun,
+      intervalMs: daemonOptions.intervalMs,
+      maxCommitsPerScan: daemonOptions.maxCommitsPerScan,
+      maxConcurrentSubmissions: daemonOptions.maxConcurrentSubmissions,
+      homeDir,
+    });
+    io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : formatDaemonScanResult(result));
+    return result.scan.failed === 0 ? 0 : 1;
+  }
+
+  await runCaptureDaemon({
+    config,
+    tokenPath: resolveCliTokenPath(deps),
+    fetchImpl: deps.fetchImpl,
+    dryRun: parsed.dryRun,
+    intervalMs: daemonOptions.intervalMs,
+    maxCommitsPerScan: daemonOptions.maxCommitsPerScan,
+    maxConcurrentSubmissions: daemonOptions.maxConcurrentSubmissions,
+    homeDir,
+    logger: (entry) => io.stderr.write(`${JSON.stringify(entry)}\n`),
+  });
+  return 0;
+}
+
+function parseDaemonArgs(args: string[]): DaemonCliOptions {
+  let action: CaptureDaemonAction = "run";
+  let intervalMs = DEFAULT_DAEMON_INTERVAL_MS;
+  let maxCommitsPerScan = DEFAULT_DAEMON_MAX_COMMITS_PER_SCAN;
+  let maxConcurrentSubmissions = DEFAULT_DAEMON_MAX_CONCURRENT_SUBMISSIONS;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--scan-once" || arg === "--once") {
+      action = "scan-once";
+      continue;
+    }
+    if (arg === "--status") {
+      action = "status";
+      continue;
+    }
+    if (arg === "--stop") {
+      action = "stop";
+      continue;
+    }
+    if (arg === "--start") {
+      action = "run";
+      continue;
+    }
+    if (arg === "--interval") {
+      intervalMs = parsePositiveInt(requireValue(args, ++index, arg), arg) * 1000;
+      continue;
+    }
+    if (arg === "--interval-ms") {
+      intervalMs = parsePositiveInt(requireValue(args, ++index, arg), arg);
+      continue;
+    }
+    if (arg === "--max-commits-per-scan" || arg === "--max-commits") {
+      maxCommitsPerScan = parsePositiveInt(requireValue(args, ++index, arg), arg);
+      continue;
+    }
+    if (arg === "--max-concurrency" || arg === "--max-concurrent-submissions") {
+      maxConcurrentSubmissions = parsePositiveInt(requireValue(args, ++index, arg), arg);
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      throw new Error(`Unknown daemon option: ${arg}`);
+    }
+    throw new Error(`Unexpected daemon argument: ${arg}`);
+  }
+
+  return { action, intervalMs, maxCommitsPerScan, maxConcurrentSubmissions };
+}
+
+function formatDaemonStatusText(config: CaptureConfig, status: Awaited<ReturnType<typeof buildOperationalStatus>>): string {
+  const daemon = status.daemon;
+  const api = status.apiReachability;
+  return [
+    "Rorca Capture Daemon Status",
+    `API URL: ${config.apiUrl}`,
+    `API reachability: ${api.reachable === null ? "unknown" : api.reachable ? "reachable" : "unreachable"}${api.statusCode ? ` (HTTP ${api.statusCode})` : ""}${api.skipped ? " (skipped)" : ""}`,
+    `Queue path: ${status.queue.path}`,
+    `Queue depth: ${status.queue.depth}`,
+    `Cursor: ${status.cursor.lastReconciledSha ?? "none"}${status.cursor.path ? ` (${status.cursor.path})` : ""}`,
+    `Hook state: ${status.hook.installed ? (status.hook.managed ? `managed/${status.hook.mode ?? "unknown"}` : "unmanaged") : "not installed"}`,
+    `Daemon: ${daemon.running ? "running" : "stopped"}${daemon.pid ? ` pid=${daemon.pid}` : ""}${daemon.stale ? " stale" : ""}`,
+    `Daemon worker_id: ${daemon.workerId ?? "unresolved"}`,
+    `Daemon last_seen: ${daemon.lastSeen ?? "never"}`,
+    `Consecutive errors: ${daemon.consecutiveErrorCount}`,
+    `Backoff: ${daemon.backoff.active ? `active until ${daemon.backoff.nextRetryAt ?? "unknown"}` : "inactive"}`,
+    `Last scan: ${daemon.lastScan && typeof daemon.lastScan.finishedAt === "string" ? daemon.lastScan.finishedAt : "never"}`,
+    `Last flush: ${daemon.lastFlush && typeof daemon.lastFlush.finishedAt === "string" ? daemon.lastFlush.finishedAt : "never"}`,
+    `Last error: ${daemon.lastError ?? api.error ?? "none"}`,
+  ].join("\n") + "\n";
+}
+
+function formatDaemonScanResult(result: Awaited<ReturnType<typeof runDaemonScanOnce>>): string {
+  const scan = result.scan;
+  const lines = [
+    `Daemon scan complete: submitted=${scan.submitted}, queued=${scan.queued}, duplicate=${scan.duplicate}, skipped-noise=${scan.skippedNoise}, dry-run=${scan.dryRun}, failed=${scan.failed}, planned=${scan.planned}`,
+    `Workspace: ${result.workspaceId}`,
+    `Cursor: ${result.cursorAfter ?? "none"}`,
+    `Queue depth: ${result.queueDepth}`,
+    `API reachability: ${result.apiReachability.reachable === null ? "unknown" : result.apiReachability.reachable ? "reachable" : "unreachable"}`,
+    `Status path: ${result.statusPath}`,
+  ];
+  if (result.flush) {
+    lines.push(`Flush: submitted=${result.flush.submitted}, failed=${result.flush.failed}, skipped=${result.flush.skipped}, remaining=${result.flush.remaining}`);
+  }
+  if (result.lastError) {
+    lines.push(`Last error: ${result.lastError}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function parsePositiveInt(value: string, flag: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flag} requires a positive integer.`);
+  }
+  return parsed;
 }
 
 async function runIngestCommit(parsed: ParsedArgs, deps: CliDeps): Promise<GitIngestResult> {
