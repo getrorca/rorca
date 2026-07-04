@@ -377,14 +377,102 @@ async function emitWalEvent(
   eventType: string,
   workspaceId: number | string,
   payload: Record<string, unknown>,
+  storyId?: string | null,
 ): Promise<void> {
   try {
-    await execute(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, $2, $3)`,
-      [eventType, workspaceId, JSON.stringify(payload)],
+    const walEvent = await queryOne<{
+      id: number;
+      ts: string;
+      event_type: string;
+      workspace_id: string | null;
+      spec_id: string | null;
+      story_id: string | null;
+      actor: string | null;
+      payload: string | Record<string, unknown> | null;
+    }>(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [eventType, workspaceId, storyId ?? null, JSON.stringify(payload)],
     );
+
+    if (walEvent) {
+      broadcastAll({
+        id: walEvent.id,
+        ts: walEvent.ts,
+        event_type: walEvent.event_type,
+        workspace_id: walEvent.workspace_id,
+        spec_id: walEvent.spec_id,
+        story_id: walEvent.story_id,
+        actor: walEvent.actor ?? '',
+        payload: typeof walEvent.payload === 'string'
+          ? walEvent.payload
+          : walEvent.payload == null
+            ? null
+            : JSON.stringify(walEvent.payload),
+      });
+    }
   } catch (err) {
     logger.warn({ err, eventType }, '[worker] Failed to emit WAL event');
+  }
+}
+
+async function synthesizeInterruptedStoryFailure(params: {
+  runId: number;
+  workspaceId: string | number;
+  status: string;
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  source: 'worker' | 'worker_retry';
+}): Promise<void> {
+  if (params.status === 'done' || params.status === 'cancelled') return;
+
+  try {
+    const active = await queryOne<{
+      story_id: string | null;
+      payload: Record<string, unknown> | string | null;
+    }>(
+      `SELECT story_id, payload
+         FROM wal_events
+        WHERE event_type = 'story_started'
+          AND payload->>'run_id' = $1
+        ORDER BY id DESC
+        LIMIT 1`,
+      [String(params.runId)],
+    );
+    const payload = typeof active?.payload === 'string'
+      ? JSON.parse(active.payload) as Record<string, unknown>
+      : active?.payload ?? {};
+    const storyId = active?.story_id ?? (typeof payload.story_id === 'string' ? payload.story_id : null);
+    if (!storyId) return;
+
+    const existing = await queryOne<{ id: number; status: string }>(
+      `SELECT id, status FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`,
+      [params.runId, storyId],
+    );
+    if (existing && existing.status !== 'retry') return;
+
+    const reason = params.exitSignal === 'SIGTERM' || params.exitCode === 143
+      ? 'engine_interrupted_sigterm'
+      : 'engine_interrupted';
+    const logPath = typeof payload.log_file === 'string' ? payload.log_file : null;
+
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, reason, log_path, finished_at)
+       VALUES ($1, $2, 'fail', $3, $4, NOW())`,
+      [params.runId, storyId, reason, logPath],
+    );
+
+    await emitWalEvent('story_failed', params.workspaceId, {
+      run_id: params.runId,
+      story_id: storyId,
+      reason,
+      error_message: `Execution engine exited before posting a terminal story result (exitCode=${params.exitCode ?? 'null'}, signal=${params.exitSignal ?? 'null'}).`,
+      infra_error: true,
+      retry_consumed: false,
+      source: params.source,
+      ...(logPath ? { log_file: logPath } : {}),
+    }, storyId);
+  } catch (err) {
+    logger.warn({ err, runId: params.runId }, '[worker] Failed to synthesize interrupted story failure');
   }
 }
 
@@ -1049,6 +1137,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
         logger.info({ runId, code, signal, status, wasCancelled }, '[worker] execution-engine exited');
 
+        await synthesizeInterruptedStoryFailure({
+          runId,
+          workspaceId,
+          status,
+          exitCode: code,
+          exitSignal: signal,
+          source: 'worker',
+        });
+
         await execute(
           `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
           [status, runId],
@@ -1628,6 +1725,15 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           : null;
 
         logger.info({ runId, code, finalStatus, wasCancelled, retryScopeComplete, fullSpecComplete, remainingStoryIds }, '[worker] retry execution-engine exited');
+
+        await synthesizeInterruptedStoryFailure({
+          runId,
+          workspaceId,
+          status: finalStatus,
+          exitCode: code,
+          exitSignal: null,
+          source: 'worker_retry',
+        });
 
         try {
           await execute(
