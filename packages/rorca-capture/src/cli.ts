@@ -14,6 +14,7 @@ import {
   type CaptureApiClient,
   type CaptureFlushResult,
   type ResolvedWorkspace,
+  type ReusableCaptureClient,
 } from "./api.js";
 import { resolveCaptureConfig, type CaptureConfig, type CaptureConfigValues, type CaptureMode } from "./config.js";
 import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "./status.js";
@@ -25,6 +26,15 @@ import {
   redactContextText,
   shouldCapturePath,
 } from "./context-safety.js";
+import {
+  buildGitCommitContextEvent,
+  extractLastRorcaRunFinishedAt,
+  readGitCommit,
+  resolveGitRange,
+  resolveGitRangeSinceTimestamp,
+  type BuiltGitCommitEvent,
+  type LastRorcaRunPointer,
+} from "./git-ingest.js";
 
 export const HELP_TEXT = `rorca-capture — API-only context capture sidecar for Rorca
 
@@ -56,9 +66,14 @@ Global options:
   --mode <local|vm|ci>   Set capture mode
   --approve              For remember: approve after submit only when capture config permits operator auto-approval
   --force                For flush: retry entries even when nextRetryAt is in the future or retryable=false
+  --dry-run              For ingest commands: inspect git commits without API writes or queue changes
   --ci                   Force CI mode; missing config is a hard error
   --json                 Emit JSON where supported
   -h, --help             Show this help
+
+Git ingest options:
+  --commit <sha>         For ingest-commit: explicit commit ref (default positional or HEAD)
+  --since <ref>          For ingest-git: scan <ref>..HEAD, or use last-rorca-run
 
 Remember options:
   --category <name>      Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha
@@ -92,6 +107,7 @@ type ParsedArgs = {
   rest: string[];
   help: boolean;
   json: boolean;
+  dryRun: boolean;
   ci: boolean;
   overrides: CaptureConfigValues;
 };
@@ -99,6 +115,12 @@ type ParsedArgs = {
 type Runtime = {
   config: CaptureConfig;
   client: CaptureApiClient;
+  workspace: ResolvedWorkspace;
+};
+
+type IngestRuntime = {
+  config: CaptureConfig;
+  client: ReusableCaptureClient;
   workspace: ResolvedWorkspace;
 };
 
@@ -172,6 +194,52 @@ type RememberResult =
   | { status: "submitted"; candidateId: string | null; created: boolean; idempotent: boolean; approved: boolean; alreadyApproved: boolean; approvalQueued: boolean }
   | { status: "queued"; queuePath: string; idempotencyKey: string; approveRequested: boolean; duplicate: boolean };
 
+type GitIngestItemStatus = "submitted" | "queued" | "duplicate" | "skipped-noise" | "dry-run";
+
+type GitIngestItemResult = {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  status: GitIngestItemStatus;
+  idempotencyKey: string;
+  relatedFiles: string[];
+  candidateCount: number;
+  noiseReason?: string;
+  queuePath?: string;
+  eventId?: string | null;
+};
+
+type GitIngestResult = {
+  command: "ingest-commit" | "ingest-git";
+  workspaceId: string;
+  repoPath: string;
+  dryRun: boolean;
+  since?: string;
+  resolvedSince?: string;
+  total: number;
+  planned: number;
+  submitted: number;
+  queued: number;
+  skippedNoise: number;
+  duplicate: number;
+  candidatesSubmitted: number;
+  candidatesQueued: number;
+  candidatesDuplicate: number;
+  items: GitIngestItemResult[];
+};
+
+type GitIngestOptions = {
+  dryRun: boolean;
+};
+
+type ContextEventApiResponse = {
+  event?: {
+    id?: string | number;
+  };
+  created?: boolean;
+  idempotent?: boolean;
+};
+
 export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): Promise<number> {
   const io = deps.io ?? { stdout: process.stdout, stderr: process.stderr };
   const parsed = parseArgs(argv);
@@ -222,25 +290,15 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
       return 0;
     }
 
-    const runtime = await resolveRuntime(parsed, deps);
-
     if (parsed.command === "ingest-git") {
-      await runtime.client.post(`/api/workspaces/${encodeURIComponent(runtime.workspace.id)}/hydrate`, {
-        types: ["git"],
-        source: "rorca-capture",
-      });
-      io.stdout.write("Git ingestion requested through Rorca API.\n");
+      const result = await runIngestGit(parsed, deps);
+      io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : formatGitIngestResult(result));
       return 0;
     }
 
     if (parsed.command === "ingest-commit") {
-      const commit = readOption(parsed.rest, "--commit") ?? firstNonFlag(parsed.rest) ?? "HEAD";
-      await runtime.client.post(`/api/workspaces/${encodeURIComponent(runtime.workspace.id)}/hydrate`, {
-        types: ["git"],
-        commit,
-        source: "rorca-capture",
-      });
-      io.stdout.write(`Commit ingestion requested through Rorca API: ${commit}\n`);
+      const result = await runIngestCommit(parsed, deps);
+      io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : formatGitIngestResult(result));
       return 0;
     }
 
@@ -257,6 +315,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let command: string | null = null;
   let help = false;
   let json = false;
+  let dryRun = false;
   let ci = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -267,6 +326,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
     if (arg === "--json") {
       json = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
       continue;
     }
     if (arg === "--ci") {
@@ -306,7 +369,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { command, rest, help, json, ci, overrides };
+  return { command, rest, help, json, dryRun, ci, overrides };
 }
 
 async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
@@ -362,6 +425,224 @@ async function runFlush(parsed: ParsedArgs, deps: CliDeps): Promise<CaptureFlush
   });
   const client = createCaptureClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
   return await client.flushQueue({ force: parsed.rest.includes("--force") });
+}
+
+async function runIngestCommit(parsed: ParsedArgs, deps: CliDeps): Promise<GitIngestResult> {
+  const commitRef = parseIngestCommitRef(parsed.rest);
+  const runtime = await resolveIngestRuntime(parsed, deps, { allowDryRunWithoutApi: true });
+  const item = await ingestCommitRef(runtime, commitRef, { dryRun: parsed.dryRun });
+  return buildGitIngestResult("ingest-commit", runtime, parsed.dryRun, [item]);
+}
+
+async function runIngestGit(parsed: ParsedArgs, deps: CliDeps): Promise<GitIngestResult> {
+  const since = parseIngestGitSince(parsed.rest);
+  const runtime = await resolveIngestRuntime(parsed, deps, { allowDryRunWithoutApi: since !== "last-rorca-run" });
+  let refs: string[];
+  let resolvedSince: string | undefined;
+
+  if (since === "last-rorca-run") {
+    const pointer = await runtime.client.get<LastRorcaRunPointer>(
+      `/api/workspaces/${encodeURIComponent(runtime.workspace.id)}/capture/last-rorca-run`,
+    );
+    const finishedAt = extractLastRorcaRunFinishedAt(pointer);
+    if (!finishedAt) {
+      throw new Error(`No completed Rorca pipeline run found for workspace '${runtime.workspace.id}'. Run a pipeline successfully first or pass --since <git-ref>.`);
+    }
+    const range = resolveGitRangeSinceTimestamp(runtime.config.repoPath, finishedAt);
+    refs = range.shas;
+    resolvedSince = range.baseRef ?? `timestamp:${finishedAt}`;
+  } else {
+    refs = resolveGitRange(runtime.config.repoPath, since);
+    resolvedSince = since;
+  }
+
+  const items: GitIngestItemResult[] = [];
+  for (const ref of refs) {
+    items.push(await ingestCommitRef(runtime, ref, { dryRun: parsed.dryRun }));
+  }
+  return buildGitIngestResult("ingest-git", runtime, parsed.dryRun, items, since, resolvedSince);
+}
+
+async function resolveIngestRuntime(
+  parsed: ParsedArgs,
+  deps: CliDeps,
+  options: { allowDryRunWithoutApi?: boolean } = {},
+): Promise<IngestRuntime> {
+  const config = resolveCaptureConfig({
+    cwd: deps.cwd,
+    env: deps.env,
+    ci: parsed.ci,
+    overrides: parsed.overrides,
+    gitRoot: deps.gitRoot,
+  });
+
+  if (parsed.dryRun && options.allowDryRunWithoutApi && config.workspaceId) {
+    return {
+      config,
+      client: undefined as unknown as ReusableCaptureClient,
+      workspace: {
+        id: config.workspaceId,
+        path: config.repoPath,
+        resolvedBy: "config",
+      },
+    };
+  }
+
+  const client = createCaptureClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  const workspace = await resolveIngestWorkspace(config, client);
+  return { config, client, workspace };
+}
+
+async function resolveIngestWorkspace(config: CaptureConfig, client: Pick<CaptureApiClient, "get">): Promise<ResolvedWorkspace> {
+  try {
+    return await resolveWorkspace(config, client);
+  } catch (error) {
+    if (isOfflineError(error) && config.workspaceId) {
+      return {
+        id: config.workspaceId,
+        path: config.repoPath,
+        resolvedBy: "config",
+      };
+    }
+    if (isOfflineError(error)) {
+      throw new Error("Rorca API is unreachable and no workspace ID is configured; pass --workspace <id> to queue offline.");
+    }
+    throw error;
+  }
+}
+
+async function ingestCommitRef(
+  runtime: IngestRuntime,
+  commitRef: string,
+  options: GitIngestOptions,
+): Promise<GitIngestItemResult> {
+  const commit = readGitCommit(runtime.config, commitRef);
+  const built = buildGitCommitContextEvent(runtime.config, runtime.workspace, commit);
+  const base = gitItemBase(built);
+
+  if (built.noisy) {
+    return {
+      ...base,
+      status: "skipped-noise",
+      noiseReason: built.noiseReason ?? "all-changed-paths-ignored",
+    };
+  }
+
+  if (options.dryRun) {
+    return { ...base, status: "dry-run" };
+  }
+
+  const submission = await runtime.client.submitContextEvent<ContextEventApiResponse>(built.payload, {
+    eventType: "git_commit",
+    contentFingerprint: built.contentHash,
+  });
+
+  if (submission.status === "queued") {
+    return {
+      ...base,
+      status: submission.duplicate ? "duplicate" : "queued",
+      queuePath: submission.queuePath,
+    };
+  }
+
+  const response = submission.response;
+  if (response.created === false || response.idempotent === true) {
+    return {
+      ...base,
+      status: "duplicate",
+      eventId: response.event?.id == null ? null : String(response.event.id),
+    };
+  }
+
+  return {
+    ...base,
+    status: "submitted",
+    eventId: response.event?.id == null ? null : String(response.event.id),
+  };
+}
+
+function gitItemBase(built: BuiltGitCommitEvent): Omit<GitIngestItemResult, "status" | "noiseReason" | "queuePath" | "eventId"> {
+  return {
+    sha: built.commit.sha,
+    shortSha: built.commit.shortSha,
+    subject: built.commit.subject,
+    idempotencyKey: built.idempotencyKey,
+    relatedFiles: built.commit.relatedFiles,
+    candidateCount: 0,
+  };
+}
+
+function buildGitIngestResult(
+  command: "ingest-commit" | "ingest-git",
+  runtime: IngestRuntime,
+  dryRun: boolean,
+  items: GitIngestItemResult[],
+  since?: string,
+  resolvedSince?: string,
+): GitIngestResult {
+  return {
+    command,
+    workspaceId: runtime.workspace.id,
+    repoPath: runtime.config.repoPath,
+    dryRun,
+    ...(since ? { since } : {}),
+    ...(resolvedSince ? { resolvedSince } : {}),
+    total: items.length,
+    planned: items.filter((item) => item.status !== "skipped-noise").length,
+    submitted: items.filter((item) => item.status === "submitted").length,
+    queued: items.filter((item) => item.status === "queued").length,
+    skippedNoise: items.filter((item) => item.status === "skipped-noise").length,
+    duplicate: items.filter((item) => item.status === "duplicate").length,
+    candidatesSubmitted: 0,
+    candidatesQueued: 0,
+    candidatesDuplicate: 0,
+    items,
+  };
+}
+
+function parseIngestCommitRef(args: string[]): string {
+  const positionals: string[] = [];
+  let commit: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--commit") {
+      commit = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--since") {
+      throw new Error("ingest-commit does not accept --since; pass a commit ref or --commit <ref>.");
+    }
+    if (arg.startsWith("--")) {
+      throw new Error(`Unknown ingest-commit option: ${arg}`);
+    }
+    positionals.push(arg);
+  }
+  if (positionals.length > 1) {
+    throw new Error("ingest-commit accepts at most one commit ref.");
+  }
+  return commit ?? positionals[0] ?? "HEAD";
+}
+
+function parseIngestGitSince(args: string[]): string {
+  let since: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--since") {
+      since = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--commit") {
+      throw new Error("ingest-git does not accept --commit; use ingest-commit <ref>.");
+    }
+    if (arg.startsWith("--")) {
+      throw new Error(`Unknown ingest-git option: ${arg}`);
+    }
+    throw new Error(`Unexpected ingest-git argument: ${arg}`);
+  }
+  if (!since) {
+    throw new Error("ingest-git requires --since <ref> (or --since last-rorca-run).");
+  }
+  return since;
 }
 
 async function runRemember(args: string[], parsed: ParsedArgs, deps: CliDeps): Promise<RememberResult> {
@@ -599,6 +880,29 @@ function validateRelatedFiles(files: string[], config: CaptureConfig): string[] 
     unique.add(normalized);
   }
   return [...unique];
+}
+
+function formatGitIngestResult(result: GitIngestResult): string {
+  if (result.command === "ingest-commit") {
+    const item = result.items[0];
+    if (!item) return "No commit found to ingest.\n";
+    if (item.status === "dry-run") {
+      return `Dry run: would submit git commit ${item.shortSha} (${item.relatedFiles.length} files, ${item.idempotencyKey}).\n`;
+    }
+    if (item.status === "skipped-noise") {
+      return `Skipped noisy git commit ${item.shortSha}: ${item.noiseReason ?? "noise"}.\n`;
+    }
+    if (item.status === "duplicate") {
+      return `Git commit already captured: ${item.shortSha}.\n`;
+    }
+    if (item.status === "queued") {
+      return `Rorca API unreachable or unavailable; queued git commit ${item.shortSha} at ${item.queuePath} (${item.idempotencyKey}).\n`;
+    }
+    return `Git commit captured: ${item.shortSha}.\n`;
+  }
+
+  const prefix = result.dryRun ? "Dry-run git ingestion" : "Git ingestion";
+  return `${prefix} complete: submitted=${result.submitted}, queued=${result.queued}, skipped-noise=${result.skippedNoise}, duplicate=${result.duplicate}, total=${result.total}, candidates-submitted=${result.candidatesSubmitted}, candidates-queued=${result.candidatesQueued}, candidates-duplicate=${result.candidatesDuplicate}\n`;
 }
 
 function formatRememberResult(result: RememberResult): string {

@@ -98,6 +98,7 @@ async function assertWorkspace(workspaceId: string): Promise<void> {
 
 async function emitContextEventCreated(event: ContextEventResponse, duplicate: boolean): Promise<void> {
   try {
+    const walEventType = event.eventType === 'git_commit' ? 'git_commit' : 'context_event_ingested';
     const payload = JSON.stringify({
       contextEventId: event.id,
       eventType: event.eventType,
@@ -106,17 +107,18 @@ async function emitContextEventCreated(event: ContextEventResponse, duplicate: b
       trustTier: event.trustTier,
       duplicate,
       relatedFiles: event.relatedFiles,
+      metadata: event.metadata,
     });
     const walEvent = await queryOne<{ id: number }>(
       `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
        VALUES ($1, $2, $3, $4::jsonb)
        RETURNING id`,
-      ['context_event_ingested', event.workspaceId, event.actor ?? 'context-capture', payload],
+      [walEventType, event.workspaceId, event.actor ?? 'context-capture', payload],
     );
     if (walEvent) {
       broadcastAll({
         id: walEvent.id,
-        event_type: 'context_event_ingested',
+        event_type: walEventType,
         workspace_id: event.workspaceId,
         spec_id: null,
         story_id: null,

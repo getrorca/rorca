@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,6 +19,45 @@ function tokenFile(repo: string): string {
   chmodSync(tokenPath, 0o600);
   return tokenPath;
 }
+
+function initGitRepo(repo: string): void {
+  git(repo, ["init", "-b", "main"]);
+  git(repo, ["config", "user.name", "Rorca Test"]);
+  git(repo, ["config", "user.email", "rorca@example.test"]);
+}
+
+function commitFile(repo: string, filePath: string, content: string, message: string, isoDate?: string): string {
+  const absolute = path.join(repo, filePath);
+  mkdirSync(path.dirname(absolute), { recursive: true });
+  writeFileSync(absolute, content, "utf8");
+  git(repo, ["add", filePath]);
+  git(repo, ["commit", "-m", message], isoDate ? { GIT_AUTHOR_DATE: isoDate, GIT_COMMITTER_DATE: isoDate } : undefined);
+  return git(repo, ["rev-parse", "HEAD"]).trim();
+}
+
+function git(repo: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
+  return execFileSync("git", args, {
+    cwd: repo,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...env },
+  });
+}
+
+function workspaceFetch(repo: string, workspaceId: string, onPost?: (url: string, body: any) => Response): CaptureFetchMock {
+  return async (url, init) => {
+    const textUrl = String(url);
+    if (textUrl.endsWith("/api/workspaces")) {
+      return new Response(JSON.stringify({ items: [{ id: workspaceId, label: "Workspace", path: repo }] }), { status: 200 });
+    }
+    if (init?.method === "POST" && onPost) {
+      return onPost(textUrl, init.body ? JSON.parse(String(init.body)) : undefined);
+    }
+    return new Response(JSON.stringify({ error: `Unexpected ${init?.method ?? "GET"} ${textUrl}` }), { status: 500 });
+  };
+}
+
+type CaptureFetchMock = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 function captureIO() {
   let stdout = "";
@@ -327,5 +367,255 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(1);
     expect(output.stderr).toContain("operatorAutoApprove=true");
     expect(called).toBe(false);
+  });
+
+  it("dry-runs ingest-commit without POST writes, queue entries, or API auth", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    const sha = commitFile(repo, "src/app.ts", "export const app = true;\n", "feat: add app");
+    const output = captureIO();
+    const posts: string[] = [];
+
+    const code = await runCli(["ingest-commit", sha, "--dry-run", "--json", "--workspace", "ws-git"], {
+      cwd: repo,
+      gitRoot: repo,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-git", (url) => {
+        posts.push(url);
+        return new Response("{}", { status: 500 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(output.stderr).toBe("");
+    expect(posts).toEqual([]);
+    const parsed = JSON.parse(output.stdout) as { dryRun: boolean; submitted: number; queued: number; items: Array<{ status: string; sha: string }> };
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.submitted).toBe(0);
+    expect(parsed.queued).toBe(0);
+    expect(parsed.items).toEqual([expect.objectContaining({ status: "dry-run", sha })]);
+  });
+
+  it("emits parseable JSON for ingest-commit submissions", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    const sha = commitFile(repo, "src/feature.ts", "export const feature = 1;\n", "feat: capture feature");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    const bodies: any[] = [];
+
+    const code = await runCli(["ingest-commit", sha, "--json", "--workspace", "ws-git-json", "--api-url", "http://api.test"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-git-json", (url, body) => {
+        expect(url).toBe("http://api.test/api/context-events");
+        bodies.push(body);
+        return new Response(JSON.stringify({ event: { id: "501" }, created: true, idempotent: false }), { status: 201 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(output.stderr).toBe("");
+    const parsed = JSON.parse(output.stdout) as { submitted: number; queued: number; skippedNoise: number; duplicate: number; items: Array<{ status: string }> };
+    expect(parsed).toMatchObject({ submitted: 1, queued: 0, skippedNoise: 0, duplicate: 0 });
+    expect(parsed.items[0]).toMatchObject({ status: "submitted" });
+    expect(bodies[0]).toMatchObject({
+      workspaceId: "ws-git-json",
+      eventType: "git_commit",
+      sourceSystem: "rorca-capture",
+      sourceRef: `git:${sha}`,
+      relatedFiles: ["src/feature.ts"],
+      trustTier: "agent_observation",
+    });
+    expect(bodies[0].idempotencyKey).toMatch(/^context-event:ws-git-json:git_commit:/);
+    expect(bodies[0].metadata.gitSha).toBe(sha);
+  });
+
+  it("queues ingest-commit submissions when the API is offline", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    const sha = commitFile(repo, "src/offline.ts", "export const offline = true;\n", "feat: offline capture");
+    const tokenPath = tokenFile(repo);
+    const queuePath = path.join(repo, ".rorca", "git-offline.ndjson");
+    const output = captureIO();
+
+    const code = await runCli(["ingest-commit", sha, "--workspace", "ws-offline-git", "--queue-path", queuePath, "--json"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: async () => {
+        throw new TypeError("fetch failed");
+      },
+    });
+
+    expect(code).toBe(0);
+    const parsed = JSON.parse(output.stdout) as { queued: number; duplicate: number; items: Array<{ status: string }> };
+    expect(parsed).toMatchObject({ queued: 1, duplicate: 0 });
+    expect(parsed.items[0].status).toBe("queued");
+    const queued = JSON.parse(readFileSync(queuePath, "utf8").trim()) as { endpoint: string; eventType: string; payload: any; key: string };
+    expect(queued.endpoint).toBe("/api/context-events");
+    expect(queued.eventType).toBe("git_commit");
+    expect(queued.payload.workspaceId).toBe("ws-offline-git");
+    expect(queued.payload.metadata.gitSha).toBe(sha);
+  });
+
+  it("reports duplicate ingest-commit submissions without inserting again", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    const sha = commitFile(repo, "src/duplicate.ts", "export const duplicate = true;\n", "feat: duplicate capture");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+
+    const code = await runCli(["ingest-commit", sha, "--json", "--workspace", "ws-dupe"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-dupe", () => new Response(JSON.stringify({ event: { id: "already" }, created: false, idempotent: true }), { status: 200 })),
+    });
+
+    expect(code).toBe(0);
+    const parsed = JSON.parse(output.stdout) as { submitted: number; duplicate: number; items: Array<{ status: string; eventId: string }> };
+    expect(parsed.submitted).toBe(0);
+    expect(parsed.duplicate).toBe(1);
+    expect(parsed.items[0]).toMatchObject({ status: "duplicate", eventId: "already" });
+  });
+
+  it("skips noisy commits using context-safety path filters", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    const sha = commitFile(repo, ".env", "SECRET_TOKEN=value\n", "chore: local env noise");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    const posts: string[] = [];
+
+    const code = await runCli(["ingest-commit", sha, "--json", "--workspace", "ws-noise"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-noise", (url) => {
+        posts.push(url);
+        return new Response("{}", { status: 500 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(posts).toEqual([]);
+    const parsed = JSON.parse(output.stdout) as { skippedNoise: number; items: Array<{ status: string; noiseReason: string }> };
+    expect(parsed.skippedNoise).toBe(1);
+    expect(parsed.items[0]).toMatchObject({ status: "skipped-noise", noiseReason: "all-changed-paths-ignored" });
+  });
+
+  it("ingest-git scans ranges oldest-first and counts submitted, skipped, and duplicates", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    const base = commitFile(repo, "src/base.ts", "export const base = true;\n", "feat: base");
+    const noisy = commitFile(repo, ".env", "SECRET_TOKEN=value\n", "chore: env noise");
+    const useful = commitFile(repo, "src/useful.ts", "export const useful = true;\n", "feat: useful");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    const submittedShas: string[] = [];
+
+    const code = await runCli(["ingest-git", "--since", base, "--json", "--workspace", "ws-range"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-range", (_url, body) => {
+        submittedShas.push(body.metadata.gitSha);
+        const duplicate = body.metadata.gitSha === useful;
+        return new Response(JSON.stringify({ event: { id: duplicate ? "existing" : "created" }, created: !duplicate, idempotent: duplicate }), { status: duplicate ? 200 : 201 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(submittedShas).toEqual([useful]);
+    expect(noisy).toMatch(/^[0-9a-f]{40}$/);
+    const parsed = JSON.parse(output.stdout) as { total: number; submitted: number; skippedNoise: number; duplicate: number; items: Array<{ sha: string; status: string }> };
+    expect(parsed).toMatchObject({ total: 2, submitted: 0, skippedNoise: 1, duplicate: 1 });
+    expect(parsed.items.map((item) => item.sha)).toEqual([noisy, useful]);
+    expect(parsed.items.map((item) => item.status)).toEqual(["skipped-noise", "duplicate"]);
+  });
+
+  it("resolves --since last-rorca-run through the API pointer", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    const before = commitFile(repo, "src/before.ts", "export const before = true;\n", "feat: before", "2026-01-01T00:00:00Z");
+    const after = commitFile(repo, "src/after.ts", "export const after = true;\n", "feat: after", "2026-01-02T00:00:00Z");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    const posted: string[] = [];
+
+    const code = await runCli(["ingest-git", "--since", "last-rorca-run", "--json", "--workspace", "ws-last"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: async (url, init) => {
+        const textUrl = String(url);
+        if (textUrl.endsWith("/api/workspaces")) {
+          return new Response(JSON.stringify({ items: [{ id: "ws-last", path: repo }] }), { status: 200 });
+        }
+        if (textUrl.endsWith("/api/workspaces/ws-last/capture/last-rorca-run")) {
+          return new Response(JSON.stringify({ workspaceId: "ws-last", finishedAt: "2026-01-01T12:00:00.000Z" }), { status: 200 });
+        }
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body));
+          posted.push(body.metadata.gitSha);
+          return new Response(JSON.stringify({ event: { id: "601" }, created: true }), { status: 201 });
+        }
+        return new Response("{}", { status: 500 });
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(before).toMatch(/^[0-9a-f]{40}$/);
+    expect(posted).toEqual([after]);
+    const parsed = JSON.parse(output.stdout) as { resolvedSince: string; submitted: number; items: Array<{ sha: string }> };
+    expect(parsed.resolvedSince).toBe(before);
+    expect(parsed.submitted).toBe(1);
+    expect(parsed.items[0].sha).toBe(after);
+  });
+
+  it("returns an actionable error when --since last-rorca-run has no pointer", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    commitFile(repo, "src/app.ts", "export const app = true;\n", "feat: app");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+
+    const code = await runCli(["ingest-git", "--since", "last-rorca-run", "--workspace", "ws-empty"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: async (url) => {
+        const textUrl = String(url);
+        if (textUrl.endsWith("/api/workspaces")) {
+          return new Response(JSON.stringify({ items: [{ id: "ws-empty", path: repo }] }), { status: 200 });
+        }
+        if (textUrl.endsWith("/api/workspaces/ws-empty/capture/last-rorca-run")) {
+          return new Response(JSON.stringify({ error: "No completed Rorca pipeline run found for workspace 'ws-empty'. Run a pipeline successfully first or pass --since <git-ref>.", code: "CAPTURE_POINTER_NOT_FOUND" }), { status: 422 });
+        }
+        return new Response("{}", { status: 500 });
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(output.stdout).toBe("");
+    expect(output.stderr).toContain("No completed Rorca pipeline run found");
+    expect(output.stderr).toContain("pass --since <git-ref>");
   });
 });
