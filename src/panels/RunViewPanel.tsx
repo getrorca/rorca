@@ -136,7 +136,7 @@ interface CommitEntry {
 type RunViewTab = 'terminal' | 'stories' | 'inspector' | 'graph' | 'skills' | 'finops' | 'compare' | 'worktrees' | 'commits';
 
 const TABS: { id: RunViewTab; label: string; icon: typeof ScrollText }[] = [
-  { id: 'terminal', label: 'Execution Trace', icon: ScrollText },
+  { id: 'terminal', label: 'Terminal', icon: ScrollText },
   { id: 'stories', label: 'Stories', icon: List },
   { id: 'inspector', label: 'Context', icon: Layers },
   { id: 'graph', label: 'Graph', icon: GitBranch },
@@ -968,6 +968,12 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const handleTabChange = useCallback((tab: RunViewTab) => {
     setActiveTab(tab);
   }, []);
+
+  // New/deep-linked runs should always open on live execution output.
+  // Do not carry a previous run's Stories/Graph/etc. tab into a fresh execution.
+  useEffect(() => {
+    setActiveTab('terminal');
+  }, [runId]);
 
   // SSE for live status updates — scoped to workspace
   const walEvents = usePipelineSSE(String(runId), workspaceId);
