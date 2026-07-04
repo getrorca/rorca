@@ -65,14 +65,15 @@ describe('Error classes', () => {
     expect(err.message).toBe('Spec not found');
   });
 
-  test('ConflictError has 409 status', () => {
-    const err = new ConflictError('Run already active');
+  test('ConflictError has 409 status and optional details', () => {
+    const err = new ConflictError('Run already active', { activeRunId: 123 });
     expect(err.statusCode).toBe(409);
     expect(err.code).toBe('CONFLICT');
+    expect(err.details).toEqual({ activeRunId: 123 });
   });
 
   test('UnprocessableError has 422 status and supports details', () => {
-    const err = new UnprocessableError('Hook failed', { hookCommand: 'lint', exitCode: 1 });
+    const err = new UnprocessableError('Hook failed', undefined, { hookCommand: 'lint', exitCode: 1 });
     expect(err.statusCode).toBe(422);
     expect(err.code).toBe('UNPROCESSABLE');
     expect(err.details).toEqual({ hookCommand: 'lint', exitCode: 1 });
