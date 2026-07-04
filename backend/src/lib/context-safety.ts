@@ -15,6 +15,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 
 export const CONTEXT_SAFETY_CONTRACT_VERSION = 'rorca-context-safety/v1';
@@ -109,6 +110,22 @@ export function normalizeContextPath(input: string): string {
   return input.split(path.sep).join('/').replace(/^\.\//, '');
 }
 
+export function safeNormalizeWorkspaceRelativePath(workspacePath: string, inputPath: string): string {
+  const rawWorkspaceRoot = path.resolve(workspacePath);
+  const workspaceRoot = resolveContextPathForComparison(rawWorkspaceRoot);
+  const rawAbsolutePath = path.isAbsolute(inputPath)
+    ? path.resolve(inputPath)
+    : path.resolve(rawWorkspaceRoot, inputPath);
+  const absolutePath = resolveWorkspaceComparablePath(rawWorkspaceRoot, workspaceRoot, rawAbsolutePath);
+  const relativePath = path.relative(workspaceRoot, absolutePath);
+
+  if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
+    throw new Error(`Path escapes workspace: ${inputPath}`);
+  }
+
+  return normalizeContextPath(relativePath);
+}
+
 export function normalizeContextIgnoreSettings(settings: ContextIgnoreSettings = {}): NormalizedContextIgnoreSettings {
   return {
     paths: [...DEFAULT_CONTEXT_IGNORE_PATHS, ...(settings.paths ?? [])],
@@ -135,9 +152,23 @@ export function normalizeContextRedactionSettings(
 }
 
 export function shouldCapturePath(relativePath: string, settings: ContextIgnoreSettings = {}): boolean {
+  return !isContextPathIgnored(relativePath, settings);
+}
+
+export function isContextPathIgnored(relativePath: string, settings: ContextIgnoreSettings = {}): boolean {
   const normalized = normalizeContextPath(relativePath);
   const ignore = normalizeContextIgnoreSettings(settings);
-  return !ignore.paths.some((pattern) => globMatches(normalized, normalizeContextPath(pattern)));
+  let ignored = false;
+
+  for (const rawPattern of ignore.paths) {
+    const prepared = prepareIgnorePattern(rawPattern);
+    if (!prepared) continue;
+    if (globMatches(normalized, prepared.pattern)) {
+      ignored = !prepared.negated;
+    }
+  }
+
+  return ignored;
 }
 
 export function enforceContextSizeLimit(
@@ -208,15 +239,59 @@ function positiveNumberOrDefault(value: number | undefined, fallback: number): n
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function resolveContextPathForComparison(inputPath: string): string {
+  const resolved = path.resolve(inputPath);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function resolveWorkspaceComparablePath(rawWorkspaceRoot: string, workspaceRoot: string, rawAbsolutePath: string): string {
+  const relativeToRawRoot = path.relative(rawWorkspaceRoot, rawAbsolutePath);
+  if (relativeToRawRoot === '') return workspaceRoot;
+  if (!relativeToRawRoot.startsWith(`..${path.sep}`) && relativeToRawRoot !== '..' && !path.isAbsolute(relativeToRawRoot)) {
+    return path.resolve(workspaceRoot, relativeToRawRoot);
+  }
+  return resolveContextPathForComparison(rawAbsolutePath);
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function prepareIgnorePattern(rawPattern: string): { pattern: string; negated: boolean } | null {
+  let pattern = normalizeContextPath(rawPattern.trim());
+  if (!pattern || pattern.startsWith('#')) return null;
+
+  const negated = pattern.startsWith('!');
+  if (negated) pattern = pattern.slice(1);
+  pattern = pattern.replace(/^\//, '');
+  if (!pattern || pattern.startsWith('#')) return null;
+  if (pattern.endsWith('/')) pattern = `${pattern}**`;
+
+  return { pattern, negated };
+}
+
 function globMatches(value: string, pattern: string): boolean {
+  if (pattern === value) return true;
+
+  if (!pattern.includes('/')) {
+    return value.split('/').some((segment) => globMatchesAnchored(segment, pattern));
+  }
+
+  if (globMatchesAnchored(value, pattern)) return true;
+  return !pattern.startsWith('**/') && globMatchesAnchored(value, `**/${pattern}`);
+}
+
+function globMatchesAnchored(value: string, pattern: string): boolean {
   if (pattern === value) return true;
   if (pattern.endsWith('/**')) {
     const prefix = pattern.slice(0, -3);
-    return value === prefix.slice(0, -1) || value.startsWith(prefix);
+    if (!prefix.includes('*')) {
+      return value === prefix.slice(0, -1) || value.startsWith(prefix);
+    }
   }
 
   const regex = new RegExp(`^${globToRegexSource(pattern)}$`);
@@ -228,7 +303,11 @@ function globToRegexSource(pattern: string): string {
   for (let index = 0; index < pattern.length; index += 1) {
     const char = pattern[index];
     const next = pattern[index + 1];
-    if (char === '*' && next === '*') {
+    const afterNext = pattern[index + 2];
+    if (char === '*' && next === '*' && afterNext === '/') {
+      source += '(?:.*/)?';
+      index += 2;
+    } else if (char === '*' && next === '*') {
       source += '.*';
       index += 1;
     } else if (char === '*') {
