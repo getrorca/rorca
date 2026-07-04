@@ -36,6 +36,8 @@ export const DEFAULT_CONTEXT_IGNORE_PATHS = [
   '.cache/**',
   '.rorca/capture-queue.ndjson',
   '.rorca/capture-queue/**',
+  '.rorca-capture-queue.jsonl',
+  '.rorca-capture-queue.jsonl.tmp',
   '*.pem',
   '*.key',
   '*.p12',
@@ -95,6 +97,12 @@ export type NormalizedContextRedactionSettings = {
   enabled: boolean;
   patterns: ContextRedactionPattern[];
   replacement: string;
+};
+
+export type ContextPayloadRedactionOptions = {
+  repoPath?: string;
+  pathReplacement?: string;
+  workspacePathReplacement?: string;
 };
 
 export function normalizeContextPath(input: string): string {
@@ -159,8 +167,49 @@ export function redactContextText(text: string, settings: ContextRedactionSettin
   }, text);
 }
 
+export function redactContextPayload(
+  value: unknown,
+  settings: ContextRedactionSettings = {},
+  options: ContextPayloadRedactionOptions = {},
+): unknown {
+  if (typeof value === 'string') {
+    return redactContextText(redactAbsoluteContextPaths(value, options), settings);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactContextPayload(item, settings, options));
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record).sort().map((key) => [key, redactContextPayload(record[key], settings, options)]),
+    );
+  }
+  return value;
+}
+
+export function redactAbsoluteContextPaths(text: string, options: ContextPayloadRedactionOptions = {}): string {
+  const pathReplacement = options.pathReplacement ?? '[REDACTED_PATH]';
+  const workspacePathReplacement = options.workspacePathReplacement ?? '[WORKSPACE]';
+  const repoPath = options.repoPath ? path.resolve(options.repoPath) : undefined;
+  let redacted = text;
+
+  if (repoPath) {
+    const repoVariants = [...new Set([repoPath, normalizeContextPath(repoPath)])];
+    for (const variant of repoVariants) {
+      redacted = redacted.replace(new RegExp(escapeRegex(variant), 'g'), workspacePathReplacement);
+    }
+  }
+
+  return redacted
+    .replace(/(^|[\s"'([{,:])((?:\/(?:Users|home|tmp|var|private|Volumes|opt|srv|etc|mnt|workspace|workspaces)[^\s"'<>()[\]{},;]*)|(?:[A-Za-z]:\\[^\s"'<>()[\]{},;]+))/g, `$1${pathReplacement}`);
+}
+
 function positiveNumberOrDefault(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function globMatches(value: string, pattern: string): boolean {

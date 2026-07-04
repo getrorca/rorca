@@ -68,7 +68,7 @@ describe("rorca-capture config discovery", () => {
 
     expect(config.apiUrl).toBe("http://localhost:3030");
     expect(config.repoPath).toBe(repo);
-    expect(config.queuePath).toBe(path.join(repo, ".rorca", "capture-queue.ndjson"));
+    expect(config.queuePath).toBe(path.join(repo, ".rorca-capture-queue.jsonl"));
     expect(config.mode).toBe("local");
     expect(config.apiOnly).toBe(true);
   });

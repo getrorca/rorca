@@ -20,6 +20,7 @@ This contract implements the product requirements in [`docs/prds/rorca-context-c
 - `install-hooks`
 - `daemon`
 - `status`
+- `flush` — replays `.rorca-capture-queue.jsonl` through the same API client, draining only successfully submitted entries.
 
 ## Non-negotiable API-only boundary
 
@@ -62,7 +63,7 @@ Supported fields:
   "apiUrl": "http://localhost:3030",
   "workspaceId": "rorca",
   "repoPath": "/path/to/repo",
-  "queuePath": ".rorca/capture-queue.ndjson",
+  "queuePath": ".rorca-capture-queue.jsonl",
   "mode": "local",
   "ignore": {
     "paths": ["node_modules/**", ".git/**"],
@@ -111,7 +112,13 @@ Text and JSON status include:
 
 `rorca-capture remember <text>` accepts `--category`, `--title`, `--files`, `--source`, `--confidence`, `--trust`/`--trust-tier`, `--workspace`, `--api-url`, and `--approve`.
 
-Before any API submission it validates the category enum, validates related files stay inside the workspace and are not ignored/oversized by the context-safety contract, and redacts sensitive text. Explicit `--source` values generate source-key idempotency; omitted sources use content-hash idempotency. If the API is unreachable, the candidate is appended to the configured NDJSON queue path for later replay.
+Before any API submission it validates the category enum, validates related files stay inside the workspace and are not ignored/oversized by the context-safety contract, and redacts sensitive text. Explicit `--source` values generate source-key idempotency; omitted sources use content-hash idempotency. If the API is unreachable or temporarily unavailable, the candidate is written to the configured JSONL queue path for later replay.
+
+## Offline queue and flush
+
+The default local queue is `<repo>/.rorca-capture-queue.jsonl` (override with `RORCA_QUEUE_PATH`/`--queue-path`). Queue writes normalize payloads to JSON-safe objects, redact secrets and absolute paths before disk, derive deterministic entry keys from `eventType + contentFingerprint`, and initialize retry metadata (`attempts`, `retryable`, `lastError`, `nextRetryAt`).
+
+`rorca-capture flush` processes entries one at a time. A successful API submission is atomically removed from the JSONL file; a failed submission remains with incremented attempts, a sanitized `lastError`, and retry timing when retryable. API 4xx failures are marked non-retryable unless `--force` is used.
 
 ## Safety/redaction dependency
 

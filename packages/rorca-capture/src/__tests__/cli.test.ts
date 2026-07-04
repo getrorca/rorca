@@ -34,7 +34,7 @@ function captureIO() {
 
 describe("rorca-capture CLI", () => {
   it("exposes MVP commands in help", async () => {
-    for (const command of ["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status"]) {
+    for (const command of ["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]) {
       expect(HELP_TEXT).toContain(command);
     }
     expect(HELP_TEXT).toContain("rorca capture <command>");
@@ -68,7 +68,7 @@ describe("rorca-capture CLI", () => {
     expect(output.stdout).toContain("Workspace: ws-1 (path)");
     expect(output.stdout).toContain("Queue path:");
     expect(output.stdout).toContain("API-only: yes");
-    expect(output.stdout).toContain("Commands: remember, ingest-commit, ingest-git, install-hooks, daemon, status");
+    expect(output.stdout).toContain("Commands: remember, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
   });
 
   it("supports JSON status output shape", async () => {
@@ -90,7 +90,7 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(output.stdout) as { ok: boolean; workspaceId: string; apiOnly: boolean; commands: string[] };
     expect(parsed).toMatchObject({ ok: true, workspaceId: "ws-2", apiOnly: true });
-    expect(parsed.commands).toEqual(["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status"]);
+    expect(parsed.commands).toEqual(["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]);
   });
 
   it("formats status text without invoking the API", () => {
@@ -238,9 +238,11 @@ describe("rorca-capture CLI", () => {
 
     expect(code).toBe(0);
     expect(output.stdout).toContain("queued memory candidate");
-    const queued = JSON.parse(readFileSync(queuePath, "utf8").trim()) as { endpoint: string; payload: any; approveRequested: boolean };
+    const queued = JSON.parse(readFileSync(queuePath, "utf8").trim()) as { endpoint: string; payload: any; attempts: number; retryable: boolean; key: string };
     expect(queued.endpoint).toBe("/api/memory/candidates");
-    expect(queued.approveRequested).toBe(false);
+    expect(queued.attempts).toBe(0);
+    expect(queued.retryable).toBe(true);
+    expect(queued.key).toMatch(/^capture:/);
     expect(queued.payload.workspaceId).toBe("ws-offline");
     expect(queued.payload.idempotencyKey).toMatch(/^memory-candidate:ws-offline:content:/);
   });

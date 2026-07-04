@@ -11,7 +11,7 @@ import {
 } from "./context-safety.js";
 
 export const DEFAULT_RORCA_API_URL = "http://localhost:3030";
-export const DEFAULT_CAPTURE_QUEUE_RELATIVE_PATH = ".rorca/capture-queue.ndjson";
+export const DEFAULT_CAPTURE_QUEUE_RELATIVE_PATH = ".rorca-capture-queue.jsonl";
 
 export type CaptureMode = "local" | "vm" | "ci";
 export type ConfigSource = "flag" | "env" | "rorca-config" | "capture-config" | "auto";

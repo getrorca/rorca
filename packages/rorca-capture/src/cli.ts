@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CaptureApiError,
-  CaptureNotFoundError,
+  CaptureNetworkError,
   createApiClient,
+  createCaptureClient,
+  formatCaptureError,
   inspectMcpToken,
   resolveWorkspace,
   type CaptureFetch,
   type CaptureApiClient,
+  type CaptureFlushResult,
   type ResolvedWorkspace,
 } from "./api.js";
 import { resolveCaptureConfig, type CaptureConfig, type CaptureConfigValues, type CaptureMode } from "./config.js";
@@ -37,6 +39,7 @@ MVP commands:
   install-hooks          Install local git hooks that call rorca-capture
   daemon                 Run the sidecar daemon contract (MVP status heartbeat)
   status                 Print resolved config, workspace, queue, token, and safety state
+  flush                  Replay the local .rorca-capture-queue.jsonl queue safely
 
 Configuration discovery order:
   1. Env vars: RORCA_API_URL, RORCA_WORKSPACE_ID, RORCA_QUEUE_PATH
@@ -52,6 +55,7 @@ Global options:
   --queue-path <path>    Override local queue path for this invocation
   --mode <local|vm|ci>   Set capture mode
   --approve              For remember: approve after submit only when capture config permits operator auto-approval
+  --force                For flush: retry entries even when nextRetryAt is in the future or retryable=false
   --ci                   Force CI mode; missing config is a hard error
   --json                 Emit JSON where supported
   -h, --help             Show this help
@@ -165,8 +169,8 @@ type RememberApproveResponse = {
 };
 
 type RememberResult =
-  | { status: "submitted"; candidateId: string | null; created: boolean; idempotent: boolean; approved: boolean; alreadyApproved: boolean }
-  | { status: "queued"; queuePath: string; idempotencyKey: string; approveRequested: boolean };
+  | { status: "submitted"; candidateId: string | null; created: boolean; idempotent: boolean; approved: boolean; alreadyApproved: boolean; approvalQueued: boolean }
+  | { status: "queued"; queuePath: string; idempotencyKey: string; approveRequested: boolean; duplicate: boolean };
 
 export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): Promise<number> {
   const io = deps.io ?? { stdout: process.stdout, stderr: process.stderr };
@@ -204,6 +208,12 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
       const statusCode = await runStatus(parsed, deps, io);
       io.stdout.write("Daemon MVP: status heartbeat complete; long-running watcher is reserved for the next implementation slice.\n");
       return statusCode;
+    }
+
+    if (parsed.command === "flush") {
+      const result = await runFlush(parsed, deps);
+      io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : formatFlushResult(result));
+      return result.failed === 0 ? 0 : 1;
     }
 
     if (parsed.command === "remember") {
@@ -262,6 +272,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (arg === "--ci") {
       ci = true;
       overrides.mode = "ci";
+      continue;
+    }
+    if (arg === "--force") {
+      rest.push(arg);
       continue;
     }
     if (arg === "--api-url") {
@@ -338,6 +352,18 @@ async function resolveRuntime(parsed: ParsedArgs, deps: CliDeps): Promise<Runtim
   return { config, client, workspace };
 }
 
+async function runFlush(parsed: ParsedArgs, deps: CliDeps): Promise<CaptureFlushResult> {
+  const config = resolveCaptureConfig({
+    cwd: deps.cwd,
+    env: deps.env,
+    ci: parsed.ci,
+    overrides: parsed.overrides,
+    gitRoot: deps.gitRoot,
+  });
+  const client = createCaptureClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  return await client.flushQueue({ force: parsed.rest.includes("--force") });
+}
+
 async function runRemember(args: string[], parsed: ParsedArgs, deps: CliDeps): Promise<RememberResult> {
   const options = parseRememberArgs(args);
   const config = resolveCaptureConfig({
@@ -353,47 +379,45 @@ async function runRemember(args: string[], parsed: ParsedArgs, deps: CliDeps): P
   }
 
   const relatedFiles = validateRelatedFiles(options.files, config);
-  const client = createApiClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  const client = createCaptureClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
   const workspace = await resolveRememberWorkspace(config, client);
   const payload = buildRememberPayload(options, config, workspace.id, relatedFiles);
+  const approvalPayload = {
+    workspaceId: workspace.id,
+    reviewer: "local-operator",
+    source: options.sourceRef ?? `rorca-capture:${payload.idempotencyKey}`,
+  };
 
-  let response: RememberApiResponse;
-  try {
-    response = await client.post<RememberApiResponse>(REMEMBER_ENDPOINT, payload);
-  } catch (error) {
-    if (!isOfflineError(error)) throw error;
-    enqueueRememberPayload(config, payload, options.approve);
+  const submission = await client.submitCandidate<RememberApiResponse>(payload, {
+    endpoint: REMEMBER_ENDPOINT,
+    approvalEndpointBase: REMEMBER_ENDPOINT,
+    approve: options.approve,
+    approvalPayload,
+    eventType: payload.eventType,
+  });
+
+  if (submission.status === "queued") {
     return {
       status: "queued",
-      queuePath: config.queuePath,
+      queuePath: submission.queuePath,
       idempotencyKey: payload.idempotencyKey,
       approveRequested: options.approve,
+      duplicate: submission.duplicate,
     };
   }
 
+  const response = submission.response;
+  const approval = submission.approval as RememberApproveResponse | undefined;
   const candidateId = response.candidate?.id ?? null;
-  let approved = false;
-  let alreadyApproved = false;
-  if (options.approve) {
-    if (!candidateId) {
-      throw new Error("Rorca API did not return a candidate id to approve.");
-    }
-    const approval = await client.post<RememberApproveResponse>(`${REMEMBER_ENDPOINT}/${encodeURIComponent(candidateId)}/approve`, {
-      workspaceId: workspace.id,
-      reviewer: "local-operator",
-      source: options.sourceRef ?? `rorca-capture:${candidateId}`,
-    });
-    approved = approval.approved === true;
-    alreadyApproved = approval.alreadyApproved === true;
-  }
 
   return {
     status: "submitted",
     candidateId,
     created: response.created !== false,
     idempotent: response.idempotent === true,
-    approved,
-    alreadyApproved,
+    approved: approval?.approved === true,
+    alreadyApproved: approval?.alreadyApproved === true,
+    approvalQueued: Boolean(submission.approvalQueued),
   };
 }
 
@@ -577,31 +601,28 @@ function validateRelatedFiles(files: string[], config: CaptureConfig): string[] 
   return [...unique];
 }
 
-function enqueueRememberPayload(config: CaptureConfig, payload: RememberPayload, approveRequested: boolean): void {
-  mkdirSync(path.dirname(config.queuePath), { recursive: true });
-  appendFileSync(config.queuePath, `${JSON.stringify({
-    version: 1,
-    queuedAt: new Date().toISOString(),
-    command: "remember",
-    method: "POST",
-    apiUrl: config.apiUrl,
-    endpoint: REMEMBER_ENDPOINT,
-    approveRequested,
-    idempotencyKey: payload.idempotencyKey,
-    payload,
-  })}\n`, "utf8");
-}
-
 function formatRememberResult(result: RememberResult): string {
   if (result.status === "queued") {
-    return `Rorca API unreachable; queued memory candidate at ${result.queuePath} (${result.idempotencyKey}).\n`;
+    const action = result.duplicate ? "already queued" : "queued";
+    return `Rorca API unreachable or unavailable; ${action} memory candidate at ${result.queuePath} (${result.idempotencyKey}).\n`;
   }
   const pieces = [
     result.idempotent ? "Memory candidate already captured" : "Memory candidate submitted",
     result.candidateId ? `id=${result.candidateId}` : null,
-    result.approved ? (result.alreadyApproved ? "already approved" : "approved") : "pending",
+    result.approvalQueued ? "approval queued" : result.approved ? (result.alreadyApproved ? "already approved" : "approved") : "pending",
   ].filter(Boolean);
   return `${pieces.join("; ")}\n`;
+}
+
+function formatFlushResult(result: CaptureFlushResult): string {
+  const lines = [
+    `Capture queue flush complete: submitted=${result.submitted}, failed=${result.failed}, skipped=${result.skipped}, remaining=${result.remaining}`,
+    `Queue path: ${result.queuePath}`,
+  ];
+  for (const failure of result.failures) {
+    lines.push(`- ${failure.key}: ${failure.message}${failure.retryable ? "" : " (not retryable without --force)"}`);
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function splitFiles(value: string): string[] {
@@ -633,7 +654,7 @@ function stableStringify(value: unknown): string {
 }
 
 function isOfflineError(error: unknown): boolean {
-  return !(error instanceof CaptureApiError) && !(error instanceof CaptureNotFoundError);
+  return error instanceof CaptureNetworkError;
 }
 
 function installHooks(config: CaptureConfig): void {
@@ -680,11 +701,7 @@ function positionalArgs(args: string[]): string[] {
 }
 
 function formatError(error: unknown): string {
-  if (error && typeof error === "object" && "toJSON" in error && typeof error.toJSON === "function") {
-    const json = error.toJSON() as { error?: string; code?: string };
-    return json.code ? `${json.code}: ${json.error ?? "Unknown error"}` : json.error ?? "Unknown error";
-  }
-  return error instanceof Error ? error.message : String(error);
+  return formatCaptureError(error);
 }
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

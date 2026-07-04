@@ -2,7 +2,7 @@ import type { CaptureConfig } from "./config.js";
 import type { ResolvedWorkspace, TokenStatus } from "./api.js";
 import { CONTEXT_SAFETY_CONTRACT_VERSION } from "./context-safety.js";
 
-export const MVP_COMMANDS = ["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status"] as const;
+export const MVP_COMMANDS = ["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"] as const;
 
 export type CaptureStatus = {
   ok: boolean;
