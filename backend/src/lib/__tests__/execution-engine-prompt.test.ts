@@ -35,8 +35,10 @@ describe('execution-engine prompt delivery hardening', () => {
     );
 
     expect(command.command).toBe('/usr/bin/pi-test-double');
-    expect(command.args).toContain('run');
-    expect(command.args).toContain('--jsonl');
+    expect(command.args).toContain('--print');
+    expect(command.args).toEqual(expect.arrayContaining(['--mode', 'text']));
+    expect(command.args).not.toContain('run');
+    expect(command.args).not.toContain('--jsonl');
     expect(command.args.some((arg: string) => arg.startsWith('@'))).toBe(false);
     expect(command.prompt).toBe(prompt);
     expect(command.writePromptToStdin).toBe(true);

@@ -2091,8 +2091,8 @@ export function buildPtyCommand(
       return {
         command: PI_BIN,
         args: [
-          'run',
-          '--jsonl',
+          '--print',
+          '--mode', 'text',
           '--no-extensions',
           '--tools', 'read,bash,edit,write,grep,find,ls',
           '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
