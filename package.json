@@ -7,7 +7,8 @@
     "packages/*"
   ],
   "bin": {
-    "rorca": "./bin/rorca.js"
+    "rorca": "./bin/rorca.js",
+    "rorca-capture": "./packages/rorca-capture/dist/cli.js"
   },
   "scripts": {
     "dev": "node scripts/dev-smart.mjs",
@@ -18,15 +19,16 @@
     "dev:server:contract": "cd backend && RORCA_DISABLE_BACKGROUND_RUNTIME=true npx tsx src/server.ts",
     "dev:worker": "cd backend && npx tsx src/worker.ts",
     "dev:worker:optional": "cd backend && RORCA_OPTIONAL_WORKER=true npx tsx src/worker.ts",
-    "build": "vite build && cd backend && tsc && cd .. && npx tsc --project bin/tsconfig.json",
+    "build": "vite build && cd backend && tsc && cd .. && npx tsc --project bin/tsconfig.json && npx tsc -p packages/rorca-capture/tsconfig.json",
     "build:contract": "npx tsx scripts/build-public-contract.ts",
     "check:contract": "npx tsx scripts/check-contract-stability.ts",
     "check:licenses": "npx tsx scripts/check-license-headers.ts",
     "check:license-boundaries": "npx tsx scripts/check-license-boundaries.ts",
     "split:check": "npx tsx scripts/check-opencore-export.ts",
     "sync:push": "node scripts/sync-opencore-push.mjs",
-    "typecheck": "tsc --noEmit && cd backend && tsc --noEmit && cd .. && npx tsc -p packages/rorca-pi-extension/tsconfig.json --noEmit && npx tsc -p packages/rorca-public-contract/tsconfig.json --noEmit",
+    "typecheck": "tsc --noEmit && cd backend && tsc --noEmit && cd .. && npx tsc -p packages/rorca-pi-extension/tsconfig.json --noEmit && npx tsc -p packages/rorca-public-contract/tsconfig.json --noEmit && npx tsc -p packages/rorca-capture/tsconfig.json --noEmit",
     "test:pi-extension": "npx vitest run --config packages/rorca-pi-extension/vitest.config.ts",
+    "test:capture": "npx vitest run --config packages/rorca-capture/vitest.config.ts",
     "lint": "npx eslint src/",
     "lint:swagger": "npx tsx scripts/check-swagger-coverage.ts",
     "lint:tier": "npx tsx scripts/check-rorca-tier-annotations.ts",
@@ -61,6 +63,7 @@
     "backend/package.json",
     "backend/package-lock.json",
     "packages/rorca-pi-extension/",
+    "packages/rorca-capture/",
     "forge/run-loop.sh",
     "forge/self-register.ts",
     "package.json",

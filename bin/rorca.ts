@@ -393,6 +393,34 @@ function runCommand(
   });
 }
 
+async function runCaptureAlias(args: string[]): Promise<number> {
+  const distEntry = path.join(ROOT_DIR, 'packages', 'rorca-capture', 'dist', 'cli.js');
+  const sourceEntry = path.join(ROOT_DIR, 'packages', 'rorca-capture', 'src', 'cli.ts');
+
+  if (existsSync(distEntry)) {
+    return spawnPassthrough(process.execPath, [distEntry, ...args]);
+  }
+
+  if (existsSync(sourceEntry)) {
+    return spawnPassthrough('npx', ['tsx', sourceEntry, ...args]);
+  }
+
+  console.error('rorca-capture entrypoint not found. Run `npm run build` first.');
+  return 1;
+}
+
+function spawnPassthrough(command: string, args: string[]): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: ROOT_DIR,
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
+    child.on('error', reject);
+    child.on('close', (code: number | null) => resolve(code ?? 1));
+  });
+}
+
 async function docker(args: string[], stdio: 'inherit' | 'pipe' = 'pipe') {
   return runCommand('docker', args, { stdio });
 }
@@ -3030,6 +3058,18 @@ program
   .option('--workspace-id <id>', 'Workspace to inject context from')
   .action(async (options: { model?: string; workspaceId?: string }) => {
     process.exitCode = await runChat(options);
+  });
+
+program
+  .command('capture')
+  .description('Thin alias for the standalone rorca-capture sidecar')
+  .helpOption(false)
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(async () => {
+    const captureIndex = process.argv.indexOf('capture');
+    const passthrough = captureIndex === -1 ? [] : process.argv.slice(captureIndex + 1);
+    process.exitCode = await runCaptureAlias(passthrough);
   });
 
 program
