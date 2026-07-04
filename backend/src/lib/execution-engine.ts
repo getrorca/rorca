@@ -1897,6 +1897,8 @@ interface PtyRunOptions {
   agentType: AgentType;
   cols: number;
   rows: number;
+  port?: number;
+  storyId?: string;
 }
 
 interface PtyProcessLike {
@@ -2134,6 +2136,7 @@ async function spawnAgentViaPty(
     let finishedWrites = Promise.resolve();
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let runTimer: ReturnType<typeof setTimeout> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2153,6 +2156,7 @@ async function spawnAgentViaPty(
       unregisterPtyCleanupTask = null;
       if (resizeTimer) clearInterval(resizeTimer);
       if (inputTimer) clearInterval(inputTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
@@ -2240,6 +2244,16 @@ async function spawnAgentViaPty(
       }, LLM_IDLE_TIMEOUT_MS);
     };
 
+    const writePtySystemMessage = (message: string): void => {
+      const buf = Buffer.from(message);
+      logStream.write(buf);
+      if (!sequenceRef) return;
+      const activeSequenceRef = sequenceRef;
+      finishedWrites = finishedWrites
+        .then(() => appendRunPtyOutput(ptyOptions.runId, buf, activeSequenceRef))
+        .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY system message', ptyOptions.runId, err));
+    };
+
     let sequenceRef: { value: number } | null = null;
 
     try {
@@ -2276,6 +2290,23 @@ async function spawnAgentViaPty(
       });
       unregisterPtyCleanupTask = registerPtyCleanupTask(`run-${ptyOptions.runId}`, () => requestPtyShutdown('SIGTERM'));
       resetInactivity();
+      heartbeatTimer = setInterval(() => {
+        const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
+        const msg = `[System] PTY heartbeat: ${ptyOptions.agentType} still running after ${elapsedSeconds}s; waiting for output...\n`;
+        writePtySystemMessage(msg);
+        recordStderr(Buffer.from(msg));
+        if (ptyOptions.port && ptyOptions.storyId) {
+          void emitWalEvent(ptyOptions.port, 'story_heartbeat', ptyOptions.workspaceId, {
+            run_id: ptyOptions.runId,
+            story_id: ptyOptions.storyId,
+            agent_type: ptyOptions.agentType,
+            terminal_mode: 'pty',
+            elapsed_seconds: elapsedSeconds,
+            message: 'Agent process is still running; no PTY output received since previous heartbeat.',
+          }, ptyOptions.storyId).catch(() => { /* emitWalEvent is already best-effort */ });
+        }
+      }, 30_000);
+      heartbeatTimer.unref?.();
       resizeTimer = setInterval(() => {
         void (async () => {
           if (!pty) return;
@@ -5047,6 +5078,8 @@ async function executeStory(
             agentType: effectiveAgent,
             cols: DEFAULT_PTY_COLS,
             rows: DEFAULT_PTY_ROWS,
+            port: config.port,
+            storyId: story.id,
           } satisfies PtyRunOptions
         : undefined;
       const result = await runAgent(
