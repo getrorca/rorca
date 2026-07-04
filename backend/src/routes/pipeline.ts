@@ -67,7 +67,12 @@ import {
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
 import { safeParseTaskManifest, type TaskManifest } from '../lib/task-manifest';
-import { computeTaskManifestHash, resolveTaskManifestArtifactPaths } from '../lib/task-manifest-artifacts';
+import { computeTaskManifestHash, resolveTaskManifestArtifactPaths, validateTaskManifestId } from '../lib/task-manifest-artifacts';
+import {
+  contextSafeRelativePathList,
+  contextSafeString,
+  sanitizeContextResponseValue,
+} from '../lib/context-safety';
 import {
   createTaskManifestExecutionEnvelope,
   writeTaskManifestExecutionEnvelope,
@@ -1039,6 +1044,10 @@ interface PipelineRunRow {
   auto_merge: boolean;
   merge_status: string | null;
   merge_commit_sha: string | null;
+  merge_error?: string | null;
+  pr_number?: number | null;
+  pr_creating?: boolean | null;
+  pr_creation_error?: string | null;
   triggered_via: 'queue' | 'run_now';
   auto_worktree: boolean;
   include_graph: boolean;
@@ -2478,6 +2487,20 @@ function buildTaskManifestTriggerOptions(input: {
     artifactRefs: input.artifactRefs,
     routeDecision: input.manifest.routeDecision,
     routeDecisionSummary,
+    policySummary: {
+      dryRun: input.manifest.policy.dryRun,
+      branchPrOnly: input.manifest.policy.branchPrOnly,
+      autoMerge: input.manifest.policy.autoMerge,
+      deploysAllowed: input.manifest.policy.deploysAllowed,
+      credentialCopyingAllowed: input.manifest.policy.credentialCopyingAllowed,
+      commandDenylistCount: input.manifest.policy.commandDenylist.length,
+      requiredValidation: input.manifest.policy.requiredValidation,
+    },
+    validationPlanSummary: {
+      requiredCommands: input.manifest.validation.requiredCommands,
+      successCriteriaCount: input.manifest.validation.successCriteria.length,
+      artifactRefCount: input.manifest.validation.artifactRefs.length,
+    },
     execution: {
       autoWorktree: input.autoWorktree,
       autoMerge: false,

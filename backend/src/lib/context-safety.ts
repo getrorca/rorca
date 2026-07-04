@@ -328,3 +328,132 @@ export function collectContextSafetyIssues(value: unknown, options: ContextSafet
   collectIssues(value, [], opts, issues);
   return issues;
 }
+
+export const CONTEXT_RESPONSE_LIMITS = {
+  maxStringChars: 1_000,
+  maxPathChars: 512,
+  maxArrayItems: 25,
+  maxObjectKeys: 40,
+  maxDepth: 6,
+} as const;
+
+export interface ContextResponseSafetyOptions extends ContextSafetyOptions {
+  maxPathChars?: number;
+  maxObjectKeys?: number;
+  maxDepth?: number;
+}
+
+export interface ContextSafeStringResult {
+  value: string;
+  truncated: boolean;
+  redacted: boolean;
+}
+
+export interface ContextSafePathListResult {
+  items: string[];
+  omittedUnsafe: number;
+  omittedOverflow: number;
+  truncated: boolean;
+  redacted: boolean;
+}
+
+function contextResponseOptions(options: ContextResponseSafetyOptions = {}) {
+  const base = withDefaultOptions({
+    ...options,
+    maxStringChars: options.maxStringChars ?? CONTEXT_RESPONSE_LIMITS.maxStringChars,
+    maxArrayItems: options.maxArrayItems ?? CONTEXT_RESPONSE_LIMITS.maxArrayItems,
+  });
+  return {
+    ...base,
+    maxPathChars: options.maxPathChars ?? CONTEXT_RESPONSE_LIMITS.maxPathChars,
+    maxObjectKeys: options.maxObjectKeys ?? CONTEXT_RESPONSE_LIMITS.maxObjectKeys,
+    maxDepth: options.maxDepth ?? CONTEXT_RESPONSE_LIMITS.maxDepth,
+  };
+}
+
+export function contextSafeString(value: unknown, options: ContextResponseSafetyOptions = {}): ContextSafeStringResult {
+  const opts = contextResponseOptions(options);
+  const input = String(value ?? '');
+  const redactedValue = redactSecretLikeStrings(input).replace(/\r\n/g, '\n');
+  const truncated = redactedValue.length > opts.maxStringChars;
+  const valueOut = truncated
+    ? `${redactedValue.slice(0, opts.maxStringChars)}… [truncated ${redactedValue.length - opts.maxStringChars} chars]`
+    : redactedValue;
+
+  return {
+    value: valueOut,
+    truncated,
+    redacted: redactedValue !== input,
+  };
+}
+
+export function contextSafeRelativePath(value: unknown, options: ContextResponseSafetyOptions = {}): ContextSafeStringResult | null {
+  if (typeof value !== 'string') return null;
+  const opts = contextResponseOptions(options);
+  const safe = contextSafeString(value, { ...opts, maxStringChars: opts.maxPathChars });
+  return isSafeRelativePath(safe.value) ? safe : null;
+}
+
+export function contextSafeRelativePathList(values: unknown, options: ContextResponseSafetyOptions = {}): ContextSafePathListResult {
+  const opts = contextResponseOptions(options);
+  const input = Array.isArray(values) ? values : [];
+  const items: string[] = [];
+  let omittedUnsafe = 0;
+  let redacted = false;
+  let truncated = input.length > opts.maxArrayItems;
+
+  for (const candidate of input.slice(0, opts.maxArrayItems)) {
+    const safe = contextSafeRelativePath(candidate, opts);
+    if (!safe) {
+      omittedUnsafe += 1;
+      continue;
+    }
+    items.push(safe.value);
+    redacted = redacted || safe.redacted;
+    truncated = truncated || safe.truncated;
+  }
+
+  return {
+    items,
+    omittedUnsafe,
+    omittedOverflow: Math.max(0, input.length - opts.maxArrayItems),
+    truncated,
+    redacted,
+  };
+}
+
+export function sanitizeContextResponseValue(
+  value: unknown,
+  options: ContextResponseSafetyOptions = {},
+  depth = 0,
+): unknown {
+  const opts = contextResponseOptions(options);
+
+  if (value === null || value === undefined) return value ?? null;
+  if (typeof value === 'string') return contextSafeString(value, opts).value;
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value !== 'object') return contextSafeString(String(value), opts).value;
+
+  if (depth >= opts.maxDepth) {
+    return `[TRUNCATED:max depth ${opts.maxDepth}]`;
+  }
+
+  if (Array.isArray(value)) {
+    const items = value.slice(0, opts.maxArrayItems).map((item) => sanitizeContextResponseValue(item, opts, depth + 1));
+    if (value.length > opts.maxArrayItems) {
+      items.push(`[TRUNCATED:${value.length - opts.maxArrayItems} additional items]`);
+    }
+    return items;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>);
+  const output: Record<string, unknown> = {};
+  for (const [key, nested] of entries.slice(0, opts.maxObjectKeys)) {
+    output[key] = sanitizeContextResponseValue(nested, opts, depth + 1);
+  }
+  if (entries.length > opts.maxObjectKeys) {
+    output._truncatedKeys = entries.length - opts.maxObjectKeys;
+  }
+  return output;
+}
