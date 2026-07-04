@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,6 +11,16 @@ function tempRepo(): string {
   const repo = mkdtempSync(path.join(tmpdir(), "rorca-capture-cli-"));
   mkdirSync(path.join(repo, ".rorca"), { recursive: true });
   return repo;
+}
+
+function tempHookRepo(): string {
+  const repo = tempRepo();
+  mkdirSync(path.join(repo, ".git", "hooks"), { recursive: true });
+  return repo;
+}
+
+function hookMode(filePath: string): string {
+  return (statSync(filePath).mode & 0o777).toString(8).padStart(3, "0");
 }
 
 function tokenFile(repo: string): string {
@@ -143,6 +153,165 @@ describe("rorca-capture CLI", () => {
     });
 
     expect(formatStatusText(status)).toContain("Safety contract: rorca-context-safety/v1");
+  });
+
+  it("installs a managed best-effort hook in the resolved workspace path", async () => {
+    const repo = tempHookRepo();
+    const otherCwd = mkdtempSync(path.join(tmpdir(), "rorca-capture-other-cwd-"));
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+
+    const code = await runCli(["install-hooks", "--workspace", "ws-hook", "--api-url", "http://api.test"], {
+      cwd: otherCwd,
+      gitRoot: null,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-hook"),
+    });
+
+    const hookPath = path.join(repo, ".git", "hooks", "post-commit");
+    const hook = readFileSync(hookPath, "utf8");
+    expect(code).toBe(0);
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain("best-effort");
+    expect(hookMode(hookPath)).toBe("755");
+    expect(hook).toContain("# RORCA MANAGED HOOK");
+    expect(hook).toContain("# RORCA_PREV_HOOK:");
+    expect(hook).toContain("rorca-capture ingest-commit HEAD");
+    expect(hook).toContain(`--repo-path '${repo}'`);
+    expect(hook).toContain("--workspace 'ws-hook'");
+    expect(hook).toContain("--api-url 'http://api.test'");
+    expect(hook).toContain("$HOME/.rorca/mcp-token");
+    expect(hook).toContain("|| true");
+    expect(hook).not.toContain("test-token");
+    expect(existsSync(path.join(otherCwd, ".git", "hooks", "post-commit"))).toBe(false);
+  });
+
+  it("preserves and chains an existing post-commit hook", async () => {
+    const repo = tempHookRepo();
+    const tokenPath = tokenFile(repo);
+    const originalHook = "#!/bin/sh\necho user hook\n";
+    const hookPath = path.join(repo, ".git", "hooks", "post-commit");
+    const backupPath = path.join(repo, ".git", "hooks", "post-commit.pre-rorca");
+    writeFileSync(hookPath, originalHook, "utf8");
+    chmodSync(hookPath, 0o644);
+    const output = captureIO();
+
+    const code = await runCli(["install-hooks", "--workspace", "ws-hook"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-hook"),
+    });
+
+    const hook = readFileSync(hookPath, "utf8");
+    expect(code).toBe(0);
+    expect(readFileSync(backupPath, "utf8")).toBe(originalHook);
+    expect(hookMode(backupPath)).toBe("755");
+    expect(hook).toContain("# RORCA_PREV_HOOK: ./post-commit.pre-rorca");
+    expect(hook).toContain('PREV_HOOK="$HOOK_DIR/post-commit.pre-rorca"');
+    expect(hook).toContain('"$PREV_HOOK" "$@"');
+    expect(hook).toContain("|| true");
+  });
+
+  it("updates an existing managed hook and generates strict-mode commands explicitly", async () => {
+    const repo = tempHookRepo();
+    const tokenPath = tokenFile(repo);
+    const initial = captureIO();
+    await expect(runCli(["install-hooks", "--workspace", "ws-strict"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: initial.io,
+      fetchImpl: workspaceFetch(repo, "ws-strict"),
+    })).resolves.toBe(0);
+
+    const output = captureIO();
+    const code = await runCli(["install-hooks", "--workspace", "ws-strict", "--strict"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-strict"),
+    });
+
+    const hookPath = path.join(repo, ".git", "hooks", "post-commit");
+    const hook = readFileSync(hookPath, "utf8");
+    expect(code).toBe(0);
+    expect(output.stdout).toContain("strict");
+    expect(output.stderr).toContain("strict rorca-capture hook mode enabled");
+    expect(hook).toContain("# RORCA_HOOK_MODE: strict");
+    expect(hook).toContain("rorca-capture ingest-commit HEAD");
+    expect(hook).not.toContain("|| true");
+    expect(existsSync(path.join(repo, ".git", "hooks", "post-commit.pre-rorca"))).toBe(false);
+  });
+
+  it("uninstalls a managed hook and restores the preserved prior hook", async () => {
+    const repo = tempHookRepo();
+    const tokenPath = tokenFile(repo);
+    const originalHook = "#!/bin/sh\necho restore me\n";
+    const hookPath = path.join(repo, ".git", "hooks", "post-commit");
+    const backupPath = path.join(repo, ".git", "hooks", "post-commit.pre-rorca");
+    writeFileSync(hookPath, originalHook, "utf8");
+    const installOutput = captureIO();
+    await expect(runCli(["install-hooks", "--workspace", "ws-restore"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: installOutput.io,
+      fetchImpl: workspaceFetch(repo, "ws-restore"),
+    })).resolves.toBe(0);
+
+    const output = captureIO();
+    const code = await runCli(["install-hooks", "--workspace", "ws-restore", "--uninstall"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-restore"),
+    });
+
+    expect(code).toBe(0);
+    expect(output.stdout).toContain("restored previous hook");
+    expect(readFileSync(hookPath, "utf8")).toBe(originalHook);
+    expect(hookMode(hookPath)).toBe("755");
+    expect(existsSync(backupPath)).toBe(false);
+  });
+
+  it("uninstalls a managed hook cleanly when no prior hook existed", async () => {
+    const repo = tempHookRepo();
+    const tokenPath = tokenFile(repo);
+    const hookPath = path.join(repo, ".git", "hooks", "post-commit");
+    const installOutput = captureIO();
+    await expect(runCli(["install-hooks", "--workspace", "ws-remove"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: installOutput.io,
+      fetchImpl: workspaceFetch(repo, "ws-remove"),
+    })).resolves.toBe(0);
+
+    const output = captureIO();
+    const code = await runCli(["install-hooks", "--workspace", "ws-remove", "--uninstall"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-remove"),
+    });
+
+    expect(code).toBe(0);
+    expect(output.stdout).toContain("removed managed hook");
+    expect(existsSync(hookPath)).toBe(false);
   });
 
   it("submits a redacted pending memory candidate with remember flags", async () => {

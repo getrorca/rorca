@@ -17,7 +17,7 @@ This contract implements the product requirements in [`docs/prds/rorca-context-c
 - `remember` — submits a pending memory candidate to `POST /api/memory/candidates`; `--approve` follows with approval only when operator auto-approval is explicitly configured.
 - `ingest-commit`
 - `ingest-git`
-- `install-hooks`
+- `install-hooks` — installs/updates a managed post-commit hook; `--strict` opts into blocking capture failures and `--uninstall` restores prior hook state.
 - `daemon`
 - `status`
 - `flush` — replays `.rorca-capture-queue.jsonl` through the same API client, draining only successfully submitted entries.
@@ -31,6 +31,7 @@ Allowed:
 - Read repo files and git metadata locally.
 - Read `~/.rorca/mcp-token` for API authentication.
 - Write local git hook files when `install-hooks` is explicitly run.
+- Preserve existing post-commit hooks as `post-commit.pre-rorca`, chain them from the managed wrapper, and restore them on `install-hooks --uninstall` where possible.
 - Send reads/writes to the Rorca Express API.
 
 Forbidden:
@@ -87,6 +88,7 @@ Mode values are `local`, `vm`, and `ci`. `CI=true` or `--ci` forces CI mode. CI 
 - Call `GET /api/workspaces` with the MCP Bearer token.
 - If `workspaceId` is configured, verify it exists in the API response.
 - Otherwise match `workspace.path` against the resolved repo path.
+- `install-hooks` must install into `path.join(workspace.path, ".git", "hooks", "post-commit")`, using the absolute path returned by the API rather than `process.cwd()`.
 - On no match, return a NotFound-compatible shape: `{ error: "Workspace not found", code: "NOT_FOUND", details: { repoPath } }`.
 
 ## Status output shape
@@ -113,6 +115,12 @@ Text and JSON status include:
 `rorca-capture remember <text>` accepts `--category`, `--title`, `--files`, `--source`, `--confidence`, `--trust`/`--trust-tier`, `--workspace`, `--api-url`, and `--approve`.
 
 Before any API submission it validates the category enum, validates related files stay inside the workspace and are not ignored/oversized by the context-safety contract, and redacts sensitive text. Explicit `--source` values generate source-key idempotency; omitted sources use content-hash idempotency. If the API is unreachable or temporarily unavailable, the candidate is written to the configured JSONL queue path for later replay.
+
+## Git hook installation
+
+`rorca-capture install-hooks` is opt-in local mode. The managed `.git/hooks/post-commit` wrapper includes `# RORCA MANAGED HOOK` and `# RORCA_PREV_HOOK:` metadata, is written with mode `0755`, and invokes `rorca-capture ingest-commit HEAD --repo-path <workspace.path> --workspace <workspaceId> --api-url <apiUrl>`. The hook reads the MCP token path at execution time (`$HOME/.rorca/mcp-token` by default, or `RORCA_MCP_TOKEN_PATH`) and never embeds token values.
+
+If a user hook already exists, install renames it to `post-commit.pre-rorca`, makes that backup executable, and runs it from the wrapper before capture. Default capture is best-effort: the ingest command ends in `|| true`. `--strict` removes `|| true` and must warn that commits can fail when Rorca is unreachable. `install-hooks --uninstall` removes a managed wrapper and restores `post-commit.pre-rorca` where present; unmanaged hooks are left untouched.
 
 ## Offline queue and flush
 

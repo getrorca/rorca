@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -46,7 +46,7 @@ MVP commands:
   remember <text>        Create a pending manual memory candidate through POST /api/memory/candidates
   ingest-commit [hash]   Send one commit ingestion request through the Rorca API
   ingest-git             Request git context ingestion through the Rorca API
-  install-hooks          Install local git hooks that call rorca-capture
+  install-hooks          Install/update local git hooks that call rorca-capture; pass --uninstall to remove them
   daemon                 Run the sidecar daemon contract (MVP status heartbeat)
   status                 Print resolved config, workspace, queue, token, and safety state
   flush                  Replay the local .rorca-capture-queue.jsonl queue safely
@@ -66,6 +66,8 @@ Global options:
   --mode <local|vm|ci>   Set capture mode
   --approve              For remember: approve after submit only when capture config permits operator auto-approval
   --force                For flush: retry entries even when nextRetryAt is in the future or retryable=false
+  --strict               For install-hooks: fail the hook when Rorca capture cannot complete
+  --uninstall            For install-hooks: remove the managed hook and restore any prior hook
   --dry-run              For ingest commands: inspect git commits without API writes or queue changes
   --ci                   Force CI mode; missing config is a hard error
   --json                 Emit JSON where supported
@@ -109,6 +111,8 @@ type ParsedArgs = {
   json: boolean;
   dryRun: boolean;
   ci: boolean;
+  strict: boolean;
+  uninstallHooks: boolean;
   overrides: CaptureConfigValues;
 };
 
@@ -260,16 +264,7 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
     }
 
     if (parsed.command === "install-hooks") {
-      const config = resolveCaptureConfig({
-        cwd: deps.cwd,
-        env: deps.env,
-        ci: parsed.ci,
-        overrides: parsed.overrides,
-        gitRoot: deps.gitRoot,
-      });
-      installHooks(config);
-      io.stdout.write(`Installed rorca-capture git hooks in ${path.join(config.repoPath, ".git", "hooks")}\n`);
-      return 0;
+      return await runInstallHooks(parsed, deps, io);
     }
 
     if (parsed.command === "daemon") {
@@ -317,6 +312,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   let json = false;
   let dryRun = false;
   let ci = false;
+  let strict = false;
+  let uninstallHooks = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -335,6 +332,14 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (arg === "--ci") {
       ci = true;
       overrides.mode = "ci";
+      continue;
+    }
+    if (arg === "--strict") {
+      strict = true;
+      continue;
+    }
+    if (arg === "--uninstall") {
+      uninstallHooks = true;
       continue;
     }
     if (arg === "--force") {
@@ -369,7 +374,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { command, rest, help, json, dryRun, ci, overrides };
+  return { command, rest, help, json, dryRun, ci, strict, uninstallHooks, overrides };
+}
+
+function resolveCliTokenPath(deps: CliDeps): string | undefined {
+  const env = deps.env ?? process.env;
+  return deps.tokenPath ?? env.RORCA_MCP_TOKEN_PATH;
 }
 
 async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
@@ -381,7 +391,8 @@ async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<
     overrides: parsed.overrides,
     gitRoot: deps.gitRoot,
   });
-  const token = inspectMcpToken(deps.tokenPath);
+  const tokenPath = resolveCliTokenPath(deps);
+  const token = inspectMcpToken(tokenPath);
   let workspace: ResolvedWorkspace | null = null;
 
   if (!token.exists) {
@@ -390,7 +401,7 @@ async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<
     errors.push(`MCP Bearer token mode ${token.mode ?? "unknown"}; expected 600`);
   } else {
     try {
-      const client = createApiClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+      const client = createApiClient(config, { tokenPath, fetchImpl: deps.fetchImpl });
       workspace = await resolveWorkspace(config, client);
     } catch (error) {
       errors.push(formatError(error));
@@ -402,6 +413,24 @@ async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<
   return status.ok ? 0 : 1;
 }
 
+async function runInstallHooks(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
+  const runtime = await resolveRuntime(parsed, deps);
+  if (parsed.uninstallHooks) {
+    const result = uninstallHooks(runtime.workspace);
+    const action = result.restored ? "restored previous hook" : "removed managed hook";
+    io.stdout.write(`Uninstalled rorca-capture post-commit hook in ${path.dirname(result.hookPath)} (${action}).\n`);
+    return 0;
+  }
+
+  const result = installHooks(runtime.config, runtime.workspace, { strict: parsed.strict });
+  const mode = parsed.strict ? "strict" : "best-effort";
+  io.stdout.write(`Installed rorca-capture post-commit hook in ${path.dirname(result.hookPath)} (${mode}).\n`);
+  if (parsed.strict) {
+    io.stderr.write("Warning: strict rorca-capture hook mode enabled; commits will fail if Rorca capture is unreachable or exits non-zero.\n");
+  }
+  return 0;
+}
+
 async function resolveRuntime(parsed: ParsedArgs, deps: CliDeps): Promise<Runtime> {
   const config = resolveCaptureConfig({
     cwd: deps.cwd,
@@ -410,7 +439,7 @@ async function resolveRuntime(parsed: ParsedArgs, deps: CliDeps): Promise<Runtim
     overrides: parsed.overrides,
     gitRoot: deps.gitRoot,
   });
-  const client = createApiClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  const client = createApiClient(config, { tokenPath: resolveCliTokenPath(deps), fetchImpl: deps.fetchImpl });
   const workspace = await resolveWorkspace(config, client);
   return { config, client, workspace };
 }
@@ -423,7 +452,7 @@ async function runFlush(parsed: ParsedArgs, deps: CliDeps): Promise<CaptureFlush
     overrides: parsed.overrides,
     gitRoot: deps.gitRoot,
   });
-  const client = createCaptureClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  const client = createCaptureClient(config, { tokenPath: resolveCliTokenPath(deps), fetchImpl: deps.fetchImpl });
   return await client.flushQueue({ force: parsed.rest.includes("--force") });
 }
 
@@ -488,7 +517,7 @@ async function resolveIngestRuntime(
     };
   }
 
-  const client = createCaptureClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  const client = createCaptureClient(config, { tokenPath: resolveCliTokenPath(deps), fetchImpl: deps.fetchImpl });
   const workspace = await resolveIngestWorkspace(config, client);
   return { config, client, workspace };
 }
@@ -660,7 +689,7 @@ async function runRemember(args: string[], parsed: ParsedArgs, deps: CliDeps): P
   }
 
   const relatedFiles = validateRelatedFiles(options.files, config);
-  const client = createCaptureClient(config, { tokenPath: deps.tokenPath, fetchImpl: deps.fetchImpl });
+  const client = createCaptureClient(config, { tokenPath: resolveCliTokenPath(deps), fetchImpl: deps.fetchImpl });
   const workspace = await resolveRememberWorkspace(config, client);
   const payload = buildRememberPayload(options, config, workspace.id, relatedFiles);
   const approvalPayload = {
@@ -961,16 +990,142 @@ function isOfflineError(error: unknown): boolean {
   return error instanceof CaptureNetworkError;
 }
 
-function installHooks(config: CaptureConfig): void {
-  const hooksDir = path.join(config.repoPath, ".git", "hooks");
-  if (!existsSync(path.join(config.repoPath, ".git"))) {
-    throw new Error(`Cannot install hooks: ${config.repoPath} does not contain a .git directory.`);
-  }
+type HookInstallOptions = {
+  strict: boolean;
+};
+
+type HookInstallResult = {
+  hookPath: string;
+  backupPath?: string;
+  restored?: boolean;
+};
+
+const RORCA_HOOK_SENTINEL = "# RORCA MANAGED HOOK";
+const RORCA_PREV_HOOK_PREFIX = "# RORCA_PREV_HOOK:";
+const RORCA_PREV_HOOK_RELATIVE = "./post-commit.pre-rorca";
+const RORCA_LEGACY_HOOK_MARKER = "# Installed by rorca-capture.";
+
+function installHooks(config: CaptureConfig, workspace: ResolvedWorkspace, options: HookInstallOptions): HookInstallResult {
+  const { repoPath, hooksDir, hookPath, backupPath } = resolveHookPaths(workspace);
   mkdirSync(hooksDir, { recursive: true });
-  const hookPath = path.join(hooksDir, "post-commit");
-  const hook = `#!/bin/sh\n# Installed by rorca-capture. Thin local hook; all Rorca writes go through the API.\nif command -v rorca-capture >/dev/null 2>&1; then\n  rorca-capture ingest-commit HEAD --repo-path \"${config.repoPath.replace(/"/g, '\\"')}\" >/dev/null 2>&1 || true\nfi\n`;
+
+  let previousHookRelative: string | undefined;
+  if (existsSync(hookPath)) {
+    const current = readFileSync(hookPath, "utf8");
+    if (isManagedHook(current)) {
+      previousHookRelative = parsePreviousHookRelative(current) ?? (existsSync(backupPath) ? RORCA_PREV_HOOK_RELATIVE : undefined);
+    } else if (isLegacyRorcaHook(current)) {
+      previousHookRelative = existsSync(backupPath) ? RORCA_PREV_HOOK_RELATIVE : undefined;
+    } else {
+      if (existsSync(backupPath)) {
+        throw new Error(`Cannot preserve existing hook because backup already exists: ${backupPath}`);
+      }
+      renameSync(hookPath, backupPath);
+      chmodSync(backupPath, 0o755);
+      previousHookRelative = RORCA_PREV_HOOK_RELATIVE;
+    }
+  }
+
+  const hook = buildPostCommitHook({
+    apiUrl: config.apiUrl,
+    repoPath,
+    workspaceId: workspace.id,
+    strict: options.strict,
+    previousHookRelative,
+  });
   writeFileSync(hookPath, hook, "utf8");
   chmodSync(hookPath, 0o755);
+  return { hookPath, ...(previousHookRelative ? { backupPath } : {}) };
+}
+
+function uninstallHooks(workspace: ResolvedWorkspace): HookInstallResult {
+  const { hookPath, backupPath, hooksDir } = resolveHookPaths(workspace);
+  if (!existsSync(hookPath)) {
+    return { hookPath, restored: false };
+  }
+
+  const current = readFileSync(hookPath, "utf8");
+  if (!isManagedHook(current) && !isLegacyRorcaHook(current)) {
+    throw new Error(`Refusing to uninstall unmanaged post-commit hook: ${hookPath}`);
+  }
+
+  const previousHookRelative = parsePreviousHookRelative(current) ?? (existsSync(backupPath) ? RORCA_PREV_HOOK_RELATIVE : undefined);
+  const previousHookPath = previousHookRelative ? resolvePreviousHookPath(hooksDir, previousHookRelative) : undefined;
+  if (previousHookPath && existsSync(previousHookPath)) {
+    rmSync(hookPath, { force: true });
+    renameSync(previousHookPath, hookPath);
+    chmodSync(hookPath, 0o755);
+    return { hookPath, backupPath: previousHookPath, restored: true };
+  }
+
+  rmSync(hookPath, { force: true });
+  return { hookPath, restored: false };
+}
+
+function resolveHookPaths(workspace: ResolvedWorkspace): { repoPath: string; hooksDir: string; hookPath: string; backupPath: string } {
+  if (!path.isAbsolute(workspace.path)) {
+    throw new Error(`Workspace path must be absolute to install hooks safely: ${workspace.path}`);
+  }
+  const repoPath = workspace.path;
+  const gitDir = path.join(repoPath, ".git");
+  if (!existsSync(gitDir)) {
+    throw new Error(`Cannot install hooks: workspace '${workspace.id}' path does not contain a .git directory (${gitDir}).`);
+  }
+  const hooksDir = path.join(repoPath, ".git", "hooks");
+  return {
+    repoPath,
+    hooksDir,
+    hookPath: path.join(hooksDir, "post-commit"),
+    backupPath: path.join(hooksDir, "post-commit.pre-rorca"),
+  };
+}
+
+function buildPostCommitHook(input: {
+  apiUrl: string;
+  repoPath: string;
+  workspaceId: string;
+  strict: boolean;
+  previousHookRelative?: string;
+}): string {
+  const previousHookComment = input.previousHookRelative ?? "";
+  const previousHookBlock = input.previousHookRelative ? `\nPREV_HOOK="$HOOK_DIR/post-commit.pre-rorca"\nif [ -x "$PREV_HOOK" ]; then\n  "$PREV_HOOK" "$@"\n  RORCA_PREV_STATUS=$?\n  if [ "$RORCA_PREV_STATUS" -ne 0 ]; then\n    exit "$RORCA_PREV_STATUS"\n  fi\nfi\n` : "";
+  const ingestCommand = `RORCA_MCP_TOKEN_PATH="$RORCA_TOKEN_PATH" rorca-capture ingest-commit HEAD --repo-path ${shellQuote(input.repoPath)} --workspace ${shellQuote(input.workspaceId)} --api-url ${shellQuote(input.apiUrl)} >/dev/null 2>&1${input.strict ? "" : " || true"}`;
+  const missingCommandBlock = input.strict
+    ? "  echo 'rorca-capture not found; strict Rorca hook failing.' >&2\n  exit 127"
+    : "  true";
+
+  return `#!/bin/sh\n${RORCA_HOOK_SENTINEL}\n${RORCA_PREV_HOOK_PREFIX} ${previousHookComment}\n# RORCA_HOOK_MODE: ${input.strict ? "strict" : "best-effort"}\n# Thin local hook; all Rorca writes go through the API. Never embed MCP token values here.\n\nHOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nRORCA_TOKEN_PATH="\${RORCA_MCP_TOKEN_PATH:-$HOME/.rorca/mcp-token}"\n# rorca-capture reads $RORCA_TOKEN_PATH at execution time; token values are not passed on argv or written to logs.\n${previousHookBlock}\nif command -v rorca-capture >/dev/null 2>&1; then\n  ${ingestCommand}\nelse\n${missingCommandBlock}\nfi\n`;
+}
+
+function isManagedHook(contents: string): boolean {
+  return contents.includes(RORCA_HOOK_SENTINEL);
+}
+
+function isLegacyRorcaHook(contents: string): boolean {
+  return contents.includes(RORCA_LEGACY_HOOK_MARKER) && contents.includes("rorca-capture ingest-commit");
+}
+
+function parsePreviousHookRelative(contents: string): string | undefined {
+  const line = contents.split(/\r?\n/).find((item) => item.startsWith(RORCA_PREV_HOOK_PREFIX));
+  if (!line) return undefined;
+  const value = line.slice(RORCA_PREV_HOOK_PREFIX.length).trim();
+  return value.length > 0 ? value : undefined;
+}
+
+function resolvePreviousHookPath(hooksDir: string, previousHookRelative: string): string {
+  if (path.isAbsolute(previousHookRelative)) {
+    throw new Error(`Invalid managed hook metadata: previous hook path must be relative (${previousHookRelative}).`);
+  }
+  const resolved = path.resolve(hooksDir, previousHookRelative);
+  const relative = path.relative(hooksDir, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Invalid managed hook metadata: previous hook path escapes hooks directory (${previousHookRelative}).`);
+  }
+  return resolved;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function requireValue(argv: string[], index: number, flag: string): string {
