@@ -20,6 +20,7 @@ import { resolveCaptureConfig, type CaptureConfig, type CaptureConfigValues, typ
 import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "./status.js";
 import {
   CONTEXT_SAFETY_CONTRACT_VERSION,
+  analyzeContextSafety,
   enforceContextSizeLimit,
   hashContextContent,
   normalizeContextPath,
@@ -173,6 +174,8 @@ type RememberPayload = {
   idempotencyKey: string;
   provenance: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  securitySensitive: boolean;
+  regulatedDomain: boolean;
   requiresReview: true;
 };
 
@@ -692,6 +695,9 @@ async function runRemember(args: string[], parsed: ParsedArgs, deps: CliDeps): P
   const client = createCaptureClient(config, { tokenPath: resolveCliTokenPath(deps), fetchImpl: deps.fetchImpl });
   const workspace = await resolveRememberWorkspace(config, client);
   const payload = buildRememberPayload(options, config, workspace.id, relatedFiles);
+  if (options.approve && payload.regulatedDomain) {
+    throw new Error("Regulated-domain memory candidates require explicit human review and cannot be auto-approved by rorca-capture.");
+  }
   const approvalPayload = {
     workspaceId: workspace.id,
     reviewer: "local-operator",
@@ -826,9 +832,11 @@ function parseRememberArgs(args: string[]): RememberOptions {
 }
 
 function buildRememberPayload(options: RememberOptions, config: CaptureConfig, workspaceId: string, relatedFiles: string[]): RememberPayload {
+  const rawTitle = options.title ?? deriveRememberTitle(options.rule);
+  const safety = analyzeContextSafety({ title: rawTitle, rule: options.rule, context: options.context, relatedFiles }, config.redaction);
   const rule = redactContextText(options.rule, config.redaction).trim();
   const context = redactContextText(options.context, config.redaction).trim();
-  const title = redactContextText(options.title ?? deriveRememberTitle(rule), config.redaction).trim();
+  const title = redactContextText(rawTitle, config.redaction).trim();
   const eventBytes = Buffer.byteLength(JSON.stringify({ title, rule, context, relatedFiles }), "utf8");
   if (!enforceContextSizeLimit(eventBytes, config.ignore, "event")) {
     throw new Error("Remember payload exceeds capture event size limit.");
@@ -876,7 +884,16 @@ function buildRememberPayload(options: RememberOptions, config: CaptureConfig, w
       operatorAutoApprove: config.operatorAutoApprove,
       ...(sourceHash ? { sourceHash } : {}),
       textBytes: Buffer.byteLength(options.text || options.rule, "utf8"),
+      safety: {
+        contractVersion: CONTEXT_SAFETY_CONTRACT_VERSION,
+        securitySensitive: safety.securitySensitive,
+        regulatedDomain: safety.regulatedDomain,
+        requiresReview: true,
+        findings: safety.findings,
+      },
     },
+    securitySensitive: safety.securitySensitive,
+    regulatedDomain: safety.regulatedDomain,
     requiresReview: true,
   };
 }

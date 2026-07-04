@@ -98,6 +98,7 @@ describe("rorca-capture CLI", () => {
 
   it("prints status output with config, workspace, token, and command shape", async () => {
     const repo = tempRepo();
+    writeFileSync(path.join(repo, ".rorca-captureignore"), "generated/**\n", "utf8");
     const tokenPath = tokenFile(repo);
     const output = captureIO();
 
@@ -117,6 +118,7 @@ describe("rorca-capture CLI", () => {
     expect(output.stdout).toContain("API URL: http://localhost:3030");
     expect(output.stdout).toContain("Workspace: ws-1 (path)");
     expect(output.stdout).toContain("Queue path:");
+    expect(output.stdout).toContain("Capture ignore:");
     expect(output.stdout).toContain("API-only: yes");
     expect(output.stdout).toContain("Commands: remember, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
   });
@@ -428,6 +430,30 @@ describe("rorca-capture CLI", () => {
     expect(called).toBe(false);
   });
 
+  it("applies .rorca-captureignore to manual file refs in CI mode before network access", async () => {
+    const repo = tempRepo();
+    mkdirSync(path.join(repo, "src"), { recursive: true });
+    writeFileSync(path.join(repo, "src", "blocked.ts"), "export const blocked = true;\n", "utf8");
+    writeFileSync(path.join(repo, ".rorca-captureignore"), "src/blocked.ts\n", "utf8");
+    const output = captureIO();
+    let called = false;
+
+    const code = await runCli(["remember", "Do not capture blocked file", "--files", "src/blocked.ts", "--ci"], {
+      cwd: repo,
+      gitRoot: repo,
+      env: { RORCA_API_URL: "http://api.test", RORCA_WORKSPACE_ID: "ws-ci" },
+      io: output.io,
+      fetchImpl: async () => {
+        called = true;
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(output.stderr).toContain("ignored by capture safety rules");
+    expect(called).toBe(false);
+  });
+
   it("queues remember candidates when the API is offline", async () => {
     const repo = tempRepo();
     const tokenPath = tokenFile(repo);
@@ -536,6 +562,33 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(1);
     expect(output.stderr).toContain("operatorAutoApprove=true");
     expect(called).toBe(false);
+  });
+
+  it("refuses to auto-approve regulated-domain remember candidates by default", async () => {
+    const repo = tempRepo();
+    writeFileSync(path.join(repo, ".rorca", "capture.json"), JSON.stringify({ operatorAutoApprove: true }), "utf8");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    let posted = false;
+
+    const code = await runCli(["remember", "HIPAA patient records must be reviewed", "--approve", "--workspace", "ws-regulated"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: async (url) => {
+        if (String(url).endsWith("/api/workspaces")) {
+          return new Response(JSON.stringify({ items: [{ id: "ws-regulated", path: repo }] }), { status: 200 });
+        }
+        posted = true;
+        return new Response("{}", { status: 500 });
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(output.stderr).toContain("Regulated-domain");
+    expect(posted).toBe(false);
   });
 
   it("dry-runs ingest-commit without POST writes, queue entries, or API auth", async () => {
@@ -672,6 +725,34 @@ describe("rorca-capture CLI", () => {
       env: {},
       io: output.io,
       fetchImpl: workspaceFetch(repo, "ws-noise", (url) => {
+        posts.push(url);
+        return new Response("{}", { status: 500 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(posts).toEqual([]);
+    const parsed = JSON.parse(output.stdout) as { skippedNoise: number; items: Array<{ status: string; noiseReason: string }> };
+    expect(parsed.skippedNoise).toBe(1);
+    expect(parsed.items[0]).toMatchObject({ status: "skipped-noise", noiseReason: "all-changed-paths-ignored" });
+  });
+
+  it("skips commits ignored by .rorca-captureignore using the same context-safety filter", async () => {
+    const repo = tempRepo();
+    initGitRepo(repo);
+    writeFileSync(path.join(repo, ".rorca-captureignore"), "generated/**\n", "utf8");
+    const sha = commitFile(repo, "generated/out.ts", "export const generated = true;\n", "chore: generated output");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    const posts: string[] = [];
+
+    const code = await runCli(["ingest-commit", sha, "--json", "--workspace", "ws-ignore-file"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-ignore-file", (url) => {
         posts.push(url);
         return new Response("{}", { status: 500 });
       }),

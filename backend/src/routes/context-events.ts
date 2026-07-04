@@ -11,6 +11,15 @@ import { queryOne } from '../db/index';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { broadcastAll } from '../lib/sse-hub';
 import {
+  CONTEXT_SAFETY_CONTRACT_VERSION,
+  loadContextCaptureIgnoreFile,
+  redactContextPayload,
+  redactContextText,
+  safeNormalizeWorkspaceRelativePath,
+  shouldCapturePath,
+  type ContextIgnoreSettings,
+} from '../lib/context-safety';
+import {
   CONTEXT_EVENT_TYPES,
   CONTEXT_TRUST_TIERS,
   buildContextEventIdempotencyKey,
@@ -89,11 +98,40 @@ function parseBody(req: Request): ContextEventBody {
   return result.data;
 }
 
-async function assertWorkspace(workspaceId: string): Promise<void> {
-  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+async function assertWorkspace(workspaceId: string): Promise<{ id: string; path: string }> {
+  const workspace = await queryOne<{ id: string; path: string }>('SELECT id, path FROM workspaces WHERE id = $1', [workspaceId]);
   if (!workspace) {
     throw new NotFoundError('Workspace', workspaceId);
   }
+  return workspace;
+}
+
+function workspaceIgnoreSettings(workspacePath: string): ContextIgnoreSettings {
+  const captureIgnore = loadContextCaptureIgnoreFile(workspacePath);
+  return captureIgnore ? { paths: captureIgnore.patterns } : {};
+}
+
+function normalizeCaptureRelatedFiles(value: unknown, workspacePath: string): string[] {
+  const ignore = workspaceIgnoreSettings(workspacePath);
+  return normalizeRelatedFiles(value).map((filePath) => {
+    let normalized: string;
+    try {
+      normalized = safeNormalizeWorkspaceRelativePath(workspacePath, filePath);
+    } catch (error) {
+      throw new ValidationError(error instanceof Error ? error.message : `Invalid related file: ${filePath}`);
+    }
+    if (!shouldCapturePath(normalized, ignore)) {
+      throw new ValidationError(`Related file is ignored by capture safety rules: ${normalized}`);
+    }
+    return normalized;
+  });
+}
+
+function redactJsonObject(value: unknown, fieldName: string, workspacePath: string): JsonObject {
+  return normalizeJsonObject(
+    redactContextPayload(value, {}, { repoPath: workspacePath }),
+    fieldName,
+  );
 }
 
 async function emitContextEventCreated(event: ContextEventResponse, duplicate: boolean): Promise<void> {
@@ -180,28 +218,37 @@ async function findByIdempotencyKey(idempotencyKey: string): Promise<ContextEven
  */
 router.post('/', async (req: Request, res: Response) => {
   const body = parseBody(req);
-  const payload = normalizeJsonObject(body.payload, 'payload');
-  const provenance = normalizeJsonObject(body.provenance, 'provenance');
-  const relatedFiles = normalizeRelatedFiles(body.relatedFiles);
-  const metadata = normalizeJsonObject(body.metadata, 'metadata');
+  const workspace = await assertWorkspace(body.workspaceId);
+  const payload = redactJsonObject(body.payload, 'payload', workspace.path);
+  const provenance = redactJsonObject(body.provenance, 'provenance', workspace.path);
+  const relatedFiles = normalizeCaptureRelatedFiles(body.relatedFiles, workspace.path);
+  const metadata = redactJsonObject(body.metadata, 'metadata', workspace.path);
   const occurredAt = parseOptionalDate(body.occurredAt, 'occurredAt') ?? new Date().toISOString();
-
-  await assertWorkspace(body.workspaceId);
+  const summary = redactContextText(body.summary, {});
+  const sourceSystem = redactContextText(body.sourceSystem, {});
+  const sourceRef = redactContextText(body.sourceRef, {});
+  const actor = body.actor ? redactContextText(body.actor, {}) : null;
 
   const derived = buildContextEventIdempotencyKey({
     workspaceId: body.workspaceId,
-    sourceSystem: body.sourceSystem,
+    sourceSystem,
     contentHash: body.contentHash,
     eventType: body.eventType,
-    sourceRef: body.sourceRef,
-    summary: body.summary,
+    sourceRef,
+    summary,
     payload,
     relatedFiles,
   });
-  const idempotencyKey = body.idempotencyKey ?? derived.idempotencyKey;
+  const idempotencyKey = body.idempotencyKey ? redactContextText(body.idempotencyKey, {}) : derived.idempotencyKey;
   const enrichedMetadata = {
     ...metadata,
     contentHash: derived.contentHash,
+    safety: {
+      ...(typeof metadata.safety === 'object' && metadata.safety !== null ? metadata.safety : {}),
+      contractVersion: CONTEXT_SAFETY_CONTRACT_VERSION,
+      redactionApplied: true,
+      pathFiltering: 'context-safety',
+    },
   };
 
   const existing = await findByIdempotencyKey(idempotencyKey);
@@ -236,11 +283,11 @@ router.post('/', async (req: Request, res: Response) => {
     [
       body.workspaceId,
       body.eventType,
-      body.sourceSystem,
-      body.sourceRef,
-      body.actor ?? null,
+      sourceSystem,
+      sourceRef,
+      actor,
       occurredAt,
-      body.summary,
+      summary,
       JSON.stringify(payload),
       JSON.stringify(provenance),
       JSON.stringify(relatedFiles),

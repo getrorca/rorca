@@ -13,6 +13,17 @@ import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { promoteMemory } from '../lib/memory-promotion';
 import { broadcastAll } from '../lib/sse-hub';
 import {
+  CONTEXT_SAFETY_CONTRACT_VERSION,
+  analyzeContextSafety,
+  loadContextCaptureIgnoreFile,
+  redactContextPayload,
+  redactContextText,
+  safeNormalizeWorkspaceRelativePath,
+  shouldCapturePath,
+  type ContextIgnoreSettings,
+  type ContextSafetyDiagnostics,
+} from '../lib/context-safety';
+import {
   CONTEXT_EVENT_TYPES,
   CONTEXT_TRUST_TIERS,
   MEMORY_CANDIDATE_CATEGORIES,
@@ -78,6 +89,7 @@ const ApproveBodySchema = CandidateEditSchema.extend({
   sourceSpecId: z.string().trim().min(1).optional(),
   sourceStoryId: z.string().trim().min(1).optional(),
   sourceRunId: z.union([z.string().trim().min(1), z.number()]).optional(),
+  regulatedReviewConfirmed: z.boolean().optional(),
   edits: CandidateEditSchema.optional(),
 });
 
@@ -232,6 +244,34 @@ async function assertWorkspace(workspaceId: string): Promise<WorkspaceRow> {
   return workspace;
 }
 
+function workspaceIgnoreSettings(workspacePath: string): ContextIgnoreSettings {
+  const captureIgnore = loadContextCaptureIgnoreFile(workspacePath);
+  return captureIgnore ? { paths: captureIgnore.patterns } : {};
+}
+
+function normalizeCaptureRelatedFiles(value: unknown, workspacePath: string): string[] {
+  const ignore = workspaceIgnoreSettings(workspacePath);
+  return normalizeRelatedFiles(value).map((filePath) => {
+    let normalized: string;
+    try {
+      normalized = safeNormalizeWorkspaceRelativePath(workspacePath, filePath);
+    } catch (error) {
+      throw new ValidationError(error instanceof Error ? error.message : `Invalid related file: ${filePath}`);
+    }
+    if (!shouldCapturePath(normalized, ignore)) {
+      throw new ValidationError(`Related file is ignored by capture safety rules: ${normalized}`);
+    }
+    return normalized;
+  });
+}
+
+function redactJsonObject(value: unknown, fieldName: string, workspacePath: string): JsonObject {
+  return normalizeJsonObject(
+    redactContextPayload(value, {}, { repoPath: workspacePath }),
+    fieldName,
+  );
+}
+
 async function assertMemory(workspaceId: string, memoryId: number): Promise<void> {
   const memory = await queryOne<{ id: number }>(
     'SELECT id FROM memories WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL',
@@ -328,7 +368,7 @@ function mergedEdits(body: ApproveBody): CandidateEditInput {
   return { ...(body.edits ?? {}), ...Object.fromEntries(Object.entries(direct).filter(([, value]) => value !== undefined)) };
 }
 
-function applyEdits(candidate: MemoryCandidateResponse, edits: CandidateEditInput): {
+type AppliedCandidateEdits = {
   suggestedCategory: MemoryCandidateCategory;
   title: string;
   rule: string;
@@ -337,7 +377,9 @@ function applyEdits(candidate: MemoryCandidateResponse, edits: CandidateEditInpu
   confidence: MemoryCandidateConfidence;
   provenance: JsonObject;
   metadata: JsonObject;
-} {
+};
+
+function applyEdits(candidate: MemoryCandidateResponse, edits: CandidateEditInput): AppliedCandidateEdits {
   const provenancePatch = edits.provenance === undefined ? {} : normalizeJsonObject(edits.provenance, 'provenance');
   const metadataPatch = edits.metadata === undefined ? {} : normalizeJsonObject(edits.metadata, 'metadata');
 
@@ -353,9 +395,21 @@ function applyEdits(candidate: MemoryCandidateResponse, edits: CandidateEditInpu
   };
 }
 
+function sanitizeAppliedEdits(applied: AppliedCandidateEdits, workspacePath: string): AppliedCandidateEdits {
+  return {
+    ...applied,
+    title: redactContextText(applied.title, {}).trim(),
+    rule: redactContextText(applied.rule, {}).trim(),
+    context: redactContextText(applied.context, {}),
+    relatedFiles: normalizeCaptureRelatedFiles(applied.relatedFiles, workspacePath),
+    provenance: redactJsonObject(applied.provenance, 'provenance', workspacePath),
+    metadata: redactJsonObject(applied.metadata, 'metadata', workspacePath),
+  };
+}
+
 async function updateCandidateAfterApproval(params: {
   candidateId: number;
-  applied: ReturnType<typeof applyEdits>;
+  applied: AppliedCandidateEdits;
   reviewer: string;
   promotedMemoryId: string;
   promotionMetadata: JsonObject;
@@ -427,6 +481,9 @@ async function approveFromRequest(req: Request, res: Response, requireEdits: boo
   if (['rejected', 'duplicate', 'superseded'].includes(candidate.reviewStatus)) {
     throw new ConflictError(`Candidate ${candidate.id} is ${candidate.reviewStatus} and cannot be approved`);
   }
+  if (candidate.regulatedDomain && candidate.requiresReview && body.regulatedReviewConfirmed !== true) {
+    throw new ConflictError(`Regulated-domain candidate ${candidate.id} requires explicit regulatedReviewConfirmed approval`);
+  }
 
   const edits = mergedEdits(body);
   if (requireEdits && Object.keys(edits).length === 0) {
@@ -435,7 +492,11 @@ async function approveFromRequest(req: Request, res: Response, requireEdits: boo
 
   const workspace = await assertWorkspace(candidate.workspaceId);
   const reviewer = body.reviewer ?? 'local-user';
-  const applied = applyEdits(candidate, edits);
+  const applied = sanitizeAppliedEdits(applyEdits(candidate, edits), workspace.path);
+  const appliedSafety = analyzeContextSafety(applied, {});
+  if (appliedSafety.regulatedDomain && body.regulatedReviewConfirmed !== true) {
+    throw new ConflictError(`Regulated-domain candidate ${candidate.id} requires explicit regulatedReviewConfirmed approval`);
+  }
   const reviewTimestamp = new Date().toISOString();
   const promotionProvenance: JsonObject = {
     ...applied.provenance,
@@ -512,6 +573,21 @@ async function findCandidateByIdempotencyKey(idempotencyKey: string, workspaceId
   return candidate ? normalizeCandidateRow(candidate) : undefined;
 }
 
+function buildSafetyMetadata(
+  safety: ContextSafetyDiagnostics,
+  overrides: { securitySensitive: boolean; regulatedDomain: boolean; requiresReview: boolean },
+): JsonObject {
+  return {
+    contractVersion: CONTEXT_SAFETY_CONTRACT_VERSION,
+    redactionApplied: true,
+    pathFiltering: 'context-safety',
+    securitySensitive: overrides.securitySensitive,
+    regulatedDomain: overrides.regulatedDomain,
+    requiresReview: overrides.requiresReview,
+    findings: safety.findings,
+  };
+}
+
 function parseStatusFilter(value: unknown): MemoryCandidateStatus[] | 'all' {
   if (value == null || value === '') return ['pending'];
   const rawValues = Array.isArray(value) ? value.flatMap((item) => String(item).split(',')) : String(value).split(',');
@@ -524,6 +600,26 @@ function parseStatusFilter(value: unknown): MemoryCandidateStatus[] | 'all' {
     }
   }
   return statuses as MemoryCandidateStatus[];
+}
+
+function parseBooleanQuery(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(parseBooleanQuery);
+  if (typeof value !== 'string') return value === true;
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function parseConfidenceThreshold(value: unknown): MemoryCandidateConfidence {
+  const threshold = typeof value === 'string' && value.trim() ? value.trim() : 'medium';
+  if (!MEMORY_CANDIDATE_CONFIDENCES.includes(threshold as MemoryCandidateConfidence)) {
+    throw new ValidationError(`minConfidence must be one of: ${MEMORY_CANDIDATE_CONFIDENCES.join(', ')}`);
+  }
+  return threshold as MemoryCandidateConfidence;
+}
+
+function confidenceRank(value: MemoryCandidateConfidence): number {
+  if (value === 'high') return 3;
+  if (value === 'medium') return 2;
+  return 1;
 }
 
 /**
@@ -565,38 +661,64 @@ router.post('/', createCandidateFromRequest);
 export async function createCandidateFromRequest(req: Request, res: Response): Promise<void> {
   const body = parseWithSchema(CandidateCreateSchema, req.body, 'Invalid memory candidate payload') as CandidateCreateInput;
   const workspace = await assertWorkspace(body.workspaceId);
-  void workspace;
 
   const contextEventId = body.contextEventId == null ? null : parsePositiveId(body.contextEventId, 'contextEventId');
   const event = contextEventId ? await loadContextEvent(body.workspaceId, contextEventId) : null;
-  const eventRelatedFiles = event ? normalizeRelatedFiles(event.relatedFiles) : [];
-  const relatedFiles = body.relatedFiles === undefined ? eventRelatedFiles : normalizeRelatedFiles(body.relatedFiles);
-  const eventProvenance = event ? normalizeJsonObject(event.provenance, 'event.provenance') : {};
+  const eventRelatedFiles = event ? normalizeCaptureRelatedFiles(event.relatedFiles, workspace.path) : [];
+  const relatedFiles = body.relatedFiles === undefined
+    ? eventRelatedFiles
+    : normalizeCaptureRelatedFiles(body.relatedFiles, workspace.path);
+  const eventProvenance = event ? redactJsonObject(event.provenance, 'event.provenance', workspace.path) : {};
   const provenance = {
     ...eventProvenance,
-    ...normalizeJsonObject(body.provenance, 'provenance'),
+    ...redactJsonObject(body.provenance, 'provenance', workspace.path),
     ...(event ? { sourceEventId: event.id } : {}),
   };
-  const metadata = normalizeJsonObject(body.metadata, 'metadata');
+  const metadata = redactJsonObject(body.metadata, 'metadata', workspace.path);
   const occurredAt = parseOptionalDate(body.occurredAt, 'occurredAt') ?? event?.occurredAt ?? null;
   const sourceSystem = body.sourceSystem ?? event?.sourceSystem ?? null;
+  const redactedSourceSystem = sourceSystem ? redactContextText(sourceSystem, {}) : null;
   const sourceRef = body.sourceRef ?? event?.sourceRef ?? null;
-  const derived = buildMemoryCandidateIdempotencyKey({
-    workspaceId: body.workspaceId,
-    contextEventId,
-    sourceSystem,
-    sourceRef,
+  const redactedSourceRef = sourceRef ? redactContextText(sourceRef, {}) : null;
+  const actor = body.actor ?? event?.actor ?? null;
+  const redactedActor = actor ? redactContextText(actor, {}) : null;
+  const title = redactContextText(body.title, {}).trim();
+  const rule = redactContextText(body.rule, {}).trim();
+  const context = redactContextText(body.context, {});
+  const claim = body.claim == null ? null : redactContextText(body.claim, {});
+  const policy = body.policy == null ? null : redactContextText(body.policy, {});
+  const incidentLearning = body.incidentLearning == null ? null : redactContextText(body.incidentLearning, {});
+  const safety = analyzeContextSafety({
     title: body.title,
     rule: body.rule,
     context: body.context,
+    claim: body.claim,
+    policy: body.policy,
+    incidentLearning: body.incidentLearning,
+    provenance: body.provenance,
+    metadata: body.metadata,
+    sourceRef,
+    relatedFiles,
+  }, {});
+  const securitySensitive = body.securitySensitive === true || safety.securitySensitive;
+  const regulatedDomain = body.regulatedDomain === true || safety.regulatedDomain;
+  const requiresReview = regulatedDomain ? true : body.requiresReview ?? true;
+  const derived = buildMemoryCandidateIdempotencyKey({
+    workspaceId: body.workspaceId,
+    contextEventId,
+    sourceSystem: redactedSourceSystem,
+    sourceRef: redactedSourceRef,
+    title,
+    rule,
+    context,
     suggestedCategory: body.suggestedCategory,
     relatedFiles,
   });
-  const idempotencyKey = body.idempotencyKey ?? derived.idempotencyKey;
+  const idempotencyKey = body.idempotencyKey ? redactContextText(body.idempotencyKey, {}) : derived.idempotencyKey;
 
   const existing = await findCandidateByIdempotencyKey(idempotencyKey, body.workspaceId);
   if (existing) {
-    await emitCandidateAudit('created', existing, { reviewer: body.actor ?? 'context-capture', duplicate: true });
+    await emitCandidateAudit('created', existing, { reviewer: redactedActor ?? 'context-capture', duplicate: true });
     res.status(200).json({ candidate: existing, created: false, idempotent: true });
     return;
   }
@@ -641,33 +763,37 @@ export async function createCandidateFromRequest(req: Request, res: Response): P
       body.workspaceId,
       contextEventId,
       body.eventType ?? event?.eventType ?? null,
-      sourceSystem,
-      sourceRef,
-      body.actor ?? event?.actor ?? null,
+      redactedSourceSystem,
+      redactedSourceRef,
+      redactedActor,
       occurredAt,
       body.suggestedCategory,
-      body.title,
-      body.rule,
-      body.context,
+      title,
+      rule,
+      context,
       JSON.stringify(relatedFiles),
       body.confidence,
       body.trustTier ?? event?.trustTier ?? 'agent_observation',
       idempotencyKey,
       JSON.stringify(provenance),
-      JSON.stringify({ ...metadata, contentHash: derived.contentHash }),
-      body.claim ?? null,
-      body.policy ?? null,
-      body.incidentLearning ?? null,
-      body.securitySensitive ?? false,
-      body.regulatedDomain ?? false,
-      body.requiresReview ?? true,
+      JSON.stringify({
+        ...metadata,
+        contentHash: derived.contentHash,
+        safety: buildSafetyMetadata(safety, { securitySensitive, regulatedDomain, requiresReview }),
+      }),
+      claim,
+      policy,
+      incidentLearning,
+      securitySensitive,
+      regulatedDomain,
+      requiresReview,
     ],
   );
 
   if (!candidate) {
     const concurrentExisting = await findCandidateByIdempotencyKey(idempotencyKey, body.workspaceId);
     if (concurrentExisting) {
-      await emitCandidateAudit('created', concurrentExisting, { reviewer: body.actor ?? 'context-capture', duplicate: true });
+      await emitCandidateAudit('created', concurrentExisting, { reviewer: redactedActor ?? 'context-capture', duplicate: true });
       res.status(200).json({ candidate: concurrentExisting, created: false, idempotent: true });
       return;
     }
@@ -675,7 +801,7 @@ export async function createCandidateFromRequest(req: Request, res: Response): P
   }
 
   const normalized = normalizeCandidateRow(candidate);
-  await emitCandidateAudit('created', normalized, { reviewer: body.actor ?? 'context-capture' });
+  await emitCandidateAudit('created', normalized, { reviewer: redactedActor ?? 'context-capture' });
   res.status(201).json({ candidate: normalized, created: true, idempotent: false });
 }
 
@@ -790,6 +916,80 @@ router.get('/', async (req: Request, res: Response) => {
   res.json({
     ...page,
     items: page.items.map(normalizeCandidateRow),
+  });
+});
+
+/**
+ * @swagger
+ * /api/context-candidates/retrieval:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: Retrieve memory candidates with conservative safety gates by default
+ *     operationId: retrieveSafeContextCandidates
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only candidate retrieval defaults to approved/non-sensitive query-level gates; broader review access requires an explicit query flag."
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: includeUnsafe
+ *         schema: { type: boolean, description: "Opt in to include pending, rejected, low-confidence, or regulated-unapproved candidates." }
+ *       - in: query
+ *         name: minConfidence
+ *         schema: { type: string, enum: [high, medium, low], default: medium }
+ *     responses:
+ *       200: { description: Paginated retrieval-safe candidates }
+ *       400: { description: Invalid filter }
+ *       404: { description: Workspace not found }
+ */
+router.get('/retrieval', async (req: Request, res: Response) => {
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
+  if (!workspaceId) throw new ValidationError('workspaceId is required');
+  await assertWorkspace(workspaceId);
+
+  const conditions = ['workspace_id = $1'];
+  const params: unknown[] = [workspaceId];
+  let paramIndex = 2;
+
+  if (!parseBooleanQuery(req.query.includeUnsafe)) {
+    const minConfidence = parseConfidenceThreshold(req.query.minConfidence);
+    params.push(confidenceRank(minConfidence));
+    conditions.push("review_status NOT IN ('pending', 'rejected')");
+    conditions.push(`(CASE confidence WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >= $${paramIndex}`);
+    conditions.push("(regulated_domain = false OR review_status = 'approved')");
+    paramIndex++;
+  }
+
+  const category = typeof req.query.category === 'string' ? req.query.category.trim() : '';
+  if (category) {
+    if (!MEMORY_CANDIDATE_CATEGORIES.includes(category as MemoryCandidateCategory)) {
+      throw new ValidationError(`category must be one of: ${MEMORY_CANDIDATE_CATEGORIES.join(', ')}`);
+    }
+    params.push(category);
+    conditions.push(`suggested_category = $${paramIndex}`);
+    paramIndex++;
+  }
+
+  const pagination = parsePaginationParams(req, { limit: 25, maxLimit: 100 });
+  const page = await paginateQuery<MemoryCandidateResponse>({
+    query: `${CANDIDATE_SELECT} WHERE ${conditions.join(' AND ')}`,
+    countQuery: `SELECT COUNT(*)::int AS total FROM memory_candidates WHERE ${conditions.join(' AND ')}`,
+    params,
+    pagination,
+    orderBy: 'id DESC',
+    cursorColumn: 'id',
+    cursorDirection: 'desc',
+  });
+
+  res.json({
+    ...page,
+    items: page.items.map(normalizeCandidateRow),
+    safety: {
+      includeUnsafe: parseBooleanQuery(req.query.includeUnsafe),
+      defaultPredicate: "review_status NOT IN ('pending', 'rejected') AND confidence >= minConfidence AND (regulated_domain = false OR review_status = 'approved')",
+    },
   });
 });
 

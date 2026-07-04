@@ -23,6 +23,8 @@ export const CONTEXT_SAFETY_CONTRACT_VERSION = 'rorca-context-safety/v1';
 export const DEFAULT_CONTEXT_MAX_FILE_BYTES = 256 * 1024;
 export const DEFAULT_CONTEXT_MAX_EVENT_BYTES = 1024 * 1024;
 
+export const DEFAULT_CONTEXT_IGNORE_FILE_NAME = '.rorca-captureignore';
+
 export const DEFAULT_CONTEXT_IGNORE_PATHS = [
   '.git/**',
   '.hg/**',
@@ -47,9 +49,12 @@ export const DEFAULT_CONTEXT_IGNORE_PATHS = [
   '.env.*',
 ] as const;
 
-export type ContextRedactionPattern = {
+export type ContextPattern = {
   name: string;
   pattern: string;
+};
+
+export type ContextRedactionPattern = ContextPattern & {
   replacement?: string;
 };
 
@@ -70,9 +75,48 @@ export const DEFAULT_CONTEXT_REDACTION_PATTERNS: ContextRedactionPattern[] = [
     replacement: '[REDACTED_GITHUB_TOKEN]',
   },
   {
+    name: 'openai-secret-key',
+    pattern: '\\bsk-[A-Za-z0-9_-]{20,}\\b',
+    replacement: 'sk-[REDACTED]',
+  },
+  {
+    name: 'database-url',
+    pattern: "\\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis)://[^\\s'\"<>]+",
+    replacement: '[REDACTED_DATABASE_URL]',
+  },
+  {
+    name: 'aws-access-key-id',
+    pattern: '\\bAKIA[0-9A-Z]{16}\\b',
+    replacement: '[REDACTED_AWS_ACCESS_KEY]',
+  },
+  {
+    name: 'jwt-token',
+    pattern: '\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b',
+    replacement: '[REDACTED_JWT]',
+  },
+  {
     name: 'private-key-block',
     pattern: '-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----',
     replacement: '[REDACTED_PRIVATE_KEY]',
+  },
+];
+
+export const DEFAULT_CONTEXT_REGULATED_DOMAIN_PATTERNS: ContextPattern[] = [
+  {
+    name: 'hipaa-phi',
+    pattern: '\\b(?:HIPAA|PHI|patient(?:\\s+(?:data|record|records|health))?|diagnosis|medical\\s+record|healthcare)\\b',
+  },
+  {
+    name: 'pci-cardholder-data',
+    pattern: '\\b(?:PCI(?:[-\\s]?DSS)?|cardholder\\s+data|credit\\s+card|payment\\s+card|primary\\s+account\\s+number|PAN)\\b',
+  },
+  {
+    name: 'privacy-pii',
+    pattern: '\\b(?:GDPR|PII|personally\\s+identifiable|SSN|social\\s+security\\s+number|data\\s+subject)\\b',
+  },
+  {
+    name: 'financial-regulatory',
+    pattern: '\\b(?:SOX|FINRA|GLBA|FedRAMP|ITAR|EAR|export\\s+controlled)\\b',
   },
 ];
 
@@ -106,6 +150,23 @@ export type ContextPayloadRedactionOptions = {
   workspacePathReplacement?: string;
 };
 
+export type ContextSafetyFinding = {
+  category: 'secret' | 'regulated-domain';
+  name: string;
+};
+
+export type ContextSafetyDiagnostics = {
+  securitySensitive: boolean;
+  regulatedDomain: boolean;
+  requiresReview: boolean;
+  findings: ContextSafetyFinding[];
+};
+
+export type ContextCaptureIgnoreFile = {
+  path: string;
+  patterns: string[];
+};
+
 export function normalizeContextPath(input: string): string {
   return input.split(path.sep).join('/').replace(/^\.\//, '');
 }
@@ -128,7 +189,7 @@ export function safeNormalizeWorkspaceRelativePath(workspacePath: string, inputP
 
 export function normalizeContextIgnoreSettings(settings: ContextIgnoreSettings = {}): NormalizedContextIgnoreSettings {
   return {
-    paths: [...DEFAULT_CONTEXT_IGNORE_PATHS, ...(settings.paths ?? [])],
+    paths: [...DEFAULT_CONTEXT_IGNORE_PATHS, ...contextUserIgnorePaths(settings)],
     maxFileBytes: positiveNumberOrDefault(settings.maxFileBytes, DEFAULT_CONTEXT_MAX_FILE_BYTES),
     maxEventBytes: positiveNumberOrDefault(settings.maxEventBytes, DEFAULT_CONTEXT_MAX_EVENT_BYTES),
   };
@@ -137,7 +198,7 @@ export function normalizeContextIgnoreSettings(settings: ContextIgnoreSettings =
 export function normalizeContextRedactionSettings(
   settings: ContextRedactionSettings = {},
 ): NormalizedContextRedactionSettings {
-  const patterns = (settings.patterns ?? DEFAULT_CONTEXT_REDACTION_PATTERNS).map((item, index) => {
+  const customPatterns = contextUserRedactionPatterns(settings).map((item, index) => {
     if (typeof item === 'string') {
       return { name: `custom-${index + 1}`, pattern: item, replacement: settings.replacement };
     }
@@ -146,7 +207,7 @@ export function normalizeContextRedactionSettings(
 
   return {
     enabled: settings.enabled ?? true,
-    patterns,
+    patterns: [...DEFAULT_CONTEXT_REDACTION_PATTERNS, ...customPatterns],
     replacement: settings.replacement ?? '[REDACTED]',
   };
 }
@@ -157,10 +218,16 @@ export function shouldCapturePath(relativePath: string, settings: ContextIgnoreS
 
 export function isContextPathIgnored(relativePath: string, settings: ContextIgnoreSettings = {}): boolean {
   const normalized = normalizeContextPath(relativePath);
-  const ignore = normalizeContextIgnoreSettings(settings);
-  let ignored = false;
 
-  for (const rawPattern of ignore.paths) {
+  for (const rawPattern of DEFAULT_CONTEXT_IGNORE_PATHS) {
+    const prepared = prepareIgnorePattern(rawPattern);
+    if (prepared && globMatches(normalized, prepared.pattern)) {
+      return true;
+    }
+  }
+
+  let ignored = false;
+  for (const rawPattern of contextUserIgnorePaths(settings)) {
     const prepared = prepareIgnorePattern(rawPattern);
     if (!prepared) continue;
     if (globMatches(normalized, prepared.pattern)) {
@@ -233,6 +300,118 @@ export function redactAbsoluteContextPaths(text: string, options: ContextPayload
 
   return redacted
     .replace(/(^|[\s"'([{,:])((?:\/(?:Users|home|tmp|var|private|Volumes|opt|srv|etc|mnt|workspace|workspaces)[^\s"'<>()[\]{},;]*)|(?:[A-Za-z]:\\[^\s"'<>()[\]{},;]+))/g, `$1${pathReplacement}`);
+}
+
+export function parseContextIgnoreFile(text: string): string[] {
+  return text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'));
+}
+
+export function loadContextCaptureIgnoreFile(
+  repoPath: string,
+  fileName = DEFAULT_CONTEXT_IGNORE_FILE_NAME,
+): ContextCaptureIgnoreFile | null {
+  const filePath = path.join(path.resolve(repoPath), fileName);
+  if (!fs.existsSync(filePath)) return null;
+  return {
+    path: filePath,
+    patterns: parseContextIgnoreFile(fs.readFileSync(filePath, 'utf8')),
+  };
+}
+
+export function analyzeContextSafety(
+  value: unknown,
+  redactionSettings: ContextRedactionSettings = {},
+): ContextSafetyDiagnostics {
+  const text = collectContextText(value);
+  const findings: ContextSafetyFinding[] = [];
+
+  for (const pattern of normalizeContextRedactionSettings(redactionSettings).patterns) {
+    if (patternMatches(text, pattern.pattern)) {
+      findings.push({ category: 'secret', name: pattern.name });
+    }
+  }
+
+  for (const pattern of DEFAULT_CONTEXT_REGULATED_DOMAIN_PATTERNS) {
+    if (patternMatches(text, pattern.pattern)) {
+      findings.push({ category: 'regulated-domain', name: pattern.name });
+    }
+  }
+
+  const uniqueFindings = uniqueSafetyFindings(findings);
+  const securitySensitive = uniqueFindings.some((finding) => finding.category === 'secret');
+  const regulatedDomain = uniqueFindings.some((finding) => finding.category === 'regulated-domain');
+
+  return {
+    securitySensitive,
+    regulatedDomain,
+    requiresReview: regulatedDomain,
+    findings: uniqueFindings,
+  };
+}
+
+function contextUserIgnorePaths(settings: ContextIgnoreSettings): string[] {
+  let paths = [...(settings.paths ?? [])];
+  while (startsWithDefaultIgnorePaths(paths)) {
+    paths = paths.slice(DEFAULT_CONTEXT_IGNORE_PATHS.length);
+  }
+  return paths;
+}
+
+function contextUserRedactionPatterns(settings: ContextRedactionSettings): Array<ContextRedactionPattern | string> {
+  let patterns = [...(settings.patterns ?? [])];
+  while (startsWithDefaultRedactionPatterns(patterns)) {
+    patterns = patterns.slice(DEFAULT_CONTEXT_REDACTION_PATTERNS.length);
+  }
+  return patterns;
+}
+
+function startsWithDefaultIgnorePaths(paths: string[]): boolean {
+  if (paths.length < DEFAULT_CONTEXT_IGNORE_PATHS.length) return false;
+  return DEFAULT_CONTEXT_IGNORE_PATHS.every((pattern, index) => paths[index] === pattern);
+}
+
+function startsWithDefaultRedactionPatterns(patterns: Array<ContextRedactionPattern | string>): boolean {
+  if (patterns.length < DEFAULT_CONTEXT_REDACTION_PATTERNS.length) return false;
+  return DEFAULT_CONTEXT_REDACTION_PATTERNS.every((pattern, index) => {
+    const current = patterns[index];
+    return typeof current !== 'string' && current.name === pattern.name && current.pattern === pattern.pattern;
+  });
+}
+
+function patternMatches(text: string, pattern: string): boolean {
+  if (!text) return false;
+  try {
+    return new RegExp(pattern, 'i').test(text);
+  } catch {
+    return false;
+  }
+}
+
+function uniqueSafetyFindings(findings: ContextSafetyFinding[]): ContextSafetyFinding[] {
+  const seen = new Set<string>();
+  return findings.filter((finding) => {
+    const key = `${finding.category}:${finding.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function collectContextText(value: unknown, seen = new WeakSet<object>()): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  if (Array.isArray(value)) return value.map((item) => collectContextText(item, seen)).join('\n');
+  if (typeof value === 'object') {
+    if (seen.has(value)) return '';
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    return Object.keys(record).sort().map((key) => `${key}\n${collectContextText(record[key], seen)}`).join('\n');
+  }
+  return '';
 }
 
 function positiveNumberOrDefault(value: number | undefined, fallback: number): number {

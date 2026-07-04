@@ -1,6 +1,6 @@
 import type { CaptureConfig } from "./config.js";
 import type { ResolvedWorkspace, TokenStatus } from "./api.js";
-import { CONTEXT_SAFETY_CONTRACT_VERSION } from "./context-safety.js";
+import { CONTEXT_SAFETY_CONTRACT_VERSION, DEFAULT_CONTEXT_IGNORE_PATHS } from "./context-safety.js";
 
 export const MVP_COMMANDS = ["remember", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"] as const;
 
@@ -15,8 +15,11 @@ export type CaptureStatus = {
   mode: CaptureConfig["mode"];
   ignore: {
     pathCount: number;
+    builtInPathCount: number;
+    userPathCount: number;
     maxFileBytes: number;
     maxEventBytes: number;
+    captureIgnorePath?: string;
   };
   redaction: {
     enabled: boolean;
@@ -48,8 +51,11 @@ export function buildCaptureStatus(input: {
     mode: input.config.mode,
     ignore: {
       pathCount: input.config.ignore.paths.length,
+      builtInPathCount: DEFAULT_CONTEXT_IGNORE_PATHS.length,
+      userPathCount: Math.max(0, input.config.ignore.paths.length - DEFAULT_CONTEXT_IGNORE_PATHS.length),
       maxFileBytes: input.config.ignore.maxFileBytes,
       maxEventBytes: input.config.ignore.maxEventBytes,
+      ...(input.config.configFiles.captureIgnore ? { captureIgnorePath: input.config.configFiles.captureIgnore } : {}),
     },
     redaction: {
       enabled: input.config.redaction.enabled,
@@ -73,7 +79,8 @@ export function formatStatusText(status: CaptureStatus): string {
     `Repo path: ${status.repoPath}`,
     `Workspace: ${status.workspaceId ?? "unresolved"} (${status.workspaceResolvedBy})`,
     `Queue path: ${status.queuePath}`,
-    `Ignore: ${status.ignore.pathCount} paths, max file ${status.ignore.maxFileBytes} bytes, max event ${status.ignore.maxEventBytes} bytes`,
+    `Ignore: ${status.ignore.pathCount} paths (${status.ignore.builtInPathCount} built-in, ${status.ignore.userPathCount} user), max file ${status.ignore.maxFileBytes} bytes, max event ${status.ignore.maxEventBytes} bytes`,
+    ...(status.ignore.captureIgnorePath ? [`Capture ignore: ${status.ignore.captureIgnorePath}`] : []),
     `Redaction: ${status.redaction.enabled ? "enabled" : "disabled"} (${status.redaction.patternCount} patterns)`,
     `Operator auto-approve: ${status.operatorAutoApprove ? "enabled" : "disabled"}`,
     `MCP token: ${status.token.exists ? status.token.path : "missing"}${status.token.mode ? ` (mode ${status.token.mode})` : ""}`,

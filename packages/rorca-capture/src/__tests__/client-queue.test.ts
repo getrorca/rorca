@@ -70,6 +70,41 @@ describe("capture client offline queue", () => {
     expect(raw).not.toContain(repo);
   });
 
+  it("redacts representative secrets before the first API submission attempt", async () => {
+    const repo = tempRepo();
+    const config = configFor(repo);
+    let submittedBody: any;
+    const client = createCaptureClient(config, {
+      token: "test-token",
+      fetchImpl: async (_url, init) => {
+        submittedBody = init?.body ? JSON.parse(String(init.body)) : undefined;
+        return new Response(JSON.stringify({ event: { id: "evt-redacted" }, created: true }), { status: 201 });
+      },
+    });
+
+    const result = await client.submitContextEvent({
+      ...eventPayload(repo),
+      summary: "Authorization: Bearer abc.def.secret-token",
+      payload: {
+        bearer: "Bearer abcdefghijklmnopqrstuvwxyz.123456",
+        openai: "sk-1234567890abcdefghijklmnop",
+        privateKey: "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----",
+        databaseUrl: "postgres://user:pass@localhost:5432/app",
+      },
+    });
+
+    expect(result.status).toBe("submitted");
+    const serialized = JSON.stringify(submittedBody);
+    expect(serialized).toContain("Bearer [REDACTED]");
+    expect(serialized).toContain("sk-[REDACTED]");
+    expect(serialized).toContain("[REDACTED_PRIVATE_KEY]");
+    expect(serialized).toContain("[REDACTED_DATABASE_URL]");
+    expect(serialized).not.toContain("secret-token");
+    expect(serialized).not.toContain("sk-1234567890abcdefghijklmnop");
+    expect(serialized).not.toContain("BEGIN PRIVATE KEY");
+    expect(serialized).not.toContain("user:pass");
+  });
+
   it("avoids duplicate queue entries for the same deterministic key", async () => {
     const repo = tempRepo();
     const config = configFor(repo);

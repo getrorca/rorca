@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import {
+  loadContextCaptureIgnoreFile,
   normalizeContextIgnoreSettings,
   normalizeContextRedactionSettings,
   type ContextIgnoreSettings,
@@ -14,7 +15,7 @@ export const DEFAULT_RORCA_API_URL = "http://localhost:3030";
 export const DEFAULT_CAPTURE_QUEUE_RELATIVE_PATH = ".rorca-capture-queue.jsonl";
 
 export type CaptureMode = "local" | "vm" | "ci";
-export type ConfigSource = "flag" | "env" | "rorca-config" | "capture-config" | "auto";
+export type ConfigSource = "flag" | "env" | "rorca-config" | "capture-config" | "capture-ignore" | "auto";
 
 export type CaptureConfigSourceMap = Partial<Record<keyof CaptureConfigValues, ConfigSource>>;
 
@@ -46,6 +47,7 @@ export type CaptureConfig = {
   configFiles: {
     rorcaConfig?: string;
     captureConfig?: string;
+    captureIgnore?: string;
   };
   operatorAutoApprove: boolean;
   apiOnly: true;
@@ -155,7 +157,17 @@ export function resolveCaptureConfig(options: ResolveCaptureConfigOptions = {}):
     values.queuePath = path.join(values.repoPath, values.queuePath);
   }
 
-  const ignore = normalizeContextIgnoreSettings(values.ignore);
+  const captureIgnoreFile = loadContextCaptureIgnoreFile(values.repoPath);
+  const ignore = normalizeContextIgnoreSettings({
+    ...values.ignore,
+    paths: [
+      ...(values.ignore?.paths ?? []),
+      ...(captureIgnoreFile?.patterns ?? []),
+    ],
+  });
+  if (captureIgnoreFile && !sources.ignore) {
+    sources.ignore = "capture-ignore";
+  }
   const redaction = normalizeContextRedactionSettings(values.redaction);
 
   return {
@@ -171,6 +183,7 @@ export function resolveCaptureConfig(options: ResolveCaptureConfigOptions = {}):
     configFiles: {
       ...(rorcaFile ? { rorcaConfig: rorcaConfigPath } : {}),
       ...(captureFile ? { captureConfig: captureConfigPath } : {}),
+      ...(captureIgnoreFile ? { captureIgnore: captureIgnoreFile.path } : {}),
     },
     apiOnly: true,
   };

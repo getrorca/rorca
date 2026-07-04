@@ -114,6 +114,12 @@ let state: {
   listItems: any[];
 };
 
+function findQueryOneCallContaining(fragment: string): { sql: string; params: unknown[] } {
+  const call = mockQueryOne.mock.calls.find(([sql]) => String(sql).includes(fragment));
+  if (!call) throw new Error(`Expected queryOne call containing ${fragment}`);
+  return { sql: String(call[0]), params: (call[1] ?? []) as unknown[] };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   state = {
@@ -218,6 +224,36 @@ describe('POST /api/context-events', () => {
     expect(res.body.idempotent).toBe(true);
     expect(res.body.event.id).toBe('existing-event');
   });
+
+  it('redacts representative secrets before inserting a context event', async () => {
+    const res = await request(buildApp())
+      .post('/api/context-events')
+      .send({
+        workspaceId: 'ws-ccs-003',
+        eventType: 'manual_cli_note',
+        sourceSystem: 'pi-sidecar',
+        sourceRef: 'session:secret',
+        summary: 'Authorization: Bearer abc.def.rawsecret',
+        payload: {
+          openai: 'sk-1234567890abcdefghijklmnop',
+          database: 'postgres://user:pass@localhost:5432/app',
+          pem: '-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----',
+        },
+        relatedFiles: ['backend/src/routes/context-events.ts'],
+      });
+
+    expect(res.status).toBe(201);
+    const insert = findQueryOneCallContaining('INSERT INTO context_events');
+    const serialized = JSON.stringify(insert.params);
+    expect(serialized).toContain('Bearer [REDACTED]');
+    expect(serialized).toContain('sk-[REDACTED]');
+    expect(serialized).toContain('[REDACTED_DATABASE_URL]');
+    expect(serialized).toContain('[REDACTED_PRIVATE_KEY]');
+    expect(serialized).not.toContain('rawsecret');
+    expect(serialized).not.toContain('sk-1234567890abcdefghijklmnop');
+    expect(serialized).not.toContain('user:pass');
+    expect(serialized).not.toContain('BEGIN PRIVATE KEY');
+  });
 });
 
 describe('context candidate creation/list/detail', () => {
@@ -238,6 +274,32 @@ describe('context candidate creation/list/detail', () => {
     expect(res.body.created).toBe(true);
     expect(res.body.candidate.reviewStatus).toBe('pending');
     expect(res.body.candidate.contextEventId).toBe('101');
+  });
+
+  it('redacts candidate secrets and forces regulated-domain candidates to require review before insert', async () => {
+    const res = await request(buildApp())
+      .post('/api/context-candidates')
+      .send({
+        workspaceId: 'ws-ccs-003',
+        suggestedCategory: 'Gotcha',
+        title: 'HIPAA patient records need review',
+        rule: 'Never persist postgres://user:pass@localhost:5432/app in captured memory.',
+        context: 'Authorization: Bearer raw-regulated-token for patient data.',
+        confidence: 'medium',
+        regulatedDomain: false,
+        requiresReview: false,
+      });
+
+    expect(res.status).toBe(201);
+    const insert = findQueryOneCallContaining('INSERT INTO memory_candidates');
+    const serialized = JSON.stringify(insert.params);
+    expect(serialized).toContain('[REDACTED_DATABASE_URL]');
+    expect(serialized).toContain('Bearer [REDACTED]');
+    expect(serialized).not.toContain('user:pass');
+    expect(serialized).not.toContain('raw-regulated-token');
+    expect(insert.params[20]).toBe(true); // security_sensitive
+    expect(insert.params[21]).toBe(true); // regulated_domain
+    expect(insert.params[22]).toBe(true); // requires_review forced true
   });
 
   it('returns the existing candidate for an idempotent sidecar retry', async () => {
@@ -286,6 +348,28 @@ describe('context candidate creation/list/detail', () => {
     expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('review_status = ANY'), expect.any(Array));
   });
 
+  it('applies default retrieval safety gates in SQL and supports explicit unsafe opt-in', async () => {
+    let res = await request(buildApp())
+      .get('/api/context-candidates/retrieval')
+      .query({ workspaceId: 'ws-ccs-003', limit: 10 });
+
+    expect(res.status).toBe(200);
+    let retrievalQuery = mockQuery.mock.calls[mockQuery.mock.calls.length - 1]?.[0] as string;
+    expect(retrievalQuery).toContain("review_status NOT IN ('pending', 'rejected')");
+    expect(retrievalQuery).toContain("CASE confidence WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END");
+    expect(retrievalQuery).toContain("(regulated_domain = false OR review_status = 'approved')");
+
+    mockQuery.mockClear();
+    res = await request(buildApp())
+      .get('/api/context-candidates/retrieval')
+      .query({ workspaceId: 'ws-ccs-003', includeUnsafe: 'true', limit: 10 });
+
+    expect(res.status).toBe(200);
+    retrievalQuery = mockQuery.mock.calls[mockQuery.mock.calls.length - 1]?.[0] as string;
+    expect(retrievalQuery).not.toContain("review_status NOT IN ('pending', 'rejected')");
+    expect(retrievalQuery).not.toContain('regulated_domain = false');
+  });
+
   it('returns NotFoundError for missing candidate detail', async () => {
     state.candidateById = undefined;
 
@@ -322,6 +406,18 @@ describe('context candidate review lifecycle', () => {
         }),
       }),
     }));
+  });
+
+  it('blocks regulated-domain approval unless explicit review confirmation is provided', async () => {
+    state.candidateById = candidateRow({ regulatedDomain: true, requiresReview: true });
+
+    const res = await request(buildApp())
+      .post('/api/context-candidates/201/approve')
+      .send({ reviewer: 'auto-operator' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('regulatedReviewConfirmed');
+    expect(mockPromoteMemory).not.toHaveBeenCalled();
   });
 
   it('rejects a candidate with an audited reason and does not promote memory', async () => {

@@ -5,6 +5,7 @@ import type { CaptureConfig } from "./config.js";
 import { buildCaptureStatus, type CaptureStatus } from "./status.js";
 import {
   enqueueCaptureQueueEntry,
+  normalizeCapturePayloadForDisk,
   readCaptureQueue,
   sanitizeCaptureErrorMessage,
   updateCaptureQueueEntryFailure,
@@ -13,6 +14,7 @@ import {
   type CaptureQueueOperation,
   type EnqueueCaptureQueueResult,
   type JsonObject,
+  type JsonValue,
 } from "./queue.js";
 
 export const MCP_TOKEN_RELATIVE_PATH = ".rorca/mcp-token";
@@ -244,7 +246,10 @@ export function createCaptureClient(config: CaptureConfig, options: {
   const api = createApiClient(config, options);
 
   return {
-    ...api,
+    get: api.get,
+    post<T>(pathname: string, body: unknown) {
+      return api.post<T>(pathname, normalizeSubmissionPayload(config, body));
+    },
     checkStatus() {
       return checkCaptureStatus(config, options);
     },
@@ -350,15 +355,16 @@ async function submitWithQueue<T>(
   payload: Record<string, unknown>,
   options: CaptureSubmitOptions = {},
 ): Promise<CaptureSubmissionResult<T>> {
+  const safePayload = normalizeSubmissionPayload(config, payload);
   try {
-    const response = await client.post<T>(endpoint, payload);
+    const response = await client.post<T>(endpoint, safePayload);
     return { status: "submitted", response };
   } catch (error) {
     if (shouldQueueOnSubmitError(error, options)) {
       const queued = enqueueCaptureQueueEntry(config.queuePath, config, {
         operation,
         endpoint,
-        payload,
+        payload: safePayload,
         eventType: options.eventType,
         contentFingerprint: options.contentFingerprint,
       });
@@ -376,10 +382,11 @@ async function submitCandidateWithOptionalApproval<T>(
 ): Promise<CaptureSubmissionResult<T>> {
   const endpoint = options.endpoint ?? "/api/context-candidates";
   const approvalEndpointBase = options.approvalEndpointBase ?? endpoint;
-  const approvalPayload = options.approvalPayload ?? defaultApprovalPayload(payload);
+  const safePayload = normalizeSubmissionPayload(config, payload);
+  const approvalPayload = normalizeSubmissionPayload(config, options.approvalPayload ?? defaultApprovalPayload(safePayload));
 
   try {
-    const response = await client.post<T>(endpoint, payload);
+    const response = await client.post<T>(endpoint, safePayload);
     if (!options.approve) return { status: "submitted", response };
 
     const candidateId = extractCandidateId(response);
@@ -407,7 +414,7 @@ async function submitCandidateWithOptionalApproval<T>(
       const queued = enqueueCaptureQueueEntry(config.queuePath, config, {
         operation: endpoint.includes("/memory/candidates") ? "memory-candidate" : "context-candidate",
         endpoint,
-        payload,
+        payload: safePayload,
         eventType: options.eventType,
         contentFingerprint: options.contentFingerprint,
         ...(options.approve ? { approval: { endpointBase: approvalEndpointBase, payload: approvalPayload as JsonObject } } : {}),
@@ -462,6 +469,15 @@ function extractCandidateId(response: unknown): string | null {
   if (!candidate || typeof candidate !== "object") return null;
   const id = (candidate as { id?: unknown }).id;
   return typeof id === "string" || typeof id === "number" ? String(id) : null;
+}
+
+function normalizeSubmissionPayload(config: CaptureConfig, payload: unknown): Record<string, unknown> {
+  const normalized = normalizeCapturePayloadForDisk(payload, config);
+  return isJsonObject(normalized) ? normalized : {};
+}
+
+function isJsonObject(value: JsonValue): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function defaultApprovalPayload(payload: Record<string, unknown>): Record<string, unknown> {

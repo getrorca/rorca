@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CaptureConfigError, resolveCaptureConfig } from "../config.js";
 import { resolveWorkspace } from "../api.js";
+import { shouldCapturePath } from "../context-safety.js";
 
 function tempRepo(): string {
   const repo = mkdtempSync(path.join(tmpdir(), "rorca-capture-"));
@@ -60,6 +61,24 @@ describe("rorca-capture config discovery", () => {
     writeFileSync(path.join(repo, ".rorca", "capture.json"), JSON.stringify({ operatorAutoApprove: true }), "utf8");
     expect(resolveCaptureConfig({ cwd: repo, gitRoot: repo, env: {} }).operatorAutoApprove).toBe(true);
     expect(resolveCaptureConfig({ cwd: repo, gitRoot: repo, env: { RORCA_CAPTURE_OPERATOR_AUTO_APPROVE: "false" } }).operatorAutoApprove).toBe(false);
+  });
+
+  it("loads .rorca-captureignore while keeping built-in excludes non-overridable", () => {
+    const repo = tempRepo();
+    writeFileSync(path.join(repo, ".rorca-captureignore"), [
+      "generated/**",
+      "!generated/keep.ts",
+      "!.env",
+      "",
+    ].join("\n"), "utf8");
+
+    const config = resolveCaptureConfig({ cwd: repo, gitRoot: repo, env: {} });
+
+    expect(config.configFiles.captureIgnore).toBe(path.join(repo, ".rorca-captureignore"));
+    expect(config.ignore.paths).toContain("generated/**");
+    expect(shouldCapturePath("generated/output.ts", config.ignore)).toBe(false);
+    expect(shouldCapturePath("generated/keep.ts", config.ignore)).toBe(true);
+    expect(shouldCapturePath(".env", config.ignore)).toBe(false);
   });
 
   it("uses default API URL and queue path in local auto-detect mode", () => {
