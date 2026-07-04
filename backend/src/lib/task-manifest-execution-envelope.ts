@@ -23,6 +23,7 @@ const DIRECT_TASK_MANIFEST_ROUTES = new Set([
   'rorca.pipeline.story',
   'rorca.pipeline.task-manifest',
   'hermes.task-manifest.direct',
+  'hermes.hrc.task-manifest',
   'task-manifest.direct',
   'direct-task-manifest',
 ]);

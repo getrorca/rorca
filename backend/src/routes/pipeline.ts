@@ -1342,10 +1342,44 @@ const PipelineTriggerSchema = z.object({
   reservedRunId: z.number().optional(),
   executionEnvironment: z.string().optional(),
   executionEnvironmentId: z.string().optional(),
-});
+}).passthrough();
+
+const HERMES_LEGACY_REPAIR_METADATA_FIELDS = [
+  'repairPlanId',
+  'evidenceIds',
+  'validationGate',
+  'principleSelection',
+  'principlePromptBundles',
+  'branchStrategy',
+  'branchName',
+  'worktreePath',
+  'baseBranch',
+  'baseHead',
+] as const;
+
+function presentHermesLegacyRepairMetadataFields(body: Record<string, unknown>): string[] {
+  return HERMES_LEGACY_REPAIR_METADATA_FIELDS.filter((field) => (
+    Object.prototype.hasOwnProperty.call(body, field) && body[field] !== undefined
+  ));
+}
+
+function assertNoLegacyHermesRepairMetadataOnPipelineTrigger(body: Record<string, unknown>): void {
+  const fields = presentHermesLegacyRepairMetadataFields(body);
+  if (fields.length === 0) return;
+
+  throw new ValidationError(
+    'Legacy Hermes repair metadata posted to /api/pipeline/trigger is not a typed task manifest. Convert repairPlanId/evidenceIds/validationGate/principleSelection/branchStrategy into a TaskManifest v1 and POST /api/pipeline/task-manifests/trigger with workspaceId, manifest, and idempotencyKey.',
+    {
+      code: 'HERMES_REPAIR_METADATA_REQUIRES_TASK_MANIFEST',
+      fields,
+      endpoint: '/api/pipeline/task-manifests/trigger',
+    },
+  );
+}
 
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
+    assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
     const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
@@ -2237,6 +2271,74 @@ function taskManifestIssueSummary(issues: Array<{ path: PropertyKey[]; message: 
     .join('; ');
 }
 
+function taskManifestIssueDetails(
+  code: string,
+  issues: Array<{ path: PropertyKey[]; message: string }>,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    code,
+    ...extra,
+    issues: issues.map((issue) => ({
+      path: issue.path.map(String).join('.'),
+      message: issue.message,
+    })),
+  };
+}
+
+function taskManifestValidationCodeFromIssues(issues: Array<{ path: PropertyKey[]; message: string }>): string {
+  const normalized = issues.map((issue) => ({
+    path: issue.path.map(String).join('.'),
+    message: issue.message,
+  }));
+
+  if (normalized.some((issue) => (
+    /(?:^|\.)path$|Paths|artifactRefs/.test(issue.path)
+    && /workspace-relative|traverse|absolute|URL|home-directory|Windows drive|NUL|unsafe/i.test(issue.message)
+  ))) {
+    return 'TASK_MANIFEST_UNSAFE_ARTIFACT_PATH';
+  }
+
+  if (normalized.some((issue) => (
+    /payload exceeds|serialized bytes/i.test(issue.message)
+    || (
+      /^context(?:\.|$)/.test(issue.path)
+      && /at most|exceeds|oversized|too large|maximum/i.test(issue.message)
+    )
+  ))) {
+    return 'TASK_MANIFEST_CONTEXT_TOO_LARGE';
+  }
+
+  return 'TASK_MANIFEST_INVALID';
+}
+
+function validationErrorWithCode(message: string, code: string, extra: Record<string, unknown> = {}): ValidationError {
+  return new ValidationError(message, { code, ...extra });
+}
+
+function assertTaskManifestRouteDecisionAllowed(manifest: TaskManifest): void {
+  const route = manifest.routeDecision.route;
+  const normalizedRoute = route.toLowerCase();
+  const highRiskRoute = normalizedRoute === 'rorca.spec.run'
+    || normalizedRoute === 'direct-repair'
+    || normalizedRoute === 'direct_repair'
+    || normalizedRoute === 'directrepair'
+    || normalizedRoute.includes('direct-repair')
+    || normalizedRoute.includes('direct_repair')
+    || normalizedRoute.includes('directrepair');
+
+  if (!highRiskRoute) return;
+
+  throw validationErrorWithCode(
+    `Task manifest routeDecision.route '${route}' is not eligible for direct execution; Hermes repair manifests must use the typed task-manifest bridge with branch/PR-only policy, not a high-risk direct-repair/spec-run route.`,
+    'TASK_MANIFEST_HIGH_RISK_ROUTE',
+    {
+      route,
+      allowedPolicy: 'branchPrOnly=true, autoMerge=false, mergeStrategy=pr|draft-pr|branch-only',
+    },
+  );
+}
+
 function sourceAuthorityHasValue(value: unknown): boolean {
   if (value === undefined || value === null) return false;
   if (typeof value === 'string') return value.trim().length > 0;
@@ -2255,29 +2357,41 @@ function assertTaskManifestSourceAuthority(
   requestIdempotencyKey: string,
 ): void {
   if (String(manifest.workspaceId) !== requestWorkspaceId) {
-    throw new ValidationError('Invalid source authority: request workspaceId must match manifest.workspaceId');
+    throw validationErrorWithCode(
+      'Invalid source authority: request workspaceId must match manifest.workspaceId',
+      'TASK_MANIFEST_WORKSPACE_AUTHORITY_MISMATCH',
+    );
   }
 
   if (manifest.idempotencyKey !== requestIdempotencyKey) {
-    throw new ValidationError('Invalid source authority: request idempotencyKey must match manifest.idempotencyKey');
+    throw validationErrorWithCode(
+      'Invalid source authority: request idempotencyKey must match manifest.idempotencyKey',
+      'TASK_MANIFEST_IDEMPOTENCY_AUTHORITY_MISMATCH',
+    );
   }
 
   const source = manifest.source as Record<string, unknown>;
   if (!Object.values(source).some(sourceAuthorityHasValue)) {
-    throw new ValidationError('Invalid source authority: task manifest source must include at least one provenance reference');
+    throw validationErrorWithCode(
+      'Invalid source authority: task manifest source must include at least one provenance reference',
+      'TASK_MANIFEST_SOURCE_REQUIRED',
+    );
   }
 
   const sourceSpecPath = manifest.source.rorca?.specPath;
   if (sourceSpecPath && !sourceSpecPath.startsWith('forge/specs/')) {
-    throw new ValidationError('Invalid source authority: source.rorca.specPath must be workspace-relative under forge/specs/');
+    throw validationErrorWithCode(
+      'Invalid source authority: source.rorca.specPath must be workspace-relative under forge/specs/',
+      'TASK_MANIFEST_SOURCE_SPEC_PATH_INVALID',
+    );
   }
 
   if (routeHasWrappedManifest(body)) {
     if (body.workspaceId === undefined || body.workspaceId === null || stringFromId(body.workspaceId) === null) {
-      throw new ValidationError('Missing required field: workspaceId');
+      throw validationErrorWithCode('Missing required field: workspaceId', 'TASK_MANIFEST_WORKSPACE_ID_REQUIRED');
     }
     if (!isNonEmptyString(body.idempotencyKey)) {
-      throw new ValidationError('Missing required field: idempotencyKey');
+      throw validationErrorWithCode('Missing required field: idempotencyKey', 'TASK_MANIFEST_IDEMPOTENCY_KEY_REQUIRED');
     }
   }
 }
@@ -2788,31 +2902,51 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     const manifestInput = resolveTaskManifestInput(requestBody);
     const parsed = safeParseTaskManifest(manifestInput);
     if (!parsed.success) {
-      throw new ValidationError(`Invalid task manifest: ${taskManifestIssueSummary(parsed.error.issues)}`);
+      const validationCode = taskManifestValidationCodeFromIssues(parsed.error.issues);
+      throw new ValidationError(
+        `Invalid task manifest: ${taskManifestIssueSummary(parsed.error.issues)}`,
+        taskManifestIssueDetails(validationCode, parsed.error.issues),
+      );
     }
     const manifest = parsed.data;
 
     const requestWorkspaceId = stringFromId(requestBody.workspaceId ?? ((manifestInput as Record<string, unknown> | undefined)?.workspaceId));
     if (!requestWorkspaceId) {
-      throw new ValidationError('Missing required field: workspaceId');
+      throw validationErrorWithCode('Missing required field: workspaceId', 'TASK_MANIFEST_WORKSPACE_ID_REQUIRED');
     }
 
     const requestIdempotencyKey = stringFromId(requestBody.idempotencyKey ?? ((manifestInput as Record<string, unknown> | undefined)?.idempotencyKey));
     if (!requestIdempotencyKey) {
-      throw new ValidationError('Missing required field: idempotencyKey');
+      throw validationErrorWithCode('Missing required field: idempotencyKey', 'TASK_MANIFEST_IDEMPOTENCY_KEY_REQUIRED');
     }
 
     assertTaskManifestSourceAuthority(requestBody, manifest, requestWorkspaceId, requestIdempotencyKey);
+    assertTaskManifestRouteDecisionAllowed(manifest);
 
     const resolvedAutoWorktree = requestBody.autoWorktree !== false;
     const resolvedAutoMerge = requestBody.autoMerge === true;
+    const resolvedMergeStrategy = requestBody.mergeStrategy ?? manifest.execution.mergeStrategy;
+    if (resolvedAutoMerge && resolvedMergeStrategy === 'direct') {
+      throw new UnprocessableError(
+        'Task manifest execution rejects autoMerge=true with mergeStrategy=direct; high-risk direct repair must use PR, draft-PR, or branch-only review.',
+        'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR',
+        { code: 'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR' },
+      );
+    }
     if (resolvedAutoMerge) {
-      throw new UnprocessableError('Task manifest execution rejects autoMerge=true; use PR, draft-PR, or branch-only review');
+      throw new UnprocessableError(
+        'Task manifest execution rejects autoMerge=true; use PR, draft-PR, or branch-only review',
+        'TASK_MANIFEST_AUTO_MERGE_REJECTED',
+        { code: 'TASK_MANIFEST_AUTO_MERGE_REJECTED' },
+      );
     }
 
-    const resolvedMergeStrategy = requestBody.mergeStrategy ?? manifest.execution.mergeStrategy;
     if (resolvedMergeStrategy === 'direct') {
-      throw new UnprocessableError('Task manifest execution rejects mergeStrategy=direct; use pr, draft-pr, or branch-only');
+      throw new UnprocessableError(
+        'Task manifest execution rejects mergeStrategy=direct; use pr, draft-pr, or branch-only',
+        'TASK_MANIFEST_DIRECT_MERGE_REJECTED',
+        { code: 'TASK_MANIFEST_DIRECT_MERGE_REJECTED' },
+      );
     }
 
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [requestWorkspaceId]) as
