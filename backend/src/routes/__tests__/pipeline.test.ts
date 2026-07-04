@@ -1603,6 +1603,88 @@ describe('POST /api/pipeline/runs/:runId/retry', () => {
     );
   });
 
+  test('preserves original agent, model, terminal, graph, merge, and reasoning options when retrying', async () => {
+    seedSpec('approved', 'retry-preserve-options');
+
+    const originalRun = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs
+         (spec_path, workspace_id, status, parallelism, agent, agent_type, agent_model,
+          auto_worktree, auto_merge, include_graph, merge_strategy, terminal_mode, trigger_options)
+       VALUES ('forge/specs/approved/retry-preserve-options.json', 'ws-pipe', 'failed', 4,
+          'pi', 'pi', 'openai-codex/gpt-5.5', true, false, true, 'branch-only', 'pty',
+          $1::jsonb)
+       RETURNING id`,
+      [JSON.stringify({ thinkingEnabled: true, thinkingBudget: 4096, effortLevel: 'xhigh', reasoningEffort: 'xhigh' })],
+    );
+    expect(originalRun?.id).toBeDefined();
+
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, retries)
+       VALUES ($1, 'US-001', 'fail', 0)`,
+      [originalRun!.id],
+    );
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${originalRun!.id}/retry`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ forceSequential: true });
+
+    expect(res.status).toBe(201);
+
+    const retryRun = await queryOne<{
+      parallelism: number;
+      agent: string;
+      agent_type: string;
+      agent_model: string | null;
+      auto_worktree: boolean;
+      auto_merge: boolean;
+      include_graph: boolean;
+      merge_strategy: string | null;
+      terminal_mode: string | null;
+      retried_from_run_id: number | null;
+    }>(
+      `SELECT parallelism, agent, agent_type, agent_model, auto_worktree, auto_merge,
+              include_graph, merge_strategy, terminal_mode, retried_from_run_id
+       FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+
+    expect(retryRun).toMatchObject({
+      parallelism: 1,
+      agent: 'pi',
+      agent_type: 'pi',
+      agent_model: 'openai-codex/gpt-5.5',
+      auto_worktree: true,
+      auto_merge: false,
+      include_graph: true,
+      merge_strategy: 'branch-only',
+      terminal_mode: 'pty',
+      retried_from_run_id: originalRun!.id,
+    });
+
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:retry',
+      expect.objectContaining({
+        runId: Number(res.body.runId),
+        originalRunId: Number(originalRun!.id),
+        storyIds: ['US-001'],
+        agent: 'pi',
+        model: 'openai-codex/gpt-5.5',
+        includeGraph: true,
+        terminalMode: 'pty',
+        thinkingEnabled: true,
+        thinkingBudget: 4096,
+        effortLevel: 'xhigh',
+        reasoningEffort: 'xhigh',
+      }),
+      expect.any(Object),
+    );
+  });
+
   test('rejects retry when the original reusable worktree is stale before queueing', async () => {
     seedSpec('approved', 'retry-stale-worktree');
     const { branchName, worktreePath } = createDeterministicSpecWorktree('retry-stale-worktree');

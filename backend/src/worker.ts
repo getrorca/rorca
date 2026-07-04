@@ -1325,6 +1325,50 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
 // ── Job handler: pipeline:retry ───────────────────────────────────────────
 
+function collectStoriesFromSpec(specJson: any): any[] {
+  if (Array.isArray(specJson?.userStories)) return specJson.userStories;
+  if (Array.isArray(specJson?.phases)) {
+    return specJson.phases.flatMap((phase: { stories?: unknown[] }) => Array.isArray(phase.stories) ? phase.stories : []);
+  }
+  return [];
+}
+
+function syncRetrySpecPassesToOriginalSpec(params: {
+  retrySpecPath: string;
+  originalSpecPath: string;
+  storyIds: string[];
+}): { syncedStoryIds: string[]; remainingStoryIds: string[] } {
+  const retrySpecJson = JSON.parse(fs.readFileSync(params.retrySpecPath, 'utf8'));
+  const originalSpecJson = JSON.parse(fs.readFileSync(params.originalSpecPath, 'utf8'));
+  const retriedIds = new Set(params.storyIds);
+  const passedInRetry = new Set(
+    collectStoriesFromSpec(retrySpecJson)
+      .filter((story: any) => retriedIds.has(String(story.id)) && story.passes === true)
+      .map((story: any) => String(story.id)),
+  );
+
+  const syncedStoryIds: string[] = [];
+  let changed = false;
+  for (const story of collectStoriesFromSpec(originalSpecJson)) {
+    const storyId = String(story.id);
+    if (passedInRetry.has(storyId) && story.passes !== true) {
+      story.passes = true;
+      syncedStoryIds.push(storyId);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(params.originalSpecPath, JSON.stringify(originalSpecJson, null, 2), 'utf8');
+  }
+
+  const remainingStoryIds = collectStoriesFromSpec(originalSpecJson)
+    .filter((story: any) => story.excluded !== true && story.passes !== true)
+    .map((story: any) => String(story.id));
+
+  return { syncedStoryIds, remainingStoryIds };
+}
+
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
@@ -1338,7 +1382,25 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
 
     const payload: PipelineRetryJobPayloadType = parsed.data;
-    const { runId, originalRunId, workspacePath, retrySpecPath, agent, model, worktreePath, sequenceOffset, envOverrides, includeGraph } = payload;
+    const {
+      runId,
+      originalRunId,
+      storyIds,
+      workspacePath,
+      specPath,
+      retrySpecPath,
+      agent,
+      model,
+      worktreePath,
+      sequenceOffset,
+      envOverrides,
+      includeGraph,
+      terminalMode: payloadTerminalMode,
+      thinkingEnabled,
+      thinkingBudget,
+      effortLevel,
+      reasoningEffort,
+    } = payload;
 
     // Effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -1353,6 +1415,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
+    const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
@@ -1420,13 +1483,25 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       '--port', backendPort,
       '--parallelism', String(parallelism ?? 1),
       '--agent', agent,
-      '--terminal-mode', terminalMode ?? 'ansi-html',
+      '--terminal-mode', effectiveTerminalMode,
     ];
     if (model) {
       engineArgs.push('--model', model);
     }
     if (includeGraph) {
       engineArgs.push('--include-graph');
+    }
+    if (thinkingEnabled !== undefined) {
+      engineArgs.push('--thinking-enabled', String(thinkingEnabled));
+    }
+    if (thinkingBudget !== undefined) {
+      engineArgs.push('--thinking-budget', String(thinkingBudget));
+    }
+    if (effortLevel) {
+      engineArgs.push('--effort-level', effortLevel);
+    }
+    if (reasoningEffort) {
+      engineArgs.push('--reasoning-effort', reasoningEffort);
     }
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
@@ -1437,7 +1512,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       ...inheritedEnvRetry,
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
-      RORCA_TERMINAL_MODE: terminalMode ?? 'ansi-html',
+      RORCA_TERMINAL_MODE: effectiveTerminalMode,
     };
 
     logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Spawning execution-engine for retry');
@@ -1506,8 +1581,14 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         const wasCancelled = cancellingRuns.delete(runId);
 
-        // Derive final status
+        // Derive final status and sync any passed retried stories from the
+        // temporary retry spec back to the canonical approved spec. Without
+        // this, a successful scoped retry can leave the original spec unaware
+        // of the pass and the next continuation may restart the same story.
         let finalStatus: string;
+        let syncedStoryIds: string[] = [];
+        let remainingStoryIds: string[] = [];
+        let retrySpecSyncSucceeded = false;
         if (wasCancelled) {
           finalStatus = 'cancelled';
         } else {
@@ -1523,14 +1604,35 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           } catch {
             finalStatus = code === 0 ? 'done' : 'failed';
           }
+
+          if (finalStatus === 'done') {
+            try {
+              const syncResult = syncRetrySpecPassesToOriginalSpec({
+                retrySpecPath,
+                originalSpecPath: path.join(workspacePath, specPath),
+                storyIds,
+              });
+              syncedStoryIds = syncResult.syncedStoryIds;
+              remainingStoryIds = syncResult.remainingStoryIds;
+              retrySpecSyncSucceeded = true;
+            } catch (syncErr: any) {
+              logger.warn({ err: syncErr, runId, retrySpecPath, specPath }, '[worker] Failed to sync retry spec pass flags back to original spec');
+            }
+          }
         }
 
-        logger.info({ runId, code, finalStatus, wasCancelled }, '[worker] retry execution-engine exited');
+        const retryScopeComplete = !wasCancelled && finalStatus === 'done';
+        const fullSpecComplete = retryScopeComplete && retrySpecSyncSucceeded && remainingStoryIds.length === 0;
+        const retrySummary = retryScopeComplete && !fullSpecComplete
+          ? `retry_scope_passed_remaining_stories:${remainingStoryIds.join(',')}`
+          : null;
+
+        logger.info({ runId, code, finalStatus, wasCancelled, retryScopeComplete, fullSpecComplete, remainingStoryIds }, '[worker] retry execution-engine exited');
 
         try {
           await execute(
-            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
-            [finalStatus, runId],
+            `UPDATE pipeline_runs SET status = $1, finished_at = NOW(), summary = COALESCE($3, summary) WHERE id = $2`,
+            [finalStatus, runId, retrySummary],
           );
 
           if (wasCancelled) {
@@ -1546,6 +1648,11 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
               status: finalStatus,
               exit_code: code,
               source: 'worker_retry',
+              retry_scope_complete: retryScopeComplete,
+              full_spec_complete: fullSpecComplete,
+              synced_story_ids: syncedStoryIds,
+              remaining_story_ids: remainingStoryIds,
+              ...(retrySummary ? { summary: retrySummary } : {}),
             });
           }
         } catch (err) {

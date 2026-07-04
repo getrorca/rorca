@@ -1839,6 +1839,28 @@ interface AgentResult {
   piSessionId?: string;
 }
 
+const PROMPT_DELIVERY_FAILURE_CATEGORY = 'prompt_delivery_failed' as const;
+const EMPTY_PROMPT_FAILURE_MESSAGE = `${PROMPT_DELIVERY_FAILURE_CATEGORY}: Refusing to launch agent with an empty prompt.`;
+
+function isEmptyPrompt(prompt: string): boolean {
+  return prompt.trim().length === 0;
+}
+
+function buildPromptDeliveryFailureResult(startTime: number = Date.now(), detail = EMPTY_PROMPT_FAILURE_MESSAGE): AgentResult {
+  return {
+    exitCode: 1,
+    stderrTail: detail,
+    elapsedMs: Math.max(0, Date.now() - startTime),
+  };
+}
+
+export function isPromptDeliveryFailureOutput(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes(PROMPT_DELIVERY_FAILURE_CATEGORY)
+    || lower.includes('no prompt provided')
+    || lower.includes('either specify one as an argument or pipe the prompt into stdin');
+}
+
 interface PiRetryContext {
   isRetry: boolean;
   attempt: number;
@@ -1906,6 +1928,7 @@ interface PtyCommand {
   args: string[];
   env: Record<string, string>;
   prompt: string;
+  writePromptToStdin?: boolean;
   cleanup?: () => void;
 }
 
@@ -1934,7 +1957,7 @@ function killProcessGroup(pid: number | null | undefined, signal: NodeJS.Signals
   }
 }
 
-function buildPtyCommand(
+export function buildPtyCommand(
   agentType: AgentType,
   prompt: string,
   cwd: string,
@@ -2078,6 +2101,7 @@ function buildPtyCommand(
         ],
         env: buildGuardedAgentEnv(cwd),
         prompt,
+        writePromptToStdin: true,
       };
     }
   }
@@ -2422,6 +2446,15 @@ function runAgent(
   piSessionOptions?: PiSessionOptions,
   ptyOptions?: PtyRunOptions,
 ): Promise<AgentResult> {
+  const startTime = Date.now();
+  if (isEmptyPrompt(prompt)) {
+    try {
+      fs.appendFileSync(logFile, `[System] ${EMPTY_PROMPT_FAILURE_MESSAGE}\n`, 'utf8');
+    } catch { /* best effort */ }
+    logger.error(`[engine] ${agentType} prompt preflight failed: empty prompt`);
+    return Promise.resolve(buildPromptDeliveryFailureResult(startTime));
+  }
+
   if (ptyOptions?.enabled) {
     return spawnAgentViaPty(
       ptyOptions,
@@ -3273,6 +3306,7 @@ type OpenCodeErrorCategory =
   | 'server_crashed'
   | 'malformed_output'
   | 'timeout'
+  | typeof PROMPT_DELIVERY_FAILURE_CATEGORY
   | 'unknown';
 
 interface ClassifiedError {
@@ -3368,6 +3402,14 @@ function classifyOpenCodeError(result: AgentResult): ClassifiedError {
 function classifyPiError(result: AgentResult): ClassifiedError {
   const lower = result.stderrTail.toLowerCase();
   const raw = result.stderrTail;
+
+  if (isPromptDeliveryFailureOutput(raw)) {
+    return {
+      category: PROMPT_DELIVERY_FAILURE_CATEGORY,
+      message: raw.trim().slice(0, 300) || 'Pi prompt was not delivered to the CLI',
+      retryable: false,
+    };
+  }
 
   if (lower.includes('no api key found') || lower.includes('use /login') || lower.includes('invalid api key')
       || lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('forbidden')) {
@@ -5589,11 +5631,68 @@ async function executeStory(
     }
 
     // ── Non-zero exit: classify error and retry ────────────────────────
-    const classified = effectiveAgent === 'opencode'
-      ? classifyOpenCodeError(result)
-      : effectiveAgent === 'pi'
-        ? classifyPiError(result)
-        : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
+    const classified = isPromptDeliveryFailureOutput(result.stderrTail)
+      ? {
+          category: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          message: result.stderrTail.trim().slice(0, 300) || 'Agent prompt was not delivered to the CLI',
+          retryable: false,
+        } as ClassifiedError
+      : effectiveAgent === 'opencode'
+        ? classifyOpenCodeError(result)
+        : effectiveAgent === 'pi'
+          ? classifyPiError(result)
+          : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
+
+    // Empty/undelivered prompt is an infrastructure failure. Do not mark the
+    // spec story as skipped/passed, and do not consume story retry attempts;
+    // the next retry/continuation should see the story as still unpassed.
+    if (classified.category === PROMPT_DELIVERY_FAILURE_CATEGORY) {
+      logger.info(`${story.id} failed due to prompt delivery infrastructure error — ${classified.message}`);
+      logger.info(`   Log: ${storyLogFile}`);
+      recordPiProgress({
+        knownIssues: [`Infrastructure failure: ${PROMPT_DELIVERY_FAILURE_CATEGORY}.`],
+        validationResults: [`Attempt failed before agent work began: ${classified.message}`],
+        remainingWork: ['Fix prompt construction/delivery and rerun this story; no story implementation retry was consumed.'],
+      });
+      rsMarkStoryFailed(effectiveCwd, {
+        storyId: story.id,
+        title: story.title,
+        status: 'failed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: effectiveAgent,
+        failReason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
+
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          error_message: classified.message,
+          infra_error: true,
+          retry_consumed: false,
+          agent_type: effectiveAgent,
+          exit_code: result.exitCode,
+          log_file: storyLogFile,
+          ...(graphHits != null ? { graph_hits: graphHits } : {}),
+        }, story.id);
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+        });
+      }
+      await persistRetrievalOutcome(false);
+      return 'failed';
+    }
 
     // Non-retryable errors (wrong API key, model not found, not installed) — fail immediately
     if (!classified.retryable) {

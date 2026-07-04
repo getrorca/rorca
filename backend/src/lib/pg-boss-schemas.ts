@@ -83,6 +83,11 @@ export const PipelineRetryJobPayload = z.object({
   sequenceOffset: z.number().int().min(0),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   includeGraph: z.boolean().optional().default(false),
+  terminalMode: TerminalModeSchema.optional().default('ansi-html'),
+  thinkingEnabled: z.boolean().optional(),
+  thinkingBudget: z.number().int().positive().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
+  reasoningEffort: z.string().optional(),
 }).strict();
 
 export type PipelineRetryJobPayloadType = z.infer<typeof PipelineRetryJobPayload>;

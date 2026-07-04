@@ -28,7 +28,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
-import { activeAgent, activeModel, type AgentType } from '../lib/config';
+import { activeAgent, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
@@ -1076,6 +1076,8 @@ interface PipelineRunRow {
   auto_worktree: boolean;
   include_graph: boolean;
   terminal_mode: TerminalMode | null;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
+  trigger_options?: Record<string, unknown> | string | null;
 }
 
 function resolveRequestedTerminalMode(value: string | null | undefined): TerminalMode {
@@ -1657,8 +1659,31 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective]);
+        const queuedTriggerOptions = Object.fromEntries(
+          Object.entries({
+            autoWorktree: !!autoWorktree,
+            autoMerge,
+            mergeStrategy,
+            triggerType: triggerType === 'scheduled' ? 'scheduled' : 'manual',
+            forceSequential,
+            agentOverride,
+            modelOverride,
+            storyId,
+            includeGraph,
+            thinkingEnabled,
+            thinkingBudget,
+            effortLevel,
+            reasoningEffort,
+            rerunFromScratch,
+            readinessOverride,
+            runAnywayOverride,
+            overrideReadinessGate,
+            terminal_mode: resolvedTerminalMode,
+            executionEnvironment: resolvedExecutionEnvironment.effective,
+          }).filter(([, value]) => value !== undefined)
+        );
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment, trigger_options)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, JSON.stringify(queuedTriggerOptions)]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
@@ -1869,15 +1894,38 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
     let runId: number;
+    const persistedTriggerOptions = Object.fromEntries(
+      Object.entries({
+        autoWorktree: needsWorktree,
+        autoMerge: computedAutoMerge,
+        mergeStrategy: resolvedMergeStrategy,
+        triggerType: validTriggerType,
+        forceSequential,
+        agentOverride,
+        modelOverride,
+        storyId,
+        includeGraph: includeGraph ?? false,
+        thinkingEnabled: resolvedThinkingEnabled,
+        thinkingBudget,
+        effortLevel,
+        reasoningEffort: resolvedReasoningEffort,
+        rerunFromScratch,
+        readinessOverride,
+        runAnywayOverride,
+        overrideReadinessGate,
+        terminal_mode: resolvedTerminalMode,
+        executionEnvironment: resolvedExecutionEnvironment.effective,
+      }).filter(([, value]) => value !== undefined)
+    );
 
     if (queuedRunId) {
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14, trigger_options = $15::jsonb WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, JSON.stringify(persistedTriggerOptions)]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, JSON.stringify(persistedTriggerOptions)]);
       runId = runResult!.id;
     }
 
@@ -4040,23 +4088,78 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     );
     const sequenceOffset = seqRow?.max_seq ?? 0;
 
-    // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id
-    //    Hotfix: allow callers to explicitly force sequential retry execution.
-    const newRunResult = forceSequential
-      ? await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, parallelism, terminal_mode)
-         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, 1, $6) RETURNING id`, [originalRun.spec_path,
-        originalRun.workspace_id,
-        originalRun.branch_name,
-        originalRun.worktree_path,
-        originalRunId,
-        originalRun.terminal_mode,])
-      : await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, terminal_mode)
-         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6) RETURNING id`, [originalRun.spec_path,
-        originalRun.workspace_id,
-        originalRun.branch_name,
-        originalRun.worktree_path,
-        originalRunId,
-        originalRun.terminal_mode,]);
+    const originalTriggerOptions = (() => {
+      const raw = originalRun.trigger_options;
+      if (!raw) return {} as Record<string, unknown>;
+      if (typeof raw === 'string') {
+        try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {} as Record<string, unknown>; }
+      }
+      return raw;
+    })();
+    const isAgentType = (value: unknown): value is AgentType =>
+      value === 'claude' || value === 'opencode' || value === 'codex' || value === 'pi';
+    const isMergeStrategy = (value: unknown): value is 'direct' | 'pr' | 'draft-pr' | 'branch-only' =>
+      value === 'direct' || value === 'pr' || value === 'draft-pr' || value === 'branch-only';
+    const retryAgent: AgentType = isAgentType(originalRun.agent_type)
+      ? originalRun.agent_type
+      : isAgentType(originalRun.agent)
+        ? originalRun.agent
+        : 'claude';
+    const retryModel = originalRun.agent_model ?? null;
+    const retryParallelism = forceSequential ? 1 : (originalRun.parallelism ?? 1);
+    const retryTerminalMode = normalizeTerminalMode(originalRun.terminal_mode);
+    const retryAutoWorktree = Boolean(originalRun.auto_worktree ?? originalRun.worktree_path);
+    const retryAutoMerge = Boolean(originalRun.auto_merge);
+    const retryIncludeGraph = Boolean(originalRun.include_graph);
+    const retryMergeStrategy = isMergeStrategy(originalRun.merge_strategy)
+      ? originalRun.merge_strategy
+      : 'direct';
+    const retryThinkingEnabled = typeof originalTriggerOptions.thinkingEnabled === 'boolean'
+      ? originalTriggerOptions.thinkingEnabled
+      : undefined;
+    const retryThinkingBudget = typeof originalTriggerOptions.thinkingBudget === 'number'
+      ? originalTriggerOptions.thinkingBudget
+      : undefined;
+    const retryEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(String(originalTriggerOptions.effortLevel ?? ''))
+      ? originalTriggerOptions.effortLevel as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+      : undefined;
+    const retryReasoningEffort = typeof originalTriggerOptions.reasoningEffort === 'string'
+      ? originalTriggerOptions.reasoningEffort
+      : undefined;
+
+    // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id.
+    //    Preserve the original run's engine/options so retry cannot silently fall
+    //    back to the process-global activeAgent/activeModel.
+    const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
+       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id,
+        parallelism, agent, agent_type, agent_model, auto_worktree, auto_merge, include_graph,
+        merge_strategy, terminal_mode, triggered_via, trigger_options)
+       VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'run_now', $15::jsonb)
+       RETURNING id`, [
+      originalRun.spec_path,
+      originalRun.workspace_id,
+      originalRun.branch_name,
+      originalRun.worktree_path,
+      originalRunId,
+      retryParallelism,
+      retryAgent,
+      retryAgent,
+      retryModel,
+      retryAutoWorktree,
+      retryAutoMerge,
+      retryIncludeGraph,
+      retryMergeStrategy,
+      retryTerminalMode,
+      JSON.stringify({
+        ...originalTriggerOptions,
+        forceSequential: forceSequential === true ? true : originalTriggerOptions.forceSequential,
+        agentOverride: retryAgent,
+        modelOverride: retryModel ?? undefined,
+        includeGraph: retryIncludeGraph,
+        terminal_mode: retryTerminalMode,
+        mergeStrategy: retryMergeStrategy,
+      }),
+    ]);
     const newRunId = newRunResult!.id;
 
     // 8. Copy successful story results from the original run to the new run
@@ -4155,6 +4258,11 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       sequenceOffset: z.number().int().min(0),
       envOverrides: z.record(z.string(), z.string()),
       includeGraph: z.boolean().optional().default(false),
+      terminalMode: z.enum(['ansi-html', 'pty']).optional().default('ansi-html'),
+      thinkingEnabled: z.boolean().optional(),
+      thinkingBudget: z.number().int().positive().optional(),
+      effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
+      reasoningEffort: z.string().optional(),
     });
 
     const jobPayload = PipelineRetryJobPayloadSchema.parse({
@@ -4164,12 +4272,17 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
       retrySpecPath,
-      agent: activeAgent,
-      model: activeModel ?? null,
+      agent: retryAgent,
+      model: retryModel,
       worktreePath: originalRun.worktree_path ?? null,
       sequenceOffset,
       envOverrides,
-      includeGraph: originalRun.include_graph ?? false,
+      includeGraph: retryIncludeGraph,
+      terminalMode: retryTerminalMode,
+      ...(retryThinkingEnabled !== undefined ? { thinkingEnabled: retryThinkingEnabled } : {}),
+      ...(retryThinkingBudget !== undefined ? { thinkingBudget: retryThinkingBudget } : {}),
+      ...(retryEffortLevel ? { effortLevel: retryEffortLevel } : {}),
+      ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
     });
 
     // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
