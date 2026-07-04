@@ -2862,9 +2862,12 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *     description: >
  *       Validates a Hermes task manifest, writes manifest.json/tasks.md plus an internal synthetic spec under
  *       forge/task-manifests/{manifestId}/, and queues the existing pipeline:run broker path. Generated MCP tool:
- *       rorca_pipeline_task_manifests_trigger. Friendly alias: rorca_trigger_task_manifest. Execution precedence is
- *       request overrides > manifest.execution overrides > synthetic envelope/spec metadata > provider/model auto-switch
- *       > workflow router > active fallback (model uses the analogous request > manifest > spec > workflow > active chain).
+ *       rorca_pipeline_task_manifests_trigger. Friendly alias: rorca_trigger_task_manifest. Hermes supplies
+ *       agent/model intent only; Rorca resolves provider/model interoperability through the broker and execution
+ *       engine. Execution precedence is request overrides > manifest.execution overrides > synthetic envelope/spec
+ *       metadata > provider/model auto-switch > workflow router > active fallback (model uses the analogous request
+ *       > manifest > spec > workflow > active chain). Safe defaults are dry-run support, branch/PR-only,
+ *       autoMerge=false, no deploys, no credential copying, no production DB writes, and no secret mutation.
  *     requestBody:
  *       required: true
  *       content:
@@ -2892,6 +2895,8 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *         description: Dry-run plan or idempotency conflict
  *       201:
  *         description: Pipeline run queued with manifest artifact references
+ *       202:
+ *         description: Manifest accepted into the queue when queue=true
  *       400: { description: Invalid task manifest, missing workspace/idempotency, invalid source authority, or ineligible route decision }
  *       409: { description: Active workspace run conflict when autoWorktree=false }
  *       422: { description: Unsafe task-manifest execution policy such as autoMerge=true or mergeStrategy=direct }

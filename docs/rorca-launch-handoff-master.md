@@ -381,18 +381,28 @@ Minimum discovery target:
 - `rorca_list_specs`
 - `rorca_approve_spec`
 - `rorca_pipeline_trigger`
+- `rorca_trigger_task_manifest`
 - `rorca_pipeline_status`
 
 ### Hermes workflow
 
-- brief → spec → review → approve → run → inspect
+Rorca owns two execution lanes:
+
+- **Mode A — Rorca delegated execution:** brief → spec → approve → Rorca run → PR/evidence/memory.
+- **Mode B — Hermes task-manifest execution via Rorca broker:** Rorca spec/context → Hermes task manifest/`tasks.md` → Rorca provider broker → PR/evidence/memory.
+
+Operational rules:
+
 - use `rorca_create_spec` for explicit spec creation
 - use `rorca_get_context` before drafting/running
+- use `POST /api/pipeline/task-manifests/trigger` / `rorca_trigger_task_manifest` only for bounded manifests with branch/PR-only, `autoMerge=false`, dry-run support, no deploys, no credential copying, no production DB writes, and no secret mutation
 - avoid legacy generate flow unless explicitly needed
+- route new features, broad architecture, high-risk security/data/ops, ambiguous scope, missing context, policy mismatch, or scope expansion back to normal Rorca spec/run
 
 ### Hermes non-goals
 
 - do not replace Pi or first-party Rorca surfaces
+- do not duplicate provider/model interoperability; Hermes passes agent/model intent to Rorca
 - do not build a separate Hermes marketplace
 - do not couple Hermes support to SQLite/PGlite decisions
 - do not change Miguel’s DB setup work to force Hermes support
@@ -411,7 +421,8 @@ The Hermes addendum should include:
 
 ### Expected workflow
 
-- brief → spec → review → approve → run → inspect
+- Mode A: brief → spec → review → approve → run → inspect
+- Mode B: Rorca spec/context → Hermes task manifest/`tasks.md` → Rorca broker → PR/evidence/memory
 
 ### Failure modes
 
