@@ -65,10 +65,66 @@ const SECRET_PATTERNS: SecretPattern[] = [
     pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/,
   },
   {
+    label: 'Bearer token',
+    pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{10,}/i,
+  },
+  {
+    label: 'environment secret assignment',
+    pattern: /\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[A-Z0-9_]*\s*=\s*['"]?(?:sk-(?:proj-)?[A-Za-z0-9_-]{8,}|[A-Za-z0-9._~+/=-]{20,})['"]?/,
+  },
+  {
     label: 'secret assignment',
     pattern: /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|credential)\b\s*[:=]\s*['"]?[A-Za-z0-9._\-+/=]{8,}/i,
   },
 ];
+
+const HIGH_ENTROPY_TOKEN_PATTERN = /[A-Za-z0-9._~+=-]{20,}/g;
+const UUID_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function toGlobalPattern(pattern: RegExp): RegExp {
+  return new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+}
+
+function shannonEntropy(value: string): number {
+  const counts = new Map<string, number>();
+  for (const char of value) {
+    counts.set(char, (counts.get(char) ?? 0) + 1);
+  }
+
+  return [...counts.values()].reduce((entropy, count) => {
+    const probability = count / value.length;
+    return entropy - probability * Math.log2(probability);
+  }, 0);
+}
+
+function characterClassCount(value: string): number {
+  return [
+    /[a-z]/.test(value),
+    /[A-Z]/.test(value),
+    /\d/.test(value),
+    /[^A-Za-z0-9]/.test(value),
+  ].filter(Boolean).length;
+}
+
+function isHighEntropySecretToken(candidate: string): boolean {
+  if (candidate.length < 20) return false;
+  if (UUID_TOKEN_PATTERN.test(candidate)) return false;
+  if (/^[a-f0-9]{32,}$/i.test(candidate)) return false;
+  if (!/[A-Z]/.test(candidate) || !/[a-z]/.test(candidate) || !/\d/.test(candidate)) return false;
+  if (characterClassCount(candidate) < 3) return false;
+  return shannonEntropy(candidate) >= 4;
+}
+
+function findHighEntropySecretToken(value: string): string | null {
+  HIGH_ENTROPY_TOKEN_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = HIGH_ENTROPY_TOKEN_PATTERN.exec(value)) !== null) {
+    if (isHighEntropySecretToken(match[0])) {
+      return match[0];
+    }
+  }
+  return null;
+}
 
 function withDefaultOptions(options: ContextSafetyOptions = {}): Required<ContextSafetyOptions> {
   return {
@@ -95,13 +151,23 @@ export function detectSecretLikeString(value: string): string | null {
       return label;
     }
   }
+
+  if (findHighEntropySecretToken(value)) {
+    return 'high entropy token';
+  }
+
   return null;
 }
 
 export function redactSecretLikeStrings(value: string): string {
-  return SECRET_PATTERNS.reduce((current, { label, pattern }) => (
-    current.replace(pattern, `[REDACTED:${label}]`)
+  const patternRedacted = SECRET_PATTERNS.reduce((current, { label, pattern }) => (
+    current.replace(toGlobalPattern(pattern), `[REDACTED:${label}]`)
   ), value);
+
+  HIGH_ENTROPY_TOKEN_PATTERN.lastIndex = 0;
+  return patternRedacted.replace(HIGH_ENTROPY_TOKEN_PATTERN, (candidate) => (
+    isHighEntropySecretToken(candidate) ? '[REDACTED:high entropy token]' : candidate
+  ));
 }
 
 export function looksLikeRawPromptBundle(value: string): boolean {
