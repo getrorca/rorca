@@ -606,7 +606,7 @@ async function scanOneCommit(ref: string, input: {
         endpoint: "/api/context-events",
         payload,
         eventType: "git_commit",
-        contentFingerprint: commit.sha,
+        contentFingerprint: built.contentHash,
       });
       return { sha: commit.sha, status: queued.duplicate ? "duplicate" : "queued" };
     }
@@ -614,7 +614,7 @@ async function scanOneCommit(ref: string, input: {
     try {
       const submission = await input.client.submitContextEvent<{ created?: boolean; idempotent?: boolean }>(payload, {
         eventType: "git_commit",
-        contentFingerprint: commit.sha,
+        contentFingerprint: built.contentHash,
       });
       if (submission.status === "queued") {
         return { sha: commit.sha, status: submission.duplicate ? "duplicate" : "queued" };
@@ -633,7 +633,7 @@ async function scanOneCommit(ref: string, input: {
           endpoint: "/api/context-events",
           payload,
           eventType: "git_commit",
-          contentFingerprint: commit.sha,
+          contentFingerprint: built.contentHash,
         });
         return { sha: commit.sha, status: queued.duplicate ? "duplicate" : "queued" };
       }

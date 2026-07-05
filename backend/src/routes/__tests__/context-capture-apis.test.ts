@@ -6,6 +6,9 @@
  */
 
 import '../../lib/async-handler';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import contextEventsRouter from '../context-events';
@@ -302,6 +305,47 @@ describe('context candidate creation/list/detail', () => {
     expect(insert.params[22]).toBe(true); // requires_review forced true
   });
 
+  it('previews related files through the canonical context-safety redaction output shape', async () => {
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-candidate-preview-'));
+    try {
+      fs.mkdirSync(path.join(workspacePath, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(workspacePath, 'src', 'secret.ts'),
+        [
+          'export const openai = "sk-1234567890abcdefghijklmnop";',
+          'export const database = "postgres://user:pass@localhost:5432/app";',
+          `export const localPath = "${workspacePath}/src/secret.ts";`,
+        ].join('\n'),
+        'utf8',
+      );
+      state.workspace = { id: 'ws-ccs-003', path: workspacePath };
+      state.candidateById = candidateRow({ relatedFiles: ['src/secret.ts'] });
+
+      const res = await request(buildApp())
+        .get('/api/context-candidates/201/file-preview')
+        .query({ workspaceId: 'ws-ccs-003', path: 'src/secret.ts' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.preview).toMatchObject({
+        path: 'src/secret.ts',
+        exists: true,
+        truncated: false,
+        withinCaptureLimit: true,
+        redactionApplied: true,
+      });
+      expect(res.body.preview.sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(res.body.preview.safety.securitySensitive).toBe(true);
+      expect(res.body.preview.text).toContain('sk-[REDACTED]');
+      expect(res.body.preview.text).toContain('[REDACTED_DATABASE_URL]');
+      expect(res.body.preview.text).toContain('[WORKSPACE]/src/secret.ts');
+      expect(res.body.preview.text).not.toContain('sk-1234567890abcdefghijklmnop');
+      expect(res.body.preview.text).not.toContain('user:pass');
+      expect(res.body.preview.text).not.toContain(workspacePath);
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
   it('returns the existing candidate for an idempotent sidecar retry', async () => {
     state.existingCandidateByKey = candidateRow({ id: 'already-there', idempotencyKey: 'candidate:dupe' });
 
@@ -368,6 +412,37 @@ describe('context candidate creation/list/detail', () => {
     retrievalQuery = mockQuery.mock.calls[mockQuery.mock.calls.length - 1]?.[0] as string;
     expect(retrievalQuery).not.toContain("review_status NOT IN ('pending', 'rejected')");
     expect(retrievalQuery).not.toContain('regulated_domain = false');
+  });
+
+  it('returns only retrieval-safe approved candidates by default and excludes pending/rejected rows', async () => {
+    state.listItems = [
+      candidateRow({ id: '301', title: 'Approved durable memory', reviewStatus: 'approved', confidence: 'medium', promotedMemoryId: 777 }),
+      candidateRow({ id: '302', title: 'Pending candidate must stay out', reviewStatus: 'pending', confidence: 'high' }),
+      candidateRow({ id: '303', title: 'Rejected candidate must stay out', reviewStatus: 'rejected', confidence: 'high' }),
+      candidateRow({ id: '304', title: 'Low confidence approved candidate must stay out', reviewStatus: 'approved', confidence: 'low', promotedMemoryId: 778 }),
+    ];
+    mockQuery.mockImplementation(async (sqlArg: string) => {
+      const sql = String(sqlArg);
+      if (!sql.includes("review_status NOT IN ('pending', 'rejected')")) {
+        return state.listItems as any;
+      }
+      return state.listItems.filter((candidate) => {
+        const status = String(candidate.reviewStatus);
+        const rank = candidate.confidence === 'high' ? 3 : candidate.confidence === 'medium' ? 2 : 1;
+        return !['pending', 'rejected'].includes(status) && rank >= 2;
+      }) as any;
+    });
+
+    const res = await request(buildApp())
+      .get('/api/context-candidates/retrieval')
+      .query({ workspaceId: 'ws-ccs-003' });
+
+    expect(res.status).toBe(200);
+    const titles = res.body.items.map((item: { title: string }) => item.title);
+    expect(titles).toEqual(['Approved durable memory']);
+    expect(titles).not.toContain('Pending candidate must stay out');
+    expect(titles).not.toContain('Rejected candidate must stay out');
+    expect(titles).not.toContain('Low confidence approved candidate must stay out');
   });
 
   it('returns NotFoundError for missing candidate detail', async () => {

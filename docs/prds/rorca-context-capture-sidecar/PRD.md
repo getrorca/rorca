@@ -8,12 +8,15 @@
 
 The package entrypoint is `packages/rorca-capture` and the binary is `rorca-capture`:
 
-- `remember <text>` — create a manual memory through `POST /api/memory`.
-- `ingest-commit [hash]` — request commit ingestion through the Rorca API.
-- `ingest-git` — request repository git-history ingestion through the Rorca API.
-- `install-hooks` — install local git hooks that call `rorca-capture`.
-- `daemon` — reserved long-running sidecar process; MVP emits a status heartbeat.
-- `status` — print resolved configuration, token, workspace, queue, ignore, redaction, and command state.
+- `remember <text>` — create a pending manual memory candidate through `POST /api/memory/candidates`; `--approve` promotes only after explicit operator auto-approval is configured.
+- `ingest-commit [hash]` — submit one idempotent `git_commit` context event through `POST /api/context-events`.
+- `ingest-git --since <ref|last-rorca-run>` — scan git history oldest-first and submit each idempotent commit context event through the same API path.
+- `ingest-pr --ci` — create a pending PR/CI memory candidate through `POST /api/memory/candidates` using deterministic merge-SHA + CI-run idempotency.
+- `import-duckbrain <path>` — import selected DuckBrain JSONL records as pending memory candidates through `POST /api/memory/candidates`.
+- `install-hooks` — install local post-commit hooks that call `rorca-capture ingest-commit HEAD` without blocking commits unless `--strict` is explicit.
+- `daemon` — reconcile local commits from the persisted cursor, queue while the API is offline, flush after health checks recover, and expose status/stop controls.
+- `status` — print resolved configuration, token, workspace, queue, daemon, hook, ignore, redaction, and command state.
+- `flush` — replay the local JSONL queue through the same public API client.
 
 Existing or future `rorca capture ...` invocations are thin aliases only. The standalone `rorca-capture` package owns the implementation.
 
@@ -43,12 +46,17 @@ Supported config values:
 - `mode`: `local`, `vm`, or `ci`
 - `ignore`: path globs, max file bytes, max event bytes
 - `redaction`: enabled flag, replacement text, redaction patterns
+- `operatorAutoApprove`: opt-in gate for `remember --approve`; defaults to `false`
 
-CI mode (`CI=true` or `--ci`) never prompts. Missing API URL or repo path is a hard configuration error.
+CI mode (`CI=true` or `--ci`) never prompts. Missing API URL, workspace, repo path, or required PR metadata is a hard configuration error.
 
 ## Workspace resolution
 
 The sidecar resolves the repository root with `git rev-parse --show-toplevel`, then calls `GET /api/workspaces` and matches the returned workspace `path` against the resolved repo path. If `workspaceId` is explicitly configured, the sidecar verifies that ID through the same API response. A missing match returns an error compatible with Rorca's `NotFoundError` response shape: `{ error, code: "NOT_FOUND", details }`.
+
+## Review, promotion, and retrieval gates
+
+Manual, PR/CI, DuckBrain, and future extracted learnings enter Rorca as pending memory candidates. Pending and rejected candidates are review artifacts only: they are not durable memories and are not included in retrieval-safe context by default. Approving a candidate calls `POST /api/memory/candidates/{id}/approve`, promotes a durable memory with provenance, and records the candidate's review metadata. Retrieval-safe candidate reads keep conservative defaults: exclude pending/rejected rows, require at least medium confidence unless explicitly lowered, and require regulated-domain candidates to be approved.
 
 ## Safety contract
 
