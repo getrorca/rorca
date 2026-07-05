@@ -257,6 +257,12 @@ Review UX must show:
 - Rorca should prefer summarized/cited context for prompt injection. Captured
   events are evidence; they do not automatically become prompt text.
 
+## Managed local service lifecycle (UCC-003)
+
+`rorca-capture service <install|start|stop|restart|status|uninstall>` manages the always-on capture daemon for a selected workspace. macOS renders and registers a launchd LaunchAgent, Linux renders and registers a systemd user service, and Windows writes a PowerShell fallback suitable for Task Scheduler or a Startup shortcut. The service wraps `rorca-capture daemon`, starts at login/boot where the platform supports it, and should be restarted after Rorca updates so stale in-memory schemas are replaced.
+
+The daemon uses durable workspace-local files under `.rorca/capture/`: `state.json` stores the WAL cursor, `queue/offline.ndjson` stores already-redacted offline payloads, and `status.json` exposes process health, `last_seen`, last scan, last flush, queue depth, backoff, source capabilities, current policy, and resource bounds. Flushes are attempted only after `GET /api/health` succeeds; failed health checks use bounded exponential backoff. Runtime bounds are configurable with `--scan-interval-ms`, `--max-commits-per-scan`, `--max-concurrency`, `--queue-warn-size`, and `--queue-max-size`. The repo daemon uses bounded polling (no recursive root watcher) and preserves cursor/idempotency across launchd/systemd restarts.
+
 ## Completion checklist for future stories
 
 - Layer-specific adapters all emit through the local API on `:3030`.

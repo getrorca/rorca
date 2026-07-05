@@ -329,8 +329,8 @@ function captureIgnoreContent(): string {
 
 function redactionConfigContent(): string {
   return jsonFileContent({
-    policyVersion: "2026-07-ucc-002",
-    rawContentDefault: "off",
+    policyVersion: "2026-07-ucc-003",
+    rawContentDefault: "metadata+hash",
     hashAlgorithm: "sha256",
     redactions: [
       { name: "environment assignments", pattern: "^[A-Z0-9_]+=." },
@@ -347,7 +347,17 @@ function sidecarConfigContent(workspace: Workspace, queuePath: string): string {
     queuePath,
     apiOnly: true,
     endpoint: "/api/context-capture/events",
+    healthEndpoint: "/api/health",
     alwaysOn: true,
+    serviceLifecycle: "rorca-capture service <install|start|stop|restart|status|uninstall>",
+    resources: {
+      scanIntervalMs: 60000,
+      maxCommitsPerScan: 20,
+      maxConcurrency: 4,
+      queueWarnSize: 100,
+      queueMaxSize: 1000,
+      watchers: { mode: "polling", recursive: false, count: 0 },
+    },
     sources: ["repoDaemon", "gitHook", "shellIntegration", "vscodeExtension", "mcpSlashCommand"],
   });
 }
@@ -357,7 +367,7 @@ function gitHookContent(hookName: string, workspace: Workspace, queuePath: strin
 }
 
 function daemonServiceContent(workspace: Workspace): string {
-  return `# ${SENTINEL}\n# Install manually after review. This file is intentionally not loaded by package postinstall.\n[Unit]\nDescription=Rorca always-on context capture for ${workspace.id}\n\n[Service]\nType=simple\nWorkingDirectory=${workspace.path}\nExecStart=rorca-capture daemon --workspace-id ${workspace.id}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n`;
+  return `# ${SENTINEL}\n# Portable reference service. Use \`rorca-capture service install --workspace-id ${workspace.id} --cwd ${workspace.path}\` to render and register the native launchd/systemd file.\n[Unit]\nDescription=Rorca always-on context capture for ${workspace.id}\n\n[Service]\nType=simple\nWorkingDirectory=${workspace.path}\nExecStart=rorca-capture daemon --workspace-id ${workspace.id} --cwd ${workspace.path} --scan-interval-ms 60000 --max-commits-per-scan 20 --max-concurrency 4 --queue-warn-size 100 --queue-max-size 1000\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 function shellSnippetContent(workspace: Workspace): string {

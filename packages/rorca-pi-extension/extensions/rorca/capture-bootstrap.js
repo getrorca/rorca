@@ -245,8 +245,8 @@ function captureIgnoreContent() {
 }
 function redactionConfigContent() {
     return jsonFileContent({
-        policyVersion: "2026-07-ucc-002",
-        rawContentDefault: "off",
+        policyVersion: "2026-07-ucc-003",
+        rawContentDefault: "metadata+hash",
         hashAlgorithm: "sha256",
         redactions: [
             { name: "environment assignments", pattern: "^[A-Z0-9_]+=." },
@@ -262,7 +262,17 @@ function sidecarConfigContent(workspace, queuePath) {
         queuePath,
         apiOnly: true,
         endpoint: "/api/context-capture/events",
+        healthEndpoint: "/api/health",
         alwaysOn: true,
+        serviceLifecycle: "rorca-capture service <install|start|stop|restart|status|uninstall>",
+        resources: {
+            scanIntervalMs: 60000,
+            maxCommitsPerScan: 20,
+            maxConcurrency: 4,
+            queueWarnSize: 100,
+            queueMaxSize: 1000,
+            watchers: { mode: "polling", recursive: false, count: 0 },
+        },
         sources: ["repoDaemon", "gitHook", "shellIntegration", "vscodeExtension", "mcpSlashCommand"],
     });
 }
@@ -270,7 +280,7 @@ function gitHookContent(hookName, workspace, queuePath) {
     return `#!/bin/sh\n# ${SENTINEL}\n# Best-effort API-only context capture hook. Does not block git operations.\nRORCA_WORKSPACE_ID=${JSON.stringify(workspace.id)}\nRORCA_QUEUE_PATH=${JSON.stringify(queuePath)}\nRORCA_HOOK=${JSON.stringify(hookName)}\nmkdir -p "$RORCA_QUEUE_PATH" 2>/dev/null || true\nprintf '{"source":"gitHook","workspaceId":"%s","hook":"%s","occurredAt":"%s"}\\n' "$RORCA_WORKSPACE_ID" "$RORCA_HOOK" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RORCA_QUEUE_PATH/git-hook.ndjson" 2>/dev/null || true\nexit 0\n`;
 }
 function daemonServiceContent(workspace) {
-    return `# ${SENTINEL}\n# Install manually after review. This file is intentionally not loaded by package postinstall.\n[Unit]\nDescription=Rorca always-on context capture for ${workspace.id}\n\n[Service]\nType=simple\nWorkingDirectory=${workspace.path}\nExecStart=rorca-capture daemon --workspace-id ${workspace.id}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n`;
+    return `# ${SENTINEL}\n# Portable reference service. Use \`rorca-capture service install --workspace-id ${workspace.id} --cwd ${workspace.path}\` to render and register the native launchd/systemd file.\n[Unit]\nDescription=Rorca always-on context capture for ${workspace.id}\n\n[Service]\nType=simple\nWorkingDirectory=${workspace.path}\nExecStart=rorca-capture daemon --workspace-id ${workspace.id} --cwd ${workspace.path} --scan-interval-ms 60000 --max-commits-per-scan 20 --max-concurrency 4 --queue-warn-size 100 --queue-max-size 1000\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n`;
 }
 function shellSnippetContent(workspace) {
     return `# ${SENTINEL}\n# Source this file from your shell only if you want command metadata capture.\nexport RORCA_CAPTURE_WORKSPACE_ID=${JSON.stringify(workspace.id)}\nexport RORCA_CAPTURE_WORKSPACE_PATH=${JSON.stringify(workspace.path)}\nrorca_capture_command_finished() {\n  local exit_code="$?"\n  command rorca-capture emit shell --workspace-id "$RORCA_CAPTURE_WORKSPACE_ID" --cwd "$PWD" --exit-code "$exit_code" >/dev/null 2>&1 || true\n  return "$exit_code"\n}\n`;
