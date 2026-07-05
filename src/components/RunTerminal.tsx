@@ -38,7 +38,7 @@ interface RunTerminalProps {
   runStatus?: RunLifecycleStatus | null;
 }
 
-type TerminalMode = 'ansi-html' | 'pty';
+type TerminalMode = 'ansi-html' | 'pty' | 'native-pty';
 type RunLifecycleStatus = string;
 
 interface RunTerminalMetaState {
@@ -49,7 +49,11 @@ interface RunTerminalMetaState {
 }
 
 function coerceTerminalMode(value: unknown): TerminalMode | null {
-  return value === 'pty' || value === 'ansi-html' ? value : null;
+  return value === 'pty' || value === 'native-pty' || value === 'ansi-html' ? value : null;
+}
+
+function isPtyTerminalMode(value: unknown): value is Extract<TerminalMode, 'pty' | 'native-pty'> {
+  return value === 'pty' || value === 'native-pty';
 }
 
 function isTerminalRunStatus(status: RunLifecycleStatus | null | undefined): boolean {
@@ -110,6 +114,28 @@ function resolveStepVisual(step: SemanticStep, isOpenCode: boolean): StepVisual 
     return OPENCODE_TOOL_ICONS[step.toolName];
   }
   return STEP_CONFIG[step.type];
+}
+
+function isHeartbeatStep(step: SemanticStep): boolean {
+  return step.toolName === 'system' && /Agent (?:still )?running|PTY heartbeat/i.test(step.label + ' ' + (step.detail ?? ''));
+}
+
+function mergeSemanticSteps(prev: SemanticStep[], incoming: SemanticStep[]): SemanticStep[] {
+  if (incoming.length === 0) return prev;
+  const next = [...prev];
+  for (const step of incoming) {
+    if (isHeartbeatStep(step)) {
+      const existingIndex = next.findIndex(isHeartbeatStep);
+      if (existingIndex >= 0) {
+        next[existingIndex] = step;
+      } else {
+        next.push(step);
+      }
+      continue;
+    }
+    next.push(step);
+  }
+  return next;
 }
 
 // ─── ANSI color palettes per theme ───────────────────────────────────────────
@@ -464,6 +490,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const seenStoryIdsRef = useRef(new Set<string>());
   // SSE line buffer for incomplete lines across chunks
   const lineBufferRef = useRef('');
+  // Chunk ids already rendered for this EventSource lifecycle. The backend
+  // replays historical PTY chunks before polling live chunks; this prevents a
+  // replay/live race or browser reconnect from painting the same sequence twice.
+  const seenChunkIdsRef = useRef(new Set<string>());
 
   // Agent type detected from backend run_meta SSE event
   const [agentType, setAgentType] = useState<string>('claude');
@@ -471,10 +501,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const terminalModeRef = useRef<TerminalMode>(rendererMode);
   const [terminalMeta, setTerminalMeta] = useState<RunTerminalMetaState>(() => ({
     requestedTerminalMode: rendererMode,
-    isPty: rendererMode === 'pty',
+    isPty: isPtyTerminalMode(rendererMode),
   }));
   const [runMetaResolved, setRunMetaResolved] = useState(false);
-  const [ptyReady, setPtyReady] = useState(rendererMode !== 'pty');
+  const [ptyReady, setPtyReady] = useState(!isPtyTerminalMode(rendererMode));
   const [ptyFocused, setPtyFocused] = useState(false);
   const [ptyInputHealthy, setPtyInputHealthy] = useState(true);
 
@@ -502,12 +532,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setTerminalMode(rendererMode);
     setTerminalMeta({
       requestedTerminalMode: rendererMode,
-      isPty: rendererMode === 'pty',
+      isPty: isPtyTerminalMode(rendererMode),
       ptyAvailable: undefined,
       ptyUnavailableHint: null,
     });
     setRunMetaResolved(false);
-    setPtyReady(rendererMode !== 'pty');
+    setPtyReady(!isPtyTerminalMode(rendererMode));
   }, [rendererMode]);
 
   // Persist mode changes
@@ -575,13 +605,13 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   }, []);
 
   useEffect(() => {
-    if (terminalMode !== 'pty' || !ptyContainerRef.current) return;
+    if (!isPtyTerminalMode(terminalMode) || !ptyContainerRef.current) return;
 
     const terminal = new Terminal({
       fontFamily: 'JetBrains Mono, Fira Code, monospace',
       fontSize: window.innerWidth < 768 ? 10 : 12,
       lineHeight: 1.3,
-      convertEol: false,
+      convertEol: true,
       cursorBlink: true,
       scrollback: 10_000,
       allowProposedApi: false,
@@ -643,7 +673,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   }, [flushPtyInput, postPtyResize, queuePtyInput, terminalMode]);
 
   useEffect(() => {
-    if (terminalMode === 'pty' && xtermRef.current) {
+    if (isPtyTerminalMode(terminalMode) && xtermRef.current) {
       xtermRef.current.options.theme = getPtyTheme(resolved);
       fitAddonRef.current?.fit();
     }
@@ -709,7 +739,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       pre.scrollTop = ratio * totalHeight;
     },
     writeMarker(text: string) {
-      if (terminalMode === 'pty') {
+      if (isPtyTerminalMode(terminalMode)) {
         xtermRef.current?.writeln(text);
         return;
       }
@@ -747,6 +777,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     lineBufferRef.current = '';
     terminalModeRef.current = rendererMode;
     pendingPtyChunksRef.current = [];
+    seenChunkIdsRef.current = new Set();
     setAgentType('claude');
     setSteps([]);
     setExpandedSet(new Set());
@@ -755,12 +786,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setTerminalMode(rendererMode);
     setTerminalMeta({
       requestedTerminalMode: rendererMode,
-      isPty: rendererMode === 'pty',
+      isPty: isPtyTerminalMode(rendererMode),
       ptyAvailable: undefined,
       ptyUnavailableHint: null,
     });
     setRunMetaResolved(false);
-    if (rendererMode === 'pty' && !ptyReady) return;
+    if (isPtyTerminalMode(rendererMode) && !ptyReady) return;
     xtermRef.current?.clear();
     if (flushTimerRef.current !== null) {
       clearTimeout(flushTimerRef.current);
@@ -798,7 +829,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         if (nextTerminalMode) {
           terminalModeRef.current = nextTerminalMode;
           setTerminalMode(nextTerminalMode);
-          if (nextTerminalMode !== 'pty') {
+          if (!isPtyTerminalMode(nextTerminalMode)) {
             setPtyReady(true);
           }
         }
@@ -808,7 +839,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           ?? rendererMode;
         const isPty = typeof meta.isPty === 'boolean'
           ? meta.isPty
-          : (nextTerminalMode ?? terminalModeRef.current) === 'pty';
+          : isPtyTerminalMode(nextTerminalMode ?? terminalModeRef.current);
         const ptyUnavailableHint = typeof (meta.ptyUnavailableHint ?? meta.pty_unavailable_hint) === 'string'
           ? (meta.ptyUnavailableHint ?? meta.pty_unavailable_hint) as string
           : null;
@@ -823,8 +854,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
+        const chunkId = e.lastEventId || '';
+        if (chunkId) {
+          if (seenChunkIdsRef.current.has(chunkId)) return;
+          seenChunkIdsRef.current.add(chunkId);
+        }
+
         const bytes = decodeBase64Chunk(e.data);
-        const isPtyChunk = terminalModeRef.current === 'pty';
+        const isPtyChunk = isPtyTerminalMode(terminalModeRef.current);
 
         if (isPtyChunk) {
           writePtyChunk(bytes);
@@ -860,7 +897,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         }
 
         if (newSteps.length > 0) {
-          setSteps(prev => [...prev, ...newSteps]);
+          setSteps(prev => mergeSemanticSteps(prev, newSteps));
         }
       } catch { /* ignore malformed chunk */ }
     });
@@ -869,12 +906,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     es.addEventListener('semantic_step', (e: MessageEvent) => {
       try {
         const step: SemanticStep = JSON.parse(e.data);
-        setSteps(prev => [...prev, step]);
+        setSteps(prev => mergeSemanticSteps(prev, [step]));
       } catch { /* ignore malformed step */ }
     });
 
     es.addEventListener('done', () => {
-      const isPtyStream = terminalModeRef.current === 'pty';
+      const isPtyStream = isPtyTerminalMode(terminalModeRef.current);
       if (flushTimerRef.current !== null) {
         clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
@@ -882,7 +919,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       if (lineBufferRef.current) {
         const finalStep = parseVerboseLine(lineBufferRef.current);
         if (finalStep) {
-          setSteps(prev => [...prev, finalStep]);
+          setSteps(prev => mergeSemanticSteps(prev, [finalStep]));
         }
         if (!isPtyStream) {
           const formatted = formatStreamJsonForDisplay(lineBufferRef.current);
@@ -970,18 +1007,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const normalizedAgentType = normalizeAgentType(agentType);
   const isOpenCode = normalizedAgentType === 'opencode' || normalizedAgentType === 'codex';
   const showAgentBadge = normalizedAgentType !== 'claude' && normalizedAgentType !== 'unknown';
-  const ptyFallbackActive = terminalMeta.requestedTerminalMode === 'pty' && (!terminalMeta.isPty || terminalMode !== 'pty');
+  const ptyFallbackActive = isPtyTerminalMode(terminalMeta.requestedTerminalMode) && (!terminalMeta.isPty || !isPtyTerminalMode(terminalMode));
   const ptyFallbackReason = terminalMeta.ptyAvailable === false
     ? 'node-pty is unavailable on this server.'
     : 'The PTY session did not start or is no longer attachable.';
   const ptyFallbackHint = terminalMeta.ptyUnavailableHint?.trim();
   const streamEnded = streamDone || isTerminalRunStatus(runStatus);
-  const resolvingEffectiveMode = terminalMeta.requestedTerminalMode === 'pty' && !runMetaResolved;
+  const resolvingEffectiveMode = isPtyTerminalMode(terminalMeta.requestedTerminalMode) && !runMetaResolved;
   const ansiSurfaceKind = resolvedMode === 'semantic' ? 'Semantic summary' : 'ANSI log';
   const fallbackAnsiState = streamEnded ? 'ANSI replay' : 'ANSI live';
   const surfaceLabel = resolvingEffectiveMode
     ? 'Checking PTY support'
-    : terminalMode === 'pty'
+    : isPtyTerminalMode(terminalMode)
       ? resolvedMode === 'semantic'
         ? `Semantic • ${streamEnded ? 'replay' : 'live'}`
         : streamEnded
@@ -996,12 +1033,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         : `${ansiSurfaceKind} • ${streamEnded ? 'replay' : 'live'}`;
   const surfaceTone = resolvingEffectiveMode
     ? 'var(--text-muted)'
-    : terminalMode === 'pty'
+    : isPtyTerminalMode(terminalMode)
       ? streamEnded ? 'var(--text-muted)' : ptyInputHealthy ? 'var(--success)' : 'var(--warning)'
       : ptyFallbackActive ? 'var(--warning)' : resolvedMode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)';
   const surfaceTitle = resolvingEffectiveMode
     ? 'Waiting for backend metadata before choosing full PTY attachment or ANSI fallback.'
-    : terminalMode === 'pty'
+    : isPtyTerminalMode(terminalMode)
       ? resolvedMode === 'semantic'
         ? 'Semantic execution summary parsed from the same PTY output stream.'
         : streamEnded
@@ -1014,7 +1051,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         : `${ansiSurfaceKind} ${streamEnded ? 'replay from saved chunks' : 'live stream'}; this is not a PTY attachment.`;
   const modeHelpText = resolvingEffectiveMode
     ? 'Checking whether a real xterm.js PTY is available. Rorca will attach to the PTY when supported, or degrade to ANSI output when it is not.'
-    : terminalMode === 'pty'
+    : isPtyTerminalMode(terminalMode)
       ? resolvedMode === 'semantic'
         ? 'Semantic view: parsed read/write/edit/bash/search/test steps from the same PTY output stream. Switch to Terminal for the full xterm.js session.'
         : streamEnded
@@ -1029,35 +1066,33 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       {/* ─── Toolbar ─────────────────────────────────────────────────────── */}
       <div className="shrink-0 px-3 py-1.5 border-b border-border bg-panel flex items-center gap-1">
         {!resolvingEffectiveMode && (
-          <>
-            <button
-              onClick={() => handleSetMode('raw')}
-              className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-                resolvedMode === 'raw'
-                  ? 'bg-accent/15 text-accent'
-                  : 'text-muted hover:text-[var(--text)]'
-              }`}
-            >
-              <span className="flex items-center gap-1">
-                <TerminalIcon size={11} />
-                {terminalMode === 'pty' ? 'Terminal' : 'Raw'}
-              </span>
-            </button>
-            <button
-              onClick={() => handleSetMode('semantic')}
-              className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-                resolvedMode === 'semantic'
-                  ? 'bg-accent/15 text-accent'
-                  : 'text-muted hover:text-[var(--text)]'
-              }`}
-            >
-              <span className="flex items-center gap-1">
-                <Layers size={11} />
-                Semantic
-              </span>
-            </button>
-          </>
+          <button
+            onClick={() => handleSetMode('raw')}
+            className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+              resolvedMode === 'raw'
+                ? 'bg-accent/15 text-accent'
+                : 'text-muted hover:text-[var(--text)]'
+            }`}
+          >
+            <span className="flex items-center gap-1">
+              <TerminalIcon size={11} />
+              {isPtyTerminalMode(terminalMode) ? 'Terminal' : 'Raw'}
+            </span>
+          </button>
         )}
+        <button
+          onClick={() => handleSetMode('semantic')}
+          className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+            resolvedMode === 'semantic'
+              ? 'bg-accent/15 text-accent'
+              : 'text-muted hover:text-[var(--text)]'
+          }`}
+        >
+          <span className="flex items-center gap-1">
+            <Layers size={11} />
+            Semantic
+          </span>
+        </button>
 
         {/* Agent type badge (shown when not claude) */}
         {showAgentBadge && (
@@ -1078,7 +1113,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         </span>
 
         {/* Copy button (raw mode only) */}
-        {terminalMode !== 'pty' && !resolvingEffectiveMode && resolvedMode === 'raw' && (
+        {!isPtyTerminalMode(terminalMode) && !resolvingEffectiveMode && resolvedMode === 'raw' && (
           <button
             onClick={handleCopy}
             className="ml-auto p-1.5 rounded-md text-muted hover:text-[var(--text)] transition-colors"
@@ -1112,7 +1147,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       {/* ─── Content area ────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 relative">
         {/* Raw terminal — ansi-to-html rendered <pre> */}
-        {terminalMode === 'pty' ? (
+        {isPtyTerminalMode(terminalMode) ? (
           <div
             ref={ptyContainerRef}
             className="h-full w-full overflow-hidden outline-none"

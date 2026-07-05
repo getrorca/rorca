@@ -233,11 +233,14 @@ export async function listRunPtyChunks(runId: number, afterSequence = 0): Promis
 }
 
 export async function getRunPtySequence(runId: number): Promise<number> {
-  const row = await queryOne<{ max_sequence: number | null }>(
+  const row = await queryOne<{ max_sequence: number | string | null }>(
     'SELECT MAX(sequence) AS max_sequence FROM run_pty_output_chunks WHERE run_id = $1',
     [runId],
   );
-  return row?.max_sequence ?? 0;
+  const maxSequence = row?.max_sequence;
+  if (maxSequence == null) return 0;
+  const parsed = Number(maxSequence);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export async function getRunPtySessionStatus(runId: number): Promise<string | null> {

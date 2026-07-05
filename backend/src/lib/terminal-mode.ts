@@ -7,7 +7,7 @@
 
 import { z } from 'zod';
 
-export const TERMINAL_MODE_VALUES = ['ansi-html', 'pty'] as const;
+export const TERMINAL_MODE_VALUES = ['ansi-html', 'pty', 'native-pty'] as const;
 
 export type TerminalMode = (typeof TERMINAL_MODE_VALUES)[number];
 
@@ -16,11 +16,15 @@ export const DEFAULT_TERMINAL_MODE: TerminalMode = 'ansi-html';
 export const TerminalModeSchema = z.enum(TERMINAL_MODE_VALUES);
 
 export function isTerminalMode(value: unknown): value is TerminalMode {
-  return value === 'ansi-html' || value === 'pty';
+  return value === 'ansi-html' || value === 'pty' || value === 'native-pty';
+}
+
+export function isPtyTerminalMode(value: unknown): value is Extract<TerminalMode, 'pty' | 'native-pty'> {
+  return value === 'pty' || value === 'native-pty';
 }
 
 export function normalizeTerminalMode(value: string | null | undefined): TerminalMode {
-  return value === 'pty' ? 'pty' : DEFAULT_TERMINAL_MODE;
+  return isTerminalMode(value) ? value : DEFAULT_TERMINAL_MODE;
 }
 
 export function invalidTerminalModeMessage(value: string): string {

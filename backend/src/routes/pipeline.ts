@@ -51,7 +51,7 @@ import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
-import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
+import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import {
   getRunPtySessionStatus,
@@ -1074,7 +1074,7 @@ function resolveRequestedTerminalMode(value: string | null | undefined): Termina
 }
 
 function assertTerminalModeAvailable(mode: TerminalMode): void {
-  if (mode === 'pty' && !PTY_AVAILABLE) {
+  if (isPtyTerminalMode(mode) && !PTY_AVAILABLE) {
     throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
   }
 }
@@ -1289,10 +1289,10 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               readinessOverride: { type: boolean, description: "Explicitly run despite readiness blockers; usage is logged to WAL for auditability." }
  *               terminal_mode:
  *                 type: string
- *                 enum: [ansi-html, pty]
+ *                 enum: [ansi-html, pty, native-pty]
  *                 nullable: true
  *                 default: ansi-html
- *                 description: "Run-level terminal renderer mode. null/missing resolves to ansi-html for backward compatibility."
+ *                 description: "Run-level terminal renderer mode. native-pty runs the real interactive CLI in xterm with marker-based completion. null/missing resolves to ansi-html for backward compatibility."
  *               executionEnvironment:
  *                 type: string
  *                 enum: [remote-rorca, local-user]
@@ -2009,6 +2009,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         readinessOverride,
         runAnywayOverride,
         overrideReadinessGate,
+        orchestration,
         terminal_mode: resolvedTerminalMode,
         executionEnvironment: resolvedExecutionEnvironment.effective,
       }).filter(([, value]) => value !== undefined)
@@ -4013,7 +4014,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
  *               workspaceId: { type: string, description: "Workspace ID" }
  *               terminal_mode:
  *                 type: string
- *                 enum: [ansi-html, pty]
+ *                 enum: [ansi-html, pty, native-pty]
  *                 nullable: true
  *                 default: ansi-html
  *     responses:
@@ -4336,7 +4337,7 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *                   items: { $ref: '#/components/schemas/StoryResult' }
  *                 terminal_mode:
  *                   type: string
- *                   enum: [ansi-html, pty]
+ *                   enum: [ansi-html, pty, native-pty]
  *                   description: "Normalized run terminal renderer mode. Missing/null historical values resolve to ansi-html."
  *                 worktreePath: { type: string, nullable: true, description: "Worktree path (if run uses worktree isolation)" }
  *                 branchName: { type: string, nullable: true, description: "Git branch name (if run uses worktree isolation)" }
@@ -4363,7 +4364,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     // Read spec JSON to return full userStories list (including pending ones)
     // OC-029: Include per-story engine assignment in response
     const runAgentType = (run.agent_type || run.agent || 'claude') as AgentType;
-    let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean; agent?: string; reroute?: { fromEngine: string; toEngine: string; reason: string } }[] = [];
+    let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean; excluded?: boolean; agent?: string; reroute?: { fromEngine: string; toEngine: string; reason: string } }[] = [];
     let specModel: string | null = null;
     try {
       const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
@@ -4381,6 +4382,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
                 title: s.title,
                 dependsOn: s.dependsOn,
                 passes: s.passes,
+                excluded: s.excluded,
                 agent: storyAgent,
                 suggestedSkills: Array.isArray(s.suggestedSkills) ? s.suggestedSkills : [],
                 ...(reroute ? { reroute: { fromEngine: reroute.fromEngine, toEngine: reroute.toEngine, reason: reroute.reason } } : {}),
@@ -5291,6 +5293,8 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const retryReasoningEffort = typeof originalTriggerOptions.reasoningEffort === 'string'
       ? originalTriggerOptions.reasoningEffort
       : undefined;
+    const retryBaseTriggerOptions = { ...originalTriggerOptions };
+    delete retryBaseTriggerOptions.orchestration;
 
     // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id.
     //    Preserve the original run's engine/options so retry cannot silently fall
@@ -5316,7 +5320,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       retryMergeStrategy,
       retryTerminalMode,
       JSON.stringify({
-        ...originalTriggerOptions,
+        ...retryBaseTriggerOptions,
         forceSequential: forceSequential === true ? true : originalTriggerOptions.forceSequential,
         agentOverride: retryAgent,
         modelOverride: retryModel ?? undefined,
@@ -5423,7 +5427,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       sequenceOffset: z.number().int().min(0),
       envOverrides: z.record(z.string(), z.string()),
       includeGraph: z.boolean().optional().default(false),
-      terminalMode: z.enum(['ansi-html', 'pty']).optional().default('ansi-html'),
+      terminalMode: z.enum(['ansi-html', 'pty', 'native-pty']).optional().default('ansi-html'),
       thinkingEnabled: z.boolean().optional(),
       thinkingBudget: z.number().int().positive().optional(),
       effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
@@ -6062,7 +6066,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       [runId],
     );
     if (!run) throw new NotFoundError('Run not found');
-    if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
+    if (!isPtyTerminalMode(normalizeTerminalMode(run.terminal_mode))) {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
     if (['done', 'failed', 'cancelled'].includes(run.status)) {
@@ -6151,7 +6155,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       [runId],
     );
     if (!run) throw new NotFoundError('Run not found');
-    if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
+    if (!isPtyTerminalMode(normalizeTerminalMode(run.terminal_mode))) {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
     if (['done', 'failed', 'cancelled'].includes(run.status)) {
@@ -6250,7 +6254,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
   const requestedTerminalMode = normalizeTerminalMode(runRow?.terminal_mode);
   const terminalStatuses = ['done', 'failed', 'cancelled'];
-  const ptyStatusAtOpen = requestedTerminalMode === 'pty'
+  const requestedPtyMode = isPtyTerminalMode(requestedTerminalMode);
+  const ptyStatusAtOpen = requestedPtyMode
     ? await waitForRunPtySessionStatus(runId, runRow && terminalStatuses.includes(runRow.status) ? 0 : 5_000)
     : null;
   // A run may be marked PTY before/without a PTY session if the child spawn fails
@@ -6258,10 +6263,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // joiners must see those chunks instead of a blank native terminal. The short
   // wait above covers the normal startup race where the UI subscribes just before
   // execution-engine has inserted run_pty_sessions.
-  const usePtyCapture = requestedTerminalMode === 'pty' && ptyStatusAtOpen !== null;
-  const terminalMode = usePtyCapture ? 'pty' : 'ansi-html';
+  const usePtyCapture = requestedPtyMode && ptyStatusAtOpen !== null;
+  const terminalMode = usePtyCapture ? requestedTerminalMode : 'ansi-html';
   const isPty = usePtyCapture;
-  const ptyFallbackActive = requestedTerminalMode === 'pty' && !isPty;
+  const ptyFallbackActive = requestedPtyMode && !isPty;
   const ptyFallbackReason = ptyFallbackActive
     ? PTY_AVAILABLE
       ? 'pty-session-unavailable'

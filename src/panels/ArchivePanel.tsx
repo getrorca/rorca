@@ -765,6 +765,7 @@ function SpecPreviewDrawer({
             ...(options?.forceSequential ? { forceSequential: true } : {}),
             ...(options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
             ...(options?.includeGraph ? { includeGraph: true } : {}),
+            ...(options?.terminal_mode ? { terminal_mode: options.terminal_mode } : {}),
             ...(options?.effortLevel ? { effortLevel: options.effortLevel } : {}),
             ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
             ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),

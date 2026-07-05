@@ -125,7 +125,7 @@ class TestResizeObserver {
   }
 }
 
-function renderTerminal(terminalMode: 'ansi-html' | 'pty' = 'pty') {
+function renderTerminal(terminalMode: 'ansi-html' | 'pty' | 'native-pty' = 'pty') {
   return render(
     <ThemeProvider>
       <RunTerminal runId={77} workspaceId="ws-test" terminalMode={terminalMode} />
@@ -199,7 +199,7 @@ describe('RunTerminal PTY fallback UI', () => {
 
     expect(screen.getByText('Checking PTY support')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Semantic/i })).toBeInTheDocument();
 
     await waitFor(() => expect(lastEventSource).not.toBeNull());
 

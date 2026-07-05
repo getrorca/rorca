@@ -195,6 +195,7 @@ export interface TriggerOptions {
   autoMerge?: boolean;
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   includeGraph?: boolean;
+  terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
   effortLevel?: EffortLevel;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
@@ -261,6 +262,7 @@ export default function TriggerPopover({
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const [forceSequential, setForceSequential] = useState(false);
   const [includeGraph, setIncludeGraph] = useState(false);
+  const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty' | 'native-pty'>('pty');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
   const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
@@ -988,6 +990,40 @@ export default function TriggerPopover({
           </div>
         </label>
 
+        {/* Native/live terminal mode */}
+        <div className="space-y-2 rounded-lg border border-border/60 bg-[var(--bg)] p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-[var(--text)]">Terminal Stream</span>
+                <span className="relative group/tip">
+                  <Info size={11} className="text-muted/60 cursor-help" />
+                  <span className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-2 rounded-md bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-72 opacity-0 pointer-events-none group-hover/tip:opacity-100 group-hover/tip:pointer-events-auto transition-opacity z-[200] shadow-xl">
+                    PTY Print keeps the reliable autonomous print/exec contract. Native PTY runs the real interactive CLI in xterm and uses a marker file to detect story completion.
+                  </span>
+                </span>
+              </div>
+              <p className="text-[10px] text-muted leading-tight mt-0.5">
+                Choose reliability-first output or the native interactive CLI experience.
+              </p>
+            </div>
+            <select
+              value={terminalMode}
+              onChange={(event) => setTerminalMode(event.target.value as 'ansi-html' | 'pty' | 'native-pty')}
+              className="shrink-0 rounded-md border border-border bg-[var(--bg-elevated)] px-2 py-1 text-[11px] text-[var(--text)]"
+            >
+              <option value="pty">PTY Print</option>
+              <option value="native-pty">Native PTY</option>
+              <option value="ansi-html">ANSI Replay</option>
+            </select>
+          </div>
+          {terminalMode === 'native-pty' && (
+            <p className="text-[10px] leading-snug text-amber-400/90">
+              Native PTY is best for supervised/debug runs. If the interactive CLI never creates the completion marker, Rorca falls back to the story timeout.
+            </p>
+          )}
+        </div>
+
         {/* Divider */}
         <div className="border-t border-border/50" />
 
@@ -1022,6 +1058,7 @@ export default function TriggerPopover({
               autoMerge: effectiveWorktree ? autoMerge : undefined,
               mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
+              terminal_mode: terminalMode,
               effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
@@ -1052,6 +1089,7 @@ export default function TriggerPopover({
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
                 mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,
+                terminal_mode: terminalMode,
                 effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,

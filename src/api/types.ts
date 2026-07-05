@@ -116,7 +116,7 @@ export interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   retried_from_run_id: number | null;
-  terminal_mode?: 'ansi-html' | 'pty';
+  terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
 }
 
 export interface StoryResult {

@@ -42,7 +42,7 @@ import { StringDecoder } from 'string_decoder';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
-import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
+import { isPtyTerminalMode, normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import {
   PTY_AVAILABLE,
   PTY_UNAVAILABLE_HINT,
@@ -389,13 +389,13 @@ function resolveNoopRecoveryEngine(
   currentEngine: AgentType,
   packet: StoryExecutionPacket,
 ): AgentType | null {
+  const fallbackEnabled = ['1', 'true', 'yes'].includes(String(process.env.RORCA_ENABLE_NOOP_ENGINE_FALLBACK ?? '').toLowerCase());
+  if (!fallbackEnabled) return null;
+
   const orchConfig = loadOrchestrationConfig(cwd);
   const candidates = [
     packet.readiness.recommendedFallbackEngine,
     orchConfig.fallbackEngine,
-    currentEngine === 'pi' ? 'codex' as AgentType : null,
-    currentEngine === 'pi' ? 'claude' as AgentType : null,
-    currentEngine === 'pi' ? 'opencode' as AgentType : null,
   ].filter((value, index, all): value is AgentType => Boolean(value) && all.indexOf(value) === index);
 
   for (const candidate of candidates) {
@@ -1892,6 +1892,7 @@ type TokenUpdateCallback = (update: TokenUpdate) => void;
 
 interface PtyRunOptions {
   enabled: boolean;
+  terminalMode: TerminalMode;
   runId: number;
   workspaceId: string;
   agentType: AgentType;
@@ -1931,11 +1932,72 @@ interface PtyCommand {
   env: Record<string, string>;
   prompt: string;
   writePromptToStdin?: boolean;
+  promptWriteDelayMs?: number;
+  promptTerminator?: string;
+  sendEofAfterPrompt?: boolean;
   cleanup?: () => void;
+}
+
+interface NativePtyCompletionMarker {
+  markerPath: string;
+  token: string;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildPromptPipePtyCommand(command: string, args: string[], prompt: string): { command: string; args: string[]; cleanup: () => void } {
+  const promptPath = path.join(os.tmpdir(), `rorca-pty-prompt-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+  fs.writeFileSync(promptPath, prompt, { encoding: 'utf8', mode: 0o600 });
+  const shellCommand = `cat ${shellQuote(promptPath)} | ${shellQuote(command)} ${args.map(shellQuote).join(' ')}`.trim();
+  return {
+    command: '/bin/bash',
+    args: ['-lc', shellCommand],
+    cleanup: () => {
+      try { fs.unlinkSync(promptPath); } catch { /* ignore */ }
+    },
+  };
 }
 
 const DEFAULT_PTY_COLS = 120;
 const DEFAULT_PTY_ROWS = 36;
+const BRACKETED_PASTE_START = '\u001b[200~';
+const BRACKETED_PASTE_END = '\u001b[201~';
+
+function sanitizeMarkerSegment(value: string | undefined): string {
+  return (value || 'story').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 80) || 'story';
+}
+
+function createNativePtyCompletionMarker(runId: number, storyId?: string): NativePtyCompletionMarker {
+  const token = `${runId}-${sanitizeMarkerSegment(storyId)}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return {
+    token,
+    markerPath: path.join(os.tmpdir(), `rorca-native-pty-done-${token}`),
+  };
+}
+
+function appendNativePtyCompletionInstruction(prompt: string, marker: NativePtyCompletionMarker): string {
+  return [
+    prompt,
+    '',
+    '## Rorca native terminal completion contract',
+    'You are running in an interactive native CLI inside Rorca. The terminal is live for the operator, but Rorca also needs a deterministic completion signal.',
+    'After you have completed the story, run validation, and written your final concise summary, create the following marker file exactly once:',
+    '',
+    '```bash',
+    `mkdir -p ${shellQuote(path.dirname(marker.markerPath))} && printf ${shellQuote(`${marker.token}\n`)} > ${shellQuote(marker.markerPath)}`,
+    '```',
+    '',
+    'This marker means the interactive CLI turn is finished; it does not by itself mark the story as passed. Rorca will still run gates, inspect changes, and commit only valid work.',
+    'If blocked, explain the blocker clearly with file-level evidence, then create the marker so Rorca can end the turn and record the failure without waiting for timeout.',
+    'Do not create this marker until your final success or blocker summary is complete.',
+  ].join('\n');
+}
+
+function bracketedPasteInput(prompt: string): string {
+  return `${BRACKETED_PASTE_START}${prompt}${BRACKETED_PASTE_END}`;
+}
 
 function loadNodePty(): NodePtyLike {
   if (!PTY_AVAILABLE) {
@@ -1970,6 +2032,7 @@ export function buildPtyCommand(
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
   piServerSkillFiles: string[] = [],
+  nativePty = false,
 ): PtyCommand {
   switch (agentType) {
     case 'claude': {
@@ -1994,6 +2057,27 @@ export function buildPtyCommand(
         }
       }
       const claudeCliModel = resolveClaudeCliModelId(agentModel);
+      if (nativePty) {
+        return {
+          command: CLAUDE_BIN,
+          args: [
+            '--dangerously-skip-permissions',
+            ...(claudeCliModel ? ['--model', claudeCliModel] : []),
+            ...(effortLevel ? ['--effort', effortLevel] : []),
+            ...(mcpConfigPath ? ['--mcp-config', mcpConfigPath] : []),
+          ],
+          env,
+          prompt: bracketedPasteInput(prompt),
+          promptWriteDelayMs: 1_000,
+          promptTerminator: '\r',
+          sendEofAfterPrompt: false,
+          cleanup: () => {
+            if (mcpConfigPath) {
+              try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+            }
+          },
+        };
+      }
       return {
         command: CLAUDE_BIN,
         args: [
@@ -2037,6 +2121,34 @@ export function buildPtyCommand(
         fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify({ ...existingConfig, mcp: mcpEntries }, null, 2), 'utf8');
       }
       const status = detectOpenCode();
+      if (nativePty) {
+        return {
+          command: status.opencodeBinPath ?? 'opencode',
+          args: [
+            '--mini',
+            ...(agentModel ? ['--model', normalizeOpenCodeModel(agentModel)] : []),
+          ],
+          env,
+          prompt: bracketedPasteInput(prompt),
+          promptWriteDelayMs: 1_000,
+          promptTerminator: '\r',
+          sendEofAfterPrompt: false,
+          cleanup: () => {
+            if (!openCodeMcpConfigPath) return;
+            try {
+              const current: Record<string, unknown> = JSON.parse(fs.readFileSync(openCodeMcpConfigPath, 'utf8'));
+              const currentMcp = (current.mcp ?? {}) as Record<string, unknown>;
+              for (const injectedName of openCodeInjectedMcpNames) {
+                delete currentMcp[injectedName];
+              }
+              if (Object.keys(currentMcp).length === 0) delete current.mcp;
+              else current.mcp = currentMcp;
+              if (Object.keys(current).length === 0) fs.unlinkSync(openCodeMcpConfigPath);
+              else fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify(current, null, 2), 'utf8');
+            } catch { /* ignore cleanup errors */ }
+          },
+        };
+      }
       return {
         command: status.opencodeBinPath ?? 'opencode',
         args: [
@@ -2074,12 +2186,36 @@ export function buildPtyCommand(
           } catch { /* ignore registration failures in PTY mode */ }
         }
       }
+      if (nativePty) {
+        return {
+          command: CODEX_BIN,
+          args: [
+            '--dangerously-bypass-approvals-and-sandbox',
+            '--no-alt-screen',
+            ...(agentModel ? ['--model', agentModel] : []),
+          ],
+          env,
+          prompt: bracketedPasteInput(prompt),
+          promptWriteDelayMs: 1_000,
+          promptTerminator: '\r',
+          sendEofAfterPrompt: false,
+          cleanup: () => {
+            for (const name of codexMcpRegisteredNames) {
+              try { execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
+            }
+          },
+        };
+      }
+      const baseArgs = ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(agentModel ? ['--model', agentModel] : [])];
+      const piped = buildPromptPipePtyCommand(CODEX_BIN, baseArgs, prompt);
       return {
-        command: CODEX_BIN,
-        args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(agentModel ? ['--model', agentModel] : [])],
+        command: piped.command,
+        args: piped.args,
         env,
-        prompt,
+        prompt: '',
+        writePromptToStdin: false,
         cleanup: () => {
+          piped.cleanup();
           for (const name of codexMcpRegisteredNames) {
             try { execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
           }
@@ -2088,22 +2224,37 @@ export function buildPtyCommand(
     }
     case 'pi': {
       const piSelection = resolvePiCliSelection(agentModel);
+      const sharedArgs = [
+        '--mode', 'text',
+        '--no-extensions',
+        '--tools', 'read,bash,edit,write,grep,find,ls',
+        '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
+        ...(effortLevel ? ['--thinking', effortLevel] : thinkingEnabled ? ['--thinking', 'high'] : []),
+        ...resolvePiExtensionPaths().flatMap(extensionPath => ['--extension', extensionPath]),
+        ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
+        ...(piSelection.model ? ['--model', piSelection.model] : []),
+        ...piServerSkillFiles.flatMap(skillFile => ['--skill', skillFile]),
+      ];
+      if (nativePty) {
+        return {
+          command: PI_BIN,
+          args: sharedArgs,
+          env: buildGuardedAgentEnv(cwd),
+          prompt: bracketedPasteInput(prompt),
+          promptWriteDelayMs: 1_000,
+          promptTerminator: '\r',
+          sendEofAfterPrompt: false,
+        };
+      }
+      const baseArgs = ['--print', ...sharedArgs];
+      const piped = buildPromptPipePtyCommand(PI_BIN, baseArgs, prompt);
       return {
-        command: PI_BIN,
-        args: [
-          '--print',
-          '--mode', 'text',
-          '--no-extensions',
-          '--tools', 'read,bash,edit,write,grep,find,ls',
-          '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
-          ...resolvePiExtensionPaths().flatMap(extensionPath => ['--extension', extensionPath]),
-          ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
-          ...(piSelection.model ? ['--model', piSelection.model] : []),
-          ...piServerSkillFiles.flatMap(skillFile => ['--skill', skillFile]),
-        ],
+        command: piped.command,
+        args: piped.args,
         env: buildGuardedAgentEnv(cwd),
-        prompt,
-        writePromptToStdin: true,
+        prompt: '',
+        writePromptToStdin: false,
+        cleanup: piped.cleanup,
       };
     }
   }
@@ -2137,6 +2288,8 @@ async function spawnAgentViaPty(
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let completionTimer: ReturnType<typeof setInterval> | null = null;
+    let promptTimer: ReturnType<typeof setTimeout> | null = null;
     let runTimer: ReturnType<typeof setTimeout> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2145,6 +2298,9 @@ async function spawnAgentViaPty(
     let finalizePromise: Promise<void> | null = null;
     let unregisterPtyCleanupTask: (() => void) | null = null;
     let inputPollInFlight = false;
+    const nativePty = ptyOptions.terminalMode === 'native-pty';
+    const nativeCompletion = nativePty ? createNativePtyCompletionMarker(ptyOptions.runId, ptyOptions.storyId) : null;
+    let nativeCompletionDetected = false;
     let resolveExitObserved: (() => void) | null = null;
     const exitObserved = new Promise<void>((resolve) => {
       resolveExitObserved = resolve;
@@ -2157,6 +2313,8 @@ async function spawnAgentViaPty(
       if (resizeTimer) clearInterval(resizeTimer);
       if (inputTimer) clearInterval(inputTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (completionTimer) clearInterval(completionTimer);
+      if (promptTimer) clearTimeout(promptTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
@@ -2167,22 +2325,27 @@ async function spawnAgentViaPty(
       }
       logStream.end();
       ptyCommand?.cleanup?.();
-      const status = watchdogFired
-        ? 'timed_out'
-        : exitCode === 0 && !exitSignal
-          ? 'exited'
-          : exitSignal
-            ? 'killed'
-            : 'failed';
+      const status = nativeCompletionDetected
+        ? 'exited'
+        : watchdogFired
+          ? 'timed_out'
+          : exitCode === 0 && !exitSignal
+            ? 'exited'
+            : exitSignal
+              ? 'killed'
+              : 'failed';
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
+      if (nativeCompletion) {
+        try { fs.unlinkSync(nativeCompletion.markerPath); } catch { /* ignore */ }
+      }
       try {
         await completeRunPtySession(ptyOptions.runId, status, exitCode, exitSignal);
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
       }
       resolve({
-        exitCode: watchdogFired ? 124 : (exitCode ?? 1),
+        exitCode: nativeCompletionDetected ? 0 : watchdogFired ? 124 : (exitCode ?? 1),
         stderrTail: Buffer.concat(stderrChunks).toString('utf8'),
         elapsedMs: Date.now() - startTime,
       });
@@ -2221,27 +2384,15 @@ async function spawnAgentViaPty(
     };
 
     const resetInactivity = (): void => {
-      if (inactivityTimer) clearTimeout(inactivityTimer);
-      inactivityTimer = setTimeout(() => {
-        watchdogFired = true;
-        const msg = Buffer.from(`[System] PTY watchdog triggered: No output received for ${Math.round(LLM_IDLE_TIMEOUT_MS / 60_000)} minutes. Killing process...\n`);
-        recordStderr(msg);
-        logStream.write(msg);
-        if (sequenceRef) {
-          const activeSequenceRef = sequenceRef;
-          finishedWrites = finishedWrites
-            .then(() => appendRunPtyOutput(ptyOptions.runId, msg, activeSequenceRef))
-            .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY watchdog message', ptyOptions.runId, err));
-        }
-        if (pty) {
-          try { pty.kill('SIGTERM'); } catch { /* ignore */ }
-          killProcessGroup(pty.pid, 'SIGTERM');
-          forceKillTimer = setTimeout(() => {
-            try { pty?.kill('SIGKILL'); } catch { /* ignore */ }
-            killProcessGroup(pty?.pid, 'SIGKILL');
-          }, 10_000);
-        }
-      }, LLM_IDLE_TIMEOUT_MS);
+      // PTY-mode non-interactive CLIs such as `pi --print --mode text` may stay
+      // silent while the model is thinking and only emit a final answer. Do not
+      // kill an otherwise-live PTY child just because no bytes have arrived; the
+      // story-level runTimer below is the authoritative timeout. Heartbeats keep
+      // the terminal visibly alive while we wait.
+      if (inactivityTimer) {
+        clearTimeout(inactivityTimer);
+        inactivityTimer = null;
+      }
     };
 
     const writePtySystemMessage = (message: string): void => {
@@ -2258,9 +2409,15 @@ async function spawnAgentViaPty(
 
     try {
       sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
+      const ptyPrompt = nativeCompletion
+        ? appendNativePtyCompletionInstruction(prompt, nativeCompletion)
+        : prompt;
+      if (nativeCompletion) {
+        try { fs.unlinkSync(nativeCompletion.markerPath); } catch { /* ignore stale marker cleanup */ }
+      }
       ptyCommand = buildPtyCommand(
         ptyOptions.agentType,
-        prompt,
+        ptyPrompt,
         cwd,
         agentModel,
         attachAddr,
@@ -2269,6 +2426,7 @@ async function spawnAgentViaPty(
         effortLevel,
         mcpServers,
         piServerSkillFiles,
+        nativePty,
       );
       const nodePty = loadNodePty();
       pty = nodePty.spawn(ptyCommand.command, ptyCommand.args, {
@@ -2292,15 +2450,20 @@ async function spawnAgentViaPty(
       resetInactivity();
       heartbeatTimer = setInterval(() => {
         const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
-        const msg = `[System] PTY heartbeat: ${ptyOptions.agentType} still running after ${elapsedSeconds}s; waiting for output...\n`;
-        writePtySystemMessage(msg);
-        recordStderr(Buffer.from(msg));
+        const isFirstHeartbeat = elapsedSeconds < 60;
+        const isFiveMinuteHeartbeat = elapsedSeconds > 0 && elapsedSeconds % 300 === 0;
+        if (isFirstHeartbeat || isFiveMinuteHeartbeat) {
+          const msg = isFirstHeartbeat
+            ? `[System] ${ptyOptions.agentType} is running; waiting for first agent output. Live heartbeats continue in run metadata.\r\n`
+            : `[System] ${ptyOptions.agentType} still running after ${elapsedSeconds}s; waiting for agent output.\r\n`;
+          writePtySystemMessage(msg);
+        }
         if (ptyOptions.port && ptyOptions.storyId) {
           void emitWalEvent(ptyOptions.port, 'story_heartbeat', ptyOptions.workspaceId, {
             run_id: ptyOptions.runId,
             story_id: ptyOptions.storyId,
             agent_type: ptyOptions.agentType,
-            terminal_mode: 'pty',
+            terminal_mode: ptyOptions.terminalMode,
             elapsed_seconds: elapsedSeconds,
             message: 'Agent process is still running; no PTY output received since previous heartbeat.',
           }, ptyOptions.storyId).catch(() => { /* emitWalEvent is already best-effort */ });
@@ -2341,6 +2504,23 @@ async function spawnAgentViaPty(
       }, 50);
       inputTimer.unref?.();
 
+      if (nativeCompletion) {
+        completionTimer = setInterval(() => {
+          if (settled || nativeCompletionDetected) return;
+          try {
+            if (!fs.existsSync(nativeCompletion.markerPath)) return;
+            const markerText = fs.readFileSync(nativeCompletion.markerPath, 'utf8').trim();
+            if (markerText !== nativeCompletion.token) return;
+            nativeCompletionDetected = true;
+            writePtySystemMessage(`\r\n[System] Native CLI completion marker observed for ${ptyOptions.storyId ?? 'story'}; closing terminal session.\r\n`);
+            void requestPtyShutdown('SIGTERM');
+          } catch (err: unknown) {
+            logRunPtyStoreError('Failed to inspect native PTY completion marker', ptyOptions.runId, err);
+          }
+        }, 1_000);
+        completionTimer.unref?.();
+      }
+
       pty.onData((chunk) => {
         const buf = toBuffer(chunk);
         if (buf.length === 0) return;
@@ -2362,11 +2542,24 @@ async function spawnAgentViaPty(
         void finalizePromise;
       });
 
-      pty.write(ptyCommand.prompt);
-      if (!ptyCommand.prompt.endsWith('\n')) {
-        pty.write('\r\n');
+      if (ptyCommand.writePromptToStdin !== false) {
+        const writePrompt = (): void => {
+          if (!pty || settled) return;
+          pty.write(ptyCommand!.prompt);
+          const terminator = ptyCommand!.promptTerminator ?? (ptyCommand!.prompt.endsWith('\n') ? '' : '\r\n');
+          if (terminator) pty.write(terminator);
+          if (ptyCommand!.sendEofAfterPrompt !== false) {
+            pty.write('\u0004');
+          }
+        };
+        const delayMs = ptyCommand.promptWriteDelayMs ?? 0;
+        if (delayMs > 0) {
+          promptTimer = setTimeout(writePrompt, delayMs);
+          promptTimer.unref?.();
+        } else {
+          writePrompt();
+        }
       }
-      pty.write('\u0004');
 
       runTimer = setTimeout(() => {
         if (!pty || settled) return;
@@ -2389,6 +2582,9 @@ async function spawnAgentViaPty(
       unregisterPtyCleanupTask = null;
       logStream.end();
       ptyCommand?.cleanup?.();
+      if (nativeCompletion) {
+        try { fs.unlinkSync(nativeCompletion.markerPath); } catch { /* ignore */ }
+      }
       resolve({ exitCode: 1, stderrTail: message, elapsedMs: Date.now() - startTime });
     }
   });
@@ -4991,7 +5187,7 @@ async function executeStory(
     }, story.id);
   };
 
-  if (effectiveAgent !== 'pi' || config.terminalMode === 'pty') {
+  if (effectiveAgent !== 'pi' || isPtyTerminalMode(config.terminalMode)) {
     await emitStoryStarted();
   }
 
@@ -5070,9 +5266,10 @@ async function executeStory(
 
       logger.info(`[agent] Launching ${effectiveAgent} for ${story.id}`);
       const agentAttemptStartedAt = Date.now();
-      const ptyOptions = config.terminalMode === 'pty' && workspaceId
+      const ptyOptions = isPtyTerminalMode(config.terminalMode) && workspaceId
         ? {
             enabled: true,
+            terminalMode: config.terminalMode,
             runId: config.runId,
             workspaceId,
             agentType: effectiveAgent,
@@ -5935,7 +6132,7 @@ async function main(): Promise<void> {
 
   logger.info(`[engine] Agent: ${config.agentType}${config.agentModel ? ` (model: ${config.agentModel})` : ''}`);
   logger.info(`[engine] Terminal mode: ${config.terminalMode}`);
-  if (config.terminalMode === 'pty' && !PTY_AVAILABLE) {
+  if (isPtyTerminalMode(config.terminalMode) && !PTY_AVAILABLE) {
     throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
   }
   if (config.attachAddr) logger.info(`[engine] OpenCode attach: ${config.attachAddr}`);
@@ -6601,7 +6798,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty|native-pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
     process.exit(1);
   }
 
