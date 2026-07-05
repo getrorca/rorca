@@ -12,13 +12,20 @@ import type {
   TriggerPipelineResponse,
   Workspace,
   WorkspaceContextRoutingResponse,
+  CaptureBootstrapVerifyRequest,
+  CaptureBootstrapVerifyResponse,
 } from "./types.js";
 
 export class RorcaApiClient {
   readonly baseUrl: string;
+  readonly defaultHeaders: Record<string, string>;
 
-  constructor(baseUrl: string = process.env.RORCA_PI_API_URL || "http://127.0.0.1:3030") {
+  constructor(
+    baseUrl: string = process.env.RORCA_PI_API_URL || "http://127.0.0.1:3030",
+    options: { headers?: Record<string, string> } = {},
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.defaultHeaders = options.headers ?? {};
   }
 
   async getHealth(): Promise<HealthResponse> {
@@ -184,12 +191,20 @@ export class RorcaApiClient {
     }, 60_000);
   }
 
+  async verifyCaptureBootstrap(input: CaptureBootstrapVerifyRequest): Promise<CaptureBootstrapVerifyResponse> {
+    return this.fetchJson<CaptureBootstrapVerifyResponse>("/api/context-capture/bootstrap/verify", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
   async fetchJson<T>(pathname: string, init?: RequestInit, timeoutMs: number = 30_000): Promise<T> {
     const response = await fetch(`${this.baseUrl}${pathname}`, {
       ...init,
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
         Accept: "application/json",
+        ...this.defaultHeaders,
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...(init?.headers || {}),
       },

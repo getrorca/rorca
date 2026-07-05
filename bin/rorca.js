@@ -15,6 +15,7 @@ import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar';
 import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
 import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
 import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
+import { formatCaptureBootstrapHumanReport, runCaptureBootstrap } from '../packages/rorca-pi-extension/extensions/rorca/capture-bootstrap.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -2452,6 +2453,24 @@ async function runTui() {
     });
     return result.code;
 }
+async function runCaptureSetupCommand(options) {
+    const report = await runCaptureBootstrap({
+        alwaysOn: Boolean(options.alwaysOn),
+        dryRun: Boolean(options.dryRun),
+        workspaceId: options.workspaceId,
+        apiBaseUrl: API_BASE,
+    });
+    if (options.json) {
+        console.log(JSON.stringify(report, null, 2));
+    }
+    else {
+        console.log(formatCaptureBootstrapHumanReport(report));
+        console.log('');
+        console.log('JSON report:');
+        console.log(JSON.stringify(report, null, 2));
+    }
+    return report.ok ? 0 : 1;
+}
 const program = new Command();
 program
     .name('rorca')
@@ -2578,6 +2597,26 @@ program
     .command('tui')
     .action(async () => {
     process.exitCode = await runTui();
+});
+program
+    .command('setup')
+    .description('Explicit setup command for the rorca-capture binary')
+    .option('--always-on', 'Install reversible always-on context capture components')
+    .option('--dry-run', 'Report what would be installed without writing files')
+    .option('--json', 'Emit only JSON output')
+    .option('--workspace-id <id>', 'Workspace id or label to bootstrap')
+    .action(async (options) => {
+    process.exitCode = await runCaptureSetupCommand(options);
+});
+const capture = program.command('capture').description('Manage always-on universal context capture');
+capture
+    .command('setup')
+    .option('--always-on', 'Install reversible always-on context capture components')
+    .option('--dry-run', 'Report what would be installed without writing files')
+    .option('--json', 'Emit only JSON output')
+    .option('--workspace-id <id>', 'Workspace id or label to bootstrap')
+    .action(async (options) => {
+    process.exitCode = await runCaptureSetupCommand(options);
 });
 const mcp = program.command('mcp').description('Manage MCP HTTP authentication');
 mcp

@@ -139,6 +139,25 @@ export type HealthResponse = {
   };
 };
 
+export type CaptureBootstrapVerifyRequest = {
+  workspaceId: string;
+  workspacePath: string;
+  queuePath: string;
+  redactionConfigPath: string;
+  captureIgnorePath: string;
+};
+
+export type CaptureBootstrapVerifyResponse = {
+  ok: boolean;
+  workspace: Workspace;
+  checks: Array<{
+    id: string;
+    ok: boolean;
+    message: string;
+    path?: string;
+  }>;
+};
+
 export type PiModel = {
   provider: string;
   model: string;
