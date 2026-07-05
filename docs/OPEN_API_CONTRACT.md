@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `2.1.0`
+Contract version: `3.1.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -15,6 +15,12 @@ Contract version: `2.1.0`
 | POST | `/api/candidates/{id}/mark-superseded` | body:review_note (optional), body:reviewer (optional), path:id (required) | `sha256:9055017b9b3b57bb00ad1b27d8272b0c6126e9daf84f2647011fa0a16f7fa1c0` |
 | POST | `/api/candidates/{id}/reject` | body:review_note (optional), body:reviewer (optional), path:id (required) | `sha256:17b974dccde32840ccf7991c6080c20479f68fa48d5914779012cc4bc1912c18` |
 | POST | `/api/candidates/{id}/revisit` | body:review_note (optional), body:reviewer (optional), path:id (required) | `sha256:f32e5449aeec2b05e064254ca013d450294b2b17a0405c8c85c4de71149d82a1` |
+| GET | `/api/context-candidates` | query:category (optional), query:confidence (optional), query:cursor (optional), query:eventType (optional), query:limit (optional), query:sourceSystem (optional), query:status (optional), query:trustTier (optional), query:workspaceId (required) | `sha256:9df7b23d1f3585b8e4338d8cd7947908a245b10471d314f72ad87b0b43105c02` |
+| POST | `/api/context-candidates` | body:confidence (optional), body:context (optional), body:contextEventId (optional), body:idempotencyKey (optional), body:relatedFiles (optional), body:rule (required), body:suggestedCategory (required), body:title (required), body:trustTier (optional), body:workspaceId (required) | `sha256:fbcbf193684997084d8612ae7b16bdad4b65e17ce014ae9b71fc70dee7f2f1b0` |
+| GET | `/api/context-candidates/{id}` | path:id (required), query:workspaceId (optional) | `sha256:94d30ad8606aa55e7e769e16fb605588a07ee823c2d8b1026d920850ff6137cc` |
+| POST | `/api/context-candidates/{id}/approve` | path:id (required) | `sha256:b770e85170ce7f322e2d2180b80f78c09c92d9ee26c813cd6916737e3467ce23` |
+| GET | `/api/context-candidates/retrieval` | query:includeUnsafe (optional), query:minConfidence (optional), query:workspaceId (required) | `sha256:63bf93ea1ca780b2c71246588eb2c3f9b509991015ecd586901f53c3a28f9028` |
+| POST | `/api/context-events` | body:actor (optional), body:contentHash (optional), body:eventType (required), body:idempotencyKey (optional), body:metadata (optional), body:occurredAt (optional), body:payload (optional), body:provenance (optional), body:relatedFiles (optional), body:sourceRef (required), body:sourceSystem (required), body:summary (optional), body:trustTier (optional), body:workspaceId (required) | `sha256:f494521cac421fae33f5ad571d333754b5250ce64ad8d10f43064df80bc3461e` |
 | POST | `/api/context-events/candidates` | body:candidate (optional) | `sha256:f0406a89d9d763902e5f5bca047f2dbbd5152889dc4429452b3b96361de91e48` |
 | POST | `/api/context-events/events` | body:event (optional) | `sha256:ac22a1e32618037f318b75a367f39d408068a19b409ba1f95c273b6b042c6322` |
 | POST | `/api/context-events/flush` | body:entries (optional) | `sha256:ba7997cb404438539260fe2fc8fbef3ad3908554f5fdbe337486c97e7a1b15ae` |
@@ -33,6 +39,8 @@ Contract version: `2.1.0`
 | GET | `/api/mcp/tools` | - | `sha256:cf01b2af54b29212534ae9119064951a1115503359aa8bb0e51f47981757965d` |
 | GET | `/api/memory` | query:category (optional), query:limit (optional), query:workspaceId (required) | `sha256:608cefe732994ac87d10942235aed8ee90afa9276c49c649001547e4a98c7546` |
 | POST | `/api/memory` | body:category (required), body:context (optional), body:relatedFiles (optional), body:rule (required), body:source (optional), body:sourceRunId (optional), body:sourceSpecId (optional), body:title (required), body:workspaceId (required) | `sha256:e4569960c6f8e24d96030581c4327dabcb8568f934383f011f398bd49a98f896` |
+| POST | `/api/memory/candidates` | body:confidence (optional), body:context (optional), body:idempotencyKey (optional), body:relatedFiles (optional), body:rule (required), body:sourceRef (optional), body:suggestedCategory (required), body:title (required), body:trustTier (optional), body:workspaceId (required) | `sha256:13e4c8b1cc3fac35fb08b998cd911cc16dcecc43769b44b01442623e60ecb304` |
+| POST | `/api/memory/candidates/{id}/approve` | path:id (required) | `sha256:763e8f3806888cc5c0831128242941e801422b3b70cb4cf77ab93a9c4d5b1950` |
 | GET | `/api/memory/categories` | - | `sha256:6ebbf548f212d100beb07e140f2a104f0de142b8500c9c9d22d0887a5ef9d20e` |
 | GET | `/api/memory/context` | query:n (optional), query:workspaceId (required) | `sha256:12191e793eac57a89b68b6cc53b2319f714257d3baa16e71487b7c98b39878d0` |
 | GET | `/api/memory/graph/neighborhood` | query:memoryId (required), query:workspaceId (required) | `sha256:9c741a16db6b08f7b55ba3ba58d9c0f9708f62b83f2a0c5ada47d9fa28f9a457` |
@@ -45,7 +53,7 @@ Contract version: `2.1.0`
 | GET | `/api/memory/review` | query:workspaceId (required) | `sha256:63b32011fe10f254210b4a0050fd3c7b27f8f94c4fcb454e4b9e4ab46328a181` |
 | POST | `/api/memory/review/{id}/action` | body:action (required), body:workspaceId (required), path:id (required) | `sha256:05178c17f8f5f366c095540d5670dbe112e2d4405f37de5e4009ee4e048154b7` |
 | GET | `/api/pipeline/runs` | query:workspaceId (required) | `sha256:589fed0adef7b6c4a26a13c733cb3ec514d6b7643a99c82ded0c361a5ab6dfb2` |
-| GET | `/api/pipeline/runs/{runId}` | path:runId (required) | `sha256:1d9fd9ce8c77d46480d9d99e428081fadc9728d30081b11cb3d8840cdb1a42fc` |
+| GET | `/api/pipeline/runs/{runId}` | path:runId (required) | `sha256:30043f8edd511560ee7725204fe083b92c03e29d0f3395c13f6e025e3550dc5e` |
 | POST | `/api/pipeline/runs/{runId}/cancel` | path:runId (required) | `sha256:ad6baae22c0e39dd86fef78bc70d6a748e644f8931b3e666db4e9790150b7da3` |
 | GET | `/api/pipeline/runs/{runId}/context-trace/{rawRef}` | path:rawRef (required), path:runId (required) | `sha256:d69339acbddc4e82ede5e2cde4ba9a002cf60e7335f2f4a67485786df96014f3` |
 | POST | `/api/pipeline/runs/{runId}/input` | body:dataBase64 (required), path:runId (required) | `sha256:f8a3f6aa2d5ae57add5776d2dcf8aa1d4d1e26f9f92443083c1cb7a5b5ff2754` |
@@ -55,7 +63,8 @@ Contract version: `2.1.0`
 | GET | `/api/pipeline/runs/{runId}/retrieval-telemetry/{telemetryId}` | path:runId (required), path:telemetryId (required) | `sha256:79a73a02d19c6bedd4af114f4e25cd55bd631d570264d276f3a0b952472e6d1d` |
 | POST | `/api/pipeline/runs/{runId}/retry` | body:forceSequential (optional), body:storyIds (optional), path:runId (required) | `sha256:719233bff39bb836289f4d0b4477bf43690765ca36cb48de49dd9173e75abed9` |
 | POST | `/api/pipeline/task-manifests/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:executionEnvironmentId (optional), body:idempotencyKey (required), body:manifest (required), body:mergeStrategy (optional), body:modelOverride (optional), body:terminalMode (optional), body:terminal_mode (optional), body:workspaceId (required) | `sha256:8c6ce52dc89a84c164046c455b816671bfceb1d548329d675efc3e9bd7d7f528` |
-| POST | `/api/pipeline/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:forceRerun (optional), body:includeGraph (optional), body:mergeStrategy (optional), body:modelOverride (optional), body:readinessOverride (optional), body:rerunFromScratch (optional), body:specPath (required), body:storyId (optional), body:terminal_mode (optional), body:thinkingBudget (optional), body:thinkingEnabled (optional), body:triggerType (optional), body:workspaceId (required) | `sha256:178cd4ad91547c537e30d239c5ee69325e92db6cf0543f100a33b3940c81d0ef` |
+| POST | `/api/pipeline/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:forceRerun (optional), body:includeGraph (optional), body:mergeStrategy (optional), body:modelOverride (optional), body:readinessOverride (optional), body:rerunFromScratch (optional), body:specPath (required), body:storyId (optional), body:terminal_mode (optional), body:thinkingBudget (optional), body:thinkingEnabled (optional), body:triggerType (optional), body:workspaceId (required) | `sha256:bd48a5ff3dcd07743ba1b2aec432d807e3fc4fd4a361b71eab434f230d642a24` |
+| GET | `/api/pipeline/worker/health` | - | `sha256:f295ae7b4c1388e4533b9b6cddd516951b92cf987e36b62c8c2c2e510a19607c` |
 | GET | `/api/recall` | query:category (optional), query:includeHealth (optional), query:includeRuns (optional), query:query (optional), query:storyText (optional), query:titlesOnly (optional), query:workspaceId (required) | `sha256:9c5672c3fdf5e0ded65c40f03760271c48722f77158c6b46a87c99621e8d5a9a` |
 | GET | `/api/retrieval-traces` | query:limit (optional), query:offset (optional), query:workspaceId (required) | `sha256:999514247daea42c051fc08f42229d29b8dc35bcc7236e9dcaff7ecea3aab027` |
 | POST | `/api/retrieval-traces` | body:briefHash (required), body:candidates (required), body:degraded (optional), body:gitSha (optional), body:graphMode (optional), body:policy (optional), body:specLogId (optional), body:tokenEstimate (optional), body:traceId (required), body:workspaceId (required) | `sha256:04dd8e240a5f5c769ad45f5d1b0b59f7999aa4df67b5ba95898c2a4c2e1a8611` |
@@ -99,5 +108,7 @@ Contract version: `2.1.0`
 | GET | `/api/specs/repair-candidates` | query:category (optional), query:limit (optional), query:workspaceId (required) | `sha256:370f4bd1f6d1986f822dc51b1575191fee28d0c0b167a894d71db795e8c434db` |
 | GET | `/api/specs/search/stories` | query:q (required), query:workspaceId (required) | `sha256:6292594de8bef5c8eab95de31ebb21a98557ecb8656e31066fa3b4dc2ec522f0` |
 | GET | `/api/version` | - | `sha256:580155644cbfddc9b3efa50861d1c011a29c2930c73dabbf45fdb8265de30f95` |
+| GET | `/api/workspaces` | query:cursor (optional), query:limit (optional) | `sha256:17b8dea2ff89bb1d8c7acb63659fe62b73747dbc118c3047bf30ce80e029ef69` |
+| GET | `/api/workspaces/{workspaceId}/capture/last-rorca-run` | path:workspaceId (required) | `sha256:5a8bd7d5e1ea819b1c6ff9ed656465427dead6c6a5d2e98a5505d61c201b7b41` |
 | GET | `/api/workspaces/{workspaceId}/hydration` | path:workspaceId (required) | `sha256:025169be7f2ec0379ff62f09b96e2f682a8b2e4f9efdddc10c298a90709357ed` |
 | POST | `/api/workspaces/{workspaceId}/hydration` | body:types (optional), path:workspaceId (required) | `sha256:d1c47bbb1246fe417b72ee908c9f266f2c40360bc7808dc4ff8cce8391bd994d` |

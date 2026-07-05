@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 import { renderWithProviders } from '../../test/helpers';
 import MemoryPanel from '../MemoryPanel';
 
@@ -74,6 +75,152 @@ const MEMORY_RELATIONS_RESPONSE = {
     },
   ],
   total: 1,
+};
+
+const MEMORY_CANDIDATE_LIST_RESPONSE = {
+  items: [
+    {
+      id: '301',
+      workspaceId: 'ws-1',
+      contextEventId: '101',
+      eventType: 'manual_cli_note',
+      sourceSystem: 'pi-sidecar',
+      sourceRef: 'session:Bearer [REDACTED]',
+      actor: 'pi',
+      occurredAt: '2026-06-03T10:00:00.000Z',
+      suggestedCategory: 'Convention',
+      title: 'Use apiFetch for sidecar review',
+      rule: 'Candidate review actions must call backend APIs through apiFetch.',
+      context: 'Captured after a sidecar observation. Secret value was redacted before storage.',
+      relatedFiles: ['src/panels/MemoryPanel.tsx'],
+      confidence: 'medium',
+      trustTier: 'working_note',
+      reviewStatus: 'pending',
+      reviewer: null,
+      reviewedAt: null,
+      promotedMemoryId: null,
+      promotedAt: null,
+      provenance: { adapter: 'pi-sidecar', rawToken: 'Bearer [REDACTED]' },
+      metadata: { safety: { redactionApplied: true } },
+      securitySensitive: true,
+      regulatedDomain: false,
+      requiresReview: true,
+      createdAt: '2026-06-03T10:00:00.000Z',
+      updatedAt: '2026-06-03T10:00:00.000Z',
+    },
+    {
+      id: '302',
+      workspaceId: 'ws-1',
+      contextEventId: null,
+      eventType: 'daemon_scan',
+      sourceSystem: 'rorca-capture',
+      sourceRef: 'scan:42',
+      actor: 'daemon',
+      occurredAt: '2026-06-02T10:00:00.000Z',
+      suggestedCategory: 'Decision',
+      title: 'Approved candidate shows promoted memory',
+      rule: 'Approved candidates should link the promoted memory id.',
+      context: 'Already reviewed.',
+      relatedFiles: [],
+      confidence: 'high',
+      trustTier: 'approved_policy',
+      reviewStatus: 'approved',
+      reviewer: 'alice',
+      reviewedAt: '2026-06-03T11:00:00.000Z',
+      promotedMemoryId: 777,
+      promotedAt: '2026-06-03T11:00:00.000Z',
+      provenance: {},
+      metadata: { review: { action: 'approve' } },
+      securitySensitive: false,
+      regulatedDomain: false,
+      requiresReview: false,
+      createdAt: '2026-06-02T10:00:00.000Z',
+      updatedAt: '2026-06-03T11:00:00.000Z',
+    },
+    {
+      id: '303',
+      workspaceId: 'ws-1',
+      contextEventId: null,
+      eventType: 'manual_note',
+      sourceSystem: 'pi-sidecar',
+      sourceRef: 'session:old',
+      actor: 'pi',
+      occurredAt: '2026-06-01T10:00:00.000Z',
+      suggestedCategory: 'Gotcha',
+      title: 'Rejected candidate remains auditable',
+      rule: 'Rejected candidates remain visible in the default audit view.',
+      context: 'Rejected by operator.',
+      relatedFiles: [],
+      confidence: 'low',
+      trustTier: 'agent_observation',
+      reviewStatus: 'rejected',
+      reviewer: 'alice',
+      reviewedAt: '2026-06-03T12:00:00.000Z',
+      promotedMemoryId: null,
+      promotedAt: null,
+      provenance: {},
+      metadata: { review: { action: 'reject', reason: 'Noisy' } },
+      securitySensitive: false,
+      regulatedDomain: false,
+      requiresReview: true,
+      createdAt: '2026-06-01T10:00:00.000Z',
+      updatedAt: '2026-06-03T12:00:00.000Z',
+    },
+    {
+      id: '304',
+      workspaceId: 'ws-1',
+      contextEventId: null,
+      eventType: 'manual_note',
+      sourceSystem: 'pi-sidecar',
+      sourceRef: 'session:later',
+      actor: 'pi',
+      occurredAt: '2026-06-01T11:00:00.000Z',
+      suggestedCategory: 'Pattern',
+      title: 'Deferred candidate remains auditable',
+      rule: 'Deferred candidates remain visible in the default audit view.',
+      context: 'Needs later confirmation.',
+      relatedFiles: [],
+      confidence: 'medium',
+      trustTier: 'engineering_decision',
+      reviewStatus: 'deferred',
+      reviewer: 'bob',
+      reviewedAt: '2026-06-03T13:00:00.000Z',
+      promotedMemoryId: null,
+      promotedAt: null,
+      provenance: {},
+      metadata: { review: { action: 'defer', reason: 'Wait for rollout' } },
+      securitySensitive: false,
+      regulatedDomain: false,
+      requiresReview: true,
+      createdAt: '2026-06-01T11:00:00.000Z',
+      updatedAt: '2026-06-03T13:00:00.000Z',
+    },
+  ],
+  total: 4,
+  hasMore: false,
+};
+
+const CANDIDATE_PREVIEW_RESPONSE = {
+  candidateId: '301',
+  workspaceId: 'ws-1',
+  preview: {
+    path: 'src/panels/MemoryPanel.tsx',
+    fileName: 'MemoryPanel.tsx',
+    exists: true,
+    text: 'const token = "Bearer [REDACTED]";\napiFetch("/api/context-candidates");',
+    truncated: false,
+    byteLength: 82,
+    maxPreviewBytes: 16384,
+    withinCaptureLimit: true,
+    redactionApplied: true,
+    sha256: 'preview-hash',
+    safety: {
+      securitySensitive: true,
+      regulatedDomain: false,
+      requiresReview: false,
+      findings: [{ category: 'secret', name: 'bearer-token' }],
+    },
+  },
 };
 
 const MEMORY_REVIEW_RESPONSE: any = {
@@ -255,6 +402,14 @@ afterAll(() => {
   vi.restoreAllMocks();
 });
 
+function renderMemoryPanel() {
+  return renderWithProviders(
+    <MemoryRouter>
+      <MemoryPanel />
+    </MemoryRouter>,
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.setItem('rorca_workspaceId', 'ws-1');
@@ -280,7 +435,198 @@ function mockPanelData(overrides?: {
   });
 }
 
+function mockPanelDataWithCandidates(overrides?: {
+  candidates?: typeof MEMORY_CANDIDATE_LIST_RESPONSE;
+  preview?: typeof CANDIDATE_PREVIEW_RESPONSE;
+  rejectCandidates?: boolean;
+}) {
+  mockApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+    if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+    if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+    if (path.startsWith('/api/memory/review?')) return MEMORY_REVIEW_RESPONSE;
+    if (path.startsWith('/api/memory/relations?')) return MEMORY_RELATIONS_RESPONSE;
+    if (path.startsWith('/api/memory/graph/overview?')) return OVERVIEW_GRAPH_RESPONSE;
+    if (path.startsWith('/api/memory/graph/neighborhood?')) return NEIGHBORHOOD_GRAPH_RESPONSE;
+    if (path.startsWith('/api/context-candidates/301/file-preview?')) return overrides?.preview ?? CANDIDATE_PREVIEW_RESPONSE;
+    if (path.startsWith('/api/context-candidates/301/') && init?.method === 'POST') {
+      return { candidate: MEMORY_CANDIDATE_LIST_RESPONSE.items[0], ok: true };
+    }
+    if (path.startsWith('/api/context-candidates?')) {
+      if (overrides?.rejectCandidates) throw new Error('Candidate API unavailable');
+      const url = new URL(`http://localhost${path}`);
+      let items = overrides?.candidates?.items ?? MEMORY_CANDIDATE_LIST_RESPONSE.items;
+      const category = url.searchParams.get('category');
+      const confidence = url.searchParams.get('confidence');
+      const trustTier = url.searchParams.get('trustTier');
+      const status = url.searchParams.get('status');
+      const source = url.searchParams.get('sourceSystem');
+      if (category) items = items.filter((item) => item.suggestedCategory === category);
+      if (confidence) items = items.filter((item) => item.confidence === confidence);
+      if (trustTier) items = items.filter((item) => item.trustTier === trustTier);
+      if (status && status !== 'all') items = items.filter((item) => item.reviewStatus === status);
+      if (source) items = items.filter((item) => item.sourceSystem === source);
+      return { items, total: items.length, hasMore: false };
+    }
+    return {};
+  });
+}
+
 describe('MemoryPanel', () => {
+  it('lists memory candidates with URL-backed filters and keeps reviewed decisions auditable', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithCandidates();
+
+    renderMemoryPanel();
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Candidates' }));
+
+    expect(await screen.findByText('Candidate review')).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Memory candidate review queue' })).toBeTruthy();
+    expect(screen.getAllByText('Use apiFetch for sidecar review').length).toBeGreaterThan(0);
+    expect(screen.getByText('Approved candidate shows promoted memory')).toBeTruthy();
+    expect(screen.getByText('Rejected candidate remains auditable')).toBeTruthy();
+    expect(screen.getByText('Deferred candidate remains auditable')).toBeTruthy();
+    expect(screen.getByText('Memory #777')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('/api/context-candidates?workspaceId=ws-1&limit=100&status=all'));
+    });
+
+    await user.type(screen.getByLabelText('Filter candidates by source'), 'pi-sidecar');
+    await user.selectOptions(screen.getByLabelText('Filter candidates by category'), 'Convention');
+    await user.selectOptions(screen.getByLabelText('Filter candidates by confidence'), 'medium');
+    await user.selectOptions(screen.getByLabelText('Filter candidates by trust tier'), 'working_note');
+    await user.selectOptions(screen.getByLabelText('Filter candidates by review status'), 'pending');
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('sourceSystem=pi-sidecar'));
+      expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('category=Convention'));
+      expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('confidence=medium'));
+      expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('trustTier=working_note'));
+      expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('status=pending'));
+    });
+  });
+
+  it('shows candidate detail, source provenance, safety flags, and backend-redacted file previews', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithCandidates();
+
+    renderMemoryPanel();
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Candidates' }));
+
+    expect(await screen.findByRole('tabpanel', { name: 'Candidates' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Memory candidate detail' })).toBeTruthy();
+    expect(screen.getAllByText('Candidate review actions must call backend APIs through apiFetch.').length).toBeGreaterThan(0);
+    expect(screen.getByText('pi-sidecar')).toBeTruthy();
+    expect(screen.getByText('session:Bearer [REDACTED]')).toBeTruthy();
+    expect(screen.getByText('Security sensitive')).toBeTruthy();
+    expect(screen.getByText('Review required')).toBeTruthy();
+    expect(screen.getByText(/"adapter": "pi-sidecar"/)).toBeTruthy();
+    expect(screen.queryByText(/super-secret-token/)).toBeNull();
+
+    expect(await screen.findByText('Redaction applied')).toBeTruthy();
+    expect(screen.getByText('secret: bearer-token')).toBeTruthy();
+    expect(screen.getAllByText(/Bearer \[REDACTED\]/).length).toBeGreaterThan(0);
+    expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('/api/context-candidates/301/file-preview?workspaceId=ws-1&path=src%2Fpanels%2FMemoryPanel.tsx'));
+  });
+
+  it('calls candidate approve, edit, reject, duplicate, supersede, conflict, and defer APIs through apiFetch', async () => {
+    const user = userEvent.setup();
+    mockPanelDataWithCandidates();
+
+    renderMemoryPanel();
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Candidates' }));
+    await screen.findByText('Operator actions');
+
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/301/approve', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ workspaceId: 'ws-1', reviewer: 'local-user' }),
+      }));
+    });
+
+    await user.clear(screen.getByLabelText('Edit title'));
+    await user.type(screen.getByLabelText('Edit title'), 'Edited candidate title');
+    await user.click(screen.getByRole('button', { name: 'Edit and approve' }));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/301/edit-and-approve', expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('Edited candidate title'),
+      }));
+    });
+
+    await user.type(screen.getByLabelText('Review reason / note'), 'Too speculative');
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/301/reject', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ workspaceId: 'ws-1', reviewer: 'local-user', reason: 'Too speculative' }),
+      }));
+    });
+
+    await user.type(screen.getByLabelText('Target ID'), '302');
+    await user.click(screen.getByRole('button', { name: 'Mark duplicate' }));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/301/duplicate', expect.objectContaining({ body: expect.stringContaining('duplicateOfCandidateId') }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Mark superseded' }));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/301/supersede', expect.objectContaining({ body: expect.stringContaining('supersededByCandidateId') }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Mark conflict' }));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/301/conflict', expect.objectContaining({ body: expect.stringContaining('conflictingCandidateId') }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Defer' }));
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/301/defer', expect.objectContaining({ body: expect.stringContaining('Too speculative') }));
+    });
+  });
+
+  it('renders candidate loading and error states with accessible retry controls', async () => {
+    const user = userEvent.setup();
+    let resolveCandidates!: (value: typeof MEMORY_CANDIDATE_LIST_RESPONSE) => void;
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.startsWith('/api/memory/items?')) return MEMORY_LIST_RESPONSE;
+      if (path.startsWith('/api/memory/review?')) return MEMORY_REVIEW_RESPONSE;
+      if (path.startsWith('/api/memory/relations?')) return MEMORY_RELATIONS_RESPONSE;
+      if (path.startsWith('/api/context-candidates?')) {
+        return await new Promise<typeof MEMORY_CANDIDATE_LIST_RESPONSE>((resolve) => {
+          resolveCandidates = resolve;
+        });
+      }
+      return {};
+    });
+
+    const { unmount } = renderMemoryPanel();
+
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Candidates' }));
+    expect(await screen.findByText('Loading memory candidates…')).toBeTruthy();
+
+    resolveCandidates(MEMORY_CANDIDATE_LIST_RESPONSE);
+    expect((await screen.findAllByText('Use apiFetch for sidecar review')).length).toBeGreaterThan(0);
+    unmount();
+
+    mockPanelDataWithCandidates({ rejectCandidates: true });
+    renderMemoryPanel();
+    await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
+    await user.click(screen.getByRole('tab', { name: 'Candidates' }));
+    expect(await screen.findByText('Candidates unavailable')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+  });
+
   it('applies analytics drill-down focus from ontology health without breaking ledger and graph workflows', async () => {
     mockPanelData();
     sessionStorage.setItem('rorca_memory_analytics_drilldown', JSON.stringify({
@@ -295,7 +641,7 @@ describe('MemoryPanel', () => {
       createdAt: '2026-06-03T12:00:00.000Z',
     }));
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Analytics drill-down: Active conflicts')).toBeTruthy();
     expect(screen.getByText('Conflict drill-down from analytics.')).toBeTruthy();
@@ -311,7 +657,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     expect(screen.queryByText('Knowledge Web')).toBeNull();
@@ -331,7 +677,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -364,7 +710,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     expect(screen.getAllByText('Superseded by memory #2').length).toBeGreaterThan(0);
@@ -378,7 +724,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.selectOptions(screen.getByLabelText('Filter by source type'), 'import');
@@ -401,7 +747,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Graph' }));
@@ -428,7 +774,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
     expect(screen.getByText(/Review queue is intentionally bounded to 120/)).toBeTruthy();
@@ -494,7 +840,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Provenance cleanup')).toBeTruthy();
     expect(screen.getByRole('list', { name: 'Provenance cleanup queue' })).toBeTruthy();
@@ -530,7 +876,7 @@ describe('MemoryPanel', () => {
       return {};
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -603,7 +949,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -639,7 +985,7 @@ describe('MemoryPanel', () => {
       return {};
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Graph' }));
@@ -662,7 +1008,7 @@ describe('MemoryPanel', () => {
       return {};
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await waitFor(() => expect(screen.getAllByTitle(/Ontology relation fetch failed/).length).toBeGreaterThan(0));
   });
@@ -680,7 +1026,7 @@ describe('MemoryPanel', () => {
       return {};
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Graph' }));
@@ -714,7 +1060,7 @@ describe('MemoryPanel', () => {
       return {};
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -782,7 +1128,7 @@ describe('MemoryPanel', () => {
       return {};
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getAllByRole('button', { name: 'Curate' })[0]);
@@ -810,7 +1156,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData({ relations: { items: [{ id: 91, relationType: 'CONFLICTS_WITH', status: 'active', sourceMemoryId: 1, targetMemoryId: 2 }], total: 1 } });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getAllByRole('button', { name: 'Curate' })[0]);
@@ -837,7 +1183,7 @@ describe('MemoryPanel', () => {
       return {};
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     expect((await screen.findAllByText(/supersedes memory #2/i)).length).toBeGreaterThan(0);
@@ -875,7 +1221,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await waitFor(() => {
       expect(screen.getByText('No memory entries yet')).toBeTruthy();
@@ -886,6 +1232,7 @@ describe('MemoryPanel', () => {
 
   const SPEC_RELEVANCE_GRAPH_RESPONSE = {
     available: true,
+    runtime: { graphMode: 'full', provider: 'age', ageAvailable: true, hint: '', message: '' },
     hub: { id: 'hub:spec-a', type: 'hub', ring: 0, label: 'spec-a', entityId: 'spec-a' },
     nodes: [
       { id: 'hub:spec-a', type: 'hub', ring: 0, label: 'spec-a', entityId: 'spec-a' },
@@ -901,9 +1248,6 @@ describe('MemoryPanel', () => {
     caps: { maxFiles: 20, maxMemories: 30, maxEdges: 80 },
     truncation: { filesTruncated: false, memoriesTruncated: false, edgesTruncated: false, totalCandidates: 1, returnedCandidates: 1 },
     fallback: { ageAvailable: true, telemetryAvailable: true, graphPathsAvailable: true, missingReasons: [] },
-    // The /api/spec-relevance-graph/by-spec route always returns a runtime
-    // descriptor (GraphRuntimeDescriptor) that SpecRelevanceGraph reads.
-    runtime: { graphMode: 'full', provider: 'age', ageAvailable: true, hint: '', message: '' },
   };
 
   function mockPanelDataWithSpecGraph(overrides?: {
@@ -925,7 +1269,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelDataWithSpecGraph();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -938,7 +1282,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelDataWithSpecGraph();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -956,7 +1300,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelDataWithSpecGraph();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -989,7 +1333,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -1008,7 +1352,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelDataWithSpecGraph();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -1028,7 +1372,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     await screen.findAllByText('Direction Stack layers cascade L1 → L5.');
     await user.click(screen.getByRole('tab', { name: 'Split' }));
@@ -1044,7 +1388,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1081,7 +1425,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1101,7 +1445,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1141,7 +1485,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1170,7 +1514,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1184,7 +1528,7 @@ describe('MemoryPanel', () => {
     const user = userEvent.setup();
     mockPanelData();
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1224,7 +1568,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1260,7 +1604,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1287,7 +1631,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1326,7 +1670,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 
@@ -1361,7 +1705,7 @@ describe('MemoryPanel', () => {
       },
     });
 
-    renderWithProviders(<MemoryPanel />);
+    renderMemoryPanel();
 
     expect(await screen.findByText('Stale memory review')).toBeTruthy();
 

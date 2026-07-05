@@ -1,6 +1,6 @@
 {
-  "contractVersion": "2.1.0",
-  "generatedAt": "2026-07-04T23:44:23.938Z",
+  "contractVersion": "3.1.0",
+  "generatedAt": "2026-07-05T09:00:13.295Z",
   "routes": [
     {
       "method": "GET",
@@ -809,6 +809,380 @@
         }
       },
       "hash": "sha256:f32e5449aeec2b05e064254ca013d450294b2b17a0405c8c85c4de71149d82a1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-candidates",
+      "parameters": [
+        {
+          "name": "category",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "confidence",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "eventType",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "sourceSystem",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "status",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "description": "pending by default; use all or a comma-separated status list to include reviewed candidates",
+            "type": "string"
+          }
+        },
+        {
+          "name": "trustTier",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "agent_observation",
+              "working_note",
+              "engineering_decision",
+              "approved_policy",
+              "verified_fact"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:9df7b23d1f3585b8e4338d8cd7947908a245b10471d314f72ad87b0b43105c02"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-candidates",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confidence": {
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low"
+                    ],
+                    "type": "string"
+                  },
+                  "context": {
+                    "type": "string"
+                  },
+                  "contextEventId": {
+                    "type": "integer"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "relatedFiles": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rule": {
+                    "type": "string"
+                  },
+                  "suggestedCategory": {
+                    "enum": [
+                      "Architecture",
+                      "Convention",
+                      "Bug Fix",
+                      "Decision",
+                      "Pattern",
+                      "Gotcha"
+                    ],
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "trustTier": {
+                    "enum": [
+                      "agent_observation",
+                      "working_note",
+                      "engineering_decision",
+                      "approved_policy",
+                      "verified_fact"
+                    ],
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "suggestedCategory",
+                  "title",
+                  "rule"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:fbcbf193684997084d8612ae7b16bdad4b65e17ce014ae9b71fc70dee7f2f1b0"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-candidates/{id}",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:94d30ad8606aa55e7e769e16fb605588a07ee823c2d8b1026d920850ff6137cc"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-candidates/{id}/approve",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {},
+        "409": {}
+      },
+      "hash": "sha256:b770e85170ce7f322e2d2180b80f78c09c92d9ee26c813cd6916737e3467ce23"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-candidates/retrieval",
+      "parameters": [
+        {
+          "name": "includeUnsafe",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "description": "Opt in to include pending, rejected, low-confidence, or regulated-unapproved candidates.",
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "minConfidence",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": "medium",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:63bf93ea1ca780b2c71246588eb2c3f9b509991015ecd586901f53c3a28f9028"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-events",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "actor": {
+                    "type": "string"
+                  },
+                  "contentHash": {
+                    "type": "string"
+                  },
+                  "eventType": {
+                    "enum": [
+                      "manual_cli_note",
+                      "manual_note",
+                      "git_commit",
+                      "git_range",
+                      "daemon_scan",
+                      "pr_merge",
+                      "incident",
+                      "duckbrain_import",
+                      "duckbrain_memory",
+                      "hermes_event",
+                      "hermes_session"
+                    ],
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "type": "object"
+                  },
+                  "occurredAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "payload": {
+                    "type": "object"
+                  },
+                  "provenance": {
+                    "type": "object"
+                  },
+                  "relatedFiles": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "sourceRef": {
+                    "type": "string"
+                  },
+                  "sourceSystem": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "trustTier": {
+                    "enum": [
+                      "agent_observation",
+                      "working_note",
+                      "engineering_decision",
+                      "approved_policy",
+                      "verified_fact"
+                    ],
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "eventType",
+                  "sourceSystem",
+                  "sourceRef"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:f494521cac421fae33f5ad571d333754b5250ce64ad8d10f43064df80bc3461e"
     },
     {
       "method": "POST",
@@ -2384,6 +2758,113 @@
       "hash": "sha256:e4569960c6f8e24d96030581c4327dabcb8568f934383f011f398bd49a98f896"
     },
     {
+      "method": "POST",
+      "path": "/api/memory/candidates",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confidence": {
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low"
+                    ],
+                    "type": "string"
+                  },
+                  "context": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "relatedFiles": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rule": {
+                    "type": "string"
+                  },
+                  "sourceRef": {
+                    "type": "string"
+                  },
+                  "suggestedCategory": {
+                    "enum": [
+                      "Architecture",
+                      "Convention",
+                      "Bug Fix",
+                      "Decision",
+                      "Pattern",
+                      "Gotcha"
+                    ],
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "trustTier": {
+                    "enum": [
+                      "agent_observation",
+                      "working_note",
+                      "engineering_decision",
+                      "approved_policy",
+                      "verified_fact"
+                    ],
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "suggestedCategory",
+                  "title",
+                  "rule"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:13e4c8b1cc3fac35fb08b998cd911cc16dcecc43769b44b01442623e60ecb304"
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/candidates/{id}/approve",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {},
+        "409": {}
+      },
+      "hash": "sha256:763e8f3806888cc5c0831128242941e801422b3b70cb4cf77ab93a9c4d5b1950"
+    },
+    {
       "method": "GET",
       "path": "/api/memory/categories",
       "parameters": [],
@@ -3009,7 +3490,8 @@
                     "description": "Normalized run terminal renderer mode. Missing/null historical values resolve to ansi-html.",
                     "enum": [
                       "ansi-html",
-                      "pty"
+                      "pty",
+                      "native-pty"
                     ],
                     "type": "string"
                   },
@@ -3026,7 +3508,7 @@
         },
         "404": {}
       },
-      "hash": "sha256:1d9fd9ce8c77d46480d9d99e428081fadc9728d30081b11cb3d8840cdb1a42fc"
+      "hash": "sha256:30043f8edd511560ee7725204fe083b92c03e29d0f3395c13f6e025e3550dc5e"
     },
     {
       "method": "POST",
@@ -3627,10 +4109,11 @@
                   },
                   "terminal_mode": {
                     "default": "ansi-html",
-                    "description": "Run-level terminal renderer mode. null/missing resolves to ansi-html for backward compatibility.",
+                    "description": "Run-level terminal renderer mode. native-pty runs the real interactive CLI in xterm with marker-based completion. null/missing resolves to ansi-html for backward compatibility.",
                     "enum": [
                       "ansi-html",
-                      "pty"
+                      "pty",
+                      "native-pty"
                     ],
                     "nullable": true,
                     "type": "string"
@@ -3707,7 +4190,207 @@
         "400": {},
         "404": {}
       },
-      "hash": "sha256:178cd4ad91547c537e30d239c5ee69325e92db6cf0543f100a33b3940c81d0ef"
+      "hash": "sha256:bd48a5ff3dcd07743ba1b2aec432d807e3fc4fd4a361b71eab434f230d642a24"
+    },
+    {
+      "method": "GET",
+      "path": "/api/pipeline/worker/health",
+      "parameters": [],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "activeChildProcesses": {
+                    "description": "Number of active execution-engine child processes (from latest heartbeat)",
+                    "type": "integer"
+                  },
+                  "activeJobs": {
+                    "items": {
+                      "properties": {
+                        "elapsedMs": {
+                          "type": "integer"
+                        },
+                        "runId": {
+                          "type": "integer"
+                        },
+                        "specId": {
+                          "type": "string"
+                        },
+                        "startedAt": {
+                          "format": "date-time",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "dlqDepth": {
+                    "type": "integer"
+                  },
+                  "lastReconciliationErrors": {
+                    "description": "Number of state mismatches fixed in last reconcile cycle (last 90s)",
+                    "type": "integer"
+                  },
+                  "pgBossVersion": {
+                    "type": "string"
+                  },
+                  "queueDepth": {
+                    "type": "integer"
+                  },
+                  "queueHealth": {
+                    "description": "Health classification based on queue stats",
+                    "enum": [
+                      "healthy",
+                      "degraded",
+                      "critical"
+                    ],
+                    "type": "string"
+                  },
+                  "queueMaxConcurrent": {
+                    "description": "Max concurrent queued (non-worktree) pipeline:run jobs",
+                    "type": "integer"
+                  },
+                  "queueStats": {
+                    "properties": {
+                      "active": {
+                        "description": "Number of jobs currently being processed",
+                        "type": "integer"
+                      },
+                      "archiveSize": {
+                        "description": "Total number of archived jobs",
+                        "type": "integer"
+                      },
+                      "completed24h": {
+                        "description": "Number of jobs completed in the last 24 hours",
+                        "type": "integer"
+                      },
+                      "failed": {
+                        "description": "Number of jobs in failed state (not yet archived)",
+                        "type": "integer"
+                      },
+                      "failedInLast24h": {
+                        "description": "Number of jobs failed in the last 24 hours",
+                        "type": "integer"
+                      },
+                      "failedInLast7d": {
+                        "description": "Number of jobs failed in the last 7 days",
+                        "type": "integer"
+                      },
+                      "oldestPendingAgeSeconds": {
+                        "description": "Age in seconds of the oldest pending job (null if no pending jobs)",
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "pending": {
+                        "description": "Number of jobs waiting to be picked up",
+                        "type": "integer"
+                      },
+                      "pickupLatency": {
+                        "description": "Job pickup latency metrics over a 24-hour rolling window (pipeline:run + pipeline:retry only)",
+                        "nullable": true,
+                        "properties": {
+                          "avgSeconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "maxSeconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "p50Seconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "p95Seconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "sampleCount": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "enum": [
+                              "healthy",
+                              "degraded",
+                              "critical"
+                            ],
+                            "type": "string"
+                          },
+                          "windowHours": {
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "queues": {
+                        "items": {
+                          "properties": {
+                            "active": {
+                              "type": "integer"
+                            },
+                            "failed": {
+                              "type": "integer"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "pending": {
+                              "type": "integer"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "runNowMaxConcurrent": {
+                    "description": "Max concurrent immediate worktree-isolated runs",
+                    "type": "integer"
+                  },
+                  "scheduledJobs": {
+                    "items": {
+                      "properties": {
+                        "cronExpr": {
+                          "type": "string"
+                        },
+                        "nextFireAt": {
+                          "format": "date-time",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "scheduleId": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "workerActive": {
+                    "type": "boolean"
+                  },
+                  "workerPid": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "workerStartedAt": {
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:f295ae7b4c1388e4533b9b6cddd516951b92cf987e36b62c8c2c2e510a19607c"
     },
     {
       "method": "GET",
@@ -7388,6 +8071,97 @@
         }
       },
       "hash": "sha256:580155644cbfddc9b3efa50861d1c011a29c2930c73dabbf45fdb8265de30f95"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workspaces",
+      "parameters": [
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 50,
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cursor": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "hasMore": {
+                    "example": false,
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "items": {
+                      "$ref": "#/components/schemas/Workspace"
+                    },
+                    "type": "array"
+                  },
+                  "total": {
+                    "example": 3,
+                    "type": "integer"
+                  },
+                  "workspaces": {
+                    "items": {
+                      "$ref": "#/components/schemas/Workspace"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "500": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:17b8dea2ff89bb1d8c7acb63659fe62b73747dbc118c3047bf30ce80e029ef69"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workspaces/{workspaceId}/capture/last-rorca-run",
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {},
+        "422": {}
+      },
+      "hash": "sha256:5a8bd7d5e1ea819b1c6ff9ed656465427dead6c6a5d2e98a5505d61c201b7b41"
     },
     {
       "method": "GET",

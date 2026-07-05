@@ -1,16 +1,14 @@
 // ─── Context Intelligence Platform — Trust Tiers ──────────────────────────────
 //
-// Trust/authority is one of the ranker's signals (US-016) and is stamped on every
-// bundle item and retrieval candidate as provenance. The tiers are ordered from
-// most to least authoritative; `TRUST_TIER_WEIGHT` gives the ranker a normalized
-// authority weight in [0, 1].
+// Trust/authority is one of the ranker's signals and is stamped on bundle items,
+// retrieval candidates, and captured context/memory-candidate provenance.
 
 import { z } from 'zod';
 
 /**
- * Ordered trust tiers (most → least authoritative):
+ * Ordered retrieval trust tiers (most → least authoritative):
  * - `authoritative` — human-curated durable truth (directions, curated memory).
- * - `reviewed`      — captured knowledge a human approved and promoted (US-035).
+ * - `reviewed`      — captured knowledge a human approved and promoted.
  * - `derived`       — facts derived from code structure (Hilo graph, git).
  * - `captured`      — sidecar-captured, not yet reviewed (pending candidate).
  * - `unverified`    — lowest authority; provenance unknown or unconfirmed.
@@ -32,3 +30,22 @@ export const TRUST_TIER_WEIGHT: Record<TrustTier, number> = {
 export function trustTierRank(tier: TrustTier): number {
   return TRUST_TIERS.indexOf(tier);
 }
+
+/** Canonical context-capture trust tiers shared by sidecar, backend contracts, and UI filters. */
+export const CONTEXT_TRUST_TIERS = [
+  'agent_observation',
+  'working_note',
+  'engineering_decision',
+  'approved_policy',
+  'verified_fact',
+] as const;
+
+export type ContextTrustTier = typeof CONTEXT_TRUST_TIERS[number];
+
+export const CONTEXT_TRUST_TIER_LABELS: Record<ContextTrustTier, string> = {
+  agent_observation: 'Agent observation',
+  working_note: 'Working note',
+  engineering_decision: 'Engineering decision',
+  approved_policy: 'Approved policy',
+  verified_fact: 'Verified fact',
+};

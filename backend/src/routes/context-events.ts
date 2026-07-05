@@ -5,399 +5,321 @@
  * See LICENSE file in the project root for full license text.
  */
 
-/**
- * US-026: Context Intelligence Platform ingestion routes.
- *
- * These are the API endpoints the capture sidecar (`rorca-capture`) talks to
- * over HTTP. They accept context events and memory candidates that have already
- * been redacted by the sidecar (US-005), validate them against the shared
- * contracts (US-002), and persist them to the Rorca DB (US-004).
- *
- * Every endpoint is idempotency-keyed so the sidecar's offline JSONL queue
- * (also US-026) can be safely replayed without double-ingestion.
- *
- * Design doc: docs/context-intelligence-platform.md §2.4 (Capture Sidecar),
- * §3 (Source-of-Truth Boundaries), §6 (Shared Contracts).
- */
-
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { validateBody } from '../lib/validate';
-import { handleRouteError } from '../lib/async-handler';
-import { NotFoundError, UnprocessableError } from '../lib/errors';
-import { queryOne } from '../db';
-import { contextEventSchema, type ContextEvent, memoryCandidateSchema } from '../lib/capture-contracts';
+import { queryOne } from '../db/index';
+import { NotFoundError, ValidationError } from '../lib/errors';
+import { broadcastAll } from '../lib/sse-hub';
+import {
+  CONTEXT_SAFETY_CONTRACT_VERSION,
+  loadContextCaptureIgnoreFile,
+  redactContextPayload,
+  redactContextText,
+  safeNormalizeWorkspaceRelativePath,
+  shouldCapturePath,
+  type ContextIgnoreSettings,
+} from '../lib/context-safety';
+import {
+  CONTEXT_EVENT_TYPES,
+  CONTEXT_TRUST_TIERS,
+  buildContextEventIdempotencyKey,
+  normalizeJsonObject,
+  normalizeRelatedFiles,
+  parseOptionalDate,
+  type ContextEventType,
+  type ContextTrustTier,
+  type JsonObject,
+} from '../lib/context-capture';
 
 const router = Router();
 
-// ════════════════════════════════════════════════════════════════════════════
-// Validation schemas for the flush (batch) endpoint
-// ════════════════════════════════════════════════════════════════════════════
-
-const reviewStatusInput = z.enum(['pending', 'approved', 'rejected', 'duplicate', 'superseded', 'revisit']);
-const trustTierInput = z.enum(['authoritative', 'trusted', 'community', 'unverified']);
-const confidenceInput = z.union([z.number().min(0).max(1), z.enum(['low', 'medium', 'high'])]).optional();
-
-const ingestionMemoryCandidateSchema = memoryCandidateSchema
-  .omit({ status: true, trust: true, confidence: true, createdAt: true })
-  .extend({
-    // Ingestion always stores candidates as pending, but accepting an omitted
-    // status keeps older sidecars/tests compatible while still validating at
-    // the route boundary.
-    status: reviewStatusInput.optional().default('pending'),
-    trust: trustTierInput.optional().default('unverified'),
-    confidence: confidenceInput,
-    createdAt: z.string().optional().default(() => new Date().toISOString()),
-  });
-
-type IngestibleMemoryCandidate = z.infer<typeof ingestionMemoryCandidateSchema>;
-
-const flushEventEntry = z.object({
-  type: z.literal('event'),
-  payload: contextEventSchema,
+const ContextEventBodySchema = z.object({
+  workspaceId: z.string().trim().min(1),
+  eventType: z.enum(CONTEXT_EVENT_TYPES),
+  sourceSystem: z.string().trim().min(1),
+  sourceRef: z.string().trim().min(1),
+  actor: z.string().trim().min(1).optional(),
+  occurredAt: z.string().trim().min(1).optional(),
+  summary: z.string().default(''),
+  payload: z.unknown().optional(),
+  provenance: z.unknown().optional(),
+  relatedFiles: z.unknown().optional(),
+  metadata: z.unknown().optional(),
+  trustTier: z.enum(CONTEXT_TRUST_TIERS).default('agent_observation'),
+  idempotencyKey: z.string().trim().min(1).max(512).optional(),
+  contentHash: z.string().trim().min(1).max(128).optional(),
 });
 
-const flushCandidateEntry = z.object({
-  type: z.literal('candidate'),
-  payload: ingestionMemoryCandidateSchema,
-});
+type ContextEventBody = z.infer<typeof ContextEventBodySchema>;
 
-const flushEntry = z.discriminatedUnion('type', [flushEventEntry, flushCandidateEntry]);
-
-const flushBody = z.object({
-  entries: z.array(flushEntry).min(1).max(100),
-});
-
-// ════════════════════════════════════════════════════════════════════════════
-// Helpers
-// ════════════════════════════════════════════════════════════════════════════
-
-function schemaVersionNumber(version: string | undefined): number {
-  return version ? Number(version.replace(/^v/i, '')) : 1;
+export interface ContextEventResponse {
+  id: string;
+  workspaceId: string;
+  eventType: ContextEventType;
+  sourceSystem: string;
+  sourceRef: string;
+  actor: string | null;
+  occurredAt: string;
+  summary: string;
+  payload: JsonObject;
+  provenance: JsonObject;
+  relatedFiles: string[];
+  metadata: JsonObject;
+  trustTier: ContextTrustTier;
+  idempotencyKey: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
-function toNumericId(id: number | string): number {
-  const parsed = typeof id === 'number' ? id : Number(id);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new UnprocessableError('Persisted id is outside the safe JSON number range');
+const CONTEXT_EVENT_SELECT = `
+  SELECT id::text AS id,
+         workspace_id AS "workspaceId",
+         event_type AS "eventType",
+         source_system AS "sourceSystem",
+         source_ref AS "sourceRef",
+         actor,
+         occurred_at AS "occurredAt",
+         summary,
+         payload,
+         provenance,
+         related_files AS "relatedFiles",
+         metadata,
+         trust_tier AS "trustTier",
+         idempotency_key AS "idempotencyKey",
+         created_at AS "createdAt",
+         updated_at AS "updatedAt"
+    FROM context_events`;
+
+function parseBody(req: Request): ContextEventBody {
+  const result = ContextEventBodySchema.safeParse(req.body);
+  if (!result.success) {
+    throw new ValidationError('Invalid context event payload', { issues: result.error.issues });
   }
-  return parsed;
+  return result.data;
 }
 
-function confidenceLabel(score: IngestibleMemoryCandidate['confidence']): 'low' | 'medium' | 'high' {
-  if (score === undefined) return 'medium';
-  if (typeof score === 'string') return score;
-  if (score >= 0.75) return 'high';
-  if (score >= 0.4) return 'medium';
-  return 'low';
+async function assertWorkspace(workspaceId: string): Promise<{ id: string; path: string }> {
+  const workspace = await queryOne<{ id: string; path: string }>('SELECT id, path FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace) {
+    throw new NotFoundError('Workspace', workspaceId);
+  }
+  return workspace;
 }
 
-/**
- * Upsert a context event with idempotency-gated INSERT … ON CONFLICT.
- * Returns the row (existing or newly inserted).
- */
-async function upsertContextEvent(event: ContextEvent): Promise<{ id: number; created: boolean }> {
-  // Verify workspace exists.
-  const ws = await queryOne<{ id: string }>(
-    'SELECT id FROM workspaces WHERE id = $1',
-    [event.workspaceId],
-  );
-  if (!ws) {
-    throw new NotFoundError(`Workspace '${event.workspaceId}' not found`);
-  }
-
-  const result = await queryOne<{ id: number | string; created: boolean }>(
-    `WITH inserted AS (
-       INSERT INTO context_events
-         (workspace_id, source_system, source_ref, event_type, actor,
-          occurred_at, summary, payload, idempotency_key, schema_version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
-       RETURNING id
-     )
-     SELECT id, TRUE AS created FROM inserted
-     UNION ALL
-     SELECT id, FALSE AS created
-       FROM context_events
-      WHERE workspace_id = $1
-        AND idempotency_key = $9
-        AND NOT EXISTS (SELECT 1 FROM inserted)
-     LIMIT 1`,
-    [
-      event.workspaceId,
-      event.source,
-      event.gitSha ?? null,
-      event.kind,
-      null, // actor — extracted from payload/auth in a later story
-      event.occurredAt,
-      null, // summary — derived downstream
-      JSON.stringify(event.payload),
-      event.idempotencyKey,
-      schemaVersionNumber(event.schemaVersion),
-    ],
-  );
-
-  if (!result) {
-    throw new UnprocessableError('Failed to upsert context event');
-  }
-
-  return { id: toNumericId(result.id), created: result.created };
+function workspaceIgnoreSettings(workspacePath: string): ContextIgnoreSettings {
+  const captureIgnore = loadContextCaptureIgnoreFile(workspacePath);
+  return captureIgnore ? { paths: captureIgnore.patterns } : {};
 }
 
-/**
- * Upsert a memory candidate with idempotency-gated INSERT … ON CONFLICT.
- * Returns the row (existing or newly inserted).
- */
-async function upsertMemoryCandidate(
-  candidate: IngestibleMemoryCandidate,
-): Promise<{ id: number; created: boolean }> {
-  const ws = await queryOne<{ id: string }>(
-    'SELECT id FROM workspaces WHERE id = $1',
-    [candidate.workspaceId],
-  );
-  if (!ws) {
-    throw new NotFoundError(`Workspace '${candidate.workspaceId}' not found`);
-  }
-
-  const relatedFiles = candidate.relatedFiles ?? [];
-  const result = await queryOne<{ id: number | string; created: boolean }>(
-    `WITH inserted AS (
-       INSERT INTO memory_candidates
-         (workspace_id, source_system, source_ref, category, title, rule, context,
-          related_files, confidence, trust_tier, review_status,
-          idempotency_key, schema_version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
-       ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
-       RETURNING id
-     )
-     SELECT id, TRUE AS created FROM inserted
-     UNION ALL
-     SELECT id, FALSE AS created
-       FROM memory_candidates
-      WHERE workspace_id = $1
-        AND idempotency_key = $11
-        AND NOT EXISTS (SELECT 1 FROM inserted)
-     LIMIT 1`,
-    [
-      candidate.workspaceId,
-      candidate.sourceEventKey ? 'rorca-capture' : 'manual',
-      candidate.sourceEventKey ?? null,
-      candidate.category ?? 'Uncategorised',
-      candidate.title,
-      candidate.body,
-      null, // context — optional review rationale can be added by governance actions later
-      JSON.stringify(relatedFiles),
-      confidenceLabel(candidate.confidence),
-      candidate.trust ?? 'unverified',
-      candidate.idempotencyKey,
-      schemaVersionNumber(candidate.schemaVersion),
-    ],
-  );
-
-  if (!result) {
-    throw new UnprocessableError('Failed to upsert memory candidate');
-  }
-
-  return { id: toNumericId(result.id), created: result.created };
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// Routes
-// ════════════════════════════════════════════════════════════════════════════
-
-/**
- * @swagger
- * /api/context-events/health:
- *   get:
- *     summary: Capture sidecar health check
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only reachability check — safe for CLI/MCP automation, no write or data exposure."
- *     x-rorca-public-api: true
- *     responses:
- *       200:
- *         description: Service is reachable and DB is connected
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 status:
- *                   type: string
- *                   example: ok
- *                 db:
- *                   type: string
- *                   example: connected
- */
-router.get('/health', async (_req: Request, res: Response) => {
-  try {
-    const row = await queryOne<{ one: number }>('SELECT 1 AS one');
-    res.json({ status: 'ok', db: row ? 'connected' : 'degraded' });
-  } catch (err) {
-    handleRouteError(res, err, 'GET /health');
-  }
-});
-
-const submitEventBodySchema = z.object({
-  event: contextEventSchema,
-});
-
-/**
- * @swagger
- * /api/context-events/events:
- *   post:
- *     summary: Submit a context event (idempotent)
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Sidecar-facing ingestion endpoint — idempotency-gated, no operator-only side effects, safe for local/MCP automation."
- *     x-rorca-public-api: true
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               event:
- *                 $ref: '#/components/schemas/ContextEvent'
- *     responses:
- *       200:
- *         description: Event accepted (or already exists — idempotent)
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 id:
- *                   type: number
- *                 created:
- *                   type: boolean
- *                   description: Whether this was a new insert (false = idempotent deduplication)
- *       404:
- *         description: Workspace not found
- */
-router.post('/events', validateBody(submitEventBodySchema), async (req: Request, res: Response) => {
-  try {
-    const { event } = req.body as { event: ContextEvent };
-    const result = await upsertContextEvent(event);
-    res.json(result);
-  } catch (err) {
-    handleRouteError(res, err, 'POST /events');
-  }
-});
-
-const submitCandidateBodySchema = z.object({
-  candidate: ingestionMemoryCandidateSchema,
-});
-
-/**
- * @swagger
- * /api/context-events/candidates:
- *   post:
- *     summary: Submit a memory candidate (idempotent)
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Sidecar-facing candidate ingestion — idempotency-gated review entry point, safe for local/MCP automation."
- *     x-rorca-public-api: true
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               candidate:
- *                 $ref: '#/components/schemas/MemoryCandidate'
- *     responses:
- *       200:
- *         description: Candidate accepted (or already exists — idempotent)
- *       404:
- *         description: Workspace not found
- */
-router.post('/candidates', validateBody(submitCandidateBodySchema), async (req: Request, res: Response) => {
-  try {
-    const { candidate } = req.body as { candidate: IngestibleMemoryCandidate };
-    const result = await upsertMemoryCandidate(candidate);
-    res.json(result);
-  } catch (err) {
-    handleRouteError(res, err, 'POST /candidates');
-  }
-});
-
-/**
- * @swagger
- * /api/context-events/flush:
- *   post:
- *     summary: Batch flush queued events and candidates (idempotent)
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Sidecar offline-queue flush — idempotent batch ingestion, no operator-only side effects, safe for local/MCP automation."
- *     x-rorca-public-api: true
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               entries:
- *                 type: array
- *                 items:
- *                   oneOf:
- *                     - type: object
- *                       properties:
- *                         type: { enum: ["event"] }
- *                         payload: { $ref: '#/components/schemas/ContextEvent' }
- *                     - type: object
- *                       properties:
- *                         type: { enum: ["candidate"] }
- *                         payload: { $ref: '#/components/schemas/MemoryCandidate' }
- *     responses:
- *       200:
- *         description: Flush result (per-entry success/failure)
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 succeeded:
- *                   type: number
- *                 failed:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       index: { type: number }
- *                       idempotencyKey: { type: string }
- *                       error: { type: string }
- */
-router.post('/flush', validateBody(flushBody), async (req: Request, res: Response) => {
-  try {
-    const { entries } = req.body as z.infer<typeof flushBody>;
-    const succeeded: number[] = [];
-    const failed: Array<{ index: number; idempotencyKey: string; error: string }> = [];
-
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      try {
-        if (entry.type === 'event') {
-          const result = await upsertContextEvent(entry.payload as ContextEvent);
-          succeeded.push(result.id);
-        } else {
-          const result = await upsertMemoryCandidate(entry.payload);
-          succeeded.push(result.id);
-        }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Unknown error';
-        const payload = entry.payload as any;
-        failed.push({
-          index: i,
-          idempotencyKey: payload?.idempotencyKey ?? 'unknown',
-          error: message,
-        });
-      }
+function normalizeCaptureRelatedFiles(value: unknown, workspacePath: string): string[] {
+  const ignore = workspaceIgnoreSettings(workspacePath);
+  return normalizeRelatedFiles(value).map((filePath) => {
+    let normalized: string;
+    try {
+      normalized = safeNormalizeWorkspaceRelativePath(workspacePath, filePath);
+    } catch (error) {
+      throw new ValidationError(error instanceof Error ? error.message : `Invalid related file: ${filePath}`);
     }
+    if (!shouldCapturePath(normalized, ignore)) {
+      throw new ValidationError(`Related file is ignored by capture safety rules: ${normalized}`);
+    }
+    return normalized;
+  });
+}
 
-    res.json({ succeeded: succeeded.length, failed });
-  } catch (err) {
-    handleRouteError(res, err, 'POST /flush');
+function redactJsonObject(value: unknown, fieldName: string, workspacePath: string): JsonObject {
+  return normalizeJsonObject(
+    redactContextPayload(value, {}, { repoPath: workspacePath }),
+    fieldName,
+  );
+}
+
+async function emitContextEventCreated(event: ContextEventResponse, duplicate: boolean): Promise<void> {
+  try {
+    const walEventType = event.eventType === 'git_commit' ? 'git_commit' : 'context_event_ingested';
+    const payload = JSON.stringify({
+      contextEventId: event.id,
+      eventType: event.eventType,
+      sourceSystem: event.sourceSystem,
+      sourceRef: event.sourceRef,
+      trustTier: event.trustTier,
+      duplicate,
+      relatedFiles: event.relatedFiles,
+      metadata: event.metadata,
+    });
+    const walEvent = await queryOne<{ id: number }>(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
+       VALUES ($1, $2, $3, $4::jsonb)
+       RETURNING id`,
+      [walEventType, event.workspaceId, event.actor ?? 'context-capture', payload],
+    );
+    if (walEvent) {
+      broadcastAll({
+        id: walEvent.id,
+        event_type: walEventType,
+        workspace_id: event.workspaceId,
+        spec_id: null,
+        story_id: null,
+        actor: event.actor ?? 'context-capture',
+        payload,
+        ts: new Date().toISOString(),
+      } as any);
+    }
+  } catch {
+    // Best-effort audit event. The durable context_event row is authoritative.
   }
+}
+
+async function findByIdempotencyKey(idempotencyKey: string): Promise<ContextEventResponse | undefined> {
+  return queryOne<ContextEventResponse>(
+    `${CONTEXT_EVENT_SELECT}
+      WHERE idempotency_key = $1`,
+    [idempotencyKey],
+  );
+}
+
+/**
+ * @swagger
+ * /api/context-events:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Ingest a durable context capture event
+ *     operationId: createContextEvent
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Sidecar event ingestion is a stable local automation surface; writes only caller-submitted observations and has no operator-only side effects."
+ *     x-rorca-public-api: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, eventType, sourceSystem, sourceRef]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               eventType: { type: string, enum: [manual_cli_note, manual_note, git_commit, git_range, daemon_scan, pr_merge, incident, duckbrain_import, duckbrain_memory, hermes_event, hermes_session] }
+ *               sourceSystem: { type: string }
+ *               sourceRef: { type: string }
+ *               actor: { type: string }
+ *               occurredAt: { type: string, format: date-time }
+ *               summary: { type: string }
+ *               payload: { type: object }
+ *               provenance: { type: object }
+ *               relatedFiles: { type: array, items: { type: string } }
+ *               metadata: { type: object }
+ *               trustTier: { type: string, enum: [agent_observation, working_note, engineering_decision, approved_policy, verified_fact] }
+ *               idempotencyKey: { type: string }
+ *               contentHash: { type: string }
+ *     responses:
+ *       201: { description: Created context event }
+ *       200: { description: Existing context event returned for an idempotent duplicate submission }
+ *       400: { description: Invalid payload }
+ *       404: { description: Workspace not found }
+ */
+router.post('/', async (req: Request, res: Response) => {
+  const body = parseBody(req);
+  const workspace = await assertWorkspace(body.workspaceId);
+  const payload = redactJsonObject(body.payload, 'payload', workspace.path);
+  const provenance = redactJsonObject(body.provenance, 'provenance', workspace.path);
+  const relatedFiles = normalizeCaptureRelatedFiles(body.relatedFiles, workspace.path);
+  const metadata = redactJsonObject(body.metadata, 'metadata', workspace.path);
+  const occurredAt = parseOptionalDate(body.occurredAt, 'occurredAt') ?? new Date().toISOString();
+  const summary = redactContextText(body.summary, {});
+  const sourceSystem = redactContextText(body.sourceSystem, {});
+  const sourceRef = redactContextText(body.sourceRef, {});
+  const actor = body.actor ? redactContextText(body.actor, {}) : null;
+
+  const derived = buildContextEventIdempotencyKey({
+    workspaceId: body.workspaceId,
+    sourceSystem,
+    contentHash: body.contentHash,
+    eventType: body.eventType,
+    sourceRef,
+    summary,
+    payload,
+    relatedFiles,
+  });
+  const idempotencyKey = body.idempotencyKey ? redactContextText(body.idempotencyKey, {}) : derived.idempotencyKey;
+  const enrichedMetadata = {
+    ...metadata,
+    contentHash: derived.contentHash,
+    safety: {
+      ...(typeof metadata.safety === 'object' && metadata.safety !== null ? metadata.safety : {}),
+      contractVersion: CONTEXT_SAFETY_CONTRACT_VERSION,
+      redactionApplied: true,
+      pathFiltering: 'context-safety',
+    },
+  };
+
+  const existing = await findByIdempotencyKey(idempotencyKey);
+  if (existing) {
+    await emitContextEventCreated(existing, true);
+    res.status(200).json({ event: existing, created: false, idempotent: true });
+    return;
+  }
+
+  const inserted = await queryOne<ContextEventResponse>(
+    `INSERT INTO context_events (
+       workspace_id,
+       event_type,
+       source_system,
+       source_ref,
+       actor,
+       occurred_at,
+       summary,
+       payload,
+       provenance,
+       related_files,
+       metadata,
+       trust_tier,
+       idempotency_key
+     ) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13)
+     ON CONFLICT (idempotency_key) DO NOTHING
+     RETURNING id::text AS id,
+               workspace_id AS "workspaceId",
+               event_type AS "eventType",
+               source_system AS "sourceSystem",
+               source_ref AS "sourceRef",
+               actor,
+               occurred_at AS "occurredAt",
+               summary,
+               payload,
+               provenance,
+               related_files AS "relatedFiles",
+               metadata,
+               trust_tier AS "trustTier",
+               idempotency_key AS "idempotencyKey",
+               created_at AS "createdAt",
+               updated_at AS "updatedAt"`,
+    [
+      body.workspaceId,
+      body.eventType,
+      sourceSystem,
+      sourceRef,
+      actor,
+      occurredAt,
+      summary,
+      JSON.stringify(payload),
+      JSON.stringify(provenance),
+      JSON.stringify(relatedFiles),
+      JSON.stringify(enrichedMetadata),
+      body.trustTier,
+      idempotencyKey,
+    ],
+  );
+
+  if (!inserted) {
+    const concurrentExisting = await findByIdempotencyKey(idempotencyKey);
+    if (concurrentExisting) {
+      await emitContextEventCreated(concurrentExisting, true);
+      res.status(200).json({ event: concurrentExisting, created: false, idempotent: true });
+      return;
+    }
+    throw new ValidationError('Failed to create context event');
+  }
+
+  await emitContextEventCreated(inserted, false);
+  res.status(201).json({ event: inserted, created: true, idempotent: false });
 });
 
 export default router;

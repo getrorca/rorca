@@ -3,7 +3,7 @@
 import { readFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { homedir } from 'os';
 import { createRequire } from 'module';
 
@@ -15,6 +15,11 @@ const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8'));
 
 // ─── --version / --help ───
 const args = process.argv.slice(2);
+const command = args[0];
+
+if (command === 'capture') {
+  runCaptureAlias(args.slice(1));
+}
 
 if (args.includes('--version') || args.includes('-v')) {
   console.log(pkg.version);
@@ -26,8 +31,9 @@ if (args.includes('--help') || args.includes('-h') || args.length === 0) {
 rorca v${pkg.version} — AI spec orchestration pipeline
 
 Usage:
-  rorca start [options]    Start the Rorca server
-  rorca --version          Print version
+  rorca start [options]      Start the Rorca server
+  rorca capture <command>    Thin alias for the standalone rorca-capture sidecar
+  rorca --version            Print version
 
 Options:
   --port <port>             Server port (default: 3030)
@@ -37,11 +43,10 @@ Examples:
   rorca start
   rorca start --port 4040
   rorca start --no-open
+  rorca capture status
 `);
   process.exit(0);
 }
-
-const command = args[0];
 
 if (command !== 'start') {
   console.error(`Unknown command: ${command}\nRun "rorca --help" for usage.`);
@@ -161,4 +166,30 @@ function openBrowser(url) {
   } catch {
     console.log(`Open ${url} in your browser.`);
   }
+}
+
+function runCaptureAlias(captureArgs) {
+  const distEntry = join(__dirname, 'packages', 'rorca-capture', 'dist', 'cli.js');
+  const sourceEntry = join(__dirname, 'packages', 'rorca-capture', 'src', 'cli.ts');
+  const result = existsSync(distEntry)
+    ? spawnSync(process.execPath, [distEntry, ...captureArgs], { stdio: 'inherit' })
+    : existsSync(sourceEntry)
+      ? spawnSync('npx', ['tsx', sourceEntry, ...captureArgs], {
+        cwd: __dirname,
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+      })
+      : null;
+
+  if (!result) {
+    console.error('rorca-capture entrypoint not found. Run `npm run build` first.');
+    process.exit(1);
+  }
+
+  if (result.error) {
+    console.error(result.error.message);
+    process.exit(1);
+  }
+
+  process.exit(result.status ?? 1);
 }

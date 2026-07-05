@@ -8111,6 +8111,9 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Worker process health check
  *     operationId: getWorkerHealth
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only worker liveness and queue status are needed by local operators and VM/server sidecar rollout checks without mutating pipeline state."
+ *     x-rorca-public-api: true
  *     description: >
  *       Returns the health status of the standalone pg-boss worker process by
  *       querying the worker_heartbeat table and pgboss.* tables directly.

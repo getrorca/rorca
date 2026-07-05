@@ -23,6 +23,22 @@ function resolveSwaggerDirname(): string {
 }
 
 const swaggerDirname = resolveSwaggerDirname();
+const swaggerApiGlobs = Array.from(new Set([
+  path.join(swaggerDirname, '../routes/*.ts'),
+  path.join(swaggerDirname, '../routes/*.js'),
+  path.join(swaggerDirname, './swagger.ts'),
+  path.join(swaggerDirname, './swagger.js'),
+  // tsx script path when invoked from repo root.
+  path.join(process.cwd(), 'backend/src/routes/*.ts'),
+  path.join(process.cwd(), 'backend/src/routes/*.js'),
+  path.join(process.cwd(), 'backend/src/lib/swagger.ts'),
+  path.join(process.cwd(), 'backend/src/lib/swagger.js'),
+  // tsx server path when invoked from backend/.
+  path.join(process.cwd(), 'src/routes/*.ts'),
+  path.join(process.cwd(), 'src/routes/*.js'),
+  path.join(process.cwd(), 'src/lib/swagger.ts'),
+  path.join(process.cwd(), 'src/lib/swagger.js'),
+]));
 
 const options: swaggerJsdoc.Options = {
   definition: {
@@ -244,12 +260,7 @@ const options: swaggerJsdoc.Options = {
       { name: 'Packs', description: 'Convention pack installation and management' },
     ],
   },
-  apis: [
-    path.join(swaggerDirname, '../routes/*.ts'),
-    path.join(swaggerDirname, '../routes/*.js'),
-    path.join(swaggerDirname, './swagger.ts'),
-    path.join(swaggerDirname, './swagger.js'),
-  ],
+  apis: swaggerApiGlobs,
 };
 
 /**
@@ -258,6 +269,9 @@ const options: swaggerJsdoc.Options = {
  *   get:
  *     tags: [Health]
  *     summary: Health check
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Unauthenticated read-only process health is required for local CLI, sidecar queue flushing, and CI readiness checks."
+ *     x-rorca-public-api: true
  *     security: []
  *     responses:
  *       200:
