@@ -84,7 +84,7 @@ function captureIO() {
 
 describe("rorca-capture CLI", () => {
   it("exposes MVP commands in help", async () => {
-    for (const command of ["remember", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]) {
+    for (const command of ["remember", "import-duckbrain", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]) {
       expect(HELP_TEXT).toContain(command);
     }
     expect(HELP_TEXT).toContain("rorca capture <command>");
@@ -120,7 +120,7 @@ describe("rorca-capture CLI", () => {
     expect(output.stdout).toContain("Queue path:");
     expect(output.stdout).toContain("Capture ignore:");
     expect(output.stdout).toContain("API-only: yes");
-    expect(output.stdout).toContain("Commands: remember, ingest-pr, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
+    expect(output.stdout).toContain("Commands: remember, import-duckbrain, ingest-pr, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
   });
 
   it("runs daemon scan/status/stop through the CLI with configurable bounds", async () => {
@@ -216,7 +216,7 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(output.stdout) as { ok: boolean; workspaceId: string; apiOnly: boolean; commands: string[] };
     expect(parsed).toMatchObject({ ok: true, workspaceId: "ws-2", apiOnly: true });
-    expect(parsed.commands).toEqual(["remember", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]);
+    expect(parsed.commands).toEqual(["remember", "import-duckbrain", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]);
   });
 
   it("formats status text without invoking the API", () => {
@@ -855,6 +855,85 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(1);
     expect(output.stderr).toContain("Regulated-domain");
     expect(posted).toBe(false);
+  });
+
+  it("dry-runs import-duckbrain JSONL without API writes or auth", async () => {
+    const repo = tempRepo();
+    const inputPath = path.join(repo, "duckbrain.jsonl");
+    writeFileSync(inputPath, JSON.stringify({
+      namespace: "cli",
+      key: "memory-1",
+      content: "CLI DuckBrain memory",
+      created_at: "2026-01-02T03:04:05.000Z",
+      tags: ["cli", "duckbrain"],
+      metadata: { source: "test" },
+    }), "utf8");
+    const output = captureIO();
+    let called = false;
+
+    const code = await runCli(["import-duckbrain", inputPath, "--dry-run", "--json", "--workspace", "ws-duck"], {
+      cwd: repo,
+      gitRoot: repo,
+      env: {},
+      io: output.io,
+      fetchImpl: async () => {
+        called = true;
+        return new Response("{}", { status: 500 });
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(called).toBe(false);
+    expect(output.stderr).toBe("");
+    const parsed = JSON.parse(output.stdout) as { imported: number; skipped: number; dryRun: boolean; candidates: Array<{ namespace: string; key: string; entryHash: string; reviewStatus: string }> };
+    expect(parsed).toMatchObject({ dryRun: true, imported: 1, skipped: 0 });
+    expect(parsed.candidates[0]).toMatchObject({ namespace: "cli", key: "memory-1", reviewStatus: "pending" });
+    expect(parsed.candidates[0].entryHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("submits import-duckbrain candidates through the memory candidate API and reports duplicates", async () => {
+    const repo = tempRepo();
+    const inputPath = path.join(repo, "duckbrain-live.jsonl");
+    writeFileSync(inputPath, JSON.stringify({
+      namespace: "cli-live",
+      key: "memory-2",
+      content: "Live DuckBrain memory",
+      tags: ["live"],
+      metadata: { source: "test" },
+    }), "utf8");
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    let posted: any;
+
+    const code = await runCli(["import-duckbrain", "--path", inputPath, "--json", "--workspace", "ws-duck", "--api-url", "http://api.test"], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: workspaceFetch(repo, "ws-duck", (url, body) => {
+        expect(url).toBe("http://api.test/api/memory/candidates");
+        posted = body;
+        return new Response(JSON.stringify({ candidate: { id: "duck-1", reviewStatus: "pending" }, created: false, idempotent: true }), { status: 200 });
+      }),
+    });
+
+    expect(code).toBe(0);
+    expect(posted).toMatchObject({
+      workspaceId: "ws-duck",
+      eventType: "duckbrain_import",
+      sourceSystem: "duckbrain",
+      sourceRef: "duckbrain:cli-live:memory-2",
+      status: "pending",
+      reviewStatus: "pending",
+      trustTier: "working_note",
+      requiresReview: true,
+    });
+    expect(posted.provenance).toMatchObject({ namespace: "cli-live", key: "memory-2", originalTags: ["live"], pendingByDefault: true });
+    expect(posted.metadata).toMatchObject({ review: { status: "pending", pendingByDefault: true, autoApproved: false } });
+    const parsed = JSON.parse(output.stdout) as { imported: number; duplicate: number; candidates: Array<{ candidateId: string; status: string }> };
+    expect(parsed).toMatchObject({ imported: 0, duplicate: 1 });
+    expect(parsed.candidates[0]).toMatchObject({ candidateId: "duck-1", status: "duplicate" });
   });
 
   it("dry-runs ingest-commit without POST writes, queue entries, or API auth", async () => {

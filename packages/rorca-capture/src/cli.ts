@@ -53,6 +53,13 @@ import {
   isPrIngestDuplicateResponse,
   parsePrIngestInput,
 } from "./pr-ingest.js";
+import {
+  DUCKBRAIN_IMPORT_ENDPOINT,
+  DUCKBRAIN_IMPORT_EVENT_TYPE,
+  importDuckBrainJsonlFile,
+  isDuckBrainImportDuplicateResponse,
+  type DuckBrainImportSummary,
+} from "./duckbrain-import.js";
 
 export const HELP_TEXT = `rorca-capture — API-only context capture sidecar for Rorca
 
@@ -62,6 +69,7 @@ Usage:
 
 MVP commands:
   remember <text>        Create a pending manual memory candidate through POST /api/memory/candidates
+  import-duckbrain <path> Import selected DuckBrain JSONL memories as pending memory candidates
   ingest-pr              CI mode: submit a pending PR merge/release/hotfix memory candidate
   ingest-commit [hash]   Send one commit ingestion request through the Rorca API
   ingest-git             Request git context ingestion through the Rorca API
@@ -87,7 +95,7 @@ Global options:
   --force                For flush: retry entries even when nextRetryAt is in the future or retryable=false
   --strict               For install-hooks: fail the hook when Rorca capture cannot complete
   --uninstall            For install-hooks: remove the managed hook and restore any prior hook
-  --dry-run              For ingest/daemon commands: inspect git commits without API writes, queue changes, or cursor advancement
+  --dry-run              For import/ingest/daemon commands: inspect inputs without API writes, queue changes, or cursor advancement
   --ci                   Force CI mode; missing config is a hard error
   --json                 Emit JSON where supported
   -h, --help             Show this help
@@ -130,6 +138,13 @@ Remember options:
   --source <ref>         Explicit source ref for source-key idempotency
   --confidence <level>   high|medium|low
   --trust <tier>         agent_observation|working_note|engineering_decision|approved_policy|verified_fact
+
+DuckBrain import options:
+  --path <path>          JSONL file path (alternative to positional path)
+  --filter <query>       Import only matching records; supports namespace:, key:, tag:, content:, metadata:
+  --namespace <value>    Alias for --filter namespace:<value>
+  --key <value>          Alias for --filter key:<value>
+  --tag <value>          Alias for --filter tag:<value>
 
 API/auth contract:
   rorca-capture never opens a PostgreSQL connection and never reads DATABASE_URL.
@@ -253,6 +268,20 @@ type PrIngestApiResponse = {
   };
   created?: boolean;
   idempotent?: boolean;
+};
+
+type DuckBrainImportApiResponse = {
+  candidate?: {
+    id?: string | number;
+    reviewStatus?: string;
+  };
+  created?: boolean;
+  idempotent?: boolean;
+};
+
+type DuckBrainImportCliOptions = {
+  path: string;
+  filters: string[];
 };
 
 type PrIngestStatus = "submitted" | "queued" | "duplicate" | "dry-run";
@@ -381,6 +410,12 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
     if (parsed.command === "remember") {
       const result = await runRemember(parsed.rest, parsed, deps);
       io.stdout.write(formatRememberResult(result));
+      return 0;
+    }
+
+    if (parsed.command === "import-duckbrain") {
+      const result = await runImportDuckBrain(parsed, deps);
+      io.stdout.write(parsed.json ? `${JSON.stringify(result, null, 2)}\n` : formatDuckBrainImportResult(result));
       return 0;
     }
 
@@ -1126,6 +1161,54 @@ async function runRemember(args: string[], parsed: ParsedArgs, deps: CliDeps): P
   };
 }
 
+async function runImportDuckBrain(parsed: ParsedArgs, deps: CliDeps): Promise<DuckBrainImportSummary> {
+  const options = parseDuckBrainImportArgs(parsed.rest);
+  const config = resolveCaptureConfig({
+    cwd: deps.cwd,
+    env: deps.env,
+    ci: parsed.ci,
+    overrides: parsed.overrides,
+    gitRoot: deps.gitRoot,
+  });
+
+  if (parsed.dryRun) {
+    return importDuckBrainJsonlFile(options.path, {
+      workspaceId: config.workspaceId ?? "dry-run",
+      config,
+      dryRun: true,
+      filters: options.filters,
+    });
+  }
+
+  const client = createCaptureClient(config, { tokenPath: resolveCliTokenPath(deps), fetchImpl: deps.fetchImpl });
+  const workspace = await resolveRememberWorkspace(config, client);
+
+  return importDuckBrainJsonlFile(options.path, {
+    workspaceId: workspace.id,
+    config,
+    filters: options.filters,
+    submitCandidate: async (payload) => {
+      const submission = await client.submitCandidate<DuckBrainImportApiResponse>(payload, {
+        endpoint: DUCKBRAIN_IMPORT_ENDPOINT,
+        eventType: DUCKBRAIN_IMPORT_EVENT_TYPE,
+        contentFingerprint: String(payload.metadata.entryHash ?? payload.idempotencyKey),
+      });
+
+      if (submission.status === "queued") {
+        return submission.duplicate
+          ? { status: "duplicate", queuePath: submission.queuePath }
+          : { status: "queued", queuePath: submission.queuePath };
+      }
+
+      const candidateId = extractDuckBrainCandidateId(submission.response);
+      if (isDuckBrainImportDuplicateResponse(submission.response)) {
+        return { status: "duplicate", candidateId };
+      }
+      return { status: "imported", candidateId };
+    },
+  });
+}
+
 async function resolveRememberWorkspace(config: CaptureConfig, client: CaptureApiClient): Promise<ResolvedWorkspace> {
   try {
     return await resolveWorkspace(config, client);
@@ -1218,6 +1301,53 @@ function parseRememberArgs(args: string[]): RememberOptions {
     trustTier: validateEnum(trustTier, CONTEXT_TRUST_TIERS, "trust tier"),
     approve,
   };
+}
+
+function parseDuckBrainImportArgs(args: string[]): DuckBrainImportCliOptions {
+  const filters: string[] = [];
+  const positionals: string[] = [];
+  let inputPath: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--path") {
+      inputPath = requireValue(args, ++index, arg);
+      continue;
+    }
+    if (arg === "--filter") {
+      filters.push(requireValue(args, ++index, arg));
+      continue;
+    }
+    if (arg === "--namespace") {
+      filters.push(`namespace:${requireValue(args, ++index, arg)}`);
+      continue;
+    }
+    if (arg === "--key") {
+      filters.push(`key:${requireValue(args, ++index, arg)}`);
+      continue;
+    }
+    if (arg === "--tag") {
+      filters.push(`tag:${requireValue(args, ++index, arg)}`);
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      throw new Error(`Unknown import-duckbrain option: ${arg}`);
+    }
+    positionals.push(arg);
+  }
+
+  if (positionals.length > 1) {
+    throw new Error("import-duckbrain accepts exactly one JSONL path.");
+  }
+  if (inputPath && positionals.length > 0) {
+    throw new Error("import-duckbrain accepts a positional path or --path, not both.");
+  }
+  const resolvedPath = inputPath ?? positionals[0];
+  if (!resolvedPath?.trim()) {
+    throw new Error("import-duckbrain requires a DuckBrain JSONL path.");
+  }
+
+  return { path: resolvedPath, filters };
 }
 
 function buildRememberPayload(options: RememberOptions, config: CaptureConfig, workspaceId: string, relatedFiles: string[]): RememberPayload {
@@ -1351,6 +1481,24 @@ function formatRememberResult(result: RememberResult): string {
     result.approvalQueued ? "approval queued" : result.approved ? (result.alreadyApproved ? "already approved" : "approved") : "pending",
   ].filter(Boolean);
   return `${pieces.join("; ")}\n`;
+}
+
+function formatDuckBrainImportResult(result: DuckBrainImportSummary): string {
+  const prefix = result.dryRun ? "Dry-run DuckBrain import" : "DuckBrain import";
+  const lines = [
+    `${prefix} complete: imported=${result.imported}, queued=${result.queued}, duplicate=${result.duplicate}, skipped=${result.skipped}, total=${result.total}`,
+  ];
+
+  for (const reason of result.reasons) {
+    lines.push(`Warning line ${reason.line}: ${reason.code} — ${reason.message}`);
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function extractDuckBrainCandidateId(response: DuckBrainImportApiResponse): string | null {
+  const id = response.candidate?.id;
+  return typeof id === "string" || typeof id === "number" ? String(id) : null;
 }
 
 function formatFlushResult(result: CaptureFlushResult): string {
