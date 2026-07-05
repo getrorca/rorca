@@ -28,7 +28,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
-import { activeAgent, type AgentType } from '../lib/config';
+import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
@@ -45,7 +45,6 @@ import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import { synthesizeRunMemory } from '../lib/auto-memory';
-import * as piDetector from '../lib/pi-detector';
 import { logger } from '../lib/logger';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
@@ -67,6 +66,24 @@ import {
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
+import { safeParseTaskManifest, type TaskManifest } from '../lib/task-manifest';
+import { computeTaskManifestHash, resolveTaskManifestArtifactPaths, validateTaskManifestId } from '../lib/task-manifest-artifacts';
+import {
+  contextSafeRelativePathList,
+  contextSafeString,
+  sanitizeContextResponseValue,
+} from '../lib/context-safety';
+import {
+  createTaskManifestExecutionEnvelope,
+  writeTaskManifestExecutionEnvelope,
+  type WriteTaskManifestExecutionEnvelopeResult,
+} from '../lib/task-manifest-execution-envelope';
+import {
+  EXECUTION_AGENT_PRECEDENCE,
+  EXECUTION_MODEL_PRECEDENCE,
+  resolveExecutionOptions,
+  type ResolvedExecutionOptions,
+} from '../lib/resolve-execution-options';
 import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
 import { createRunnerJob } from '../lib/execution-runner-jobs';
@@ -94,47 +111,6 @@ function buildCleanEnvForMerge(): Record<string, string> {
     }
   }
   return env;
-}
-
-const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
-
-function normalizePiModelId(provider: string, model: string): string {
-  return `${provider}/${model}`;
-}
-
-function resolvePreferredPiModel(requestedModel: string | null, models: piDetector.PiModel[]): string | null {
-  if (models.length === 0) {
-    if (requestedModel?.startsWith('openai-codex/')) return requestedModel;
-    return DEFAULT_PI_MODEL;
-  }
-
-  const normalized = new Map<string, string>();
-  for (const model of models) {
-    const id = normalizePiModelId(model.provider, model.model);
-    normalized.set(id, id);
-    normalized.set(model.model, id);
-  }
-
-  if (requestedModel) {
-    const exact = normalized.get(requestedModel);
-    if (exact) return exact;
-  }
-
-  const preferredIds = [
-    'openai-codex/gpt-5.4',
-    'openai-codex/gpt-5.4-mini',
-    'openai-codex/gpt-5.3-codex',
-    'openai-codex/gpt-5.2',
-  ];
-  for (const id of preferredIds) {
-    if (normalized.has(id)) return normalized.get(id)!;
-  }
-
-  const firstCodex = models.find((model) => model.provider === 'openai-codex');
-  if (firstCodex) return normalizePiModelId(firstCodex.provider, firstCodex.model);
-
-  const first = models[0];
-  return normalizePiModelId(first.provider, first.model);
 }
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
@@ -1072,11 +1048,18 @@ interface PipelineRunRow {
   auto_merge: boolean;
   merge_status: string | null;
   merge_commit_sha: string | null;
+  merge_error?: string | null;
+  pr_number?: number | null;
+  pr_creating?: boolean | null;
+  pr_creation_error?: string | null;
   triggered_via: 'queue' | 'run_now';
   auto_worktree: boolean;
   include_graph: boolean;
   terminal_mode: TerminalMode | null;
   merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
+  idempotency_key?: string | null;
+  task_manifest_id?: string | null;
+  task_manifest_artifacts?: Record<string, unknown> | string | null;
   trigger_options?: Record<string, unknown> | string | null;
 }
 
@@ -1100,6 +1083,77 @@ function normalizePipelineRun<T extends { terminal_mode?: string | null }>(run: 
   return {
     ...run,
     terminal_mode: normalizeTerminalMode(run.terminal_mode),
+  };
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseJsonRecordLike(value: unknown): JsonRecord | null {
+  if (isJsonRecord(value)) return value;
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isJsonRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonRecordArrayLike(value: unknown): JsonRecord[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const records = value.filter(isJsonRecord);
+  return records.length === value.length ? records : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getStoredManifestHashFromRun(row: Pick<PipelineRunRow, 'trigger_options' | 'task_manifest_artifacts'>): string | undefined {
+  const triggerOptions = parseJsonRecordLike(row.trigger_options);
+  const artifacts = parseJsonRecordLike(row.task_manifest_artifacts);
+  return stringValue(triggerOptions?.manifestHash)
+    ?? stringValue(parseJsonRecordLike(triggerOptions?.taskManifest)?.manifestHash)
+    ?? stringValue(artifacts?.manifestHash);
+}
+
+function getStoredArtifactRefsFromTriggerOptions(value: unknown): JsonRecord[] | undefined {
+  const triggerOptions = parseJsonRecordLike(value);
+  return parseJsonRecordArrayLike(triggerOptions?.artifactRefs);
+}
+
+function buildManifestSourceFromRun(row: Pick<PipelineRunRow, 'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'>): JsonRecord | null {
+  const triggerOptions = parseJsonRecordLike(row.trigger_options);
+  const artifacts = parseJsonRecordLike(row.task_manifest_artifacts);
+  const manifestId = row.task_manifest_id ?? stringValue(triggerOptions?.manifestId);
+  const idempotencyKey = row.idempotency_key ?? stringValue(triggerOptions?.idempotencyKey);
+  const manifestHash = getStoredManifestHashFromRun(row);
+
+  if (!manifestId && !idempotencyKey && !manifestHash && !artifacts && !triggerOptions) {
+    return null;
+  }
+
+  const artifactPaths = parseJsonRecordLike(triggerOptions?.artifactPaths)
+    ?? (artifacts ? {
+      artifactDir: artifacts.artifactDir,
+      manifestPath: artifacts.manifestPath,
+      tasksMdPath: artifacts.tasksMdPath,
+      specPath: artifacts.specPath,
+    } : undefined);
+
+  return {
+    manifestId: manifestId ?? null,
+    idempotencyKey: idempotencyKey ?? null,
+    manifestHash: manifestHash ?? null,
+    sourceRefs: triggerOptions?.sourceRefs ?? null,
+    artifactPaths: artifactPaths ?? null,
+    routeDecision: triggerOptions?.routeDecision ?? null,
+    routeDecisionSummary: triggerOptions?.routeDecisionSummary ?? null,
+    artifacts: artifacts ?? null,
   };
 }
 
@@ -1290,12 +1344,53 @@ const PipelineTriggerSchema = z.object({
   overrideReadinessGate: z.boolean().optional(),
   terminal_mode: z.string().nullable().optional(),
   terminalMode: z.string().nullable().optional(),
+  idempotencyKey: z.string().optional(),
+  manifestId: z.string().optional(),
+  taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
+  taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  triggerOptions: z.record(z.string(), z.unknown()).optional(),
+  reservedRunId: z.number().optional(),
   executionEnvironment: z.enum(['remote-rorca', 'local-user']).optional(),
-});
+  executionEnvironmentId: z.string().optional(),
+}).passthrough();
 
-router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
+const HERMES_LEGACY_REPAIR_METADATA_FIELDS = [
+  'repairPlanId',
+  'evidenceIds',
+  'validationGate',
+  'principleSelection',
+  'principlePromptBundles',
+  'branchStrategy',
+  'branchName',
+  'worktreePath',
+  'baseBranch',
+  'baseHead',
+] as const;
+
+function presentHermesLegacyRepairMetadataFields(body: Record<string, unknown>): string[] {
+  return HERMES_LEGACY_REPAIR_METADATA_FIELDS.filter((field) => (
+    Object.prototype.hasOwnProperty.call(body, field) && body[field] !== undefined
+  ));
+}
+
+function assertNoLegacyHermesRepairMetadataOnPipelineTrigger(body: Record<string, unknown>): void {
+  const fields = presentHermesLegacyRepairMetadataFields(body);
+  if (fields.length === 0) return;
+
+  throw new ValidationError(
+    'Legacy Hermes repair metadata posted to /api/pipeline/trigger is not a typed task manifest. Convert repairPlanId/evidenceIds/validationGate/principleSelection/branchStrategy into a TaskManifest v1 and POST /api/pipeline/task-manifests/trigger with workspaceId, manifest, and idempotencyKey.',
+    {
+      code: 'HERMES_REPAIR_METADATA_REQUIRES_TASK_MANIFEST',
+      fields,
+      endpoint: '/api/pipeline/task-manifests/trigger',
+    },
+  );
+}
+
+async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, executionEnvironment } = req.body;
+    assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1364,90 +1459,36 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       return;
     }
 
-    // 3. Resolve agent type and model.
-    //    Model: ONLY from spec JSON or per-story override. No hidden DB/env fallbacks.
-    //    Agent runtime: request agentOverride > spec agentOverride > in-memory active agent
+    // 3. Resolve agent type and model via the shared pipeline/task-manifest helper.
+    //    Agent precedence: request > manifest (when provided by caller) > spec/envelope > model auto-switch > workflow router > active fallback.
+    //    Model precedence: request > manifest (when provided by caller) > spec/envelope > workflow router > active fallback.
     const pipelineUser = await getEffectiveUser(req);
     const wfConfig = await resolveWorkflowConfig('pipeline_execution', pipelineUser?.id);
 
     const specModelPath = path.join(workspace.path, specPath);
     const specModelJson = fs.existsSync(specModelPath) ? JSON.parse(fs.readFileSync(specModelPath, 'utf8')) : {};
     const specLevelModel: string | null = specModelJson.model ?? null;
-    // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id)
+    // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id) or synthetic task-manifest envelope.
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
     // Read spec-level reasoning config — used as defaults when trigger request omits reasoning params
     const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
     const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
     const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
-    // Model comes from: request modelOverride > spec.model > null (no hidden DB/env fallbacks)
-    const resolvedAgentModel: string | null = modelOverride ?? specLevelModel;
 
-    // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
-    // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
-    const OPENCODE_PROVIDER_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/'];
-    // Note: 'anthropic/' prefix is intentionally excluded — anthropic/claude-* models must stay on Claude CLI.
-    // Only non-Claude provider prefixes trigger the OpenCode auto-switch.
-    const modelNeedsOpenCode = resolvedAgentModel != null && OPENCODE_PROVIDER_PREFIXES.some(p => resolvedAgentModel.startsWith(p));
-    // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models.
-    // Exclude anthropic/claude-* (OpenRouter format for Claude models — should still use Claude CLI).
-    const modelIsNonClaude = resolvedAgentModel != null
-      && resolvedAgentModel.includes('/')
-      && !resolvedAgentModel.startsWith('claude-')
-      && !resolvedAgentModel.startsWith('anthropic/claude-');
-    const runtimeAgent = activeAgent;
-    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && runtimeAgent === 'claude';
-    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > in-memory active agent
-    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : runtimeAgent);
-
-    // Translate model IDs for OpenCode execution.
-    // OpenCode expects "provider/org/model" format (e.g. "openrouter/anthropic/claude-opus-4.6").
-    // Rorca stores models as either:
-    //   - Claude-style IDs: "claude-opus-4-6" (Anthropic SDK format, dashes)
-    //   - OpenRouter catalog IDs: "z-ai/glm-5", "anthropic/claude-opus-4.6" (org/model)
-    //   - Already-prefixed: "openrouter/z-ai/glm-5", "openai/gpt-4o"
-    let finalAgentModel = resolvedAgentModel;
-    if (finalAgentModel && resolvedAgentType === 'opencode') {
-      // Already has a known provider prefix — pass through as-is
-      if (modelNeedsOpenCode) {
-        // e.g. "openrouter/z-ai/glm-5", "openai/gpt-4o" — already correct
-      }
-      // Claude SDK model IDs → OpenRouter format (dashes to dots, add anthropic/ prefix)
-      else if (/^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/')) {
-        // claude-opus-4-6 → anthropic/claude-opus-4.6
-        // claude-sonnet-4-6 → anthropic/claude-sonnet-4.6
-        // claude-haiku-4-5-20251001 → anthropic/claude-haiku-4.5 (strip date suffix)
-        const openRouterId = finalAgentModel
-          .replace(/-(\d+)-(\d+)(?:-\d{8})?$/, '-$1.$2')  // "4-6" → "4.6", strip date
-          .replace(/-(\d{8})$/, '');                         // catch remaining date suffixes
-        finalAgentModel = `openrouter/anthropic/${openRouterId}`;
-      }
-      // Bare org/model from OpenRouter catalog (e.g. "z-ai/glm-5", "anthropic/claude-opus-4.6")
-      else if (modelIsNonClaude) {
-        finalAgentModel = `openrouter/${finalAgentModel}`;
-      }
-    }
-
-    // When running with Claude CLI, only claude-* model IDs are valid.
-    // If the spec has an OpenRouter model (e.g. "z-ai/glm-5") but the user
-    // explicitly selected Claude CLI, clear the model so Claude uses its default.
-    if (resolvedAgentType === 'claude' && finalAgentModel) {
-      const isClaudeModel = /^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/');
-      if (!isClaudeModel) {
-        finalAgentModel = null;
-      }
-    }
-
-    if (resolvedAgentType === 'pi') {
-      const piStatus = piDetector.detectPi();
-      if (piStatus.piInstalled && piStatus.piBinPath) {
-        const availablePiModels = piDetector.listPiModels(piStatus.piBinPath);
-        const preferredPiModel = resolvePreferredPiModel(finalAgentModel, availablePiModels);
-        if (preferredPiModel !== finalAgentModel) {
-          logger.info({ requestedModel: finalAgentModel, preferredPiModel }, '[Pipeline] Adjusted Pi model to an available local Pi model');
-        }
-        finalAgentModel = preferredPiModel;
-      }
-    }
+    const executionOptions = resolveExecutionOptions({
+      requestAgentOverride: agentOverride,
+      manifestAgentOverride: manifestExecutionAgentOverride,
+      specAgentOverride: specLevelAgent,
+      requestModelOverride: modelOverride,
+      manifestModelOverride: manifestExecutionModelOverride,
+      specModel: specLevelModel,
+      workflowConfig: wfConfig,
+      activeAgentFallback: activeAgent,
+      activeModelFallback: activeModel,
+      log: logger,
+    });
+    const resolvedAgentType: AgentType = executionOptions.resolvedAgentType;
+    const finalAgentModel = executionOptions.finalAgentModel;
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedExecutionEnvironment.effective === 'remote-rorca' && resolvedAgentType === 'claude') {
@@ -1643,7 +1684,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const { queue } = req.body;
     const useExternalPiOrchestration = resolvedAgentType === 'pi' && isPiExternalOrchestrationEnabled();
 
-    if (!queuedRunId) {
+    if (!queuedRunId && !reservedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
       if (queue && !useExternalPiOrchestration) {
         const MAX_QUEUE_DEPTH = 10;
@@ -1659,7 +1700,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queuedTriggerOptions = Object.fromEntries(
+        const queuedBaseTriggerOptions = Object.fromEntries(
           Object.entries({
             autoWorktree: !!autoWorktree,
             autoMerge,
@@ -1682,8 +1723,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
             executionEnvironment: resolvedExecutionEnvironment.effective,
           }).filter(([, value]) => value !== undefined)
         );
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment, trigger_options)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, JSON.stringify(queuedTriggerOptions)]);
+        const queuedTaskManifestArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
+        const queuedTriggerOptions = JSON.stringify({
+          ...queuedBaseTriggerOptions,
+          ...(triggerOptions ?? {}),
+        });
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, queuedTaskManifestArtifacts, queuedTriggerOptions]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
@@ -1695,6 +1741,16 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           terminalMode: resolvedTerminalMode,
           terminal_mode: resolvedTerminalMode,
           executionEnvironment: resolvedExecutionEnvironment.effective,
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+          ...(manifestId ? { manifestId } : {}),
+          ...(taskManifestArtifacts ? { artifacts: taskManifestArtifacts } : {}),
+          ...(taskManifestArtifactRefs ? { artifactRefs: taskManifestArtifactRefs } : {}),
+          ...(triggerOptions ? { manifestSource: buildManifestSourceFromRun({
+            idempotency_key: idempotencyKey ?? null,
+            task_manifest_id: manifestId ?? null,
+            task_manifest_artifacts: taskManifestArtifacts ?? null,
+            trigger_options: triggerOptions,
+          }) } : {}),
           ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
           ...(executionReadiness ? { executionReadiness } : {}),
           ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
@@ -1734,18 +1790,48 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const absSpecPath = path.join(workspace.path, specPath);
 
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
+    const existingRunId = queuedRunId ?? reservedRunId;
     const triggeredVia = queuedRunId ? 'queue' : 'run_now';
 
     if (useExternalPiOrchestration) {
       const specId = path.basename(specPath, '.json');
-      const runResult = await queryOne<{ id: number }>(
-        `INSERT INTO pipeline_runs
-           (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode)
-         VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8)
-         RETURNING id`,
-        [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode],
-      );
-      const runId = runResult!.id;
+      const serializedExternalArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
+      const serializedExternalTriggerOptions = triggerOptions ? JSON.stringify(triggerOptions) : null;
+      let runId: number;
+
+      if (existingRunId) {
+        await execute(
+          `UPDATE pipeline_runs
+              SET spec_path = $1,
+                  workspace_id = $2,
+                  status = 'pi_native',
+                  trigger_type = $3,
+                  agent = $4,
+                  agent_type = $5,
+                  agent_model = $6,
+                  started_at = NULL,
+                  finished_at = NULL,
+                  pid = NULL,
+                  triggered_via = $7,
+                  terminal_mode = $8,
+                  idempotency_key = COALESCE($9, idempotency_key),
+                  task_manifest_id = COALESCE($10, task_manifest_id),
+                  task_manifest_artifacts = COALESCE($11::jsonb, task_manifest_artifacts),
+                  trigger_options = COALESCE($12::jsonb, trigger_options)
+            WHERE id = $13`,
+          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions, existingRunId],
+        );
+        runId = Number(existingRunId);
+      } else {
+        const runResult = await queryOne<{ id: number }>(
+          `INSERT INTO pipeline_runs
+             (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+           VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11::jsonb, COALESCE($12::jsonb, '{}'::jsonb))
+           RETURNING id`,
+          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions],
+        );
+        runId = Number(runResult!.id);
+      }
 
       const walEvent = await queryOne<WalEvent>(
         `INSERT INTO wal_events (event_type, workspace_id, spec_id, payload)
@@ -1769,6 +1855,16 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         terminal_mode: resolvedTerminalMode,
         executionEnvironment: resolvedExecutionEnvironment.effective,
         expectsExternalOrchestration: true,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(manifestId ? { manifestId } : {}),
+        ...(taskManifestArtifacts ? { artifacts: taskManifestArtifacts } : {}),
+        ...(taskManifestArtifactRefs ? { artifactRefs: taskManifestArtifactRefs } : {}),
+        ...(triggerOptions ? { manifestSource: buildManifestSourceFromRun({
+          idempotency_key: idempotencyKey ?? null,
+          task_manifest_id: manifestId ?? null,
+          task_manifest_artifacts: taskManifestArtifacts ?? null,
+          trigger_options: triggerOptions,
+        }) } : {}),
         specReadiness: (req as any)._specReadiness,
       });
       return;
@@ -1894,7 +1990,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
     let runId: number;
-    const persistedTriggerOptions = Object.fromEntries(
+    const requestedTriggerOptions = Object.fromEntries(
       Object.entries({
         autoWorktree: needsWorktree,
         autoMerge: computedAutoMerge,
@@ -1918,14 +2014,39 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }).filter(([, value]) => value !== undefined)
     );
 
-    if (queuedRunId) {
-      // Promote queued run to running — worker will actually execute it
+    const existingRunMetadata = existingRunId
+      ? await queryOne<Pick<PipelineRunRow, 'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'>>(
+        `SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options FROM pipeline_runs WHERE id = $1`,
+        [existingRunId],
+      )
+      : undefined;
+    const persistedArtifacts = parseJsonRecordLike(existingRunMetadata?.task_manifest_artifacts) ?? undefined;
+    const existingTriggerOptions = parseJsonRecordLike(existingRunMetadata?.trigger_options) ?? undefined;
+    const effectiveIdempotencyKey = idempotencyKey ?? existingRunMetadata?.idempotency_key ?? stringValue(existingTriggerOptions?.idempotencyKey);
+    const effectiveManifestId = manifestId ?? existingRunMetadata?.task_manifest_id ?? stringValue(existingTriggerOptions?.manifestId);
+    const effectiveTaskManifestArtifacts = taskManifestArtifacts ?? persistedArtifacts;
+    const effectiveTaskManifestArtifactRefs = taskManifestArtifactRefs ?? getStoredArtifactRefsFromTriggerOptions(existingTriggerOptions);
+    const effectiveTriggerOptions = {
+      ...requestedTriggerOptions,
+      ...(existingTriggerOptions ?? {}),
+      ...(triggerOptions ?? {}),
+    };
+
+    const serializedTaskManifestArtifacts = effectiveTaskManifestArtifacts
+      ? JSON.stringify(effectiveTaskManifestArtifacts)
+      : null;
+    const serializedTriggerOptions = JSON.stringify(effectiveTriggerOptions);
+
+    if (existingRunId) {
+      // Promote or complete a pre-reserved queued run — worker will actually execute it.
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14, trigger_options = $15::jsonb WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, JSON.stringify(persistedTriggerOptions)]);
-      runId = queuedRunId;
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14,
+         idempotency_key = COALESCE($15, idempotency_key), task_manifest_id = COALESCE($16, task_manifest_id), task_manifest_artifacts = COALESCE($17::jsonb, task_manifest_artifacts), trigger_options = $18::jsonb
+         WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, existingRunId, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      runId = existingRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, JSON.stringify(persistedTriggerOptions)]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
       runId = runResult!.id;
     }
 
@@ -2101,6 +2222,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
       ...(effortLevel ? { effortLevel } : {}),
       ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
+      ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
+      ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
+      ...(effectiveTaskManifestArtifacts ? { taskManifestArtifacts: effectiveTaskManifestArtifacts } : {}),
+      ...(effectiveTaskManifestArtifactRefs ? { taskManifestArtifactRefs: effectiveTaskManifestArtifactRefs } : {}),
+      ...(effectiveTriggerOptions ? { triggerOptions: effectiveTriggerOptions } : {}),
+      ...(executionEnvironment ? { executionEnvironment } : {}),
+      ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
     };
 
     let runnerJobId: string | undefined;
@@ -2113,10 +2241,19 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       runnerJobId = runnerJob.id;
       logger.info(`[Pipeline] Enqueued local runner job for runId=${runId}`);
     } else {
-      await getBoss().send('pipeline:run', jobPayload, {
+      const boss = getBoss();
+      if (typeof boss.createQueue === 'function') {
+        await boss.createQueue('pipeline:run');
+      }
+      const jobId = await boss.send('pipeline:run', jobPayload, {
         retryLimit: 0,
         expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
       });
+
+      if (jobId === null) {
+        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
+        throw new ServiceUnavailableError('Failed to enqueue pipeline:run job: pg-boss returned null (queue may be missing or not started)');
+      }
 
       logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
     }
@@ -2146,6 +2283,17 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       terminal_mode: resolvedTerminalMode,
       executionEnvironment: resolvedExecutionEnvironment.effective,
       ...(runnerJobId ? { runnerJobId } : {}),
+      ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
+      ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
+      ...(effectiveTaskManifestArtifacts ? { artifacts: effectiveTaskManifestArtifacts } : {}),
+      ...(effectiveTaskManifestArtifactRefs ? { artifactRefs: effectiveTaskManifestArtifactRefs } : {}),
+      ...(effectiveTriggerOptions ? { manifestSource: buildManifestSourceFromRun({
+        idempotency_key: effectiveIdempotencyKey ?? null,
+        task_manifest_id: effectiveManifestId ?? null,
+        task_manifest_artifacts: effectiveTaskManifestArtifacts ?? null,
+        trigger_options: effectiveTriggerOptions,
+      }) } : {}),
+      ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
@@ -2154,7 +2302,1021 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Trigger');
   }
-});
+}
+
+router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigger);
+
+const TaskManifestTriggerRequestSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]).optional(),
+  manifest: z.unknown().optional(),
+  dryRun: z.boolean().optional(),
+  autoWorktree: z.boolean().optional().default(true),
+  autoMerge: z.boolean().optional().default(false),
+  mergeStrategy: z.enum(['pr', 'draft-pr', 'branch-only', 'direct']).optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
+  modelOverride: z.string().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
+  executionEnvironment: z.string().optional(),
+  executionEnvironmentId: z.string().optional(),
+  terminal_mode: z.string().nullable().optional(),
+  terminalMode: z.string().nullable().optional(),
+  idempotencyKey: z.string().optional(),
+  includeGraph: z.boolean().optional(),
+  forceSequential: z.boolean().optional(),
+  queue: z.boolean().optional(),
+}).passthrough();
+
+type TaskManifestTriggerRequestBody = z.infer<typeof TaskManifestTriggerRequestSchema>;
+
+type TaskManifestArtifactsResponse = {
+  artifactDir: string;
+  manifestPath: string;
+  tasksMdPath: string;
+  specPath: string;
+  manifestHash: string;
+  reused: boolean;
+  absolute: {
+    artifactDir: string;
+    manifestPath: string;
+    tasksMdPath: string;
+    specPath: string;
+  };
+};
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function stringFromId(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return isNonEmptyString(value) ? value.trim() : null;
+}
+
+function routeHasWrappedManifest(body: TaskManifestTriggerRequestBody): boolean {
+  return Object.prototype.hasOwnProperty.call(body, 'manifest');
+}
+
+function taskManifestIssueSummary(issues: Array<{ path: PropertyKey[]; message: string }>): string {
+  return issues
+    .map((issue) => {
+      const prefix = issue.path.length > 0 ? `${issue.path.map(String).join('.')}: ` : '';
+      return `${prefix}${issue.message}`;
+    })
+    .join('; ');
+}
+
+function taskManifestIssueDetails(
+  code: string,
+  issues: Array<{ path: PropertyKey[]; message: string }>,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    code,
+    ...extra,
+    issues: issues.map((issue) => ({
+      path: issue.path.map(String).join('.'),
+      message: issue.message,
+    })),
+  };
+}
+
+function taskManifestValidationCodeFromIssues(issues: Array<{ path: PropertyKey[]; message: string }>): string {
+  const normalized = issues.map((issue) => ({
+    path: issue.path.map(String).join('.'),
+    message: issue.message,
+  }));
+
+  if (normalized.some((issue) => (
+    /(?:^|\.)path$|Paths|artifactRefs/.test(issue.path)
+    && /workspace-relative|traverse|absolute|URL|home-directory|Windows drive|NUL|unsafe/i.test(issue.message)
+  ))) {
+    return 'TASK_MANIFEST_UNSAFE_ARTIFACT_PATH';
+  }
+
+  if (normalized.some((issue) => (
+    /payload exceeds|serialized bytes/i.test(issue.message)
+    || (
+      /^context(?:\.|$)/.test(issue.path)
+      && /at most|exceeds|oversized|too large|maximum/i.test(issue.message)
+    )
+  ))) {
+    return 'TASK_MANIFEST_CONTEXT_TOO_LARGE';
+  }
+
+  return 'TASK_MANIFEST_INVALID';
+}
+
+function validationErrorWithCode(message: string, code: string, extra: Record<string, unknown> = {}): ValidationError {
+  return new ValidationError(message, { code, ...extra });
+}
+
+function assertTaskManifestRouteDecisionAllowed(manifest: TaskManifest): void {
+  const route = manifest.routeDecision.route;
+  const normalizedRoute = route.toLowerCase();
+  const highRiskRoute = normalizedRoute === 'rorca.spec.run'
+    || normalizedRoute === 'direct-repair'
+    || normalizedRoute === 'direct_repair'
+    || normalizedRoute === 'directrepair'
+    || normalizedRoute.includes('direct-repair')
+    || normalizedRoute.includes('direct_repair')
+    || normalizedRoute.includes('directrepair');
+
+  if (!highRiskRoute) return;
+
+  throw validationErrorWithCode(
+    `Task manifest routeDecision.route '${route}' is not eligible for direct execution; Hermes repair manifests must use the typed task-manifest bridge with branch/PR-only policy, not a high-risk direct-repair/spec-run route.`,
+    'TASK_MANIFEST_HIGH_RISK_ROUTE',
+    {
+      route,
+      allowedPolicy: 'branchPrOnly=true, autoMerge=false, mergeStrategy=pr|draft-pr|branch-only',
+    },
+  );
+}
+
+function sourceAuthorityHasValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'number' || typeof value === 'boolean') return true;
+  if (Array.isArray(value)) return value.some(sourceAuthorityHasValue);
+  if (typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>).some(sourceAuthorityHasValue);
+  }
+  return false;
+}
+
+function assertTaskManifestSourceAuthority(
+  body: TaskManifestTriggerRequestBody,
+  manifest: TaskManifest,
+  requestWorkspaceId: string,
+  requestIdempotencyKey: string,
+): void {
+  if (String(manifest.workspaceId) !== requestWorkspaceId) {
+    throw validationErrorWithCode(
+      'Invalid source authority: request workspaceId must match manifest.workspaceId',
+      'TASK_MANIFEST_WORKSPACE_AUTHORITY_MISMATCH',
+    );
+  }
+
+  if (manifest.idempotencyKey !== requestIdempotencyKey) {
+    throw validationErrorWithCode(
+      'Invalid source authority: request idempotencyKey must match manifest.idempotencyKey',
+      'TASK_MANIFEST_IDEMPOTENCY_AUTHORITY_MISMATCH',
+    );
+  }
+
+  const source = manifest.source as Record<string, unknown>;
+  if (!Object.values(source).some(sourceAuthorityHasValue)) {
+    throw validationErrorWithCode(
+      'Invalid source authority: task manifest source must include at least one provenance reference',
+      'TASK_MANIFEST_SOURCE_REQUIRED',
+    );
+  }
+
+  const sourceSpecPath = manifest.source.rorca?.specPath;
+  if (sourceSpecPath && !sourceSpecPath.startsWith('forge/specs/')) {
+    throw validationErrorWithCode(
+      'Invalid source authority: source.rorca.specPath must be workspace-relative under forge/specs/',
+      'TASK_MANIFEST_SOURCE_SPEC_PATH_INVALID',
+    );
+  }
+
+  if (routeHasWrappedManifest(body)) {
+    if (body.workspaceId === undefined || body.workspaceId === null || stringFromId(body.workspaceId) === null) {
+      throw validationErrorWithCode('Missing required field: workspaceId', 'TASK_MANIFEST_WORKSPACE_ID_REQUIRED');
+    }
+    if (!isNonEmptyString(body.idempotencyKey)) {
+      throw validationErrorWithCode('Missing required field: idempotencyKey', 'TASK_MANIFEST_IDEMPOTENCY_KEY_REQUIRED');
+    }
+  }
+}
+
+function buildTaskManifestArtifactsResponse(
+  envelope: WriteTaskManifestExecutionEnvelopeResult,
+): TaskManifestArtifactsResponse {
+  const manifestPath = path.join(envelope.relativeArtifactDir, 'manifest.json');
+  const tasksMdPath = path.join(envelope.relativeArtifactDir, 'tasks.md');
+  return {
+    artifactDir: envelope.relativeArtifactDir,
+    manifestPath,
+    tasksMdPath,
+    specPath: envelope.relativeSpecPath,
+    manifestHash: envelope.manifestHash,
+    reused: envelope.artifactReused,
+    absolute: {
+      artifactDir: envelope.artifactDir,
+      manifestPath: envelope.manifestPath,
+      tasksMdPath: envelope.tasksMdPath,
+      specPath: envelope.specPath,
+    },
+  };
+}
+
+function buildTaskManifestArtifactRefs(artifacts: TaskManifestArtifactsResponse): Array<Record<string, unknown>> {
+  return [
+    {
+      kind: 'task-manifest',
+      role: 'manifest-json',
+      path: artifacts.manifestPath,
+      digest: artifacts.manifestHash,
+    },
+    {
+      kind: 'task-manifest',
+      role: 'tasks-md-projection',
+      path: artifacts.tasksMdPath,
+      durableSourceOfTruth: false,
+    },
+    {
+      kind: 'task-manifest',
+      role: 'synthetic-spec',
+      path: artifacts.specPath,
+      digest: artifacts.manifestHash,
+    },
+  ];
+}
+
+function buildTaskManifestEstimatedPlan(input: {
+  manifest: TaskManifest;
+  envelope: WriteTaskManifestExecutionEnvelopeResult;
+  artifacts: TaskManifestArtifactsResponse;
+  autoWorktree: boolean;
+  mergeStrategy: 'pr' | 'draft-pr' | 'branch-only';
+  agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
+  modelOverride?: string;
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+  terminalMode: TerminalMode;
+  executionEnvironment?: string;
+  executionEnvironmentId?: string;
+  executionEnvironmentSupported?: boolean;
+  executionOptions?: ResolvedExecutionOptions;
+}): Record<string, unknown> {
+  return {
+    willQueue: false,
+    willSpawnSubprocess: false,
+    workspaceId: input.manifest.workspaceId,
+    manifestId: input.manifest.manifestId,
+    idempotencyKey: input.manifest.idempotencyKey,
+    specPath: input.envelope.relativeSpecPath,
+    artifactPaths: {
+      manifest: input.artifacts.manifestPath,
+      tasksMd: input.artifacts.tasksMdPath,
+      syntheticSpec: input.artifacts.specPath,
+    },
+    autoWorktree: input.autoWorktree,
+    autoMerge: false,
+    mergeStrategy: input.mergeStrategy,
+    agentOverride: input.agentOverride ?? input.manifest.execution.agentOverride ?? null,
+    modelOverride: input.modelOverride ?? input.manifest.execution.modelOverride ?? null,
+    effortLevel: input.effortLevel ?? input.manifest.execution.effortLevel ?? null,
+    terminalMode: input.terminalMode,
+    terminal_mode: input.terminalMode,
+    executionEnvironment: input.executionEnvironment ?? input.manifest.execution.executionEnvironment ?? null,
+    executionEnvironmentId: input.executionEnvironmentId ?? input.manifest.execution.executionEnvironmentId ?? null,
+    executionEnvironmentSupported: input.executionEnvironmentSupported ?? false,
+    executionOptionPrecedence: {
+      agent: EXECUTION_AGENT_PRECEDENCE,
+      model: EXECUTION_MODEL_PRECEDENCE,
+    },
+    ...(input.executionOptions ? {
+      resolvedAgentType: input.executionOptions.resolvedAgentType,
+      resolvedAgentModel: input.executionOptions.finalAgentModel,
+      agentSource: input.executionOptions.agentSource,
+      modelSource: input.executionOptions.modelSource,
+      autoSwitchedToOpenCode: input.executionOptions.autoSwitchedToOpenCode,
+    } : {}),
+    storyCount: input.envelope.spec.userStories.length,
+    tasks: input.envelope.spec.userStories.map((story) => ({
+      storyId: story.id,
+      title: story.title,
+      dependsOn: story.dependsOn,
+    })),
+  };
+}
+
+function resolveTaskManifestInput(body: TaskManifestTriggerRequestBody): unknown {
+  return body && (body as Record<string, unknown>).manifestVersion === 1
+    ? body
+    : body.manifest;
+}
+
+function hasExecutionEnvironmentSupport(): boolean {
+  return [
+    path.join(__dirname, '..', 'lib', 'execution-environment.ts'),
+    path.join(__dirname, '..', 'lib', 'execution-environment.js'),
+  ].some((candidate) => fs.existsSync(candidate));
+}
+
+function resolveTaskManifestExecutionEnvironment(
+  body: TaskManifestTriggerRequestBody,
+  manifest: TaskManifest,
+): { supported: boolean; executionEnvironment: 'remote-rorca' | 'local-user'; executionEnvironmentId?: string } {
+  const bridgeSupported = hasExecutionEnvironmentSupport();
+  const requestedEnvironment = body.executionEnvironment ?? manifest.execution.executionEnvironment ?? 'remote-rorca';
+  const requestedEnvironmentId = body.executionEnvironmentId ?? manifest.execution.executionEnvironmentId;
+  const supportedEnvironment = requestedEnvironment === 'remote-rorca' || requestedEnvironment === 'local-user';
+
+  return {
+    supported: bridgeSupported && supportedEnvironment,
+    executionEnvironment: requestedEnvironment === 'local-user' ? 'local-user' : 'remote-rorca',
+    ...(requestedEnvironmentId ? { executionEnvironmentId: requestedEnvironmentId } : {}),
+  };
+}
+
+type TaskManifestRunLookupRow = Pick<PipelineRunRow,
+  'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'
+> & {
+  id: number;
+  spec_path: string;
+  status: string;
+  queue_position: number | null;
+  triggered_via?: 'queue' | 'run_now' | null;
+};
+
+type TaskManifestRunReservation =
+  | { kind: 'existing'; row: TaskManifestRunLookupRow }
+  | { kind: 'created'; runId: number; queuePosition: number | null };
+
+function buildPlannedTaskManifestEnvelope(workspacePath: string, manifest: TaskManifest): WriteTaskManifestExecutionEnvelopeResult {
+  const spec = createTaskManifestExecutionEnvelope(manifest);
+  const paths = resolveTaskManifestArtifactPaths(workspacePath, manifest.manifestId);
+  const fileName = `${spec.id}.json`;
+  return {
+    spec,
+    specPath: path.join(paths.artifactDir, fileName),
+    relativeSpecPath: path.join(paths.relativeArtifactDir, fileName),
+    artifactDir: paths.artifactDir,
+    relativeArtifactDir: paths.relativeArtifactDir,
+    manifestPath: paths.manifestPath,
+    tasksMdPath: paths.tasksMdPath,
+    manifestHash: computeTaskManifestHash(manifest),
+    artifactReused: false,
+  };
+}
+
+function buildTaskManifestTriggerOptions(input: {
+  manifest: TaskManifest;
+  manifestHash: string;
+  artifacts: TaskManifestArtifactsResponse;
+  artifactRefs: JsonRecord[];
+  autoWorktree: boolean;
+  mergeStrategy: 'pr' | 'draft-pr' | 'branch-only';
+  terminalMode: TerminalMode;
+  agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
+  modelOverride?: string;
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+  executionEnvironment?: string;
+  executionEnvironmentId?: string;
+  executionEnvironmentSupported: boolean;
+  executionOptions: ResolvedExecutionOptions;
+  sourceStoryIds: string[];
+}): JsonRecord {
+  const routeDecisionSummary = [
+    input.manifest.routeDecision.route,
+    input.manifest.routeDecision.reason,
+  ].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' — ');
+
+  return {
+    source: 'task-manifest',
+    manifestId: input.manifest.manifestId,
+    idempotencyKey: input.manifest.idempotencyKey,
+    manifestHash: input.manifestHash,
+    sourceRefs: {
+      ...input.manifest.source,
+      sourceStoryIds: input.sourceStoryIds,
+    },
+    artifactPaths: {
+      artifactDir: input.artifacts.artifactDir,
+      manifestPath: input.artifacts.manifestPath,
+      tasksMdPath: input.artifacts.tasksMdPath,
+      specPath: input.artifacts.specPath,
+    },
+    artifactRefs: input.artifactRefs,
+    routeDecision: input.manifest.routeDecision,
+    routeDecisionSummary,
+    policySummary: {
+      dryRun: input.manifest.policy.dryRun,
+      branchPrOnly: input.manifest.policy.branchPrOnly,
+      autoMerge: input.manifest.policy.autoMerge,
+      deploysAllowed: input.manifest.policy.deploysAllowed,
+      credentialCopyingAllowed: input.manifest.policy.credentialCopyingAllowed,
+      commandDenylistCount: input.manifest.policy.commandDenylist.length,
+      requiredValidation: input.manifest.policy.requiredValidation,
+    },
+    validationPlanSummary: {
+      requiredCommands: input.manifest.validation.requiredCommands,
+      successCriteriaCount: input.manifest.validation.successCriteria.length,
+      artifactRefCount: input.manifest.validation.artifactRefs.length,
+    },
+    execution: {
+      autoWorktree: input.autoWorktree,
+      autoMerge: false,
+      mergeStrategy: input.mergeStrategy,
+      terminalMode: input.terminalMode,
+      agentOverride: input.agentOverride ?? input.manifest.execution.agentOverride ?? null,
+      modelOverride: input.modelOverride ?? input.manifest.execution.modelOverride ?? null,
+      effortLevel: input.effortLevel ?? input.manifest.execution.effortLevel ?? null,
+      executionEnvironment: input.executionEnvironment ?? input.manifest.execution.executionEnvironment ?? null,
+      executionEnvironmentId: input.executionEnvironmentId ?? input.manifest.execution.executionEnvironmentId ?? null,
+      executionEnvironmentSupported: input.executionEnvironmentSupported,
+      resolvedAgentType: input.executionOptions.resolvedAgentType,
+      resolvedAgentModel: input.executionOptions.finalAgentModel ?? null,
+      agentSource: input.executionOptions.agentSource,
+      modelSource: input.executionOptions.modelSource,
+      autoSwitchedToOpenCode: input.executionOptions.autoSwitchedToOpenCode,
+    },
+  };
+}
+
+async function findTaskManifestRunByIdempotencyKey(
+  workspaceId: string,
+  idempotencyKey: string,
+): Promise<TaskManifestRunLookupRow | undefined> {
+  return queryOne<TaskManifestRunLookupRow>(
+    `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+       FROM pipeline_runs
+      WHERE workspace_id = $1
+        AND idempotency_key = $2
+      ORDER BY id DESC
+      LIMIT 1`,
+    [workspaceId, idempotencyKey],
+  );
+}
+
+function assertExistingTaskManifestRunMatchesHash(
+  row: TaskManifestRunLookupRow,
+  manifestHash: string,
+  idempotencyKey: string,
+): void {
+  const storedHash = getStoredManifestHashFromRun(row);
+  if (storedHash === manifestHash) return;
+
+  throw new ConflictError(
+    `Task manifest idempotency key '${idempotencyKey}' already exists with a different manifest hash`,
+    {
+      runId: Number(row.id),
+      idempotencyKey,
+      existingManifestHash: storedHash ?? null,
+      requestedManifestHash: manifestHash,
+    },
+  );
+}
+
+function buildTaskManifestReplayResponse(input: {
+  row: TaskManifestRunLookupRow;
+  manifest: TaskManifest;
+  manifestHash: string;
+  fallbackArtifacts: TaskManifestArtifactsResponse;
+  fallbackArtifactRefs: JsonRecord[];
+}): JsonRecord {
+  const artifacts = parseJsonRecordLike(input.row.task_manifest_artifacts) ?? input.fallbackArtifacts;
+  const artifactRefs = getStoredArtifactRefsFromTriggerOptions(input.row.trigger_options) ?? input.fallbackArtifactRefs;
+  return {
+    ok: true,
+    idempotent: true,
+    reused: true,
+    queued: input.row.status === 'queued',
+    runId: Number(input.row.id),
+    status: input.row.status,
+    queuePosition: input.row.queue_position,
+    manifestId: input.row.task_manifest_id ?? input.manifest.manifestId,
+    idempotencyKey: input.row.idempotency_key ?? input.manifest.idempotencyKey,
+    manifestHash: getStoredManifestHashFromRun(input.row) ?? input.manifestHash,
+    artifacts,
+    artifactRefs,
+    manifestSource: buildManifestSourceFromRun(input.row),
+  };
+}
+
+async function getTaskManifestActiveConflict(
+  workspaceId: string,
+  autoWorktree: boolean,
+): Promise<{ activeRunId?: number; reason?: string } | null> {
+  if (autoWorktree) {
+    const concurrencyRows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM worker_settings WHERE key = 'run_now_max_concurrent'`,
+    );
+    const runNowMaxConcurrent = concurrencyRows.length > 0 ? parseInt(concurrencyRows[0].value, 10) : 3;
+    const activeWorktreeCount = Number((await queryOne<{ count: string }>(
+      `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') AND worktree_path IS NOT NULL`,
+      [workspaceId],
+    ))?.count ?? '0');
+
+    if (activeWorktreeCount >= runNowMaxConcurrent) {
+      const activeRun = await queryOne<{ id: number }>(
+        `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') AND worktree_path IS NOT NULL LIMIT 1`,
+        [workspaceId],
+      );
+      return {
+        activeRunId: activeRun ? Number(activeRun.id) : undefined,
+        reason: `Maximum ${runNowMaxConcurrent} concurrent worktree runs reached. Wait for an active run to complete or increase run_now_max_concurrent.`,
+      };
+    }
+    return null;
+  }
+
+  const activeRun = await queryOne<{ id: number }>(
+    `SELECT id
+       FROM pipeline_runs
+      WHERE workspace_id = $1
+        AND status IN ('queued', 'running', 'paused', 'pi_native')
+      ORDER BY id DESC
+      LIMIT 1`,
+    [workspaceId],
+  );
+  return activeRun ? { activeRunId: Number(activeRun.id) } : null;
+}
+
+async function reserveTaskManifestRun(input: {
+  workspaceId: string;
+  specPath: string;
+  idempotencyKey: string;
+  manifestId: string;
+  manifestHash: string;
+  artifacts: TaskManifestArtifactsResponse;
+  triggerOptions: JsonRecord;
+  queue: boolean;
+  autoWorktree: boolean;
+  mergeStrategy: 'pr' | 'draft-pr' | 'branch-only';
+  terminalMode: TerminalMode;
+  includeGraph: boolean;
+  agentType: AgentType;
+  agentModel: string | null;
+}): Promise<TaskManifestRunReservation> {
+  return transaction(async (client) => {
+    await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
+
+    const existingResult = await client.query<TaskManifestRunLookupRow>(
+      `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+         FROM pipeline_runs
+        WHERE workspace_id = $1
+          AND idempotency_key = $2
+        ORDER BY id DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [input.workspaceId, input.idempotencyKey],
+    );
+    const existing = existingResult.rows[0];
+    if (existing) {
+      assertExistingTaskManifestRunMatchesHash(existing, input.manifestHash, input.idempotencyKey);
+      return { kind: 'existing', row: existing };
+    }
+
+    let queuePosition: number | null = null;
+    if (input.queue) {
+      const queueCountResult = await client.query<{ count: string }>(
+        `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`,
+        [input.workspaceId],
+      );
+      const queueCount = Number(queueCountResult.rows[0]?.count ?? '0');
+      if (queueCount >= 10) {
+        throw new ConflictError('Queue full', { currentDepth: queueCount, maxQueueDepth: 10 });
+      }
+      queuePosition = queueCount + 1;
+    }
+
+    const insertResult = await client.query<{ id: number; queue_position: number | null }>(
+      `INSERT INTO pipeline_runs (
+         spec_path, workspace_id, status, trigger_type, queued_at, queue_position,
+         triggered_via, auto_worktree, auto_merge, merge_strategy, terminal_mode,
+         include_graph, agent, agent_type, agent_model,
+         idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+       ) VALUES (
+         $1, $2, 'queued', 'manual', NOW(), $3,
+         $4, $5, false, $6, $7,
+         $8, $9, $10, $11,
+         $12, $13, $14::jsonb, $15::jsonb
+       )
+       ON CONFLICT (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+       RETURNING id, queue_position`,
+      [
+        input.specPath,
+        input.workspaceId,
+        queuePosition,
+        input.queue ? 'queue' : 'run_now',
+        input.autoWorktree,
+        input.mergeStrategy,
+        input.terminalMode,
+        input.includeGraph,
+        input.agentType,
+        input.agentType,
+        input.agentModel,
+        input.idempotencyKey,
+        input.manifestId,
+        JSON.stringify(input.artifacts),
+        JSON.stringify(input.triggerOptions),
+      ],
+    );
+
+    const inserted = insertResult.rows[0];
+    if (inserted) {
+      return { kind: 'created', runId: Number(inserted.id), queuePosition: inserted.queue_position };
+    }
+
+    const racedResult = await client.query<TaskManifestRunLookupRow>(
+      `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+         FROM pipeline_runs
+        WHERE workspace_id = $1
+          AND idempotency_key = $2
+        ORDER BY id DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [input.workspaceId, input.idempotencyKey],
+    );
+    const raced = racedResult.rows[0];
+    if (!raced) {
+      throw new ConflictError('Task manifest idempotency reservation failed; retry the request');
+    }
+    assertExistingTaskManifestRunMatchesHash(raced, input.manifestHash, input.idempotencyKey);
+    return { kind: 'existing', row: raced };
+  });
+}
+
+async function deleteTaskManifestReservation(runId: number, idempotencyKey: string): Promise<void> {
+  await execute(
+    `DELETE FROM pipeline_runs
+      WHERE id = $1
+        AND idempotency_key = $2
+        AND status = 'queued'`,
+    [runId, idempotencyKey],
+  ).catch(() => undefined);
+}
+
+/**
+ * @swagger
+ * /api/pipeline/task-manifests/trigger:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Trigger a bounded Hermes task manifest through the Rorca pipeline broker
+ *     operationId: triggerTaskManifestPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Stable local task-manifest execution is safe for MCP/CLI because the route validates bounded Hermes manifests, requires workspaceId and idempotencyKey, rejects autoMerge=true and mergeStrategy=direct, and the manifest policy forbids deploys and credential-copying before any pg-boss job is inserted."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Validates a Hermes task manifest, writes manifest.json/tasks.md plus an internal synthetic spec under
+ *       forge/task-manifests/{manifestId}/, and queues the existing pipeline:run broker path. Generated MCP tool:
+ *       rorca_pipeline_task_manifests_trigger. Friendly alias: rorca_trigger_task_manifest. Hermes supplies
+ *       agent/model intent only; Rorca resolves provider/model interoperability through the broker and execution
+ *       engine. Execution precedence is request overrides > manifest.execution overrides > synthetic envelope/spec
+ *       metadata > provider/model auto-switch > workflow router > active fallback (model uses the analogous request
+ *       > manifest > spec > workflow > active chain). Safe defaults are dry-run support, branch/PR-only,
+ *       autoMerge=false, no deploys, no credential copying, no production DB writes, and no secret mutation.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, manifest, idempotencyKey]
+ *             properties:
+ *               workspaceId: { type: string, description: "Rorca workspace authority anchor" }
+ *               manifest: { type: object, description: "Hermes TaskManifest v1 payload" }
+ *               idempotencyKey: { type: string, format: uuid, description: "Hermes-issued idempotency key; must match manifest.idempotencyKey" }
+ *               dryRun: { type: boolean, default: false }
+ *               autoWorktree: { type: boolean, default: true }
+ *               autoMerge: { type: boolean, default: false, description: "Must be false; task manifests never auto-merge" }
+ *               mergeStrategy: { type: string, enum: [pr, draft-pr, branch-only], default: draft-pr }
+ *               agentOverride: { type: string, enum: [claude, opencode, codex, pi] }
+ *               modelOverride: { type: string }
+ *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh] }
+ *               executionEnvironment: { type: string, description: "Optional; carried to the broker only when local execution-environment support is installed, otherwise defaults to remote-rorca." }
+ *               executionEnvironmentId: { type: string, description: "Optional execution-environment identifier when supported." }
+ *               terminal_mode: { type: string, enum: [ansi-html, pty], nullable: true }
+ *               terminalMode: { type: string, enum: [ansi-html, pty], nullable: true }
+ *     responses:
+ *       200:
+ *         description: Dry-run plan or idempotency conflict
+ *       201:
+ *         description: Pipeline run queued with manifest artifact references
+ *       202:
+ *         description: Manifest accepted into the queue when queue=true
+ *       400: { description: Invalid task manifest, missing workspace/idempotency, invalid source authority, or ineligible route decision }
+ *       409: { description: Active workspace run conflict when autoWorktree=false }
+ *       422: { description: Unsafe task-manifest execution policy such as autoMerge=true or mergeStrategy=direct }
+ */
+async function handleTaskManifestTrigger(req: Request, res: Response): Promise<void> {
+  try {
+    const requestBody = req.body as TaskManifestTriggerRequestBody;
+    const manifestInput = resolveTaskManifestInput(requestBody);
+    const parsed = safeParseTaskManifest(manifestInput);
+    if (!parsed.success) {
+      const validationCode = taskManifestValidationCodeFromIssues(parsed.error.issues);
+      throw new ValidationError(
+        `Invalid task manifest: ${taskManifestIssueSummary(parsed.error.issues)}`,
+        taskManifestIssueDetails(validationCode, parsed.error.issues),
+      );
+    }
+    const manifest = parsed.data;
+
+    const requestWorkspaceId = stringFromId(requestBody.workspaceId ?? ((manifestInput as Record<string, unknown> | undefined)?.workspaceId));
+    if (!requestWorkspaceId) {
+      throw validationErrorWithCode('Missing required field: workspaceId', 'TASK_MANIFEST_WORKSPACE_ID_REQUIRED');
+    }
+
+    const requestIdempotencyKey = stringFromId(requestBody.idempotencyKey ?? ((manifestInput as Record<string, unknown> | undefined)?.idempotencyKey));
+    if (!requestIdempotencyKey) {
+      throw validationErrorWithCode('Missing required field: idempotencyKey', 'TASK_MANIFEST_IDEMPOTENCY_KEY_REQUIRED');
+    }
+
+    assertTaskManifestSourceAuthority(requestBody, manifest, requestWorkspaceId, requestIdempotencyKey);
+    assertTaskManifestRouteDecisionAllowed(manifest);
+
+    const resolvedAutoWorktree = requestBody.autoWorktree !== false;
+    const resolvedAutoMerge = requestBody.autoMerge === true;
+    const resolvedMergeStrategy = requestBody.mergeStrategy ?? manifest.execution.mergeStrategy;
+    if (resolvedAutoMerge && resolvedMergeStrategy === 'direct') {
+      throw new UnprocessableError(
+        'Task manifest execution rejects autoMerge=true with mergeStrategy=direct; high-risk direct repair must use PR, draft-PR, or branch-only review.',
+        'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR',
+        { code: 'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR' },
+      );
+    }
+    if (resolvedAutoMerge) {
+      throw new UnprocessableError(
+        'Task manifest execution rejects autoMerge=true; use PR, draft-PR, or branch-only review',
+        'TASK_MANIFEST_AUTO_MERGE_REJECTED',
+        { code: 'TASK_MANIFEST_AUTO_MERGE_REJECTED' },
+      );
+    }
+
+    if (resolvedMergeStrategy === 'direct') {
+      throw new UnprocessableError(
+        'Task manifest execution rejects mergeStrategy=direct; use pr, draft-pr, or branch-only',
+        'TASK_MANIFEST_DIRECT_MERGE_REJECTED',
+        { code: 'TASK_MANIFEST_DIRECT_MERGE_REJECTED' },
+      );
+    }
+
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [requestWorkspaceId]) as
+      { id: string; label: string; path: string; domain?: string } | undefined;
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const plannedEnvelope = buildPlannedTaskManifestEnvelope(workspace.path, manifest);
+    const plannedArtifacts = buildTaskManifestArtifactsResponse(plannedEnvelope);
+    const plannedArtifactRefs = buildTaskManifestArtifactRefs(plannedArtifacts);
+    const resolvedTerminalMode = resolveRequestedTerminalMode(requestBody.terminal_mode ?? requestBody.terminalMode ?? manifest.execution.terminalMode);
+    assertTerminalModeAvailable(resolvedTerminalMode);
+    const resolvedDryRun = requestBody.dryRun === true || manifest.policy.dryRun === true;
+    const resolvedAgentOverride = requestBody.agentOverride ?? manifest.execution.agentOverride;
+    const resolvedModelOverride = requestBody.modelOverride ?? manifest.execution.modelOverride;
+    const resolvedEffortLevel = requestBody.effortLevel ?? manifest.execution.effortLevel;
+    const executionEnvironmentResolution = resolveTaskManifestExecutionEnvironment(requestBody, manifest);
+    const resolvedExecutionEnvironment = executionEnvironmentResolution.executionEnvironment;
+    const resolvedExecutionEnvironmentId = executionEnvironmentResolution.executionEnvironmentId;
+
+    const taskManifestUser = await getEffectiveUser(req);
+    const taskManifestWfConfig = await resolveWorkflowConfig('pipeline_execution', taskManifestUser?.id);
+    const taskManifestExecutionOptions = resolveExecutionOptions({
+      requestAgentOverride: requestBody.agentOverride,
+      manifestAgentOverride: manifest.execution.agentOverride,
+      specAgentOverride: plannedEnvelope.spec.agentOverride,
+      requestModelOverride: requestBody.modelOverride,
+      manifestModelOverride: manifest.execution.modelOverride,
+      specModel: plannedEnvelope.spec.model ?? null,
+      workflowConfig: taskManifestWfConfig,
+      activeAgentFallback: activeAgent,
+      activeModelFallback: activeModel,
+      log: logger,
+    });
+
+    const plannedTriggerOptions = buildTaskManifestTriggerOptions({
+      manifest,
+      manifestHash: plannedEnvelope.manifestHash,
+      artifacts: plannedArtifacts,
+      artifactRefs: plannedArtifactRefs,
+      autoWorktree: resolvedAutoWorktree,
+      mergeStrategy: resolvedMergeStrategy,
+      agentOverride: resolvedAgentOverride,
+      modelOverride: resolvedModelOverride,
+      effortLevel: resolvedEffortLevel,
+      terminalMode: resolvedTerminalMode,
+      executionEnvironment: resolvedExecutionEnvironment,
+      executionEnvironmentId: resolvedExecutionEnvironmentId,
+      executionEnvironmentSupported: executionEnvironmentResolution.supported,
+      executionOptions: taskManifestExecutionOptions,
+      sourceStoryIds: plannedEnvelope.spec.sourceStoryIds,
+    });
+
+    if (resolvedDryRun) {
+      const dryRunEnvelope = await writeTaskManifestExecutionEnvelope({
+        workspacePath: workspace.path,
+        manifest,
+      });
+      const dryRunArtifacts = buildTaskManifestArtifactsResponse(dryRunEnvelope);
+      const dryRunArtifactRefs = buildTaskManifestArtifactRefs(dryRunArtifacts);
+      const dryRunTriggerOptions = buildTaskManifestTriggerOptions({
+        manifest,
+        manifestHash: dryRunEnvelope.manifestHash,
+        artifacts: dryRunArtifacts,
+        artifactRefs: dryRunArtifactRefs,
+        autoWorktree: resolvedAutoWorktree,
+        mergeStrategy: resolvedMergeStrategy,
+        agentOverride: resolvedAgentOverride,
+        modelOverride: resolvedModelOverride,
+        effortLevel: resolvedEffortLevel,
+        terminalMode: resolvedTerminalMode,
+        executionEnvironment: resolvedExecutionEnvironment,
+        executionEnvironmentId: resolvedExecutionEnvironmentId,
+        executionEnvironmentSupported: executionEnvironmentResolution.supported,
+        executionOptions: taskManifestExecutionOptions,
+        sourceStoryIds: dryRunEnvelope.spec.sourceStoryIds,
+      });
+      const model = taskManifestExecutionOptions.finalAgentModel ?? DEFAULT_MODEL;
+      const estimate = await estimateDryRunCost(
+        dryRunEnvelope.spec,
+        requestWorkspaceId,
+        model,
+        resolvedEffortLevel ? { enabled: true, effort: resolvedEffortLevel } : undefined,
+      );
+      res.status(200).json({
+        ok: true,
+        dryRun: true,
+        queued: false,
+        manifestId: manifest.manifestId,
+        idempotencyKey: requestIdempotencyKey,
+        manifestHash: dryRunEnvelope.manifestHash,
+        artifacts: dryRunArtifacts,
+        artifactRefs: dryRunArtifactRefs,
+        manifestSource: buildManifestSourceFromRun({
+          idempotency_key: requestIdempotencyKey,
+          task_manifest_id: manifest.manifestId,
+          task_manifest_artifacts: dryRunArtifacts,
+          trigger_options: dryRunTriggerOptions,
+        }),
+        estimatedExecutionPlan: buildTaskManifestEstimatedPlan({
+          manifest,
+          envelope: dryRunEnvelope,
+          artifacts: dryRunArtifacts,
+          autoWorktree: resolvedAutoWorktree,
+          mergeStrategy: resolvedMergeStrategy,
+          agentOverride: resolvedAgentOverride,
+          modelOverride: resolvedModelOverride,
+          effortLevel: resolvedEffortLevel,
+          terminalMode: resolvedTerminalMode,
+          executionEnvironment: resolvedExecutionEnvironment,
+          executionEnvironmentId: resolvedExecutionEnvironmentId,
+          executionEnvironmentSupported: executionEnvironmentResolution.supported,
+          executionOptions: taskManifestExecutionOptions,
+        }),
+        estimate,
+      });
+      return;
+    }
+
+    const existingIdempotentRun = await findTaskManifestRunByIdempotencyKey(requestWorkspaceId, requestIdempotencyKey);
+    if (existingIdempotentRun) {
+      assertExistingTaskManifestRunMatchesHash(existingIdempotentRun, plannedEnvelope.manifestHash, requestIdempotencyKey);
+      res.status(200).json(buildTaskManifestReplayResponse({
+        row: existingIdempotentRun,
+        manifest,
+        manifestHash: plannedEnvelope.manifestHash,
+        fallbackArtifacts: plannedArtifacts,
+        fallbackArtifactRefs: plannedArtifactRefs,
+      }));
+      return;
+    }
+
+    const activeConflict = await getTaskManifestActiveConflict(requestWorkspaceId, resolvedAutoWorktree);
+    if (activeConflict) {
+      res.status(200).json({
+        ok: false,
+        conflict: true,
+        activeRunId: activeConflict.activeRunId,
+        reason: activeConflict.reason,
+        manifestId: manifest.manifestId,
+        idempotencyKey: requestIdempotencyKey,
+        manifestHash: plannedEnvelope.manifestHash,
+      });
+      return;
+    }
+
+    const reservation = await reserveTaskManifestRun({
+      workspaceId: requestWorkspaceId,
+      specPath: plannedEnvelope.relativeSpecPath,
+      idempotencyKey: requestIdempotencyKey,
+      manifestId: manifest.manifestId,
+      manifestHash: plannedEnvelope.manifestHash,
+      artifacts: plannedArtifacts,
+      triggerOptions: plannedTriggerOptions,
+      queue: requestBody.queue === true,
+      autoWorktree: resolvedAutoWorktree,
+      mergeStrategy: resolvedMergeStrategy,
+      terminalMode: resolvedTerminalMode,
+      includeGraph: requestBody.includeGraph === true,
+      agentType: taskManifestExecutionOptions.resolvedAgentType,
+      agentModel: taskManifestExecutionOptions.finalAgentModel ?? null,
+    });
+
+    if (reservation.kind === 'existing') {
+      res.status(200).json(buildTaskManifestReplayResponse({
+        row: reservation.row,
+        manifest,
+        manifestHash: plannedEnvelope.manifestHash,
+        fallbackArtifacts: plannedArtifacts,
+        fallbackArtifactRefs: plannedArtifactRefs,
+      }));
+      return;
+    }
+
+    let envelope = plannedEnvelope;
+    let artifacts = plannedArtifacts;
+    let artifactRefs = plannedArtifactRefs;
+    let triggerOptions = plannedTriggerOptions;
+    try {
+      envelope = await writeTaskManifestExecutionEnvelope({
+        workspacePath: workspace.path,
+        manifest,
+      });
+      artifacts = buildTaskManifestArtifactsResponse(envelope);
+      artifactRefs = buildTaskManifestArtifactRefs(artifacts);
+      triggerOptions = buildTaskManifestTriggerOptions({
+        manifest,
+        manifestHash: envelope.manifestHash,
+        artifacts,
+        artifactRefs,
+        autoWorktree: resolvedAutoWorktree,
+        mergeStrategy: resolvedMergeStrategy,
+        agentOverride: resolvedAgentOverride,
+        modelOverride: resolvedModelOverride,
+        effortLevel: resolvedEffortLevel,
+        terminalMode: resolvedTerminalMode,
+        executionEnvironment: resolvedExecutionEnvironment,
+        executionEnvironmentId: resolvedExecutionEnvironmentId,
+        executionEnvironmentSupported: executionEnvironmentResolution.supported,
+        executionOptions: taskManifestExecutionOptions,
+        sourceStoryIds: envelope.spec.sourceStoryIds,
+      });
+      await execute(
+        `UPDATE pipeline_runs
+            SET task_manifest_artifacts = $1::jsonb,
+                trigger_options = $2::jsonb
+          WHERE id = $3`,
+        [JSON.stringify(artifacts), JSON.stringify(triggerOptions), reservation.runId],
+      );
+    } catch (artifactError) {
+      await deleteTaskManifestReservation(reservation.runId, requestIdempotencyKey);
+      throw artifactError;
+    }
+
+    if (requestBody.queue === true) {
+      res.status(202).json({
+        ok: true,
+        queued: true,
+        runId: reservation.runId,
+        queuePosition: reservation.queuePosition,
+        manifestId: manifest.manifestId,
+        idempotencyKey: requestIdempotencyKey,
+        manifestHash: envelope.manifestHash,
+        artifacts,
+        artifactRefs,
+        manifestSource: buildManifestSourceFromRun({
+          idempotency_key: requestIdempotencyKey,
+          task_manifest_id: manifest.manifestId,
+          task_manifest_artifacts: artifacts,
+          trigger_options: triggerOptions,
+        }),
+      });
+      return;
+    }
+
+    req.body = {
+      specPath: envelope.relativeSpecPath,
+      workspaceId: requestWorkspaceId,
+      autoWorktree: resolvedAutoWorktree,
+      autoMerge: false,
+      mergeStrategy: resolvedMergeStrategy,
+      dryRun: false,
+      triggerType: 'manual',
+      queue: false,
+      reservedRunId: reservation.runId,
+      forceSequential: requestBody.forceSequential === true,
+      includeGraph: requestBody.includeGraph === true,
+      readinessOverride: true,
+      idempotencyKey: requestIdempotencyKey,
+      manifestId: manifest.manifestId,
+      taskManifestArtifacts: artifacts,
+      taskManifestArtifactRefs: artifactRefs,
+      triggerOptions,
+      ...(requestBody.agentOverride ? { agentOverride: requestBody.agentOverride } : {}),
+      ...(manifest.execution.agentOverride ? { manifestExecutionAgentOverride: manifest.execution.agentOverride } : {}),
+      ...(requestBody.modelOverride ? { modelOverride: requestBody.modelOverride } : {}),
+      ...(manifest.execution.modelOverride ? { manifestExecutionModelOverride: manifest.execution.modelOverride } : {}),
+      ...(resolvedEffortLevel ? { effortLevel: resolvedEffortLevel } : {}),
+      terminalMode: resolvedTerminalMode,
+      ...(executionEnvironmentResolution.supported ? { executionEnvironment: resolvedExecutionEnvironment } : {}),
+      ...(executionEnvironmentResolution.supported && resolvedExecutionEnvironmentId ? { executionEnvironmentId: resolvedExecutionEnvironmentId } : {}),
+    };
+
+    await handlePipelineTrigger(req, res);
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Task manifest trigger');
+  }
+}
+
+router.post('/task-manifests/trigger', validateBody(TaskManifestTriggerRequestSchema), handleTaskManifestTrigger);
+router.post('/task-manifest/trigger', validateBody(TaskManifestTriggerRequestSchema), handleTaskManifestTrigger);
 
 // ─── POST /api/pipeline/context-preview — Preview context routing per story ───
 
@@ -3311,6 +4473,8 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       contextComparison = { predicted: predictedMap, actual: actualMap };
     }
 
+    const manifestSource = buildManifestSourceFromRun(run as PipelineRunRow);
+
     res.json({
       run,
       stories,
@@ -3332,6 +4496,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       storyTokenBreakdown,
       runState,
       contextComparison,
+      ...(manifestSource ? { manifestSource } : {}),
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Get run');
@@ -7735,8 +8900,9 @@ router.get('/queue/:workspaceId', async (req: Request, res: Response) => {
     const runNowMaxConcurrent = settingsMap['run_now_max_concurrent'] ? parseInt(settingsMap['run_now_max_concurrent'], 10) : 3;
 
     // Active runs for this workspace
-    const activeRuns = await query<{ id: number; spec_path: string; status: string; started_at: string; triggered_via: string; branch_name: string | null; worktree_path: string | null; agent_type: string }>(
-      `SELECT id, spec_path, status, started_at, triggered_via, branch_name, worktree_path, agent_type
+    const activeRuns = await query<PipelineRunRow>(
+      `SELECT id, spec_path, workspace_id, status, started_at, triggered_via, branch_name, worktree_path, agent_type,
+              idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
        FROM pipeline_runs
        WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native')
        ORDER BY started_at ASC`,
@@ -7744,17 +8910,23 @@ router.get('/queue/:workspaceId', async (req: Request, res: Response) => {
     );
 
     // Queued runs for this workspace
-    const queuedRuns = await query<{ id: number; spec_path: string; status: string; queued_at: string; queue_position: number; triggered_via: string; auto_worktree: boolean }>(
-      `SELECT id, spec_path, status, queued_at, queue_position, triggered_via, auto_worktree
+    const queuedRuns = await query<PipelineRunRow>(
+      `SELECT id, spec_path, workspace_id, status, queued_at, queue_position, triggered_via, auto_worktree,
+              idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
        FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
        ORDER BY queue_position ASC, queued_at ASC`,
       [workspaceId],
     );
 
+    const withManifestSource = (run: PipelineRunRow) => ({
+      ...run,
+      ...(buildManifestSourceFromRun(run) ? { manifestSource: buildManifestSourceFromRun(run) } : {}),
+    });
+
     res.json({
-      active: activeRuns,
-      queued: queuedRuns,
+      active: activeRuns.map(withManifestSource),
+      queued: queuedRuns.map(withManifestSource),
       queueDepth: queuedRuns.length,
       maxQueueDepth: MAX_QUEUE_DEPTH,
       queueMaxConcurrent,

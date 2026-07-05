@@ -20,6 +20,7 @@ import { logger } from './logger';
 export type WorkflowRuntime = 'native' | 'claude' | 'opencode' | 'codex' | 'pi';
 
 export type WorkflowId = 'spec_generation' | 'pipeline_execution' | 'memory_consolidation';
+export type WorkflowConfigSource = 'workflow_configs' | 'agent_config' | 'env' | 'default';
 
 export interface ResolvedWorkflowConfig {
   workflowId: string;
@@ -28,6 +29,12 @@ export interface ResolvedWorkflowConfig {
   model: string | null;
   apiKey: string | null;
   baseUrl: string | null;
+  /** Non-enumerable at runtime; used internally to distinguish hardcoded defaults from explicit workflow routing. */
+  runtimeSource?: WorkflowConfigSource;
+  /** Non-enumerable at runtime; used internally for execution-option precedence diagnostics. */
+  modelSource?: WorkflowConfigSource;
+  /** Non-enumerable at runtime; used internally for diagnostics. */
+  providerSource?: WorkflowConfigSource;
 }
 
 interface WorkflowConfigRow {
@@ -76,6 +83,9 @@ export async function resolveWorkflowConfig(
   let runtime: WorkflowRuntime | null = null;
   let provider: ProviderType | null = null;
   let model: string | null = null;
+  let runtimeSource: WorkflowConfigSource | undefined;
+  let providerSource: WorkflowConfigSource | undefined;
+  let modelSource: WorkflowConfigSource | undefined;
 
   // ── Layer 1: DB workflow_configs ──────────────────────────────────────────
   try {
@@ -87,6 +97,11 @@ export async function resolveWorkflowConfig(
       runtime = row.runtime as WorkflowRuntime;
       provider = row.provider as ProviderType;
       model = row.model;
+      runtimeSource = 'workflow_configs';
+      providerSource = 'workflow_configs';
+      if (row.model) {
+        modelSource = 'workflow_configs';
+      }
     }
   } catch {
     // Table may not exist yet — fall through
@@ -101,7 +116,13 @@ export async function resolveWorkflowConfig(
       );
       if (agentRow) {
         runtime = AGENT_TO_RUNTIME[agentRow.agent_type] ?? null;
-        model = model ?? agentRow.agent_model;
+        if (runtime) {
+          runtimeSource = 'agent_config';
+        }
+        if (!model && agentRow.agent_model) {
+          model = agentRow.agent_model;
+          modelSource = 'agent_config';
+        }
       }
     } catch {
       // Table may not exist yet — fall through
@@ -113,29 +134,48 @@ export async function resolveWorkflowConfig(
     const envAgent = process.env.RORCA_AGENT?.toLowerCase().trim();
     if (envAgent && AGENT_TO_RUNTIME[envAgent]) {
       runtime = AGENT_TO_RUNTIME[envAgent];
+      runtimeSource = 'env';
     }
   }
   if (!model) {
-    model = process.env.RORCA_MODEL?.trim() || null;
+    const envModel = process.env.RORCA_MODEL?.trim() || null;
+    if (envModel) {
+      model = envModel;
+      modelSource = 'env';
+    }
   }
   if (!provider) {
     const specProvider = process.env.SPEC_PROVIDER?.toLowerCase().trim();
     if (specProvider === 'anthropic' || specProvider === 'openrouter' || specProvider === 'openai-compat') {
       provider = specProvider;
+      providerSource = 'env';
     } else if (specProvider === 'claude') {
       provider = 'claude-cli';
+      providerSource = 'env';
     }
   }
 
   // ── Layer 4: hardcoded defaults ──────────────────────────────────────────
   const wfId = workflowId as WorkflowId;
-  runtime = runtime ?? RUNTIME_DEFAULTS[wfId] ?? 'native';
-  provider = provider ?? DEFAULT_PROVIDER;
+  if (!runtime) {
+    runtime = RUNTIME_DEFAULTS[wfId] ?? 'native';
+    runtimeSource = 'default';
+  }
+  if (!provider) {
+    provider = DEFAULT_PROVIDER;
+    providerSource = 'default';
+  }
 
   // ── API key resolution ───────────────────────────────────────────────────
   const { apiKey, baseUrl } = await resolveApiKey(userId ?? null, provider, runtime);
 
-  return { workflowId, runtime, provider, model, apiKey, baseUrl };
+  const resolved: ResolvedWorkflowConfig = { workflowId, runtime, provider, model, apiKey, baseUrl };
+  Object.defineProperties(resolved, {
+    runtimeSource: { value: runtimeSource, enumerable: false },
+    modelSource: { value: modelSource, enumerable: false },
+    providerSource: { value: providerSource, enumerable: false },
+  });
+  return resolved;
 }
 
 // ─── API Key Helper ─────────────────────────────────────────────────────────

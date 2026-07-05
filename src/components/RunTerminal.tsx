@@ -1028,32 +1028,36 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     <div className="h-full w-full flex flex-col">
       {/* ─── Toolbar ─────────────────────────────────────────────────────── */}
       <div className="shrink-0 px-3 py-1.5 border-b border-border bg-panel flex items-center gap-1">
-        <button
-          onClick={() => handleSetMode('raw')}
-          className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-            resolvedMode === 'raw'
-              ? 'bg-accent/15 text-accent'
-              : 'text-muted hover:text-[var(--text)]'
-          }`}
-        >
-          <span className="flex items-center gap-1">
-            <TerminalIcon size={11} />
-            {terminalMode === 'pty' ? 'Terminal' : 'Raw'}
-          </span>
-        </button>
-        <button
-          onClick={() => handleSetMode('semantic')}
-          className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-            resolvedMode === 'semantic'
-              ? 'bg-accent/15 text-accent'
-              : 'text-muted hover:text-[var(--text)]'
-          }`}
-        >
-          <span className="flex items-center gap-1">
-            <Layers size={11} />
-            Semantic
-          </span>
-        </button>
+        {!resolvingEffectiveMode && (
+          <>
+            <button
+              onClick={() => handleSetMode('raw')}
+              className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+                resolvedMode === 'raw'
+                  ? 'bg-accent/15 text-accent'
+                  : 'text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              <span className="flex items-center gap-1">
+                <TerminalIcon size={11} />
+                {terminalMode === 'pty' ? 'Terminal' : 'Raw'}
+              </span>
+            </button>
+            <button
+              onClick={() => handleSetMode('semantic')}
+              className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+                resolvedMode === 'semantic'
+                  ? 'bg-accent/15 text-accent'
+                  : 'text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              <span className="flex items-center gap-1">
+                <Layers size={11} />
+                Semantic
+              </span>
+            </button>
+          </>
+        )}
 
         {/* Agent type badge (shown when not claude) */}
         {showAgentBadge && (
@@ -1074,7 +1078,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         </span>
 
         {/* Copy button (raw mode only) */}
-        {terminalMode !== 'pty' && resolvedMode === 'raw' && (
+        {terminalMode !== 'pty' && !resolvingEffectiveMode && resolvedMode === 'raw' && (
           <button
             onClick={handleCopy}
             className="ml-auto p-1.5 rounded-md text-muted hover:text-[var(--text)] transition-colors"

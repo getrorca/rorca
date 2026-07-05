@@ -1,6 +1,6 @@
 {
-  "contractVersion": "2.0.0",
-  "generatedAt": "2026-07-03T21:24:52.536Z",
+  "contractVersion": "2.1.0",
+  "generatedAt": "2026-07-04T23:44:23.938Z",
   "routes": [
     {
       "method": "GET",
@@ -3413,6 +3413,121 @@
         "409": {}
       },
       "hash": "sha256:719233bff39bb836289f4d0b4477bf43690765ca36cb48de49dd9173e75abed9"
+    },
+    {
+      "method": "POST",
+      "path": "/api/pipeline/task-manifests/trigger",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "agentOverride": {
+                    "enum": [
+                      "claude",
+                      "opencode",
+                      "codex",
+                      "pi"
+                    ],
+                    "type": "string"
+                  },
+                  "autoMerge": {
+                    "default": false,
+                    "description": "Must be false; task manifests never auto-merge",
+                    "type": "boolean"
+                  },
+                  "autoWorktree": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "dryRun": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "effortLevel": {
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "max",
+                      "xhigh"
+                    ],
+                    "type": "string"
+                  },
+                  "executionEnvironment": {
+                    "description": "Optional; carried to the broker only when local execution-environment support is installed, otherwise defaults to remote-rorca.",
+                    "type": "string"
+                  },
+                  "executionEnvironmentId": {
+                    "description": "Optional execution-environment identifier when supported.",
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "description": "Hermes-issued idempotency key; must match manifest.idempotencyKey",
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "manifest": {
+                    "description": "Hermes TaskManifest v1 payload",
+                    "type": "object"
+                  },
+                  "mergeStrategy": {
+                    "default": "draft-pr",
+                    "enum": [
+                      "pr",
+                      "draft-pr",
+                      "branch-only"
+                    ],
+                    "type": "string"
+                  },
+                  "modelOverride": {
+                    "type": "string"
+                  },
+                  "terminal_mode": {
+                    "enum": [
+                      "ansi-html",
+                      "pty"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "terminalMode": {
+                    "enum": [
+                      "ansi-html",
+                      "pty"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "description": "Rorca workspace authority anchor",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "manifest",
+                  "idempotencyKey"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "202": {},
+        "400": {},
+        "409": {},
+        "422": {}
+      },
+      "hash": "sha256:8c6ce52dc89a84c164046c455b816671bfceb1d548329d675efc3e9bd7d7f528"
     },
     {
       "method": "POST",

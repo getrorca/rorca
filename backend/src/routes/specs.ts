@@ -590,9 +590,13 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
-function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string; reviewStatus?: ReviewStatus; source?: string; model?: string } {
+function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string; reviewStatus?: ReviewStatus; source?: string; model?: string; internal?: unknown } {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
+}
+
+function isInternalSpecContent(content: { internal?: unknown; source?: unknown }): boolean {
+  return content.internal === true || content.internal === 'true' || content.source === 'hermes-task-manifest';
 }
 
 /**
@@ -638,6 +642,9 @@ async function buildSummary(
   workspaceId?: string,
 ): Promise<SpecSummary> {
   const content = parseSpecFile(filePath);
+  if (isInternalSpecContent(content)) {
+    throw new ValidationError('Internal synthetic spec is hidden from user spec summaries');
+  }
   const stat = fs.statSync(filePath);
   const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
   const specId = fileName.replace('.json', '');
@@ -6408,6 +6415,7 @@ async function rebuildSearchIndex(workspaceId: string, workspacePath: string): P
     try {
       const filePath = path.join(pendingDir, file);
       const content = parseSpecFile(filePath);
+      if (isInternalSpecContent(content)) continue;
       const slug = file.replace('.json', '');
       const fields = extractSearchableFields(content);
       const stat = fs.statSync(filePath);
@@ -6423,6 +6431,7 @@ async function rebuildSearchIndex(workspaceId: string, workspacePath: string): P
     try {
       const filePath = path.join(approvedDir, file);
       const content = parseSpecFile(filePath);
+      if (isInternalSpecContent(content)) continue;
       const slug = file.replace('.json', '');
       const fields = extractSearchableFields(content);
       const stat = fs.statSync(filePath);
@@ -6874,6 +6883,7 @@ router.get('/search/stories', async (req: Request, res: Response) => {
         const filePath = path.join(dir, file);
         try {
           const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          if (isInternalSpecContent(content)) continue;
           const specTitle = content.title ?? specId;
           const stories: UserStory[] = content.userStories ?? [];
 

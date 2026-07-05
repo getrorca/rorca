@@ -194,7 +194,7 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(screen.getByText('Waiting for semantic events…')).toBeInTheDocument();
   });
 
-  it('uses neutral copy while resolving PTY support and hides ANSI toggles in real PTY mode', async () => {
+  it('uses neutral copy while resolving PTY support and shows PTY terminal/semantic controls after resolution', async () => {
     renderTerminal('pty');
 
     expect(screen.getByText('Checking PTY support')).toBeInTheDocument();
@@ -213,9 +213,10 @@ describe('RunTerminal PTY fallback UI', () => {
     });
 
     expect(await screen.findByText('Full PTY • click to focus')).toBeInTheDocument();
-    expect(screen.getByText(/real xterm\.js terminal with stdin\/stdout/)).toBeInTheDocument();
+    expect(screen.getByText(/Terminal view: full PTY attachment with stdin\/stdout/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Terminal/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Semantic/i })).toBeInTheDocument();
   });
 
   it('focuses the xterm pane and sends keyboard input only while in authoritative PTY mode', async () => {

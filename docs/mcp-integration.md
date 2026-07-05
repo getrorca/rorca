@@ -23,7 +23,12 @@ Hermes is an **external distribution channel**, not a second control plane.
 - Hermes lets an external agent host discover and call Rorca's MCP tools and run
   the bundled skills.
 - Rorca remains the source of truth for spec state, run state, approvals,
-  memory, retrieval/graph context, and branch/PR/merge behavior.
+  memory, retrieval/graph context, provider/model resolution, and
+  branch/PR/merge behavior.
+- Hermes does **not** implement provider/model interoperability. It passes
+  agent/model intent to Rorca; Rorca's execution engine and provider broker
+  resolve execution through the first-class `claude`, `opencode`, `codex`, and
+  `pi` paths.
 - Hermes is **not** a replacement for the first-party Rorca app/TUI. The
   human-facing kanban, spec review UX, analytics, and settings live in Rorca
   itself. Hermes is the machine- and operator-facing path for getting work in
@@ -82,6 +87,7 @@ to the same route — prefer the canonical name in new automation.
 | List specs | `rorca_list_specs` | — |
 | Approve a spec | `rorca_approve_spec` | `rorca_specs_by_specId_approve` |
 | Trigger a pipeline run | `rorca_trigger_run` | `rorca_pipeline_trigger` |
+| Trigger a bounded Hermes task manifest | `rorca_pipeline_task_manifests_trigger` | `rorca_trigger_task_manifest` |
 | Pipeline status (recent runs) | `rorca_pipeline_status` | — |
 | Single run status | `rorca_run_status` | `rorca_get_pipeline_runs_by_runId` |
 | Retry failed stories | `rorca_retry_story` | `rorca_pipeline_runs_by_runId_retry` |
@@ -166,7 +172,184 @@ The skills teach this exact loop. Hermes should not collapse or skip steps.
 `/skill:rorca-forge-run`, but the underlying steps and verification are the
 same.
 
-## 5. Graph Lite and BYOP — what to expect
+## 5. Two execution lanes: full specs vs Hermes task manifests
+
+Rorca is the canonical source of truth in both lanes. The difference is the
+shape of the work admitted into the broker.
+
+| Lane | Use when | Flow | Canonical entry point |
+| --- | --- | --- | --- |
+| **Mode A — Rorca delegated execution** | A product brief, new feature, architecture change, or anything that needs durable spec review. | brief → spec → approve → Rorca run → PR/evidence/memory | `rorca_create_spec` → `rorca_approve_spec` → `rorca_trigger_run` |
+| **Mode B — Hermes task-manifest execution via Rorca broker** | A bounded, already-scoped Hermes/HRC repair can be represented as a typed manifest with explicit context refs, target paths, validation, and safe policy defaults. | Rorca spec/context → Hermes task manifest/`tasks.md` → Rorca provider broker → PR/evidence/memory | `POST /api/pipeline/task-manifests/trigger` / `rorca_trigger_task_manifest` |
+
+Mode B is **not** a separate Hermes execution engine. Hermes may propose
+`agentOverride`, `modelOverride`, or effort/terminal intent, but it does not own
+provider/model routing or compatibility. Rorca validates the manifest, creates a
+synthetic internal execution envelope, and resolves the final provider/model via
+its broker and execution engine (`claude`, `opencode`, `codex`, `pi`).
+
+### Safe defaults for Mode B
+
+Task-manifest execution is intentionally narrower than a normal spec run. Use
+these defaults verbatim when preparing or reviewing a Hermes manifest:
+
+- `dry-run` support
+- branch/PR-only
+- `autoMerge=false`
+- no deploys
+- no credential copying
+- no production DB writes
+- no secret mutation
+
+Rorca enforces the typed manifest shape, rejects `autoMerge=true` and direct
+merge strategies, and preserves manifest artifacts. Operators are still
+responsible for keeping the bounded task content aligned with the last three
+items above; do not encode production database writes, secret rotation, or raw
+credential handling as a task-manifest repair.
+
+### Canonical API/tool contract
+
+- **REST endpoint**: `POST /api/pipeline/task-manifests/trigger`
+- **Generated MCP tool**: `rorca_pipeline_task_manifests_trigger`
+- **Friendly MCP alias**: `rorca_trigger_task_manifest`
+- **Swagger exposure**: `x-rorca-tier: public`, `x-rorca-public-api: true`
+- **Swagger rationale**: "Stable local task-manifest execution is safe for MCP/CLI because the route validates bounded Hermes manifests, requires workspaceId and idempotencyKey, rejects autoMerge=true and mergeStrategy=direct, and the manifest policy forbids deploys and credential-copying before any pg-boss job is inserted."
+
+Request summary:
+
+- Required: `workspaceId`, `manifest` (TaskManifest v1 JSON), and
+  `idempotencyKey` matching `manifest.idempotencyKey`.
+- Optional: `dryRun`, `autoWorktree`, `mergeStrategy` (`pr`, `draft-pr`, or
+  `branch-only`), `agentOverride`, `modelOverride`, effort/terminal settings,
+  and execution-environment hints when supported.
+- Unsafe: `autoMerge=true` and `mergeStrategy=direct` are rejected.
+
+Response summary:
+
+- `200` — dry-run plan, idempotent replay, or active-run conflict summary.
+- `201` — run accepted and delegated to the existing Rorca pipeline broker.
+- `202` — queued response when the caller explicitly queues the manifest.
+- `400` / `409` / `422` — invalid manifest/source authority, active conflict,
+  or unsafe execution policy.
+
+### Manifest JSON vs `tasks.md`
+
+`manifest.json` is canonical. `tasks.md` is a deterministic, human-readable
+projection for operators and agents; it is useful context, not durable state.
+Treat it the same way you treat synthesized direction-stack output: readable and
+reviewable, but not the source of truth.
+
+Safe manifest excerpt (no secrets, no raw logs, no model API keys):
+
+```json
+{
+  "manifestVersion": 1,
+  "manifestId": "33333333-3333-4333-8333-333333333333",
+  "idempotencyKey": "44444444-4444-4444-8444-444444444444",
+  "workspaceId": "ws-hermes",
+  "source": {
+    "rorca": {
+      "specId": "rorca-task-manifest-execution-bridge-for-hermes",
+      "runId": "20260316000440",
+      "storyId": "TMB-008"
+    },
+    "operator": {
+      "intentId": "hrc-repair-intent-008",
+      "summary": "Run a bounded bridge repair with PR-only review."
+    }
+  },
+  "routeDecision": {
+    "route": "hermes.hrc.task-manifest",
+    "reason": "Bounded repair fits the task-manifest bridge."
+  },
+  "objective": "Validate the task-manifest bridge without live external side effects.",
+  "boundedScope": {
+    "summary": "Modify only bridge route tests and fixtures.",
+    "allowedPaths": ["backend/src/routes/pipeline.ts"],
+    "forbiddenPaths": ["backend/src/db/pg-migrations"]
+  },
+  "tasks": [
+    {
+      "taskId": "TMB-008-HRC-route-contract",
+      "title": "Cover HRC manifest routing",
+      "targetPaths": ["backend/src/routes/__tests__/pipeline-hermes-manifest-bridge.test.ts"],
+      "acceptanceCriteria": ["Route accepts typed manifests", "Legacy repair metadata is rejected"]
+    }
+  ],
+  "context": {
+    "summary": "Context refs point to bounded artifacts; raw prompt bundles stay outside Rorca.",
+    "tasksMdProjection": {
+      "path": "tasks.md",
+      "generatedFrom": "manifest",
+      "durableSourceOfTruth": false
+    }
+  },
+  "policy": {
+    "dryRun": true,
+    "branchPrOnly": true,
+    "autoMerge": false,
+    "deploysAllowed": false,
+    "credentialCopyingAllowed": false
+  },
+  "execution": {
+    "agentOverride": "opencode",
+    "modelOverride": "anthropic/claude-sonnet-4-5-20250929",
+    "mergeStrategy": "draft-pr"
+  },
+  "validation": {
+    "requiredCommands": ["cd backend && npx tsc --noEmit"],
+    "successCriteria": ["Typecheck passes"]
+  },
+  "evidence": []
+}
+```
+
+Corresponding `tasks.md` projection excerpt:
+
+```md
+# Task Manifest Projection
+
+> Deterministic projection for operator and agent readability only.
+> `manifest.json` is the durable source of truth.
+
+## Manifest ID
+33333333-3333-4333-8333-333333333333
+
+## Guardrails
+
+### Policy
+- Dry Run: true
+- Branch PR Only: true
+- Auto Merge: false
+- Deploys Allowed: false
+- Credential Copying Allowed: false
+
+## Tasks
+
+### TMB-008-HRC-route-contract — Cover HRC manifest routing
+- Target Paths:
+  - backend/src/routes/__tests__/pipeline-hermes-manifest-bridge.test.ts
+- Acceptance Criteria:
+  - Route accepts typed manifests
+  - Legacy repair metadata is rejected
+```
+
+### When Mode B must fall back to Mode A
+
+Use a normal Rorca spec/run instead of the task-manifest bridge when any of
+these are true:
+
+| Condition | Required route |
+| --- | --- |
+| New feature | Mode A — draft/review/approve a full Rorca spec |
+| Broad architecture change | Mode A |
+| High-risk security/data/ops work | Mode A |
+| Ambiguous scope | Mode A |
+| Missing context or weak provenance refs | Mode A |
+| Policy mismatch with the safe defaults above | Mode A |
+| Scope expansion beyond the manifest's bounded paths/tasks | Stop Mode B and route back to Mode A |
+
+## 6. Graph Lite and BYOP — what to expect
 
 Hermes must stay truthful about Rorca's database and graph capabilities, which
 depend on how the connected workspace's database is configured.
@@ -205,7 +388,7 @@ For human setup of each database path, see
 [`../QUICKSTART.md`](../QUICKSTART.md), and the BYOP walkthrough in
 [`supabase-setup.md`](supabase-setup.md).
 
-## 6. Do not overclaim
+## 7. Do not overclaim
 
 To keep Hermes honest:
 
@@ -215,8 +398,13 @@ To keep Hermes honest:
 - Do not treat backend context-summary backfill as the normal creation
   contract — it is a repair-only fallback.
 - Do not present Hermes as a replacement for the first-party Rorca app/TUI.
+- Do not claim Hermes owns provider/model routing or interoperability; it passes
+  intent to Rorca.
+- Do not treat `tasks.md` as canonical state; the manifest JSON is canonical.
+- Do not use the task-manifest bridge for broad, high-risk, or expanding work
+  that belongs in a reviewed Rorca spec/run.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Check |
 | --- | --- |

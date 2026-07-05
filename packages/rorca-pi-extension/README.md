@@ -377,13 +377,16 @@ stable aliases — prefer the canonical name):
 - list specs: `rorca_list_specs`
 - approve a spec: `rorca_approve_spec`
 - trigger a run: `rorca_trigger_run`
+- trigger a bounded Hermes task manifest through Rorca's broker: `rorca_pipeline_task_manifests_trigger` (alias `rorca_trigger_task_manifest`)
 - pipeline/run status: `rorca_pipeline_status`, `rorca_run_status`
 - retry stories: `rorca_retry_story`
 
 The authoritative source is `backend/src/lib/mcp-http.ts`. Do not hard code older
-names that are not present in that surface. See
-[`docs/mcp-integration.md`](../../docs/mcp-integration.md) for the full table and
-registration details.
+names that are not present in that surface. Hermes does not implement
+provider/model interoperability; task-manifest calls pass agent/model intent to
+Rorca, and Rorca resolves the final execution path. See
+[`docs/mcp-integration.md`](../../docs/mcp-integration.md) for the full table,
+two-lane operating model, and registration details.
 
 ## Graph Lite and BYOP behavior
 
