@@ -843,7 +843,14 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
 
-    if (payload.agent === 'pi' && isPiExternalOrchestrationEnabled()) {
+    // External Pi orchestration is only for local-user runner jobs. Remote Rorca
+    // jobs must be executed by this worker; otherwise the worker consumes the
+    // pg-boss job and leaves pipeline_runs stuck in status='queued'.
+    if (
+      payload.agent === 'pi'
+      && payload.executionEnvironment === 'local-user'
+      && isPiExternalOrchestrationEnabled()
+    ) {
       const runRow = await queryOne<{ workspace_id: number }>(
         'SELECT workspace_id FROM pipeline_runs WHERE id = $1',
         [payload.runId],
@@ -854,6 +861,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           run_id: payload.runId,
           spec_path: payload.specPath,
           model: payload.model ?? null,
+          execution_environment: payload.executionEnvironment,
         });
       }
       await getBoss().complete('pipeline:run', job.id);

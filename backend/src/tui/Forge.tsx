@@ -129,7 +129,11 @@ interface SpecGenerationJobResponse {
   error?: string | null;
 }
 
-type TerminalMode = 'ansi-html' | 'pty';
+type TerminalMode = 'ansi-html' | 'pty' | 'native-pty';
+
+function isPtyTerminalMode(value: unknown): value is Extract<TerminalMode, 'pty' | 'native-pty'> {
+  return value === 'pty' || value === 'native-pty';
+}
 type ForegroundStreamState = 'connecting' | 'live' | 'reconnecting' | 'done' | 'disconnected';
 
 interface OutputRunMeta {
@@ -2418,7 +2422,7 @@ export function Forge(): JSX.Element {
   }, [foregroundRun]);
 
   useEffect(() => {
-    if (!foregroundRun || foregroundRun.terminalMode !== 'pty') {
+    if (!foregroundRun || !isPtyTerminalMode(foregroundRun.terminalMode)) {
       return;
     }
     if (foregroundRun.streamState === 'done' || foregroundRun.streamState === 'disconnected' || foregroundRun.cancelRequested) {

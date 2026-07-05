@@ -55,7 +55,7 @@ interface PipelineRun {
   pr_creating?: boolean;
   pr_creation_error?: string | null;
   include_graph?: boolean;
-  terminal_mode?: 'ansi-html' | 'pty';
+  terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
 }
 
 interface StoryResultSeed {
@@ -1375,7 +1375,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
   // Detect if we should show multi-pane terminal (parallelism > 1 with 2+ concurrent stories)
   const useMultiPane = useMemo(() => {
-    if (!run || run.terminal_mode === 'pty' || (run.parallelism ?? 1) <= 1) return false;
+    if (!run || run.terminal_mode === 'pty' || run.terminal_mode === 'native-pty' || (run.parallelism ?? 1) <= 1) return false;
     // Count stories that have started but not finished
     const started = new Set<string>();
     const finished = new Set<string>();

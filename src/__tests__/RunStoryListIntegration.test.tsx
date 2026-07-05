@@ -85,15 +85,16 @@ function makeWalEvent(overrides: Partial<WalEvent> & { event_type: string }): Wa
   };
 }
 
-function makeSpecStory(id: string, title: string, deps: string[] = []) {
-  return { id, title, dependsOn: deps, passes: false };
+function makeSpecStory(id: string, title: string, deps: string[] = [], passes = false) {
+  return { id, title, dependsOn: deps, passes };
 }
 
-function makeStoryResult(storyId: string, status: string, elapsed = 30) {
+function makeStoryResult(storyId: string, status: string, elapsed = 30, reason: string | null = null) {
   return {
     story_id: storyId,
     status,
     elapsed_seconds: elapsed,
+    reason,
     started_at: new Date(Date.now() - elapsed * 1000).toISOString(),
     finished_at: status !== 'running' ? new Date().toISOString() : null,
     retries: 0,
@@ -102,12 +103,15 @@ function makeStoryResult(storyId: string, status: string, elapsed = 30) {
   };
 }
 
-function setupRunApiFetch(runId: number, stories: ReturnType<typeof makeStoryResult>[], specStories: ReturnType<typeof makeSpecStory>[], runStatus = 'running') {
+function setupRunApiFetch(runId: number, stories: ReturnType<typeof makeStoryResult>[], specStories: ReturnType<typeof makeSpecStory>[], runStatus = 'running', runOverrides: Record<string, unknown> = {}) {
   mockApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
     if (path.includes(`/api/pipeline/runs/${runId}`)) {
       return {
-        run: createMockRun({ id: runId, status: runStatus as 'running' | 'done', workspace_id: 'ws-1' }),
+        run: {
+          ...createMockRun({ id: runId, status: runStatus as 'running' | 'done', workspace_id: 'ws-1' }),
+          ...runOverrides,
+        },
         stories,
         specStories,
       };
@@ -399,6 +403,83 @@ describe('RunStoryList Integration', () => {
     // Footer counts
     expect(screen.getByText('1 passed')).toBeInTheDocument();
     expect(screen.getByText('1 failed')).toBeInTheDocument();
+  });
+
+  it('uses persisted trigger-time wave plan instead of recomputing from mutated pass flags', async () => {
+    const specStories = [
+      makeSpecStory('US-001', 'Already carried forward', [], true),
+      // US-002 has passes:true because the engine mutated the spec after it ran;
+      // the UI must still keep it in its original runtime wave.
+      makeSpecStory('US-002', 'Completed in runtime wave', [], true),
+      makeSpecStory('US-003', 'Still running in same runtime wave'),
+    ];
+
+    setupRunApiFetch(42, [
+      makeStoryResult('US-001', 'skip', 1, 'previously_passed'),
+      makeStoryResult('US-002', 'pass', 45),
+    ], specStories, 'running', {
+      parallelism: 2,
+      trigger_options: {
+        orchestration: {
+          mode: 'wave-parallel',
+          parallelism: 2,
+          waveCount: 1,
+          waves: [{ index: 0, storyIds: ['US-002', 'US-003'] }],
+        },
+      },
+    });
+
+    const startedEvent = makeWalEvent({
+      event_type: 'story_started',
+      story_id: 'US-003',
+      payload: JSON.stringify({ run_id: 42, wave_index: 0 }),
+    });
+
+    renderWithProviders(
+      <RunStoryList runId={42} walEvents={[startedEvent]} parallelism={2} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Wave 0: 2 stories/i)).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('1 pre-passed')).toBeInTheDocument();
+    expect(screen.getByText('US-002')).toBeInTheDocument();
+    expect(screen.getByText('US-003')).toBeInTheDocument();
+    expect(screen.queryByText('Wave 1')).not.toBeInTheDocument();
+  });
+
+  it('uses WAL wave indices for existing runs without persisted trigger wave plans', async () => {
+    const specStories = [
+      makeSpecStory('US-001', 'Runtime wave member', [], true),
+      makeSpecStory('US-002', 'Runtime wave member two'),
+      makeSpecStory('US-003', 'Not started yet'),
+    ];
+
+    setupRunApiFetch(42, [makeStoryResult('US-001', 'pass', 30)], specStories, 'running');
+
+    const waveEventOne = makeWalEvent({
+      event_type: 'story_started',
+      story_id: 'US-001',
+      payload: JSON.stringify({ run_id: 42, wave_index: 2 }),
+    });
+    const waveEventTwo = makeWalEvent({
+      event_type: 'story_started',
+      story_id: 'US-002',
+      payload: JSON.stringify({ run_id: 42, wave_index: 2 }),
+    });
+
+    renderWithProviders(
+      <RunStoryList runId={42} walEvents={[waveEventOne, waveEventTwo]} parallelism={3} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Wave 2: 2 stories/i)).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Wave 0')).not.toBeInTheDocument();
+    expect(screen.getByText('1 pending · no runtime wave yet')).toBeInTheDocument();
+    expect(screen.getByText('US-003')).toBeInTheDocument();
   });
 
   it('shows empty state message when no stories exist', async () => {

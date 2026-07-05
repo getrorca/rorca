@@ -89,7 +89,7 @@ afterAll(async () => {
   delete process.env.NODE_ENV;
 });
 
-async function seedRun(terminalMode: 'ansi-html' | 'pty', agentType = 'claude'): Promise<number> {
+async function seedRun(terminalMode: 'ansi-html' | 'pty' | 'native-pty', agentType = 'claude'): Promise<number> {
   const row = await queryOne<{ id: number }>(
     `INSERT INTO pipeline_runs (spec_path, workspace_id, status, pid, terminal_mode, agent_type)
      VALUES ($1, $2, $3, $4, $5, $6)

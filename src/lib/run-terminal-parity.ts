@@ -228,6 +228,18 @@ export function parseVerboseLine(line: string): RunTerminalSemanticStep | null {
         return { type: 'search', label: `${rawPrefix} ${detail}`.trim(), detail: detail || undefined, ts: new Date().toISOString(), toolName: prefix };
       case 'test':
         return { type: 'test', label: detail ? `Test ${detail}` : 'Test', detail: detail || undefined, ts: new Date().toISOString(), toolName: prefix };
+      case 'system':
+        if (/PTY heartbeat|waiting for (?:first )?agent output|still running/i.test(detail)) {
+          const elapsed = detail.match(/after\s+(\d+)s/i)?.[1];
+          return {
+            type: 'unknown',
+            label: elapsed ? `Agent still running — ${elapsed}s` : 'Agent running — waiting for output',
+            detail: detail || undefined,
+            ts: new Date().toISOString(),
+            toolName: 'system',
+          };
+        }
+        return { type: 'unknown', label: detail ? `System: ${detail.slice(0, 80)}` : 'System', detail: detail || undefined, ts: new Date().toISOString(), toolName: 'system' };
       default:
         return null;
     }
@@ -376,6 +388,57 @@ export function parseVerboseLine(line: string): RunTerminalSemanticStep | null {
     } catch {
       // fall through to regex matching
     }
+  }
+
+  if (/^Files changed:\s*$/i.test(clean)) {
+    return { type: 'edit', label: 'Files changed', ts: new Date().toISOString(), toolName: 'pi-summary' };
+  }
+
+  if (/^What changed:\s*$/i.test(clean)) {
+    return { type: 'plan', label: 'Implementation summary', ts: new Date().toISOString(), toolName: 'pi-summary' };
+  }
+
+  if (/^Validation passed:\s*$/i.test(clean)) {
+    return { type: 'test', label: 'Validation passed', ts: new Date().toISOString(), toolName: 'pi-summary' };
+  }
+
+  if (/^Completion status:\s*complete\.?$/i.test(clean)) {
+    return { type: 'commit', label: 'Story completed', detail: clean, ts: new Date().toISOString(), toolName: 'pi-summary' };
+  }
+
+  const builtStory = clean.match(/^Built\s+([A-Z]{1,6}-\d{3,4})\s+implementation\.?$/i);
+  if (builtStory) {
+    return { type: 'commit', label: `Built ${builtStory[1]}`, detail: clean, ts: new Date().toISOString(), toolName: 'pi-summary' };
+  }
+
+  const backtickBullet = clean.match(/^[-•]\s+`([^`]+)`\s*$/);
+  if (backtickBullet) {
+    const value = backtickBullet[1].trim();
+    const commandLike = /^(?:npm|pnpm|yarn|node|npx|git|vitest|jest|tsc|python|pytest|cargo|go|make)\b/.test(value);
+    if (commandLike) {
+      const testLike = /(?:test|vitest|jest|tsc|lint|typecheck|build|diff\s+--check|pytest)/i.test(value);
+      return {
+        type: testLike ? 'test' : 'bash',
+        label: value.slice(0, 100),
+        detail: value,
+        ts: new Date().toISOString(),
+        toolName: testLike ? 'validation' : 'bash',
+      };
+    }
+    if (/\.[A-Za-z0-9]+$/.test(value) || value.includes('/')) {
+      return { type: 'edit', label: `Changed ${value}`.slice(0, 100), detail: value, ts: new Date().toISOString(), toolName: 'pi-summary' };
+    }
+  }
+
+  const summaryBullet = clean.match(/^[-•]\s+(Added|Updated|Wired|Classif(?:y|ied|ies)|Suppressed|Validated|Implemented|Fixed|Documented|Exposed|Created|Changed|Refactored|Removed)\b(.+)$/i);
+  if (summaryBullet) {
+    return {
+      type: 'plan',
+      label: `${summaryBullet[1]}${summaryBullet[2]}`.trim().slice(0, 100),
+      detail: clean.replace(/^[-•]\s+/, ''),
+      ts: new Date().toISOString(),
+      toolName: 'pi-summary',
+    };
   }
 
   for (const [pattern, type] of VERBOSE_PATTERNS) {

@@ -58,7 +58,7 @@ export const PipelineRunJobPayload = z.object({
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
-  effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
 }).strict();
 

@@ -34,14 +34,41 @@ describe('execution-engine prompt delivery hardening', () => {
       [],
     );
 
+    expect(command.command).toBe('/bin/bash');
+    expect(command.args.join(' ')).toContain('/usr/bin/pi-test-double');
+    expect(command.args.join(' ')).toContain('--print');
+    expect(command.args.join(' ')).toContain('--mode');
+    expect(command.args.join(' ')).toContain('text');
+    expect(command.args.join(' ')).not.toContain('--jsonl');
+    expect(command.prompt).toBe('');
+    expect(command.writePromptToStdin).toBe(false);
+  });
+
+  test('Pi native PTY command starts interactive Pi and pastes the prompt without --print', () => {
+    const { buildPtyCommand } = require('../execution-engine') as typeof import('../execution-engine');
+
+    const prompt = 'Implement story US-001 with validation.';
+    const command = buildPtyCommand(
+      'pi',
+      prompt,
+      process.cwd(),
+      'openai-codex/gpt-5.5',
+      null,
+      undefined,
+      undefined,
+      'xhigh',
+      undefined,
+      [],
+      true,
+    );
+
     expect(command.command).toBe('/usr/bin/pi-test-double');
-    expect(command.args).toContain('--print');
+    expect(command.args).not.toContain('--print');
     expect(command.args).toEqual(expect.arrayContaining(['--mode', 'text']));
-    expect(command.args).not.toContain('run');
-    expect(command.args).not.toContain('--jsonl');
-    expect(command.args.some((arg: string) => arg.startsWith('@'))).toBe(false);
-    expect(command.prompt).toBe(prompt);
-    expect(command.writePromptToStdin).toBe(true);
+    expect(command.prompt).toContain(prompt);
+    expect(command.prompt).toContain('\u001b[200~');
+    expect(command.promptTerminator).toBe('\r');
+    expect(command.sendEofAfterPrompt).toBe(false);
   });
 
   test('recognizes the Pi CLI no-prompt message as prompt delivery failure', () => {
