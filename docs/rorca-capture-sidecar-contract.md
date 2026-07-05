@@ -1,6 +1,6 @@
 # Rorca Capture Sidecar Architecture Contract
 
-This contract implements the product requirements in [`docs/prds/rorca-context-capture-sidecar/PRD.md`](./prds/rorca-context-capture-sidecar/PRD.md).
+This contract implements the product requirements in [`docs/prds/rorca-context-capture-sidecar/PRD.md`](./prds/rorca-context-capture-sidecar/PRD.md). For copy-pasteable rollout steps, see the [operator guide](./rorca-capture-sidecar-operator-guide.md).
 
 ## Package and entrypoint
 
@@ -24,7 +24,7 @@ This contract implements the product requirements in [`docs/prds/rorca-context-c
 
 ## Non-negotiable API-only boundary
 
-The sidecar never writes directly to the Rorca database.
+The sidecar never writes directly to the Rorca database and only calls stable routes marked `x-rorca-public-api: true` with `x-rorca-tier: public` in the OpenAPI annotations.
 
 Allowed:
 
@@ -32,13 +32,14 @@ Allowed:
 - Read `~/.rorca/mcp-token` for API authentication.
 - Write local git hook files when `install-hooks` is explicitly run.
 - Preserve existing post-commit hooks as `post-commit.pre-rorca`, chain them from the managed wrapper, and restore them on `install-hooks --uninstall` where possible.
-- Send reads/writes to the Rorca Express API.
+- Send reads/writes to stable Rorca Express API routes listed in `docs/OPEN_API_CONTRACT.md`.
 
 Forbidden:
 
 - Reading or requiring `DATABASE_URL`.
 - Importing `pg` or constructing a PostgreSQL `Pool`.
-- Writing Rorca memory, ingest, queue, workspace, or WAL records outside `POST /api/...`.
+- Writing Rorca memory, ingest, queue, workspace, or WAL records outside stable `POST /api/...` routes.
+- Calling omitted-tier, `admin`, `paid`, or other non-public endpoints as part of the sidecar integration contract.
 
 All API requests use:
 

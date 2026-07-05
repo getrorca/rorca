@@ -4,6 +4,7 @@ Standalone API-only context capture sidecar for Rorca.
 
 - Product requirements: [`../../docs/prds/rorca-context-capture-sidecar/PRD.md`](../../docs/prds/rorca-context-capture-sidecar/PRD.md)
 - Architecture contract: [`../../docs/rorca-capture-sidecar-contract.md`](../../docs/rorca-capture-sidecar-contract.md)
+- Operator rollout guide: [`../../docs/rorca-capture-sidecar-operator-guide.md`](../../docs/rorca-capture-sidecar-operator-guide.md)
 
 The implementation owner is the `rorca-capture` binary. `rorca capture ...` is only a thin compatibility alias that shells out to this package.
 
@@ -36,4 +37,4 @@ rorca-capture daemon
 
 `daemon` reconciles local git commits from `$HOME/.rorca/capture-cursor-<workspaceId>.json`, writes status/PID heartbeats under `$HOME/.rorca/`, flushes the JSONL queue after `GET /api/health` succeeds, and backs off exponentially on repeated API errors. Use `--dry-run` to scan without network calls, queue writes, or cursor advancement.
 
-All Rorca writes go through `POST /api/...` with `Authorization: Bearer $(cat ~/.rorca/mcp-token)`. Hook files reference the token path at runtime and never embed token values. This package must not read `DATABASE_URL` or connect directly to PostgreSQL.
+All Rorca writes go through stable `x-rorca-public-api: true` routes with `Authorization: Bearer $(cat ~/.rorca/mcp-token)`. Hook files reference the token path at runtime and never embed token values. This package must not read `DATABASE_URL`, connect directly to PostgreSQL, or write Rorca DB tables outside the public API contract.

@@ -1031,6 +1031,7 @@ router.get('/', async (req: Request, res: Response) => {
  *     operationId: retrieveSafeContextCandidates
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Read-only candidate retrieval defaults to approved/non-sensitive query-level gates; broader review access requires an explicit query flag."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -1175,8 +1176,9 @@ router.get('/:id', async (req: Request, res: Response) => {
  *     tags: [Context Capture]
  *     summary: Approve a memory candidate and promote it to durable Rorca memory
  *     operationId: approveContextCandidate
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Approval mutates user-owned durable memory, so it requires authenticated/local-owner intent while remaining MCP-callable."
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Candidate approval is a stable local-operator sidecar action gated by explicit operator auto-approval config; it promotes only an existing reviewed candidate."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: path
  *         name: id

@@ -242,6 +242,9 @@ const options: swaggerJsdoc.Options = {
  *   get:
  *     tags: [Health]
  *     summary: Health check
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Unauthenticated read-only process health is required for local CLI, sidecar queue flushing, and CI readiness checks."
+ *     x-rorca-public-api: true
  *     security: []
  *     responses:
  *       200:

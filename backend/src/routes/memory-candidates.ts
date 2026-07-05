@@ -53,8 +53,9 @@ router.post('/', createCandidateFromRequest);
  *     tags: [Memory]
  *     summary: Approve a memory candidate and promote it to durable Rorca memory
  *     operationId: approveMemoryCandidate
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Approval mutates user-owned durable memory and is only called by explicit local operator intent."
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Manual sidecar candidate approval is a stable local-operator action gated by explicit operator auto-approval config after a pending candidate is created."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: path
  *         name: id

@@ -82,6 +82,16 @@ function captureIO() {
   };
 }
 
+function repoRoot(): string {
+  let current = process.cwd();
+  while (true) {
+    if (existsSync(path.join(current, "docs", "rorca-capture-sidecar-operator-guide.md"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) throw new Error("Could not resolve repository root for docs assertions");
+    current = parent;
+  }
+}
+
 describe("rorca-capture CLI", () => {
   it("exposes MVP commands in help", async () => {
     for (const command of ["remember", "import-duckbrain", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]) {
@@ -94,6 +104,32 @@ describe("rorca-capture CLI", () => {
     await expect(runCli(["--help"], { io: output.io })).resolves.toBe(0);
     expect(output.stdout).toContain("MVP commands");
     expect(output.stderr).toBe("");
+  });
+
+  it("keeps operator docs aligned with sidecar commands and stable API boundaries", () => {
+    const docs = [
+      "docs/rorca-capture-sidecar-operator-guide.md",
+      "docs/rorca-capture-sidecar-contract.md",
+      "packages/rorca-capture/README.md",
+    ].map((docPath) => readFileSync(path.join(repoRoot(), docPath), "utf8")).join("\n");
+
+    for (const phrase of [
+      "rorca-capture install-hooks",
+      "rorca-capture daemon --status",
+      "rorca-capture flush --force",
+      "RORCA_OPTIONAL_WORKER=true npm run dev:worker:optional",
+      "GET /api/context-candidates/retrieval",
+      "GET /api/pipeline/worker/health",
+      "backend/src/lib/context-safety.ts",
+      "rorca mcp setup-claude",
+      "rorca mcp rotate-token",
+      "x-rorca-public-api: true",
+      "x-rorca-tier: public",
+      "never writes directly to the Rorca database",
+      "Direct DB writes",
+    ]) {
+      expect(docs).toContain(phrase);
+    }
   });
 
   it("prints status output with config, workspace, token, and command shape", async () => {
