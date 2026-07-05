@@ -24,21 +24,38 @@ export type ShellCaptureEvent = {
   source: "shellIntegration";
   occurredAt: string;
   payload: {
-    eventType: "cli_command" | "agent_cli_session";
+    eventType: "shell_command" | "agent_cli_session";
+    payload_schema_version: "2026-07-ucc-007.v1";
     source_system: "shell";
     tool_name: string;
     session_id: string;
+    host_application: string | null;
+    workspace_id: string;
+    repo_path_hash: string;
+    source_identity: {
+      source_system: "shell";
+      tool_name: string;
+      host_application: string | null;
+      session_id: string;
+      workspace_id: string;
+      repo_path_hash: string;
+    };
     phase: ShellCapturePhase;
     policyMode: CapturePolicyMode;
-    commandSummary: string | null;
-    commandHash: string;
+    command_summary: string | null;
+    command_hash: string;
     cwd: string | null;
-    exitCode: number | null;
-    durationMs: number | null;
-    gitBranch: string | null;
-    gitSha: string | null;
+    exit_code: number | null;
+    duration_ms: number | null;
+    git_branch: string | null;
+    git_sha: string | null;
+    related_files: Array<{ path: string; role: "mentioned" | null; hash: string | null }>;
+    capture_policy: { policy_version: string; mode: CapturePolicyMode; raw_content: "metadata" | "summary" | "explicit" | "off" };
+    trust_tier: "local";
+    idempotency_key: string;
+    provenance: { capture_source: "shellIntegration"; source_event_id: string; adapter_version: string | null; emitted_at: string; received_at: null; local_only: true };
     agent: AgentDetection;
-    regulatedSignals: string[];
+    regulated_signals: string[];
   };
   safety: { contextSafetyModule: "backend/src/lib/context-safety.ts"; policyVersion: string; redactionCount: number; ignoredPathCount: number; truncated: boolean; hashAlgorithm: "sha256"; contentHash: string };
 };
@@ -60,7 +77,8 @@ export type BuildShellCaptureEventInput = {
   gitSha?: string | null;
 };
 
-const POLICY_VERSION = "2026-07-ucc-004";
+const POLICY_VERSION = "2026-07-ucc-007";
+const PAYLOAD_SCHEMA_VERSION = "2026-07-ucc-007.v1";
 const MAX_COMMAND_BYTES = 16_384;
 
 export function normalizeCaptureShell(value: string | undefined): CaptureShell | undefined {
@@ -146,25 +164,50 @@ export function buildShellCaptureEvent(input: BuildShellCaptureEventInput): Shel
   if (policyMode === "off" || isIgnoredPath(input.cwd, input.workspacePath, ignorePatterns)) return null;
   const redacted = redactCommand(input.command, input.workspacePath, ignorePatterns);
   const agent = detectAgentBinary(input.command, input.customAgentPatterns);
+  const phase = input.phase ?? "end";
+  const sessionId = input.sessionId ?? process.env.RORCA_CAPTURE_SESSION_ID ?? "shell";
+  const toolName = agent.recognized ? agent.binary : "shell";
+  const repoPathHash = `sha256:${sha256(path.resolve(input.workspacePath))}`;
+  const commandHash = sha256(input.command);
+  const eventId = `shell:${sha256(`${input.workspaceId}|${occurredAt}|${phase}|${input.command}|${input.exitCode ?? ""}`).slice(0, 24)}`;
+  const rawContent = policyMode === "explicit-transcript-import" ? "explicit" : policyMode === "command-summary" ? "summary" : "metadata";
+  const idempotencyKey = `sha256:${sha256(JSON.stringify([agent.recognized ? "agent_cli_session" : "shell_command", "shell", sessionId, input.workspaceId, occurredAt, phase, commandHash, input.exitCode ?? null]))}`;
   const payload: ShellCaptureEvent["payload"] = {
-    eventType: agent.recognized ? "agent_cli_session" : "cli_command",
+    eventType: agent.recognized ? "agent_cli_session" : "shell_command",
+    payload_schema_version: PAYLOAD_SCHEMA_VERSION,
     source_system: "shell",
-    tool_name: agent.recognized ? agent.binary : "shell",
-    session_id: input.sessionId ?? process.env.RORCA_CAPTURE_SESSION_ID ?? "shell",
-    phase: input.phase ?? "end",
+    tool_name: toolName,
+    session_id: sessionId,
+    host_application: null,
+    workspace_id: input.workspaceId,
+    repo_path_hash: repoPathHash,
+    source_identity: {
+      source_system: "shell",
+      tool_name: toolName,
+      host_application: null,
+      session_id: sessionId,
+      workspace_id: input.workspaceId,
+      repo_path_hash: repoPathHash,
+    },
+    phase,
     policyMode,
-    commandSummary: policyMode === "metadata-only" ? null : redacted.text,
-    commandHash: sha256(input.command),
+    command_summary: policyMode === "metadata-only" ? null : redacted.text,
+    command_hash: commandHash,
     cwd: redactPath(input.cwd, input.workspacePath, ignorePatterns),
-    exitCode: Number.isFinite(input.exitCode ?? NaN) ? Number(input.exitCode) : null,
-    durationMs: Number.isFinite(input.durationMs ?? NaN) ? Number(input.durationMs) : null,
-    gitBranch: input.gitBranch ?? null,
-    gitSha: input.gitSha ?? null,
+    exit_code: Number.isFinite(input.exitCode ?? NaN) ? Number(input.exitCode) : null,
+    duration_ms: Number.isFinite(input.durationMs ?? NaN) ? Number(input.durationMs) : null,
+    git_branch: input.gitBranch ?? null,
+    git_sha: input.gitSha ?? null,
+    related_files: [],
+    capture_policy: { policy_version: POLICY_VERSION, mode: policyMode, raw_content: rawContent },
+    trust_tier: "local",
+    idempotency_key: idempotencyKey,
+    provenance: { capture_source: "shellIntegration", source_event_id: eventId, adapter_version: null, emitted_at: occurredAt, received_at: null, local_only: true },
     agent,
-    regulatedSignals: redacted.regulatedSignals,
+    regulated_signals: redacted.regulatedSignals,
   };
   return {
-    id: `shell:${sha256(`${input.workspaceId}|${occurredAt}|${input.phase ?? "end"}|${input.command}|${input.exitCode ?? ""}`).slice(0, 24)}`,
+    id: eventId,
     workspaceId: input.workspaceId,
     source: "shellIntegration",
     occurredAt,

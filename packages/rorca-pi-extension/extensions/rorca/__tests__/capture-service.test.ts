@@ -162,6 +162,8 @@ describe("managed capture daemon", () => {
 
     expect(posted).toHaveLength(2);
     expect(posted.map((event) => (event as { id: string }).id)).toEqual(["commit:aaa111", "commit:bbb222"]);
+    expect((posted[0] as { payload: { eventType: string; payload_schema_version: string; idempotency_key: string; provenance: { capture_source: string } } }).payload).toMatchObject({ eventType: "git_commit", payload_schema_version: "2026-07-ucc-007.v1", provenance: { capture_source: "repoDaemon" } });
+    expect((posted[0] as { payload: { idempotency_key: string } }).payload.idempotency_key).toMatch(/^sha256:/);
     const state = JSON.parse(readFileSync(path.join(ws.path, ".rorca", "capture", "state.json"), "utf8"));
     expect(state.cursor.lastCommit).toBe("bbb222");
     expect(state.cursor.pendingEventIds).toEqual([]);
@@ -202,7 +204,7 @@ describe("managed capture daemon", () => {
     expect(status.queueDepth).toBe(1);
     expect(status.backoffMs).toBeGreaterThan(0);
     expect(status.sourceCapabilities.repoDaemon.status).toBe("active");
-    expect(status.capturePolicy.version).toBe("2026-07-ucc-003");
+    expect(status.capturePolicy.version).toBe("2026-07-ucc-007");
     expect(status.resourceBounds.watchers).toEqual({ mode: "polling", count: 0, recursive: false, boundedBy: "maxConcurrency" });
     expect(resolveCaptureServicePaths(ws).queuePath).toContain(path.join(".rorca", "capture", "queue"));
   });

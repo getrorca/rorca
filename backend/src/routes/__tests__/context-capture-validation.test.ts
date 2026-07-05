@@ -1,0 +1,63 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { ValidationError } from '../../lib/errors';
+import { normalizeContextEventPayload } from '../context-capture';
+
+const baseInput = {
+  workspaceId: 'rorca',
+  workspacePath: '/tmp/rorca',
+  source: 'shellIntegration' as const,
+  occurredAt: '2026-07-05T00:00:00.000Z',
+  policyMode: 'command-summary' as const,
+  policyVersion: '2026-07-ucc-007',
+};
+
+describe('context-capture route validation helpers', () => {
+  test('normalizes legacy shell command identity into UCC-007 source/provenance shape', () => {
+    const payload = normalizeContextEventPayload({
+      ...baseInput,
+      payload: {
+        eventType: 'cli_command',
+        source_system: 'shell',
+        tool_name: 'shell',
+        session_id: 'session-1',
+        commandSummary: 'npm test',
+        commandHash: 'a'.repeat(64),
+        phase: 'end',
+        exitCode: 0,
+        durationMs: 50,
+        gitBranch: 'main',
+        gitSha: 'b'.repeat(40),
+        agent: { recognized: false, binary: 'unknown' },
+        regulatedSignals: [],
+      },
+    });
+
+    expect(payload.eventType).toBe('shell_command');
+    expect(payload.payload_schema_version).toBe('2026-07-ucc-007.v1');
+    expect(payload.source_identity).toMatchObject({ source_system: 'shell', tool_name: 'shell', session_id: 'session-1', workspace_id: 'rorca' });
+    expect(payload.idempotency_key).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(payload.provenance.capture_source).toBe('shellIntegration');
+    expect(payload.trust_tier).toBe('local');
+  });
+
+  test('rejects malformed event types through ValidationError', () => {
+    expect(() => normalizeContextEventPayload({ ...baseInput, payload: { eventType: 'bad_event' } })).toThrow(ValidationError);
+  });
+
+  test('keeps public Swagger tier annotations and request contract shape', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'context-capture.ts'), 'utf8');
+    const eventsDoc = source.slice(source.indexOf('/api/context-capture/events'), source.indexOf("router.post('/events'"));
+    expect(eventsDoc).toContain('x-rorca-tier: public');
+    expect(eventsDoc).toContain('x-rorca-rationale:');
+    expect(eventsDoc).toContain('x-rorca-public-api: true');
+    expect(eventsDoc).toContain('payload: { type: object }');
+  });
+});

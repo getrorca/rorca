@@ -5,7 +5,8 @@ export const SHELL_BLOCK_START = "# >>> rorca-capture always-on (managed) >>>";
 export const SHELL_BLOCK_END = "# <<< rorca-capture always-on (managed) <<<";
 export const SUPPORTED_CAPTURE_SHELLS = ["zsh", "bash", "fish", "powershell"];
 export const BUILTIN_AGENT_BINARIES = ["claude", "codex", "opencode", "pi", "aider", "cursor"];
-const POLICY_VERSION = "2026-07-ucc-004";
+const POLICY_VERSION = "2026-07-ucc-007";
+const PAYLOAD_SCHEMA_VERSION = "2026-07-ucc-007.v1";
 const MAX_COMMAND_BYTES = 16_384;
 export function normalizeCaptureShell(value) {
     const base = path.basename(value || "").toLowerCase();
@@ -103,25 +104,50 @@ export function buildShellCaptureEvent(input) {
         return null;
     const redacted = redactCommand(input.command, input.workspacePath, ignorePatterns);
     const agent = detectAgentBinary(input.command, input.customAgentPatterns);
+    const phase = input.phase ?? "end";
+    const sessionId = input.sessionId ?? process.env.RORCA_CAPTURE_SESSION_ID ?? "shell";
+    const toolName = agent.recognized ? agent.binary : "shell";
+    const repoPathHash = `sha256:${sha256(path.resolve(input.workspacePath))}`;
+    const commandHash = sha256(input.command);
+    const eventId = `shell:${sha256(`${input.workspaceId}|${occurredAt}|${phase}|${input.command}|${input.exitCode ?? ""}`).slice(0, 24)}`;
+    const rawContent = policyMode === "explicit-transcript-import" ? "explicit" : policyMode === "command-summary" ? "summary" : "metadata";
+    const idempotencyKey = `sha256:${sha256(JSON.stringify([agent.recognized ? "agent_cli_session" : "shell_command", "shell", sessionId, input.workspaceId, occurredAt, phase, commandHash, input.exitCode ?? null]))}`;
     const payload = {
-        eventType: agent.recognized ? "agent_cli_session" : "cli_command",
+        eventType: agent.recognized ? "agent_cli_session" : "shell_command",
+        payload_schema_version: PAYLOAD_SCHEMA_VERSION,
         source_system: "shell",
-        tool_name: agent.recognized ? agent.binary : "shell",
-        session_id: input.sessionId ?? process.env.RORCA_CAPTURE_SESSION_ID ?? "shell",
-        phase: input.phase ?? "end",
+        tool_name: toolName,
+        session_id: sessionId,
+        host_application: null,
+        workspace_id: input.workspaceId,
+        repo_path_hash: repoPathHash,
+        source_identity: {
+            source_system: "shell",
+            tool_name: toolName,
+            host_application: null,
+            session_id: sessionId,
+            workspace_id: input.workspaceId,
+            repo_path_hash: repoPathHash,
+        },
+        phase,
         policyMode,
-        commandSummary: policyMode === "metadata-only" ? null : redacted.text,
-        commandHash: sha256(input.command),
+        command_summary: policyMode === "metadata-only" ? null : redacted.text,
+        command_hash: commandHash,
         cwd: redactPath(input.cwd, input.workspacePath, ignorePatterns),
-        exitCode: Number.isFinite(input.exitCode ?? NaN) ? Number(input.exitCode) : null,
-        durationMs: Number.isFinite(input.durationMs ?? NaN) ? Number(input.durationMs) : null,
-        gitBranch: input.gitBranch ?? null,
-        gitSha: input.gitSha ?? null,
+        exit_code: Number.isFinite(input.exitCode ?? NaN) ? Number(input.exitCode) : null,
+        duration_ms: Number.isFinite(input.durationMs ?? NaN) ? Number(input.durationMs) : null,
+        git_branch: input.gitBranch ?? null,
+        git_sha: input.gitSha ?? null,
+        related_files: [],
+        capture_policy: { policy_version: POLICY_VERSION, mode: policyMode, raw_content: rawContent },
+        trust_tier: "local",
+        idempotency_key: idempotencyKey,
+        provenance: { capture_source: "shellIntegration", source_event_id: eventId, adapter_version: null, emitted_at: occurredAt, received_at: null, local_only: true },
         agent,
-        regulatedSignals: redacted.regulatedSignals,
+        regulated_signals: redacted.regulatedSignals,
     };
     return {
-        id: `shell:${sha256(`${input.workspaceId}|${occurredAt}|${input.phase ?? "end"}|${input.command}|${input.exitCode ?? ""}`).slice(0, 24)}`,
+        id: eventId,
         workspaceId: input.workspaceId,
         source: "shellIntegration",
         occurredAt,

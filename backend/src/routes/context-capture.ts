@@ -6,12 +6,21 @@
  */
 
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { queryOne } from '../db/index';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { DEFAULT_CAPTURE_POLICY, sanitizeCapturePayload, sanitizeCliCommandEvent, type CapturePolicyMode } from '../lib/context-safety';
-import { ContextCaptureEventJobPayload } from '../lib/pg-boss-schemas';
+import {
+  CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION,
+  ContextCaptureEventJobPayload,
+  ContextEventTypeEnum,
+  SourceSystemEnum,
+  deriveContextEventIdempotencyKey,
+  type CaptureSourceType,
+  type UnifiedContextEventPayloadType,
+} from '../lib/pg-boss-schemas';
 
 const router = Router();
 
@@ -47,18 +56,243 @@ function parsePolicyMode(value: unknown): CapturePolicyMode {
 function isCliCapturePayload(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false;
   const eventType = (payload as Record<string, unknown>).eventType;
-  return eventType === 'cli_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
+  return eventType === 'cli_command' || eventType === 'shell_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
 }
 
 function assertAgentMetadata(payload: unknown): void {
   if (!payload || typeof payload !== 'object') return;
   const obj = payload as Record<string, unknown>;
-  if (obj.eventType !== 'agent_memory' && obj.eventType !== 'adapter_context') return;
+  if (obj.eventType !== 'agent_memory' && obj.eventType !== 'adapter_context' && obj.eventType !== 'explicit_memory') return;
   for (const key of ['source_system', 'tool_name', 'session_id']) {
-    if (typeof obj[key] !== 'string' || !String(obj[key]).trim()) {
+    const sourceIdentity = obj.source_identity && typeof obj.source_identity === 'object' ? obj.source_identity as Record<string, unknown> : undefined;
+    const value = obj[key] ?? sourceIdentity?.[key];
+    if (typeof value !== 'string' || !String(value).trim()) {
       throw new ValidationError(`Adapter payload requires ${key} metadata`);
     }
   }
+}
+
+function sha256(value: string): string {
+  return `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function sourceSystemFor(source: CaptureSourceType): string {
+  const mapping: Record<CaptureSourceType, string> = {
+    repoDaemon: 'repo_daemon',
+    gitHook: 'git_hook',
+    shellIntegration: 'shell',
+    vscodeExtension: 'vscode',
+    agentAdapter: 'agent_adapter',
+    mcpSlashCommand: 'mcp',
+    ciPrIngestion: 'ci',
+    externalImport: 'external_import',
+  };
+  return mapping[source];
+}
+
+function normalizeRelatedFiles(value: unknown): Array<{ path: string; role: 'opened' | 'saved' | 'changed' | 'mentioned' | 'diagnostic' | 'reviewed' | null; hash: string | null }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item === 'string' && item.trim()) return [{ path: item, role: 'mentioned' as const, hash: null }];
+    if (!item || typeof item !== 'object') return [];
+    const obj = item as Record<string, unknown>;
+    const filePath = stringValue(obj.path);
+    if (!filePath) return [];
+    const role = typeof obj.role === 'string' && ['opened', 'saved', 'changed', 'mentioned', 'diagnostic', 'reviewed'].includes(obj.role) ? obj.role as 'opened' | 'saved' | 'changed' | 'mentioned' | 'diagnostic' | 'reviewed' : null;
+    return [{ path: filePath, role, hash: stringValue(obj.hash) }];
+  });
+}
+
+export function normalizeContextEventPayload(input: {
+  payload: unknown;
+  workspaceId: string;
+  workspacePath: string;
+  source: CaptureSourceType;
+  occurredAt: string;
+  policyMode: CapturePolicyMode;
+  policyVersion: string;
+}): UnifiedContextEventPayloadType {
+  if (!input.payload || typeof input.payload !== 'object') {
+    throw new ValidationError('Context capture payload must be an object');
+  }
+
+  const raw = input.payload as Record<string, unknown>;
+  const rawIdentity = raw.source_identity && typeof raw.source_identity === 'object' ? raw.source_identity as Record<string, unknown> : {};
+  const legacyEventType = stringValue(raw.eventType);
+  const inferredEventType = legacyEventType === 'cli_command'
+    ? 'shell_command'
+    : legacyEventType ?? (stringValue(raw.commit) || stringValue(raw.git_sha) || stringValue(raw.gitSha) ? 'git_commit' : null);
+  if (!inferredEventType || !ContextEventTypeEnum.safeParse(inferredEventType).success) {
+    throw new ValidationError('Unsupported context capture event type', { eventType: raw.eventType });
+  }
+
+  const sourceSystemCandidate = stringValue(raw.source_system) ?? stringValue(rawIdentity.source_system) ?? sourceSystemFor(input.source);
+  const sourceSystem = SourceSystemEnum.safeParse(sourceSystemCandidate).success ? sourceSystemCandidate : sourceSystemFor(input.source);
+  const toolName = stringValue(raw.tool_name) ?? stringValue(rawIdentity.tool_name) ?? stringValue((raw.agent as Record<string, unknown> | undefined)?.binary) ?? sourceSystem;
+  const hostApplication = stringValue(raw.host_application) ?? stringValue(rawIdentity.host_application) ?? (input.source === 'vscodeExtension' ? 'vscode' : null);
+  const sessionId = stringValue(raw.session_id) ?? stringValue(rawIdentity.session_id);
+  const repoPathHash = stringValue(raw.repo_path_hash) ?? stringValue(rawIdentity.repo_path_hash) ?? sha256(path.resolve(input.workspacePath));
+  const gitBranch = stringValue(raw.git_branch) ?? stringValue(raw.gitBranch);
+  const gitSha = stringValue(raw.git_sha) ?? stringValue(raw.gitSha) ?? stringValue(raw.commit);
+  const relatedFiles = normalizeRelatedFiles(raw.related_files ?? raw.relatedFiles ?? raw.changed_files ?? raw.changedFiles);
+  const policyMode = parsePolicyMode(raw.policyMode ?? raw.policy_mode ?? input.policyMode);
+  const sourceIdentity = {
+    source_system: sourceSystem,
+    tool_name: toolName,
+    host_application: hostApplication,
+    session_id: sessionId,
+    workspace_id: input.workspaceId,
+    repo_path_hash: repoPathHash,
+  };
+  const base = {
+    payload_schema_version: CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION,
+    source_identity: sourceIdentity,
+    source_system: sourceSystem,
+    tool_name: toolName,
+    host_application: hostApplication,
+    session_id: sessionId,
+    workspace_id: input.workspaceId,
+    repo_path_hash: repoPathHash,
+    git_branch: gitBranch,
+    git_sha: gitSha,
+    related_files: relatedFiles,
+    capture_policy: {
+      policy_version: stringValue((raw.capture_policy as Record<string, unknown> | undefined)?.policy_version) ?? input.policyVersion,
+      mode: policyMode,
+      raw_content: policyMode === 'explicit-transcript-import' ? 'explicit' as const : policyMode === 'command-summary' ? 'summary' as const : policyMode === 'off' ? 'off' as const : 'metadata' as const,
+    },
+    trust_tier: raw.trust_tier === 'untrusted' || raw.trust_tier === 'verified' || raw.trust_tier === 'privileged' ? raw.trust_tier : 'local' as const,
+    provenance: {
+      capture_source: input.source,
+      source_event_id: stringValue(raw.source_event_id) ?? stringValue(raw.id),
+      adapter_version: stringValue(raw.adapter_version),
+      emitted_at: stringValue(raw.emitted_at) ?? input.occurredAt,
+      received_at: new Date().toISOString(),
+      local_only: raw.local_only !== false,
+    },
+  };
+
+  const commandHash = stringValue(raw.command_hash) ?? stringValue(raw.commandHash);
+  const commandSummary = stringValue(raw.command_summary) ?? stringValue(raw.commandSummary);
+  const exitCode = numberValue(raw.exit_code) ?? numberValue(raw.exitCode);
+  const durationMs = numberValue(raw.duration_ms) ?? numberValue(raw.durationMs);
+  const agent = raw.agent && typeof raw.agent === 'object' ? raw.agent as Record<string, unknown> : {};
+  const normalizedAgent = {
+    recognized: Boolean(agent.recognized),
+    binary: stringValue(agent.binary) ?? 'unknown',
+    matchedPattern: stringValue(agent.matchedPattern),
+  };
+
+  const idempotencyKey = stringValue(raw.idempotency_key) ?? deriveContextEventIdempotencyKey({
+    eventType: inferredEventType as never,
+    source_system: sourceSystem,
+    tool_name: toolName,
+    host_application: hostApplication,
+    session_id: sessionId,
+    workspace_id: input.workspaceId,
+    occurred_at: input.occurredAt,
+    command_hash: commandHash,
+    phase: stringValue(raw.phase),
+    exit_code: exitCode,
+    git_sha: gitSha,
+    memory_hash: stringValue(raw.memory_hash),
+    activity_type: stringValue(raw.activity_type),
+    related_files: relatedFiles,
+    provider: stringValue(raw.provider),
+    repository: stringValue(raw.repository),
+    pr_number: raw.pr_number as string | number | null | undefined,
+    head_sha: stringValue(raw.head_sha) ?? stringValue(raw.headSha),
+    run_id: stringValue(raw.run_id),
+  });
+
+  const normalized = (() => {
+    if (inferredEventType === 'agent_cli_session' || inferredEventType === 'shell_command') {
+      return {
+        ...base,
+        eventType: inferredEventType,
+        idempotency_key: idempotencyKey,
+        phase: raw.phase === 'start' ? 'start' : 'end',
+        policyMode,
+        command_summary: commandSummary,
+        command_hash: commandHash ?? sha256(String(raw.command ?? commandSummary ?? '')),
+        cwd: stringValue(raw.cwd),
+        exit_code: exitCode,
+        duration_ms: durationMs,
+        agent: inferredEventType === 'agent_cli_session' ? { ...normalizedAgent, recognized: true, binary: normalizedAgent.binary === 'unknown' ? 'custom' : normalizedAgent.binary } : normalizedAgent,
+        regulated_signals: Array.isArray(raw.regulated_signals) ? raw.regulated_signals : Array.isArray(raw.regulatedSignals) ? raw.regulatedSignals : [],
+      };
+    }
+    if (inferredEventType === 'git_commit') {
+      return {
+        ...base,
+        eventType: inferredEventType,
+        idempotency_key: idempotencyKey,
+        git_sha: gitSha,
+        commit_subject: stringValue(raw.commit_subject) ?? stringValue(raw.subject),
+        committed_at: stringValue(raw.committed_at) ?? stringValue(raw.committedAt),
+        author_hash: stringValue(raw.author_hash),
+        changed_files: relatedFiles,
+      };
+    }
+    if (inferredEventType === 'ci_pr') {
+      return {
+        ...base,
+        eventType: inferredEventType,
+        idempotency_key: idempotencyKey,
+        provider: stringValue(raw.provider) ?? 'other',
+        repository: stringValue(raw.repository) ?? 'unknown',
+        pr_number: raw.pr_number ?? raw.prNumber ?? 'unknown',
+        head_sha: stringValue(raw.head_sha) ?? stringValue(raw.headSha) ?? gitSha ?? 'unknown',
+        base_branch: stringValue(raw.base_branch) ?? stringValue(raw.baseBranch),
+        status: ['queued', 'running', 'success', 'failure', 'cancelled', 'unknown'].includes(String(raw.status)) ? raw.status : 'unknown',
+        run_id: stringValue(raw.run_id) ?? stringValue(raw.runId),
+      };
+    }
+    if (inferredEventType === 'ide_session') {
+      return {
+        ...base,
+        eventType: inferredEventType,
+        idempotency_key: idempotencyKey,
+        ide_session_state: ['started', 'active', 'ended'].includes(String(raw.ide_session_state)) ? raw.ide_session_state : 'active',
+        workspace_folders: Array.isArray(raw.workspace_folders) ? raw.workspace_folders : [],
+        extension_version: stringValue(raw.extension_version),
+      };
+    }
+    if (inferredEventType === 'editor_activity') {
+      return {
+        ...base,
+        eventType: inferredEventType,
+        idempotency_key: idempotencyKey,
+        activity_type: ['open', 'save', 'close', 'diagnostic', 'selection', 'command'].includes(String(raw.activity_type)) ? raw.activity_type : 'command',
+        document_uri_hash: stringValue(raw.document_uri_hash),
+        language_id: stringValue(raw.language_id),
+        summary: stringValue(raw.summary),
+      };
+    }
+    return {
+      ...base,
+      eventType: 'explicit_memory',
+      idempotency_key: idempotencyKey,
+      memory_hash: stringValue(raw.memory_hash) ?? sha256(String(raw.memory_summary ?? raw.memory ?? '')),
+      memory_summary: stringValue(raw.memory_summary) ?? stringValue(raw.memory) ?? 'Explicit memory',
+      category: stringValue(raw.category),
+      requested_by: raw.requested_by === 'agent' || raw.requested_by === 'system' ? raw.requested_by : 'human',
+    };
+  })();
+
+  const parsed = ContextCaptureEventJobPayload.shape.payload.safeParse(normalized);
+  if (!parsed.success) {
+    throw new ValidationError('Invalid context capture event payload', { issues: parsed.error.issues });
+  }
+  return parsed.data;
 }
 
 function readCaptureIgnorePatterns(workspacePath: string): string[] {
@@ -202,6 +436,10 @@ router.post('/events', async (req, res, next) => {
   try {
     const workspaceId = assertString(req.body.workspaceId, 'workspaceId');
     const source = assertString(req.body.source, 'source');
+    const parsedSource = ContextCaptureEventJobPayload.shape.source.safeParse(source);
+    if (!parsedSource.success) {
+      throw new ValidationError('Invalid context capture source', { issues: parsedSource.error.issues });
+    }
     const occurredAt = assertString(req.body.occurredAt, 'occurredAt');
     const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) throw new NotFoundError('Workspace', workspaceId);
@@ -240,8 +478,17 @@ router.post('/events', async (req, res, next) => {
       return;
     }
 
-    const event = ContextCaptureEventJobPayload.safeParse({ workspaceId, source, occurredAt, payload: sanitized.payload, safety: sanitized.safety });
-    if (isCliCapturePayload(payload) && !event.success) {
+    const normalizedPayload = normalizeContextEventPayload({
+      payload: sanitized.payload,
+      workspaceId,
+      workspacePath: workspace.path,
+      source: parsedSource.data,
+      occurredAt,
+      policyMode,
+      policyVersion: sanitized.safety.policyVersion,
+    });
+    const event = ContextCaptureEventJobPayload.safeParse({ workspaceId, source: parsedSource.data, occurredAt, payload: normalizedPayload, safety: sanitized.safety });
+    if (!event.success) {
       throw new ValidationError('Invalid context capture event payload', { issues: event.error.issues });
     }
 
@@ -251,7 +498,7 @@ router.post('/events', async (req, res, next) => {
       workspaceId,
       source,
       occurredAt,
-      payload: sanitized.payload,
+      payload: event.data.payload,
       safety: sanitized.safety,
       capability: captureCapability(),
     });

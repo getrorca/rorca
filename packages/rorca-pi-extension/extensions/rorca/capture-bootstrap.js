@@ -250,7 +250,7 @@ function captureIgnoreContent() {
 }
 function redactionConfigContent() {
     return jsonFileContent({
-        policyVersion: "2026-07-ucc-003",
+        policyVersion: "2026-07-ucc-007",
         rawContentDefault: "metadata+hash",
         hashAlgorithm: "sha256",
         redactions: [

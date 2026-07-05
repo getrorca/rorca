@@ -158,6 +158,42 @@ export type CaptureBootstrapVerifyResponse = {
   }>;
 };
 
+export const CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION = "2026-07-ucc-007.v1" as const;
+export const CONTEXT_EVENT_TYPES = ["agent_cli_session", "ide_session", "shell_command", "editor_activity", "explicit_memory", "git_commit", "ci_pr"] as const;
+export const TRUST_TIERS = ["untrusted", "local", "verified", "privileged"] as const;
+
+export type ContextEventType = typeof CONTEXT_EVENT_TYPES[number];
+export type TrustTier = typeof TRUST_TIERS[number];
+export type ContextCaptureSource = "repoDaemon" | "gitHook" | "shellIntegration" | "vscodeExtension" | "agentAdapter" | "mcpSlashCommand" | "ciPrIngestion" | "externalImport";
+
+export type ContextEventSourceIdentity = {
+  source_system: "shell" | "ide" | "vscode" | "vscode-fork" | "agent_adapter" | "repo_daemon" | "git_hook" | "ci" | "mcp" | "external_import";
+  tool_name: string;
+  host_application: string | null;
+  session_id: string | null;
+  workspace_id: string;
+  repo_path_hash: string | null;
+};
+
+export type UnifiedContextEventBase = {
+  eventType: ContextEventType;
+  payload_schema_version: typeof CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION;
+  source_identity: ContextEventSourceIdentity;
+  source_system: ContextEventSourceIdentity["source_system"];
+  tool_name: string;
+  host_application: string | null;
+  session_id: string | null;
+  workspace_id: string;
+  repo_path_hash: string | null;
+  git_branch: string | null;
+  git_sha: string | null;
+  related_files: Array<{ path: string; role: string | null; hash: string | null }>;
+  capture_policy: { policy_version: string; mode: "off" | "metadata-only" | "command-summary" | "explicit-transcript-import"; raw_content: "off" | "metadata" | "summary" | "explicit" };
+  trust_tier: TrustTier;
+  idempotency_key: string;
+  provenance: { capture_source: ContextCaptureSource; source_event_id: string | null; adapter_version: string | null; emitted_at: string | null; received_at: string | null; local_only: boolean };
+};
+
 export type PiModel = {
   provider: string;
   model: string;

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import type { ChildProcess, SpawnSyncOptions } from "node:child_process";
 import type { Workspace } from "./types.js";
 
@@ -59,10 +60,10 @@ type CaptureState = {
 type QueuedEvent = {
   id: string;
   workspaceId: string;
-  source: "repoDaemon" | "shellIntegration" | "gitHook" | "vscodeExtension" | "mcpSlashCommand";
+  source: "repoDaemon" | "shellIntegration" | "gitHook" | "vscodeExtension" | "agentAdapter" | "mcpSlashCommand" | "ciPrIngestion" | "externalImport";
   occurredAt: string;
   payload: unknown;
-  safety: { redactionCount: number; truncated: boolean; hashAlgorithm: "sha256"; policyVersion: string; [key: string]: unknown };
+  safety: { contextSafetyModule: "backend/src/lib/context-safety.ts"; policyVersion: string; redactionCount: number; ignoredPathCount: number; truncated: boolean; hashAlgorithm: "sha256"; contentHash: string; [key: string]: unknown };
 };
 
 export type CaptureServiceRunner = (command: string, args: string[], options?: SpawnSyncOptions) => { status: number | null; stdout?: Buffer | string; stderr?: Buffer | string; error?: Error };
@@ -274,7 +275,7 @@ async function scanRepository(workspace: Workspace, paths: CaptureServicePaths, 
   const newCommits = startIndex > 0 ? commits.slice(startIndex) : commits;
   for (const commit of newCommits) {
     if (!commit.hash || commit.hash === state.cursor.lastCommit || existing.has(`commit:${commit.hash}`)) continue;
-    const event = redactedEvent(workspace.id, `commit:${commit.hash}`, now().toISOString(), {
+    const event = redactedEvent(workspace.id, workspace.path, `commit:${commit.hash}`, now().toISOString(), {
       commit: commit.hash,
       subject: commit.subject,
       committedAt: new Date(Number(commit.timestamp) * 1000).toISOString(),
@@ -370,9 +371,62 @@ function writeState(filePath: string, state: CaptureState): void {
   writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
-function redactedEvent(workspaceId: string, id: string, occurredAt: string, payload: Record<string, unknown>): QueuedEvent {
+function redactedEvent(workspaceId: string, workspacePath: string, id: string, occurredAt: string, payload: Record<string, unknown>): QueuedEvent {
   const redacted = redact(payload);
-  return { id, workspaceId, source: "repoDaemon", occurredAt, payload: redacted.payload, safety: redacted.safety };
+  const commit = String(redacted.payload.commit ?? "");
+  const subject = typeof redacted.payload.subject === "string" ? redacted.payload.subject : null;
+  const committedAt = typeof redacted.payload.committedAt === "string" ? redacted.payload.committedAt : null;
+  const repoPathHash = `sha256:${sha256(path.resolve(workspacePath))}`;
+  const idempotencyKey = `sha256:${sha256(JSON.stringify(["git_commit", "repo_daemon", workspaceId, commit]))}`;
+  const eventPayload = {
+    eventType: "git_commit",
+      payload_schema_version: "2026-07-ucc-007.v1",
+      source_system: "repo_daemon",
+      tool_name: "rorca-capture-daemon",
+      host_application: null,
+      session_id: null,
+      workspace_id: workspaceId,
+      repo_path_hash: repoPathHash,
+      source_identity: {
+        source_system: "repo_daemon",
+        tool_name: "rorca-capture-daemon",
+        host_application: null,
+        session_id: null,
+        workspace_id: workspaceId,
+        repo_path_hash: repoPathHash,
+      },
+      git_branch: null,
+      git_sha: commit,
+      related_files: [],
+      capture_policy: { policy_version: "2026-07-ucc-007", mode: "metadata-only", raw_content: "metadata" },
+      trust_tier: "local",
+      idempotency_key: idempotencyKey,
+      provenance: { capture_source: "repoDaemon", source_event_id: id, adapter_version: null, emitted_at: occurredAt, received_at: null, local_only: true },
+      commit_subject: subject,
+      committed_at: committedAt,
+      author_hash: null,
+      changed_files: [],
+    };
+  return {
+    id,
+    workspaceId,
+    source: "repoDaemon",
+    occurredAt,
+    payload: eventPayload,
+    safety: {
+      contextSafetyModule: "backend/src/lib/context-safety.ts",
+      policyVersion: redacted.safety.policyVersion,
+      redactionCount: redacted.safety.redactionCount,
+      ignoredPathCount: 0,
+      truncated: redacted.safety.truncated,
+      hashAlgorithm: "sha256",
+      contentHash: sha256(JSON.stringify(eventPayload)),
+    },
+  };
+}
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
 }
 
 function redact(payload: Record<string, unknown>): { payload: Record<string, unknown>; safety: QueuedEvent["safety"] } {
@@ -393,7 +447,8 @@ function redact(payload: Record<string, unknown>): { payload: Record<string, unk
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, visit(child)]));
     return value;
   };
-  return { payload: visit(payload) as Record<string, unknown>, safety: { redactionCount, truncated, hashAlgorithm: "sha256", policyVersion: "2026-07-ucc-003" } };
+  const sanitized = visit(payload) as Record<string, unknown>;
+  return { payload: sanitized, safety: { contextSafetyModule: "backend/src/lib/context-safety.ts", policyVersion: "2026-07-ucc-007", redactionCount, ignoredPathCount: 0, truncated, hashAlgorithm: "sha256", contentHash: sha256(JSON.stringify(sanitized)) } };
 }
 
 function nextBackoff(current: number, max: number): number {
@@ -401,7 +456,7 @@ function nextBackoff(current: number, max: number): number {
 }
 
 function defaultCapturePolicy() {
-  return { version: "2026-07-ucc-003", rawContentDefault: "metadata+hash", hashAlgorithm: "sha256", boundedWatchers: true } as const;
+  return { version: "2026-07-ucc-007", rawContentDefault: "metadata+hash", hashAlgorithm: "sha256", boundedWatchers: true } as const;
 }
 
 function startFallbackProcess(workspace: Workspace, command: string, config?: Partial<CaptureServiceConfig>): ChildProcess {

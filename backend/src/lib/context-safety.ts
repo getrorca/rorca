@@ -25,7 +25,7 @@ export type AgentBinaryDetection = {
 };
 
 export type CliCommandSafetyInput = {
-  eventType?: 'cli_command' | 'agent_cli_session';
+  eventType?: 'cli_command' | 'shell_command' | 'agent_cli_session';
   source_system?: string;
   tool_name?: string;
   session_id?: string;
@@ -46,7 +46,7 @@ export type CliCommandSafetyInput = {
 };
 
 export type SanitizedCliCommandEvent = {
-  eventType: 'cli_command' | 'agent_cli_session';
+  eventType: 'cli_command' | 'shell_command' | 'agent_cli_session';
   source_system: string;
   tool_name: string;
   session_id: string;

@@ -27,9 +27,12 @@ import {
   type PipelineRetryJobPayloadType,
   PipelineCancelJobPayload,
   type PipelineCancelJobPayloadType,
-  CliCommandContextEventPayload,
+  ShellCommandContextEventPayload,
   AgentCliSessionContextEventPayload,
   ContextCaptureEventJobPayload,
+  ContextEventIdempotencyGuidance,
+  CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION,
+  deriveContextEventIdempotencyKey,
 } from '../lib/pg-boss-schemas';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -372,22 +375,49 @@ describe('Worker handler payload validation — invalid payload throws before sp
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Context capture event schemas', () => {
+  const sourceIdentity = {
+    source_system: 'shell' as const,
+    tool_name: 'shell',
+    host_application: null,
+    session_id: 'session-1',
+    workspace_id: 'rorca',
+    repo_path_hash: `sha256:${'1'.repeat(64)}`,
+  };
+
+  const common = {
+    payload_schema_version: CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION,
+    source_identity: sourceIdentity,
+    source_system: 'shell' as const,
+    tool_name: 'shell',
+    host_application: null,
+    session_id: 'session-1',
+    workspace_id: 'rorca',
+    repo_path_hash: `sha256:${'1'.repeat(64)}`,
+    git_branch: 'main',
+    git_sha: 'b'.repeat(40),
+    related_files: [{ path: 'src/index.ts', role: 'mentioned' as const, hash: null }],
+    capture_policy: { policy_version: '2026-07-ucc-007', mode: 'command-summary' as const, raw_content: 'summary' as const },
+    trust_tier: 'local' as const,
+    provenance: { capture_source: 'shellIntegration' as const, source_event_id: 'event-1', adapter_version: null, emitted_at: '2026-07-05T00:00:00.000Z', received_at: null, local_only: true },
+  };
+
   const basePayload = {
+    ...common,
+    idempotency_key: deriveContextEventIdempotencyKey({ eventType: 'shell_command', source_system: 'shell', session_id: 'session-1', workspace_id: 'rorca', occurred_at: '2026-07-05T00:00:00.000Z', phase: 'end', command_hash: 'a'.repeat(64), exit_code: 0 }),
     phase: 'end' as const,
     policyMode: 'command-summary' as const,
-    commandSummary: 'claude --print [REDACTED]',
-    commandHash: 'a'.repeat(64),
+    command_summary: 'claude --print [REDACTED]',
+    command_hash: 'a'.repeat(64),
     cwd: '/workspace',
-    exitCode: 0,
-    durationMs: 123,
-    gitBranch: 'main',
-    gitSha: 'b'.repeat(40),
-    regulatedSignals: [],
+    exit_code: 0,
+    duration_ms: 123,
+    agent: { recognized: false, binary: 'unknown' as const, matchedPattern: null },
+    regulated_signals: [],
   };
 
   const safety = {
     contextSafetyModule: 'backend/src/lib/context-safety.ts' as const,
-    policyVersion: '2026-07-ucc-004',
+    policyVersion: '2026-07-ucc-007',
     redactionCount: 1,
     ignoredPathCount: 0,
     truncated: false,
@@ -395,15 +425,14 @@ describe('Context capture event schemas', () => {
     contentHash: 'c'.repeat(64),
   };
 
-  test('cli_command accepts unknown commands at metadata level', () => {
-    const parsed = CliCommandContextEventPayload.parse({
+  test('shell_command accepts unknown commands at metadata level', () => {
+    const parsed = ShellCommandContextEventPayload.parse({
       ...basePayload,
-      eventType: 'cli_command',
+      eventType: 'shell_command',
       policyMode: 'metadata-only',
-      commandSummary: null,
-      agent: { recognized: false, binary: 'unknown' },
+      command_summary: null,
     });
-    expect(parsed.commandSummary).toBeNull();
+    expect(parsed.command_summary).toBeNull();
     expect(parsed.agent.binary).toBe('unknown');
   });
 
@@ -411,10 +440,21 @@ describe('Context capture event schemas', () => {
     const parsed = AgentCliSessionContextEventPayload.parse({
       ...basePayload,
       eventType: 'agent_cli_session',
+      idempotency_key: deriveContextEventIdempotencyKey({ eventType: 'agent_cli_session', source_system: 'shell', tool_name: 'claude', session_id: 'session-1', workspace_id: 'rorca', occurred_at: '2026-07-05T00:00:00.000Z', command_hash: 'a'.repeat(64) }),
+      tool_name: 'claude',
+      source_identity: { ...sourceIdentity, tool_name: 'claude' },
       agent: { recognized: true, binary: 'claude', matchedPattern: 'claude' },
     });
     expect(parsed.agent.binary).toBe('claude');
     expect(() => AgentCliSessionContextEventPayload.parse({ ...parsed, agent: { recognized: false, binary: 'unknown' } })).toThrow(z.ZodError);
+  });
+
+  test('every UCC-007 event type has deterministic idempotency guidance', () => {
+    expect(Object.keys(ContextEventIdempotencyGuidance).sort()).toEqual(['agent_cli_session', 'ci_pr', 'editor_activity', 'explicit_memory', 'git_commit', 'ide_session', 'shell_command'].sort());
+    expect(ContextEventIdempotencyGuidance.git_commit).toContain('git_sha');
+    expect(deriveContextEventIdempotencyKey({ eventType: 'git_commit', source_system: 'repo_daemon', workspace_id: 'rorca', git_sha: 'abc1234' })).toBe(
+      deriveContextEventIdempotencyKey({ eventType: 'git_commit', source_system: 'repo_daemon', workspace_id: 'rorca', git_sha: 'abc1234' }),
+    );
   });
 
   test('context capture job payload is strict and includes safety report', () => {
@@ -422,10 +462,10 @@ describe('Context capture event schemas', () => {
       workspaceId: 'rorca',
       source: 'shellIntegration',
       occurredAt: '2026-07-05T00:00:00.000Z',
-      payload: { ...basePayload, eventType: 'agent_cli_session', agent: { recognized: true, binary: 'opencode' } },
+      payload: { ...basePayload, eventType: 'shell_command' },
       safety,
     });
-    expect(event.payload.eventType).toBe('agent_cli_session');
+    expect(event.payload.eventType).toBe('shell_command');
     expect(() => ContextCaptureEventJobPayload.parse({ ...event, directDbWrite: true })).toThrow(z.ZodError);
   });
 });
