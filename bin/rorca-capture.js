@@ -1,21 +1,29 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { formatCaptureBootstrapHumanReport, runCaptureBootstrap } from '../packages/rorca-pi-extension/extensions/rorca/capture-bootstrap.js';
+import { formatCaptureBootstrapHumanReport, runCaptureBootstrap, runCaptureTeardown } from '../packages/rorca-pi-extension/extensions/rorca/capture-bootstrap.js';
+import { buildShellCaptureEvent, enqueueShellCaptureEvent, postShellCaptureEvent, readCaptureIgnorePatterns } from '../packages/rorca-pi-extension/extensions/rorca/capture-shell.js';
 import { readCaptureServiceStatus, runCaptureServiceLifecycle, runManagedCaptureDaemon } from '../packages/rorca-pi-extension/extensions/rorca/capture-service.js';
 
 function parseArgs(argv) {
-  const options = { alwaysOn: false, dryRun: false, json: false, workspaceId: undefined, cwd: process.cwd(), exitCode: undefined, once: false };
+  const options = { alwaysOn: false, dryRun: false, json: false, uninstall: false, workspaceId: undefined, cwd: process.cwd(), exitCode: undefined, once: false, phase: 'end', command: '', policyMode: process.env.RORCA_CAPTURE_POLICY || 'metadata-only', customAgentPatterns: (process.env.RORCA_CAPTURE_AGENT_PATTERNS || '').split(',').filter(Boolean) };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--always-on') options.alwaysOn = true;
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--json') options.json = true;
+    else if (arg === '--uninstall' || arg === '--teardown') options.uninstall = true;
     else if (arg === '--once') options.once = true;
     else if (arg === '--workspace-id') options.workspaceId = argv[++i];
     else if (arg === '--cwd') options.cwd = argv[++i] || process.cwd();
     else if (arg === '--exit-code') options.exitCode = Number(argv[++i] || '0');
+    else if (arg === '--duration-ms') options.durationMs = Number(argv[++i] || '0');
+    else if (arg === '--phase') options.phase = argv[++i] || 'end';
+    else if (arg === '--command') options.command = argv[++i] || '';
+    else if (arg === '--policy') options.policyMode = argv[++i] || options.policyMode;
+    else if (arg === '--agent-pattern') options.customAgentPatterns.push(argv[++i] || '');
     else if (arg === '--scan-interval-ms') options.scanIntervalMs = Number(argv[++i]);
     else if (arg === '--max-commits-per-scan') options.maxCommitsPerScan = Number(argv[++i]);
     else if (arg === '--max-concurrency') options.maxConcurrency = Number(argv[++i]);
@@ -29,7 +37,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Usage: rorca-capture setup --always-on [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--exit-code <n>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
+  console.log(`Usage: rorca-capture setup --always-on [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture setup --uninstall [--dry-run] [--json]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--phase start|end] [--command <cmd>] [--exit-code <n>] [--duration-ms <n>] [--policy metadata-only|command-summary|off] [--agent-pattern <regex>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
 }
 
 function findQueuePath(startDir) {
@@ -43,6 +51,27 @@ function findQueuePath(startDir) {
   }
 }
 
+function findWorkspacePath(startDir) {
+  let current = path.resolve(startDir || process.cwd());
+  for (;;) {
+    if (existsSync(path.join(current, '.rorca-captureignore')) || existsSync(path.join(current, '.git')) || existsSync(path.join(current, '.rorca'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(startDir || process.cwd());
+    current = parent;
+  }
+}
+
+function readGitInfo(cwd) {
+  const run = (args) => {
+    const result = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return result.status === 0 ? String(result.stdout || '').trim() : null;
+  };
+  return {
+    gitBranch: run(['rev-parse', '--abbrev-ref', 'HEAD']),
+    gitSha: run(['rev-parse', 'HEAD']),
+  };
+}
+
 function appendQueueEvent(queuePath, event) {
   mkdirSync(queuePath, { recursive: true });
   const source = typeof event.source === 'string' ? event.source : 'capture';
@@ -50,10 +79,17 @@ function appendQueueEvent(queuePath, event) {
 }
 
 async function runSetup(options) {
+  if (options.uninstall) {
+    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: options.cwd, env: process.env });
+    console.log(JSON.stringify(teardown, null, 2));
+    return teardown.ok ? 0 : 1;
+  }
+
   const report = await runCaptureBootstrap({
     alwaysOn: Boolean(options.alwaysOn),
     dryRun: Boolean(options.dryRun),
     workspaceId: options.workspaceId,
+    cwd: options.cwd,
   });
 
   if (options.json) {
@@ -68,7 +104,7 @@ async function runSetup(options) {
   return report.ok ? 0 : 1;
 }
 
-function runEmit(positional, options) {
+async function runEmit(positional, options) {
   const source = positional[1];
   if (source !== 'shell') {
     console.error('Only `rorca-capture emit shell` is supported.');
@@ -78,13 +114,26 @@ function runEmit(positional, options) {
     console.error('--workspace-id is required.');
     return 1;
   }
-  appendQueueEvent(findQueuePath(options.cwd), {
-    source: 'shellIntegration',
+  const cwd = path.resolve(options.cwd || process.cwd());
+  const workspacePath = findWorkspacePath(cwd);
+  const git = readGitInfo(cwd);
+  const event = buildShellCaptureEvent({
     workspaceId: options.workspaceId,
-    cwd: path.resolve(options.cwd || process.cwd()),
-    exitCode: Number.isFinite(options.exitCode) ? options.exitCode : 0,
-    occurredAt: new Date().toISOString(),
+    workspacePath,
+    cwd,
+    command: String(options.command || ''),
+    phase: options.phase === 'start' ? 'start' : 'end',
+    exitCode: Number.isFinite(options.exitCode) ? options.exitCode : null,
+    durationMs: Number.isFinite(options.durationMs) ? options.durationMs : null,
+    gitBranch: git.gitBranch,
+    gitSha: git.gitSha,
+    policyMode: options.policyMode,
+    captureIgnorePatterns: readCaptureIgnorePatterns(workspacePath),
+    customAgentPatterns: options.customAgentPatterns.filter(Boolean),
   });
+  if (!event) return 0;
+  const posted = await postShellCaptureEvent({ apiBaseUrl: options.apiBaseUrl || process.env.RORCA_CAPTURE_API_URL || 'http://127.0.0.1:3030', event });
+  if (!posted) enqueueShellCaptureEvent(findQueuePath(cwd), event);
   return 0;
 }
 
@@ -142,7 +191,7 @@ try {
   let code;
   if (positional[0] === 'setup') code = await runSetup(options);
   else if (positional[0] === 'service') code = runService(positional, options);
-  else if (positional[0] === 'emit') code = runEmit(positional, options);
+  else if (positional[0] === 'emit') code = await runEmit(positional, options);
   else if (positional[0] === 'daemon') code = await runDaemon(options);
   else {
     printHelp();

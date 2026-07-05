@@ -1,9 +1,19 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { RorcaApiClient } from "./api.js";
 import type { HealthResponse, Workspace } from "./types.js";
+import {
+  SUPPORTED_CAPTURE_SHELLS,
+  installManagedShellBlock,
+  managedSourceBlock,
+  normalizeCaptureShell,
+  renderShellSnippet,
+  shellStartupFile,
+  uninstallManagedShellBlock,
+  type CaptureShell,
+} from "./capture-shell.js";
 
 export type CaptureBootstrapStepStatus = "installed" | "skipped" | "would-install" | "degraded" | "failed";
 export type CaptureBootstrapOverallStatus = "ok" | "dry-run" | "degraded" | "failed";
@@ -43,6 +53,14 @@ export type CaptureBootstrapOptions = {
   workspaceId?: string;
   apiBaseUrl?: string;
   apiClient?: CaptureBootstrapApiClient;
+  env?: NodeJS.ProcessEnv;
+};
+
+export type CaptureTeardownOptions = {
+  dryRun?: boolean;
+  cwd?: string;
+  homeDir?: string;
+  shells?: CaptureShell[];
   env?: NodeJS.ProcessEnv;
 };
 
@@ -370,8 +388,9 @@ function daemonServiceContent(workspace: Workspace): string {
   return `# ${SENTINEL}\n# Portable reference service. Use \`rorca-capture service install --workspace-id ${workspace.id} --cwd ${workspace.path}\` to render and register the native launchd/systemd file.\n[Unit]\nDescription=Rorca always-on context capture for ${workspace.id}\n\n[Service]\nType=simple\nWorkingDirectory=${workspace.path}\nExecStart=rorca-capture daemon --workspace-id ${workspace.id} --cwd ${workspace.path} --scan-interval-ms 60000 --max-commits-per-scan 20 --max-concurrency 4 --queue-warn-size 100 --queue-max-size 1000\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n`;
 }
 
-function shellSnippetContent(workspace: Workspace): string {
-  return `# ${SENTINEL}\n# Source this file from your shell only if you want command metadata capture.\nexport RORCA_CAPTURE_WORKSPACE_ID=${JSON.stringify(workspace.id)}\nexport RORCA_CAPTURE_WORKSPACE_PATH=${JSON.stringify(workspace.path)}\nrorca_capture_command_finished() {\n  local exit_code="$?"\n  command rorca-capture emit shell --workspace-id "$RORCA_CAPTURE_WORKSPACE_ID" --cwd "$PWD" --exit-code "$exit_code" >/dev/null 2>&1 || true\n  return "$exit_code"\n}\n`;
+function shellSnippetFile(captureDir: string, shell: CaptureShell): string {
+  const extension = shell === "fish" ? "fish" : shell === "powershell" ? "ps1" : "sh";
+  return path.join(captureDir, "shell", `rorca-capture.${shell}.${extension}`);
 }
 
 function ideAdapterContent(workspace: Workspace): string {
@@ -423,23 +442,46 @@ function installGitHooks(workspace: Workspace, queuePath: string, dryRun: boolea
   }, dryRun));
 }
 
-function installShellSnippet(workspace: Workspace, captureDir: string, env: NodeJS.ProcessEnv, dryRun: boolean): CaptureBootstrapStep {
-  const shell = env.SHELL ? path.basename(env.SHELL) : "unknown";
-  const snippetPath = path.join(captureDir, "shell", "rorca-capture.sh");
-  const installed = installManagedFile({
-    id: "shell-snippet",
-    label: "Shell snippet",
-    path: snippetPath,
-    content: shellSnippetContent(workspace),
-  }, dryRun);
+function installShellSnippets(workspace: Workspace, captureDir: string, homeDir: string, env: NodeJS.ProcessEnv, dryRun: boolean, apiBaseUrl: string): CaptureBootstrapStep[] {
+  const detectedShell = normalizeCaptureShell(env.SHELL || env.ComSpec || env.PSModulePath);
+  const steps: CaptureBootstrapStep[] = [];
 
-  return {
-    ...installed,
-    details: { shell },
-    nextActions: shell === "unknown"
-      ? ["Set SHELL or manually source the generated snippet from your preferred shell config."]
-      : [`Review the snippet, then source ${snippetPath} from your ${shell} config if desired.`],
-  };
+  for (const shell of SUPPORTED_CAPTURE_SHELLS) {
+    const snippetPath = shellSnippetFile(captureDir, shell);
+    steps.push(installManagedFile({
+      id: `shell-snippet:${shell}`,
+      label: `Shell snippet (${shell})`,
+      path: snippetPath,
+      content: renderShellSnippet(shell, { workspace, apiBaseUrl }),
+    }, dryRun));
+  }
+
+  if (!detectedShell) {
+    steps.push(step({
+      id: "shell-startup-block",
+      label: "Shell startup block",
+      status: "degraded",
+      message: "Could not detect a supported interactive shell; snippet files were generated without editing shell startup files.",
+      details: { supportedShells: SUPPORTED_CAPTURE_SHELLS },
+      nextActions: ["Manually source the generated snippet for zsh, bash, fish, or PowerShell if desired."],
+    }));
+    return steps;
+  }
+
+  const snippetPath = shellSnippetFile(captureDir, detectedShell);
+  const startupFile = shellStartupFile(detectedShell, homeDir);
+  const status = installManagedShellBlock(startupFile, managedSourceBlock(detectedShell, snippetPath), dryRun);
+  steps.push(step({
+    id: `shell-startup-block:${detectedShell}`,
+    label: `Shell startup block (${detectedShell})`,
+    status: status === "installed" ? "installed" : status === "would-install" ? "would-install" : "skipped",
+    path: startupFile,
+    message: status === "skipped" ? "Managed shell startup block already installed." : status === "would-install" ? "Managed shell startup block would be installed." : "Managed shell startup block installed with clear sentinels.",
+    details: { shell: detectedShell, snippetPath, sentinels: ["# >>> rorca-capture always-on (managed) >>>", "# <<< rorca-capture always-on (managed) <<<"] },
+    nextActions: ["Restart your shell or source the updated shell startup file to enable command metadata capture.", "Run `rorca-capture setup --uninstall` to remove only the managed sentinel blocks."],
+  }));
+
+  return steps;
 }
 
 function detectIde(workspace: Workspace): { available: boolean; reason?: string } {
@@ -561,7 +603,7 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
   steps.push(installManagedFile({ id: "sidecar-config", label: "Sidecar config", path: sidecarConfigPath, content: sidecarConfigContent(workspace, queuePath) }, dryRun));
   steps.push(...installGitHooks(workspace, queuePath, dryRun));
   steps.push(installManagedFile({ id: "daemon-service", label: "Daemon/service file", path: daemonPath, content: daemonServiceContent(workspace) }, dryRun));
-  steps.push(installShellSnippet(workspace, captureDir, env, dryRun));
+  steps.push(...installShellSnippets(workspace, captureDir, homeDir, env, dryRun, client.baseUrl));
   steps.push(installIdeAdapter(workspace, dryRun));
   steps.push(installManagedFile({ id: "mcp-slash-config", label: "MCP/slash-command config", path: mcpSlashPath, content: mcpSlashConfigContent(workspace) }, dryRun));
 
@@ -572,7 +614,7 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
     sidecarConfigPath,
     ...GIT_HOOKS.map((hook) => path.join(workspace.path, ".git", "hooks", hook)),
     daemonPath,
-    path.join(captureDir, "shell"),
+    ...SUPPORTED_CAPTURE_SHELLS.map((shell) => shellSnippetFile(captureDir, shell)),
     path.join(workspace.path, ".vscode", "rorca-capture-adapter.json"),
     mcpSlashPath,
     uninstallPath,
@@ -580,6 +622,35 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
   steps.push(installManagedFile({ id: "uninstall-metadata", label: "Uninstall metadata", path: uninstallPath, content: uninstallMetadataContent(workspace, artifactPaths) }, dryRun));
 
   return buildReport({ dryRun, alwaysOn: true, apiBaseUrl: client.baseUrl, workspace, steps });
+}
+
+export function runCaptureTeardown(options: CaptureTeardownOptions = {}): { ok: boolean; dryRun: boolean; steps: CaptureBootstrapStep[] } {
+  const dryRun = Boolean(options.dryRun);
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  const homeDir = options.homeDir ?? os.homedir();
+  const env = options.env ?? process.env;
+  const detected = normalizeCaptureShell(env.SHELL || env.ComSpec || env.PSModulePath);
+  const shells = options.shells ?? (detected ? [detected] : SUPPORTED_CAPTURE_SHELLS);
+  const steps: CaptureBootstrapStep[] = [];
+
+  for (const shell of shells) {
+    const startupFile = shellStartupFile(shell, homeDir);
+    const status = uninstallManagedShellBlock(startupFile, dryRun);
+    steps.push(step({
+      id: `shell-startup-block:${shell}`,
+      label: `Shell startup block (${shell})`,
+      status: status === "removed" ? "installed" : status === "would-remove" ? "would-install" : "skipped",
+      path: startupFile,
+      message: status === "skipped" ? "No managed shell startup block found." : status === "would-remove" ? "Managed shell startup block would be removed." : "Managed shell startup block removed.",
+    }));
+  }
+
+  const captureDir = path.join(cwd, ".rorca", "capture");
+  if (existsSync(captureDir) && !dryRun) {
+    for (const shell of SUPPORTED_CAPTURE_SHELLS) rmSync(shellSnippetFile(captureDir, shell), { force: true });
+  }
+
+  return { ok: true, dryRun, steps };
 }
 
 function buildReport(input: { dryRun: boolean; alwaysOn: boolean; apiBaseUrl: string; workspace?: Workspace; steps: CaptureBootstrapStep[] }): CaptureBootstrapReport {

@@ -10,7 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { queryOne } from '../db/index';
 import { NotFoundError, ValidationError } from '../lib/errors';
-import { DEFAULT_CAPTURE_POLICY, sanitizeCapturePayload } from '../lib/context-safety';
+import { DEFAULT_CAPTURE_POLICY, sanitizeCapturePayload, sanitizeCliCommandEvent, type CapturePolicyMode } from '../lib/context-safety';
+import { ContextCaptureEventJobPayload } from '../lib/pg-boss-schemas';
 
 const router = Router();
 
@@ -36,6 +37,23 @@ function assertInsideWorkspace(workspacePath: string, candidatePath: string, nam
   if (!isInside(workspacePath, candidatePath)) {
     throw new ValidationError(`${name} must be inside the workspace path`, { workspacePath, candidatePath });
   }
+}
+
+function parsePolicyMode(value: unknown): CapturePolicyMode {
+  if (value === 'off' || value === 'metadata-only' || value === 'command-summary' || value === 'explicit-transcript-import') return value;
+  return 'metadata-only';
+}
+
+function isCliCapturePayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const eventType = (payload as Record<string, unknown>).eventType;
+  return eventType === 'cli_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
+}
+
+function readCaptureIgnorePatterns(workspacePath: string): string[] {
+  const ignorePath = path.join(workspacePath, '.rorca-captureignore');
+  if (!fs.existsSync(ignorePath)) return [];
+  return fs.readFileSync(ignorePath, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 function captureCapability() {
@@ -143,8 +161,9 @@ router.post('/bootstrap/verify', async (req, res, next) => {
  *     tags: [Context Capture]
  *     summary: Submit a redacted context capture event
  *     operationId: submitContextCaptureEvent
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Context capture events are user-owned local workspace telemetry; ingestion is callable by local sidecars but still requires the local auth boundary."
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Local shell and daemon capture submit already-redacted command metadata through this stable public API; it has no operator side effects and never writes directly to context tables."
+ *     x-rorca-public-api: true
  *     requestBody:
  *       required: true
  *       content:
@@ -170,13 +189,51 @@ router.post('/events', async (req, res, next) => {
     const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) throw new NotFoundError('Workspace', workspaceId);
 
-    const sanitized = sanitizeCapturePayload(req.body.payload ?? {});
+    const payload = req.body.payload ?? {};
+    const policyMode = parsePolicyMode(req.body.policyMode ?? (payload as Record<string, unknown>).policyMode);
+    const ignorePatterns = readCaptureIgnorePatterns(workspace.path);
+    if (isCliCapturePayload(payload) && (payload as Record<string, unknown>).transcript !== undefined && policyMode !== 'explicit-transcript-import') {
+      throw new ValidationError('Transcript capture requires explicit-transcript-import policy');
+    }
+
+    const sanitized = isCliCapturePayload(payload)
+      ? sanitizeCliCommandEvent({
+        ...(payload as Record<string, unknown>),
+        policyMode,
+        workspacePath: workspace.path,
+        captureIgnorePatterns: ignorePatterns,
+      })
+      : sanitizeCapturePayload(payload, {
+        ...DEFAULT_CAPTURE_POLICY,
+        rawContentDefault: policyMode === 'explicit-transcript-import' ? 'explicit' : DEFAULT_CAPTURE_POLICY.rawContentDefault,
+      });
+
+    if (sanitized.payload === null) {
+      res.json({
+        ok: true,
+        accepted: false,
+        workspaceId,
+        source,
+        occurredAt,
+        reason: policyMode === 'off' ? 'policy_off' : 'capture_ignore',
+        safety: sanitized.safety,
+        capability: captureCapability(),
+      });
+      return;
+    }
+
+    const event = ContextCaptureEventJobPayload.safeParse({ workspaceId, source, occurredAt, payload: sanitized.payload, safety: sanitized.safety });
+    if (isCliCapturePayload(payload) && !event.success) {
+      throw new ValidationError('Invalid context capture event payload', { issues: event.error.issues });
+    }
+
     res.json({
       ok: true,
       accepted: true,
       workspaceId,
       source,
       occurredAt,
+      payload: sanitized.payload,
       safety: sanitized.safety,
       capability: captureCapability(),
     });

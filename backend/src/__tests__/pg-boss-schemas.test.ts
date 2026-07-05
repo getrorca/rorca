@@ -27,6 +27,9 @@ import {
   type PipelineRetryJobPayloadType,
   PipelineCancelJobPayload,
   type PipelineCancelJobPayloadType,
+  CliCommandContextEventPayload,
+  AgentCliSessionContextEventPayload,
+  ContextCaptureEventJobPayload,
 } from '../lib/pg-boss-schemas';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -361,5 +364,68 @@ describe('Worker handler payload validation — invalid payload throws before sp
       // naturally so pg-boss marks the job as failed
       expect(err).toBeInstanceOf(z.ZodError);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Context capture event payloads
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Context capture event schemas', () => {
+  const basePayload = {
+    phase: 'end' as const,
+    policyMode: 'command-summary' as const,
+    commandSummary: 'claude --print [REDACTED]',
+    commandHash: 'a'.repeat(64),
+    cwd: '/workspace',
+    exitCode: 0,
+    durationMs: 123,
+    gitBranch: 'main',
+    gitSha: 'b'.repeat(40),
+    regulatedSignals: [],
+  };
+
+  const safety = {
+    contextSafetyModule: 'backend/src/lib/context-safety.ts' as const,
+    policyVersion: '2026-07-ucc-004',
+    redactionCount: 1,
+    ignoredPathCount: 0,
+    truncated: false,
+    hashAlgorithm: 'sha256' as const,
+    contentHash: 'c'.repeat(64),
+  };
+
+  test('cli_command accepts unknown commands at metadata level', () => {
+    const parsed = CliCommandContextEventPayload.parse({
+      ...basePayload,
+      eventType: 'cli_command',
+      policyMode: 'metadata-only',
+      commandSummary: null,
+      agent: { recognized: false, binary: 'unknown' },
+    });
+    expect(parsed.commandSummary).toBeNull();
+    expect(parsed.agent.binary).toBe('unknown');
+  });
+
+  test('agent_cli_session requires recognized agent binary', () => {
+    const parsed = AgentCliSessionContextEventPayload.parse({
+      ...basePayload,
+      eventType: 'agent_cli_session',
+      agent: { recognized: true, binary: 'claude', matchedPattern: 'claude' },
+    });
+    expect(parsed.agent.binary).toBe('claude');
+    expect(() => AgentCliSessionContextEventPayload.parse({ ...parsed, agent: { recognized: false, binary: 'unknown' } })).toThrow(z.ZodError);
+  });
+
+  test('context capture job payload is strict and includes safety report', () => {
+    const event = ContextCaptureEventJobPayload.parse({
+      workspaceId: 'rorca',
+      source: 'shellIntegration',
+      occurredAt: '2026-07-05T00:00:00.000Z',
+      payload: { ...basePayload, eventType: 'agent_cli_session', agent: { recognized: true, binary: 'opencode' } },
+      safety,
+    });
+    expect(event.payload.eventType).toBe('agent_cli_session');
+    expect(() => ContextCaptureEventJobPayload.parse({ ...event, directDbWrite: true })).toThrow(z.ZodError);
   });
 });

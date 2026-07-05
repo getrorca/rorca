@@ -59,10 +59,10 @@ type CaptureState = {
 type QueuedEvent = {
   id: string;
   workspaceId: string;
-  source: "repoDaemon";
+  source: "repoDaemon" | "shellIntegration" | "gitHook" | "vscodeExtension" | "mcpSlashCommand";
   occurredAt: string;
   payload: unknown;
-  safety: { redactionCount: number; truncated: boolean; hashAlgorithm: "sha256"; policyVersion: string };
+  safety: { redactionCount: number; truncated: boolean; hashAlgorithm: "sha256"; policyVersion: string; [key: string]: unknown };
 };
 
 export type CaptureServiceRunner = (command: string, args: string[], options?: SpawnSyncOptions) => { status: number | null; stdout?: Buffer | string; stderr?: Buffer | string; error?: Error };

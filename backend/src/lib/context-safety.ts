@@ -7,6 +7,8 @@
 
 import crypto from 'node:crypto';
 
+export type CapturePolicyMode = 'off' | 'metadata-only' | 'command-summary' | 'explicit-transcript-import';
+
 export type CapturePolicy = {
   version: string;
   maxStringBytes: number;
@@ -14,6 +16,46 @@ export type CapturePolicy = {
   rawContentDefault: 'off' | 'metadata+hash' | 'explicit';
   hashAlgorithm: 'sha256';
   redactionPatterns: Array<{ name: string; pattern: RegExp; replacement: string }>;
+};
+
+export type AgentBinaryDetection = {
+  recognized: boolean;
+  binary: 'claude' | 'codex' | 'opencode' | 'pi' | 'aider' | 'cursor' | 'custom' | 'unknown';
+  matchedPattern?: string;
+};
+
+export type CliCommandSafetyInput = {
+  eventType?: 'cli_command' | 'agent_cli_session';
+  phase?: 'start' | 'end';
+  command?: string;
+  cwd?: string;
+  workspacePath?: string;
+  exitCode?: number | null;
+  durationMs?: number | null;
+  gitBranch?: string | null;
+  gitSha?: string | null;
+  startedAt?: string;
+  endedAt?: string;
+  customAgentPatterns?: string[];
+  captureIgnorePatterns?: string[];
+  policyMode?: CapturePolicyMode;
+  transcript?: unknown;
+};
+
+export type SanitizedCliCommandEvent = {
+  eventType: 'cli_command' | 'agent_cli_session';
+  phase: 'start' | 'end';
+  policyMode: CapturePolicyMode;
+  commandSummary: string | null;
+  commandHash: string;
+  cwd: string | null;
+  exitCode: number | null;
+  durationMs: number | null;
+  gitBranch: string | null;
+  gitSha: string | null;
+  agent: AgentBinaryDetection;
+  regulatedSignals: string[];
+  transcript?: unknown;
 };
 
 export type CaptureSafetyReport = {
@@ -42,8 +84,18 @@ export const DEFAULT_CAPTURE_POLICY: CapturePolicy = {
     { name: 'private key block', pattern: /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, replacement: '[REDACTED_PRIVATE_KEY]' },
     { name: 'bearer token', pattern: /Bearer\s+[A-Za-z0-9._~+/-]+=*/g, replacement: 'Bearer [REDACTED]' },
     { name: 'api key', pattern: /\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;}]+/gi, replacement: '$1=[REDACTED]' },
+    { name: 'long token', pattern: /\b[A-Za-z0-9_=-]{32,}\b/g, replacement: '[REDACTED_TOKEN]' },
+    { name: 'url credential', pattern: /(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, replacement: '$1[REDACTED]@' },
   ],
 };
+
+export const BUILTIN_AGENT_BINARIES = ['claude', 'codex', 'opencode', 'pi', 'aider', 'cursor'] as const;
+
+const REGULATED_SIGNAL_RULES: Array<{ name: string; pattern: RegExp }> = [
+  { name: 'possible_ssn', pattern: /\b\d{3}-\d{2}-\d{4}\b/ },
+  { name: 'possible_credit_card', pattern: /\b(?:\d[ -]*?){13,19}\b/ },
+  { name: 'regulated_domain_keyword', pattern: /\b(hipaa|phi|pci|cardholder|ssn|medical\s+record|patient)\b/i },
+];
 
 export function hashCaptureContent(value: unknown): string {
   return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
@@ -117,6 +169,107 @@ function boundPayload(payload: unknown, policy: CapturePolicy, counters: { trunc
     byteLength: Buffer.byteLength(encoded),
     preview: encoded.slice(0, policy.maxStringBytes),
   };
+}
+
+export function detectAgentBinary(commandText: string, customPatterns: string[] = []): AgentBinaryDetection {
+  const firstToken = commandText.trim().match(/^(?:env\s+)?(?:[A-Z0-9_]+=[^\s]+\s+)*(?:command\s+)?(?:npx\s+)?(?:["']?)([^\s"']+)/i)?.[1] ?? '';
+  const basename = firstToken.split(/[\\/]/).pop()?.replace(/\.(cmd|exe|ps1)$/i, '').toLowerCase() ?? '';
+  if ((BUILTIN_AGENT_BINARIES as readonly string[]).includes(basename)) {
+    return { recognized: true, binary: basename as AgentBinaryDetection['binary'], matchedPattern: basename };
+  }
+  for (const pattern of customPatterns) {
+    try {
+      if (new RegExp(pattern, 'i').test(commandText)) return { recognized: true, binary: 'custom', matchedPattern: pattern };
+    } catch {
+      if (commandText.toLowerCase().includes(pattern.toLowerCase())) return { recognized: true, binary: 'custom', matchedPattern: pattern };
+    }
+  }
+  return { recognized: false, binary: 'unknown' };
+}
+
+export function isCaptureIgnoredPath(candidatePath: string, workspacePath: string | undefined, patterns: string[] = []): boolean {
+  if (!candidatePath || patterns.length === 0) return false;
+  const root = pathNormalize(workspacePath || process.cwd());
+  const absolute = pathNormalize(pathIsAbsolute(candidatePath) ? candidatePath : `${root}/${candidatePath}`);
+  const relative = stripLeadingSlash(absolute.startsWith(`${root}/`) ? absolute.slice(root.length + 1) : absolute);
+  return patterns.some((rawPattern) => matchesCaptureIgnorePattern(relative, absolute, root, rawPattern));
+}
+
+export function redactCommandText(commandText: string, input: { workspacePath?: string; captureIgnorePatterns?: string[]; policy?: CapturePolicy } = {}): { text: string; redactionCount: number; regulatedSignals: string[] } {
+  const counters = { redactionCount: 0, truncated: false };
+  let text = sanitizeString(commandText, input.policy ?? DEFAULT_CAPTURE_POLICY, counters);
+  const regulatedSignals = REGULATED_SIGNAL_RULES.filter((rule) => rule.pattern.test(commandText)).map((rule) => rule.name);
+  const pathTokens = Array.from(text.matchAll(/(?:^|\s)(['"]?)([^\s'"<>|;&]+(?:\/[^^\s'"<>|;&]*)+)\1/g));
+  for (const match of pathTokens) {
+    const token = match[2];
+    if (isCaptureIgnoredPath(token, input.workspacePath, input.captureIgnorePatterns)) {
+      text = text.split(token).join('[REDACTED_PATH]');
+      counters.redactionCount += 1;
+    }
+  }
+  return { text, redactionCount: counters.redactionCount, regulatedSignals };
+}
+
+export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: CapturePolicy = DEFAULT_CAPTURE_POLICY): SanitizedCapturePayload & { payload: SanitizedCliCommandEvent | null } {
+  const policyMode = input.policyMode ?? 'metadata-only';
+  if (policyMode === 'off') {
+    return { payload: null, safety: sanitizeCapturePayload({ skipped: 'policy_off' }, policy).safety };
+  }
+  if (input.transcript !== undefined && policyMode !== 'explicit-transcript-import') {
+    throw new Error('Transcript capture requires explicit-transcript-import policy');
+  }
+  if (input.cwd && isCaptureIgnoredPath(input.cwd, input.workspacePath, input.captureIgnorePatterns)) {
+    return { payload: null, safety: sanitizeCapturePayload({ skipped: 'capture_ignore' }, policy).safety };
+  }
+  const command = input.command ?? '';
+  const redacted = redactCommandText(command, { workspacePath: input.workspacePath, captureIgnorePatterns: input.captureIgnorePatterns, policy });
+  const event: SanitizedCliCommandEvent = {
+    eventType: input.eventType ?? (detectAgentBinary(command, input.customAgentPatterns).recognized ? 'agent_cli_session' : 'cli_command'),
+    phase: input.phase ?? 'end',
+    policyMode,
+    commandSummary: policyMode === 'metadata-only' ? null : redacted.text,
+    commandHash: hashCaptureContent(command),
+    cwd: input.cwd ? redactCommandText(input.cwd, { workspacePath: input.workspacePath, captureIgnorePatterns: input.captureIgnorePatterns, policy }).text : null,
+    exitCode: typeof input.exitCode === 'number' && Number.isFinite(input.exitCode) ? input.exitCode : null,
+    durationMs: typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) ? input.durationMs : null,
+    gitBranch: input.gitBranch ?? null,
+    gitSha: input.gitSha ?? null,
+    agent: detectAgentBinary(command, input.customAgentPatterns),
+    regulatedSignals: redacted.regulatedSignals,
+    ...(policyMode === 'explicit-transcript-import' && input.transcript !== undefined ? { transcript: input.transcript } : {}),
+  };
+  return sanitizeCapturePayload(event, {
+    ...policy,
+    rawContentDefault: policyMode === 'explicit-transcript-import' ? 'explicit' : policy.rawContentDefault,
+  }) as SanitizedCapturePayload & { payload: SanitizedCliCommandEvent };
+}
+
+function matchesCaptureIgnorePattern(relative: string, absolute: string, root: string, rawPattern: string): boolean {
+  const trimmed = rawPattern.trim();
+  if (!trimmed || trimmed.startsWith('#')) return false;
+  const negated = trimmed.startsWith('!');
+  if (negated) return false;
+  const pattern = stripLeadingSlash(trimmed.endsWith('/') ? `${trimmed}**` : trimmed);
+  const target = relative || stripLeadingSlash(absolute.replace(`${root}/`, ''));
+  if (!pattern.includes('*')) return target === pattern || target.startsWith(`${pattern}/`);
+  const regex = new RegExp(`^${pattern.split('**').map(escapeRegex).join('.*').split('\\*').join('[^/]*')}$`);
+  return regex.test(target);
+}
+
+function pathNormalize(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
+}
+
+function pathIsAbsolute(value: string): boolean {
+  return /^([A-Za-z]:)?[\\/]/.test(value);
+}
+
+function stripLeadingSlash(value: string): string {
+  return value.replace(/^\/+/, '');
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function stableStringify(value: unknown): string {

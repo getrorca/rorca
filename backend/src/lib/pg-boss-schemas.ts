@@ -126,3 +126,57 @@ export const SpecJobPayload = z.object({
 }).strict();
 
 export type SpecJobPayloadType = z.infer<typeof SpecJobPayload>;
+
+// ── context:capture ─────────────────────────────────────────────────────────
+
+export const CapturePolicyModeEnum = z.enum(['off', 'metadata-only', 'command-summary', 'explicit-transcript-import']);
+export const AgentBinaryEnum = z.enum(['claude', 'codex', 'opencode', 'pi', 'aider', 'cursor', 'custom', 'unknown']);
+
+export const CliCommandContextEventPayload = z.object({
+  eventType: z.literal('cli_command'),
+  phase: z.enum(['start', 'end']).default('end'),
+  policyMode: CapturePolicyModeEnum.default('metadata-only'),
+  commandSummary: z.string().nullable(),
+  commandHash: z.string().min(16),
+  cwd: z.string().nullable(),
+  exitCode: z.number().int().nullable(),
+  durationMs: z.number().int().nonnegative().nullable(),
+  gitBranch: z.string().nullable(),
+  gitSha: z.string().nullable(),
+  agent: z.object({
+    recognized: z.boolean(),
+    binary: AgentBinaryEnum,
+    matchedPattern: z.string().optional(),
+  }).strict(),
+  regulatedSignals: z.array(z.string()).default([]),
+}).strict();
+
+export const AgentCliSessionContextEventPayload = CliCommandContextEventPayload.extend({
+  eventType: z.literal('agent_cli_session'),
+  agent: z.object({
+    recognized: z.literal(true),
+    binary: AgentBinaryEnum.exclude(['unknown']),
+    matchedPattern: z.string().optional(),
+  }).strict(),
+}).strict();
+
+export const ContextCaptureEventJobPayload = z.object({
+  workspaceId: z.string().min(1),
+  source: z.enum(['shellIntegration', 'repoDaemon', 'gitHook', 'vscodeExtension', 'mcpSlashCommand']),
+  occurredAt: z.string().datetime(),
+  payload: z.union([CliCommandContextEventPayload, AgentCliSessionContextEventPayload]),
+  safety: z.object({
+    contextSafetyModule: z.literal('backend/src/lib/context-safety.ts'),
+    policyVersion: z.string().min(1),
+    redactionCount: z.number().int().nonnegative(),
+    ignoredPathCount: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+    hashAlgorithm: z.literal('sha256'),
+    contentHash: z.string().min(16),
+  }).strict(),
+}).strict();
+
+export type CapturePolicyModeType = z.infer<typeof CapturePolicyModeEnum>;
+export type CliCommandContextEventPayloadType = z.infer<typeof CliCommandContextEventPayload>;
+export type AgentCliSessionContextEventPayloadType = z.infer<typeof AgentCliSessionContextEventPayload>;
+export type ContextCaptureEventJobPayloadType = z.infer<typeof ContextCaptureEventJobPayload>;
