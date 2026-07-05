@@ -1,0 +1,42 @@
+import { describe, expect, test } from "vitest";
+import { RORCA_COMMANDS, RORCA_COMMAND_TITLES, registerRorcaCommands, submitRememberSelection } from "../src/commands.js";
+import type { RorcaCaptureClient } from "../src/client.js";
+
+describe("Rorca VS Code command registration", () => {
+  test("registers all required commands", () => {
+    const registered: string[] = [];
+    const disposables = registerRorcaCommands({
+      registry: { registerCommand: (command) => { registered.push(command); return { dispose: () => undefined }; } },
+      handlers: Object.fromEntries(Object.values(RORCA_COMMANDS).map((command) => [command, () => undefined])) as never,
+    });
+
+    expect(registered).toEqual(Object.values(RORCA_COMMANDS));
+    expect(registered.map((command) => RORCA_COMMAND_TITLES[command as keyof typeof RORCA_COMMAND_TITLES])).toEqual([
+      "Rorca: Capture Session Summary",
+      "Rorca: Remember Selection",
+      "Rorca: Pause Capture",
+      "Rorca: Show Capture Status",
+      "Rorca: Review Candidates",
+    ]);
+    expect(disposables).toHaveLength(5);
+  });
+
+  test("Remember Selection submits governed memory candidates for review", async () => {
+    const submissions: unknown[] = [];
+    const client = { submit: async (input: unknown) => { submissions.push(input); return { queued: true }; } } as RorcaCaptureClient;
+
+    const result = await submitRememberSelection({
+      client,
+      config: { enabled: true, apiBaseUrl: "http://127.0.0.1:3030", policyMode: "metadata-only", queueMaxSize: 100, memoryCandidateMaxCount: 1, memoryCandidateTokenCap: 500 },
+      workspaceId: "ws",
+      workspacePath: "/repo",
+      selectionText: "Use apiFetch for frontend API calls.",
+      filePath: "/repo/src/lib/api.ts",
+      languageId: "typescript",
+    });
+
+    expect(result.queued).toBe(true);
+    expect(result.governance.submittedCandidates).toBe(1);
+    expect(submissions[0]).toMatchObject({ eventType: "memory_candidate", workspaceId: "ws", payload: { reviewRequired: true } });
+  });
+});
