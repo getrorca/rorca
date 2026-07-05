@@ -8,10 +8,13 @@
 /**
  * execution-engine.ts — Universal TypeScript execution engine for the Ralph Loop.
  *
- * Replaces both run-loop.sh and run-loop.ts. Supports three agent types:
- *   - claude:   `claude --dangerously-skip-permissions --print --verbose --output-format stream-json`
- *   - opencode: `opencode run --format json --attach <socket> --model <model>`
- *   - codex:    `codex --approval-mode auto-edit`
+ * Replaces both run-loop.sh and run-loop.ts. Supports four agent types.
+ * Semantic/ANSI mode uses non-interactive machine-readable commands; PTY mode
+ * uses interactive node-pty adapters and bracketed-paste prompt injection.
+ *   - claude:   semantic `claude --print ...`; PTY interactive `claude ...`
+ *   - opencode: semantic `opencode run --format json ...`; PTY interactive `opencode ...`
+ *   - codex:    semantic `codex exec ...`; PTY interactive `codex --approval-mode auto-edit`
+ *   - pi:       semantic Pi RPC; PTY interactive `pi --mode text ...`
  *
  * Agent type is read from config (RORCA_AGENT env var via config.ts, default: claude).
  * ATTACH_ADDR for opencode is passed via function argument from opencode-server.ts,
@@ -44,6 +47,16 @@ import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import {
+  buildPtyCompletionMarker,
+  buildPtyMarkerFilePath,
+  createBaseInteractivePtyAdapter,
+  createPtyCompletionState,
+  injectPromptWithChunkedTyping,
+  type InteractivePtyAgentAdapter,
+  type PtyCompletionState,
+  type PtyLaunchCommand,
+} from './interactive-pty-agent-adapter';
+import {
   PTY_AVAILABLE,
   PTY_UNAVAILABLE_HINT,
   registerPtyCleanupTask,
@@ -57,6 +70,8 @@ import {
   completeRunPtySession,
   initializeRunPtySequence,
   logRunPtyStoreError,
+  markRunPtyCompletionMarkerSeen,
+  recordRunPtyHeartbeat,
   startRunPtySession,
 } from './run-pty-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
@@ -432,12 +447,12 @@ interface PiRpcServer {
   ready: boolean;
   cwd: string;
   model: string | null;
+  thinkingLevel: string | null;
   skillFiles: string[];
   mcpServersSignature: string;
 }
-let _piRpcServer: PiRpcServer | null = null;
+const _piRpcServers = new Set<PiRpcServer>();
 let _piRpcExitCleanupRegistered = false;
-let _piRpcStoryQueue: Promise<void> = Promise.resolve();
 
 const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
@@ -492,6 +507,23 @@ export function resolveClaudeCliModelId(requestedModel: string | null): string |
   //   claude-sonnet-4.7 -> claude-sonnet-4-7
   //   claude-haiku-4.5-20251001 -> claude-haiku-4-5-20251001
   return trimmed.replace(/-(\d+)\.(\d+)(?:(-\d{8})?)$/, '-$1-$2$3');
+}
+
+function resolvePiThinkingLevel(requestedModel: string | null, effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'): string | null {
+  if (!effortLevel) return null;
+  const id = requestedModel?.toLowerCase() ?? '';
+  const bare = id.includes('/') ? id.split('/').pop()! : id;
+  const isDeepSeekV4 = bare === 'deepseek-v4-pro' || bare === 'deepseek-v4-flash';
+
+  if (isDeepSeekV4) {
+    if (effortLevel === 'low') return 'off';
+    if (effortLevel === 'max' || effortLevel === 'xhigh') return 'xhigh';
+    if (effortLevel === 'medium') return 'high';
+    return effortLevel;
+  }
+
+  if (effortLevel === 'max') return 'xhigh';
+  return effortLevel;
 }
 
 function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
@@ -1156,11 +1188,6 @@ function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void)
   };
 }
 
-function samePiSkillFiles(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((value, index) => value === b[index]);
-}
-
 function normalizePiMcpServers(mcpServers?: Record<string, string>): string {
   if (!mcpServers || Object.keys(mcpServers).length === 0) return '';
   return JSON.stringify(Object.entries(mcpServers).sort(([a], [b]) => a.localeCompare(b)));
@@ -1171,22 +1198,10 @@ async function startPiRpcServer(
   model: string | null,
   skillFiles: string[] = [],
   mcpServers?: Record<string, string>,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Promise<PiRpcServer> {
+  const thinkingLevel = resolvePiThinkingLevel(model, effortLevel);
   const mcpServersSignature = normalizePiMcpServers(mcpServers);
-  if (
-    _piRpcServer?.ready
-    && _piRpcServer.cwd === cwd
-    && _piRpcServer.model === model
-    && samePiSkillFiles(_piRpcServer.skillFiles, skillFiles)
-    && (mcpServersSignature === '' || _piRpcServer.mcpServersSignature === mcpServersSignature)
-  ) {
-    return _piRpcServer;
-  }
-
-  if (_piRpcServer) {
-    await stopPiRpcServer();
-  }
-
   const piSelection = resolvePiCliSelection(model);
   const explicitExtensions = resolvePiExtensionPaths();
   const args = [
@@ -1197,9 +1212,10 @@ async function startPiRpcServer(
     ...explicitExtensions.flatMap(extensionPath => ['--extension', extensionPath]),
     ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
     ...(piSelection.model ? ['--model', piSelection.model] : []),
+    ...(thinkingLevel ? ['--thinking', thinkingLevel] : []),
     ...skillFiles.flatMap(skillFile => ['--skill', skillFile]),
   ];
-  logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'} mcp=${mcpServersSignature || 'none'}`);
+  logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} thinking=${thinkingLevel ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'} mcp=${mcpServersSignature || 'none'}`);
   const env = buildGuardedAgentEnv(cwd);
   if (mcpServers?.rorca) {
     env.RORCA_PI_MCP_URL = mcpServers.rorca;
@@ -1222,6 +1238,7 @@ async function startPiRpcServer(
     ready: false,
     cwd,
     model,
+    thinkingLevel,
     skillFiles,
     mcpServersSignature,
   };
@@ -1303,9 +1320,7 @@ async function startPiRpcServer(
   child.on('exit', (code, signal) => {
     detachStdoutReader();
     server.ready = false;
-    if (_piRpcServer === server) {
-      _piRpcServer = null;
-    }
+    _piRpcServers.delete(server);
     const exitMessage = `pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
     failPending(exitMessage);
     for (const listener of [...server.eventListeners]) {
@@ -1325,13 +1340,13 @@ async function startPiRpcServer(
   }
 
   server.ready = true;
-  _piRpcServer = server;
+  _piRpcServers.add(server);
 
   if (!_piRpcExitCleanupRegistered) {
     _piRpcExitCleanupRegistered = true;
     process.on('exit', () => {
-      if (_piRpcServer) {
-        try { _piRpcServer.process.kill('SIGTERM'); } catch { /* already gone */ }
+      for (const activeServer of _piRpcServers) {
+        try { activeServer.process.kill('SIGTERM'); } catch { /* already gone */ }
       }
     });
   }
@@ -1339,11 +1354,8 @@ async function startPiRpcServer(
   return server;
 }
 
-async function stopPiRpcServer(): Promise<void> {
-  const server = _piRpcServer;
-  if (!server) return;
-
-  _piRpcServer = null;
+async function stopSinglePiRpcServer(server: PiRpcServer): Promise<void> {
+  _piRpcServers.delete(server);
   server.ready = false;
 
   const exitPromise = new Promise<void>((resolve) => {
@@ -1369,6 +1381,15 @@ async function stopPiRpcServer(): Promise<void> {
     try { server.process.kill('SIGKILL'); } catch { /* already gone */ }
     await exitPromise.catch(() => {});
   }
+}
+
+async function stopPiRpcServer(server?: PiRpcServer): Promise<void> {
+  if (server) {
+    await stopSinglePiRpcServer(server);
+    return;
+  }
+
+  await Promise.all([..._piRpcServers].map(activeServer => stopSinglePiRpcServer(activeServer)));
 }
 
 function sendPiRpcCommand(server: PiRpcServer, command: object): Promise<unknown> {
@@ -1821,6 +1842,28 @@ interface AgentResult {
   piSessionId?: string;
 }
 
+const PROMPT_DELIVERY_FAILURE_CATEGORY = 'prompt_delivery_failed' as const;
+const EMPTY_PROMPT_FAILURE_MESSAGE = `${PROMPT_DELIVERY_FAILURE_CATEGORY}: Refusing to launch agent with an empty prompt.`;
+
+function isEmptyPrompt(prompt: string): boolean {
+  return prompt.trim().length === 0;
+}
+
+function buildPromptDeliveryFailureResult(startTime: number = Date.now(), detail = EMPTY_PROMPT_FAILURE_MESSAGE): AgentResult {
+  return {
+    exitCode: 1,
+    stderrTail: detail,
+    elapsedMs: Math.max(0, Date.now() - startTime),
+  };
+}
+
+export function isPromptDeliveryFailureOutput(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes(PROMPT_DELIVERY_FAILURE_CATEGORY)
+    || lower.includes('no prompt provided')
+    || lower.includes('either specify one as an argument or pipe the prompt into stdin');
+}
+
 interface PiRetryContext {
   isRetry: boolean;
   attempt: number;
@@ -1857,6 +1900,8 @@ interface PtyRunOptions {
   agentType: AgentType;
   cols: number;
   rows: number;
+  port?: number;
+  storyId?: string;
 }
 
 interface PtyProcessLike {
@@ -1883,13 +1928,7 @@ interface NodePtyLike {
   ): PtyProcessLike;
 }
 
-interface PtyCommand {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-  prompt: string;
-  cleanup?: () => void;
-}
+type PtyCommand = PtyLaunchCommand;
 
 const DEFAULT_PTY_COLS = 120;
 const DEFAULT_PTY_ROWS = 36;
@@ -1916,7 +1955,7 @@ function killProcessGroup(pid: number | null | undefined, signal: NodeJS.Signals
   }
 }
 
-function buildPtyCommand(
+export function buildPtyCommand(
   agentType: AgentType,
   prompt: string,
   cwd: string,
@@ -1955,17 +1994,14 @@ function buildPtyCommand(
         command: CLAUDE_BIN,
         args: [
           '--dangerously-skip-permissions',
-          '--print',
-          '--verbose',
-          '--output-format', 'stream-json',
           ...(claudeCliModel ? ['--model', claudeCliModel] : []),
-          ...(thinkingEnabled ? ['--thinking'] : []),
           ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
           ...(effortLevel ? ['--effort', effortLevel] : []),
           ...(mcpConfigPath ? ['--mcp-config', mcpConfigPath] : []),
         ],
         env,
         prompt,
+        startupDelayMs: 900,
         cleanup: () => {
           if (mcpConfigPath) {
             try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
@@ -1997,13 +2033,12 @@ function buildPtyCommand(
       return {
         command: status.opencodeBinPath ?? 'opencode',
         args: [
-          'run',
-          '--format', 'json',
           ...(attachAddr ? ['--attach', attachAddr] : []),
           ...(agentModel ? ['--model', normalizeOpenCodeModel(agentModel)] : []),
         ],
         env,
         prompt,
+        startupDelayMs: 900,
         cleanup: () => {
           if (!openCodeMcpConfigPath) return;
           try {
@@ -2033,9 +2068,10 @@ function buildPtyCommand(
       }
       return {
         command: CODEX_BIN,
-        args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(agentModel ? ['--model', agentModel] : [])],
+        args: ['--approval-mode', 'auto-edit', ...(agentModel ? ['--model', agentModel] : [])],
         env,
         prompt,
+        startupDelayMs: 900,
         cleanup: () => {
           for (const name of codexMcpRegisteredNames) {
             try { execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
@@ -2045,24 +2081,50 @@ function buildPtyCommand(
     }
     case 'pi': {
       const piSelection = resolvePiCliSelection(agentModel);
+      const piThinkingLevel = resolvePiThinkingLevel(agentModel, effortLevel);
       return {
         command: PI_BIN,
         args: [
-          'run',
-          '--jsonl',
+          '--mode', 'text',
           '--no-extensions',
           '--tools', 'read,bash,edit,write,grep,find,ls',
           '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
           ...resolvePiExtensionPaths().flatMap(extensionPath => ['--extension', extensionPath]),
           ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
           ...(piSelection.model ? ['--model', piSelection.model] : []),
+          ...(piThinkingLevel ? ['--thinking', piThinkingLevel] : []),
           ...piServerSkillFiles.flatMap(skillFile => ['--skill', skillFile]),
         ],
         env: buildGuardedAgentEnv(cwd),
         prompt,
+        startupDelayMs: 900,
       };
     }
   }
+}
+
+function buildInteractivePtyAgentAdapter(
+  agentType: AgentType,
+  agentModel: string | null,
+  attachAddr: string | null,
+  thinkingEnabled?: boolean,
+  thinkingBudget?: number,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+  mcpServers?: Record<string, string>,
+  piServerSkillFiles: string[] = [],
+): InteractivePtyAgentAdapter {
+  return createBaseInteractivePtyAdapter(agentType, (input) => buildPtyCommand(
+    input.agentType,
+    input.prompt,
+    input.cwd,
+    agentModel,
+    attachAddr,
+    thinkingEnabled,
+    thinkingBudget,
+    effortLevel,
+    mcpServers,
+    piServerSkillFiles,
+  ));
 }
 
 async function spawnAgentViaPty(
@@ -2089,9 +2151,13 @@ async function spawnAgentViaPty(
     let exitCode: number | null = null;
     let exitSignal: string | null = null;
     let watchdogFired = false;
+    let completionMarkerSeen = false;
+    let completionState: PtyCompletionState | null = null;
+    let adapter: InteractivePtyAgentAdapter | null = null;
     let finishedWrites = Promise.resolve();
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let runTimer: ReturnType<typeof setTimeout> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2111,6 +2177,7 @@ async function spawnAgentViaPty(
       unregisterPtyCleanupTask = null;
       if (resizeTimer) clearInterval(resizeTimer);
       if (inputTimer) clearInterval(inputTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
@@ -2121,22 +2188,24 @@ async function spawnAgentViaPty(
       }
       logStream.end();
       ptyCommand?.cleanup?.();
-      const status = watchdogFired
-        ? 'timed_out'
-        : exitCode === 0 && !exitSignal
-          ? 'exited'
-          : exitSignal
-            ? 'killed'
-            : 'failed';
+      const status = completionMarkerSeen
+        ? 'exited'
+        : watchdogFired
+          ? 'timed_out'
+          : exitCode === 0 && !exitSignal
+            ? 'exited'
+            : exitSignal
+              ? 'killed'
+              : 'failed';
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
       try {
-        await completeRunPtySession(ptyOptions.runId, status, exitCode, exitSignal);
+        await completeRunPtySession(ptyOptions.runId, status, completionMarkerSeen ? 0 : exitCode, completionMarkerSeen ? null : exitSignal);
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
       }
       resolve({
-        exitCode: watchdogFired ? 124 : (exitCode ?? 1),
+        exitCode: completionMarkerSeen ? 0 : watchdogFired ? 124 : (exitCode ?? 1),
         stderrTail: Buffer.concat(stderrChunks).toString('utf8'),
         elapsedMs: Date.now() - startTime,
       });
@@ -2181,12 +2250,6 @@ async function spawnAgentViaPty(
         const msg = Buffer.from(`[System] PTY watchdog triggered: No output received for ${Math.round(LLM_IDLE_TIMEOUT_MS / 60_000)} minutes. Killing process...\n`);
         recordStderr(msg);
         logStream.write(msg);
-        if (sequenceRef) {
-          const activeSequenceRef = sequenceRef;
-          finishedWrites = finishedWrites
-            .then(() => appendRunPtyOutput(ptyOptions.runId, msg, activeSequenceRef))
-            .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY watchdog message', ptyOptions.runId, err));
-        }
         if (pty) {
           try { pty.kill('SIGTERM'); } catch { /* ignore */ }
           killProcessGroup(pty.pid, 'SIGTERM');
@@ -2202,10 +2265,12 @@ async function spawnAgentViaPty(
 
     try {
       sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
-      ptyCommand = buildPtyCommand(
+      const storyIdForMarker = ptyOptions.storyId ?? 'run';
+      const completionMarker = buildPtyCompletionMarker(ptyOptions.runId, storyIdForMarker);
+      const markerFilePath = buildPtyMarkerFilePath(ptyOptions.runId, storyIdForMarker);
+      completionState = createPtyCompletionState(completionMarker);
+      adapter = buildInteractivePtyAgentAdapter(
         ptyOptions.agentType,
-        prompt,
-        cwd,
         agentModel,
         attachAddr,
         thinkingEnabled,
@@ -2214,6 +2279,21 @@ async function spawnAgentViaPty(
         mcpServers,
         piServerSkillFiles,
       );
+      const preparedPrompt = adapter.preparePrompt({
+        basePrompt: prompt,
+        runId: ptyOptions.runId,
+        storyId: storyIdForMarker,
+        agentType: ptyOptions.agentType,
+        completionMarker,
+        markerFilePath,
+      });
+      ptyCommand = adapter.resolveCommand({
+        agentType: ptyOptions.agentType,
+        prompt: preparedPrompt,
+        cwd,
+        runId: ptyOptions.runId,
+        storyId: storyIdForMarker,
+      });
       const nodePty = loadNodePty();
       pty = nodePty.spawn(ptyCommand.command, ptyCommand.args, {
         name: 'xterm-256color',
@@ -2231,9 +2311,27 @@ async function spawnAgentViaPty(
         cols: ptyOptions.cols,
         rows: ptyOptions.rows,
         childPid: pty.pid ?? null,
+        completionMarker,
       });
       unregisterPtyCleanupTask = registerPtyCleanupTask(`run-${ptyOptions.runId}`, () => requestPtyShutdown('SIGTERM'));
       resetInactivity();
+      heartbeatTimer = setInterval(() => {
+        const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
+        void recordRunPtyHeartbeat(ptyOptions.runId)
+          .catch((err: unknown) => logRunPtyStoreError('Failed to record PTY heartbeat', ptyOptions.runId, err));
+        if (ptyOptions.port && ptyOptions.storyId) {
+          void emitWalEvent(ptyOptions.port, 'story_heartbeat', ptyOptions.workspaceId, {
+            run_id: ptyOptions.runId,
+            story_id: ptyOptions.storyId,
+            agent_type: ptyOptions.agentType,
+            terminal_mode: 'pty',
+            elapsed_seconds: elapsedSeconds,
+            heartbeat_only: true,
+            message: 'Agent process is still running; heartbeat is connection/process liveness metadata, not terminal output.',
+          }, ptyOptions.storyId).catch(() => { /* emitWalEvent is already best-effort */ });
+        }
+      }, 30_000);
+      heartbeatTimer.unref?.();
       resizeTimer = setInterval(() => {
         void (async () => {
           if (!pty) return;
@@ -2274,6 +2372,27 @@ async function spawnAgentViaPty(
         resetInactivity();
         logStream.write(buf);
         recordStderr(buf);
+        if (adapter && completionState && !completionMarkerSeen) {
+          const signal = adapter.detectCompletion?.(buf.toString('utf8'), completionState) ?? null;
+          if (signal?.type === 'marker') {
+            completionMarkerSeen = true;
+            void markRunPtyCompletionMarkerSeen(ptyOptions.runId, signal.marker)
+              .catch((err: unknown) => logRunPtyStoreError('Failed to mark PTY completion marker', ptyOptions.runId, err));
+            if (ptyOptions.port && ptyOptions.storyId) {
+              void emitWalEvent(ptyOptions.port, 'story_completion_marker', ptyOptions.workspaceId, {
+                run_id: ptyOptions.runId,
+                story_id: ptyOptions.storyId,
+                agent_type: ptyOptions.agentType,
+                terminal_mode: 'pty',
+                marker: signal.marker,
+                message: 'Agent completion marker observed; merge and validation gates still determine story pass.',
+              }, ptyOptions.storyId).catch(() => { /* best effort */ });
+            }
+            setTimeout(() => {
+              void requestPtyShutdown('SIGTERM');
+            }, 250).unref?.();
+          }
+        }
         if (!sequenceRef) return;
         const activeSequenceRef = sequenceRef;
         finishedWrites = finishedWrites
@@ -2289,11 +2408,14 @@ async function spawnAgentViaPty(
         void finalizePromise;
       });
 
-      pty.write(ptyCommand.prompt);
-      if (!ptyCommand.prompt.endsWith('\n')) {
-        pty.write('\r\n');
+      try {
+        await (adapter ?? buildInteractivePtyAgentAdapter(ptyOptions.agentType, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServers, piServerSkillFiles))
+          .injectPrompt(pty, ptyCommand.prompt);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(`[engine] Bracketed PTY prompt injection failed for ${ptyOptions.agentType}; falling back to chunked typing: ${message}`);
+        await injectPromptWithChunkedTyping(pty, ptyCommand.prompt, { startupDelayMs: 0 });
       }
-      pty.write('\u0004');
 
       runTimer = setTimeout(() => {
         if (!pty || settled) return;
@@ -2404,6 +2526,15 @@ function runAgent(
   piSessionOptions?: PiSessionOptions,
   ptyOptions?: PtyRunOptions,
 ): Promise<AgentResult> {
+  const startTime = Date.now();
+  if (isEmptyPrompt(prompt)) {
+    try {
+      fs.appendFileSync(logFile, `[System] ${EMPTY_PROMPT_FAILURE_MESSAGE}\n`, 'utf8');
+    } catch { /* best effort */ }
+    logger.error(`[engine] ${agentType} prompt preflight failed: empty prompt`);
+    return Promise.resolve(buildPromptDeliveryFailureResult(startTime));
+  }
+
   if (ptyOptions?.enabled) {
     return spawnAgentViaPty(
       ptyOptions,
@@ -2430,7 +2561,7 @@ function runAgent(
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
     case 'pi':
-      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers);
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers, effortLevel);
   }
 }
 
@@ -2494,7 +2625,6 @@ function spawnClaude(
       '--verbose',
       '--output-format', 'stream-json',
       ...(claudeCliModel ? ['--model', claudeCliModel] : []),
-      ...(thinkingEnabled ? ['--thinking'] : []),
       ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
       ...(effortLevel ? ['--effort', effortLevel] : []),
       ...(mcpConfigPath ? ['--mcp-config', mcpConfigPath] : []),
@@ -3019,21 +3149,20 @@ async function spawnPiRpc(
   piServerSkillFiles: string[] = [],
   _piSessionOptions?: PiSessionOptions,
   mcpServers?: Record<string, string>,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Promise<AgentResult> {
-  const previousStory = _piRpcStoryQueue;
-  let releaseStoryQueue!: () => void;
-  const currentStory = new Promise<void>(resolve => {
-    releaseStoryQueue = resolve;
-  });
-  _piRpcStoryQueue = currentStory;
-
-  await previousStory;
-
   const startTime = Date.now();
-  try {
-    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
-    let server = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers);
+  let serverForCleanup: PiRpcServer | null = null;
+  const launchPiRpcServer = async (): Promise<PiRpcServer> => {
+    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
+    const launchedServer = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers, effortLevel);
+    serverForCleanup = launchedServer;
     logger.info('[pi-rpc] pi RPC server started');
+    return launchedServer;
+  };
+
+  try {
+    let server = await launchPiRpcServer();
 
     let piSessionId: string | undefined;
     try {
@@ -3045,8 +3174,9 @@ async function spawnPiRpc(
       const message = error instanceof Error ? (error.stack || error.message) : String(error);
       logger.warn(`[pi-rpc] Session bootstrap failed on first attempt; restarting RPC server once. ${message}`);
       logger.warn(`[pi-rpc] First-attempt stderr tail:\n${server.stderr.slice(-4096)}`);
-      await stopPiRpcServer();
-      server = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers);
+      await stopPiRpcServer(server);
+      if (serverForCleanup === server) serverForCleanup = null;
+      server = await launchPiRpcServer();
       logger.info('[pi-rpc] pi RPC server restarted after bootstrap failure');
       piSessionId = await preparePiRpcSession(
         (command) => sendPiRpcCommand(server, command),
@@ -3241,7 +3371,9 @@ async function spawnPiRpc(
       };
     }
   } finally {
-    releaseStoryQueue();
+    if (serverForCleanup) {
+      await stopPiRpcServer(serverForCleanup);
+    }
   }
 }
 
@@ -3255,6 +3387,7 @@ type OpenCodeErrorCategory =
   | 'server_crashed'
   | 'malformed_output'
   | 'timeout'
+  | typeof PROMPT_DELIVERY_FAILURE_CATEGORY
   | 'unknown';
 
 interface ClassifiedError {
@@ -3350,6 +3483,14 @@ function classifyOpenCodeError(result: AgentResult): ClassifiedError {
 function classifyPiError(result: AgentResult): ClassifiedError {
   const lower = result.stderrTail.toLowerCase();
   const raw = result.stderrTail;
+
+  if (isPromptDeliveryFailureOutput(raw)) {
+    return {
+      category: PROMPT_DELIVERY_FAILURE_CATEGORY,
+      message: raw.trim().slice(0, 300) || 'Pi prompt was not delivered to the CLI',
+      retryable: false,
+    };
+  }
 
   if (lower.includes('no api key found') || lower.includes('use /login') || lower.includes('invalid api key')
       || lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('forbidden')) {
@@ -3698,6 +3839,38 @@ function getStoryWorkingTreeChanges(cwd: string): StoryWorkingTreeChanges {
   return classifyStoryWorkingTreeChanges(files);
 }
 
+function getGitHead(cwd: string): string | null {
+  try {
+    const head = execSync('git rev-parse HEAD', {
+      cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return /^[0-9a-f]{40}$/i.test(head) ? head : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCommittedStoryChangesSince(cwd: string, baseHead: string | null): StoryWorkingTreeChanges {
+  if (!baseHead || !/^[0-9a-f]{40}$/i.test(baseHead)) {
+    return { meaningfulFiles: [], metadataFiles: [] };
+  }
+
+  const currentHead = getGitHead(cwd);
+  if (!currentHead || currentHead === baseHead) {
+    return { meaningfulFiles: [], metadataFiles: [] };
+  }
+
+  try {
+    const files = readGitLines(cwd, `git diff --name-only ${baseHead}..HEAD --`);
+    return classifyStoryWorkingTreeChanges(files);
+  } catch {
+    return { meaningfulFiles: [], metadataFiles: [] };
+  }
+}
+
 function gitPathArgs(files: string[]): string {
   return files.map(file => JSON.stringify(file)).join(' ');
 }
@@ -3860,6 +4033,179 @@ interface StoryWorktree {
   branchName: string;
 }
 
+interface PendingIntegratedPass {
+  story: UserStory;
+  agentType: AgentType;
+  logPath: string;
+  storyResultExtra: Record<string, unknown>;
+  activeSkillsExtra: Record<string, unknown>;
+  tokenPayload: {
+    inputTokens: number;
+    outputTokens: number;
+    modelUsed: string;
+    costUsd: number;
+  };
+  graphHits?: number;
+}
+
+interface IntegrationValidationResult {
+  ok: boolean;
+  reason?: 'unmerged_files' | 'conflict_markers' | 'diff_check';
+  files: string[];
+  details?: string;
+}
+
+function readGitLines(cwd: string, command: string): string[] {
+  const output = execSync(command, {
+    cwd,
+    env: buildCleanEnv(),
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).trim();
+  return output.length > 0 ? output.split('\n').map(line => line.trim()).filter(Boolean) : [];
+}
+
+function getIntegrationCandidateFiles(cwd: string): string[] {
+  try {
+    return readGitLines(cwd, 'git diff --name-only HEAD');
+  } catch {
+    return [];
+  }
+}
+
+function findConflictMarkerFiles(cwd: string, files: string[]): string[] {
+  const markerFiles: string[] = [];
+  const markerPattern = /^(<<<<<<< .+|=======$|>>>>>>> .+)$/m;
+
+  for (const file of files) {
+    const absPath = path.join(cwd, file);
+    try {
+      if (!fs.existsSync(absPath)) continue;
+      const stat = fs.statSync(absPath);
+      if (!stat.isFile() || stat.size > 5 * 1024 * 1024) continue;
+      const content = fs.readFileSync(absPath, 'utf8');
+      if (content.includes('\u0000')) continue;
+      if (markerPattern.test(content)) markerFiles.push(file);
+    } catch {
+      // Binary/unreadable files are not conflict-marker candidates.
+    }
+  }
+
+  return markerFiles;
+}
+
+function runDiffCheck(cwd: string): string | null {
+  const env = buildCleanEnv();
+  for (const command of ['git diff --check', 'git diff --cached --check']) {
+    try {
+      execSync(command, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (err: unknown) {
+      const e = err as Error & { stdout?: Buffer; stderr?: Buffer };
+      return (e.stdout?.toString() || e.stderr?.toString() || e.message || command).trim();
+    }
+  }
+  return null;
+}
+
+function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegrationCandidateFiles(cwd)): IntegrationValidationResult {
+  let unmerged: string[] = [];
+  try {
+    unmerged = readGitLines(cwd, 'git diff --name-only --diff-filter=U');
+  } catch {
+    unmerged = [];
+  }
+  if (unmerged.length > 0) {
+    return { ok: false, reason: 'unmerged_files', files: unmerged };
+  }
+
+  const markerFiles = findConflictMarkerFiles(cwd, candidateFiles);
+  if (markerFiles.length > 0) {
+    return { ok: false, reason: 'conflict_markers', files: markerFiles };
+  }
+
+  const diffCheck = runDiffCheck(cwd);
+  if (diffCheck) {
+    return { ok: false, reason: 'diff_check', files: candidateFiles, details: diffCheck };
+  }
+
+  return { ok: true, files: [] };
+}
+
+async function finalizeIntegratedStoryPass(
+  config: EngineConfig,
+  workspaceId: string | null,
+  pending: PendingIntegratedPass,
+): Promise<void> {
+  await markStoryPassed(config.jsonPath, pending.story.id);
+
+  if (!workspaceId) return;
+
+  await emitWalEvent(config.port, 'story_passed', workspaceId, {
+    run_id: config.runId,
+    story_id: pending.story.id,
+    story_title: pending.story.title,
+    agent_type: pending.agentType,
+    input_tokens: pending.tokenPayload.inputTokens,
+    output_tokens: pending.tokenPayload.outputTokens,
+    cost_usd: pending.tokenPayload.costUsd,
+    integrated: true,
+    ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
+  }, pending.story.id);
+  await postStoryResult(config.port, {
+    runId: config.runId,
+    storyId: pending.story.id,
+    status: 'pass',
+    logPath: pending.logPath,
+    ...pending.storyResultExtra,
+    ...pending.activeSkillsExtra,
+    ...pending.tokenPayload,
+  });
+
+  await autoSynthesizeMemory(
+    pending.story.id,
+    workspaceId,
+    buildStoryText(pending.story),
+    readLogTail(pending.logPath),
+    'passed',
+    config.runId,
+    config.port,
+  );
+}
+
+async function recordStoryMergeConflict(
+  config: EngineConfig,
+  workspaceId: string | null,
+  wt: StoryWorktree,
+  conflictingFiles: string[],
+  pending?: PendingIntegratedPass,
+  wave?: number,
+): Promise<void> {
+  await markStoryMergeFailed(config.jsonPath, wt.storyId);
+
+  if (!workspaceId) return;
+
+  await emitWalEvent(config.port, 'story_failed', workspaceId, {
+    run_id: config.runId,
+    story_id: wt.storyId,
+    reason: 'merge_conflict',
+    conflictingFiles,
+    worktree_branch: wt.branchName,
+    ...(wave != null ? { wave } : {}),
+  }, wt.storyId);
+  await postStoryResult(config.port, {
+    runId: config.runId,
+    storyId: wt.storyId,
+    status: 'fail',
+    reason: 'merge_conflict',
+    blockedBy: [],
+    logPath: pending?.logPath,
+    worktreePath: wt.worktreePath,
+    worktreeBranch: wt.branchName,
+    ...(pending?.activeSkillsExtra ?? {}),
+    ...(pending?.tokenPayload ?? {}),
+  });
+}
+
 function createStoryWorktree(
   workspaceCwd: string,
   specSlug: string,
@@ -3911,9 +4257,23 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
 
   try {
     execSync(
-      `git merge --no-ff "${wt.branchName}" -m "merge: ${wt.storyId} from worktree"`,
+      `git merge --no-ff --no-commit "${wt.branchName}"`,
       { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 120_000 },
     );
+
+    const candidateFiles = getIntegrationCandidateFiles(workspaceCwd);
+    const validation = validateIntegratedWorktree(workspaceCwd, candidateFiles);
+    if (!validation.ok) {
+      logger.error(`  [worktree] Merge validation failed for ${wt.storyId}: ${validation.reason} ${validation.files.join(', ')}`);
+      try { execSync('git merge --abort', { cwd: workspaceCwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+      return false;
+    }
+
+    try {
+      execSync(`git commit -m "merge: ${wt.storyId} from worktree"`, { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 30_000 });
+    } catch {
+      logger.info(`  [worktree] ${wt.storyId} merge produced no new commit`);
+    }
     logger.info(`  [worktree] Merged ${wt.branchName} into workspace`);
     return true;
   } catch (mergeErr: unknown) {
@@ -3937,6 +4297,14 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
         const quotedFiles = conflicted.map(f => `"${f}"`).join(' ');
         execSync(`git checkout --ours -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
         execSync('git add -A', { cwd: workspaceCwd, env, stdio: 'pipe' });
+
+        const validation = validateIntegratedWorktree(workspaceCwd, getIntegrationCandidateFiles(workspaceCwd));
+        if (!validation.ok) {
+          logger.error(`  [worktree] Runtime-only merge validation failed for ${wt.storyId}: ${validation.reason} ${validation.files.join(', ')}`);
+          try { execSync('git merge --abort', { cwd: workspaceCwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+          return false;
+        }
+
         execSync(`git commit -m "merge: ${wt.storyId} from worktree (runtime conflicts auto-resolved)"`, {
           cwd: workspaceCwd, env, stdio: 'pipe',
         });
@@ -4120,6 +4488,16 @@ async function mergeWave(
     }
 
     if (mergeClean) {
+      const candidateFiles = getIntegrationCandidateFiles(cwd);
+      const validation = validateIntegratedWorktree(cwd, candidateFiles);
+      if (!validation.ok) {
+        logger.error(`  [merge] ${wt.storyId} failed integration validation: ${validation.reason} ${validation.files.join(', ')}`);
+        if (validation.details) logger.error(`  [merge] ${validation.details}`);
+        try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+        mergeFailures.push({ storyId: wt.storyId, conflictingFiles: validation.files });
+        continue;
+      }
+
       try {
         execSync(`git commit -m "merge: ${wt.storyId}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
         logger.info(`  [merge] ${wt.storyId} merged cleanly`);
@@ -4140,6 +4518,14 @@ async function mergeWave(
       try {
         // Try normal commit first
         execSync(`git add -A`, { cwd, env, stdio: 'pipe' });
+        const validation = validateIntegratedWorktree(cwd, getIntegrationCandidateFiles(cwd));
+        if (!validation.ok) {
+          logger.error(`  [merge] ${wt.storyId} failed post-resolution integration validation: ${validation.reason} ${validation.files.join(', ')}`);
+          if (validation.details) logger.error(`  [merge] ${validation.details}`);
+          try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+          mergeFailures.push({ storyId: wt.storyId, conflictingFiles: validation.files });
+          continue;
+        }
         execSync(
           `git commit -m "${commitMsg}"`,
           { cwd, env, stdio: 'pipe', timeout: 30_000 },
@@ -4543,9 +4929,11 @@ async function executeStory(
   personaRegistry?: PersonaRegistry,
   waveIndex?: number,
   spec?: SpecJson,
+  pendingIntegratedPasses?: Map<string, PendingIntegratedPass>,
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
+  const storyStartHead = getGitHead(effectiveCwd);
 
   // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
   setFallbackContext(effectiveCwd, config.runId);
@@ -4916,10 +5304,10 @@ async function executeStory(
   // CIE-007: Mark story started in run-state.json
   rsMarkStoryStarted(effectiveCwd, story.id);
 
-  const storyResultExtra = worktreeInfo
+  const storyResultExtra: Record<string, unknown> = worktreeInfo
     ? { worktreePath: worktreeInfo.worktreePath, worktreeBranch: worktreeInfo.branchName }
     : {};
-  const activeSkillsExtra = activeSkillNames.length > 0 ? { activeSkills: activeSkillNames } : {};
+  const activeSkillsExtra: Record<string, unknown> = activeSkillNames.length > 0 ? { activeSkills: activeSkillNames } : {};
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
@@ -4987,6 +5375,8 @@ async function executeStory(
             agentType: effectiveAgent,
             cols: DEFAULT_PTY_COLS,
             rows: DEFAULT_PTY_ROWS,
+            port: config.port,
+            storyId: story.id,
           } satisfies PtyRunOptions
         : undefined;
       const result = await runAgent(
@@ -5067,6 +5457,9 @@ async function executeStory(
             storyCwd, worktreeInfo, undefined, allStories,
             fallback, fallback === 'opencode' ? config.attachAddr : null,
             personaRegistry,
+            waveIndex,
+            spec,
+            pendingIntegratedPasses,
           );
         }
 
@@ -5195,14 +5588,20 @@ async function executeStory(
         return 'failed';
       }
 
-      // Gate passed — verify agent produced meaningful code changes (not just runtime metadata)
+      // Gate passed — verify agent produced meaningful code changes (not just runtime metadata).
+      // Some agents, especially Pi in autonomous mode, may commit their own work before returning.
+      // Treat meaningful commits created since this story started as valid output instead of
+      // misclassifying the clean working tree as a no-op.
       // Journey mode stories browse the live app and may intentionally produce no file edits.
       try {
         const { meaningfulFiles } = mode === 'journey'
           ? { meaningfulFiles: [] }
           : getStoryWorkingTreeChanges(effectiveCwd);
+        const committedMeaningfulFiles = mode === 'journey'
+          ? []
+          : getCommittedStoryChangesSince(effectiveCwd, storyStartHead).meaningfulFiles;
 
-        if (mode !== 'journey' && meaningfulFiles.length === 0) {
+        if (mode !== 'journey' && meaningfulFiles.length === 0 && committedMeaningfulFiles.length === 0) {
           if (storyAllowsNoCodeChanges(story, mode)) {
             logger.info(`${story.id}: No meaningful file changes detected, but the story is validation/documentation-only — allowing pass`);
           } else {
@@ -5246,7 +5645,7 @@ async function executeStory(
                 story, config, mode, playbook, logDir, workspaceId, retryCounts,
                 storyCwd, worktreeInfo, undefined, allStories,
                 noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
-                personaRegistry, waveIndex, spec,
+                personaRegistry, waveIndex, spec, pendingIntegratedPasses,
               );
             }
 
@@ -5281,6 +5680,8 @@ async function executeStory(
             return 'failed';
           }
           await persistRetrievalOutcome(false);
+        } else if (mode !== 'journey' && meaningfulFiles.length === 0 && committedMeaningfulFiles.length > 0) {
+          logger.info(`${story.id}: Working tree is clean because agent already committed meaningful changes (${committedMeaningfulFiles.join(', ')})`);
         }
       } catch (err: any) {
         logger.warn(`${story.id}: Failed to inspect working tree for meaningful changes: ${err?.message ?? String(err)}`);
@@ -5351,97 +5752,84 @@ async function executeStory(
       const commitResult = gitCommitStory(effectiveCwd, story.id, story.title, mode);
 
       if (mode !== 'journey' && !commitResult.committed) {
-        const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
-        retryCounts.set(story.id, noChangeRetries);
-        const failureReason = commitResult.reason === 'git_error' ? 'commit_verification_failed' : 'no_code_changes';
-        const failureSummary = commitResult.reason === 'git_error'
-          ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
-          : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
+        const committedChanges = getCommittedStoryChangesSince(effectiveCwd, storyStartHead);
+        if (committedChanges.meaningfulFiles.length > 0) {
+          logger.info(`${story.id}: Agent already committed meaningful story changes (${committedChanges.meaningfulFiles.join(', ')})`);
+        } else {
+          const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, noChangeRetries);
+          const failureReason = commitResult.reason === 'git_error' ? 'commit_verification_failed' : 'no_code_changes';
+          const failureSummary = commitResult.reason === 'git_error'
+            ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
+            : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
 
-        const noopFallback = resolveNoopRecoveryEngine(config.cwd, effectiveAgent, executionPacket);
-        if (
-          effectiveAgent === 'pi'
-          && noChangeRetries >= 2
-          && noopFallback
-          && !reroutedStories.has(story.id)
-        ) {
-          logger.warn(`${story.id}: Pi produced commit-stage no-op twice — rerouting to ${noopFallback}`);
-          reroutedStories.set(story.id, {
-            storyId: story.id,
-            fromEngine: effectiveAgent,
-            toEngine: noopFallback,
-            reason: failureReason,
-          });
-          retryCounts.delete(story.id);
-          if (workspaceId) {
-            await emitWalEvent(config.port, 'story_rerouted', workspaceId, {
-              run_id: config.runId,
-              story_id: story.id,
-              story_title: story.title,
+          const noopFallback = resolveNoopRecoveryEngine(config.cwd, effectiveAgent, executionPacket);
+          if (
+            effectiveAgent === 'pi'
+            && noChangeRetries >= 2
+            && noopFallback
+            && !reroutedStories.has(story.id)
+          ) {
+            logger.warn(`${story.id}: Pi produced commit-stage no-op twice — rerouting to ${noopFallback}`);
+            reroutedStories.set(story.id, {
+              storyId: story.id,
               fromEngine: effectiveAgent,
               toEngine: noopFallback,
               reason: failureReason,
-              attempt: noChangeRetries,
-              readiness_score: executionPacket.readiness.score,
-            }, story.id);
+            });
+            retryCounts.delete(story.id);
+            if (workspaceId) {
+              await emitWalEvent(config.port, 'story_rerouted', workspaceId, {
+                run_id: config.runId,
+                story_id: story.id,
+                story_title: story.title,
+                fromEngine: effectiveAgent,
+                toEngine: noopFallback,
+                reason: failureReason,
+                attempt: noChangeRetries,
+                readiness_score: executionPacket.readiness.score,
+              }, story.id);
+            }
+            return executeStory(
+              story, config, mode, playbook, logDir, workspaceId, retryCounts,
+              storyCwd, worktreeInfo, undefined, allStories,
+              noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
+              personaRegistry, waveIndex, spec, pendingIntegratedPasses,
+            );
           }
-          return executeStory(
-            story, config, mode, playbook, logDir, workspaceId, retryCounts,
-            storyCwd, worktreeInfo, undefined, allStories,
-            noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
-            personaRegistry, waveIndex, spec,
-          );
-        }
 
-        if (noChangeRetries < MAX_RETRIES) {
-          logger.warn(`${story.id}: ${failureSummary} — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);
-          continue;
-        }
+          if (noChangeRetries < MAX_RETRIES) {
+            logger.warn(`${story.id}: ${failureSummary} — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);
+            continue;
+          }
 
-        logger.warn(`${story.id}: ${failureSummary} — treating as failure`);
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId,
-            story_id: story.id,
-            reason: failureReason,
-            summary: failureSummary,
-            log_file: storyLogFile,
-          }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+          logger.warn(`${story.id}: ${failureSummary} — treating as failure`);
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              reason: failureReason,
+              summary: failureSummary,
+              log_file: storyLogFile,
+            }, story.id);
+            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+          }
+          markStorySkipped(config.jsonPath, story.id);
+          rsMarkStoryFailed(effectiveCwd, {
+            storyId: story.id,
+            title: story.title,
+            status: 'failed',
+            startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+            finishedAt: new Date().toISOString(),
+            agentType: effectiveAgent,
+            failReason: failureReason,
+            retries: noChangeRetries,
+          });
+          writeProgressTxt(effectiveCwd);
+          await persistRetrievalOutcome(false);
+          return 'failed';
         }
-        markStorySkipped(config.jsonPath, story.id);
-        rsMarkStoryFailed(effectiveCwd, {
-          storyId: story.id,
-          title: story.title,
-          status: 'failed',
-          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
-          finishedAt: new Date().toISOString(),
-          agentType: effectiveAgent,
-          failReason: failureReason,
-          retries: noChangeRetries,
-        });
-        writeProgressTxt(effectiveCwd);
-        await persistRetrievalOutcome(false);
-        return 'failed';
       }
-
-      // All checks passed — mark story as done
-      markStoryPassed(config.jsonPath, story.id);
-      retryCounts.delete(story.id);
-      retryCounts.delete(rateLimitKey);
-
-      // CIE-007: Record story completion in run-state.json
-      rsMarkStoryCompleted(effectiveCwd, {
-        storyId: story.id,
-        title: story.title,
-        status: 'passed',
-        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
-        finishedAt: new Date().toISOString(),
-        agentType: effectiveAgent,
-        model: currentModel ?? undefined,
-        elapsedMs: result.elapsedMs,
-      });
-      writeProgressTxt(effectiveCwd);
 
       // CIE-006: Post-commit violation detection
       if (assignedRole) {
@@ -5481,8 +5869,7 @@ async function executeStory(
           if (totalBlockers > 0) {
             logger.info(`  [review] ${totalBlockers} blocker(s) found — marking ${story.id} as needs_revision`);
 
-            // Revert the passed status — story needs revision
-            markStoryNeedsRevision(config.jsonPath, story.id);
+            await markStoryNeedsRevision(config.jsonPath, story.id);
 
             if (workspaceId) {
               await emitWalEvent(config.port, 'story_review_blocked', workspaceId, {
@@ -5499,7 +5886,7 @@ async function executeStory(
                   line: b.line,
                 }))),
               }, story.id);
-              await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'needs_revision', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+              await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', reason: 'needs_revision', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
             }
             await persistRetrievalOutcome(false);
             return 'failed';
@@ -5509,23 +5896,56 @@ async function executeStory(
         }
       }
 
-      if (workspaceId) {
-        await emitWalEvent(config.port, 'story_passed', workspaceId, {
-          run_id: config.runId, story_id: story.id, story_title: story.title,
-          agent_type: effectiveAgent,
-          input_tokens: tokenPayload.inputTokens,
-          output_tokens: tokenPayload.outputTokens,
-          cost_usd: tokenPayload.costUsd,
-          ...(graphHits != null ? { graph_hits: graphHits } : {}),
-        }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+      retryCounts.delete(story.id);
+      retryCounts.delete(rateLimitKey);
 
-        // PG-020: Auto-synthesize memory from passed story
-        await autoSynthesizeMemory(
-          story.id, workspaceId, buildStoryText(story),
-          readLogTail(storyLogFile), 'passed', config.runId, config.port,
-        );
+      // CIE-007: Record local implementation completion. In parallel worktree mode,
+      // this is intentionally not the canonical pass gate — merge finalization below is.
+      rsMarkStoryCompleted(effectiveCwd, {
+        storyId: story.id,
+        title: story.title,
+        status: 'passed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: effectiveAgent,
+        model: currentModel ?? undefined,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
+
+      const pendingPass: PendingIntegratedPass = {
+        story,
+        agentType: effectiveAgent,
+        logPath: storyLogFile,
+        storyResultExtra,
+        activeSkillsExtra,
+        tokenPayload,
+        ...(graphHits != null ? { graphHits } : {}),
+      };
+
+      if (worktreeInfo && pendingIntegratedPasses) {
+        pendingIntegratedPasses.set(story.id, pendingPass);
+        logger.info(`${story.id} implementation validated; awaiting merge before canonical pass`);
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_implemented', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            story_title: story.title,
+            agent_type: effectiveAgent,
+            merge_pending: true,
+            worktree_path: worktreeInfo.worktreePath,
+            worktree_branch: worktreeInfo.branchName,
+            log_file: storyLogFile,
+            input_tokens: tokenPayload.inputTokens,
+            output_tokens: tokenPayload.outputTokens,
+            cost_usd: tokenPayload.costUsd,
+            ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          }, story.id);
+        }
+      } else {
+        await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
       }
+
       await persistRetrievalOutcome(true);
       return 'passed';
     }
@@ -5571,11 +5991,68 @@ async function executeStory(
     }
 
     // ── Non-zero exit: classify error and retry ────────────────────────
-    const classified = effectiveAgent === 'opencode'
-      ? classifyOpenCodeError(result)
-      : effectiveAgent === 'pi'
-        ? classifyPiError(result)
-        : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
+    const classified = isPromptDeliveryFailureOutput(result.stderrTail)
+      ? {
+          category: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          message: result.stderrTail.trim().slice(0, 300) || 'Agent prompt was not delivered to the CLI',
+          retryable: false,
+        } as ClassifiedError
+      : effectiveAgent === 'opencode'
+        ? classifyOpenCodeError(result)
+        : effectiveAgent === 'pi'
+          ? classifyPiError(result)
+          : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
+
+    // Empty/undelivered prompt is an infrastructure failure. Do not mark the
+    // spec story as skipped/passed, and do not consume story retry attempts;
+    // the next retry/continuation should see the story as still unpassed.
+    if (classified.category === PROMPT_DELIVERY_FAILURE_CATEGORY) {
+      logger.info(`${story.id} failed due to prompt delivery infrastructure error — ${classified.message}`);
+      logger.info(`   Log: ${storyLogFile}`);
+      recordPiProgress({
+        knownIssues: [`Infrastructure failure: ${PROMPT_DELIVERY_FAILURE_CATEGORY}.`],
+        validationResults: [`Attempt failed before agent work began: ${classified.message}`],
+        remainingWork: ['Fix prompt construction/delivery and rerun this story; no story implementation retry was consumed.'],
+      });
+      rsMarkStoryFailed(effectiveCwd, {
+        storyId: story.id,
+        title: story.title,
+        status: 'failed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: effectiveAgent,
+        failReason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
+
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          error_message: classified.message,
+          infra_error: true,
+          retry_consumed: false,
+          agent_type: effectiveAgent,
+          exit_code: result.exitCode,
+          log_file: storyLogFile,
+          ...(graphHits != null ? { graph_hits: graphHits } : {}),
+        }, story.id);
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+        });
+      }
+      await persistRetrievalOutcome(false);
+      return 'failed';
+    }
 
     // Non-retryable errors (wrong API key, model not found, not installed) — fail immediately
     if (!classified.retryable) {
@@ -5696,6 +6173,7 @@ export {
   preparePiRpcSession,
   isMeaningfulStoryChange,
   classifyStoryWorkingTreeChanges,
+  getCommittedStoryChangesSince,
   formatRetrievedMemorySection,
   buildRetrievalSelectionsFromContext as buildStoryRetrievalSelections,
 };
@@ -5875,7 +6353,7 @@ async function main(): Promise<void> {
     : null;
 
   if (requiredEngines.has('pi')) {
-    await startPiRpcServer(config.cwd, config.agentModel, piServerSkillBundle?.skillFiles ?? []);
+    logger.info('[pi-rpc] Pi story RPC servers will be started per story for wave-parallel execution');
   }
 
   async function cleanupBrowserServers(): Promise<void> {
@@ -6107,6 +6585,7 @@ async function runParallel(
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
+  const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
@@ -6186,7 +6665,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index, specForBrowserMcp)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index, specForBrowserMcp, pendingIntegratedPasses)
           .then(result => ({ storyId: story.id, result }));
     });
 
@@ -6217,23 +6696,21 @@ async function runParallel(
         logger.info(`  [worktree] Single-story wave — direct merge`);
         const wt = passedInWave[0];
         const merged = mergeStoryWorktree(config.cwd, wt);
+        const pendingPass = pendingIntegratedPasses.get(wt.storyId);
         if (!merged) {
-          logger.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
+          logger.error(`  [worktree] ${wt.storyId} passed implementation but merge failed — marking as merge_conflict`);
           failedIds.add(wt.storyId);
-          markStoryMergeFailed(config.jsonPath, wt.storyId);
-          if (workspaceId) {
-            await emitWalEvent(config.port, 'story_failed', workspaceId, {
-              run_id: config.runId, story_id: wt.storyId,
-              reason: 'merge_conflict', worktree_branch: wt.branchName,
-            }, wt.storyId);
-          }
+          await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
+          logger.info(`  [worktree] Preserving failed merge worktree for inspection: ${wt.worktreePath}`);
         } else {
-          // Force-update spec JSON in main workspace after merge.
-          // The merge may conflict on the spec JSON and lose the passes:true written
-          // in the worktree — writing it directly here ensures it is never lost.
-          try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
+          if (pendingPass) {
+            await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+            pendingIntegratedPasses.delete(wt.storyId);
+          } else {
+            await markStoryPassed(config.jsonPath, wt.storyId);
+          }
+          removeStoryWorktree(config.cwd, wt);
         }
-        removeStoryWorktree(config.cwd, wt);
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
         const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir);
@@ -6246,10 +6723,14 @@ async function runParallel(
             });
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
-          // Force-update spec JSON for every story that passed — merge can conflict on
-          // this file and lose the passes:true that was written inside each worktree.
           for (const wt of passedInWave) {
-            try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
+            const pendingPass = pendingIntegratedPasses.get(wt.storyId);
+            if (pendingPass) {
+              await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+              pendingIntegratedPasses.delete(wt.storyId);
+            } else {
+              await markStoryPassed(config.jsonPath, wt.storyId);
+            }
           }
           for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
         } else {
@@ -6260,20 +6741,31 @@ async function runParallel(
           for (const failure of failures) {
             logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
             failedIds.add(failure.storyId);
-            markStoryMergeFailed(config.jsonPath, failure.storyId);
-
-            if (workspaceId) {
-              await emitWalEvent(config.port, 'story_failed', workspaceId, {
-                run_id: config.runId, story_id: failure.storyId,
-                reason: 'merge_conflict', conflictingFiles: failure.conflictingFiles,
-                wave: wave.index,
-              }, failure.storyId);
+            const wt = worktreeMap.get(failure.storyId);
+            if (wt) {
+              await recordStoryMergeConflict(
+                config,
+                workspaceId,
+                wt,
+                failure.conflictingFiles,
+                pendingIntegratedPasses.get(failure.storyId),
+                wave.index,
+              );
+            } else {
+              await markStoryMergeFailed(config.jsonPath, failure.storyId);
             }
           }
 
-          // Clean up successfully merged worktrees (those NOT in the failure set)
+          // Finalize and clean up successfully merged worktrees (those NOT in the failure set).
           for (const wt of passedInWave) {
             if (!failedStoryIds.has(wt.storyId)) {
+              const pendingPass = pendingIntegratedPasses.get(wt.storyId);
+              if (pendingPass) {
+                await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+                pendingIntegratedPasses.delete(wt.storyId);
+              } else {
+                await markStoryPassed(config.jsonPath, wt.storyId);
+              }
               removeStoryWorktree(config.cwd, wt);
             }
           }
