@@ -263,6 +263,14 @@ Review UX must show:
 
 The daemon uses durable workspace-local files under `.rorca/capture/`: `state.json` stores the WAL cursor, `queue/offline.ndjson` stores already-redacted offline payloads, and `status.json` exposes process health, `last_seen`, last scan, last flush, queue depth, backoff, source capabilities, current policy, and resource bounds. Flushes are attempted only after `GET /api/health` succeeds; failed health checks use bounded exponential backoff. Runtime bounds are configurable with `--scan-interval-ms`, `--max-commits-per-scan`, `--max-concurrency`, `--queue-warn-size`, and `--queue-max-size`. The repo daemon uses bounded polling (no recursive root watcher) and preserves cursor/idempotency across launchd/systemd restarts.
 
+## Agent-specific adapters (UCC-006)
+
+`rorca-capture setup --always-on` now renders thin, reversible adapter artifacts for Pi, Claude Code, Codex, and OpenCode. The files live under `.rorca/capture/adapters/` plus a project-local `.pi/extensions/rorca/capture-command.json` alias. They call `rorca-capture remember` or `POST /api/context-capture/events`; none of them write to PostgreSQL, embed bearer/API token values, or modify provider model/configuration.
+
+Claude Code receives documented slash-command/MCP config that points at `~/.rorca/mcp-token` (path only) and follows the local MCP bearer/OAuth flow. Pi receives a first-class `/rorca-remember`/skill alias that routes through the capture CLI/public API. Codex and OpenCode receive pass-through wrapper scripts; if the native binary is missing the wrappers exit `127` and the setup report marks fallback mode, while normal runs invoke the native binary with unchanged arguments and exit with its exact status. Codex examples use `codex exec --dangerously-bypass-approvals-and-sandbox -m <model>` with prompt content on stdin.
+
+Every adapter command/event includes `source_system`, `tool_name`, and `session_id` metadata so downstream consumers can distinguish Pi, Claude Code, Codex, OpenCode, shell, IDE, and daemon events without inspecting free-form body text.
+
 ## Completion checklist for future stories
 
 - Layer-specific adapters all emit through the local API on `:3030`.

@@ -7,7 +7,7 @@ import { buildShellCaptureEvent, enqueueShellCaptureEvent, postShellCaptureEvent
 import { readCaptureServiceStatus, runCaptureServiceLifecycle, runManagedCaptureDaemon } from '../packages/rorca-pi-extension/extensions/rorca/capture-service.js';
 
 function parseArgs(argv) {
-  const options = { alwaysOn: false, dryRun: false, json: false, uninstall: false, workspaceId: undefined, cwd: process.cwd(), exitCode: undefined, once: false, phase: 'end', command: '', policyMode: process.env.RORCA_CAPTURE_POLICY || 'metadata-only', customAgentPatterns: (process.env.RORCA_CAPTURE_AGENT_PATTERNS || '').split(',').filter(Boolean) };
+  const options = { alwaysOn: false, dryRun: false, json: false, uninstall: false, workspaceId: undefined, cwd: process.cwd(), exitCode: undefined, once: false, phase: 'end', command: '', policyMode: process.env.RORCA_CAPTURE_POLICY || 'metadata-only', customAgentPatterns: (process.env.RORCA_CAPTURE_AGENT_PATTERNS || '').split(',').filter(Boolean), sourceSystem: undefined, toolName: undefined, sessionId: undefined, message: undefined, category: 'Decision', title: undefined, rule: undefined, context: undefined, sourceRef: undefined };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -30,6 +30,15 @@ function parseArgs(argv) {
     else if (arg === '--queue-warn-size') options.queueWarnSize = Number(argv[++i]);
     else if (arg === '--queue-max-size') options.queueMaxSize = Number(argv[++i]);
     else if (arg === '--api-base-url') options.apiBaseUrl = argv[++i];
+    else if (arg === '--source-system') options.sourceSystem = argv[++i];
+    else if (arg === '--tool-name') options.toolName = argv[++i];
+    else if (arg === '--session-id') options.sessionId = argv[++i];
+    else if (arg === '--message') options.message = argv[++i];
+    else if (arg === '--category') options.category = argv[++i] || options.category;
+    else if (arg === '--title') options.title = argv[++i];
+    else if (arg === '--rule') options.rule = argv[++i];
+    else if (arg === '--context') options.context = argv[++i];
+    else if (arg === '--source') options.sourceRef = argv[++i];
     else if (arg === '--help' || arg === '-h') options.help = true;
     else positional.push(arg);
   }
@@ -37,7 +46,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Usage: rorca-capture setup --always-on [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture setup --uninstall [--dry-run] [--json]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--phase start|end] [--command <cmd>] [--exit-code <n>] [--duration-ms <n>] [--policy metadata-only|command-summary|off] [--agent-pattern <regex>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
+  console.log(`Usage: rorca-capture setup --always-on [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture setup --uninstall [--dry-run] [--json]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--phase start|end] [--command <cmd>] [--exit-code <n>] [--duration-ms <n>] [--policy metadata-only|command-summary|off] [--agent-pattern <regex>]\n       rorca-capture remember --workspace-id <id> --source-system <pi|claude_code|codex|opencode|shell|ide|daemon> --tool-name <name> --session-id <id> --message <summary> [--category <name>] [--title <title>] [--rule <rule>] [--context <context>] [--source <ref>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
 }
 
 function findQueuePath(startDir) {
@@ -102,6 +111,60 @@ async function runSetup(options) {
   }
 
   return report.ok ? 0 : 1;
+}
+
+function buildRememberEvent(options) {
+  if (!options.workspaceId) throw new Error('--workspace-id is required.');
+  if (!options.sourceSystem) throw new Error('--source-system is required.');
+  if (!options.toolName) throw new Error('--tool-name is required.');
+  if (!options.sessionId) throw new Error('--session-id is required.');
+  const message = String(options.message || options.rule || options.context || '').trim();
+  if (!message) throw new Error('--message is required unless --rule or --context is provided.');
+  const sourceSystem = String(options.sourceSystem);
+  const toolName = String(options.toolName);
+  const sessionId = String(options.sessionId);
+  return {
+    workspaceId: options.workspaceId,
+    source: sourceSystem === 'pi' || sourceSystem === 'claude_code' ? 'mcpSlashCommand' : 'shellIntegration',
+    occurredAt: new Date().toISOString(),
+    policyMode: 'explicit-transcript-import',
+    payload: {
+      source_system: sourceSystem,
+      tool_name: toolName,
+      session_id: sessionId,
+      eventType: 'agent_memory',
+      category: options.category || 'Decision',
+      title: options.title || `${toolName} remembered context`,
+      rule: options.rule || message,
+      context: options.context || message,
+      source: options.sourceRef || `${sourceSystem}:${sessionId}`,
+      summary: message,
+    },
+  };
+}
+
+async function postRememberEvent(options, event) {
+  const apiBaseUrl = options.apiBaseUrl || process.env.RORCA_CAPTURE_API_URL || 'http://127.0.0.1:3030';
+  try {
+    const response = await fetch(`${apiBaseUrl.replace(/\/$/, '')}/api/context-capture/events`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(2_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function runRemember(options) {
+  const event = buildRememberEvent(options);
+  const posted = await postRememberEvent(options, event);
+  if (!posted) appendQueueEvent(findQueuePath(options.cwd), { ...event, queuedAt: new Date().toISOString() });
+  if (options.json) console.log(JSON.stringify({ ok: true, posted, queued: !posted, event }, null, 2));
+  else console.log(posted ? 'Rorca capture memory submitted.' : 'Rorca capture memory queued for daemon flush.');
+  return 0;
 }
 
 async function runEmit(positional, options) {
@@ -192,6 +255,7 @@ try {
   if (positional[0] === 'setup') code = await runSetup(options);
   else if (positional[0] === 'service') code = runService(positional, options);
   else if (positional[0] === 'emit') code = await runEmit(positional, options);
+  else if (positional[0] === 'remember') code = await runRemember(options);
   else if (positional[0] === 'daemon') code = await runDaemon(options);
   else {
     printHelp();

@@ -134,6 +134,9 @@ export const AgentBinaryEnum = z.enum(['claude', 'codex', 'opencode', 'pi', 'aid
 
 export const CliCommandContextEventPayload = z.object({
   eventType: z.literal('cli_command'),
+  source_system: z.string().min(1).default('shell'),
+  tool_name: z.string().min(1).default('shell'),
+  session_id: z.string().min(1).default('shell'),
   phase: z.enum(['start', 'end']).default('end'),
   policyMode: CapturePolicyModeEnum.default('metadata-only'),
   commandSummary: z.string().nullable(),

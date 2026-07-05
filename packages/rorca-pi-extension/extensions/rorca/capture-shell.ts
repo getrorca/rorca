@@ -25,6 +25,9 @@ export type ShellCaptureEvent = {
   occurredAt: string;
   payload: {
     eventType: "cli_command" | "agent_cli_session";
+    source_system: "shell";
+    tool_name: string;
+    session_id: string;
     phase: ShellCapturePhase;
     policyMode: CapturePolicyMode;
     commandSummary: string | null;
@@ -52,6 +55,7 @@ export type BuildShellCaptureEventInput = {
   policyMode?: CapturePolicyMode;
   customAgentPatterns?: string[];
   captureIgnorePatterns?: string[];
+  sessionId?: string;
   gitBranch?: string | null;
   gitSha?: string | null;
 };
@@ -144,6 +148,9 @@ export function buildShellCaptureEvent(input: BuildShellCaptureEventInput): Shel
   const agent = detectAgentBinary(input.command, input.customAgentPatterns);
   const payload: ShellCaptureEvent["payload"] = {
     eventType: agent.recognized ? "agent_cli_session" : "cli_command",
+    source_system: "shell",
+    tool_name: agent.recognized ? agent.binary : "shell",
+    session_id: input.sessionId ?? process.env.RORCA_CAPTURE_SESSION_ID ?? "shell",
     phase: input.phase ?? "end",
     policyMode,
     commandSummary: policyMode === "metadata-only" ? null : redacted.text,

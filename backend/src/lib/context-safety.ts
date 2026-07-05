@@ -26,6 +26,9 @@ export type AgentBinaryDetection = {
 
 export type CliCommandSafetyInput = {
   eventType?: 'cli_command' | 'agent_cli_session';
+  source_system?: string;
+  tool_name?: string;
+  session_id?: string;
   phase?: 'start' | 'end';
   command?: string;
   cwd?: string;
@@ -44,6 +47,9 @@ export type CliCommandSafetyInput = {
 
 export type SanitizedCliCommandEvent = {
   eventType: 'cli_command' | 'agent_cli_session';
+  source_system: string;
+  tool_name: string;
+  session_id: string;
   phase: 'start' | 'end';
   policyMode: CapturePolicyMode;
   commandSummary: string | null;
@@ -223,8 +229,12 @@ export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: Ca
   }
   const command = input.command ?? '';
   const redacted = redactCommandText(command, { workspacePath: input.workspacePath, captureIgnorePatterns: input.captureIgnorePatterns, policy });
+  const detectedAgent = detectAgentBinary(command, input.customAgentPatterns);
   const event: SanitizedCliCommandEvent = {
-    eventType: input.eventType ?? (detectAgentBinary(command, input.customAgentPatterns).recognized ? 'agent_cli_session' : 'cli_command'),
+    eventType: input.eventType ?? (detectedAgent.recognized ? 'agent_cli_session' : 'cli_command'),
+    source_system: typeof input.source_system === 'string' && input.source_system.trim() ? input.source_system : 'shell',
+    tool_name: typeof input.tool_name === 'string' && input.tool_name.trim() ? input.tool_name : detectedAgent.recognized ? detectedAgent.binary : 'shell',
+    session_id: typeof input.session_id === 'string' && input.session_id.trim() ? input.session_id : 'shell',
     phase: input.phase ?? 'end',
     policyMode,
     commandSummary: policyMode === 'metadata-only' ? null : redacted.text,
@@ -234,7 +244,7 @@ export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: Ca
     durationMs: typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) ? input.durationMs : null,
     gitBranch: input.gitBranch ?? null,
     gitSha: input.gitSha ?? null,
-    agent: detectAgentBinary(command, input.customAgentPatterns),
+    agent: detectedAgent,
     regulatedSignals: redacted.regulatedSignals,
     ...(policyMode === 'explicit-transcript-import' && input.transcript !== undefined ? { transcript: input.transcript } : {}),
   };

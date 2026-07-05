@@ -7,6 +7,7 @@ import { SUPPORTED_CAPTURE_SHELLS, installManagedShellBlock, managedSourceBlock,
 const SENTINEL = "rorca-managed: v1 | uninstall: rorca capture teardown";
 const JSON_SENTINEL = { rorcaManaged: "v1", uninstall: "rorca capture teardown" };
 const GIT_HOOKS = ["post-commit", "post-checkout", "post-merge", "post-rewrite", "pre-push"];
+const AGENT_ADAPTER_TOOLS = ["pi", "claude-code", "codex", "opencode"];
 function step(input) {
     return { ...input, nextActions: input.nextActions ?? [] };
 }
@@ -241,6 +242,9 @@ function installDirectory(id, label, dirPath, dryRun) {
 function jsonFileContent(payload) {
     return `${JSON.stringify({ ...JSON_SENTINEL, ...payload }, null, 2)}\n`;
 }
+function shQuote(value) {
+    return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
 function captureIgnoreContent() {
     return `# ${SENTINEL}\n# Paths below are ignored by always-on context capture.\nnode_modules/\ndist/\nbuild/\n.env\n.env.*\n*.pem\n*.key\n.rorca/capture/queue/\n`;
 }
@@ -274,7 +278,13 @@ function sidecarConfigContent(workspace, queuePath) {
             queueMaxSize: 1000,
             watchers: { mode: "polling", recursive: false, count: 0 },
         },
-        sources: ["repoDaemon", "gitHook", "shellIntegration", "vscodeExtension", "mcpSlashCommand"],
+        sources: ["repoDaemon", "gitHook", "shellIntegration", "vscodeExtension", "mcpSlashCommand", "agentAdapters"],
+        sourceMetadata: {
+            repoDaemon: { source_system: "daemon", tool_name: "rorca-capture-daemon", session_id: "daemon" },
+            gitHook: { source_system: "git", tool_name: "git-hook", session_id: "git" },
+            shellIntegration: { source_system: "shell", tool_name: "shell", session_id: "${RORCA_CAPTURE_SESSION_ID:-shell}" },
+            vscodeExtension: { source_system: "ide", tool_name: "vscode-extension", session_id: "${VSCODE_SESSION_ID:-manual}" },
+        },
     });
 }
 function gitHookContent(hookName, workspace, queuePath) {
@@ -292,6 +302,7 @@ function ideAdapterContent(workspace) {
         workspaceId: workspace.id,
         adapter: "vscode-compatible",
         apiOnly: true,
+        metadata: { source_system: "ide", tool_name: "vscode-extension", session_id: "${VSCODE_SESSION_ID:-manual}" },
         capture: { files: "explicit-or-save-events", diagnostics: true, chatPanels: "explicit-export-only" },
     });
 }
@@ -299,9 +310,105 @@ function mcpSlashConfigContent(workspace) {
     return jsonFileContent({
         workspaceId: workspace.id,
         mcpServer: "http://127.0.0.1:3030/mcp",
-        commands: ["/rorca-save-memory", "/rorca-capture-context"],
+        commands: ["/rorca-save-memory", "/rorca-capture-context", "/rorca-remember"],
         tokenFile: "~/.rorca/mcp-token",
+        tokenPolicy: "read token at runtime only; never embed bearer values in command/config artifacts",
     });
+}
+function adapterSourceSystem(tool) {
+    if (tool === "claude-code")
+        return "claude_code";
+    return tool;
+}
+function adapterSessionExpression(tool) {
+    if (tool === "claude-code")
+        return "${CLAUDE_SESSION_ID:-manual}";
+    if (tool === "codex")
+        return "${CODEX_SESSION_ID:-manual}";
+    if (tool === "opencode")
+        return "${OPENCODE_SESSION_ID:-manual}";
+    return "${PI_SESSION_ID:-manual}";
+}
+function rememberCommand(tool, workspace, message = "<summary-or-decision>") {
+    return `rorca-capture remember --workspace-id ${shQuote(workspace.id)} --source-system ${shQuote(adapterSourceSystem(tool))} --tool-name ${shQuote(tool)} --session-id ${shQuote(adapterSessionExpression(tool))} --message ${shQuote(message)}`;
+}
+export function renderAgentAdapterConfig(tool, workspace, apiBaseUrl = "http://127.0.0.1:3030") {
+    const sourceSystem = adapterSourceSystem(tool);
+    const base = {
+        workspaceId: workspace.id,
+        apiBaseUrl,
+        endpoint: "/api/context-capture/events",
+        tokenFile: "~/.rorca/mcp-token",
+        tokenPolicy: "token path only; bearer/API key values must never be written to this artifact",
+        metadata: { source_system: sourceSystem, tool_name: tool, session_id: adapterSessionExpression(tool) },
+        rememberCommand: rememberCommand(tool, workspace),
+    };
+    if (tool === "claude-code") {
+        return jsonFileContent({
+            adapter: "claude-code",
+            ...base,
+            mcp: { serverUrl: `${apiBaseUrl.replace(/\/$/, "")}/mcp`, auth: { type: "bearer-token-file", tokenFile: "~/.rorca/mcp-token" } },
+            slashCommands: [
+                { name: "/rorca-remember", description: "Send an explicit summary or decision to Rorca capture.", command: rememberCommand(tool, workspace, "$ARGUMENTS") },
+                { name: "/rorca-capture-context", description: "Submit a context-event summary without embedding credentials.", command: rememberCommand(tool, workspace, "$ARGUMENTS") },
+            ],
+        });
+    }
+    if (tool === "pi") {
+        return jsonFileContent({
+            adapter: "pi",
+            ...base,
+            pi: {
+                commandAlias: "/rorca-remember",
+                skillAlias: "/skill:rorca-capture",
+                route: "rorca-capture remember or public /api/context-capture/events",
+                replacesLegacyDirectDbWrites: true,
+            },
+        });
+    }
+    return jsonFileContent({
+        adapter: tool,
+        ...base,
+        wrapper: `./rorca-${tool}-wrapper.sh`,
+        fallback: "If the native tool binary is missing or has no hook API, use shell capture plus the explicit rememberCommand above.",
+        behavior: "passes arguments through unchanged and exits with the native tool exit code",
+    });
+}
+export function renderAgentWrapperScript(tool, workspace, captureCommand = "rorca-capture") {
+    const binary = tool;
+    const envName = tool === "codex" ? "RORCA_CODEX_BIN" : "RORCA_OPENCODE_BIN";
+    const sourceSystem = adapterSourceSystem(tool);
+    const commandPreview = tool === "codex" ? "codex exec --dangerously-bypass-approvals-and-sandbox -m <model>" : "opencode run";
+    return `#!/bin/sh\n# ${SENTINEL}\n# Thin Rorca ${tool} adapter. It does not read provider credentials or mutate provider config.\nset +e\nTOOL_BIN=\"${`$`}{${envName}:-}\"\nif [ -z \"$TOOL_BIN\" ]; then\n  TOOL_BIN=\"$(command -v ${binary} 2>/dev/null)\"\nfi\nif [ -z \"$TOOL_BIN\" ] || [ ! -x \"$TOOL_BIN\" ]; then\n  echo \"Rorca ${tool} adapter: ${binary} binary not found; fallback to shell capture and explicit remember: ${rememberCommand(tool, workspace)}\" >&2\n  exit 127\nfi\nSESSION_ID=\"${`$`}{${tool === "codex" ? "CODEX_SESSION_ID" : "OPENCODE_SESSION_ID"}:-manual}\"\n${captureCommand} emit shell --phase start --workspace-id ${shQuote(workspace.id)} --cwd \"$PWD\" --command ${shQuote(`${commandPreview} $*`)} --policy command-summary >/dev/null 2>&1 || true\n\"$TOOL_BIN\" \"$@\"\nCODE=$?\n${captureCommand} emit shell --phase end --workspace-id ${shQuote(workspace.id)} --cwd \"$PWD\" --command ${shQuote(`${commandPreview} $*`)} --exit-code \"$CODE\" --duration-ms 0 --policy command-summary >/dev/null 2>&1 || true\n${captureCommand} remember --workspace-id ${shQuote(workspace.id)} --source-system ${shQuote(sourceSystem)} --tool-name ${shQuote(tool)} --session-id \"$SESSION_ID\" --message \"${tool} session ended with exit code $CODE\" >/dev/null 2>&1 || true\nexit \"$CODE\"\n`;
+}
+function agentAdapterFiles(workspace, captureDir, apiBaseUrl) {
+    return [
+        { id: "agent-adapter:pi", label: "Pi capture command alias", path: path.join(workspace.path, ".pi", "extensions", "rorca", "capture-command.json"), content: renderAgentAdapterConfig("pi", workspace, apiBaseUrl) },
+        { id: "agent-adapter:claude-code", label: "Claude Code slash/MCP adapter", path: path.join(captureDir, "adapters", "claude-code", "slash-commands.json"), content: renderAgentAdapterConfig("claude-code", workspace, apiBaseUrl) },
+        { id: "agent-adapter:codex-config", label: "Codex capture adapter config", path: path.join(captureDir, "adapters", "codex", "adapter.json"), content: renderAgentAdapterConfig("codex", workspace, apiBaseUrl) },
+        { id: "agent-adapter:codex-wrapper", label: "Codex pass-through wrapper", path: path.join(captureDir, "adapters", "codex", "rorca-codex-wrapper.sh"), content: renderAgentWrapperScript("codex", workspace), executable: true },
+        { id: "agent-adapter:opencode-config", label: "OpenCode capture adapter config", path: path.join(captureDir, "adapters", "opencode", "adapter.json"), content: renderAgentAdapterConfig("opencode", workspace, apiBaseUrl) },
+        { id: "agent-adapter:opencode-wrapper", label: "OpenCode pass-through wrapper", path: path.join(captureDir, "adapters", "opencode", "rorca-opencode-wrapper.sh"), content: renderAgentWrapperScript("opencode", workspace), executable: true },
+    ];
+}
+function installAgentAdapters(workspace, captureDir, apiBaseUrl, env, dryRun) {
+    const steps = agentAdapterFiles(workspace, captureDir, apiBaseUrl).map((file) => installManagedFile(file, dryRun));
+    for (const tool of ["codex", "opencode"]) {
+        const envName = tool === "codex" ? "RORCA_CODEX_BIN" : "RORCA_OPENCODE_BIN";
+        const configured = env[envName];
+        const available = configured ? existsSync(configured) : spawnSync(process.platform === "win32" ? "where" : "which", [tool], { stdio: "ignore", env }).status === 0;
+        if (!available) {
+            steps.push(step({
+                id: `agent-adapter:${tool}:fallback`,
+                label: `${tool} adapter fallback`,
+                status: "degraded",
+                message: `${tool} binary was not found; generated wrapper will exit 127 and setup falls back to shell capture plus explicit remember commands.`,
+                details: { tool, fallbackCommand: rememberCommand(tool, workspace), source_system: adapterSourceSystem(tool), tool_name: tool, session_id: adapterSessionExpression(tool) },
+                nextActions: [`Install ${tool} or set ${envName} to the native binary path before using the wrapper.`],
+            }));
+        }
+    }
+    return steps;
 }
 function uninstallMetadataContent(workspace, artifactPaths) {
     return jsonFileContent({
@@ -480,6 +587,7 @@ export async function runCaptureBootstrap(options) {
     steps.push(...installShellSnippets(workspace, captureDir, homeDir, env, dryRun, client.baseUrl));
     steps.push(installIdeAdapter(workspace, dryRun));
     steps.push(installManagedFile({ id: "mcp-slash-config", label: "MCP/slash-command config", path: mcpSlashPath, content: mcpSlashConfigContent(workspace) }, dryRun));
+    steps.push(...installAgentAdapters(workspace, captureDir, client.baseUrl, env, dryRun));
     const artifactPaths = [
         queuePath,
         redactionConfigPath,
@@ -490,6 +598,7 @@ export async function runCaptureBootstrap(options) {
         ...SUPPORTED_CAPTURE_SHELLS.map((shell) => shellSnippetFile(captureDir, shell)),
         path.join(workspace.path, ".vscode", "rorca-capture-adapter.json"),
         mcpSlashPath,
+        ...agentAdapterFiles(workspace, captureDir, client.baseUrl).map((file) => file.path),
         uninstallPath,
     ];
     steps.push(installManagedFile({ id: "uninstall-metadata", label: "Uninstall metadata", path: uninstallPath, content: uninstallMetadataContent(workspace, artifactPaths) }, dryRun));

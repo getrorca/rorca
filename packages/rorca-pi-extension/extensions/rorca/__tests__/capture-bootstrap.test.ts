@@ -1,8 +1,9 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runCaptureBootstrap, type CaptureBootstrapApiClient } from "../capture-bootstrap.js";
+import { renderAgentAdapterConfig, renderAgentWrapperScript, runCaptureBootstrap, type CaptureBootstrapApiClient } from "../capture-bootstrap.js";
 import type { Workspace } from "../types.js";
 
 const temps: string[] = [];
@@ -174,5 +175,84 @@ describe("runCaptureBootstrap", () => {
     expect(report.ok).toBe(false);
     expect(report.failed.find((item) => item.id === "mcp-token")?.message).toContain("expected 600");
     expect((statSync(tokenPath).mode & 0o777).toString(8)).toBe("644");
+  });
+
+  it("renders agent adapter configs with metadata and without token leakage", async () => {
+    const { root, home, workspace } = makeRepo();
+    const report = await runCaptureBootstrap({
+      alwaysOn: true,
+      cwd: root,
+      homeDir: home,
+      apiClient: api(workspace),
+      env: { SHELL: "/bin/zsh", PATH: "" },
+    });
+
+    expect(report.steps.map((item) => item.id)).toContain("agent-adapter:claude-code");
+    const artifacts = [
+      path.join(root, ".pi", "extensions", "rorca", "capture-command.json"),
+      path.join(root, ".rorca", "capture", "adapters", "claude-code", "slash-commands.json"),
+      path.join(root, ".rorca", "capture", "adapters", "codex", "adapter.json"),
+      path.join(root, ".rorca", "capture", "adapters", "opencode", "adapter.json"),
+    ];
+    for (const artifact of artifacts) {
+      const content = readFileSync(artifact, "utf8");
+      expect(content).toContain("source_system");
+      expect(content).toContain("tool_name");
+      expect(content).toContain("session_id");
+      expect(content).toContain("rorca-capture remember");
+      expect(content).toContain("~/.rorca/mcp-token");
+      expect(content).not.toContain("public-token");
+      expect(content).not.toMatch(/Bearer\s+[A-Za-z0-9._~+/-]+=*/);
+      expect(content).not.toMatch(/(?:api[_-]?key|token|secret|password)\s*[:=]\s*[A-Za-z0-9._~+/-]{16,}/i);
+    }
+  });
+
+  it("documents Claude Code slash/MCP commands without embedding bearer tokens", () => {
+    const { workspace } = makeRepo();
+    const config = renderAgentAdapterConfig("claude-code", workspace, "http://127.0.0.1:3030");
+    expect(config).toContain("/rorca-remember");
+    expect(config).toContain("bearer-token-file");
+    expect(config).toContain("~/.rorca/mcp-token");
+    expect(config).toContain("source_system");
+    expect(config).not.toContain("Bearer ");
+    expect(config).not.toMatch(/[A-Za-z0-9_=-]{32,}/);
+  });
+
+  it("renders Codex/OpenCode wrappers that preserve tool exit codes", () => {
+    if (process.platform === "win32") return;
+    const { workspace } = makeRepo();
+    const dir = tempDir();
+    const fakeTool = path.join(dir, "codex-real");
+    const fakeCapture = path.join(dir, "rorca-capture");
+    const wrapper = path.join(dir, "rorca-codex-wrapper.sh");
+    writeFileSync(fakeTool, "#!/bin/sh\necho native-tool \"$@\"\nexit 42\n", "utf8");
+    writeFileSync(fakeCapture, "#!/bin/sh\nexit 0\n", "utf8");
+    writeFileSync(wrapper, renderAgentWrapperScript("codex", workspace, fakeCapture), "utf8");
+    chmodSync(fakeTool, 0o755);
+    chmodSync(fakeCapture, 0o755);
+    chmodSync(wrapper, 0o755);
+
+    const result = spawnSync(wrapper, ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5"], {
+      env: { ...process.env, RORCA_CODEX_BIN: fakeTool, CODEX_SESSION_ID: "session-1" },
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(42);
+    expect(result.stdout).toContain("native-tool exec --dangerously-bypass-approvals-and-sandbox -m gpt-5");
+  });
+
+  it("renders wrapper fallback mode when the native tool binary is missing", () => {
+    if (process.platform === "win32") return;
+    const { workspace } = makeRepo();
+    const dir = tempDir();
+    const wrapper = path.join(dir, "rorca-opencode-wrapper.sh");
+    writeFileSync(wrapper, renderAgentWrapperScript("opencode", workspace, "rorca-capture"), "utf8");
+    chmodSync(wrapper, 0o755);
+
+    const result = spawnSync(wrapper, ["run"], { env: { PATH: "" }, encoding: "utf8" });
+
+    expect(result.status).toBe(127);
+    expect(result.stderr).toContain("binary not found");
+    expect(result.stderr).toContain("rorca-capture remember");
   });
 });

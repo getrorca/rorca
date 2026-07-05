@@ -50,6 +50,17 @@ function isCliCapturePayload(payload: unknown): boolean {
   return eventType === 'cli_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
 }
 
+function assertAgentMetadata(payload: unknown): void {
+  if (!payload || typeof payload !== 'object') return;
+  const obj = payload as Record<string, unknown>;
+  if (obj.eventType !== 'agent_memory' && obj.eventType !== 'adapter_context') return;
+  for (const key of ['source_system', 'tool_name', 'session_id']) {
+    if (typeof obj[key] !== 'string' || !String(obj[key]).trim()) {
+      throw new ValidationError(`Adapter payload requires ${key} metadata`);
+    }
+  }
+}
+
 function readCaptureIgnorePatterns(workspacePath: string): string[] {
   const ignorePath = path.join(workspacePath, '.rorca-captureignore');
   if (!fs.existsSync(ignorePath)) return [];
@@ -69,6 +80,12 @@ function captureCapability() {
         fallbackSources: ['repoDaemon', 'gitHook', 'shellIntegration', 'mcpSlashCommand'],
       },
       mcpSlashCommand: { status: 'active' },
+      agentAdapters: {
+        status: 'active',
+        tools: ['pi', 'claude-code', 'codex', 'opencode'],
+        requiredMetadata: ['source_system', 'tool_name', 'session_id'],
+        fallbackSources: ['shellIntegration', 'gitHook', 'repoDaemon'],
+      },
     },
     policy: {
       version: DEFAULT_CAPTURE_POLICY.version,
@@ -190,6 +207,7 @@ router.post('/events', async (req, res, next) => {
     if (!workspace) throw new NotFoundError('Workspace', workspaceId);
 
     const payload = req.body.payload ?? {};
+    assertAgentMetadata(payload);
     const policyMode = parsePolicyMode(req.body.policyMode ?? (payload as Record<string, unknown>).policyMode);
     const ignorePatterns = readCaptureIgnorePatterns(workspace.path);
     if (isCliCapturePayload(payload) && (payload as Record<string, unknown>).transcript !== undefined && policyMode !== 'explicit-transcript-import') {

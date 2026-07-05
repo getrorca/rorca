@@ -105,6 +105,9 @@ export function buildShellCaptureEvent(input) {
     const agent = detectAgentBinary(input.command, input.customAgentPatterns);
     const payload = {
         eventType: agent.recognized ? "agent_cli_session" : "cli_command",
+        source_system: "shell",
+        tool_name: agent.recognized ? agent.binary : "shell",
+        session_id: input.sessionId ?? process.env.RORCA_CAPTURE_SESSION_ID ?? "shell",
         phase: input.phase ?? "end",
         policyMode,
         commandSummary: policyMode === "metadata-only" ? null : redacted.text,
