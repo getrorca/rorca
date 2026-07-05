@@ -811,41 +811,67 @@ export async function createCandidateFromRequest(req: Request, res: Response): P
   }
 
   const candidate = await queryOne<MemoryCandidateResponse>(
-    `WITH inserted AS (
-       INSERT INTO memory_candidates (
-         workspace_id,
-         context_event_id,
-         event_type,
-         source_system,
-         source_ref,
-         actor,
-         occurred_at,
-         suggested_category,
-         title,
-         rule,
-         context,
-         related_files,
-         confidence,
-         trust_tier,
-         review_status,
-         idempotency_key,
-         provenance,
-         metadata,
-         claim,
-         policy,
-         incident_learning,
-         security_sensitive,
-         regulated_domain,
-         requires_review
-       ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10, $11, $12::jsonb,
-         $13, $14, 'pending', $15, $16::jsonb, $17::jsonb, $18, $19, $20, $21, $22, $23
-       )
-       ON CONFLICT (idempotency_key) DO NOTHING
-       RETURNING id
+    `INSERT INTO memory_candidates (
+       workspace_id,
+       context_event_id,
+       event_type,
+       source_system,
+       source_ref,
+       actor,
+       occurred_at,
+       suggested_category,
+       title,
+       rule,
+       context,
+       related_files,
+       confidence,
+       trust_tier,
+       review_status,
+       idempotency_key,
+       provenance,
+       metadata,
+       claim,
+       policy,
+       incident_learning,
+       security_sensitive,
+       regulated_domain,
+       requires_review
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10, $11, $12::jsonb,
+       $13, $14, 'pending', $15, $16::jsonb, $17::jsonb, $18, $19, $20, $21, $22, $23
      )
-     ${CANDIDATE_SELECT}
-     WHERE id = (SELECT id FROM inserted)`,
+     ON CONFLICT (idempotency_key) DO NOTHING
+     RETURNING id::text AS id,
+               workspace_id AS "workspaceId",
+               context_event_id::text AS "contextEventId",
+               event_type AS "eventType",
+               source_system AS "sourceSystem",
+               source_ref AS "sourceRef",
+               actor,
+               occurred_at AS "occurredAt",
+               suggested_category AS "suggestedCategory",
+               title,
+               rule,
+               context,
+               related_files AS "relatedFiles",
+               confidence,
+               trust_tier AS "trustTier",
+               review_status AS "reviewStatus",
+               reviewer,
+               reviewed_at AS "reviewedAt",
+               promoted_memory_id AS "promotedMemoryId",
+               promoted_at AS "promotedAt",
+               idempotency_key AS "idempotencyKey",
+               provenance,
+               metadata,
+               claim,
+               policy,
+               incident_learning AS "incidentLearning",
+               security_sensitive AS "securitySensitive",
+               regulated_domain AS "regulatedDomain",
+               requires_review AS "requiresReview",
+               created_at AS "createdAt",
+               updated_at AS "updatedAt"`,
     [
       body.workspaceId,
       contextEventId,

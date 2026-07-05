@@ -6,7 +6,6 @@
  */
 
 import type { Request } from 'express';
-import { swaggerSpec } from './swagger';
 
 export type RorcaTier = 'public' | 'auth' | 'paid' | 'admin';
 export type RorcaTierOrDenied = RorcaTier | 'denied';
@@ -166,7 +165,10 @@ export function resolveRorcaPlan(rawPlan: string | null | undefined): RorcaPlan 
   }
 }
 
-export function getRorcaTier(operation: RorcaTierOperationLike): RorcaTierMetadata {
+export function getRorcaTier(operation: RorcaTierOperationLike | null | undefined): RorcaTierMetadata {
+  if (!operation) {
+    return { tier: 'denied', capability: null };
+  }
   const raw = operation['x-rorca-tier'];
   const capability = isPlanCapability(operation['x-rorca-capability'])
     ? operation['x-rorca-capability']
@@ -188,7 +190,7 @@ export function tierAllowedFromMcp(tier: RorcaTierOrDenied): boolean {
 
 export function matchOperationFromRoute(
   req: Pick<Request, 'method' | 'path'>,
-  spec: OpenApiTierSpecLike = swaggerSpec as OpenApiTierSpecLike,
+  spec: OpenApiTierSpecLike,
 ): RorcaTierOperationLike | null {
   const method = req.method.toUpperCase();
   const pathname = req.path;

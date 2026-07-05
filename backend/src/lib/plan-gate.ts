@@ -9,6 +9,7 @@ import type { RequestHandler } from 'express';
 import { getEffectiveUser } from './get-user';
 import { verifyLicense } from './license-verifier';
 import { logger } from './logger';
+import { swaggerSpec } from './swagger';
 import {
   getRorcaTier,
   matchOperationFromRoute,
@@ -33,7 +34,7 @@ function resolveEffectivePlan(rawPlan: string | null | undefined): RorcaPlan {
 export function planGate(): RequestHandler {
   return async (req, res, next) => {
     try {
-      const operation = matchOperationFromRoute(req);
+      const operation = matchOperationFromRoute(req, swaggerSpec as any);
       if (!operation) {
         next();
         return;

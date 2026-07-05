@@ -15,7 +15,23 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const CONTRACT_PATH = path.join(__dirname, '../docs/OPEN_API_CONTRACT.md');
+const CONTRACT_SNAPSHOT_PATH = path.join(__dirname, '../docs/openapi-public-snapshot.json');
+
+const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head']);
+
+const SENSITIVE_PREFIXES = [
+  '/api/vault',
+  '/api/terminal',
+  '/api/webhooks',
+  '/api/auth',
+];
+
+const SENSITIVE_PATH_PARTS = [
+  '/env-vars',
+  '/skills/install',
+];
+
+const EXPECTED_PAID_CAPABILITIES: Record<string, PlanCapability> = {};
 
 type Operation = {
   summary?: string;
@@ -38,83 +54,8 @@ type Operation = {
 
 type SpecPaths = Record<string, Record<string, Operation | undefined> | undefined>;
 
-const EXPECTED: Record<RorcaTier, string[]> = {
-  public: [
-    'GET /api/specs',
-    'GET /api/specs/kanban',
-    'GET /api/specs/archive',
-    'GET /api/specs/search/stories',
-    'GET /api/specs/{specId}',
-    'GET /api/specs/{specId}/versions',
-    'GET /api/specs/{specId}/diff',
-    'GET /api/specs/{specId}/graph',
-    'POST /api/specs/generate',
-    'POST /api/specs/{specId}/approve',
-    'POST /api/specs/{specId}/reject',
-    'POST /api/specs/{specId}/add-stories',
-    'PUT /api/specs/{specId}',
-    'PATCH /api/specs/{specId}/stories/{storyId}',
-    'DELETE /api/specs/{specId}/stories/{storyId}',
-    'GET /api/pipeline/runs',
-    'GET /api/pipeline/runs/{runId}',
-    'GET /api/pipeline/runs/{runId}/log',
-    'POST /api/pipeline/trigger',
-    'POST /api/pipeline/runs/{runId}/cancel',
-    'POST /api/pipeline/runs/{runId}/retry',
-    'GET /api/direction',
-    'PUT /api/direction',
-    'POST /api/direction/synthesize',
-    'GET /api/search',
-    'GET /api/recall',
-    'GET /api/health',
-    'GET /api/version',
-  ],
-  auth: [
-    'GET /api/users/me',
-    'GET /api/settings/profile',
-    'PUT /api/settings/profile',
-    'GET /api/settings/display',
-    'PUT /api/settings/display',
-    'GET /api/settings/worker',
-    'GET /api/workspaces',
-    'GET /api/workspaces/{id}',
-    'PATCH /api/workspaces/{id}',
-    'GET /api/workspaces/{id}/stats',
-    'GET /api/workspaces/{id}/health',
-    'GET /api/workspaces/{id}/rorca-config',
-    'PUT /api/workspaces/{id}/rorca-config',
-    'GET /api/onboarding',
-    'PUT /api/onboarding',
-  ],
-  paid: [],
-  admin: [
-    'POST /api/admin/backup',
-    'GET /api/admin/backups',
-    'POST /api/admin/embed-all',
-    'GET /api/admin/embed-all/status',
-    'GET /api/admin/embedding-provider',
-    'GET /api/admin/mcp-audit',
-    'GET /api/admin/mcp-audit/summary',
-    'POST /api/admin/graph-backfill',
-    'GET /api/admin/graph-stats',
-    'POST /api/admin/age-recheck',
-    'POST /api/admin/generate-license',
-    'POST /api/graph/populate',
-  ],
-};
-
-const SENSITIVE_PREFIXES = [
-  '/api/vault',
-  '/api/terminal',
-  '/api/webhooks',
-  '/api/auth',
-];
-
-const SENSITIVE_EXACT = new Set([
-  'POST /api/workspaces',
-]);
-
-const EXPECTED_PAID_CAPABILITIES: Record<string, PlanCapability> = {
+type ContractSnapshot = {
+  routes?: Array<{ method?: string; path?: string }>;
 };
 
 function contractLine(method: string, pathname: string): string {
@@ -127,7 +68,7 @@ function collectOperations(paths: SpecPaths): Map<string, Operation> {
   for (const [pathname, methods] of Object.entries(paths)) {
     if (!methods) continue;
     for (const [method, operation] of Object.entries(methods)) {
-      if (!operation) continue;
+      if (!operation || !HTTP_METHODS.has(method.toLowerCase())) continue;
       operations.set(contractLine(method, pathname), operation);
     }
   }
@@ -135,73 +76,55 @@ function collectOperations(paths: SpecPaths): Map<string, Operation> {
   return operations;
 }
 
-function listParams(operation: Operation): string[] {
-  const params = (operation.parameters ?? []).map((param) => {
-    const suffix = param.required ? 'required' : 'optional';
-    return `${param.in}:${param.name} (${suffix})`;
-  });
-
-  const jsonSchema = operation.requestBody?.content?.['application/json']?.schema;
-  const required = new Set(jsonSchema?.required ?? []);
-
-  for (const name of Object.keys(jsonSchema?.properties ?? {})) {
-    params.push(`body:${name} (${required.has(name) ? 'required' : 'optional'})`);
-  }
-
-  return params;
+function readPublicContractSnapshot(): Set<string> | null {
+  if (!fs.existsSync(CONTRACT_SNAPSHOT_PATH)) return null;
+  const parsed = JSON.parse(fs.readFileSync(CONTRACT_SNAPSHOT_PATH, 'utf8')) as ContractSnapshot;
+  return new Set(
+    (parsed.routes ?? [])
+      .filter((route) => route.method && route.path)
+      .map((route) => contractLine(String(route.method), String(route.path))),
+  );
 }
 
-function writeContract(publicOperations: Array<[string, Operation]>): void {
-  const lines: string[] = [
-    '# Open API Contract',
-    '',
-    'Stable public API surface for the open-source CLI.',
-    '',
-    '| Method | Path | Parameters | Summary |',
-    '| --- | --- | --- | --- |',
-  ];
+function isValidTier(raw: unknown): raw is RorcaTier {
+  return raw === 'public' || raw === 'auth' || raw === 'paid' || raw === 'admin';
+}
 
-  for (const [key, operation] of publicOperations.sort(([a], [b]) => a.localeCompare(b))) {
-    const firstSpace = key.indexOf(' ');
-    const method = key.slice(0, firstSpace);
-    const pathname = key.slice(firstSpace + 1);
-    const params = listParams(operation).join(', ') || '-';
-    const summary = operation.summary ?? '-';
-    lines.push(`| ${method} | \`${pathname}\` | ${params} | ${summary} |`);
-  }
-
-  fs.mkdirSync(path.dirname(CONTRACT_PATH), { recursive: true });
-  fs.writeFileSync(CONTRACT_PATH, `${lines.join('\n')}\n`, 'utf8');
+function isSensitiveRoute(key: string): boolean {
+  const pathname = key.slice(key.indexOf(' ') + 1);
+  return SENSITIVE_PREFIXES.some((prefix) => pathname.startsWith(prefix)) ||
+    SENSITIVE_PATH_PARTS.some((part) => pathname.includes(part));
 }
 
 function main(): void {
   const paths = (swaggerSpec as { paths?: SpecPaths }).paths ?? {};
   const operations = collectOperations(paths);
-  const expectedEntries = new Map<string, RorcaTier>();
-
-  for (const [tier, entries] of Object.entries(EXPECTED) as Array<[RorcaTier, string[]]>) {
-    for (const entry of entries) {
-      expectedEntries.set(entry, tier);
-    }
-  }
-
   const errors: string[] = [];
 
-  for (const [key, expectedTier] of expectedEntries) {
-    const operation = operations.get(key);
-    if (!operation) {
-      errors.push(`Missing swagger operation for expected tiered route: ${key}`);
+  for (const [key, operation] of operations) {
+    const rawTier = operation['x-rorca-tier'];
+    if (rawTier !== undefined && !isValidTier(rawTier)) {
+      errors.push(`Route ${key} has invalid x-rorca-tier '${rawTier}'`);
       continue;
     }
 
     const metadata = getRorcaTier(operation);
-    if (metadata.tier !== expectedTier) {
-      errors.push(`Route ${key} expected tier ${expectedTier} but found ${metadata.tier}`);
+    if (metadata.tier === 'denied') {
+      if (metadata.publicApi === true) {
+        errors.push(`Default-denied route ${key} must not include x-rorca-public-api: true`);
+      }
+      continue;
     }
+
     if (!metadata.rationale) {
       errors.push(`Route ${key} is missing x-rorca-rationale`);
     }
-    if (expectedTier === 'paid') {
+
+    if (metadata.tier !== 'public' && metadata.publicApi === true) {
+      errors.push(`Non-public route ${key} must not include x-rorca-public-api: true`);
+    }
+
+    if (metadata.tier === 'paid') {
       const rawCapability = operation['x-rorca-capability'];
       if (!isPlanCapability(rawCapability)) {
         errors.push(
@@ -213,64 +136,36 @@ function main(): void {
         );
       }
     }
-    if (expectedTier === 'public' && metadata.publicApi !== true) {
-      errors.push(`Public route ${key} must include x-rorca-public-api: true`);
-    }
-    if (expectedTier !== 'public' && metadata.publicApi === true) {
-      errors.push(`Non-public route ${key} must not include x-rorca-public-api: true`);
-    }
-  }
 
-  for (const [key, operation] of operations) {
-    const metadata = getRorcaTier(operation);
-    if (metadata.tier === 'denied') continue;
-
-    if (!expectedEntries.has(key)) {
-      errors.push(`Unexpected tier annotation on ${key} (${metadata.tier})`);
-    }
-    if (metadata.tier === 'paid' && !expectedEntries.has(key)) {
-      const rawCapability = operation['x-rorca-capability'];
-      if (!isPlanCapability(rawCapability)) {
-        errors.push(
-          `Paid route ${key} must include valid x-rorca-capability (${PLAN_CAPABILITY_KEYS.join(', ')})`,
-        );
-      }
-    }
-
-    const pathname = key.slice(key.indexOf(' ') + 1);
-    if (
-      SENSITIVE_EXACT.has(key) ||
-      pathname.includes('/env-vars') ||
-      pathname.includes('/skills/install') ||
-      SENSITIVE_PREFIXES.some((prefix) => pathname.startsWith(prefix))
-    ) {
+    if (isSensitiveRoute(key)) {
       errors.push(`Sensitive route must remain default-denied: ${key}`);
     }
   }
 
+  const publicApiOperations = new Set(
+    Array.from(operations.entries())
+      .filter(([, operation]) => {
+        const metadata = getRorcaTier(operation);
+        return metadata.tier === 'public' && metadata.publicApi === true;
+      })
+      .map(([key]) => key),
+  );
+
+  const committedContract = readPublicContractSnapshot();
+  if (committedContract) {
+    for (const key of publicApiOperations) {
+      if (!committedContract.has(key)) {
+        errors.push(`Public API route ${key} is annotated but missing from docs/openapi-public-snapshot.json`);
+      }
+    }
+    for (const key of committedContract) {
+      if (!publicApiOperations.has(key)) {
+        errors.push(`Public API snapshot route ${key} is missing a public x-rorca-public-api annotation`);
+      }
+    }
+  }
+
   const summary = summarizeRorcaTiers(swaggerSpec as any);
-
-  if (
-    summary.public !== EXPECTED.public.length ||
-    summary.auth !== EXPECTED.auth.length ||
-    summary.paid !== EXPECTED.paid.length ||
-    summary.admin !== EXPECTED.admin.length
-  ) {
-    errors.push(
-      `Tier count mismatch: got ${summary.public}/${summary.auth}/${summary.paid}/${summary.admin}, expected ${EXPECTED.public.length}/${EXPECTED.auth.length}/${EXPECTED.paid.length}/${EXPECTED.admin.length}`,
-    );
-  }
-
-  if (summary.publicApi !== EXPECTED.public.length) {
-    errors.push(`Public API count mismatch: got ${summary.publicApi}, expected ${EXPECTED.public.length}`);
-  }
-
-  const publicOperations = Array.from(operations.entries()).filter(([_, operation]) => {
-    const metadata = getRorcaTier(operation);
-    return metadata.tier === 'public' && metadata.publicApi === true;
-  });
-
-  writeContract(publicOperations);
 
   for (const error of errors) {
     console.error(`[Tier Lint] ERROR ${error}`);

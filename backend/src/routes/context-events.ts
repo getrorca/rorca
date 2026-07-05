@@ -259,27 +259,38 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   const inserted = await queryOne<ContextEventResponse>(
-    `WITH inserted AS (
-        INSERT INTO context_events (
-          workspace_id,
-          event_type,
-          source_system,
-          source_ref,
-          actor,
-          occurred_at,
-          summary,
-          payload,
-          provenance,
-          related_files,
-          metadata,
-          trust_tier,
-          idempotency_key
-        ) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13)
-        ON CONFLICT (idempotency_key) DO NOTHING
-        RETURNING id
-      )
-      ${CONTEXT_EVENT_SELECT}
-      WHERE id = (SELECT id FROM inserted)`, 
+    `INSERT INTO context_events (
+       workspace_id,
+       event_type,
+       source_system,
+       source_ref,
+       actor,
+       occurred_at,
+       summary,
+       payload,
+       provenance,
+       related_files,
+       metadata,
+       trust_tier,
+       idempotency_key
+     ) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13)
+     ON CONFLICT (idempotency_key) DO NOTHING
+     RETURNING id::text AS id,
+               workspace_id AS "workspaceId",
+               event_type AS "eventType",
+               source_system AS "sourceSystem",
+               source_ref AS "sourceRef",
+               actor,
+               occurred_at AS "occurredAt",
+               summary,
+               payload,
+               provenance,
+               related_files AS "relatedFiles",
+               metadata,
+               trust_tier AS "trustTier",
+               idempotency_key AS "idempotencyKey",
+               created_at AS "createdAt",
+               updated_at AS "updatedAt"`,
     [
       body.workspaceId,
       body.eventType,

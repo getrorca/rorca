@@ -8,6 +8,24 @@
 import swaggerJsdoc from 'swagger-jsdoc';
 import path from 'path';
 
+const swaggerApiGlobs = Array.from(new Set([
+  // CJS build/runtime path: backend/dist/lib or backend/src/lib.
+  path.join(__dirname, '../routes/*.ts'),
+  path.join(__dirname, '../routes/*.js'),
+  path.join(__dirname, './swagger.ts'),
+  path.join(__dirname, './swagger.js'),
+  // tsx script path when invoked from repo root.
+  path.join(process.cwd(), 'backend/src/routes/*.ts'),
+  path.join(process.cwd(), 'backend/src/routes/*.js'),
+  path.join(process.cwd(), 'backend/src/lib/swagger.ts'),
+  path.join(process.cwd(), 'backend/src/lib/swagger.js'),
+  // tsx server path when invoked from backend/.
+  path.join(process.cwd(), 'src/routes/*.ts'),
+  path.join(process.cwd(), 'src/routes/*.js'),
+  path.join(process.cwd(), 'src/lib/swagger.ts'),
+  path.join(process.cwd(), 'src/lib/swagger.js'),
+]));
+
 const options: swaggerJsdoc.Options = {
   definition: {
     openapi: '3.0.3',
@@ -228,12 +246,7 @@ const options: swaggerJsdoc.Options = {
       { name: 'Packs', description: 'Convention pack installation and management' },
     ],
   },
-  apis: [
-    path.join(__dirname, '../routes/*.ts'),
-    path.join(__dirname, '../routes/*.js'),
-    path.join(__dirname, './swagger.ts'),
-    path.join(__dirname, './swagger.js'),
-  ],
+  apis: swaggerApiGlobs,
 };
 
 /**
