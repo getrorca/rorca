@@ -140,7 +140,9 @@ export function normalizeContextEventPayload(input: {
   const raw = input.payload as Record<string, unknown>;
   const rawIdentity = raw.source_identity && typeof raw.source_identity === 'object' ? raw.source_identity as Record<string, unknown> : {};
   const legacyEventType = stringValue(raw.eventType);
-  const inferredEventType = legacyEventType ?? (stringValue(raw.commit) || stringValue(raw.git_sha) || stringValue(raw.gitSha) ? 'git_commit' : null);
+  const adapterMemoryAliases = new Set(['agent_memory', 'adapter_context']);
+  const normalizedEventType = legacyEventType && adapterMemoryAliases.has(legacyEventType) ? 'explicit_memory' : legacyEventType;
+  const inferredEventType = normalizedEventType ?? (stringValue(raw.commit) || stringValue(raw.git_sha) || stringValue(raw.gitSha) ? 'git_commit' : null);
   if (!inferredEventType || !ContextEventTypeEnum.safeParse(inferredEventType).success) {
     throw new ValidationError('Unsupported context capture event type', { eventType: raw.eventType });
   }
@@ -201,6 +203,8 @@ export function normalizeContextEventPayload(input: {
     binary: stringValue(agent.binary) ?? 'unknown',
     matchedPattern: stringValue(agent.matchedPattern),
   };
+  const memorySummary = stringValue(raw.memory_summary) ?? stringValue(raw.memory) ?? stringValue(raw.summary) ?? stringValue(raw.rule) ?? stringValue(raw.context) ?? stringValue(raw.title) ?? 'Explicit memory';
+  const memoryHash = stringValue(raw.memory_hash) ?? sha256(memorySummary);
 
   const idempotencyKey = stringValue(raw.idempotency_key) ?? deriveContextEventIdempotencyKey({
     eventType: inferredEventType as never,
@@ -214,7 +218,7 @@ export function normalizeContextEventPayload(input: {
     phase: stringValue(raw.phase),
     exit_code: exitCode,
     git_sha: gitSha,
-    memory_hash: stringValue(raw.memory_hash),
+    memory_hash: memoryHash,
     activity_type: stringValue(raw.activity_type),
     related_files: relatedFiles,
     provider: stringValue(raw.provider),
@@ -292,10 +296,10 @@ export function normalizeContextEventPayload(input: {
       ...base,
       eventType: 'explicit_memory',
       idempotency_key: idempotencyKey,
-      memory_hash: stringValue(raw.memory_hash) ?? sha256(String(raw.memory_summary ?? raw.memory ?? '')),
-      memory_summary: stringValue(raw.memory_summary) ?? stringValue(raw.memory) ?? 'Explicit memory',
+      memory_hash: memoryHash,
+      memory_summary: memorySummary,
       category: stringValue(raw.category),
-      requested_by: raw.requested_by === 'agent' || raw.requested_by === 'system' ? raw.requested_by : 'human',
+      requested_by: raw.requested_by === 'agent' || raw.requested_by === 'system' ? raw.requested_by : legacyEventType && adapterMemoryAliases.has(legacyEventType) ? 'agent' : 'human',
     };
   })();
 

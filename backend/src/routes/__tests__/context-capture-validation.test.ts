@@ -48,6 +48,49 @@ describe('context-capture route validation helpers', () => {
     expect(payload.trust_tier).toBe('local');
   });
 
+  test('preserves agent adapter source metadata for remember events', () => {
+    const payload = normalizeContextEventPayload({
+      ...baseInput,
+      source: 'mcpSlashCommand',
+      payload: {
+        eventType: 'agent_memory',
+        source_system: 'claude_code',
+        tool_name: 'claude-code',
+        session_id: 'claude-session-1',
+        summary: 'Prefer token file paths over embedded bearer values.',
+        category: 'Decision',
+      },
+    });
+
+    expect(payload.eventType).toBe('explicit_memory');
+    if (payload.eventType !== 'explicit_memory') throw new Error('expected explicit memory payload');
+    expect(payload.source_system).toBe('claude_code');
+    expect(payload.source_identity).toMatchObject({ source_system: 'claude_code', tool_name: 'claude-code', session_id: 'claude-session-1' });
+    expect(payload.memory_summary).toBe('Prefer token file paths over embedded bearer values.');
+    expect(payload.requested_by).toBe('agent');
+    expect(payload.idempotency_key).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  test('preserves all first-class adapter source_system values', () => {
+    for (const sourceSystem of ['pi', 'claude_code', 'codex', 'opencode', 'shell', 'ide', 'daemon'] as const) {
+      const payload = normalizeContextEventPayload({
+        ...baseInput,
+        source: sourceSystem === 'shell' ? 'shellIntegration' : sourceSystem === 'ide' ? 'vscodeExtension' : sourceSystem === 'daemon' ? 'repoDaemon' : 'agentAdapter',
+        payload: {
+          eventType: 'adapter_context',
+          source_system: sourceSystem,
+          tool_name: `${sourceSystem}-tool`,
+          session_id: `${sourceSystem}-session`,
+          summary: `${sourceSystem} adapter decision`,
+        },
+      });
+
+      expect(payload.source_system).toBe(sourceSystem);
+      expect(payload.tool_name).toBe(`${sourceSystem}-tool`);
+      expect(payload.session_id).toBe(`${sourceSystem}-session`);
+    }
+  });
+
   test('rejects malformed event types through ValidationError', () => {
     expect(() => normalizeContextEventPayload({ ...baseInput, payload: { eventType: 'bad_event' } })).toThrow(ValidationError);
   });

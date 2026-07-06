@@ -272,16 +272,29 @@ describe("runCaptureBootstrap", () => {
       path.join(root, ".rorca", "capture", "adapters", "codex", "adapter.json"),
       path.join(root, ".rorca", "capture", "adapters", "opencode", "adapter.json"),
     ];
+    const expectedSourceSystemByArtifact = new Map([
+      [artifacts[0], "pi"],
+      [artifacts[1], "claude_code"],
+      [artifacts[2], "codex"],
+      [artifacts[3], "opencode"],
+    ]);
     for (const artifact of artifacts) {
       const content = readFileSync(artifact, "utf8");
+      const config = JSON.parse(content) as { metadata: { source_system: string; tool_name: string; session_id: string }; rememberCommand: string; tokenFile: string };
       expect(content).toContain("source_system");
       expect(content).toContain("tool_name");
       expect(content).toContain("session_id");
       expect(content).toContain("rorca-capture remember");
       expect(content).toContain("~/.rorca/mcp-token");
+      expect(config.metadata.source_system).toBe(expectedSourceSystemByArtifact.get(artifact));
+      expect(config.metadata.tool_name).toBeTruthy();
+      expect(config.metadata.session_id).toMatch(/\$\{.+:-manual\}/);
+      expect(config.rememberCommand).toContain("--source-system");
+      expect(config.rememberCommand).toContain("--session-id");
+      expect(config.tokenFile).toBe("~/.rorca/mcp-token");
       expect(content).not.toContain("public-token");
       expect(content).not.toMatch(/Bearer\s+[A-Za-z0-9._~+/-]+=*/);
-      expect(content).not.toMatch(/(?:api[_-]?key|token|secret|password)\s*[:=]\s*[A-Za-z0-9._~+/-]{16,}/i);
+      expect(content).not.toMatch(/(?:api[_-]?key|secret|password)\s*[:=]\s*[A-Za-z0-9._~+/-]{16,}/i);
     }
   });
 

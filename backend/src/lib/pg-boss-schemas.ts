@@ -143,7 +143,23 @@ export const CaptureSourceEnum = z.enum([
   'ciPrIngestion',
   'externalImport',
 ]);
-export const SourceSystemEnum = z.enum(['shell', 'ide', 'vscode', 'vscode-fork', 'agent_adapter', 'repo_daemon', 'git_hook', 'ci', 'mcp', 'external_import']);
+export const SourceSystemEnum = z.enum([
+  'shell',
+  'ide',
+  'vscode',
+  'vscode-fork',
+  'agent_adapter',
+  'repo_daemon',
+  'git_hook',
+  'ci',
+  'mcp',
+  'external_import',
+  'pi',
+  'claude_code',
+  'codex',
+  'opencode',
+  'daemon',
+]);
 export const ContextEventTypeEnum = z.enum(['agent_cli_session', 'cli_command', 'ide_session', 'shell_command', 'editor_activity', 'explicit_memory', 'git_commit', 'ci_pr']);
 export const AgentBinaryEnum = z.enum(['claude', 'codex', 'opencode', 'pi', 'aider', 'cursor', 'custom', 'unknown']);
 

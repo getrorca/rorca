@@ -159,7 +159,7 @@ export type CaptureBootstrapVerifyResponse = {
 };
 
 export const CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION = "2026-07-ucc-007.v1" as const;
-export const CONTEXT_EVENT_TYPES = ["agent_cli_session", "ide_session", "shell_command", "editor_activity", "explicit_memory", "git_commit", "ci_pr"] as const;
+export const CONTEXT_EVENT_TYPES = ["agent_cli_session", "cli_command", "ide_session", "shell_command", "editor_activity", "explicit_memory", "git_commit", "ci_pr"] as const;
 export const TRUST_TIERS = ["untrusted", "local", "verified", "privileged"] as const;
 
 export type ContextEventType = typeof CONTEXT_EVENT_TYPES[number];
@@ -167,7 +167,7 @@ export type TrustTier = typeof TRUST_TIERS[number];
 export type ContextCaptureSource = "repoDaemon" | "gitHook" | "shellIntegration" | "vscodeExtension" | "agentAdapter" | "mcpSlashCommand" | "ciPrIngestion" | "externalImport";
 
 export type ContextEventSourceIdentity = {
-  source_system: "shell" | "ide" | "vscode" | "vscode-fork" | "agent_adapter" | "repo_daemon" | "git_hook" | "ci" | "mcp" | "external_import";
+  source_system: "shell" | "ide" | "vscode" | "vscode-fork" | "agent_adapter" | "repo_daemon" | "git_hook" | "ci" | "mcp" | "external_import" | "pi" | "claude_code" | "codex" | "opencode" | "daemon";
   tool_name: string;
   host_application: string | null;
   session_id: string | null;
