@@ -28,6 +28,7 @@ import {
   PipelineCancelJobPayload,
   type PipelineCancelJobPayloadType,
   ShellCommandContextEventPayload,
+  CliCommandContextEventPayload,
   AgentCliSessionContextEventPayload,
   ContextCaptureEventJobPayload,
   ContextEventIdempotencyGuidance,
@@ -425,15 +426,17 @@ describe('Context capture event schemas', () => {
     contentHash: 'c'.repeat(64),
   };
 
-  test('shell_command accepts unknown commands at metadata level', () => {
-    const parsed = ShellCommandContextEventPayload.parse({
+  test('cli_command accepts unknown commands at metadata level', () => {
+    const parsed = CliCommandContextEventPayload.parse({
       ...basePayload,
-      eventType: 'shell_command',
+      eventType: 'cli_command',
+      idempotency_key: deriveContextEventIdempotencyKey({ eventType: 'cli_command', source_system: 'shell', session_id: 'session-1', workspace_id: 'rorca', occurred_at: '2026-07-05T00:00:00.000Z', phase: 'end', command_hash: 'a'.repeat(64), exit_code: 0 }),
       policyMode: 'metadata-only',
       command_summary: null,
     });
     expect(parsed.command_summary).toBeNull();
     expect(parsed.agent.binary).toBe('unknown');
+    expect(ShellCommandContextEventPayload.parse({ ...basePayload, eventType: 'shell_command' }).eventType).toBe('shell_command');
   });
 
   test('agent_cli_session requires recognized agent binary', () => {
@@ -450,7 +453,7 @@ describe('Context capture event schemas', () => {
   });
 
   test('every UCC-007 event type has deterministic idempotency guidance', () => {
-    expect(Object.keys(ContextEventIdempotencyGuidance).sort()).toEqual(['agent_cli_session', 'ci_pr', 'editor_activity', 'explicit_memory', 'git_commit', 'ide_session', 'shell_command'].sort());
+    expect(Object.keys(ContextEventIdempotencyGuidance).sort()).toEqual(['agent_cli_session', 'ci_pr', 'cli_command', 'editor_activity', 'explicit_memory', 'git_commit', 'ide_session', 'shell_command'].sort());
     expect(ContextEventIdempotencyGuidance.git_commit).toContain('git_sha');
     expect(deriveContextEventIdempotencyKey({ eventType: 'git_commit', source_system: 'repo_daemon', workspace_id: 'rorca', git_sha: 'abc1234' })).toBe(
       deriveContextEventIdempotencyKey({ eventType: 'git_commit', source_system: 'repo_daemon', workspace_id: 'rorca', git_sha: 'abc1234' }),

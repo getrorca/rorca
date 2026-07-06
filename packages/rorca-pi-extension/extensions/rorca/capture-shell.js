@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import { DEFAULT_CAPTURE_POLICY, detectAgentBinary as detectCanonicalAgentBinary, hashCaptureContent, isCaptureIgnoredPath, redactCommandText, sanitizeCapturePayload } from "../../../../backend/dist/lib/context-safety.js";
 export const SHELL_BLOCK_START = "# >>> rorca-capture always-on (managed) >>>";
 export const SHELL_BLOCK_END = "# <<< rorca-capture always-on (managed) <<<";
 export const SUPPORTED_CAPTURE_SHELLS = ["zsh", "bash", "fish", "powershell"];
 export const BUILTIN_AGENT_BINARIES = ["claude", "codex", "opencode", "pi", "aider", "cursor"];
-const POLICY_VERSION = "2026-07-ucc-007";
+const POLICY_VERSION = DEFAULT_CAPTURE_POLICY.version;
 const PAYLOAD_SCHEMA_VERSION = "2026-07-ucc-007.v1";
-const MAX_COMMAND_BYTES = 16_384;
 export function normalizeCaptureShell(value) {
     const base = path.basename(value || "").toLowerCase();
     if (base === "zsh")
@@ -80,40 +80,26 @@ export function readCaptureIgnorePatterns(workspacePath) {
     return readFileSync(file, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
 }
 export function detectAgentBinary(command, customPatterns = []) {
-    const first = command.trim().match(/^(?:env\s+)?(?:[A-Z0-9_]+=[^\s]+\s+)*(?:command\s+)?(?:npx\s+)?["']?([^\s"']+)/i)?.[1] ?? "";
-    const base = path.basename(first).replace(/\.(cmd|exe|ps1)$/i, "").toLowerCase();
-    if (BUILTIN_AGENT_BINARIES.includes(base))
-        return { recognized: true, binary: base, matchedPattern: base };
-    for (const pattern of customPatterns) {
-        try {
-            if (new RegExp(pattern, "i").test(command))
-                return { recognized: true, binary: "custom", matchedPattern: pattern };
-        }
-        catch {
-            if (command.toLowerCase().includes(pattern.toLowerCase()))
-                return { recognized: true, binary: "custom", matchedPattern: pattern };
-        }
-    }
-    return { recognized: false, binary: "unknown" };
+    return detectCanonicalAgentBinary(command, customPatterns);
 }
 export function buildShellCaptureEvent(input) {
     const policyMode = input.policyMode ?? "metadata-only";
     const occurredAt = input.occurredAt ?? new Date().toISOString();
     const ignorePatterns = input.captureIgnorePatterns ?? readCaptureIgnorePatterns(input.workspacePath);
-    if (policyMode === "off" || isIgnoredPath(input.cwd, input.workspacePath, ignorePatterns))
+    if (policyMode === "off" || isCaptureIgnoredPath(input.cwd, input.workspacePath, ignorePatterns))
         return null;
-    const redacted = redactCommand(input.command, input.workspacePath, ignorePatterns);
+    const redacted = redactCommandText(input.command, { workspacePath: input.workspacePath, captureIgnorePatterns: ignorePatterns });
     const agent = detectAgentBinary(input.command, input.customAgentPatterns);
     const phase = input.phase ?? "end";
     const sessionId = input.sessionId ?? process.env.RORCA_CAPTURE_SESSION_ID ?? "shell";
     const toolName = agent.recognized ? agent.binary : "shell";
     const repoPathHash = `sha256:${sha256(path.resolve(input.workspacePath))}`;
-    const commandHash = sha256(input.command);
+    const commandHash = hashCaptureContent(input.command);
     const eventId = `shell:${sha256(`${input.workspaceId}|${occurredAt}|${phase}|${input.command}|${input.exitCode ?? ""}`).slice(0, 24)}`;
     const rawContent = policyMode === "explicit-transcript-import" ? "explicit" : policyMode === "command-summary" ? "summary" : "metadata";
-    const idempotencyKey = `sha256:${sha256(JSON.stringify([agent.recognized ? "agent_cli_session" : "shell_command", "shell", sessionId, input.workspaceId, occurredAt, phase, commandHash, input.exitCode ?? null]))}`;
+    const idempotencyKey = `sha256:${sha256(JSON.stringify([agent.recognized ? "agent_cli_session" : "cli_command", "shell", sessionId, input.workspaceId, occurredAt, phase, commandHash, input.exitCode ?? null]))}`;
     const payload = {
-        eventType: agent.recognized ? "agent_cli_session" : "shell_command",
+        eventType: agent.recognized ? "agent_cli_session" : "cli_command",
         payload_schema_version: PAYLOAD_SCHEMA_VERSION,
         source_system: "shell",
         tool_name: toolName,
@@ -133,7 +119,7 @@ export function buildShellCaptureEvent(input) {
         policyMode,
         command_summary: policyMode === "metadata-only" ? null : redacted.text,
         command_hash: commandHash,
-        cwd: redactPath(input.cwd, input.workspacePath, ignorePatterns),
+        cwd: input.cwd && isCaptureIgnoredPath(input.cwd, input.workspacePath, ignorePatterns) ? "[REDACTED_PATH]" : input.cwd,
         exit_code: Number.isFinite(input.exitCode ?? NaN) ? Number(input.exitCode) : null,
         duration_ms: Number.isFinite(input.durationMs ?? NaN) ? Number(input.durationMs) : null,
         git_branch: input.gitBranch ?? null,
@@ -146,13 +132,19 @@ export function buildShellCaptureEvent(input) {
         agent,
         regulated_signals: redacted.regulatedSignals,
     };
+    const sanitized = sanitizeCapturePayload(payload);
     return {
         id: eventId,
         workspaceId: input.workspaceId,
         source: "shellIntegration",
         occurredAt,
         payload,
-        safety: { contextSafetyModule: "backend/src/lib/context-safety.ts", policyVersion: POLICY_VERSION, redactionCount: redacted.redactionCount, ignoredPathCount: redacted.ignoredPathCount, truncated: redacted.truncated, hashAlgorithm: "sha256", contentHash: sha256(JSON.stringify(payload)) },
+        safety: {
+            ...sanitized.safety,
+            redactionCount: sanitized.safety.redactionCount + redacted.redactionCount,
+            ignoredPathCount: sanitized.safety.ignoredPathCount + redacted.ignoredPathCount,
+            truncated: sanitized.safety.truncated || redacted.truncated,
+        },
     };
 }
 export function enqueueShellCaptureEvent(queuePath, event) {
@@ -184,62 +176,6 @@ export function rewriteQueuedEvents(queuePath, events) {
     const tmp = `${file}.tmp`;
     writeFileSync(tmp, events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : ""), "utf8");
     renameSync(tmp, file);
-}
-function redactCommand(command, workspacePath, ignorePatterns) {
-    let text = command;
-    let redactionCount = 0;
-    let ignoredPathCount = 0;
-    let truncated = false;
-    const patterns = [
-        /\b[A-Z0-9_]{2,}=([^\s]+)/g,
-        /Bearer\s+[A-Za-z0-9._~+/-]+=*/g,
-        /\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;}]+/gi,
-        /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,
-        /\b[A-Za-z0-9_=-]{32,}\b/g,
-    ];
-    for (const pattern of patterns)
-        text = text.replace(pattern, () => { redactionCount += 1; return "[REDACTED]"; });
-    for (const token of text.split(/\s+/)) {
-        const cleaned = token.replace(/^['"]|['"]$/g, "");
-        if (cleaned.includes("/") && isIgnoredPath(cleaned, workspacePath, ignorePatterns)) {
-            text = text.split(cleaned).join("[REDACTED_PATH]");
-            ignoredPathCount += 1;
-            redactionCount += 1;
-        }
-    }
-    if (Buffer.byteLength(text) > MAX_COMMAND_BYTES) {
-        truncated = true;
-        text = Buffer.from(text).subarray(0, MAX_COMMAND_BYTES).toString("utf8");
-    }
-    const regulatedSignals = [
-        /\b\d{3}-\d{2}-\d{4}\b/.test(command) ? "possible_ssn" : "",
-        /\b(?:\d[ -]*?){13,19}\b/.test(command) ? "possible_credit_card" : "",
-        /\b(hipaa|phi|pci|cardholder|patient|medical\s+record)\b/i.test(command) ? "regulated_domain_keyword" : "",
-    ].filter(Boolean);
-    return { text, redactionCount, ignoredPathCount, truncated, regulatedSignals };
-}
-function redactPath(value, workspacePath, ignorePatterns) {
-    return isIgnoredPath(value, workspacePath, ignorePatterns) ? "[REDACTED_PATH]" : value;
-}
-function isIgnoredPath(candidate, workspacePath, patterns) {
-    if (!patterns.length)
-        return false;
-    const root = normalizePath(workspacePath);
-    const absolute = normalizePath(path.isAbsolute(candidate) ? candidate : path.join(root, candidate));
-    const relative = absolute.startsWith(`${root}/`) ? absolute.slice(root.length + 1) : absolute;
-    return patterns.some((raw) => {
-        const pattern = raw.replace(/^\//, "");
-        if (!pattern || pattern.startsWith("!"))
-            return false;
-        if (pattern.endsWith("/"))
-            return relative === pattern.slice(0, -1) || relative.startsWith(pattern);
-        if (pattern.includes("*"))
-            return new RegExp(`^${escapeRegex(pattern).replace(/\\\*\\\*/g, ".*").replace(/\\\*/g, "[^/]*")}$`).test(relative);
-        return relative === pattern || relative.startsWith(`${pattern}/`);
-    });
-}
-function normalizePath(value) {
-    return value.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "");
 }
 function sha256(value) {
     return crypto.createHash("sha256").update(value).digest("hex");

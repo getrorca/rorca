@@ -84,7 +84,7 @@ describe("command capture normalization and safety", () => {
       captureIgnorePatterns: ["secrets/"],
     });
     expect(event).not.toBeNull();
-    expect(event?.payload.command_summary).toContain("[REDACTED]");
+    expect(event?.payload.command_summary).toMatch(/\[REDACTED(?:_[A-Z]+)?\]/);
     expect(event?.payload.command_summary).toContain("[REDACTED_PATH]");
     expect(event?.payload.exit_code).toBe(2);
     expect(event?.payload.agent.binary).toBe("claude");
@@ -92,6 +92,8 @@ describe("command capture normalization and safety", () => {
     expect(event?.payload.tool_name).toBe("claude");
     expect(event?.payload.session_id).toBe("shell");
     expect(event?.payload.regulated_signals).toContain("possible_ssn");
+    expect(event?.safety.contextSafetyModule).toBe("backend/src/lib/context-safety.ts");
+    expect(event?.safety.ignoredPathCount).toBeGreaterThan(0);
     expect(event?.payload.payload_schema_version).toBe("2026-07-ucc-007.v1");
     expect(event?.payload.idempotency_key).toMatch(/^sha256:/);
     expect(JSON.stringify(event)).not.toContain("super-secret");
@@ -101,7 +103,7 @@ describe("command capture normalization and safety", () => {
   it("records unknown commands at metadata-only level when policy allows", () => {
     const ws = workspace();
     const event = buildShellCaptureEvent({ workspaceId: ws.id, workspacePath: ws.path, cwd: ws.path, command: "make deploy SECRET=abc", policyMode: "metadata-only", sessionId: "session-123" });
-    expect(event?.payload.eventType).toBe("shell_command");
+    expect(event?.payload.eventType).toBe("cli_command");
     expect(event?.payload.source_system).toBe("shell");
     expect(event?.payload.tool_name).toBe("shell");
     expect(event?.payload.session_id).toBe("session-123");

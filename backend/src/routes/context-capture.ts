@@ -10,8 +10,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { queryOne } from '../db/index';
-import { NotFoundError, ValidationError } from '../lib/errors';
+import { NotFoundError, ServiceUnavailableError, ValidationError } from '../lib/errors';
 import { DEFAULT_CAPTURE_POLICY, sanitizeCapturePayload, sanitizeCliCommandEvent, type CapturePolicyMode } from '../lib/context-safety';
+import { getBoss } from '../lib/pg-boss';
 import {
   CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION,
   ContextCaptureEventJobPayload,
@@ -139,9 +140,7 @@ export function normalizeContextEventPayload(input: {
   const raw = input.payload as Record<string, unknown>;
   const rawIdentity = raw.source_identity && typeof raw.source_identity === 'object' ? raw.source_identity as Record<string, unknown> : {};
   const legacyEventType = stringValue(raw.eventType);
-  const inferredEventType = legacyEventType === 'cli_command'
-    ? 'shell_command'
-    : legacyEventType ?? (stringValue(raw.commit) || stringValue(raw.git_sha) || stringValue(raw.gitSha) ? 'git_commit' : null);
+  const inferredEventType = legacyEventType ?? (stringValue(raw.commit) || stringValue(raw.git_sha) || stringValue(raw.gitSha) ? 'git_commit' : null);
   if (!inferredEventType || !ContextEventTypeEnum.safeParse(inferredEventType).success) {
     throw new ValidationError('Unsupported context capture event type', { eventType: raw.eventType });
   }
@@ -226,7 +225,7 @@ export function normalizeContextEventPayload(input: {
   });
 
   const normalized = (() => {
-    if (inferredEventType === 'agent_cli_session' || inferredEventType === 'shell_command') {
+    if (inferredEventType === 'agent_cli_session' || inferredEventType === 'cli_command' || inferredEventType === 'shell_command') {
       return {
         ...base,
         eventType: inferredEventType,
@@ -443,6 +442,7 @@ router.post('/bootstrap/verify', async (req, res, next) => {
  *       200: { description: Event accepted }
  *       400: { description: Invalid event }
  *       404: { description: Workspace not found }
+ *       503: { description: Capture queue unavailable; client should keep local queued copy }
  */
 router.post('/events', async (req, res, next) => {
   try {
@@ -504,9 +504,24 @@ router.post('/events', async (req, res, next) => {
       throw new ValidationError('Invalid context capture event payload', { issues: event.error.issues });
     }
 
+    let queuedJobId: string | null = null;
+    try {
+      const boss = getBoss();
+      await boss.createQueue('context:capture');
+      queuedJobId = await boss.send('context:capture', event.data, { retryLimit: 3 });
+    } catch (error) {
+      throw new ServiceUnavailableError(`Context capture queue unavailable; local capture client should keep the event queued for retry: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!queuedJobId) {
+      throw new ServiceUnavailableError('Context capture queue rejected the event; local capture client should keep the event queued for retry.');
+    }
+
     res.json({
       ok: true,
       accepted: true,
+      queued: true,
+      queueName: 'context:capture',
+      queueJobId: queuedJobId,
       workspaceId,
       source,
       occurredAt,

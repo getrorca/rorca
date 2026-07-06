@@ -20,7 +20,7 @@ const baseInput = {
 };
 
 describe('context-capture route validation helpers', () => {
-  test('normalizes legacy shell command identity into UCC-007 source/provenance shape', () => {
+  test('normalizes cli command identity into UCC-007 source/provenance shape', () => {
     const payload = normalizeContextEventPayload({
       ...baseInput,
       payload: {
@@ -40,7 +40,7 @@ describe('context-capture route validation helpers', () => {
       },
     });
 
-    expect(payload.eventType).toBe('shell_command');
+    expect(payload.eventType).toBe('cli_command');
     expect(payload.payload_schema_version).toBe('2026-07-ucc-007.v1');
     expect(payload.source_identity).toMatchObject({ source_system: 'shell', tool_name: 'shell', session_id: 'session-1', workspace_id: 'rorca' });
     expect(payload.idempotency_key).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -59,6 +59,14 @@ describe('context-capture route validation helpers', () => {
     expect(eventsDoc).toContain('x-rorca-rationale:');
     expect(eventsDoc).toContain('x-rorca-public-api: true');
     expect(eventsDoc).toContain('payload: { type: object }');
+  });
+
+  test('events route uses pg-boss context:capture queue instead of direct context table writes', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'context-capture.ts'), 'utf8');
+    const handler = source.slice(source.indexOf("router.post('/events'"), source.indexOf('/api/context-capture/capability'));
+    expect(handler).toContain("boss.createQueue('context:capture')");
+    expect(handler).toContain("boss.send('context:capture'");
+    expect(handler).not.toMatch(/INSERT\s+INTO\s+context/i);
   });
 
   test('bootstrap verification locks queue, redaction, and ignore paths to canonical locations', () => {

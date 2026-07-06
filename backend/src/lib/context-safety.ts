@@ -80,7 +80,7 @@ export type SanitizedCapturePayload = {
 };
 
 export const DEFAULT_CAPTURE_POLICY: CapturePolicy = {
-  version: '2026-07-ucc-003',
+  version: '2026-07-ucc-007',
   maxStringBytes: 16_384,
   maxPayloadBytes: 128_000,
   rawContentDefault: 'metadata+hash',
@@ -136,6 +136,10 @@ function sanitizeValue(value: unknown, policy: CapturePolicy, counters: { redact
   if (typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (/^(hash|commandHash|command_hash|contentHash|content_hash|idempotency_key|repo_path_hash|gitSha|git_sha)$/i.test(key) && typeof child === 'string') {
+        out[key] = child;
+        continue;
+      }
       if (/^(raw|content|text|stdout|stderr)$/i.test(key) && policy.rawContentDefault !== 'explicit') {
         out[key] = typeof child === 'string' ? { hash: hashCaptureContent(child), byteLength: Buffer.byteLength(child), redacted: true } : '[REDACTED_RAW_CONTENT]';
         counters.redactionCount += 1;
@@ -201,20 +205,23 @@ export function isCaptureIgnoredPath(candidatePath: string, workspacePath: strin
   return patterns.some((rawPattern) => matchesCaptureIgnorePattern(relative, absolute, root, rawPattern));
 }
 
-export function redactCommandText(commandText: string, input: { workspacePath?: string; captureIgnorePatterns?: string[]; policy?: CapturePolicy } = {}): { text: string; redactionCount: number; regulatedSignals: string[] } {
+export function redactCommandText(commandText: string, input: { workspacePath?: string; captureIgnorePatterns?: string[]; policy?: CapturePolicy } = {}): { text: string; redactionCount: number; ignoredPathCount: number; truncated: boolean; regulatedSignals: string[] } {
   const counters = { redactionCount: 0, truncated: false };
   let text = sanitizeString(commandText, input.policy ?? DEFAULT_CAPTURE_POLICY, counters);
+  let ignoredPathCount = 0;
   const regulatedSignals = REGULATED_SIGNAL_RULES.filter((rule) => rule.pattern.test(commandText)).map((rule) => rule.name);
-  const pathTokens = Array.from(text.matchAll(/(?:^|\s)(['"]?)([^\s'"<>|;&]+(?:\/[^^\s'"<>|;&]*)+)\1/g));
+  const pathTokens = Array.from(text.matchAll(/(?:^|\s)(['"]?)([^\s'"<>|;&]+(?:[\\/][^\s'"<>|;&]*)+)\1/g));
   for (const match of pathTokens) {
     const token = match[2];
     if (isCaptureIgnoredPath(token, input.workspacePath, input.captureIgnorePatterns)) {
       text = text.split(token).join('[REDACTED_PATH]');
       counters.redactionCount += 1;
+      ignoredPathCount += 1;
     }
   }
-  return { text, redactionCount: counters.redactionCount, regulatedSignals };
+  return { text, redactionCount: counters.redactionCount, ignoredPathCount, truncated: counters.truncated, regulatedSignals };
 }
+
 
 export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: CapturePolicy = DEFAULT_CAPTURE_POLICY): SanitizedCapturePayload & { payload: SanitizedCliCommandEvent | null } {
   const policyMode = input.policyMode ?? 'metadata-only';
@@ -225,7 +232,8 @@ export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: Ca
     throw new Error('Transcript capture requires explicit-transcript-import policy');
   }
   if (input.cwd && isCaptureIgnoredPath(input.cwd, input.workspacePath, input.captureIgnorePatterns)) {
-    return { payload: null, safety: sanitizeCapturePayload({ skipped: 'capture_ignore' }, policy).safety };
+    const skipped = sanitizeCapturePayload({ skipped: 'capture_ignore' }, policy).safety;
+    return { payload: null, safety: { ...skipped, ignoredPathCount: skipped.ignoredPathCount + 1 } };
   }
   const command = input.command ?? '';
   const redacted = redactCommandText(command, { workspacePath: input.workspacePath, captureIgnorePatterns: input.captureIgnorePatterns, policy });
@@ -248,10 +256,19 @@ export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: Ca
     regulatedSignals: redacted.regulatedSignals,
     ...(policyMode === 'explicit-transcript-import' && input.transcript !== undefined ? { transcript: input.transcript } : {}),
   };
-  return sanitizeCapturePayload(event, {
+  const sanitized = sanitizeCapturePayload(event, {
     ...policy,
     rawContentDefault: policyMode === 'explicit-transcript-import' ? 'explicit' : policy.rawContentDefault,
   }) as SanitizedCapturePayload & { payload: SanitizedCliCommandEvent };
+  return {
+    ...sanitized,
+    safety: {
+      ...sanitized.safety,
+      redactionCount: sanitized.safety.redactionCount + redacted.redactionCount,
+      ignoredPathCount: sanitized.safety.ignoredPathCount + redacted.ignoredPathCount,
+      truncated: sanitized.safety.truncated || redacted.truncated,
+    },
+  };
 }
 
 function matchesCaptureIgnorePattern(relative: string, absolute: string, root: string, rawPattern: string): boolean {
@@ -259,11 +276,18 @@ function matchesCaptureIgnorePattern(relative: string, absolute: string, root: s
   if (!trimmed || trimmed.startsWith('#')) return false;
   const negated = trimmed.startsWith('!');
   if (negated) return false;
-  const pattern = stripLeadingSlash(trimmed.endsWith('/') ? `${trimmed}**` : trimmed);
+  const directoryPattern = trimmed.endsWith('/');
+  const pattern = stripLeadingSlash(directoryPattern ? `${trimmed}**` : trimmed);
   const target = relative || stripLeadingSlash(absolute.replace(`${root}/`, ''));
-  if (!pattern.includes('*')) return target === pattern || target.startsWith(`${pattern}/`);
-  const regex = new RegExp(`^${pattern.split('**').map(escapeRegex).join('.*').split('\\*').join('[^/]*')}$`);
-  return regex.test(target);
+  const targetParts = target.split('/').filter(Boolean);
+  const basename = targetParts.at(-1) ?? target;
+  if (!pattern.includes('*')) {
+    if (!pattern.includes('/')) return basename === pattern || targetParts.includes(pattern);
+    return target === pattern || target.startsWith(`${pattern}/`);
+  }
+  const regex = globPatternToRegex(pattern);
+  if (regex.test(target)) return true;
+  return !pattern.includes('/') && regex.test(basename);
 }
 
 function pathNormalize(value: string): string {
@@ -278,8 +302,26 @@ function stripLeadingSlash(value: string): string {
   return value.replace(/^\/+/, '');
 }
 
+function globPatternToRegex(pattern: string): RegExp {
+  let source = '';
+  for (let i = 0; i < pattern.length; i += 1) {
+    const char = pattern[i];
+    if (char === '*') {
+      if (pattern[i + 1] === '*') {
+        source += '.*';
+        i += 1;
+      } else {
+        source += '[^/]*';
+      }
+      continue;
+    }
+    source += escapeRegex(char);
+  }
+  return new RegExp(`^${source}$`);
+}
+
 function escapeRegex(value: string): string {
-  return value.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function stableStringify(value: unknown): string {
