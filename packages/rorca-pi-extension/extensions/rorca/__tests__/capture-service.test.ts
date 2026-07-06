@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -124,6 +124,15 @@ describe("capture service rendering", () => {
 });
 
 describe("capture service lifecycle", () => {
+  it("does not spawn the Windows fallback daemon during dry-run start", () => {
+    const ws = workspace();
+    const result = runCaptureServiceLifecycle({ action: "start", workspace: ws, platform: "win32", dryRun: true, command: "/bin/rorca-capture" });
+
+    expect(result.ok).toBe(true);
+    expect(result.commands).toEqual([]);
+    expect(existsSync(path.join(ws.path, ".rorca", "capture", "service.pid"))).toBe(false);
+  });
+
   it("constructs install/start/stop/restart/uninstall commands without executing in dry-run", () => {
     const ws = workspace();
     const calls: string[] = [];
@@ -183,7 +192,9 @@ describe("managed capture daemon", () => {
 
     await runManagedCaptureDaemon({ workspace: ws, once: true, fetchImpl, spawnSyncImpl: gitLog(commits) });
     expect(posted).toHaveLength(0);
-    expect(readFileSync(path.join(ws.path, ".rorca", "capture", "queue", "offline.ndjson"), "utf8")).toContain("[REDACTED]");
+    const queued = readFileSync(path.join(ws.path, ".rorca", "capture", "queue", "offline.ndjson"), "utf8");
+    expect(queued).toContain("[REDACTED_ENV]");
+    expect(queued).toContain('"contextSafetyModule":"backend/src/lib/context-safety.ts"');
 
     online = true;
     await runManagedCaptureDaemon({ workspace: ws, once: true, fetchImpl, spawnSyncImpl: gitLog(commits) });

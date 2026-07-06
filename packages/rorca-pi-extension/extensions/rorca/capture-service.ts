@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import type { ChildProcess, SpawnSyncOptions } from "node:child_process";
+import { DEFAULT_CAPTURE_POLICY, hashCaptureContent, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety";
 import type { Workspace } from "./types.js";
 
 export type CaptureServicePlatform = "darwin" | "linux" | "win32";
@@ -149,7 +150,7 @@ export function runCaptureServiceLifecycle(input: { action: CaptureServiceAction
     commands.push([cmd, ...args].join(" "));
     if (!input.dryRun) {
       const result = runner(cmd, args, { cwd: input.workspace.path, stdio: "pipe" });
-      if (result.status && result.status !== 0) throw new Error(`${cmd} ${args.join(" ")} failed`);
+      if (result.error || result.status !== 0) throw new Error(`${cmd} ${args.join(" ")} failed`);
     }
   };
 
@@ -170,7 +171,7 @@ export function runCaptureServiceLifecycle(input: { action: CaptureServiceAction
   if (input.action === "start") {
     if (platform === "darwin") run("launchctl", ["kickstart", "-k", `gui/${process.getuid?.() ?? 501}/${serviceName}`]);
     else if (platform === "linux") run("systemctl", ["--user", "start", serviceName]);
-    else startFallbackProcess(input.workspace, command, input.config);
+    else if (!input.dryRun) startFallbackProcess(input.workspace, command, input.config);
     return { ok: true, action: input.action, platform, serviceFile: paths.serviceFile, commands, message: "Managed capture service started." };
   }
 
@@ -372,10 +373,11 @@ function writeState(filePath: string, state: CaptureState): void {
 }
 
 function redactedEvent(workspaceId: string, workspacePath: string, id: string, occurredAt: string, payload: Record<string, unknown>): QueuedEvent {
-  const redacted = redact(payload);
-  const commit = String(redacted.payload.commit ?? "");
-  const subject = typeof redacted.payload.subject === "string" ? redacted.payload.subject : null;
-  const committedAt = typeof redacted.payload.committedAt === "string" ? redacted.payload.committedAt : null;
+  const redacted = sanitizeCapturePayload(payload, { ...DEFAULT_CAPTURE_POLICY, rawContentDefault: "explicit" });
+  const safePayload = redacted.payload as Record<string, unknown>;
+  const commit = String(safePayload.commit ?? "");
+  const subject = typeof safePayload.subject === "string" ? safePayload.subject : null;
+  const committedAt = typeof safePayload.committedAt === "string" ? safePayload.committedAt : null;
   const repoPathHash = `sha256:${sha256(path.resolve(workspacePath))}`;
   const idempotencyKey = `sha256:${sha256(JSON.stringify(["git_commit", "repo_daemon", workspaceId, commit]))}`;
   const eventPayload = {
@@ -420,35 +422,13 @@ function redactedEvent(workspaceId: string, workspacePath: string, id: string, o
       ignoredPathCount: 0,
       truncated: redacted.safety.truncated,
       hashAlgorithm: "sha256",
-      contentHash: sha256(JSON.stringify(eventPayload)),
+      contentHash: hashCaptureContent(eventPayload),
     },
   };
 }
 
 function sha256(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
-}
-
-function redact(payload: Record<string, unknown>): { payload: Record<string, unknown>; safety: QueuedEvent["safety"] } {
-  let redactionCount = 0;
-  let truncated = false;
-  const patterns = [/[A-Z0-9_]{2,}=([^\s]+)/g, /Bearer\s+[A-Za-z0-9._~+/-]+=*/g, /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g];
-  const visit = (value: unknown): unknown => {
-    if (typeof value === "string") {
-      let output = value;
-      for (const pattern of patterns) output = output.replace(pattern, () => { redactionCount += 1; return "[REDACTED]"; });
-      if (Buffer.byteLength(output) > 16_384) {
-        truncated = true;
-        output = output.slice(0, 16_384);
-      }
-      return output;
-    }
-    if (Array.isArray(value)) return value.map(visit);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, visit(child)]));
-    return value;
-  };
-  const sanitized = visit(payload) as Record<string, unknown>;
-  return { payload: sanitized, safety: { contextSafetyModule: "backend/src/lib/context-safety.ts", policyVersion: "2026-07-ucc-007", redactionCount, ignoredPathCount: 0, truncated, hashAlgorithm: "sha256", contentHash: sha256(JSON.stringify(sanitized)) } };
 }
 
 function nextBackoff(current: number, max: number): number {
