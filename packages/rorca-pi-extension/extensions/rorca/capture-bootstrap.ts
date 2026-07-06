@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -39,6 +39,7 @@ export type CaptureBootstrapReport = {
   summary: Record<CaptureBootstrapStepStatus, number>;
   installed: CaptureBootstrapStep[];
   skipped: CaptureBootstrapStep[];
+  wouldInstall: CaptureBootstrapStep[];
   degraded: CaptureBootstrapStep[];
   failed: CaptureBootstrapStep[];
   steps: CaptureBootstrapStep[];
@@ -83,6 +84,11 @@ type ManagedFile = {
   path: string;
   content: string;
   executable?: boolean;
+};
+
+type UninstallMetadata = {
+  rorcaManaged?: string;
+  removes?: unknown;
 };
 
 const SENTINEL = "rorca-managed: v1 | uninstall: rorca capture teardown";
@@ -742,9 +748,123 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
   return buildReport({ dryRun, alwaysOn: true, apiBaseUrl: client.baseUrl, workspace, steps });
 }
 
+function findTeardownWorkspaceRoot(cwd: string): string {
+  let current = path.resolve(cwd);
+  for (;;) {
+    if (existsSync(path.join(current, ".rorca", "capture", "uninstall.json"))) return current;
+    if (existsSync(path.join(current, ".rorca-captureignore")) && existsSync(path.join(current, ".rorca", "capture"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(cwd);
+    current = parent;
+  }
+}
+
+function readUninstallArtifactPaths(workspaceRoot: string): { uninstallPath: string; artifactPaths: string[]; step?: CaptureBootstrapStep } {
+  const uninstallPath = path.join(workspaceRoot, ".rorca", "capture", "uninstall.json");
+  if (!existsSync(uninstallPath)) {
+    return {
+      uninstallPath,
+      artifactPaths: [],
+      step: step({
+        id: "uninstall-metadata",
+        label: "Uninstall metadata",
+        status: "degraded",
+        path: uninstallPath,
+        message: "No uninstall metadata found; teardown will only remove managed shell startup blocks.",
+        nextActions: ["Run `rorca capture setup --always-on` first, or remove older capture artifacts manually after checking sentinels."],
+      }),
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(uninstallPath, "utf8")) as UninstallMetadata;
+    if (parsed.rorcaManaged !== "v1" || !Array.isArray(parsed.removes)) {
+      throw new Error("uninstall metadata is not a Rorca-managed v1 removes list");
+    }
+    const artifactPaths = parsed.removes.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+    return { uninstallPath, artifactPaths };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      uninstallPath,
+      artifactPaths: [],
+      step: step({
+        id: "uninstall-metadata",
+        label: "Uninstall metadata",
+        status: "failed",
+        path: uninstallPath,
+        message: `Could not parse uninstall metadata: ${message}`,
+        nextActions: ["Inspect .rorca/capture/uninstall.json before removing capture artifacts manually."],
+      }),
+    };
+  }
+}
+
+function contentHasManagedSentinel(filePath: string): boolean {
+  const content = readFileSync(filePath, "utf8");
+  return content.includes(SENTINEL) || content.includes('"rorcaManaged": "v1"');
+}
+
+function teardownManagedArtifact(workspaceRoot: string, artifactPath: string, uninstallPath: string, dryRun: boolean): CaptureBootstrapStep {
+  const resolvedPath = path.resolve(artifactPath);
+  if (!isWithin(workspaceRoot, resolvedPath)) {
+    return step({
+      id: "managed-artifact",
+      label: "Managed artifact",
+      status: "degraded",
+      path: resolvedPath,
+      message: "Artifact path is outside the workspace and was left untouched.",
+      nextActions: ["Inspect uninstall metadata for unexpected paths before removing anything manually."],
+    });
+  }
+
+  if (!existsSync(resolvedPath)) {
+    return step({ id: "managed-artifact", label: "Managed artifact", status: "skipped", path: resolvedPath, message: "Artifact already absent." });
+  }
+
+  const stat = statSync(resolvedPath);
+  if (stat.isDirectory()) {
+    try {
+      const names = readdirSync(resolvedPath);
+      if (names.length > 0) {
+        return step({
+          id: "managed-artifact",
+          label: "Managed artifact directory",
+          status: "degraded",
+          path: resolvedPath,
+          message: "Managed directory is not empty and was left in place to avoid deleting queued capture data.",
+          nextActions: [`Review ${resolvedPath} and remove it manually if no queued events are needed.`],
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return step({ id: "managed-artifact", label: "Managed artifact directory", status: "failed", path: resolvedPath, message: `Could not inspect directory: ${message}` });
+    }
+    if (dryRun) return step({ id: "managed-artifact", label: "Managed artifact directory", status: "would-install", path: resolvedPath, message: "Empty managed directory would be removed." });
+    rmSync(resolvedPath, { recursive: true, force: true });
+    return step({ id: "managed-artifact", label: "Managed artifact directory", status: "installed", path: resolvedPath, message: "Empty managed directory removed." });
+  }
+
+  if (!contentHasManagedSentinel(resolvedPath)) {
+    return step({
+      id: "managed-artifact",
+      label: "Managed artifact",
+      status: "degraded",
+      path: resolvedPath,
+      message: "File does not carry a Rorca-managed sentinel and was left untouched.",
+      nextActions: [`Manually inspect ${resolvedPath} before removing it.`],
+    });
+  }
+
+  if (dryRun) return step({ id: "managed-artifact", label: "Managed artifact", status: "would-install", path: resolvedPath, message: resolvedPath === uninstallPath ? "Uninstall metadata would be removed last." : "Managed artifact would be removed." });
+  rmSync(resolvedPath, { force: true });
+  return step({ id: "managed-artifact", label: "Managed artifact", status: "installed", path: resolvedPath, message: resolvedPath === uninstallPath ? "Uninstall metadata removed last." : "Managed artifact removed." });
+}
+
 export function runCaptureTeardown(options: CaptureTeardownOptions = {}): { ok: boolean; dryRun: boolean; steps: CaptureBootstrapStep[] } {
   const dryRun = Boolean(options.dryRun);
   const cwd = path.resolve(options.cwd ?? process.cwd());
+  const workspaceRoot = findTeardownWorkspaceRoot(cwd);
   const homeDir = options.homeDir ?? os.homedir();
   const env = options.env ?? process.env;
   const detected = normalizeCaptureShell(env.SHELL || env.ComSpec || env.PSModulePath);
@@ -763,12 +883,21 @@ export function runCaptureTeardown(options: CaptureTeardownOptions = {}): { ok: 
     }));
   }
 
-  const captureDir = path.join(cwd, ".rorca", "capture");
-  if (existsSync(captureDir) && !dryRun) {
-    for (const shell of SUPPORTED_CAPTURE_SHELLS) rmSync(shellSnippetFile(captureDir, shell), { force: true });
+  const metadata = readUninstallArtifactPaths(workspaceRoot);
+  if (metadata.step) steps.push(metadata.step);
+  const orderedArtifactPaths = Array.from(new Set(metadata.artifactPaths))
+    .map((item) => path.resolve(item))
+    .filter((item) => item !== workspaceRoot)
+    .sort((left, right) => {
+      if (left === metadata.uninstallPath) return 1;
+      if (right === metadata.uninstallPath) return -1;
+      return right.length - left.length;
+    });
+  for (const artifactPath of orderedArtifactPaths) {
+    steps.push(teardownManagedArtifact(workspaceRoot, artifactPath, metadata.uninstallPath, dryRun));
   }
 
-  return { ok: true, dryRun, steps };
+  return { ok: steps.every((item) => item.status !== "failed"), dryRun, steps };
 }
 
 function buildReport(input: { dryRun: boolean; alwaysOn: boolean; apiBaseUrl: string; workspace?: Workspace; steps: CaptureBootstrapStep[] }): CaptureBootstrapReport {
@@ -776,7 +905,8 @@ function buildReport(input: { dryRun: boolean; alwaysOn: boolean; apiBaseUrl: st
   const failed = input.steps.filter((item) => item.status === "failed");
   const degraded = input.steps.filter((item) => item.status === "degraded");
   const installed = input.steps.filter((item) => item.status === "installed");
-  const skipped = input.steps.filter((item) => item.status === "skipped" || item.status === "would-install");
+  const skipped = input.steps.filter((item) => item.status === "skipped");
+  const wouldInstall = input.steps.filter((item) => item.status === "would-install");
   const status: CaptureBootstrapOverallStatus = failed.length > 0
     ? "failed"
     : input.dryRun
@@ -804,6 +934,7 @@ function buildReport(input: { dryRun: boolean; alwaysOn: boolean; apiBaseUrl: st
     summary,
     installed,
     skipped,
+    wouldInstall,
     degraded,
     failed,
     steps: input.steps,

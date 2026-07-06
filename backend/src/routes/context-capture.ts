@@ -48,6 +48,18 @@ function assertInsideWorkspace(workspacePath: string, candidatePath: string, nam
   }
 }
 
+function assertExpectedBootstrapPath(workspacePath: string, candidatePath: string, name: string, expectedRelativePath: string): void {
+  assertInsideWorkspace(workspacePath, candidatePath, name);
+  const expectedPath = path.resolve(workspacePath, expectedRelativePath);
+  if (path.resolve(candidatePath) !== expectedPath) {
+    throw new ValidationError(`${name} must be ${expectedRelativePath} for always-on capture setup`, {
+      workspacePath,
+      candidatePath,
+      expectedPath,
+    });
+  }
+}
+
 function parsePolicyMode(value: unknown): CapturePolicyMode {
   if (value === 'off' || value === 'metadata-only' || value === 'command-summary' || value === 'explicit-transcript-import') return value;
   return 'metadata-only';
@@ -385,9 +397,9 @@ router.post('/bootstrap/verify', async (req, res, next) => {
       throw new ValidationError('Registered workspace path does not exist', { registeredPath });
     }
 
-    assertInsideWorkspace(registeredPath, queuePath, 'queuePath');
-    assertInsideWorkspace(registeredPath, redactionConfigPath, 'redactionConfigPath');
-    assertInsideWorkspace(registeredPath, captureIgnorePath, 'captureIgnorePath');
+    assertExpectedBootstrapPath(registeredPath, queuePath, 'queuePath', path.join('.rorca', 'capture', 'queue'));
+    assertExpectedBootstrapPath(registeredPath, redactionConfigPath, 'redactionConfigPath', path.join('.rorca', 'capture', 'redaction.json'));
+    assertExpectedBootstrapPath(registeredPath, captureIgnorePath, 'captureIgnorePath', '.rorca-captureignore');
 
     res.json({
       ok: true,

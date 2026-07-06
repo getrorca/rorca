@@ -46,7 +46,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Usage: rorca-capture setup --always-on [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture setup --uninstall [--dry-run] [--json]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--phase start|end] [--command <cmd>] [--exit-code <n>] [--duration-ms <n>] [--policy metadata-only|command-summary|off] [--agent-pattern <regex>]\n       rorca-capture remember --workspace-id <id> --source-system <pi|claude_code|codex|opencode|shell|ide|daemon> --tool-name <name> --session-id <id> --message <summary> [--category <name>] [--title <title>] [--rule <rule>] [--context <context>] [--source <ref>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
+  console.log(`Usage: rorca-capture setup --always-on [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture setup --uninstall [--dry-run] [--json]\n       rorca-capture teardown [--dry-run] [--json]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--phase start|end] [--command <cmd>] [--exit-code <n>] [--duration-ms <n>] [--policy metadata-only|command-summary|off] [--agent-pattern <regex>]\n       rorca-capture remember --workspace-id <id> --source-system <pi|claude_code|codex|opencode|shell|ide|daemon> --tool-name <name> --session-id <id> --message <summary> [--category <name>] [--title <title>] [--rule <rule>] [--context <context>] [--source <ref>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
 }
 
 function findQueuePath(startDir) {
@@ -253,6 +253,11 @@ if (options.help || positional.length === 0) {
 try {
   let code;
   if (positional[0] === 'setup') code = await runSetup(options);
+  else if (positional[0] === 'teardown') {
+    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: options.cwd, env: process.env });
+    console.log(JSON.stringify(teardown, null, 2));
+    code = teardown.ok ? 0 : 1;
+  }
   else if (positional[0] === 'service') code = runService(positional, options);
   else if (positional[0] === 'emit') code = await runEmit(positional, options);
   else if (positional[0] === 'remember') code = await runRemember(options);

@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { renderAgentAdapterConfig, renderAgentWrapperScript, runCaptureBootstrap, type CaptureBootstrapApiClient } from "../capture-bootstrap.js";
+import { renderAgentAdapterConfig, renderAgentWrapperScript, runCaptureBootstrap, runCaptureTeardown, type CaptureBootstrapApiClient } from "../capture-bootstrap.js";
 import type { Workspace } from "../types.js";
 
 const temps: string[] = [];
@@ -66,6 +66,8 @@ describe("runCaptureBootstrap", () => {
 
     expect(report.status).toBe("dry-run");
     expect(report.summary["would-install"]).toBeGreaterThan(0);
+    expect(report.wouldInstall.length).toBe(report.summary["would-install"]);
+    expect(report.skipped.every((item) => item.status === "skipped")).toBe(true);
     expect(existsSync(path.join(root, ".rorca", "capture", "sidecar.json"))).toBe(false);
     expect(report.nextActions.join("\n")).toContain("Rerun without --dry-run");
   });
@@ -98,6 +100,82 @@ describe("runCaptureBootstrap", () => {
     expect(metadata.command).toBe("rorca capture teardown");
     expect(metadata.removes).toContain(path.join(root, ".rorca-captureignore"));
     expect(readFileSync(path.join(root, ".git", "hooks", "post-commit"), "utf8")).toContain("rorca-managed: v1");
+  });
+
+  it("uses backend-assisted verification with the planned workspace-scoped paths", async () => {
+    const { root, home, workspace } = makeRepo();
+    const observed: unknown[] = [];
+
+    const report = await runCaptureBootstrap({
+      alwaysOn: true,
+      cwd: root,
+      homeDir: home,
+      apiClient: api(workspace, {
+        async verifyCaptureBootstrap(input) {
+          observed.push(input);
+          return { ok: true, workspace, checks: [] };
+        },
+      }),
+      env: { SHELL: "/bin/bash", PATH: "" },
+    });
+
+    expect(report.failed).toEqual([]);
+    expect(observed).toEqual([{
+      workspaceId: "demo",
+      workspacePath: root,
+      queuePath: path.join(root, ".rorca", "capture", "queue"),
+      redactionConfigPath: path.join(root, ".rorca", "capture", "redaction.json"),
+      captureIgnorePath: path.join(root, ".rorca-captureignore"),
+    }]);
+  });
+
+  it("blocks file writes when backend-assisted verification fails", async () => {
+    const { root, home, workspace } = makeRepo();
+
+    const report = await runCaptureBootstrap({
+      alwaysOn: true,
+      cwd: root,
+      homeDir: home,
+      apiClient: api(workspace, {
+        async verifyCaptureBootstrap() {
+          throw new Error("redactionConfigPath must be canonical");
+        },
+      }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.failed.map((item) => item.id)).toContain("backend-assisted-onboarding");
+    expect(existsSync(path.join(root, ".rorca", "capture", "sidecar.json"))).toBe(false);
+  });
+
+  it("tears down only sentinel-managed artifacts from uninstall metadata", async () => {
+    const { root, home, workspace } = makeRepo();
+    await runCaptureBootstrap({
+      alwaysOn: true,
+      cwd: root,
+      homeDir: home,
+      apiClient: api(workspace),
+      env: { SHELL: "/bin/zsh", PATH: "" },
+    });
+
+    const protectedFile = path.join(root, ".rorca", "capture", "protected.txt");
+    writeFileSync(protectedFile, "user file", "utf8");
+    const uninstallPath = path.join(root, ".rorca", "capture", "uninstall.json");
+    const metadata = JSON.parse(readFileSync(uninstallPath, "utf8")) as { removes: string[] };
+    metadata.removes.push(protectedFile);
+    writeFileSync(uninstallPath, JSON.stringify({ rorcaManaged: "v1", uninstall: "rorca capture teardown", ...metadata }, null, 2), "utf8");
+
+    const dryRun = runCaptureTeardown({ dryRun: true, cwd: root, homeDir: home, env: { SHELL: "/bin/zsh" } });
+    expect(dryRun.steps.some((item) => item.status === "would-install" && item.path === path.join(root, ".rorca-captureignore"))).toBe(true);
+    expect(existsSync(path.join(root, ".rorca-captureignore"))).toBe(true);
+
+    const teardown = runCaptureTeardown({ cwd: root, homeDir: home, env: { SHELL: "/bin/zsh" } });
+    expect(teardown.ok).toBe(true);
+    expect(existsSync(path.join(root, ".rorca-captureignore"))).toBe(false);
+    expect(existsSync(path.join(root, ".git", "hooks", "post-commit"))).toBe(false);
+    expect(existsSync(uninstallPath)).toBe(false);
+    expect(readFileSync(protectedFile, "utf8")).toBe("user file");
+    expect(teardown.steps.find((item) => item.path === protectedFile)?.status).toBe("degraded");
   });
 
   it("reports partial capability detection as degraded when IDE support is unavailable", async () => {

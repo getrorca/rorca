@@ -15,7 +15,7 @@ import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar';
 import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
 import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
 import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
-import { formatCaptureBootstrapHumanReport, runCaptureBootstrap } from '../packages/rorca-pi-extension/extensions/rorca/capture-bootstrap.js';
+import { formatCaptureBootstrapHumanReport, runCaptureBootstrap, runCaptureTeardown } from '../packages/rorca-pi-extension/extensions/rorca/capture-bootstrap.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -2454,6 +2454,11 @@ async function runTui() {
     return result.code;
 }
 async function runCaptureSetupCommand(options) {
+    if (options.uninstall || options.teardown) {
+        const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: process.cwd(), env: process.env });
+        console.log(JSON.stringify(teardown, null, 2));
+        return teardown.ok ? 0 : 1;
+    }
     const report = await runCaptureBootstrap({
         alwaysOn: Boolean(options.alwaysOn),
         dryRun: Boolean(options.dryRun),
@@ -2602,6 +2607,8 @@ program
     .command('setup')
     .description('Explicit setup command for the rorca-capture binary')
     .option('--always-on', 'Install reversible always-on context capture components')
+    .option('--uninstall', 'Remove only sentinel-managed capture components using uninstall metadata')
+    .option('--teardown', 'Alias for --uninstall')
     .option('--dry-run', 'Report what would be installed without writing files')
     .option('--json', 'Emit only JSON output')
     .option('--workspace-id <id>', 'Workspace id or label to bootstrap')
@@ -2612,11 +2619,20 @@ const capture = program.command('capture').description('Manage always-on univers
 capture
     .command('setup')
     .option('--always-on', 'Install reversible always-on context capture components')
+    .option('--uninstall', 'Remove only sentinel-managed capture components using uninstall metadata')
+    .option('--teardown', 'Alias for --uninstall')
     .option('--dry-run', 'Report what would be installed without writing files')
     .option('--json', 'Emit only JSON output')
     .option('--workspace-id <id>', 'Workspace id or label to bootstrap')
     .action(async (options) => {
     process.exitCode = await runCaptureSetupCommand(options);
+});
+capture
+    .command('teardown')
+    .option('--dry-run', 'Report what would be removed without writing files')
+    .option('--json', 'Emit only JSON output')
+    .action(async (options) => {
+    process.exitCode = await runCaptureSetupCommand({ ...options, teardown: true });
 });
 const mcp = program.command('mcp').description('Manage MCP HTTP authentication');
 mcp
