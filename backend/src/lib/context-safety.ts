@@ -239,7 +239,9 @@ export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: Ca
   const redacted = redactCommandText(command, { workspacePath: input.workspacePath, captureIgnorePatterns: input.captureIgnorePatterns, policy });
   const detectedAgent = detectAgentBinary(command, input.customAgentPatterns);
   const event: SanitizedCliCommandEvent = {
-    eventType: input.eventType ?? (detectedAgent.recognized ? 'agent_cli_session' : 'cli_command'),
+    eventType: input.eventType === 'cli_command'
+      ? 'shell_command'
+      : input.eventType ?? (detectedAgent.recognized ? 'agent_cli_session' : 'shell_command'),
     source_system: typeof input.source_system === 'string' && input.source_system.trim() ? input.source_system : 'shell',
     tool_name: typeof input.tool_name === 'string' && input.tool_name.trim() ? input.tool_name : detectedAgent.recognized ? detectedAgent.binary : 'shell',
     session_id: typeof input.session_id === 'string' && input.session_id.trim() ? input.session_id : 'shell',

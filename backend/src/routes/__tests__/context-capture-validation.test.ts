@@ -40,7 +40,7 @@ describe('context-capture route validation helpers', () => {
       },
     });
 
-    expect(payload.eventType).toBe('cli_command');
+    expect(payload.eventType).toBe('shell_command');
     expect(payload.payload_schema_version).toBe('2026-07-ucc-007.v1');
     expect(payload.source_identity).toMatchObject({ source_system: 'shell', tool_name: 'shell', session_id: 'session-1', workspace_id: 'rorca' });
     expect(payload.idempotency_key).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -89,6 +89,21 @@ describe('context-capture route validation helpers', () => {
       expect(payload.tool_name).toBe(`${sourceSystem}-tool`);
       expect(payload.session_id).toBe(`${sourceSystem}-session`);
     }
+  });
+
+  test('normalizes legacy cli_command input to canonical shell_command', () => {
+    const payload = normalizeContextEventPayload({
+      ...baseInput,
+      payload: {
+        eventType: 'cli_command',
+        command: 'echo hello',
+        session_id: 'legacy-session',
+      },
+    });
+
+    expect(payload.eventType).toBe('shell_command');
+    expect(payload.source_system).toBe('shell');
+    expect(payload.source_identity.session_id).toBe('legacy-session');
   });
 
   test('rejects malformed event types through ValidationError', () => {

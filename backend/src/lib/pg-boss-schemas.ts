@@ -160,7 +160,7 @@ export const SourceSystemEnum = z.enum([
   'opencode',
   'daemon',
 ]);
-export const ContextEventTypeEnum = z.enum(['agent_cli_session', 'cli_command', 'ide_session', 'shell_command', 'editor_activity', 'explicit_memory', 'git_commit', 'ci_pr']);
+export const ContextEventTypeEnum = z.enum(['agent_cli_session', 'ide_session', 'shell_command', 'editor_activity', 'explicit_memory', 'git_commit', 'ci_pr']);
 export const AgentBinaryEnum = z.enum(['claude', 'codex', 'opencode', 'pi', 'aider', 'cursor', 'custom', 'unknown']);
 
 // Keep values in sync with shared/contracts/trust.ts. The strings are intentionally
@@ -172,7 +172,6 @@ const sha256String = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 
 export const ContextEventIdempotencyGuidance = {
   agent_cli_session: 'sha256:event_type + source_system + tool_name + session_id + workspace_id + occurred_at_minute + command_hash',
-  cli_command: 'sha256:event_type + source_system + session_id + workspace_id + occurred_at + phase + command_hash + exit_code',
   ide_session: 'sha256:event_type + source_system + host_application + session_id + workspace_id + occurred_at_hour',
   shell_command: 'sha256:event_type + source_system + session_id + workspace_id + occurred_at + phase + command_hash + exit_code',
   editor_activity: 'sha256:event_type + source_system + host_application + session_id + workspace_id + occurred_at + activity_type + related_file_paths',
@@ -246,7 +245,12 @@ export const ShellCommandContextEventPayload = UnifiedContextEventBase.extend({
   regulated_signals: z.array(z.string()).default([]),
 }).strict();
 
-export const CliCommandContextEventPayload = ShellCommandContextEventPayload.extend({
+/**
+ * Legacy shell integrations may still send `cli_command`; route-boundary
+ * normalization aliases it to the canonical UCC-007 `shell_command` before
+ * queueing or persistence. It is intentionally not part of ContextEventTypeEnum.
+ */
+export const LegacyCliCommandContextEventPayload = ShellCommandContextEventPayload.extend({
   eventType: z.literal('cli_command'),
 }).strict();
 
@@ -304,7 +308,6 @@ export const CiPrContextEventPayload = UnifiedContextEventBase.extend({
 
 export const UnifiedContextEventPayload = z.discriminatedUnion('eventType', [
   AgentCliSessionContextEventPayload,
-  CliCommandContextEventPayload,
   IdeSessionContextEventPayload,
   ShellCommandContextEventPayload,
   EditorActivityContextEventPayload,
@@ -362,7 +365,6 @@ export function deriveContextEventIdempotencyKey(input: {
   const bucketHour = input.occurred_at ? input.occurred_at.slice(0, 13) : null;
   const materialByType: Record<z.infer<typeof ContextEventTypeEnum>, unknown> = {
     agent_cli_session: [input.eventType, input.source_system, input.tool_name, input.session_id, input.workspace_id, bucketMinute, input.command_hash],
-    cli_command: [input.eventType, input.source_system, input.session_id, input.workspace_id, input.occurred_at, input.phase, input.command_hash, input.exit_code],
     ide_session: [input.eventType, input.source_system, input.host_application, input.session_id, input.workspace_id, bucketHour],
     shell_command: [input.eventType, input.source_system, input.session_id, input.workspace_id, input.occurred_at, input.phase, input.command_hash, input.exit_code],
     editor_activity: [input.eventType, input.source_system, input.host_application, input.session_id, input.workspace_id, input.occurred_at, input.activity_type, (input.related_files ?? []).map((file) => file.path).sort()],
@@ -378,7 +380,7 @@ export type CaptureSourceType = z.infer<typeof CaptureSourceEnum>;
 export type SourceSystemType = z.infer<typeof SourceSystemEnum>;
 export type TrustTierType = z.infer<typeof TrustTierEnum>;
 export type ShellCommandContextEventPayloadType = z.infer<typeof ShellCommandContextEventPayload>;
-export type CliCommandContextEventPayloadType = z.infer<typeof CliCommandContextEventPayload>;
+export type LegacyCliCommandContextEventPayloadType = z.infer<typeof LegacyCliCommandContextEventPayload>;
 export type AgentCliSessionContextEventPayloadType = z.infer<typeof AgentCliSessionContextEventPayload>;
 export type UnifiedContextEventPayloadType = z.infer<typeof UnifiedContextEventPayload>;
 export type ContextCaptureEventJobPayloadType = z.infer<typeof ContextCaptureEventJobPayload>;

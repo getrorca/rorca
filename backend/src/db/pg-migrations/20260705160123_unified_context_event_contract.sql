@@ -1,5 +1,6 @@
 -- Migration: 20260705160123_unified_context_event_contract
 -- Purpose: Brownfield-compatible UCC-007 unified context event payload contract.
+-- Legacy cli_command inputs are normalized to canonical shell_command before persistence.
 
 CREATE TABLE IF NOT EXISTS context_events (
   id BIGSERIAL PRIMARY KEY,

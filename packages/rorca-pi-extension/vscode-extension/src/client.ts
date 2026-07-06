@@ -10,7 +10,6 @@ export type RorcaCaptureEventType =
   | "editor_activity"
   | "explicit_memory"
   | "shell_command"
-  | "cli_command"
   | "agent_cli_session"
   | "git_commit"
   | "ci_pr";
@@ -85,11 +84,30 @@ export class RorcaCaptureClient {
 
   buildEvent(input: CaptureEventInput): RorcaCaptureEvent {
     const occurredAt = input.occurredAt ?? new Date().toISOString();
+    const repoPathHash = `sha256:${crypto.createHash("sha256").update(path.resolve(input.workspacePath)).digest("hex")}`;
+    const sourceSystem = typeof input.payload.source_system === "string" ? input.payload.source_system : "vscode";
+    const toolName = typeof input.payload.tool_name === "string" ? input.payload.tool_name : "rorca-vscode-extension";
+    const hostApplication = typeof input.payload.host_application === "string" ? input.payload.host_application : "vscode";
+    const sessionId = typeof input.payload.session_id === "string" ? input.payload.session_id : `vscode:${input.workspaceId}`;
     const rawPayload = {
       ...input.payload,
       eventType: input.eventType,
       policyMode: input.policyMode,
-      repo_path_hash: `sha256:${crypto.createHash("sha256").update(path.resolve(input.workspacePath)).digest("hex")}`,
+      payload_schema_version: "2026-07-ucc-007.v1",
+      source_system: sourceSystem,
+      tool_name: toolName,
+      host_application: hostApplication,
+      session_id: sessionId,
+      workspace_id: input.workspaceId,
+      repo_path_hash: repoPathHash,
+      source_identity: {
+        source_system: sourceSystem,
+        tool_name: toolName,
+        host_application: hostApplication,
+        session_id: sessionId,
+        workspace_id: input.workspaceId,
+        repo_path_hash: repoPathHash,
+      },
     };
     const ignoreReport = { ignoredPathCount: 0 };
     const payloadWithIgnoredPathsRedacted = redactIgnoredPaths(rawPayload, input.workspacePath, readCaptureIgnorePatterns(input.workspacePath), ignoreReport);
@@ -104,7 +122,6 @@ export class RorcaCaptureClient {
       payload: {
         ...(typeof sanitized.payload === "object" && sanitized.payload ? sanitized.payload as Record<string, unknown> : { value: sanitized.payload }),
         source_event_id: id,
-        idempotencyKey: id,
       },
       safety: { ...sanitized.safety, ignoredPathCount: sanitized.safety.ignoredPathCount + ignoreReport.ignoredPathCount },
     };

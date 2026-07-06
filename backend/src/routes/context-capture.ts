@@ -141,7 +141,11 @@ export function normalizeContextEventPayload(input: {
   const rawIdentity = raw.source_identity && typeof raw.source_identity === 'object' ? raw.source_identity as Record<string, unknown> : {};
   const legacyEventType = stringValue(raw.eventType);
   const adapterMemoryAliases = new Set(['agent_memory', 'adapter_context']);
-  const normalizedEventType = legacyEventType && adapterMemoryAliases.has(legacyEventType) ? 'explicit_memory' : legacyEventType;
+  const normalizedEventType = legacyEventType && adapterMemoryAliases.has(legacyEventType)
+    ? 'explicit_memory'
+    : legacyEventType === 'cli_command'
+      ? 'shell_command'
+      : legacyEventType;
   const inferredEventType = normalizedEventType ?? (stringValue(raw.commit) || stringValue(raw.git_sha) || stringValue(raw.gitSha) ? 'git_commit' : null);
   if (!inferredEventType || !ContextEventTypeEnum.safeParse(inferredEventType).success) {
     throw new ValidationError('Unsupported context capture event type', { eventType: raw.eventType });
@@ -229,7 +233,7 @@ export function normalizeContextEventPayload(input: {
   });
 
   const normalized = (() => {
-    if (inferredEventType === 'agent_cli_session' || inferredEventType === 'cli_command' || inferredEventType === 'shell_command') {
+    if (inferredEventType === 'agent_cli_session' || inferredEventType === 'shell_command') {
       return {
         ...base,
         eventType: inferredEventType,

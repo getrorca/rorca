@@ -159,7 +159,7 @@ export type CaptureBootstrapVerifyResponse = {
 };
 
 export const CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION = "2026-07-ucc-007.v1" as const;
-export const CONTEXT_EVENT_TYPES = ["agent_cli_session", "cli_command", "ide_session", "shell_command", "editor_activity", "explicit_memory", "git_commit", "ci_pr"] as const;
+export const CONTEXT_EVENT_TYPES = ["agent_cli_session", "ide_session", "shell_command", "editor_activity", "explicit_memory", "git_commit", "ci_pr"] as const;
 export const TRUST_TIERS = ["untrusted", "local", "verified", "privileged"] as const;
 
 export type ContextEventType = typeof CONTEXT_EVENT_TYPES[number];
@@ -193,6 +193,49 @@ export type UnifiedContextEventBase = {
   idempotency_key: string;
   provenance: { capture_source: ContextCaptureSource; source_event_id: string | null; adapter_version: string | null; emitted_at: string | null; received_at: string | null; local_only: boolean };
 };
+
+export const CONTEXT_EVENT_IDEMPOTENCY_GUIDANCE = {
+  agent_cli_session: "sha256:event_type + source_system + tool_name + session_id + workspace_id + occurred_at_minute + command_hash",
+  ide_session: "sha256:event_type + source_system + host_application + session_id + workspace_id + occurred_at_hour",
+  shell_command: "sha256:event_type + source_system + session_id + workspace_id + occurred_at + phase + command_hash + exit_code",
+  editor_activity: "sha256:event_type + source_system + host_application + session_id + workspace_id + occurred_at + activity_type + related_file_paths",
+  explicit_memory: "sha256:event_type + source_system + tool_name + session_id + workspace_id + memory_hash + occurred_at",
+  git_commit: "sha256:event_type + source_system + workspace_id + git_sha",
+  ci_pr: "sha256:event_type + source_system + workspace_id + provider + repository + pr_number + head_sha + run_id",
+} as const satisfies Record<ContextEventType, string>;
+
+export type ShellCommandContextEvent = UnifiedContextEventBase & {
+  eventType: "shell_command";
+  phase: "start" | "end";
+  policyMode: "off" | "metadata-only" | "command-summary" | "explicit-transcript-import";
+  command_summary: string | null;
+  command_hash: string;
+  cwd: string | null;
+  exit_code: number | null;
+  duration_ms: number | null;
+  agent: { recognized: boolean; binary: "claude" | "codex" | "opencode" | "pi" | "aider" | "cursor" | "custom" | "unknown"; matchedPattern?: string | null };
+  regulated_signals: string[];
+};
+
+export type AgentCliSessionContextEvent = Omit<ShellCommandContextEvent, "eventType" | "agent"> & {
+  eventType: "agent_cli_session";
+  agent: { recognized: true; binary: "claude" | "codex" | "opencode" | "pi" | "aider" | "cursor" | "custom"; matchedPattern?: string | null };
+};
+
+export type IdeSessionContextEvent = UnifiedContextEventBase & { eventType: "ide_session"; ide_session_state: "started" | "active" | "ended"; workspace_folders: string[]; extension_version: string | null };
+export type EditorActivityContextEvent = UnifiedContextEventBase & { eventType: "editor_activity"; activity_type: "open" | "save" | "close" | "diagnostic" | "selection" | "command"; document_uri_hash: string | null; language_id: string | null; summary: string | null };
+export type ExplicitMemoryContextEvent = UnifiedContextEventBase & { eventType: "explicit_memory"; memory_hash: string; memory_summary: string; category: string | null; requested_by: "human" | "agent" | "system" };
+export type GitCommitContextEvent = UnifiedContextEventBase & { eventType: "git_commit"; git_sha: string; commit_subject: string | null; committed_at: string | null; author_hash: string | null; changed_files: UnifiedContextEventBase["related_files"] };
+export type CiPrContextEvent = UnifiedContextEventBase & { eventType: "ci_pr"; provider: "github" | "gitlab" | "circleci" | "buildkite" | "jenkins" | "other"; repository: string; pr_number: string; head_sha: string; base_branch: string | null; status: "queued" | "running" | "success" | "failure" | "cancelled" | "unknown"; run_id: string | null };
+
+export type UnifiedContextEventPayload =
+  | AgentCliSessionContextEvent
+  | IdeSessionContextEvent
+  | ShellCommandContextEvent
+  | EditorActivityContextEvent
+  | ExplicitMemoryContextEvent
+  | GitCommitContextEvent
+  | CiPrContextEvent;
 
 export type PiModel = {
   provider: string;

@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execute } from '../index';
 import { checkDuplicatePrefixes } from '../pg-index';
 
 const migrationFile = '20260705160123_unified_context_event_contract.sql';
@@ -20,6 +21,10 @@ describe('UCC-007 context event contract migration', () => {
     const files = fs.readdirSync(migrationDir).filter((file) => file.endsWith('.sql'));
     expect(() => checkDuplicatePrefixes(files)).not.toThrow();
     expect(migrationFile).toMatch(/^20260705160123_/);
+  });
+
+  test('can be applied a second time as a brownfield no-op', async () => {
+    await expect(execute(sql)).resolves.toBeDefined();
   });
 
   test('is brownfield/idempotency friendly for existing rows and reruns', () => {
@@ -37,6 +42,7 @@ describe('UCC-007 context event contract migration', () => {
     for (const eventType of ['agent_cli_session', 'ide_session', 'shell_command', 'editor_activity', 'explicit_memory', 'git_commit', 'ci_pr']) {
       expect(sql).toContain(`'${eventType}'`);
     }
+    expect(sql).not.toContain("'cli_command'");
     for (const tier of ['untrusted', 'local', 'verified', 'privileged']) {
       expect(sql).toContain(`'${tier}'`);
     }

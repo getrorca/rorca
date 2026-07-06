@@ -103,7 +103,7 @@ describe("command capture normalization and safety", () => {
   it("records unknown commands at metadata-only level when policy allows", () => {
     const ws = workspace();
     const event = buildShellCaptureEvent({ workspaceId: ws.id, workspacePath: ws.path, cwd: ws.path, command: "make deploy SECRET=abc", policyMode: "metadata-only", sessionId: "session-123" });
-    expect(event?.payload.eventType).toBe("cli_command");
+    expect(event?.payload.eventType).toBe("shell_command");
     expect(event?.payload.source_system).toBe("shell");
     expect(event?.payload.tool_name).toBe("shell");
     expect(event?.payload.session_id).toBe("session-123");

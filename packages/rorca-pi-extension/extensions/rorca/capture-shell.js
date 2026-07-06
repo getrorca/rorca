@@ -97,9 +97,13 @@ export function buildShellCaptureEvent(input) {
     const commandHash = hashCaptureContent(input.command);
     const eventId = `shell:${sha256(`${input.workspaceId}|${occurredAt}|${phase}|${input.command}|${input.exitCode ?? ""}`).slice(0, 24)}`;
     const rawContent = policyMode === "explicit-transcript-import" ? "explicit" : policyMode === "command-summary" ? "summary" : "metadata";
-    const idempotencyKey = `sha256:${sha256(JSON.stringify([agent.recognized ? "agent_cli_session" : "cli_command", "shell", sessionId, input.workspaceId, occurredAt, phase, commandHash, input.exitCode ?? null]))}`;
+    const eventType = agent.recognized ? "agent_cli_session" : "shell_command";
+    const idempotencyMaterial = eventType === "agent_cli_session"
+        ? [eventType, "shell", toolName, sessionId, input.workspaceId, occurredAt.slice(0, 16), commandHash]
+        : [eventType, "shell", sessionId, input.workspaceId, occurredAt, phase, commandHash, input.exitCode ?? null];
+    const idempotencyKey = `sha256:${sha256(JSON.stringify(idempotencyMaterial))}`;
     const payload = {
-        eventType: agent.recognized ? "agent_cli_session" : "cli_command",
+        eventType,
         payload_schema_version: PAYLOAD_SCHEMA_VERSION,
         source_system: "shell",
         tool_name: toolName,
