@@ -337,3 +337,112 @@ same contract for local operators. It defaults to `dryRun: true`; setting
 `default_retrieval_eligible=false` and `status='pending'`. Imports never write to
 `memories`, the graph, or retrieval-visible context. Candidate approval remains
 through the existing context-distillation governance endpoints.
+
+## UCC-012 compatibility lab, rollout, and validation runbook
+
+The compatibility lab is intentionally split into automated local checks plus manual smoke scripts for surfaces that are not available in headless CI. The automated entry point is:
+
+```bash
+# From the repository root
+npm run test:capture
+```
+
+That script runs the Pi extension capture E2E harness and focused backend Jest coverage. The E2E harness creates a fresh git workspace, runs `rorca capture setup --always-on --policy repo-and-command`, starts the managed daemon in one-shot mode, captures a git commit, injects shell/agent and VS Code extension-style events, distills memory candidates, approves one candidate into durable memory, renders `MEMORY.md`, verifies pending/rejected candidates stay out of default retrieval, and runs uninstall cleanup with `--all`. It does not spawn a long-running `tsx src/server.ts`, `tsx src/worker.ts`, pg-boss worker, daemon, or extension host; teardown asserts capture queue and `service.pid` state are removed.
+
+### Copy-paste local setup
+
+```bash
+# 1. Start a fresh Rorca service. The API server does not hot-reload route/lib changes.
+lsof -ti:3030 | xargs -r kill -9
+cd backend && RORCA_DISABLE_BACKGROUND_RUNTIME=true npx tsx src/server.ts
+
+# 2. In a second shell, install reversible always-on capture for the current repo.
+cd /path/to/your/workspace
+rorca-capture setup --always-on --policy metadata-only
+
+# 3. Install/start the managed service for your OS.
+rorca-capture service install --workspace-id <workspace-id>
+rorca-capture service start --workspace-id <workspace-id>
+
+# 4. Check status and queue health.
+rorca-capture status --workspace-id <workspace-id>
+```
+
+Use `--policy repo-and-command` only after reviewing the privacy model below. Raw transcripts are still not enabled by default; richer content requires explicit policy and source support.
+
+### Pause, resume, and uninstall
+
+```bash
+# Stop accepting new capture submissions without deleting local setup.
+rorca-capture pause --workspace-id <workspace-id>
+rorca-capture status --workspace-id <workspace-id>
+rorca-capture resume --workspace-id <workspace-id>
+
+# Stop/remove the OS service wrapper.
+rorca-capture service stop --workspace-id <workspace-id>
+rorca-capture service uninstall --workspace-id <workspace-id>
+
+# Remove generated hooks, shell snippets, adapters, queue, and runtime status files.
+rorca-capture teardown --all
+```
+
+Uninstall is a privacy control. `teardown --all` may delete pending redacted offline queue entries; inspect `.rorca/capture/queue/offline.ndjson` first if you need to replay them.
+
+### Adapter installation smoke matrix
+
+Run the applicable commands from a disposable workspace and confirm `rorca-capture status` shows the source as active or degraded with fallback sources:
+
+| Surface | Automated coverage | Manual smoke command |
+| --- | --- | --- |
+| Pi | E2E verifies `.pi/extensions/rorca/capture-command.json` and agent event distillation. | `pi` then invoke `/rorca-remember` or the generated Pi alias if available. |
+| Claude Code | Setup renders Claude Code slash/MCP adapter metadata. | `claude` then invoke the generated `/rorca-remember` command; token path is `~/.rorca/mcp-token`, never an embedded bearer value. |
+| Codex | Setup renders pass-through wrapper. | `codex exec --dangerously-bypass-approvals-and-sandbox -m <model>` with a short prompt on stdin; wrapper must preserve exit status. |
+| OpenCode | Setup renders pass-through wrapper. | `opencode run` through the generated wrapper; native binary absence should return `127` and report fallback mode. |
+| zsh | E2E installs/removes managed startup block. | `SHELL=/bin/zsh rorca-capture setup --always-on --policy metadata-only`, open a new zsh, run `echo rorca-smoke`. |
+| bash | Teardown compatibility test covers removal path. | `SHELL=/bin/bash rorca-capture setup --always-on --policy metadata-only`, open bash, run `git status`. |
+| fish | Teardown compatibility test covers removal path. | `SHELL=/usr/bin/fish rorca-capture setup --always-on --policy metadata-only`, open fish, run `pwd`. |
+| PowerShell | Teardown compatibility test covers removal path. | `pwsh -NoProfile`, run the generated snippet from `.rorca/capture/shell/powershell.ps1`. |
+| VS Code | E2E distills a VS Code extension-style editor event. | Install the generated `.vscode/rorca-capture-adapter.json`/extension package, open a file, and run the Rorca capture status command. |
+| VSCodium | Documented compatible fork. | Install the VSIX with `codium --install-extension <vsix>`; verify extension host APIs and status command work. |
+| Cursor | Manual-only attempted install if locally available. | Try `cursor --install-extension <vsix>` or the UI installer. If chat APIs are unavailable, verify degraded IDE status and repo/shell/git fallback. |
+| Windsurf | Manual-only attempted install if locally available. | Try Windsurf's VSIX/extension installer. If proprietary chat APIs are unavailable, verify degraded IDE status and repo/shell/git fallback. |
+
+VS Code fork compatibility means the fork preserves the standard VS Code extension host/API and extension installation mechanism. VSCodium is expected to work when those APIs are present. Cursor and Windsurf are best-effort because local builds may expose standard file/diagnostic APIs while hiding proprietary AI chat panes.
+
+### Privacy model and proprietary chat caveat
+
+Rorca capture remains local-first and API-only. Adapters post to the local Express API; they never write directly to PostgreSQL, migrations, graph tables, or `MEMORY.md`. `backend/src/lib/context-safety.ts` is the canonical redaction and hashing layer. Default setup uses metadata/hash capture, stores already-redacted offline queue entries, and requires human approval before candidates become durable retrieval-visible memories.
+
+Proprietary chat panes cannot be scraped unless the product exposes an API, export, hook, or explicit user command. This is a deliberate limitation, not a bug. When Cursor, Windsurf, or another VS Code-compatible fork blocks chat access, fallback layers continue to capture repo, shell, and git context through the daemon, git hooks, shell integration, CI/PR import, and explicit MCP/slash commands. Capability status should be `degraded` with fallback sources, not `failed`, when those layers remain active.
+
+### Validation checklist
+
+Before release, run or record why each item is unavailable:
+
+```bash
+npm run typecheck
+npm run test:capture
+cd backend && JEST_SKIP_RUNTIME_MIGRATIONS=true npx jest src/lib/__tests__/context-distillation.test.ts src/routes/__tests__/context-capture-validation.test.ts --runInBand
+npx vitest run --config packages/rorca-pi-extension/vitest.config.ts
+npm run lint:tier
+npm run lint:swagger
+npm run check:contract
+npm run build
+```
+
+Caveats:
+
+- Do not run broad backend Jest or `npm test` against a live database. Use focused Jest with `JEST_SKIP_RUNTIME_MIGRATIONS=true` or an isolated `_test` database.
+- Backend `tsc` excludes `__tests__`; for compile-only test validation, run focused Jest or an explicit test-file TypeScript command before declaring test code green.
+- `npm run lint:swagger` and `npm run lint:tier` currently fail in some `tsx` ESM contexts because `__dirname` resolves to an empty spec. If that occurs, run the compiled/node equivalent or document the blocked attempt; do not hide the failure inside the E2E suite.
+- Public contract checks are required only when endpoint contracts change. This story adds tests/docs and a pure memory projection helper; no public endpoint contract changes are expected.
+- After any E2E/manual validation, confirm no long-running processes remain: `pgrep -fl 'tsx src/(server|worker)\.ts|rorca-capture|extensionHost'` and stop leftovers before handing off.
+
+### Troubleshooting
+
+- **Setup cannot find the workspace**: register the repository in Rorca, then rerun setup from inside that repository or pass `--workspace-id`.
+- **MCP token failure**: create/repair `~/.rorca/mcp-token` and ensure POSIX mode `600` (`chmod 600 ~/.rorca/mcp-token`).
+- **Queue grows while offline**: start the API, run `rorca-capture status`, then verify `GET /api/health` succeeds. Offline queue payloads are already redacted but should still be treated as local operator data.
+- **Stale API routes after code changes**: kill and restart `tsx src/server.ts`; the backend does not hot-reload.
+- **Graph/search_path oddities after AGE tests**: verify graph code restores `SET search_path = rorca, public` after `LOAD 'age'` before reusing pooled connections.
+- **pg-boss E2E enqueue returns null**: create queues before `send()` (`await boss.createQueue('queue:name')`) and call `boss.stop()` in teardown.

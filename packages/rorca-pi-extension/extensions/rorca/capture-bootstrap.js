@@ -632,6 +632,10 @@ export async function runCaptureBootstrap(options) {
         redactionConfigPath,
         captureIgnorePath,
         sidecarConfigPath,
+        path.join(captureDir, "service.pid"),
+        path.join(captureDir, "state.json"),
+        path.join(captureDir, "status.json"),
+        path.join(captureDir, "service.log"),
         ...GIT_HOOKS.map((hook) => path.join(workspace.path, ".git", "hooks", hook)),
         daemonPath,
         ...SUPPORTED_CAPTURE_SHELLS.map((shell) => shellSnippetFile(captureDir, shell)),
@@ -700,6 +704,11 @@ function contentHasManagedSentinel(filePath) {
     const content = readFileSync(filePath, "utf8");
     return content.includes(SENTINEL) || content.includes('"rorcaManaged": "v1"');
 }
+function isCaptureRuntimeArtifact(workspaceRoot, filePath) {
+    const captureDir = path.join(workspaceRoot, ".rorca", "capture");
+    const relative = path.relative(captureDir, filePath);
+    return !relative.startsWith("..") && !path.isAbsolute(relative) && ["service.pid", "state.json", "status.json", "service.log"].includes(relative);
+}
 function teardownManagedArtifact(workspaceRoot, artifactPath, uninstallPath, dryRun, removeAll = false) {
     const resolvedPath = path.resolve(artifactPath);
     if (!isWithin(workspaceRoot, resolvedPath)) {
@@ -740,14 +749,20 @@ function teardownManagedArtifact(workspaceRoot, artifactPath, uninstallPath, dry
         return step({ id: "managed-artifact", label: "Managed artifact directory", status: "installed", path: resolvedPath, message: "Empty managed directory removed." });
     }
     if (!contentHasManagedSentinel(resolvedPath)) {
-        return step({
-            id: "managed-artifact",
-            label: "Managed artifact",
-            status: "degraded",
-            path: resolvedPath,
-            message: "File does not carry a Rorca-managed sentinel and was left untouched.",
-            nextActions: [`Manually inspect ${resolvedPath} before removing it.`],
-        });
+        if (!removeAll || !isCaptureRuntimeArtifact(workspaceRoot, resolvedPath)) {
+            return step({
+                id: "managed-artifact",
+                label: "Managed artifact",
+                status: "degraded",
+                path: resolvedPath,
+                message: "File does not carry a Rorca-managed sentinel and was left untouched.",
+                nextActions: [`Manually inspect ${resolvedPath} before removing it.`],
+            });
+        }
+        if (dryRun)
+            return step({ id: "managed-artifact", label: "Managed runtime artifact", status: "would-install", path: resolvedPath, message: "Runtime capture state would be removed by uninstall --all." });
+        rmSync(resolvedPath, { force: true });
+        return step({ id: "managed-artifact", label: "Managed runtime artifact", status: "installed", path: resolvedPath, message: "Runtime capture state removed by uninstall --all." });
     }
     if (dryRun)
         return step({ id: "managed-artifact", label: "Managed artifact", status: "would-install", path: resolvedPath, message: resolvedPath === uninstallPath ? "Uninstall metadata would be removed last." : "Managed artifact would be removed." });
@@ -777,7 +792,10 @@ export function runCaptureTeardown(options = {}) {
     const metadata = readUninstallArtifactPaths(workspaceRoot);
     if (metadata.step)
         steps.push(metadata.step);
-    const orderedArtifactPaths = Array.from(new Set(metadata.artifactPaths))
+    const runtimeArtifactPaths = options.all
+        ? ["service.pid", "state.json", "status.json", "service.log"].map((fileName) => path.join(workspaceRoot, ".rorca", "capture", fileName))
+        : [];
+    const orderedArtifactPaths = Array.from(new Set([...metadata.artifactPaths, ...runtimeArtifactPaths]))
         .map((item) => path.resolve(item))
         .filter((item) => item !== workspaceRoot)
         .sort((left, right) => {
