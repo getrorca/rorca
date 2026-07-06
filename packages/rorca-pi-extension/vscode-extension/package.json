@@ -19,6 +19,12 @@
     "onCommand:rorca.reviewCandidates"
   ],
   "main": "./out/packages/rorca-pi-extension/vscode-extension/src/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Rorca Capture activates UI/status commands in untrusted workspaces, but event capture and submissions remain disabled until Workspace Trust is granted."
+    }
+  },
   "contributes": {
     "commands": [
       { "command": "rorca.captureSessionSummary", "title": "Rorca: Capture Session Summary" },

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -24,16 +24,43 @@ describe("Rorca VS Code capture client", () => {
     const result = await client.submit({
       workspaceId: "ws",
       workspacePath,
-      eventType: "memory_candidate",
+      eventType: "explicit_memory",
       policyMode: "command-summary",
       occurredAt: "2026-07-05T00:00:00.000Z",
-      payload: { selection: "password=hunter2 token=abcdefghijklmnopqrstuvwxyz1234567890" },
+      payload: { memory_summary: "password=hunter2 token=abcdefghijklmnopqrstuvwxyz1234567890", category: "Decision", requested_by: "human" },
     });
 
     expect(result.queued).toBe(true);
     expect(JSON.stringify(result.event.payload)).not.toContain("hunter2");
+    expect(result.event.payload).toMatchObject({ eventType: "explicit_memory", source_event_id: result.event.id });
     expect(result.event.safety.contextSafetyModule).toBe("backend/src/lib/context-safety.ts");
     expect(readQueuedCaptureEvents(queuePathForWorkspace(workspacePath))).toHaveLength(1);
+  });
+
+  test("applies .rorca-captureignore path redaction before queueing", async () => {
+    const workspacePath = mkdtempSync(path.join(os.tmpdir(), "rorca-vscode-ignore-"));
+    tmpDirs.push(workspacePath);
+    mkdirSync(path.join(workspacePath, "secrets"), { recursive: true });
+    writeFileSync(path.join(workspacePath, ".rorca-captureignore"), "secrets/\n", "utf8");
+    const client = new RorcaCaptureClient({
+      apiBaseUrl: "http://127.0.0.1:3030",
+      queuePath: queuePathForWorkspace(workspacePath),
+      queueMaxSize: 10,
+      fetchImpl: async () => ({ ok: false }) as Response,
+    });
+
+    const result = await client.submit({
+      workspaceId: "ws",
+      workspacePath,
+      eventType: "editor_activity",
+      policyMode: "metadata-only",
+      occurredAt: "2026-07-05T00:00:00.000Z",
+      payload: { activity_type: "save", related_files: [{ path: path.join(workspacePath, "secrets", "token.txt"), role: "saved" }] },
+    });
+
+    expect(JSON.stringify(result.event.payload)).not.toContain("token.txt");
+    expect(result.event.payload).toMatchObject({ related_files: [{ path: "[REDACTED_PATH]" }] });
+    expect(result.event.safety.ignoredPathCount).toBe(1);
   });
 
   test("keeps queue fallback idempotent and bounded", () => {

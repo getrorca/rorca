@@ -7,11 +7,13 @@ describe("Rorca Capture VS Code extension manifest", () => {
     const manifest = JSON.parse(readFileSync(path.join(process.cwd(), "packages/rorca-pi-extension/vscode-extension/package.json"), "utf8")) as {
       engines: { vscode: string };
       activationEvents: string[];
+      capabilities: { untrustedWorkspaces: { supported: string; description: string } };
       contributes: { commands: Array<{ command: string; title: string }>; configuration: { properties: Record<string, unknown> } };
     };
 
     expect(manifest.engines.vscode).toMatch(/^\^1\./);
     expect(manifest.activationEvents).toContain("onStartupFinished");
+    expect(manifest.capabilities.untrustedWorkspaces.supported).toBe("limited");
     expect(manifest.contributes.commands.map((command) => command.command)).toEqual([
       "rorca.captureSessionSummary",
       "rorca.rememberSelection",

@@ -49,15 +49,20 @@ export async function submitRememberSelection(input: {
     relatedFiles: input.filePath ? [input.filePath] : [],
   };
   const governed = applyMemoryCandidateGovernance([candidate], input.config);
+  const firstCandidate = governed.candidates[0];
   const result = await input.client.submit({
     workspaceId: input.workspaceId,
     workspacePath: input.workspacePath,
-    eventType: "memory_candidate",
+    eventType: "explicit_memory",
     policyMode: input.config.policyMode,
     payload: {
+      memory_summary: firstCandidate?.rule ?? "Memory candidate omitted because it exceeded Rorca governance caps.",
+      category: firstCandidate?.category ?? candidate.category,
+      requested_by: "human",
       candidates: governed.candidates,
       governance: governed.governance,
       reviewRequired: true,
+      related_files: (firstCandidate?.relatedFiles ?? candidate.relatedFiles)?.map((filePath) => ({ path: filePath, role: "mentioned" as const })) ?? [],
     },
   });
   return { queued: result.queued, governance: governed.governance };

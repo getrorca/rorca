@@ -1,20 +1,19 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import { sanitizeCapturePayload, type SanitizedCapturePayload } from "../../../../backend/src/lib/context-safety.js";
+import { isCaptureIgnoredPath, sanitizeCapturePayload, type SanitizedCapturePayload } from "../../../../backend/src/lib/context-safety.js";
 import type { CapturePolicyMode, RorcaCaptureConfig } from "./config.js";
 
 export type RorcaSource = "vscodeExtension";
 export type RorcaCaptureEventType =
-  | "activation"
-  | "editor_active"
-  | "file_saved"
-  | "terminal_opened"
-  | "task_started"
-  | "task_ended"
-  | "session_summary"
-  | "memory_candidate"
-  | "capability_report";
+  | "ide_session"
+  | "editor_activity"
+  | "explicit_memory"
+  | "shell_command"
+  | "cli_command"
+  | "agent_cli_session"
+  | "git_commit"
+  | "ci_pr";
 
 export type MemoryCandidate = {
   category: "Architecture" | "Convention" | "Bug Fix" | "Decision" | "Pattern" | "Gotcha";
@@ -90,9 +89,11 @@ export class RorcaCaptureClient {
       ...input.payload,
       eventType: input.eventType,
       policyMode: input.policyMode,
-      workspacePath: input.workspacePath,
+      repo_path_hash: `sha256:${crypto.createHash("sha256").update(path.resolve(input.workspacePath)).digest("hex")}`,
     };
-    const sanitized = sanitizeCapturePayload(rawPayload);
+    const ignoreReport = { ignoredPathCount: 0 };
+    const payloadWithIgnoredPathsRedacted = redactIgnoredPaths(rawPayload, input.workspacePath, readCaptureIgnorePatterns(input.workspacePath), ignoreReport);
+    const sanitized = sanitizeCapturePayload(payloadWithIgnoredPathsRedacted);
     const id = `vscode:${hashStable({ workspaceId: input.workspaceId, source: "vscodeExtension", occurredAt, payloadHash: sanitized.safety.contentHash })}`;
     return {
       id,
@@ -102,9 +103,10 @@ export class RorcaCaptureClient {
       policyMode: input.policyMode,
       payload: {
         ...(typeof sanitized.payload === "object" && sanitized.payload ? sanitized.payload as Record<string, unknown> : { value: sanitized.payload }),
+        source_event_id: id,
         idempotencyKey: id,
       },
-      safety: sanitized.safety,
+      safety: { ...sanitized.safety, ignoredPathCount: sanitized.safety.ignoredPathCount + ignoreReport.ignoredPathCount },
     };
   }
 
@@ -201,6 +203,28 @@ export function applyMemoryCandidateGovernance(candidates: MemoryCandidate[], co
       submittedTokens,
     },
   };
+}
+
+function readCaptureIgnorePatterns(workspacePath: string): string[] {
+  const ignorePath = path.join(workspacePath, ".rorca-captureignore");
+  if (!existsSync(ignorePath)) return [];
+  return readFileSync(ignorePath, "utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function redactIgnoredPaths(value: unknown, workspacePath: string, patterns: string[], report: { ignoredPathCount: number }): unknown {
+  if (patterns.length === 0) return value;
+  if (typeof value === "string") {
+    if (isCaptureIgnoredPath(value, workspacePath, patterns)) {
+      report.ignoredPathCount += 1;
+      return "[REDACTED_PATH]";
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item) => redactIgnoredPaths(item, workspacePath, patterns, report));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, redactIgnoredPaths(child, workspacePath, patterns, report)]));
+  }
+  return value;
 }
 
 function estimateTokens(text: string): number {

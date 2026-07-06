@@ -37,6 +37,34 @@ describe("Rorca VS Code command registration", () => {
 
     expect(result.queued).toBe(true);
     expect(result.governance.submittedCandidates).toBe(1);
-    expect(submissions[0]).toMatchObject({ eventType: "memory_candidate", workspaceId: "ws", payload: { reviewRequired: true } });
+    expect(submissions[0]).toMatchObject({
+      eventType: "explicit_memory",
+      workspaceId: "ws",
+      payload: {
+        memory_summary: "Use apiFetch for frontend API calls.",
+        category: "Decision",
+        requested_by: "human",
+        reviewRequired: true,
+      },
+    });
+  });
+
+  test("Remember Selection does not bypass governance when the selection exceeds token caps", async () => {
+    const submissions: Array<{ payload?: { memory_summary?: string; governance?: { submittedCandidates: number; droppedCandidates: number } } }> = [];
+    const client = { submit: async (input: never) => { submissions.push(input); return { queued: false }; } } as RorcaCaptureClient;
+
+    await submitRememberSelection({
+      client,
+      config: { enabled: true, apiBaseUrl: "http://127.0.0.1:3030", policyMode: "metadata-only", queueMaxSize: 100, memoryCandidateMaxCount: 1, memoryCandidateTokenCap: 100 },
+      workspaceId: "ws",
+      workspacePath: "/repo",
+      selectionText: "x".repeat(1000),
+      filePath: "/repo/src/large.ts",
+      languageId: "typescript",
+    });
+
+    expect(submissions[0]?.payload?.governance).toMatchObject({ submittedCandidates: 0, droppedCandidates: 1 });
+    expect(submissions[0]?.payload?.memory_summary).toBe("Memory candidate omitted because it exceeded Rorca governance caps.");
+    expect(submissions[0]?.payload?.memory_summary).not.toContain("xxx");
   });
 });

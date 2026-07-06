@@ -3,6 +3,7 @@ declare module "vscode" {
   export type ExtensionContext = {
     subscriptions: Disposable[];
     globalState: { get<T>(key: string, defaultValue?: T): T | undefined; update(key: string, value: unknown): Thenable<void> };
+    extension: { packageJSON?: { version?: string } };
   };
   export type Uri = { fsPath: string; scheme: string; toString(): string };
   export const Uri: { parse(value: string): Uri };
@@ -13,6 +14,7 @@ declare module "vscode" {
   export type StatusBarItem = Disposable & { text: string; tooltip?: string; command?: string; show(): void };
   export enum StatusBarAlignment { Left = 1, Right = 2 }
   export enum ConfigurationTarget { Global = 1, Workspace = 2, WorkspaceFolder = 3 }
+  export const env: { appName: string; sessionId: string };
   export const commands: {
     registerCommand(command: string, callback: (...args: unknown[]) => unknown): Disposable;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;

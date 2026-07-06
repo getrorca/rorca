@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import path from "node:path";
 import { RorcaCaptureClient, queuePathForWorkspace } from "./client.js";
 import { normalizeRorcaCaptureConfig, type RorcaCaptureConfig } from "./config.js";
@@ -65,8 +66,15 @@ export function activate(context: vscode.ExtensionContext): void {
       eventType,
       policyMode: state.config.policyMode,
       payload: {
+        source_system: "vscode",
+        tool_name: "rorca-capture-vscode",
+        host_application: vscode.env.appName,
+        session_id: vscode.env.sessionId,
+        adapter_version: context.extension.packageJSON?.version,
         ...payload,
         hostApi: "vscode-stable-extension-api",
+        git_branch: git.branch,
+        git_sha: git.sha,
         git,
       },
     });
@@ -77,7 +85,7 @@ export function activate(context: vscode.ExtensionContext): void {
     registry: vscode.commands,
     handlers: {
       [RORCA_COMMANDS.captureSessionSummary]: async () => {
-        await submit("session_summary", buildSessionSummary());
+        await submit("ide_session", buildSessionSummary("active"));
         await vscode.window.showInformationMessage("Rorca session summary captured.");
       },
       [RORCA_COMMANDS.rememberSelection]: async () => {
@@ -122,25 +130,25 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument((document) => {
-      void submit("file_saved", documentMetadata(document));
+      void submit("editor_activity", documentActivityPayload("save", document, "File saved in VS Code-compatible editor."));
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (editor) void submit("editor_active", documentMetadata(editor.document));
+      if (editor) void submit("editor_activity", documentActivityPayload("open", editor.document, "Active editor changed."));
     }),
     vscode.window.onDidOpenTerminal((terminal) => {
-      void submit("terminal_opened", { terminalName: terminal.name, processIdAvailable: Boolean(terminal.processId) });
+      void submit("editor_activity", { activity_type: "command", summary: `Terminal opened: ${terminal.name}`, terminalName: terminal.name, processIdAvailable: Boolean(terminal.processId) });
     }),
     vscode.tasks.onDidStartTask((event) => {
-      void submit("task_started", { taskName: event.execution.task.name, taskSource: event.execution.task.source, taskDefinition: event.execution.task.definition ?? null });
+      void submit("editor_activity", { activity_type: "command", summary: `Task started: ${event.execution.task.name}`, taskName: event.execution.task.name, taskSource: event.execution.task.source, taskDefinition: event.execution.task.definition ?? null });
     }),
     vscode.tasks.onDidEndTaskProcess((event) => {
-      void submit("task_ended", { taskName: event.execution.task.name, taskSource: event.execution.task.source, exitCode: event.exitCode ?? null });
+      void submit("editor_activity", { activity_type: "command", summary: `Task ended: ${event.execution.task.name}`, taskName: event.execution.task.name, taskSource: event.execution.task.source, exitCode: event.exitCode ?? null });
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => { canCapture(buildState()); }),
   );
 
   canCapture(buildState());
-  void submit("activation", { capability: "stable-vscode-extension-api", proprietaryAiChat: "unsupported-without-explicit-adapter-api" });
+  void submit("ide_session", { ...buildSessionSummary("started"), capability: "stable-vscode-extension-api", proprietaryAiChat: "unsupported-without-explicit-adapter-api" });
   statusBar.show();
 }
 
@@ -156,22 +164,30 @@ function updateStatusBar(statusBar: vscode.StatusBarItem, state: "active" | "que
   statusBar.show();
 }
 
-function buildSessionSummary(): Record<string, unknown> {
+function buildSessionSummary(ideSessionState: "started" | "active" | "ended"): Record<string, unknown> {
   const editor = vscode.window.activeTextEditor;
   return {
-    activeEditor: editor ? documentMetadata(editor.document) : null,
-    workspaceFolders: vscode.workspace.workspaceFolders?.map((folder) => ({ name: folder.name, uriScheme: folder.uri.scheme, path: folder.uri.fsPath })) ?? [],
+    ide_session_state: ideSessionState,
+    workspace_folders: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
+    activeEditor: editor ? documentActivityPayload("open", editor.document, "Active editor at session summary capture.") : null,
     proprietaryAiChat: "unsupported-without-explicit-adapter-api",
   };
 }
 
-function documentMetadata(document: vscode.TextDocument): Record<string, unknown> {
+function documentActivityPayload(activityType: "open" | "save" | "close" | "diagnostic" | "selection" | "command", document: vscode.TextDocument, summary: string): Record<string, unknown> {
   return {
+    activity_type: activityType,
+    document_uri_hash: hashDocumentUri(document.uri.toString()),
+    language_id: document.languageId,
+    summary,
+    related_files: document.uri.scheme === "file" && document.uri.fsPath ? [{ path: document.uri.fsPath, role: activityType === "save" ? "saved" : "opened", hash: null }] : [],
     uriScheme: document.uri.scheme,
-    filePath: document.uri.fsPath,
-    languageId: document.languageId,
     isUntitled: document.isUntitled,
   };
+}
+
+function hashDocumentUri(uri: string): string {
+  return `sha256:${crypto.createHash("sha256").update(uri).digest("hex")}`;
 }
 
 function readGitContext(workspacePath: string): { branch: string | null; sha: string | null } {
