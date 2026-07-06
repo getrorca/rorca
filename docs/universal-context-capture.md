@@ -51,6 +51,26 @@ annotations before it can be exposed through MCP. Frontend management UI must us
 `src/lib/apiFetch`; non-frontend adapters call the same local API over HTTP and
 must not bypass it.
 
+## UCC-009 privacy, consent, and audit controls
+
+Always-on setup is opt-in and must include an explicit policy choice:
+`off`, `metadata-only`, `repo-and-command`, `ide-assisted`, or `full` explicit-session summaries.
+No setup command may silently enable transcript capture by default.
+
+The single operator status surface is `rorca-capture status --workspace-id <id>`
+and the Settings → Workspace Context → Capture Status UI. Both display active
+integrations, last captured event metadata, queue depth, redaction policy,
+ignored paths, pause state, and redaction diagnostics. Diagnostics are limited
+to counts, redaction type names, and regulated-domain flag names; they must not
+echo matched secret values or raw payloads.
+
+`rorca-capture pause`, `resume`, and `uninstall --all` are privacy controls, not
+UI hints. Pause/resume is enforced at capture queue submission boundaries, and
+uninstall removes managed hooks, shell snippets, IDE config, agent adapter
+artifacts, and pending capture queue state where possible. Local audit rows may
+record only event type, integration id, timestamp, and redaction summary counts
+or flag names — never raw captured payloads.
+
 ## Capture event contract
 
 Rorca should normalize all sources into one event envelope before persistence or

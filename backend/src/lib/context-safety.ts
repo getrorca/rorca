@@ -7,7 +7,35 @@
 
 import crypto from 'node:crypto';
 
-export type CapturePolicyMode = 'off' | 'metadata-only' | 'command-summary' | 'explicit-transcript-import';
+export type CapturePolicyMode =
+  | 'off'
+  | 'metadata-only'
+  | 'repo-and-command'
+  | 'ide-assisted'
+  | 'full'
+  /** @deprecated use repo-and-command */
+  | 'command-summary'
+  /** @deprecated use full */
+  | 'explicit-transcript-import';
+
+export type CanonicalCapturePolicyMode = 'off' | 'metadata-only' | 'repo-and-command' | 'ide-assisted' | 'full';
+
+export const CANONICAL_CAPTURE_POLICY_MODES: CanonicalCapturePolicyMode[] = ['off', 'metadata-only', 'repo-and-command', 'ide-assisted', 'full'];
+
+export function normalizeCapturePolicyMode(value: unknown, fallback: CanonicalCapturePolicyMode = 'metadata-only'): CanonicalCapturePolicyMode {
+  if (value === 'off' || value === 'metadata-only' || value === 'repo-and-command' || value === 'ide-assisted' || value === 'full') return value;
+  if (value === 'command-summary') return 'repo-and-command';
+  if (value === 'explicit-transcript-import') return 'full';
+  return fallback;
+}
+
+export function capturePolicyRawContent(mode: CapturePolicyMode): 'off' | 'metadata' | 'summary' | 'explicit' {
+  const normalized = normalizeCapturePolicyMode(mode);
+  if (normalized === 'off') return 'off';
+  if (normalized === 'metadata-only') return 'metadata';
+  if (normalized === 'repo-and-command' || normalized === 'ide-assisted') return 'summary';
+  return 'explicit';
+}
 
 export type CapturePolicy = {
   version: string;
@@ -72,6 +100,17 @@ export type CaptureSafetyReport = {
   truncated: boolean;
   hashAlgorithm: 'sha256';
   contentHash: string;
+  redactionTypes?: string[];
+  regulatedSignals?: string[];
+};
+
+export type RedactionDiagnostics = {
+  redactionCount: number;
+  ignoredPathCount: number;
+  redactionTypes: string[];
+  regulatedSignals: string[];
+  regulatedDomainFlags: string[];
+  truncated: boolean;
 };
 
 export type SanitizedCapturePayload = {
@@ -108,7 +147,7 @@ export function hashCaptureContent(value: unknown): string {
 }
 
 export function sanitizeCapturePayload(input: unknown, policy: CapturePolicy = DEFAULT_CAPTURE_POLICY): SanitizedCapturePayload {
-  const counters = { redactionCount: 0, ignoredPathCount: 0, truncated: false };
+  const counters = { redactionCount: 0, ignoredPathCount: 0, truncated: false, redactionTypes: new Set<string>(), regulatedSignals: new Set<string>() };
   const payload = sanitizeValue(input, policy, counters, 0);
   const bounded = boundPayload(payload, policy, counters);
   return {
@@ -121,11 +160,13 @@ export function sanitizeCapturePayload(input: unknown, policy: CapturePolicy = D
       truncated: counters.truncated,
       hashAlgorithm: policy.hashAlgorithm,
       contentHash: hashCaptureContent(bounded),
+      redactionTypes: Array.from(counters.redactionTypes).sort(),
+      regulatedSignals: Array.from(counters.regulatedSignals).sort(),
     },
   };
 }
 
-function sanitizeValue(value: unknown, policy: CapturePolicy, counters: { redactionCount: number; ignoredPathCount: number; truncated: boolean }, depth: number): unknown {
+function sanitizeValue(value: unknown, policy: CapturePolicy, counters: { redactionCount: number; ignoredPathCount: number; truncated: boolean; redactionTypes?: Set<string>; regulatedSignals?: Set<string> }, depth: number): unknown {
   if (depth > 16) {
     counters.truncated = true;
     return '[TRUNCATED_DEPTH]';
@@ -143,6 +184,7 @@ function sanitizeValue(value: unknown, policy: CapturePolicy, counters: { redact
       if (/^(raw|content|text|stdout|stderr)$/i.test(key) && policy.rawContentDefault !== 'explicit') {
         out[key] = typeof child === 'string' ? { hash: hashCaptureContent(child), byteLength: Buffer.byteLength(child), redacted: true } : '[REDACTED_RAW_CONTENT]';
         counters.redactionCount += 1;
+        counters.redactionTypes?.add('raw_content');
         continue;
       }
       out[key] = sanitizeValue(child, policy, counters, depth + 1);
@@ -152,12 +194,15 @@ function sanitizeValue(value: unknown, policy: CapturePolicy, counters: { redact
   return String(value);
 }
 
-function sanitizeString(input: string, policy: CapturePolicy, counters: { redactionCount: number; truncated: boolean }): string {
+function sanitizeString(input: string, policy: CapturePolicy, counters: { redactionCount: number; truncated: boolean; redactionTypes?: Set<string> }): string {
   let output = input;
   for (const rule of policy.redactionPatterns) {
     output = output.replace(rule.pattern, (...args: unknown[]) => {
       const match = String(args[0]);
-      if (match) counters.redactionCount += 1;
+      if (match) {
+        counters.redactionCount += 1;
+        counters.redactionTypes?.add(rule.name);
+      }
       return rule.replacement.replace(/\$(\d+)/g, (_placeholder, index: string) => String(args[Number(index)] ?? ''));
     });
   }
@@ -205,8 +250,8 @@ export function isCaptureIgnoredPath(candidatePath: string, workspacePath: strin
   return patterns.some((rawPattern) => matchesCaptureIgnorePattern(relative, absolute, root, rawPattern));
 }
 
-export function redactCommandText(commandText: string, input: { workspacePath?: string; captureIgnorePatterns?: string[]; policy?: CapturePolicy } = {}): { text: string; redactionCount: number; ignoredPathCount: number; truncated: boolean; regulatedSignals: string[] } {
-  const counters = { redactionCount: 0, truncated: false };
+export function redactCommandText(commandText: string, input: { workspacePath?: string; captureIgnorePatterns?: string[]; policy?: CapturePolicy } = {}): { text: string; redactionCount: number; ignoredPathCount: number; truncated: boolean; regulatedSignals: string[]; redactionTypes: string[] } {
+  const counters = { redactionCount: 0, truncated: false, redactionTypes: new Set<string>() };
   let text = sanitizeString(commandText, input.policy ?? DEFAULT_CAPTURE_POLICY, counters);
   let ignoredPathCount = 0;
   const regulatedSignals = REGULATED_SIGNAL_RULES.filter((rule) => rule.pattern.test(commandText)).map((rule) => rule.name);
@@ -216,20 +261,21 @@ export function redactCommandText(commandText: string, input: { workspacePath?: 
     if (isCaptureIgnoredPath(token, input.workspacePath, input.captureIgnorePatterns)) {
       text = text.split(token).join('[REDACTED_PATH]');
       counters.redactionCount += 1;
+      counters.redactionTypes.add('ignored_path');
       ignoredPathCount += 1;
     }
   }
-  return { text, redactionCount: counters.redactionCount, ignoredPathCount, truncated: counters.truncated, regulatedSignals };
+  return { text, redactionCount: counters.redactionCount, ignoredPathCount, truncated: counters.truncated, regulatedSignals, redactionTypes: Array.from(counters.redactionTypes).sort() };
 }
 
 
 export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: CapturePolicy = DEFAULT_CAPTURE_POLICY): SanitizedCapturePayload & { payload: SanitizedCliCommandEvent | null } {
-  const policyMode = input.policyMode ?? 'metadata-only';
+  const policyMode = normalizeCapturePolicyMode(input.policyMode ?? 'metadata-only');
   if (policyMode === 'off') {
     return { payload: null, safety: sanitizeCapturePayload({ skipped: 'policy_off' }, policy).safety };
   }
-  if (input.transcript !== undefined && policyMode !== 'explicit-transcript-import') {
-    throw new Error('Transcript capture requires explicit-transcript-import policy');
+  if (input.transcript !== undefined && policyMode !== 'full') {
+    throw new Error('Transcript capture requires full explicit-session summary policy');
   }
   if (input.cwd && isCaptureIgnoredPath(input.cwd, input.workspacePath, input.captureIgnorePatterns)) {
     const skipped = sanitizeCapturePayload({ skipped: 'capture_ignore' }, policy).safety;
@@ -256,11 +302,11 @@ export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: Ca
     gitSha: input.gitSha ?? null,
     agent: detectedAgent,
     regulatedSignals: redacted.regulatedSignals,
-    ...(policyMode === 'explicit-transcript-import' && input.transcript !== undefined ? { transcript: input.transcript } : {}),
+    ...(policyMode === 'full' && input.transcript !== undefined ? { transcript: input.transcript } : {}),
   };
   const sanitized = sanitizeCapturePayload(event, {
     ...policy,
-    rawContentDefault: policyMode === 'explicit-transcript-import' ? 'explicit' : policy.rawContentDefault,
+    rawContentDefault: policyMode === 'full' ? 'explicit' : policy.rawContentDefault,
   }) as SanitizedCapturePayload & { payload: SanitizedCliCommandEvent };
   return {
     ...sanitized,
@@ -269,7 +315,21 @@ export function sanitizeCliCommandEvent(input: CliCommandSafetyInput, policy: Ca
       redactionCount: sanitized.safety.redactionCount + redacted.redactionCount,
       ignoredPathCount: sanitized.safety.ignoredPathCount + redacted.ignoredPathCount,
       truncated: sanitized.safety.truncated || redacted.truncated,
+      redactionTypes: Array.from(new Set([...(sanitized.safety.redactionTypes ?? []), ...redacted.redactionTypes])).sort(),
+      regulatedSignals: Array.from(new Set([...(sanitized.safety.regulatedSignals ?? []), ...redacted.regulatedSignals])).sort(),
     },
+  };
+}
+
+export function formatRedactionDiagnostics(input: Partial<CaptureSafetyReport> & { regulatedSignals?: string[] } = {}): RedactionDiagnostics {
+  const regulatedSignals = Array.from(new Set(input.regulatedSignals ?? [])).sort();
+  return {
+    redactionCount: Number(input.redactionCount ?? 0),
+    ignoredPathCount: Number(input.ignoredPathCount ?? 0),
+    redactionTypes: Array.from(new Set(input.redactionTypes ?? [])).sort(),
+    regulatedSignals,
+    regulatedDomainFlags: regulatedSignals,
+    truncated: Boolean(input.truncated),
   };
 }
 

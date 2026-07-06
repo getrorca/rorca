@@ -52,11 +52,29 @@ function api(workspace: Workspace, overrides: Partial<CaptureBootstrapApiClient>
 }
 
 describe("runCaptureBootstrap", () => {
+  it("requires an explicit setup policy and does not default to silent capture", async () => {
+    const { root, home, workspace } = makeRepo();
+
+    const report = await runCaptureBootstrap({
+      alwaysOn: true,
+      dryRun: true,
+      cwd: root,
+      homeDir: home,
+      apiClient: api(workspace),
+      env: { SHELL: "/bin/zsh", PATH: "" },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.failed.find((item) => item.id === "capture-policy-choice")?.message).toContain("explicit --policy choice");
+    expect(existsSync(path.join(root, ".rorca", "capture", "sidecar.json"))).toBe(false);
+  });
+
   it("performs a dry-run without writing files and reports would-install steps", async () => {
     const { root, home, workspace } = makeRepo();
 
     const report = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       dryRun: true,
       cwd: root,
       homeDir: home,
@@ -77,6 +95,7 @@ describe("runCaptureBootstrap", () => {
 
     const first = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace),
@@ -84,6 +103,7 @@ describe("runCaptureBootstrap", () => {
     });
     const second = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace),
@@ -108,6 +128,7 @@ describe("runCaptureBootstrap", () => {
 
     const report = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace, {
@@ -126,6 +147,7 @@ describe("runCaptureBootstrap", () => {
       queuePath: path.join(root, ".rorca", "capture", "queue"),
       redactionConfigPath: path.join(root, ".rorca", "capture", "redaction.json"),
       captureIgnorePath: path.join(root, ".rorca-captureignore"),
+      policyMode: "metadata-only",
     }]);
   });
 
@@ -134,6 +156,7 @@ describe("runCaptureBootstrap", () => {
 
     const report = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace, {
@@ -152,6 +175,7 @@ describe("runCaptureBootstrap", () => {
     const { root, home, workspace } = makeRepo();
     await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace),
@@ -185,6 +209,7 @@ describe("runCaptureBootstrap", () => {
     try {
       const report = await runCaptureBootstrap({
         alwaysOn: true,
+        policyMode: "metadata-only",
         cwd: root,
         homeDir: home,
         apiClient: api(workspace),
@@ -208,6 +233,7 @@ describe("runCaptureBootstrap", () => {
 
     const report = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace),
@@ -223,6 +249,7 @@ describe("runCaptureBootstrap", () => {
 
     const report = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace, {
@@ -245,6 +272,7 @@ describe("runCaptureBootstrap", () => {
 
     const report = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace),
@@ -259,6 +287,7 @@ describe("runCaptureBootstrap", () => {
     const { root, home, workspace } = makeRepo();
     const report = await runCaptureBootstrap({
       alwaysOn: true,
+      policyMode: "metadata-only",
       cwd: root,
       homeDir: home,
       apiClient: api(workspace),

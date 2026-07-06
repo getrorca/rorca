@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import type { ChildProcess, SpawnSyncOptions } from "node:child_process";
-import { DEFAULT_CAPTURE_POLICY, hashCaptureContent, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety";
+import { DEFAULT_CAPTURE_POLICY, hashCaptureContent, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety.js";
 import type { Workspace } from "./types.js";
 
 export type CaptureServicePlatform = "darwin" | "linux" | "win32";
@@ -40,7 +40,7 @@ export type CaptureServiceStatus = {
   queueDepth: number;
   backoffMs: number;
   sourceCapabilities: Record<string, { status: "active" | "degraded" | "disabled" | "failed"; reason?: string; fallbackSources?: string[] }>;
-  capturePolicy: ReturnType<typeof defaultCapturePolicy>;
+  capturePolicy: ReturnType<typeof defaultCapturePolicy> & { mode?: string; paused?: boolean };
   resourceBounds: Omit<CaptureServiceConfig, "apiBaseUrl"> & { watchers: { mode: "polling"; count: 0; recursive: false; boundedBy: "maxConcurrency" } };
   cursor: CaptureCursor;
 };
@@ -222,7 +222,7 @@ export function readCaptureServiceStatus(workspace: Workspace, input: { platform
       shellIntegration: { status: "active" },
       vscodeExtension: { status: "degraded", reason: "extension_host_optional", fallbackSources: ["repoDaemon", "gitHook", "shellIntegration"] },
     },
-    capturePolicy: defaultCapturePolicy(),
+    capturePolicy: { ...defaultCapturePolicy(), ...readLocalCapturePolicy(paths.captureDir) },
     resourceBounds: {
       scanIntervalMs: config.scanIntervalMs,
       maxCommitsPerScan: config.maxCommitsPerScan,
@@ -248,8 +248,11 @@ export async function runManagedCaptureDaemon(input: { workspace: Workspace; con
   const tick = async () => {
     const state = readState(paths.stateFile);
     state.last_seen = now().toISOString();
-    await scanRepository(input.workspace, paths, config, state, spawnSyncImpl, now);
-    await flushQueue(input.workspace, paths, config, state, fetchImpl, now);
+    const localPolicy = readLocalCapturePolicy(paths.captureDir);
+    if (!localPolicy.paused && localPolicy.policyMode !== 'off') {
+      await scanRepository(input.workspace, paths, config, state, spawnSyncImpl, now);
+      await flushQueue(input.workspace, paths, config, state, fetchImpl, now);
+    }
     writeState(paths.stateFile, state);
     writeFileSync(paths.statusFile, `${JSON.stringify(readCaptureServiceStatus(input.workspace, { config }), null, 2)}\n`, "utf8");
   };
@@ -437,6 +440,19 @@ function nextBackoff(current: number, max: number): number {
 
 function defaultCapturePolicy() {
   return { version: "2026-07-ucc-007", rawContentDefault: "metadata+hash", hashAlgorithm: "sha256", boundedWatchers: true } as const;
+}
+
+function readLocalCapturePolicy(captureDir: string): { policyMode?: string; mode?: string; paused?: boolean } {
+  const policyPath = path.join(captureDir, "policy.json");
+  const sidecarPath = path.join(captureDir, "sidecar.json");
+  for (const filePath of [policyPath, sidecarPath]) {
+    if (!existsSync(filePath)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(filePath, "utf8")) as { policyMode?: string; paused?: boolean };
+      return { policyMode: parsed.policyMode, mode: parsed.policyMode, paused: Boolean(parsed.paused) };
+    } catch { /* ignore malformed local policy */ }
+  }
+  return { policyMode: "metadata-only", mode: "metadata-only", paused: false };
 }
 
 function startFallbackProcess(workspace: Workspace, command: string, config?: Partial<CaptureServiceConfig>): ChildProcess {

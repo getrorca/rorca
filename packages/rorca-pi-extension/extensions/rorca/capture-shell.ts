@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import { DEFAULT_CAPTURE_POLICY, detectAgentBinary as detectCanonicalAgentBinary, hashCaptureContent, isCaptureIgnoredPath, redactCommandText, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety";
+import { DEFAULT_CAPTURE_POLICY, capturePolicyRawContent, detectAgentBinary as detectCanonicalAgentBinary, hashCaptureContent, isCaptureIgnoredPath, normalizeCapturePolicyMode, redactCommandText, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety.js";
 import type { Workspace } from "./types.js";
 
 export type CaptureShell = "zsh" | "bash" | "fish" | "powershell";
-export type CapturePolicyMode = "off" | "metadata-only" | "command-summary" | "explicit-transcript-import";
+export type CapturePolicyMode = "off" | "metadata-only" | "repo-and-command" | "ide-assisted" | "full" | "command-summary" | "explicit-transcript-import";
 export type ShellCapturePhase = "start" | "end";
 
 export const SHELL_BLOCK_START = "# >>> rorca-capture always-on (managed) >>>";
@@ -99,7 +99,7 @@ export function shellStartupFile(shell: CaptureShell, homeDir: string): string {
 
 export function renderShellSnippet(shell: CaptureShell, input: { workspace: Workspace; command?: string; policyMode?: CapturePolicyMode; apiBaseUrl?: string }): string {
   const command = input.command ?? "rorca-capture";
-  const policy = input.policyMode ?? "command-summary";
+  const policy = normalizeCapturePolicyMode(input.policyMode ?? "repo-and-command");
   const apiBaseUrl = input.apiBaseUrl ?? "http://127.0.0.1:3030";
   if (shell === "fish") {
     return `${SHELL_BLOCK_START}\nset -gx RORCA_CAPTURE_WORKSPACE_ID ${fishQuote(input.workspace.id)}\nset -gx RORCA_CAPTURE_WORKSPACE_PATH ${fishQuote(input.workspace.path)}\nset -gx RORCA_CAPTURE_POLICY ${fishQuote(policy)}\nset -gx RORCA_CAPTURE_API_URL ${fishQuote(apiBaseUrl)}\nset -gx __rorca_capture_command \"\"\nset -gx __rorca_capture_started_at 0\nfunction __rorca_capture_preexec --on-event fish_preexec\n  set -gx __rorca_capture_command $argv\n  set -gx __rorca_capture_started_at (date +%s 2>/dev/null; or echo 0)\n  command ${command} emit shell --phase start --workspace-id $RORCA_CAPTURE_WORKSPACE_ID --cwd (pwd) --command "$argv" --policy $RORCA_CAPTURE_POLICY --api-base-url $RORCA_CAPTURE_API_URL >/dev/null 2>&1; or true\nend\nfunction __rorca_capture_postexec --on-event fish_postexec\n  set -l code $status\n  set -l now (date +%s 2>/dev/null; or echo 0)\n  set -l duration_ms (math "($now - $__rorca_capture_started_at) * 1000" 2>/dev/null; or echo 0)\n  command ${command} emit shell --phase end --workspace-id $RORCA_CAPTURE_WORKSPACE_ID --cwd (pwd) --command "$__rorca_capture_command" --exit-code $code --duration-ms $duration_ms --policy $RORCA_CAPTURE_POLICY --api-base-url $RORCA_CAPTURE_API_URL >/dev/null 2>&1; or true\nend\n${SHELL_BLOCK_END}\n`;
@@ -151,7 +151,7 @@ export function detectAgentBinary(command: string, customPatterns: string[] = []
 }
 
 export function buildShellCaptureEvent(input: BuildShellCaptureEventInput): ShellCaptureEvent | null {
-  const policyMode = input.policyMode ?? "metadata-only";
+  const policyMode = normalizeCapturePolicyMode(input.policyMode ?? "metadata-only");
   const occurredAt = input.occurredAt ?? new Date().toISOString();
   const ignorePatterns = input.captureIgnorePatterns ?? readCaptureIgnorePatterns(input.workspacePath);
   if (policyMode === "off" || isCaptureIgnoredPath(input.cwd, input.workspacePath, ignorePatterns)) return null;
@@ -163,7 +163,7 @@ export function buildShellCaptureEvent(input: BuildShellCaptureEventInput): Shel
   const repoPathHash = `sha256:${sha256(path.resolve(input.workspacePath))}`;
   const commandHash = hashCaptureContent(input.command);
   const eventId = `shell:${sha256(`${input.workspaceId}|${occurredAt}|${phase}|${input.command}|${input.exitCode ?? ""}`).slice(0, 24)}`;
-  const rawContent = policyMode === "explicit-transcript-import" ? "explicit" : policyMode === "command-summary" ? "summary" : "metadata";
+  const rawContent = capturePolicyRawContent(policyMode);
   const eventType: ShellCaptureEvent["payload"]["eventType"] = agent.recognized ? "agent_cli_session" : "shell_command";
   const idempotencyMaterial = eventType === "agent_cli_session"
     ? [eventType, "shell", toolName, sessionId, input.workspaceId, occurredAt.slice(0, 16), commandHash]

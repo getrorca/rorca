@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { queryOne } from '../db/index';
 import { NotFoundError, ServiceUnavailableError, ValidationError } from '../lib/errors';
-import { DEFAULT_CAPTURE_POLICY, sanitizeCapturePayload, sanitizeCliCommandEvent, type CapturePolicyMode } from '../lib/context-safety';
+import { DEFAULT_CAPTURE_POLICY, capturePolicyRawContent, formatRedactionDiagnostics, normalizeCapturePolicyMode, sanitizeCapturePayload, sanitizeCliCommandEvent, type CapturePolicyMode } from '../lib/context-safety';
 import { getBoss } from '../lib/pg-boss';
 import {
   approveMemoryCandidate,
@@ -32,6 +32,15 @@ import {
   type CaptureSourceType,
   type UnifiedContextEventPayloadType,
 } from '../lib/pg-boss-schemas';
+import {
+  appendContextCaptureAudit,
+  drainContextCaptureQueue,
+  getContextCaptureControlState,
+  getContextCaptureQueueDepth,
+  listContextCaptureAudit,
+  recordContextCaptureSubmission,
+  upsertContextCaptureControlState,
+} from '../lib/context-capture-controls';
 
 const router = Router();
 
@@ -96,8 +105,7 @@ function parseCandidateId(value: unknown): number {
 }
 
 function parsePolicyMode(value: unknown): CapturePolicyMode {
-  if (value === 'off' || value === 'metadata-only' || value === 'command-summary' || value === 'explicit-transcript-import') return value;
-  return 'metadata-only';
+  return normalizeCapturePolicyMode(value, 'metadata-only');
 }
 
 function isCliCapturePayload(payload: unknown): boolean {
@@ -218,7 +226,7 @@ export function normalizeContextEventPayload(input: {
     capture_policy: {
       policy_version: stringValue((raw.capture_policy as Record<string, unknown> | undefined)?.policy_version) ?? input.policyVersion,
       mode: policyMode,
-      raw_content: policyMode === 'explicit-transcript-import' ? 'explicit' as const : policyMode === 'command-summary' ? 'summary' as const : policyMode === 'off' ? 'off' as const : 'metadata' as const,
+      raw_content: capturePolicyRawContent(policyMode),
     },
     trust_tier: raw.trust_tier === 'untrusted' || raw.trust_tier === 'verified' || raw.trust_tier === 'privileged' ? raw.trust_tier : 'local' as const,
     provenance: {
@@ -376,6 +384,7 @@ function captureCapability() {
     },
     policy: {
       version: DEFAULT_CAPTURE_POLICY.version,
+      availableModes: ['off', 'metadata-only', 'repo-and-command', 'ide-assisted', 'full'],
       rawContentDefault: DEFAULT_CAPTURE_POLICY.rawContentDefault,
       maxStringBytes: DEFAULT_CAPTURE_POLICY.maxStringBytes,
       maxPayloadBytes: DEFAULT_CAPTURE_POLICY.maxPayloadBytes,
@@ -398,8 +407,8 @@ function captureCapability() {
  *     tags: [Context Capture]
  *     summary: Verify always-on capture bootstrap inputs
  *     operationId: verifyContextCaptureBootstrap
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Capture bootstrap verification reads user-owned workspace registration and local filesystem paths before an explicit setup action mutates reversible workspace files."
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Capture bootstrap verification prepares operator-level always-on integrations and local filesystem paths before an explicit setup action mutates reversible workspace files."
  *     description: Validates workspace registration, repository path, and planned capture queue/redaction/ignore paths for the explicit always-on capture setup command. This endpoint performs verification only; it does not install hooks or modify shell/editor configuration.
  *     requestBody:
  *       required: true
@@ -472,9 +481,8 @@ router.post('/bootstrap/verify', async (req, res, next) => {
  *     tags: [Context Capture]
  *     summary: Submit a redacted context capture event
  *     operationId: submitContextCaptureEvent
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Local shell and daemon capture submit already-redacted command metadata through this stable public API; it has no operator side effects and never writes directly to context tables."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Local shell, daemon, IDE, and agent capture submissions are operator-controlled telemetry writes gated by explicit local policy and pause state."
  *     requestBody:
  *       required: true
  *       content:
@@ -507,10 +515,29 @@ router.post('/events', async (req, res, next) => {
 
     const payload = req.body.payload ?? {};
     assertAgentMetadata(payload);
-    const policyMode = parsePolicyMode(req.body.policyMode ?? (payload as Record<string, unknown>).policyMode);
+    const control = await getContextCaptureControlState(workspaceId);
+    const requestedPolicyMode = parsePolicyMode(req.body.policyMode ?? (payload as Record<string, unknown>).policyMode);
+    const policyMode = control.policyMode === 'off' ? requestedPolicyMode : control.policyMode;
     const ignorePatterns = readCaptureIgnorePatterns(workspace.path);
-    if (isCliCapturePayload(payload) && (payload as Record<string, unknown>).transcript !== undefined && policyMode !== 'explicit-transcript-import') {
-      throw new ValidationError('Transcript capture requires explicit-transcript-import policy');
+    const integrationId = `${source}:${typeof (payload as Record<string, unknown>).tool_name === 'string' ? (payload as Record<string, unknown>).tool_name : 'unknown'}`;
+    if (control.paused || control.policyMode === 'off' || policyMode === 'off') {
+      const safety = sanitizeCapturePayload({ skipped: control.paused ? 'paused' : 'policy_off', source, eventType: (payload as Record<string, unknown>).eventType }).safety;
+      await recordContextCaptureSubmission({ workspaceId, eventType: 'capture_suppressed', integrationId, payloadEventType: String((payload as Record<string, unknown>).eventType ?? 'unknown'), safety });
+      res.json({
+        ok: true,
+        accepted: false,
+        workspaceId,
+        source,
+        occurredAt,
+        reason: control.paused ? 'paused' : 'policy_off',
+        safety,
+        redactionDiagnostics: formatRedactionDiagnostics(safety),
+        capability: captureCapability(),
+      });
+      return;
+    }
+    if (isCliCapturePayload(payload) && (payload as Record<string, unknown>).transcript !== undefined && policyMode !== 'full') {
+      throw new ValidationError('Transcript capture requires full explicit-session summary policy');
     }
 
     const sanitized = isCliCapturePayload(payload)
@@ -522,18 +549,20 @@ router.post('/events', async (req, res, next) => {
       })
       : sanitizeCapturePayload(payload, {
         ...DEFAULT_CAPTURE_POLICY,
-        rawContentDefault: policyMode === 'explicit-transcript-import' ? 'explicit' : DEFAULT_CAPTURE_POLICY.rawContentDefault,
+        rawContentDefault: policyMode === 'full' ? 'explicit' : DEFAULT_CAPTURE_POLICY.rawContentDefault,
       });
 
     if (sanitized.payload === null) {
+      await recordContextCaptureSubmission({ workspaceId, eventType: 'capture_suppressed', integrationId, payloadEventType: 'capture_ignore', safety: sanitized.safety });
       res.json({
         ok: true,
         accepted: false,
         workspaceId,
         source,
         occurredAt,
-        reason: policyMode === 'off' ? 'policy_off' : 'capture_ignore',
+        reason: 'capture_ignore',
         safety: sanitized.safety,
+        redactionDiagnostics: formatRedactionDiagnostics(sanitized.safety),
         capability: captureCapability(),
       });
       return;
@@ -565,6 +594,8 @@ router.post('/events', async (req, res, next) => {
       throw new ServiceUnavailableError('Context capture queue rejected the event; local capture client should keep the event queued for retry.');
     }
 
+    await recordContextCaptureSubmission({ workspaceId, eventType: 'capture_submitted', integrationId, payloadEventType: event.data.payload.eventType, safety: sanitized.safety });
+
     res.json({
       ok: true,
       accepted: true,
@@ -576,6 +607,7 @@ router.post('/events', async (req, res, next) => {
       occurredAt,
       payload: event.data.payload,
       safety: sanitized.safety,
+      redactionDiagnostics: formatRedactionDiagnostics(sanitized.safety),
       capability: captureCapability(),
     });
   } catch (err) {
@@ -597,6 +629,181 @@ router.post('/events', async (req, res, next) => {
  */
 router.get('/capability', (_req, res) => {
   res.json({ captureCapability: captureCapability() });
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/status:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: Get always-on capture privacy/control status
+ *     operationId: getContextCaptureStatus
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Capture status exposes operator-only local integration, pause, queue, audit, ignore, and redaction policy state."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture control status }
+ *       404: { description: Workspace not found }
+ */
+router.get('/:workspaceId/status', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const control = await getContextCaptureControlState(workspaceId);
+    const ignoredPaths = readCaptureIgnorePatterns(workspace.path);
+    const queueDepth = await getContextCaptureQueueDepth(workspaceId);
+    const auditLog = await listContextCaptureAudit(workspaceId, 20);
+    res.json({
+      ok: true,
+      workspace,
+      status: {
+        ...control,
+        ignoredPaths,
+        queueDepth,
+        redactionPolicy: {
+          version: DEFAULT_CAPTURE_POLICY.version,
+          mode: control.policyMode,
+          rawContentDefault: DEFAULT_CAPTURE_POLICY.rawContentDefault,
+          availableModes: ['off', 'metadata-only', 'repo-and-command', 'ide-assisted', 'full'],
+        },
+        auditLog,
+      },
+      capability: captureCapability(),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/policy:
+ *   patch:
+ *     tags: [Context Capture]
+ *     summary: Update always-on capture policy and active integrations
+ *     operationId: updateContextCapturePolicy
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Changing capture policy enables/disables local telemetry integrations and is operator-only configuration."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture policy updated }
+ *       400: { description: Invalid policy }
+ *       404: { description: Workspace not found }
+ */
+router.patch('/:workspaceId/policy', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const mode = normalizeCapturePolicyMode(req.body.policyMode ?? req.body.mode, 'off');
+    const activeIntegrations = req.body.activeIntegrations && typeof req.body.activeIntegrations === 'object' ? req.body.activeIntegrations as Record<string, unknown> : undefined;
+    const ignoredPaths = Array.isArray(req.body.ignoredPaths) ? req.body.ignoredPaths.filter((item: unknown): item is string => typeof item === 'string') : undefined;
+    const state = await upsertContextCaptureControlState({ workspaceId, policyMode: mode, activeIntegrations, ignoredPaths });
+    await appendContextCaptureAudit({ workspaceId, eventType: 'policy_update', integrationId: 'operator' });
+    res.json({ ok: true, workspaceId, status: state });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/pause:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Pause always-on capture submissions
+ *     operationId: pauseContextCapture
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Pausing capture is an operator-only privacy control that suppresses queue submissions across integrations."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture paused }
+ */
+router.post('/:workspaceId/pause', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const status = await upsertContextCaptureControlState({ workspaceId, paused: true });
+    await appendContextCaptureAudit({ workspaceId, eventType: 'pause', integrationId: 'operator' });
+    res.json({ ok: true, status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/resume:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Resume always-on capture submissions
+ *     operationId: resumeContextCapture
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Resuming capture is an operator-only privacy control that re-enables queue submissions under the explicit policy."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture resumed }
+ */
+router.post('/:workspaceId/resume', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const status = await upsertContextCaptureControlState({ workspaceId, paused: false });
+    await appendContextCaptureAudit({ workspaceId, eventType: 'resume', integrationId: 'operator' });
+    res.json({ ok: true, status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/uninstall:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Mark capture integrations uninstalled and drain pending capture queue
+ *     operationId: uninstallContextCapture
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Uninstalling capture removes operator integrations and drains local telemetry queues, so it is operator-only maintenance."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture uninstalled }
+ */
+router.post('/:workspaceId/uninstall', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const drainedQueueEntries = await drainContextCaptureQueue(workspaceId);
+    const status = await upsertContextCaptureControlState({ workspaceId, policyMode: 'off', paused: true, activeIntegrations: {}, ignoredPaths: [] });
+    await appendContextCaptureAudit({ workspaceId, eventType: 'uninstall', integrationId: 'operator' });
+    res.json({ ok: true, status, drainedQueueEntries });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**

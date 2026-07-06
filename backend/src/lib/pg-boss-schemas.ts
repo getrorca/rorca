@@ -132,7 +132,7 @@ export type SpecJobPayloadType = z.infer<typeof SpecJobPayload>;
 
 export const CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION = '2026-07-ucc-007.v1' as const;
 
-export const CapturePolicyModeEnum = z.enum(['off', 'metadata-only', 'command-summary', 'explicit-transcript-import']);
+export const CapturePolicyModeEnum = z.enum(['off', 'metadata-only', 'repo-and-command', 'ide-assisted', 'full', 'command-summary', 'explicit-transcript-import']);
 export const CaptureSourceEnum = z.enum([
   'repoDaemon',
   'gitHook',

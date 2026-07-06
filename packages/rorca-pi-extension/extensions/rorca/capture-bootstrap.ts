@@ -12,8 +12,10 @@ import {
   renderShellSnippet,
   shellStartupFile,
   uninstallManagedShellBlock,
+  type CapturePolicyMode,
   type CaptureShell,
 } from "./capture-shell.js";
+import { CANONICAL_CAPTURE_POLICY_MODES, normalizeCapturePolicyMode } from "../../../../backend/src/lib/context-safety.js";
 
 export type CaptureBootstrapStepStatus = "installed" | "skipped" | "would-install" | "degraded" | "failed";
 export type CaptureBootstrapOverallStatus = "ok" | "dry-run" | "degraded" | "failed";
@@ -55,6 +57,7 @@ export type CaptureBootstrapOptions = {
   apiBaseUrl?: string;
   apiClient?: CaptureBootstrapApiClient;
   env?: NodeJS.ProcessEnv;
+  policyMode?: CapturePolicyMode;
 };
 
 export type CaptureTeardownOptions = {
@@ -63,6 +66,7 @@ export type CaptureTeardownOptions = {
   homeDir?: string;
   shells?: CaptureShell[];
   env?: NodeJS.ProcessEnv;
+  all?: boolean;
 };
 
 export type CaptureBootstrapApiClient = {
@@ -75,7 +79,9 @@ export type CaptureBootstrapApiClient = {
     queuePath: string;
     redactionConfigPath: string;
     captureIgnorePath: string;
+    policyMode?: string;
   }): Promise<unknown>;
+  configureCapturePolicy?(input: { workspaceId: string; policyMode: string; activeIntegrations?: Record<string, unknown>; ignoredPaths?: string[] }): Promise<unknown>;
 };
 
 type ManagedFile = {
@@ -371,7 +377,7 @@ function redactionConfigContent(): string {
   });
 }
 
-function sidecarConfigContent(workspace: Workspace, queuePath: string): string {
+function sidecarConfigContent(workspace: Workspace, queuePath: string, policyMode: string): string {
   return jsonFileContent({
     workspaceId: workspace.id,
     workspacePath: workspace.path,
@@ -380,6 +386,8 @@ function sidecarConfigContent(workspace: Workspace, queuePath: string): string {
     endpoint: "/api/context-capture/events",
     healthEndpoint: "/api/health",
     alwaysOn: true,
+    policyMode,
+    paused: false,
     serviceLifecycle: "rorca-capture service <install|start|stop|restart|status|uninstall>",
     resources: {
       scanIntervalMs: 60000,
@@ -399,8 +407,8 @@ function sidecarConfigContent(workspace: Workspace, queuePath: string): string {
   });
 }
 
-function gitHookContent(hookName: string, workspace: Workspace, queuePath: string): string {
-  return `#!/bin/sh\n# ${SENTINEL}\n# Best-effort API-only context capture hook. Does not block git operations.\nRORCA_WORKSPACE_ID=${JSON.stringify(workspace.id)}\nRORCA_QUEUE_PATH=${JSON.stringify(queuePath)}\nRORCA_HOOK=${JSON.stringify(hookName)}\nmkdir -p "$RORCA_QUEUE_PATH" 2>/dev/null || true\nprintf '{"source":"gitHook","workspaceId":"%s","hook":"%s","occurredAt":"%s"}\\n' "$RORCA_WORKSPACE_ID" "$RORCA_HOOK" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RORCA_QUEUE_PATH/git-hook.ndjson" 2>/dev/null || true\nexit 0\n`;
+function gitHookContent(hookName: string, workspace: Workspace, queuePath: string, policyMode: string): string {
+  return `#!/bin/sh\n# ${SENTINEL}\n# Best-effort API-only context capture hook. Does not block git operations.\nRORCA_WORKSPACE_ID=${JSON.stringify(workspace.id)}\nRORCA_QUEUE_PATH=${JSON.stringify(queuePath)}\nRORCA_CAPTURE_POLICY=${JSON.stringify(policyMode)}\nRORCA_HOOK=${JSON.stringify(hookName)}\nmkdir -p "$RORCA_QUEUE_PATH" 2>/dev/null || true\nif [ "$RORCA_CAPTURE_POLICY" = "off" ]; then exit 0; fi\nprintf '{"source":"gitHook","workspaceId":"%s","hook":"%s","policyMode":"%s","occurredAt":"%s"}\\n' "$RORCA_WORKSPACE_ID" "$RORCA_HOOK" "$RORCA_CAPTURE_POLICY" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RORCA_QUEUE_PATH/git-hook.ndjson" 2>/dev/null || true\nexit 0\n`;
 }
 
 function daemonServiceContent(workspace: Workspace): string {
@@ -542,7 +550,7 @@ function uninstallMetadataContent(workspace: Workspace, artifactPaths: string[])
   });
 }
 
-function installGitHooks(workspace: Workspace, queuePath: string, dryRun: boolean): CaptureBootstrapStep[] {
+function installGitHooks(workspace: Workspace, queuePath: string, dryRun: boolean, policyMode: string): CaptureBootstrapStep[] {
   const hooksDir = path.join(workspace.path, ".git", "hooks");
   if (!existsSync(path.join(workspace.path, ".git"))) {
     return [step({
@@ -559,12 +567,12 @@ function installGitHooks(workspace: Workspace, queuePath: string, dryRun: boolea
     id: `git-hook:${hookName}`,
     label: `Git hook ${hookName}`,
     path: path.join(hooksDir, hookName),
-    content: gitHookContent(hookName, workspace, queuePath),
+    content: gitHookContent(hookName, workspace, queuePath, policyMode),
     executable: true,
   }, dryRun));
 }
 
-function installShellSnippets(workspace: Workspace, captureDir: string, homeDir: string, env: NodeJS.ProcessEnv, dryRun: boolean, apiBaseUrl: string): CaptureBootstrapStep[] {
+function installShellSnippets(workspace: Workspace, captureDir: string, homeDir: string, env: NodeJS.ProcessEnv, dryRun: boolean, apiBaseUrl: string, policyMode: string): CaptureBootstrapStep[] {
   const detectedShell = normalizeCaptureShell(env.SHELL || env.ComSpec || env.PSModulePath);
   const steps: CaptureBootstrapStep[] = [];
 
@@ -574,7 +582,7 @@ function installShellSnippets(workspace: Workspace, captureDir: string, homeDir:
       id: `shell-snippet:${shell}`,
       label: `Shell snippet (${shell})`,
       path: snippetPath,
-      content: renderShellSnippet(shell, { workspace, apiBaseUrl }),
+      content: renderShellSnippet(shell, { workspace, apiBaseUrl, policyMode: policyMode as CapturePolicyMode }),
     }, dryRun));
   }
 
@@ -635,7 +643,7 @@ function installIdeAdapter(workspace: Workspace, dryRun: boolean): CaptureBootst
   }, dryRun);
 }
 
-async function backendVerify(client: CaptureBootstrapApiClient, workspace: Workspace, paths: { queuePath: string; redactionConfigPath: string; captureIgnorePath: string }): Promise<CaptureBootstrapStep> {
+async function backendVerify(client: CaptureBootstrapApiClient, workspace: Workspace, paths: { queuePath: string; redactionConfigPath: string; captureIgnorePath: string }, policyMode: string): Promise<CaptureBootstrapStep> {
   if (!client.verifyCaptureBootstrap) {
     return step({
       id: "backend-assisted-onboarding",
@@ -653,6 +661,7 @@ async function backendVerify(client: CaptureBootstrapApiClient, workspace: Works
       queuePath: paths.queuePath,
       redactionConfigPath: paths.redactionConfigPath,
       captureIgnorePath: paths.captureIgnorePath,
+      policyMode,
     });
     return step({
       id: "backend-assisted-onboarding",
@@ -687,10 +696,29 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
       label: "Always-on flag",
       status: "failed",
       message: "Setup requires --always-on to avoid surprise capture configuration.",
-      nextActions: ["Rerun as `rorca capture setup --always-on` after reviewing what will be installed."],
+      nextActions: ["Rerun as `rorca capture setup --always-on --policy <off|metadata-only|repo-and-command|ide-assisted|full>` after reviewing what will be installed."],
     }));
     return buildReport({ dryRun, alwaysOn: false, apiBaseUrl: client.baseUrl, steps });
   }
+
+  if (!options.policyMode || !CANONICAL_CAPTURE_POLICY_MODES.includes(String(options.policyMode) as typeof CANONICAL_CAPTURE_POLICY_MODES[number])) {
+    steps.push(step({
+      id: "capture-policy-choice",
+      label: "Capture policy choice",
+      status: "failed",
+      message: "Setup requires an explicit --policy choice: off, metadata-only, repo-and-command, ide-assisted, or full. No transcript capture is enabled by default.",
+      nextActions: ["Rerun setup with `--policy metadata-only` (safest useful default) or another explicit policy."],
+    }));
+    return buildReport({ dryRun, alwaysOn: true, apiBaseUrl: client.baseUrl, steps });
+  }
+  const policyMode = normalizeCapturePolicyMode(options.policyMode, 'off');
+  steps.push(step({
+    id: "capture-policy-choice",
+    label: "Capture policy choice",
+    status: "skipped",
+    message: `Explicit capture policy selected: ${policyMode}.`,
+    details: { availablePolicies: CANONICAL_CAPTURE_POLICY_MODES },
+  }));
 
   steps.push(await verifyApi(client));
   const resolved = await resolveWorkspace(client, cwd, options.workspaceId);
@@ -712,7 +740,7 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
   const mcpSlashPath = path.join(captureDir, "mcp", "slash-commands.json");
   const uninstallPath = path.join(captureDir, "uninstall.json");
 
-  steps.push(await backendVerify(client, workspace, { queuePath, redactionConfigPath, captureIgnorePath }));
+  steps.push(await backendVerify(client, workspace, { queuePath, redactionConfigPath, captureIgnorePath }, policyMode));
 
   const blockingFailure = steps.some((item) => item.status === "failed" && ["mcp-token", "api-reachability", "workspace-registration", "backend-assisted-onboarding"].includes(item.id));
   if (blockingFailure) {
@@ -722,10 +750,25 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
   steps.push(installDirectory("queue-path", "Capture queue", queuePath, dryRun));
   steps.push(installManagedFile({ id: "redaction-config", label: "Redaction config", path: redactionConfigPath, content: redactionConfigContent() }, dryRun));
   steps.push(installManagedFile({ id: "capture-ignore", label: ".rorca-captureignore", path: captureIgnorePath, content: captureIgnoreContent() }, dryRun));
-  steps.push(installManagedFile({ id: "sidecar-config", label: "Sidecar config", path: sidecarConfigPath, content: sidecarConfigContent(workspace, queuePath) }, dryRun));
-  steps.push(...installGitHooks(workspace, queuePath, dryRun));
+  if (client.configureCapturePolicy && !dryRun) {
+    try {
+      await client.configureCapturePolicy({
+        workspaceId: workspace.id,
+        policyMode,
+        ignoredPaths: captureIgnoreContent().split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')),
+        activeIntegrations: { repoDaemon: true, gitHook: true, shellIntegration: true, vscodeExtension: true, agentAdapters: true, mcpSlashCommand: true },
+      });
+      steps.push(step({ id: "capture-policy-persisted", label: "Capture policy", status: "installed", message: "Explicit capture policy persisted to local operator settings." }));
+    } catch (error) {
+      steps.push(step({ id: "capture-policy-persisted", label: "Capture policy", status: "failed", message: `Could not persist capture policy: ${error instanceof Error ? error.message : String(error)}` }));
+    }
+  } else if (dryRun) {
+    steps.push(step({ id: "capture-policy-persisted", label: "Capture policy", status: "would-install", message: "Explicit capture policy would be persisted to local operator settings." }));
+  }
+  steps.push(installManagedFile({ id: "sidecar-config", label: "Sidecar config", path: sidecarConfigPath, content: sidecarConfigContent(workspace, queuePath, policyMode) }, dryRun));
+  steps.push(...installGitHooks(workspace, queuePath, dryRun, policyMode));
   steps.push(installManagedFile({ id: "daemon-service", label: "Daemon/service file", path: daemonPath, content: daemonServiceContent(workspace) }, dryRun));
-  steps.push(...installShellSnippets(workspace, captureDir, homeDir, env, dryRun, client.baseUrl));
+  steps.push(...installShellSnippets(workspace, captureDir, homeDir, env, dryRun, client.baseUrl, policyMode));
   steps.push(installIdeAdapter(workspace, dryRun));
   steps.push(installManagedFile({ id: "mcp-slash-config", label: "MCP/slash-command config", path: mcpSlashPath, content: mcpSlashConfigContent(workspace) }, dryRun));
   steps.push(...installAgentAdapters(workspace, captureDir, client.baseUrl, env, dryRun));
@@ -805,7 +848,7 @@ function contentHasManagedSentinel(filePath: string): boolean {
   return content.includes(SENTINEL) || content.includes('"rorcaManaged": "v1"');
 }
 
-function teardownManagedArtifact(workspaceRoot: string, artifactPath: string, uninstallPath: string, dryRun: boolean): CaptureBootstrapStep {
+function teardownManagedArtifact(workspaceRoot: string, artifactPath: string, uninstallPath: string, dryRun: boolean, removeAll = false): CaptureBootstrapStep {
   const resolvedPath = path.resolve(artifactPath);
   if (!isWithin(workspaceRoot, resolvedPath)) {
     return step({
@@ -826,21 +869,21 @@ function teardownManagedArtifact(workspaceRoot: string, artifactPath: string, un
   if (stat.isDirectory()) {
     try {
       const names = readdirSync(resolvedPath);
-      if (names.length > 0) {
+      if (names.length > 0 && !removeAll) {
         return step({
           id: "managed-artifact",
           label: "Managed artifact directory",
           status: "degraded",
           path: resolvedPath,
           message: "Managed directory is not empty and was left in place to avoid deleting queued capture data.",
-          nextActions: [`Review ${resolvedPath} and remove it manually if no queued events are needed.`],
+          nextActions: [`Review ${resolvedPath} and remove it manually if no queued events are needed, or rerun with uninstall --all.`],
         });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return step({ id: "managed-artifact", label: "Managed artifact directory", status: "failed", path: resolvedPath, message: `Could not inspect directory: ${message}` });
     }
-    if (dryRun) return step({ id: "managed-artifact", label: "Managed artifact directory", status: "would-install", path: resolvedPath, message: "Empty managed directory would be removed." });
+    if (dryRun) return step({ id: "managed-artifact", label: "Managed artifact directory", status: "would-install", path: resolvedPath, message: removeAll ? "Managed directory and queued events would be removed." : "Empty managed directory would be removed." });
     rmSync(resolvedPath, { recursive: true, force: true });
     return step({ id: "managed-artifact", label: "Managed artifact directory", status: "installed", path: resolvedPath, message: "Empty managed directory removed." });
   }
@@ -894,7 +937,7 @@ export function runCaptureTeardown(options: CaptureTeardownOptions = {}): { ok: 
       return right.length - left.length;
     });
   for (const artifactPath of orderedArtifactPaths) {
-    steps.push(teardownManagedArtifact(workspaceRoot, artifactPath, metadata.uninstallPath, dryRun));
+    steps.push(teardownManagedArtifact(workspaceRoot, artifactPath, metadata.uninstallPath, dryRun, Boolean(options.all)));
   }
 
   return { ok: steps.every((item) => item.status !== "failed"), dryRun, steps };

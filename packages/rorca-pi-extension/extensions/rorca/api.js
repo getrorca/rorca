@@ -141,6 +141,21 @@ export class RorcaApiClient {
             body: JSON.stringify(input),
         });
     }
+    async configureCapturePolicy(input) {
+        return this.fetchJson(`/api/context-capture/${encodeURIComponent(input.workspaceId)}/policy`, {
+            method: "PATCH",
+            body: JSON.stringify({ policyMode: input.policyMode, activeIntegrations: input.activeIntegrations, ignoredPaths: input.ignoredPaths }),
+        });
+    }
+    async getCaptureStatus(workspaceId) {
+        return this.fetchJson(`/api/context-capture/${encodeURIComponent(workspaceId)}/status`);
+    }
+    async setCapturePaused(workspaceId, paused) {
+        return this.fetchJson(`/api/context-capture/${encodeURIComponent(workspaceId)}/${paused ? "pause" : "resume"}`, { method: "POST" });
+    }
+    async uninstallCapture(workspaceId) {
+        return this.fetchJson(`/api/context-capture/${encodeURIComponent(workspaceId)}/uninstall`, { method: "POST" });
+    }
     async fetchJson(pathname, init, timeoutMs = 30_000) {
         const response = await fetch(`${this.baseUrl}${pathname}`, {
             ...init,

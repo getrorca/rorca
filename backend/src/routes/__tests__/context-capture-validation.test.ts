@@ -15,7 +15,7 @@ const baseInput = {
   workspacePath: '/tmp/rorca',
   source: 'shellIntegration' as const,
   occurredAt: '2026-07-05T00:00:00.000Z',
-  policyMode: 'command-summary' as const,
+  policyMode: 'repo-and-command' as const,
   policyVersion: '2026-07-ucc-007',
 };
 
@@ -110,12 +110,12 @@ describe('context-capture route validation helpers', () => {
     expect(() => normalizeContextEventPayload({ ...baseInput, payload: { eventType: 'bad_event' } })).toThrow(ValidationError);
   });
 
-  test('keeps public Swagger tier annotations and request contract shape', () => {
+  test('keeps admin Swagger tier annotations and request contract shape', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'context-capture.ts'), 'utf8');
     const eventsDoc = source.slice(source.indexOf('/api/context-capture/events'), source.indexOf("router.post('/events'"));
-    expect(eventsDoc).toContain('x-rorca-tier: public');
+    expect(eventsDoc).toContain('x-rorca-tier: admin');
     expect(eventsDoc).toContain('x-rorca-rationale:');
-    expect(eventsDoc).toContain('x-rorca-public-api: true');
+    expect(eventsDoc).not.toContain('x-rorca-public-api: true');
     expect(eventsDoc).toContain('payload: { type: object }');
   });
 
@@ -124,7 +124,8 @@ describe('context-capture route validation helpers', () => {
     const handler = source.slice(source.indexOf("router.post('/events'"), source.indexOf('/api/context-capture/capability'));
     expect(handler).toContain("boss.createQueue('context:capture')");
     expect(handler).toContain("boss.send('context:capture'");
-    expect(handler).not.toMatch(/INSERT\s+INTO\s+context/i);
+    expect(handler).toContain("recordContextCaptureSubmission");
+    expect(handler).not.toMatch(/INSERT\s+INTO\s+context_events/i);
   });
 
   test('bootstrap verification locks queue, redaction, and ignore paths to canonical locations', () => {

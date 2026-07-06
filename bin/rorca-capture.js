@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { formatCaptureBootstrapHumanReport, runCaptureBootstrap, runCaptureTeardown } from '../packages/rorca-pi-extension/extensions/rorca/capture-bootstrap.js';
@@ -7,7 +7,7 @@ import { buildShellCaptureEvent, enqueueShellCaptureEvent, postShellCaptureEvent
 import { readCaptureServiceStatus, runCaptureServiceLifecycle, runManagedCaptureDaemon } from '../packages/rorca-pi-extension/extensions/rorca/capture-service.js';
 
 function parseArgs(argv) {
-  const options = { alwaysOn: false, dryRun: false, json: false, uninstall: false, workspaceId: undefined, cwd: process.cwd(), exitCode: undefined, once: false, phase: 'end', command: '', policyMode: process.env.RORCA_CAPTURE_POLICY || 'metadata-only', customAgentPatterns: (process.env.RORCA_CAPTURE_AGENT_PATTERNS || '').split(',').filter(Boolean), sourceSystem: undefined, toolName: undefined, sessionId: undefined, message: undefined, category: 'Decision', title: undefined, rule: undefined, context: undefined, sourceRef: undefined };
+  const options = { alwaysOn: false, dryRun: false, json: false, uninstall: false, all: false, workspaceId: undefined, cwd: process.cwd(), exitCode: undefined, once: false, phase: 'end', command: '', policyMode: undefined, customAgentPatterns: (process.env.RORCA_CAPTURE_AGENT_PATTERNS || '').split(',').filter(Boolean), sourceSystem: undefined, toolName: undefined, sessionId: undefined, message: undefined, category: 'Decision', title: undefined, rule: undefined, context: undefined, sourceRef: undefined };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -15,6 +15,7 @@ function parseArgs(argv) {
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--json') options.json = true;
     else if (arg === '--uninstall' || arg === '--teardown') options.uninstall = true;
+    else if (arg === '--all') options.all = true;
     else if (arg === '--once') options.once = true;
     else if (arg === '--workspace-id') options.workspaceId = argv[++i];
     else if (arg === '--cwd') options.cwd = argv[++i] || process.cwd();
@@ -46,7 +47,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Usage: rorca-capture setup --always-on [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture setup --uninstall [--dry-run] [--json]\n       rorca-capture teardown [--dry-run] [--json]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--phase start|end] [--command <cmd>] [--exit-code <n>] [--duration-ms <n>] [--policy metadata-only|command-summary|off] [--agent-pattern <regex>]\n       rorca-capture remember --workspace-id <id> --source-system <pi|claude_code|codex|opencode|shell|ide|daemon> --tool-name <name> --session-id <id> --message <summary> [--category <name>] [--title <title>] [--rule <rule>] [--context <context>] [--source <ref>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
+  console.log(`Usage: rorca-capture setup --always-on --policy <off|metadata-only|repo-and-command|ide-assisted|full> [--dry-run] [--json] [--workspace-id <id>]\n       rorca-capture pause|resume|status --workspace-id <id> [--cwd <dir>] [--json]\n       rorca-capture uninstall --all --workspace-id <id> [--dry-run] [--json]\n       rorca-capture setup --uninstall [--all] [--dry-run] [--json]\n       rorca-capture teardown [--all] [--dry-run] [--json]\n       rorca-capture service <install|start|stop|restart|status|uninstall> --workspace-id <id> [--cwd <dir>] [--dry-run] [--json]\n       rorca-capture emit shell --workspace-id <id> [--cwd <dir>] [--phase start|end] [--command <cmd>] [--exit-code <n>] [--duration-ms <n>] [--policy off|metadata-only|repo-and-command|ide-assisted|full] [--agent-pattern <regex>]\n       rorca-capture remember --workspace-id <id> --source-system <pi|claude_code|codex|opencode|shell|ide|daemon> --tool-name <name> --session-id <id> --message <summary> [--category <name>] [--title <title>] [--rule <rule>] [--context <context>] [--source <ref>]\n       rorca-capture daemon --workspace-id <id> [--cwd <dir>] [--once]\n\nExplicitly bootstraps and runs reversible, API-only always-on context capture helpers. Service lifecycle changes should be restarted after Rorca updates.`);
 }
 
 function findQueuePath(startDir) {
@@ -87,9 +88,18 @@ function appendQueueEvent(queuePath, event) {
   writeFileSync(path.join(queuePath, `${source}.ndjson`), `${JSON.stringify(event)}\n`, { encoding: 'utf8', flag: 'a' });
 }
 
+function readLocalCapturePolicy(workspacePath) {
+  const file = path.join(workspacePath, '.rorca', 'capture', 'policy.json');
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 async function runSetup(options) {
   if (options.uninstall) {
-    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: options.cwd, env: process.env });
+    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: options.cwd, env: process.env, all: Boolean(options.all) });
     console.log(JSON.stringify(teardown, null, 2));
     return teardown.ok ? 0 : 1;
   }
@@ -99,6 +109,7 @@ async function runSetup(options) {
     dryRun: Boolean(options.dryRun),
     workspaceId: options.workspaceId,
     cwd: options.cwd,
+    policyMode: options.policyMode,
   });
 
   if (options.json) {
@@ -127,7 +138,7 @@ function buildRememberEvent(options) {
     workspaceId: options.workspaceId,
     source: sourceSystem === 'pi' || sourceSystem === 'claude_code' ? 'mcpSlashCommand' : 'shellIntegration',
     occurredAt: new Date().toISOString(),
-    policyMode: 'explicit-transcript-import',
+    policyMode: 'full',
     payload: {
       source_system: sourceSystem,
       tool_name: toolName,
@@ -180,6 +191,8 @@ async function runEmit(positional, options) {
   const cwd = path.resolve(options.cwd || process.cwd());
   const workspacePath = findWorkspacePath(cwd);
   const git = readGitInfo(cwd);
+  const localPolicy = readLocalCapturePolicy(workspacePath);
+  if (localPolicy?.paused || localPolicy?.policyMode === 'off') return 0;
   const event = buildShellCaptureEvent({
     workspaceId: options.workspaceId,
     workspacePath,
@@ -190,7 +203,7 @@ async function runEmit(positional, options) {
     durationMs: Number.isFinite(options.durationMs) ? options.durationMs : null,
     gitBranch: git.gitBranch,
     gitSha: git.gitSha,
-    policyMode: options.policyMode,
+    policyMode: options.policyMode || localPolicy?.policyMode || process.env.RORCA_CAPTURE_POLICY || 'metadata-only',
     captureIgnorePatterns: readCaptureIgnorePatterns(workspacePath),
     customAgentPatterns: options.customAgentPatterns.filter(Boolean),
   });
@@ -216,6 +229,46 @@ function serviceConfigFromOptions(options) {
     queueMaxSize: Number.isFinite(options.queueMaxSize) ? options.queueMaxSize : undefined,
     apiBaseUrl: options.apiBaseUrl,
   };
+}
+
+async function postCaptureControl(options, action) {
+  if (!options.workspaceId) throw new Error('--workspace-id is required.');
+  const apiBaseUrl = options.apiBaseUrl || process.env.RORCA_CAPTURE_API_URL || 'http://127.0.0.1:3030';
+  const method = action === 'status' ? 'GET' : 'POST';
+  const response = await fetch(`${apiBaseUrl.replace(/\/$/, '')}/api/context-capture/${encodeURIComponent(options.workspaceId)}/${action === 'uninstall' ? 'uninstall' : action}`, {
+    method,
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(2_000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error || data?.message || `capture ${action} failed`);
+  return data;
+}
+
+function writeLocalPauseState(options, paused) {
+  const workspacePath = findWorkspacePath(options.cwd);
+  const file = path.join(workspacePath, '.rorca', 'capture', 'policy.json');
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ rorcaManaged: 'v1', policyMode: options.policyMode || process.env.RORCA_CAPTURE_POLICY || 'metadata-only', paused, updatedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+}
+
+async function runControl(action, options) {
+  if (action === 'pause' || action === 'resume') writeLocalPauseState(options, action === 'pause');
+  let remote = null;
+  try {
+    remote = await postCaptureControl(options, action);
+  } catch (error) {
+    if (action === 'status') throw error;
+    remote = { ok: false, warning: error instanceof Error ? error.message : String(error) };
+  }
+  if (action === 'uninstall') {
+    const service = runCaptureServiceLifecycle({ action: 'uninstall', workspace: workspaceFromOptions(options), config: serviceConfigFromOptions(options), dryRun: options.dryRun, command: process.argv[1] });
+    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: options.cwd, env: process.env, all: Boolean(options.all) });
+    remote = { remote, service, teardown };
+  }
+  if (options.json || action === 'status' || action === 'uninstall') console.log(JSON.stringify(remote, null, 2));
+  else console.log(`Rorca capture ${action}: ok`);
+  return 0;
 }
 
 async function runDaemon(options) {
@@ -254,10 +307,12 @@ try {
   let code;
   if (positional[0] === 'setup') code = await runSetup(options);
   else if (positional[0] === 'teardown') {
-    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: options.cwd, env: process.env });
+    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: options.cwd, env: process.env, all: Boolean(options.all) });
     console.log(JSON.stringify(teardown, null, 2));
     code = teardown.ok ? 0 : 1;
   }
+  else if (positional[0] === 'pause' || positional[0] === 'resume' || positional[0] === 'status') code = await runControl(positional[0], options);
+  else if (positional[0] === 'uninstall') code = await runControl('uninstall', options);
   else if (positional[0] === 'service') code = runService(positional, options);
   else if (positional[0] === 'emit') code = await runEmit(positional, options);
   else if (positional[0] === 'remember') code = await runRemember(options);

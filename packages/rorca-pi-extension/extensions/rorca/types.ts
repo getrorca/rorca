@@ -145,6 +145,7 @@ export type CaptureBootstrapVerifyRequest = {
   queuePath: string;
   redactionConfigPath: string;
   captureIgnorePath: string;
+  policyMode?: "off" | "metadata-only" | "repo-and-command" | "ide-assisted" | "full";
 };
 
 export type CaptureBootstrapVerifyResponse = {

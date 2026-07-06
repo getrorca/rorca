@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
-import { DEFAULT_CAPTURE_POLICY, hashCaptureContent, sanitizeCapturePayload } from "../../../../backend/dist/lib/context-safety.js";
+import { DEFAULT_CAPTURE_POLICY, hashCaptureContent, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety.js";
 export function defaultCaptureServiceConfig(input = {}) {
     return {
         scanIntervalMs: input.scanIntervalMs ?? 60_000,
@@ -168,7 +168,7 @@ export function readCaptureServiceStatus(workspace, input = {}) {
             shellIntegration: { status: "active" },
             vscodeExtension: { status: "degraded", reason: "extension_host_optional", fallbackSources: ["repoDaemon", "gitHook", "shellIntegration"] },
         },
-        capturePolicy: defaultCapturePolicy(),
+        capturePolicy: { ...defaultCapturePolicy(), ...readLocalCapturePolicy(paths.captureDir) },
         resourceBounds: {
             scanIntervalMs: config.scanIntervalMs,
             maxCommitsPerScan: config.maxCommitsPerScan,
@@ -192,8 +192,11 @@ export async function runManagedCaptureDaemon(input) {
     const tick = async () => {
         const state = readState(paths.stateFile);
         state.last_seen = now().toISOString();
-        await scanRepository(input.workspace, paths, config, state, spawnSyncImpl, now);
-        await flushQueue(input.workspace, paths, config, state, fetchImpl, now);
+        const localPolicy = readLocalCapturePolicy(paths.captureDir);
+        if (!localPolicy.paused && localPolicy.policyMode !== 'off') {
+            await scanRepository(input.workspace, paths, config, state, spawnSyncImpl, now);
+            await flushQueue(input.workspace, paths, config, state, fetchImpl, now);
+        }
         writeState(paths.stateFile, state);
         writeFileSync(paths.statusFile, `${JSON.stringify(readCaptureServiceStatus(input.workspace, { config }), null, 2)}\n`, "utf8");
     };
@@ -383,6 +386,20 @@ function nextBackoff(current, max) {
 }
 function defaultCapturePolicy() {
     return { version: "2026-07-ucc-007", rawContentDefault: "metadata+hash", hashAlgorithm: "sha256", boundedWatchers: true };
+}
+function readLocalCapturePolicy(captureDir) {
+    const policyPath = path.join(captureDir, "policy.json");
+    const sidecarPath = path.join(captureDir, "sidecar.json");
+    for (const filePath of [policyPath, sidecarPath]) {
+        if (!existsSync(filePath))
+            continue;
+        try {
+            const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+            return { policyMode: parsed.policyMode, mode: parsed.policyMode, paused: Boolean(parsed.paused) };
+        }
+        catch { /* ignore malformed local policy */ }
+    }
+    return { policyMode: "metadata-only", mode: "metadata-only", paused: false };
 }
 function startFallbackProcess(workspace, command, config) {
     const paths = resolveCaptureServicePaths(workspace, "win32");
