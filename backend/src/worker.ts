@@ -56,6 +56,7 @@ import { initDb, query, queryOne, execute, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
+import { registerContextCaptureHandlers } from './lib/context-distillation';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { advanceQueue } from './lib/run-queue';
@@ -2675,6 +2676,7 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+  await registerContextCaptureHandlers(boss);
   await registerSpecJobHandlers(boss);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).

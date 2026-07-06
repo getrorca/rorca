@@ -14,6 +14,16 @@ import { NotFoundError, ServiceUnavailableError, ValidationError } from '../lib/
 import { DEFAULT_CAPTURE_POLICY, sanitizeCapturePayload, sanitizeCliCommandEvent, type CapturePolicyMode } from '../lib/context-safety';
 import { getBoss } from '../lib/pg-boss';
 import {
+  approveMemoryCandidate,
+  getMemoryCandidateCounts,
+  getMemoryDistillationSettings,
+  listMemoryCandidates,
+  rejectMemoryCandidate,
+  upsertMemoryDistillationSettings,
+  type MemoryCandidateStatus,
+  type MemoryDistillationMode,
+} from '../lib/context-distillation';
+import {
   CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION,
   ContextCaptureEventJobPayload,
   ContextEventTypeEnum,
@@ -59,6 +69,30 @@ function assertExpectedBootstrapPath(workspacePath: string, candidatePath: strin
       expectedPath,
     });
   }
+}
+
+function parseDistillationMode(value: unknown): MemoryDistillationMode {
+  if (value === 'off' || value === 'explicit-only' || value === 'conservative-auto-candidates' || value === 'trusted-auto-approve') return value;
+  throw new ValidationError('Invalid distillation mode', { mode: value });
+}
+
+function parseCandidateStatus(value: unknown): MemoryCandidateStatus | 'all' {
+  if (value === undefined || value === null || value === 'all') return 'all';
+  if (value === 'pending' || value === 'review_required' || value === 'approved' || value === 'rejected' || value === 'auto_approved') return value;
+  throw new ValidationError('Invalid candidate status', { status: value });
+}
+
+function parsePositiveInt(value: unknown, fieldName: string, fallback: number, max: number): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) throw new ValidationError(`${fieldName} must be an integer between 1 and ${max}`);
+  return parsed;
+}
+
+function parseCandidateId(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new ValidationError('candidateId must be a positive integer');
+  return parsed;
 }
 
 function parsePolicyMode(value: unknown): CapturePolicyMode {
@@ -347,6 +381,13 @@ function captureCapability() {
       maxPayloadBytes: DEFAULT_CAPTURE_POLICY.maxPayloadBytes,
       hashAlgorithm: DEFAULT_CAPTURE_POLICY.hashAlgorithm,
     },
+    distillation: {
+      queueName: 'context:distill',
+      defaultMode: 'conservative-auto-candidates',
+      modes: ['off', 'explicit-only', 'conservative-auto-candidates', 'trusted-auto-approve'],
+      defaultCandidateStatus: 'pending',
+      securitySensitiveStatus: 'review_required',
+    },
   };
 }
 
@@ -556,6 +597,208 @@ router.post('/events', async (req, res, next) => {
  */
 router.get('/capability', (_req, res) => {
   res.json({ captureCapability: captureCapability() });
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/config:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: Get context-event memory distillation settings
+ *     operationId: getContextDistillationConfig
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Distillation mode controls local operator automation and potential auto-approval of memory candidates, so it is operator-only maintenance surface."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Distillation configuration and candidate counts }
+ *       404: { description: Workspace not found }
+ */
+router.get('/distillation/:workspaceId/config', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const settings = await getMemoryDistillationSettings(workspaceId);
+    const candidateCounts = await getMemoryCandidateCounts(workspaceId);
+    res.json({ ok: true, workspaceId, settings, candidateCounts });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/config:
+ *   patch:
+ *     tags: [Context Capture]
+ *     summary: Update context-event memory distillation settings
+ *     operationId: updateContextDistillationConfig
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Changing distillation and trusted auto-approve policy is an operator-only side effect that can alter how local context becomes reviewable memory."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               mode: { type: string, enum: [off, explicit-only, conservative-auto-candidates, trusted-auto-approve] }
+ *               operatorAutoApprove: { type: boolean }
+ *               llmSummarization: { type: boolean }
+ *               maxEventsPerJob: { type: integer, minimum: 1, maximum: 100 }
+ *     responses:
+ *       200: { description: Distillation configuration updated }
+ *       400: { description: Invalid configuration }
+ *       404: { description: Workspace not found }
+ */
+router.patch('/distillation/:workspaceId/config', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+
+    const patch: Parameters<typeof upsertMemoryDistillationSettings>[1] = {};
+    if (req.body.mode !== undefined) patch.mode = parseDistillationMode(req.body.mode);
+    if (req.body.operatorAutoApprove !== undefined) {
+      if (typeof req.body.operatorAutoApprove !== 'boolean') throw new ValidationError('operatorAutoApprove must be a boolean');
+      patch.operatorAutoApprove = req.body.operatorAutoApprove;
+    }
+    if (req.body.llmSummarization !== undefined) {
+      if (typeof req.body.llmSummarization !== 'boolean') throw new ValidationError('llmSummarization must be a boolean');
+      patch.llmSummarization = req.body.llmSummarization;
+    }
+    if (req.body.maxEventsPerJob !== undefined) {
+      if (!Number.isInteger(req.body.maxEventsPerJob) || req.body.maxEventsPerJob < 1 || req.body.maxEventsPerJob > 100) {
+        throw new ValidationError('maxEventsPerJob must be an integer between 1 and 100');
+      }
+      patch.maxEventsPerJob = req.body.maxEventsPerJob;
+    }
+
+    const settings = await upsertMemoryDistillationSettings(workspaceId, patch);
+    const candidateCounts = await getMemoryCandidateCounts(workspaceId);
+    res.json({ ok: true, workspaceId, settings, candidateCounts });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: List reviewable memory candidates from context distillation
+ *     operationId: listContextDistillationCandidates
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Candidate review exposes local captured context snippets and approval state, so it is operator-only maintenance surface."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [all, pending, review_required, approved, rejected, auto_approved] }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *     responses:
+ *       200: { description: Candidate list }
+ *       404: { description: Workspace not found }
+ */
+router.get('/distillation/:workspaceId/candidates', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const status = parseCandidateStatus(req.query.status);
+    const limit = parsePositiveInt(req.query.limit, 'limit', 50, 100);
+    const candidates = await listMemoryCandidates({ workspaceId, status, limit });
+    res.json({ ok: true, workspaceId, candidates });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates/{candidateId}/approve:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Approve a distilled memory candidate into default retrieval
+ *     operationId: approveContextDistillationCandidate
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Approving a candidate promotes captured local context into retrieval memory, which is an operator-only side effect."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: candidateId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Candidate approved }
+ *       404: { description: Workspace or candidate not found }
+ */
+router.post('/distillation/:workspaceId/candidates/:candidateId/approve', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const candidateId = parseCandidateId(req.params.candidateId);
+    const approved = await approveMemoryCandidate(workspaceId, candidateId);
+    if (!approved) throw new NotFoundError('Memory candidate', String(candidateId));
+    res.json({ ok: true, workspaceId, ...approved });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates/{candidateId}/reject:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Reject a distilled memory candidate
+ *     operationId: rejectContextDistillationCandidate
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Rejecting a candidate changes local memory review state and is operator-only maintenance surface."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: candidateId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Candidate rejected }
+ *       404: { description: Workspace or candidate not found }
+ */
+router.post('/distillation/:workspaceId/candidates/:candidateId/reject', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const candidateId = parseCandidateId(req.params.candidateId);
+    const rejected = await rejectMemoryCandidate(workspaceId, candidateId);
+    if (!rejected) throw new NotFoundError('Memory candidate', String(candidateId));
+    res.json({ ok: true, workspaceId, candidateId, status: 'rejected' });
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

@@ -158,7 +158,7 @@ function sanitizeString(input: string, policy: CapturePolicy, counters: { redact
     output = output.replace(rule.pattern, (...args: unknown[]) => {
       const match = String(args[0]);
       if (match) counters.redactionCount += 1;
-      return rule.replacement;
+      return rule.replacement.replace(/\$(\d+)/g, (_placeholder, index: string) => String(args[Number(index)] ?? ''));
     });
   }
   const bytes = Buffer.byteLength(output);
