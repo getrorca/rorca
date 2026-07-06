@@ -599,27 +599,45 @@ export async function getMemoryCandidateCounts(workspaceId: string): Promise<Rec
   return counts;
 }
 
-export async function listMemoryCandidates(input: { workspaceId: string; status?: MemoryCandidateStatus | 'all'; limit?: number }): Promise<Array<Record<string, unknown>>> {
+export async function listMemoryCandidates(input: {
+  workspaceId: string;
+  status?: MemoryCandidateStatus | 'all';
+  limit?: number;
+  sourceSystem?: string;
+  toolName?: string;
+  hostApp?: string;
+  eventType?: string;
+  trustTier?: string;
+  confidence?: string;
+  regulatedFlag?: boolean;
+}): Promise<Array<Record<string, unknown>>> {
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
-  if (input.status && input.status !== 'all') {
-    return query(
-      `SELECT id, created_at, status, category, content, confidence, provenance, related_files,
-              evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible, approved_memory_id
-         FROM memory_candidates
-        WHERE workspace_id = $1 AND status = $2
-        ORDER BY created_at DESC
-        LIMIT $3`,
-      [input.workspaceId, input.status, limit],
-    );
-  }
+  const clauses = ['workspace_id = $1'];
+  const params: unknown[] = [input.workspaceId];
+  const addEquals = (column: string, value: unknown) => {
+    params.push(value);
+    clauses.push(`${column} = $${params.length}`);
+  };
+  if (input.status && input.status !== 'all') addEquals('status', input.status);
+  if (input.sourceSystem) addEquals('source_system', input.sourceSystem);
+  if (input.toolName) addEquals('tool_name', input.toolName);
+  if (input.hostApp) addEquals('host_application', input.hostApp);
+  if (input.eventType) addEquals('event_type', input.eventType);
+  if (input.trustTier) addEquals('trust_tier', input.trustTier);
+  if (input.confidence) addEquals('confidence', input.confidence);
+  if (typeof input.regulatedFlag === 'boolean') addEquals('security_sensitive', input.regulatedFlag);
+  params.push(limit);
   return query(
     `SELECT id, created_at, status, category, content, confidence, provenance, related_files,
-            evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible, approved_memory_id
+            evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible,
+            approved_memory_id, context_event_id, event_type, source_system, tool_name,
+            host_application, session_id, git_branch, git_sha, capture_policy, trust_tier,
+            source_event_id, source_session_id
        FROM memory_candidates
-      WHERE workspace_id = $1
+      WHERE ${clauses.join(' AND ')}
       ORDER BY created_at DESC
-      LIMIT $2`,
-    [input.workspaceId, limit],
+      LIMIT $${params.length}`,
+    params,
   );
 }
 
@@ -693,6 +711,73 @@ export async function rejectMemoryCandidate(workspaceId: string, candidateId: nu
     [candidateId, workspaceId],
   );
   return result.rowCount > 0;
+}
+
+export type MemoryCandidateReviewAction = 'edit' | 'duplicate' | 'supersede' | 'conflict' | 'defer';
+
+export async function applyMemoryCandidateReviewAction(input: {
+  workspaceId: string;
+  candidateId: number;
+  action: MemoryCandidateReviewAction;
+  content?: string;
+  category?: string;
+  confidence?: 'high' | 'medium' | 'low';
+  note?: string;
+  targetCandidateId?: number;
+}): Promise<Record<string, unknown> | null> {
+  const candidate = await queryOne<Record<string, unknown>>(
+    `SELECT * FROM memory_candidates WHERE id = $1 AND workspace_id = $2`,
+    [input.candidateId, input.workspaceId],
+  );
+  if (!candidate) return null;
+
+  if (input.action === 'edit') {
+    const content = stringValue(input.content) ?? stringValue(candidate.content);
+    if (!content) return null;
+    const category = stringValue(input.category) ?? stringValue(candidate.category) ?? 'Pattern';
+    const confidence = input.confidence ?? (stringValue(candidate.confidence) as 'high' | 'medium' | 'low' | null) ?? 'medium';
+    await execute(
+      `UPDATE memory_candidates
+          SET content = $3, category = $4, confidence = $5,
+              payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object('content', $3, 'category', $4, 'confidence', $5),
+              review_reason = NULL
+        WHERE id = $1 AND workspace_id = $2`,
+      [input.candidateId, input.workspaceId, content, category, confidence],
+    );
+    return { candidateId: input.candidateId, action: input.action, status: candidate.status };
+  }
+
+  if (input.action === 'defer') {
+    await execute(
+      `UPDATE memory_candidates
+          SET status = 'review_required', review_reason = $3, resolved_at = NULL, default_retrieval_eligible = false
+        WHERE id = $1 AND workspace_id = $2`,
+      [input.candidateId, input.workspaceId, input.note ? `deferred: ${input.note}` : 'deferred_for_later_review'],
+    );
+    return { candidateId: input.candidateId, action: input.action, status: 'review_required' };
+  }
+
+  if (input.action === 'duplicate') {
+    await execute(
+      `UPDATE memory_candidates
+          SET status = 'rejected', resolved_at = NOW(), default_retrieval_eligible = false,
+              review_reason = $3
+        WHERE id = $1 AND workspace_id = $2`,
+      [input.candidateId, input.workspaceId, input.note ? `duplicate: ${input.note}` : 'duplicate_candidate_rejected'],
+    );
+    return { candidateId: input.candidateId, action: input.action, status: 'rejected' };
+  }
+
+  const relationLabel = input.action === 'supersede' ? 'superseded_by_candidate' : 'conflicts_with_candidate';
+  const relationNote = input.targetCandidateId ? `${relationLabel}:${input.targetCandidateId}` : relationLabel;
+  await execute(
+    `UPDATE memory_candidates
+        SET status = 'rejected', resolved_at = NOW(), default_retrieval_eligible = false,
+            review_reason = $3
+      WHERE id = $1 AND workspace_id = $2`,
+    [input.candidateId, input.workspaceId, input.note ? `${relationNote} ${input.note}` : relationNote],
+  );
+  return { candidateId: input.candidateId, action: input.action, status: 'rejected', targetCandidateId: input.targetCandidateId ?? null };
 }
 
 // Imported by tests to assert no accidental transaction dependency in pure logic.

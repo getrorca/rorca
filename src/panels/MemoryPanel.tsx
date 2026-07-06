@@ -12,6 +12,7 @@ import { apiFetch } from '../lib/apiFetch';
 import { MEMORY_ANALYTICS_DRILLDOWN_STORAGE_KEY, type MemoryAnalyticsDrilldown } from '../lib/memoryAnalyticsDrilldown';
 import SpecRelevanceGraph from '../components/SpecRelevanceGraph';
 import { useSpecRelevanceGraph } from '../hooks/useSpecRelevanceGraph';
+import AlwaysOnCaptureSection from './AlwaysOnCaptureSection';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -3009,6 +3010,8 @@ export default function MemoryPanel() {
               );
             })}
           </div>
+
+          <AlwaysOnCaptureSection />
 
           <ReviewWorkflowSection
             data={reviewData}

@@ -5,7 +5,10 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { formatRedactionDiagnostics, sanitizeCapturePayload, sanitizeCliCommandEvent } from '../context-safety';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { formatRedactionDiagnostics, readSafeContextFilePreview, sanitizeCapturePayload, sanitizeCliCommandEvent } from '../context-safety';
 
 describe('context-safety privacy diagnostics', () => {
   test('redaction diagnostics expose counts and types but not sentinel secret values', () => {
@@ -33,5 +36,18 @@ describe('context-safety privacy diagnostics', () => {
     expect(serialized).not.toContain(sentinel);
     expect(diagnostics.redactionCount).toBeGreaterThan(0);
     expect(diagnostics.redactionTypes).toContain('raw_content');
+  });
+
+  test('safe file previews stay workspace-scoped and redact content', async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'rorca-preview-'));
+    await fs.mkdir(path.join(workspace, 'src'));
+    await fs.writeFile(path.join(workspace, 'src', 'secret.ts'), 'const token = "SUPER_SECRET_VALUE_12345678901234567890";');
+
+    const preview = await readSafeContextFilePreview(workspace, 'src/secret.ts');
+    expect(preview.workspaceRelativePath).toBe('src/secret.ts');
+    expect(preview.content).not.toContain('SUPER_SECRET_VALUE_12345678901234567890');
+    expect(preview.redactionDiagnostics.redactionCount).toBeGreaterThan(0);
+
+    await expect(readSafeContextFilePreview(workspace, '../outside.txt')).rejects.toThrow(/inside the workspace/);
   });
 });

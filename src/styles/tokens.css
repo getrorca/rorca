@@ -13,6 +13,12 @@
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
+  --status-healthy: var(--success);
+  --status-healthy-bg: rgba(16, 185, 129, 0.12);
+  --status-degraded: var(--warning);
+  --status-degraded-bg: rgba(245, 158, 11, 0.12);
+  --status-offline: var(--error);
+  --status-offline-bg: rgba(239, 68, 68, 0.12);
   --skeleton: #2d2d4a;
   --skeleton-shimmer: #3d3d5c;
   --terminal-bg: #0d0d1a;
@@ -43,6 +49,12 @@
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
+  --status-healthy: var(--success);
+  --status-healthy-bg: rgba(16, 185, 129, 0.12);
+  --status-degraded: var(--warning);
+  --status-degraded-bg: rgba(245, 158, 11, 0.12);
+  --status-offline: var(--error);
+  --status-offline-bg: rgba(239, 68, 68, 0.12);
   --skeleton: #e5e5e5;
   --skeleton-shimmer: #f5f5f5;
   --terminal-bg: #f5f5f5;

@@ -6,6 +6,8 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 export type CapturePolicyMode =
   | 'off'
@@ -116,6 +118,21 @@ export type RedactionDiagnostics = {
 export type SanitizedCapturePayload = {
   payload: unknown;
   safety: CaptureSafetyReport;
+};
+
+export type SafeContextFilePreview = {
+  path: string;
+  workspaceRelativePath: string;
+  byteLength: number;
+  truncated: boolean;
+  contentHash: string;
+  content: string;
+  redactionDiagnostics: RedactionDiagnostics;
+};
+
+export type SafeContextFilePreviewOptions = {
+  maxBytes?: number;
+  policy?: CapturePolicy;
 };
 
 export const DEFAULT_CAPTURE_POLICY: CapturePolicy = {
@@ -331,6 +348,49 @@ export function formatRedactionDiagnostics(input: Partial<CaptureSafetyReport> &
     regulatedDomainFlags: regulatedSignals,
     truncated: Boolean(input.truncated),
   };
+}
+
+export function resolveWorkspaceRelativePath(workspacePath: string, candidatePath: string): { absolutePath: string; relativePath: string } {
+  const root = path.resolve(workspacePath);
+  const absolutePath = path.resolve(root, candidatePath);
+  const relativePath = path.relative(root, absolutePath);
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    throw new Error('Preview path must be inside the workspace');
+  }
+  return { absolutePath, relativePath: pathNormalize(relativePath) };
+}
+
+export async function readSafeContextFilePreview(
+  workspacePath: string,
+  candidatePath: string,
+  options: SafeContextFilePreviewOptions = {},
+): Promise<SafeContextFilePreview> {
+  const policy = options.policy ?? DEFAULT_CAPTURE_POLICY;
+  const maxBytes = Math.min(Math.max(options.maxBytes ?? 32_768, 1), 128_000);
+  const { absolutePath, relativePath } = resolveWorkspaceRelativePath(workspacePath, candidatePath);
+  const stat = await fs.stat(absolutePath);
+  if (!stat.isFile()) throw new Error('Preview path must be a file');
+  const handle = await fs.open(absolutePath, 'r');
+  try {
+    const bytesToRead = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(bytesToRead);
+    await handle.read(buffer, 0, bytesToRead, 0);
+    if (buffer.includes(0)) throw new Error('Binary file previews are not supported');
+    const raw = buffer.toString('utf8');
+    const sanitized = sanitizeCapturePayload({ preview: raw }, policy);
+    const payload = sanitized.payload && typeof sanitized.payload === 'object' ? sanitized.payload as Record<string, unknown> : {};
+    return {
+      path: candidatePath,
+      workspaceRelativePath: relativePath,
+      byteLength: stat.size,
+      truncated: stat.size > maxBytes || sanitized.safety.truncated,
+      contentHash: hashCaptureContent(raw),
+      content: typeof payload.preview === 'string' ? payload.preview : '',
+      redactionDiagnostics: formatRedactionDiagnostics(sanitized.safety),
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 function matchesCaptureIgnorePattern(relative: string, absolute: string, root: string, rawPattern: string): boolean {

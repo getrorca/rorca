@@ -107,3 +107,15 @@ export function attachSSE(res: Response): () => void {
   });
   return unsubscribe;
 }
+
+/**
+ * Wire an Express SSE response to a named topic. Route handlers should use this
+ * helper rather than writing topic events directly so all live updates flow
+ * through the hub.
+ */
+export function attachTopicSSE<T = unknown>(topic: string, res: Response, eventName = 'message'): () => void {
+  const unsubscribe = subscribeTopic<T>(topic, (event) => {
+    res.write(`event: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`);
+  });
+  return unsubscribe;
+}

@@ -14,12 +14,14 @@ import { NotFoundError, ServiceUnavailableError, ValidationError } from '../lib/
 import { DEFAULT_CAPTURE_POLICY, capturePolicyRawContent, formatRedactionDiagnostics, normalizeCapturePolicyMode, sanitizeCapturePayload, sanitizeCliCommandEvent, type CapturePolicyMode } from '../lib/context-safety';
 import { getBoss } from '../lib/pg-boss';
 import {
+  applyMemoryCandidateReviewAction,
   approveMemoryCandidate,
   getMemoryCandidateCounts,
   getMemoryDistillationSettings,
   listMemoryCandidates,
   rejectMemoryCandidate,
   upsertMemoryDistillationSettings,
+  type MemoryCandidateReviewAction,
   type MemoryCandidateStatus,
   type MemoryDistillationMode,
 } from '../lib/context-distillation';
@@ -41,6 +43,7 @@ import {
   recordContextCaptureSubmission,
   upsertContextCaptureControlState,
 } from '../lib/context-capture-controls';
+import { attachTopicSSE, broadcastTopic } from '../lib/sse-hub';
 
 const router = Router();
 
@@ -89,6 +92,33 @@ function parseCandidateStatus(value: unknown): MemoryCandidateStatus | 'all' {
   if (value === undefined || value === null || value === 'all') return 'all';
   if (value === 'pending' || value === 'review_required' || value === 'approved' || value === 'rejected' || value === 'auto_approved') return value;
   throw new ValidationError('Invalid candidate status', { status: value });
+}
+
+function parseOptionalString(value: unknown, fieldName: string, allowed?: readonly string[]): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new ValidationError(`${fieldName} must be a string`);
+  if (allowed && !allowed.includes(value)) throw new ValidationError(`Invalid ${fieldName}`, { [fieldName]: value, allowed });
+  return value;
+}
+
+function parseOptionalBoolean(value: unknown, fieldName: string): boolean | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === 'true' || value === true) return true;
+  if (value === 'false' || value === false) return false;
+  throw new ValidationError(`${fieldName} must be true or false`);
+}
+
+function parseCandidateReviewAction(value: unknown): MemoryCandidateReviewAction {
+  if (value === 'edit' || value === 'duplicate' || value === 'supersede' || value === 'conflict' || value === 'defer') return value;
+  throw new ValidationError('Invalid candidate review action', { action: value });
+}
+
+function contextCaptureTopic(workspaceId: string): string {
+  return `context-capture:${workspaceId}`;
+}
+
+function publishCaptureEvent(workspaceId: string, event: Record<string, unknown>): void {
+  broadcastTopic(contextCaptureTopic(workspaceId), { workspaceId, occurredAt: new Date().toISOString(), ...event });
 }
 
 function parsePositiveInt(value: unknown, fieldName: string, fallback: number, max: number): number {
@@ -523,6 +553,7 @@ router.post('/events', async (req, res, next) => {
     if (control.paused || control.policyMode === 'off' || policyMode === 'off') {
       const safety = sanitizeCapturePayload({ skipped: control.paused ? 'paused' : 'policy_off', source, eventType: (payload as Record<string, unknown>).eventType }).safety;
       await recordContextCaptureSubmission({ workspaceId, eventType: 'capture_suppressed', integrationId, payloadEventType: String((payload as Record<string, unknown>).eventType ?? 'unknown'), safety });
+      publishCaptureEvent(workspaceId, { type: 'capture_suppressed', source, integrationId, reason: control.paused ? 'paused' : 'policy_off' });
       res.json({
         ok: true,
         accepted: false,
@@ -554,6 +585,7 @@ router.post('/events', async (req, res, next) => {
 
     if (sanitized.payload === null) {
       await recordContextCaptureSubmission({ workspaceId, eventType: 'capture_suppressed', integrationId, payloadEventType: 'capture_ignore', safety: sanitized.safety });
+      publishCaptureEvent(workspaceId, { type: 'capture_suppressed', source, integrationId, reason: 'capture_ignore' });
       res.json({
         ok: true,
         accepted: false,
@@ -595,6 +627,7 @@ router.post('/events', async (req, res, next) => {
     }
 
     await recordContextCaptureSubmission({ workspaceId, eventType: 'capture_submitted', integrationId, payloadEventType: event.data.payload.eventType, safety: sanitized.safety });
+    publishCaptureEvent(workspaceId, { type: 'capture_submitted', source, integrationId, payloadEventType: event.data.payload.eventType });
 
     res.json({
       ok: true,
@@ -682,6 +715,38 @@ router.get('/:workspaceId/status', async (req, res, next) => {
 
 /**
  * @swagger
+ * /api/context-capture/{workspaceId}/stream:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: Stream always-on capture status updates
+ *     operationId: streamContextCaptureStatus
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Streams operator-only local capture queue/action changes through the SSE hub for live status dashboards."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: text/event-stream with capture_event messages }
+ */
+router.get('/:workspaceId/stream', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    const unsubscribe = attachTopicSSE(contextCaptureTopic(workspaceId), res, 'capture_event');
+    req.on('close', unsubscribe);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
  * /api/context-capture/{workspaceId}/policy:
  *   patch:
  *     tags: [Context Capture]
@@ -709,6 +774,7 @@ router.patch('/:workspaceId/policy', async (req, res, next) => {
     const ignoredPaths = Array.isArray(req.body.ignoredPaths) ? req.body.ignoredPaths.filter((item: unknown): item is string => typeof item === 'string') : undefined;
     const state = await upsertContextCaptureControlState({ workspaceId, policyMode: mode, activeIntegrations, ignoredPaths });
     await appendContextCaptureAudit({ workspaceId, eventType: 'policy_update', integrationId: 'operator' });
+    publishCaptureEvent(workspaceId, { type: 'policy_update', policyMode: state.policyMode, paused: state.paused });
     res.json({ ok: true, workspaceId, status: state });
   } catch (err) {
     next(err);
@@ -739,6 +805,7 @@ router.post('/:workspaceId/pause', async (req, res, next) => {
     if (!workspace) throw new NotFoundError('Workspace', workspaceId);
     const status = await upsertContextCaptureControlState({ workspaceId, paused: true });
     await appendContextCaptureAudit({ workspaceId, eventType: 'pause', integrationId: 'operator' });
+    publishCaptureEvent(workspaceId, { type: 'pause', paused: true });
     res.json({ ok: true, status });
   } catch (err) {
     next(err);
@@ -769,6 +836,7 @@ router.post('/:workspaceId/resume', async (req, res, next) => {
     if (!workspace) throw new NotFoundError('Workspace', workspaceId);
     const status = await upsertContextCaptureControlState({ workspaceId, paused: false });
     await appendContextCaptureAudit({ workspaceId, eventType: 'resume', integrationId: 'operator' });
+    publishCaptureEvent(workspaceId, { type: 'resume', paused: false });
     res.json({ ok: true, status });
   } catch (err) {
     next(err);
@@ -800,6 +868,7 @@ router.post('/:workspaceId/uninstall', async (req, res, next) => {
     const drainedQueueEntries = await drainContextCaptureQueue(workspaceId);
     const status = await upsertContextCaptureControlState({ workspaceId, policyMode: 'off', paused: true, activeIntegrations: {}, ignoredPaths: [] });
     await appendContextCaptureAudit({ workspaceId, eventType: 'uninstall', integrationId: 'operator' });
+    publishCaptureEvent(workspaceId, { type: 'uninstall', drainedQueueEntries });
     res.json({ ok: true, status, drainedQueueEntries });
   } catch (err) {
     next(err);
@@ -929,7 +998,14 @@ router.get('/distillation/:workspaceId/candidates', async (req, res, next) => {
     if (!workspace) throw new NotFoundError('Workspace', workspaceId);
     const status = parseCandidateStatus(req.query.status);
     const limit = parsePositiveInt(req.query.limit, 'limit', 50, 100);
-    const candidates = await listMemoryCandidates({ workspaceId, status, limit });
+    const sourceSystem = parseOptionalString(req.query.sourceSystem, 'sourceSystem');
+    const toolName = parseOptionalString(req.query.toolName, 'toolName');
+    const hostApp = parseOptionalString(req.query.hostApp, 'hostApp');
+    const eventType = parseOptionalString(req.query.eventType, 'eventType');
+    const trustTier = parseOptionalString(req.query.trustTier, 'trustTier', ['untrusted', 'local', 'verified', 'privileged']);
+    const confidence = parseOptionalString(req.query.confidence, 'confidence', ['high', 'medium', 'low']);
+    const regulatedFlag = parseOptionalBoolean(req.query.regulatedFlag, 'regulatedFlag');
+    const candidates = await listMemoryCandidates({ workspaceId, status, limit, sourceSystem, toolName, hostApp, eventType, trustTier, confidence, regulatedFlag });
     res.json({ ok: true, workspaceId, candidates });
   } catch (err) {
     next(err);
@@ -966,6 +1042,7 @@ router.post('/distillation/:workspaceId/candidates/:candidateId/approve', async 
     const candidateId = parseCandidateId(req.params.candidateId);
     const approved = await approveMemoryCandidate(workspaceId, candidateId);
     if (!approved) throw new NotFoundError('Memory candidate', String(candidateId));
+    publishCaptureEvent(workspaceId, { type: 'candidate_approved', candidateId, memoryId: approved.memoryId });
     res.json({ ok: true, workspaceId, ...approved });
   } catch (err) {
     next(err);
@@ -1002,7 +1079,59 @@ router.post('/distillation/:workspaceId/candidates/:candidateId/reject', async (
     const candidateId = parseCandidateId(req.params.candidateId);
     const rejected = await rejectMemoryCandidate(workspaceId, candidateId);
     if (!rejected) throw new NotFoundError('Memory candidate', String(candidateId));
+    publishCaptureEvent(workspaceId, { type: 'candidate_rejected', candidateId });
     res.json({ ok: true, workspaceId, candidateId, status: 'rejected' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates/{candidateId}/action:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Apply a review action to a context memory candidate
+ *     operationId: actionContextDistillationCandidate
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Candidate review actions mutate local captured context review state and can alter later retrieval eligibility."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: candidateId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Candidate action applied }
+ *       400: { description: Invalid action }
+ *       404: { description: Workspace or candidate not found }
+ */
+router.post('/distillation/:workspaceId/candidates/:candidateId/action', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const candidateId = parseCandidateId(req.params.candidateId);
+    const action = parseCandidateReviewAction(req.body.action);
+    const targetCandidateId = req.body.targetCandidateId === undefined || req.body.targetCandidateId === null || req.body.targetCandidateId === ''
+      ? undefined
+      : parseCandidateId(req.body.targetCandidateId);
+    const result = await applyMemoryCandidateReviewAction({
+      workspaceId,
+      candidateId,
+      action,
+      content: typeof req.body.content === 'string' ? req.body.content : undefined,
+      category: typeof req.body.category === 'string' ? req.body.category : undefined,
+      confidence: req.body.confidence === 'high' || req.body.confidence === 'medium' || req.body.confidence === 'low' ? req.body.confidence : undefined,
+      note: typeof req.body.note === 'string' ? req.body.note : undefined,
+      targetCandidateId,
+    });
+    if (!result) throw new NotFoundError('Memory candidate', String(candidateId));
+    publishCaptureEvent(workspaceId, { type: 'candidate_action', candidateId, action, targetCandidateId: targetCandidateId ?? null });
+    res.json({ ok: true, workspaceId, ...result });
   } catch (err) {
     next(err);
   }
