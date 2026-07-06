@@ -44,6 +44,7 @@ import {
   upsertContextCaptureControlState,
 } from '../lib/context-capture-controls';
 import { attachTopicSSE, broadcastTopic } from '../lib/sse-hub';
+import { importExternalMemoryCandidates, stageExternalMemoryImportCandidates, type ExternalMemoryImportFormat, type ExternalMemoryImportVendor } from '../lib/external-memory-import-adapters';
 
 const router = Router();
 
@@ -136,6 +137,25 @@ function parseCandidateId(value: unknown): number {
 
 function parsePolicyMode(value: unknown): CapturePolicyMode {
   return normalizeCapturePolicyMode(value, 'metadata-only');
+}
+
+function parseImportVendor(value: unknown): ExternalMemoryImportVendor {
+  const vendor = assertString(value, 'vendor') as ExternalMemoryImportVendor;
+  return vendor;
+}
+
+function parseImportFormat(value: unknown): ExternalMemoryImportFormat | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === 'json' || value === 'jsonl' || value === 'markdown') return value;
+  throw new ValidationError('Invalid import format', { format: value });
+}
+
+function resolveWorkspaceSourceFile(workspacePath: string, value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const raw = assertString(value, 'sourceFile');
+  const resolved = path.isAbsolute(raw) ? raw : path.resolve(workspacePath, raw);
+  assertInsideWorkspace(workspacePath, resolved, 'sourceFile');
+  return resolved;
 }
 
 function isCliCapturePayload(payload: unknown): boolean {
@@ -870,6 +890,81 @@ router.post('/:workspaceId/uninstall', async (req, res, next) => {
     await appendContextCaptureAudit({ workspaceId, eventType: 'uninstall', integrationId: 'operator' });
     publishCaptureEvent(workspaceId, { type: 'uninstall', drainedQueueEntries });
     res.json({ ok: true, status, drainedQueueEntries });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/imports/{workspaceId}:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Import external memory or trace exports as pending review candidates
+ *     operationId: importExternalContextMemory
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Bulk-importing third-party memory/traces can expose local code context and creates review candidates, so it is operator-only maintenance surface."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [vendor]
+ *             properties:
+ *               vendor: { type: string }
+ *               adapter: { type: string, enum: [memory-bank-file, trace-memory-api] }
+ *               dryRun: { type: boolean, default: true }
+ *               sourceFile: { type: string, description: Workspace-relative JSON, JSONL, or Markdown export path }
+ *               rawText: { type: string, description: Inline JSON/JSONL/Markdown export content }
+ *               format: { type: string, enum: [json, jsonl, markdown] }
+ *               apiEndpoint: { type: string }
+ *               apiItems: { type: array, items: { type: object }, description: Operator-supplied API export rows; used instead of vendor SDK dependencies }
+ *               limit: { type: integer, minimum: 1, maximum: 500 }
+ *     responses:
+ *       200: { description: Import candidates produced or staged }
+ *       400: { description: Malformed export or invalid request }
+ *       404: { description: Workspace not found }
+ *       422: { description: Unknown or unsupported vendor }
+ */
+router.post('/imports/:workspaceId', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+
+    const vendor = parseImportVendor(req.body.vendor);
+    const adapter = req.body.adapter === 'memory-bank-file' || req.body.adapter === 'trace-memory-api' ? req.body.adapter : undefined;
+    const dryRun = req.body.dryRun !== false;
+    const sourceFile = resolveWorkspaceSourceFile(workspace.path, req.body.sourceFile);
+    const rawText = typeof req.body.rawText === 'string' ? req.body.rawText : undefined;
+    const format = parseImportFormat(req.body.format);
+    const apiEndpoint = typeof req.body.apiEndpoint === 'string' && req.body.apiEndpoint.trim() ? req.body.apiEndpoint.trim() : undefined;
+    const apiItems = Array.isArray(req.body.apiItems) ? req.body.apiItems : undefined;
+    const limit = parsePositiveInt(req.body.limit, 'limit', 100, 500);
+
+    const result = await importExternalMemoryCandidates({
+      workspaceId,
+      workspacePath: workspace.path,
+      vendor,
+      adapter,
+      dryRun,
+      limit,
+      source: {
+        filePath: sourceFile,
+        rawText,
+        format,
+        apiEndpoint,
+        apiProvider: apiItems ? async () => apiItems : undefined,
+      },
+    });
+    const staged = dryRun ? undefined : await stageExternalMemoryImportCandidates(result.candidates);
+    res.json({ ok: true, workspaceId, result: { ...result, diagnostics: { ...result.diagnostics, stagedCandidates: staged?.inserted ?? 0 } }, staged });
   } catch (err) {
     next(err);
   }

@@ -302,3 +302,38 @@ Every adapter command/event includes `source_system`, `tool_name`, and `session_
 - Context safety is centralized in `backend/src/lib/context-safety.ts`.
 - No adapter performs direct DB writes, secret mutation, provider-native
   execution changes, or hidden capture outside configured policy.
+
+## UCC-011 external memory and trace import adapters
+
+External imports use `backend/src/lib/external-memory-import-adapters.ts`.
+The adapter interface is deliberately small: adapters accept a workspace id,
+source descriptor, vendor, and first-class `dryRun` flag, then return normalized
+`ExternalMemoryImportCandidate` objects. Adapters do not import vendor SDKs at
+module load time and do not write to active memory. File adapters use plain file
+I/O; API/trace adapters use an injected provider function or dynamically loaded
+module so non-users never install every vendor dependency.
+
+Supported concrete adapters:
+
+| Adapter | Vendors / ecosystems | Inputs | Status | Limitations |
+| --- | --- | --- | --- | --- |
+| `memory-bank-file` | Cline, Roo, Cursor, Windsurf-style memory banks, Continue/Cody/Pieces/custom exports | JSON, JSONL, Markdown | Validated for generic memory-bank shapes | Vendor-specific schemas are normalized heuristically from common `id`, `content/text/summary`, `tags`, `confidence/trust_tier`, and `related_files/files` fields. Proprietary encrypted/local-only stores must be exported by the user first. |
+| `trace-memory-api` | mem0, Zep/Graphiti, Letta/MemGPT, LangSmith/Langfuse, Glean, Unblocked, Greptile, Cody/custom API exports | Injected provider or dynamic module returning trace/memory rows | Experimental; covered with mocked provider tests | Rorca ships no required SDKs or credentials. Operators must provide a provider/export function or API-exported rows. Rate limits, pagination, and auth remain vendor-specific. |
+| DuckBrain | Existing Rorca support | Existing path | Existing | Not changed by UCC-011. |
+| Native proprietary exports without public file/API access | Pieces/Cody/Glean/Greptile variants where no export is available | None | Roadmap | Requires vendor-supported export/API or explicit user-supplied dump. |
+
+Every imported item preserves provenance: `vendor`, `source_file` or
+`api_endpoint`, `original_id`, absolute ISO `imported_at`/`occurred_at` when
+available, `tags`, `confidence`, US-002 trust-tier vocabulary
+(`untrusted|local|verified|privileged`), `related_files`, and
+`redaction_diagnostics` from `context-safety.ts`. Idempotency is deterministic:
+Rorca derives an external id from `(workspace_id, vendor, original_id)` and a
+provenance hash from the sanitized source metadata/content hash; duplicate
+`dedupe_key` values are skipped.
+
+The admin endpoint `POST /api/context-capture/imports/{workspaceId}` exposes the
+same contract for local operators. It defaults to `dryRun: true`; setting
+`dryRun: false` stages rows as `memory_candidates` only, with
+`default_retrieval_eligible=false` and `status='pending'`. Imports never write to
+`memories`, the graph, or retrieval-visible context. Candidate approval remains
+through the existing context-distillation governance endpoints.
