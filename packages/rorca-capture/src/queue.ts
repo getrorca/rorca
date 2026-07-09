@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CaptureConfig } from "./config.js";

@@ -1,6 +1,6 @@
 {
-  "contractVersion": "3.1.0",
-  "generatedAt": "2026-07-05T09:00:13.295Z",
+  "contractVersion": "3.2.0",
+  "generatedAt": "2026-07-09T06:54:23.781Z",
   "routes": [
     {
       "method": "GET",
@@ -3418,6 +3418,70 @@
         "404": {}
       },
       "hash": "sha256:05178c17f8f5f366c095540d5670dbe112e2d4405f37de5e4009ee4e048154b7"
+    },
+    {
+      "method": "POST",
+      "path": "/api/operator-chat/query",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "input": {
+                    "description": "User/operator question",
+                    "type": "string"
+                  },
+                  "maxTokens": {
+                    "maximum": 2000,
+                    "minimum": 256,
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "enum": [
+                      "general",
+                      "coding",
+                      "research",
+                      "genesis"
+                    ],
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "Optional model override for model synthesis",
+                    "type": "string"
+                  },
+                  "operatorContext": {
+                    "description": "Redacted caller context used for grounding",
+                    "type": "object"
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "useModel": {
+                    "description": "Request model synthesis when safe and configured",
+                    "type": "boolean"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {}
+      },
+      "hash": "sha256:a84a3bbfd814b78c662cb45d2a1bb8a7d123ae4fd8869c2e45158bdeabf1a756"
     },
     {
       "method": "GET",
