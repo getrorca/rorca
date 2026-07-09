@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `3.1.0`
+Contract version: `3.2.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -52,6 +52,7 @@ Contract version: `3.1.0`
 | PATCH | `/api/memory/relations/{id}` | body:status (required), body:workspaceId (required), path:id (required) | `sha256:91614b58a6079c45f9322e2a2dfa008ac47f3a4bee51eee5909294308bae3a6c` |
 | GET | `/api/memory/review` | query:workspaceId (required) | `sha256:63b32011fe10f254210b4a0050fd3c7b27f8f94c4fcb454e4b9e4ab46328a181` |
 | POST | `/api/memory/review/{id}/action` | body:action (required), body:workspaceId (required), path:id (required) | `sha256:05178c17f8f5f366c095540d5670dbe112e2d4405f37de5e4009ee4e048154b7` |
+| POST | `/api/operator-chat/query` | body:input (required), body:maxTokens (optional), body:mode (optional), body:model (optional), body:operatorContext (optional), body:source (optional), body:useModel (optional), body:workspaceId (optional) | `sha256:a84a3bbfd814b78c662cb45d2a1bb8a7d123ae4fd8869c2e45158bdeabf1a756` |
 | GET | `/api/pipeline/runs` | query:workspaceId (required) | `sha256:589fed0adef7b6c4a26a13c733cb3ec514d6b7643a99c82ded0c361a5ab6dfb2` |
 | GET | `/api/pipeline/runs/{runId}` | path:runId (required) | `sha256:30043f8edd511560ee7725204fe083b92c03e29d0f3395c13f6e025e3550dc5e` |
 | POST | `/api/pipeline/runs/{runId}/cancel` | path:runId (required) | `sha256:ad6baae22c0e39dd86fef78bc70d6a748e644f8931b3e666db4e9790150b7da3` |
@@ -112,3 +113,4 @@ Contract version: `3.1.0`
 | GET | `/api/workspaces/{workspaceId}/capture/last-rorca-run` | path:workspaceId (required) | `sha256:5a8bd7d5e1ea819b1c6ff9ed656465427dead6c6a5d2e98a5505d61c201b7b41` |
 | GET | `/api/workspaces/{workspaceId}/hydration` | path:workspaceId (required) | `sha256:025169be7f2ec0379ff62f09b96e2f682a8b2e4f9efdddc10c298a90709357ed` |
 | POST | `/api/workspaces/{workspaceId}/hydration` | body:types (optional), path:workspaceId (required) | `sha256:d1c47bbb1246fe417b72ee908c9f266f2c40360bc7808dc4ff8cce8391bd994d` |
+
