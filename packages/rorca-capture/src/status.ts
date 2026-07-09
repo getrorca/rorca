@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import type { CaptureConfig } from "./config.js";
 import type { ResolvedWorkspace, TokenStatus } from "./api.js";
 import { CONTEXT_SAFETY_CONTRACT_VERSION, DEFAULT_CONTEXT_IGNORE_PATHS } from "./context-safety.js";
