@@ -1,8 +1,14 @@
 declare module "@mariozechner/pi-coding-agent" {
+  export class Theme {
+    fg(kind: string, value: string): string;
+    strikethrough(value: string): string;
+  }
+
   export interface ExtensionUi {
     notify(message: string, level?: "info" | "success" | "warning" | "error"): void;
     setStatus(key: string, value?: string): void;
     setWidget(key: string, value?: string[]): void;
+    custom<T>(factory: (tui: import("@mariozechner/pi-tui").TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => import("@mariozechner/pi-tui").Component | Promise<import("@mariozechner/pi-tui").Component>, options?: Record<string, unknown>): Promise<T>;
     select(title: string, options: string[], config?: Record<string, unknown>): Promise<string | undefined>;
     confirm(title: string, message: string): Promise<boolean>;
     theme: {

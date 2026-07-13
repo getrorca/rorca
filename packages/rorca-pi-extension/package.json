@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "keywords": ["pi-package", "rorca", "pi-extension"],
+  "keywords": ["pi-package", "rorca", "pi-extension", "vscode-extension"],
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"
   },
@@ -13,6 +13,8 @@
     "skills": ["./skills"]
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:vscode": "tsc -p vscode-extension/tsconfig.json --noEmit",
+    "setup:vscode-hosts": "node vscode-extension/out/packages/rorca-pi-extension/vscode-extension/src/install.js"
   }
 }

@@ -10,5 +10,5 @@
     "resolveJsonModule": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["extensions/**/*.ts", "extensions/**/*.d.ts"]
+  "include": ["extensions/**/*.ts", "extensions/**/*.d.ts", "vscode-extension/src/**/*.ts", "vscode-extension/src/**/*.d.ts"]
 }

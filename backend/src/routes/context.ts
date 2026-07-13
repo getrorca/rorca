@@ -26,6 +26,7 @@ import { createJob, updateJobStatus } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import { queryOne } from '../db/index';
 import { buildContextHealthSummary } from '../lib/auto-memory';
+import { readSafeContextFilePreview } from '../lib/context-safety';
 
 const router = Router();
 
@@ -352,6 +353,80 @@ router.post('/enrich/async', async (req: Request, res: Response) => {
     res.status(202).json(payload);
   } catch (error) {
     handleRouteError(res, error, '[context] enrich async');
+  }
+});
+
+function parseCandidateRelatedFilePaths(value: unknown): string[] {
+  const parsed = typeof value === 'string' ? (() => { try { return JSON.parse(value); } catch { return value; } })() : value;
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((item) => {
+    if (typeof item === 'string' && item.trim()) return [item];
+    if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).path === 'string') return [(item as Record<string, string>).path];
+    return [];
+  });
+}
+
+/**
+ * @swagger
+ * /api/context/candidates/{id}/preview:
+ *   get:
+ *     tags: [Context]
+ *     summary: Safely preview a file related to a context memory candidate
+ *     operationId: previewContextCandidateFile
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Candidate file previews expose local workspace file contents and must remain operator-only while routing through context-safety redaction gates."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Safe redacted file preview }
+ *       400: { description: Invalid preview request }
+ *       404: { description: Candidate, workspace, or file not found }
+ */
+router.get('/candidates/:id/preview', async (req: Request, res: Response) => {
+  try {
+    const candidateId = Number(req.params.id);
+    if (!Number.isInteger(candidateId) || candidateId <= 0) throw new ValidationError('candidate id must be a positive integer');
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : '';
+    const previewPath = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!workspaceId) throw new ValidationError('workspaceId query parameter is required');
+    if (!previewPath) throw new ValidationError('path query parameter is required');
+
+    const row = await queryOne<{ workspace_path: string; related_files: unknown }>(
+      `SELECT w.path AS workspace_path, mc.related_files
+         FROM memory_candidates mc
+         JOIN workspaces w ON w.id = mc.workspace_id
+        WHERE mc.id = $1 AND mc.workspace_id = $2`,
+      [candidateId, workspaceId],
+    );
+    if (!row) throw new NotFoundError('Memory candidate', String(candidateId));
+    const relatedFilePaths = parseCandidateRelatedFilePaths(row.related_files);
+    if (!relatedFilePaths.includes(previewPath)) {
+      throw new ValidationError('Preview path must be one of the candidate related files', { previewPath, relatedFilePaths });
+    }
+
+    let preview: Awaited<ReturnType<typeof readSafeContextFilePreview>>;
+    try {
+      preview = await readSafeContextFilePreview(row.workspace_path, previewPath);
+    } catch (previewError) {
+      const message = previewError instanceof Error ? previewError.message : String(previewError);
+      const code = previewError && typeof previewError === 'object' ? (previewError as { code?: string }).code : undefined;
+      if (code === 'ENOENT') throw new NotFoundError('Candidate file', previewPath);
+      throw new ValidationError(message);
+    }
+    res.json({ ok: true, candidateId, workspaceId, preview });
+  } catch (error) {
+    handleRouteError(res, error, '[context] candidate preview');
   }
 });
 

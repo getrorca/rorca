@@ -7,7 +7,8 @@
     "packages/*"
   ],
   "bin": {
-    "rorca": "./bin/rorca.js"
+    "rorca": "./bin/rorca.js",
+    "rorca-capture": "./bin/rorca-capture.js"
   },
   "scripts": {
     "dev": "node scripts/dev-smart.mjs",
@@ -27,6 +28,7 @@
     "sync:push": "node scripts/sync-opencore-push.mjs",
     "typecheck": "tsc --noEmit && cd backend && tsc --noEmit && cd .. && npx tsc -p packages/rorca-pi-extension/tsconfig.json --noEmit && npx tsc -p packages/rorca-public-contract/tsconfig.json --noEmit",
     "test:pi-extension": "npx vitest run --config packages/rorca-pi-extension/vitest.config.ts",
+    "test:capture": "npx vitest run --config packages/rorca-pi-extension/vitest.config.ts packages/rorca-pi-extension/extensions/rorca/__tests__/capture-compatibility-e2e.test.ts && cd backend && JEST_SKIP_RUNTIME_MIGRATIONS=true npx jest src/lib/__tests__/context-distillation.test.ts src/routes/__tests__/context-capture-validation.test.ts --runInBand",
     "lint": "npx eslint src/",
     "lint:swagger": "npx tsx scripts/check-swagger-coverage.ts",
     "lint:tier": "npx tsx scripts/check-rorca-tier-annotations.ts",
@@ -54,6 +56,7 @@
   },
   "files": [
     "bin/rorca.js",
+    "bin/rorca-capture.js",
     "cli.js",
     "dist/",
     "backend/dist/",

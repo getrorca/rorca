@@ -174,7 +174,126 @@ export interface WsSectionProps {
 
 // ─── Context Section (Library | Files | Routing | Skills) ───────────────────
 
-type ContextSubTab = 'library' | 'files' | 'routing' | 'skills';
+type ContextSubTab = 'library' | 'capture' | 'files' | 'routing' | 'skills';
+
+type CaptureControlStatus = {
+  policyMode: string;
+  paused: boolean;
+  activeIntegrations: Record<string, unknown>;
+  ignoredPaths: string[];
+  queueDepth: number;
+  redactionPolicy: { version: string; mode: string; availableModes: string[] };
+  lastCapturedEvent: {
+    occurredAt: string | null;
+    eventType: string | null;
+    integrationId: string | null;
+    redactionDiagnostics: {
+      redactionCount: number;
+      ignoredPathCount: number;
+      redactionTypes: string[];
+      regulatedDomainFlags: string[];
+      truncated: boolean;
+    };
+  };
+  auditLog: Array<{ id: string; eventType: string; integrationId: string; occurredAt: string; redactionDiagnostics: { redactionCount: number; redactionTypes: string[]; regulatedDomainFlags: string[] } }>;
+};
+
+function ContextCaptureStatusCard({ workspaceId, showToast }: WsSectionProps) {
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState<CaptureControlStatus | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await apiFetch<{ status: CaptureControlStatus }>(`/api/context-capture/${encodeURIComponent(workspaceId)}/status`);
+      setStatus(data.status);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to load capture status', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId, showToast]);
+
+  useEffect(() => { void loadStatus(); }, [loadStatus]);
+
+  const setPause = async (paused: boolean) => {
+    try {
+      await apiFetch(`/api/context-capture/${encodeURIComponent(workspaceId)}/${paused ? 'pause' : 'resume'}`, { method: 'POST' });
+      showToast(paused ? 'Context capture paused' : 'Context capture resumed', 'success');
+      await loadStatus();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update capture pause state', 'error');
+    }
+  };
+
+  if (loading && !status) {
+    return <div className="flex items-center gap-2 text-sm text-muted"><Loader2 size={16} className="animate-spin" /> Loading capture controls...</div>;
+  }
+
+  if (!status) return null;
+
+  const diagnostics = status.lastCapturedEvent.redactionDiagnostics;
+  const integrations = Object.keys(status.activeIntegrations).filter((key) => status.activeIntegrations[key]);
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border border-border bg-panel p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text)]">Always-on capture privacy controls</h3>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              Shows the single operator policy, pause state, queue depth, ignored paths, integrations, and redaction diagnostics. Secret values and raw payloads are never displayed.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => void loadStatus()} className="rounded border border-border px-3 py-1.5 text-xs text-muted hover:bg-surface-100">Refresh</button>
+            <button type="button" onClick={() => void setPause(!status.paused)} className="rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90">
+              {status.paused ? 'Resume' : 'Pause'}
+            </button>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Policy</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{status.policyMode}</div></div>
+          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Pause state</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{status.paused ? 'Paused' : 'Active'}</div></div>
+          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Queue depth</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{status.queueDepth}</div></div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="rounded-xl border border-border bg-panel p-4">
+          <h4 className="text-sm font-semibold text-[var(--text)]">Integrations and ignored paths</h4>
+          <div className="mt-3 text-xs text-muted">Active integrations: {integrations.length ? integrations.join(', ') : 'none'}</div>
+          <div className="mt-2 text-xs text-muted">Ignored paths: {status.ignoredPaths.length ? status.ignoredPaths.join(', ') : 'none configured'}</div>
+          <div className="mt-2 text-xs text-muted">Redaction policy: {status.redactionPolicy.version}</div>
+        </div>
+        <div className="rounded-xl border border-border bg-panel p-4">
+          <h4 className="text-sm font-semibold text-[var(--text)]">Last captured event</h4>
+          <div className="mt-3 space-y-1 text-xs text-muted">
+            <div>Time: {status.lastCapturedEvent.occurredAt ?? 'none'}</div>
+            <div>Integration: {status.lastCapturedEvent.integrationId ?? 'none'}</div>
+            <div>Event type: {status.lastCapturedEvent.eventType ?? 'none'}</div>
+            <div>Redactions: {diagnostics.redactionCount} ({diagnostics.redactionTypes.join(', ') || 'none'})</div>
+            <div>Regulated flags: {diagnostics.regulatedDomainFlags.join(', ') || 'none'}</div>
+            <div>Ignored path hits: {diagnostics.ignoredPathCount}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-border bg-panel p-4">
+        <h4 className="text-sm font-semibold text-[var(--text)]">Local audit log</h4>
+        <div className="mt-3 divide-y divide-border text-xs">
+          {status.auditLog.length === 0 && <div className="py-2 text-muted">No audit events yet.</div>}
+          {status.auditLog.slice(0, 8).map((item) => (
+            <div key={item.id} className="flex flex-col gap-1 py-2 sm:flex-row sm:items-center sm:justify-between">
+              <span className="text-[var(--text)]">{item.eventType} · {item.integrationId}</span>
+              <span className="text-muted">{item.occurredAt} · redactions={item.redactionDiagnostics.redactionCount} · flags={item.redactionDiagnostics.regulatedDomainFlags.join(', ') || 'none'}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
   const [subTab, setSubTab] = useState<ContextSubTab>('library');
@@ -228,6 +347,10 @@ export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
         <button role="tab" aria-selected={subTab === 'library'} onClick={() => setSubTab('library')} className={tabClass('library')}>
           <Layers size={14} />
           Library
+        </button>
+        <button role="tab" aria-selected={subTab === 'capture'} onClick={() => setSubTab('capture')} className={tabClass('capture')}>
+          <Info size={14} />
+          Capture Status
         </button>
         <button role="tab" aria-selected={subTab === 'files'} onClick={() => setSubTab('files')} className={tabClass('files')}>
           <FileText size={14} />
@@ -305,6 +428,7 @@ export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
           </aside>
         </div>
       )}
+      {subTab === 'capture' && <ContextCaptureStatusCard workspaceId={workspaceId} showToast={showToast} />}
       {subTab === 'files' && <ContextFilesEditor workspaceId={workspaceId} showToast={showToast} />}
       {subTab === 'routing' && <ContextRoutingSettings workspaceId={workspaceId} showToast={showToast} />}
       {subTab === 'skills' && <SkillsManager workspaceId={workspaceId} showToast={showToast} />}
