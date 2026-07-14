@@ -14,6 +14,7 @@ import { activeAgent, activeModel, agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
 import { detectPi } from '../lib/pi-detector';
+import { getPtyCliCompatibility } from '../lib/pty-cli-compat';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
@@ -355,6 +356,10 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       piBinPath: pi.piBinPath,
       // MP-009: Engine availability for EngineSelector (all three engines, cached 30s)
       engines,
+      // PTY readiness is a separate, verified contract: each result includes
+      // resolved binary, version/help probe outcomes, supported flags, and
+      // actionable diagnostics without exposing credentials or prompt data.
+      ptyCliCompatibility: getPtyCliCompatibility(),
       embeddings: getQueueStats(),
       cache: cacheStats(),
       activeJobs: activeJobsResult.status === 'fulfilled' ? activeJobsResult.value : [],

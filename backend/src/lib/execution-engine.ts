@@ -13,7 +13,7 @@
  * uses interactive node-pty adapters and bracketed-paste prompt injection.
  *   - claude:   semantic `claude --print ...`; PTY interactive `claude ...`
  *   - opencode: semantic `opencode run --format json ...`; PTY interactive `opencode ...`
- *   - codex:    semantic `codex exec ...`; PTY interactive `codex --approval-mode auto-edit`
+ *   - codex:    semantic `codex exec ...`; PTY interactive flags verified from `codex --help`
  *   - pi:       semantic Pi RPC; PTY interactive `pi --mode text ...`
  *
  * Agent type is read from config (RORCA_AGENT env var via config.ts, default: claude).
@@ -84,6 +84,11 @@ import { transitionRunLifecycle } from './run-lifecycle';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
+import {
+  assertPtyCliCompatible,
+  type PtyCliCapability,
+  type PtyCliCompatibility,
+} from './pty-cli-compat';
 import {
   buildPiProgressLogPath,
   buildPiServerSkillFiles,
@@ -539,7 +544,7 @@ function resolvePiThinkingLevel(requestedModel: string | null, effortLevel?: 'lo
   return effortLevel;
 }
 
-function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
+function resolvePiCliSelection(requestedModel: string | null, piBin = PI_BIN): PiCliSelection {
   if (!requestedModel) return { provider: null, model: null };
 
   const trimmed = requestedModel.trim();
@@ -553,7 +558,7 @@ function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
     };
   }
 
-  const available = listPiModels(PI_BIN);
+  const available = listPiModels(piBin);
 
   const slashIndex = trimmed.indexOf('/');
   if (slashIndex !== -1) {
@@ -1979,9 +1984,20 @@ export function buildPtyCommand(
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
   piServerSkillFiles: string[] = [],
+  verifiedCompatibility?: PtyCliCompatibility,
 ): PtyCommand {
+  const requireCapabilities = (capabilities: PtyCliCapability[] = []): PtyCliCompatibility =>
+    assertPtyCliCompatible(agentType, capabilities, verifiedCompatibility);
+
   switch (agentType) {
     case 'claude': {
+      const claudeCliModel = resolveClaudeCliModelId(agentModel);
+      const compatibility = requireCapabilities([
+        ...(claudeCliModel ? ['model' as const] : []),
+        ...(thinkingBudget && thinkingBudget > 0 ? ['thinkingBudget' as const] : []),
+        ...(effortLevel ? ['effort' as const] : []),
+        ...(mcpServers && Object.keys(mcpServers).length > 0 ? ['mcpConfig' as const] : []),
+      ]);
       const env = buildGuardedAgentEnv(cwd);
       let mcpConfigPath: string | null = null;
       if (mcpServers && Object.keys(mcpServers).length > 0) {
@@ -2002,11 +2018,10 @@ export function buildPtyCommand(
           fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
         }
       }
-      const claudeCliModel = resolveClaudeCliModelId(agentModel);
       return {
-        command: CLAUDE_BIN,
+        command: compatibility.binaryPath!,
         args: [
-          '--dangerously-skip-permissions',
+          ...(compatibility.capabilities.permissionBypass ? ['--dangerously-skip-permissions'] : []),
           ...(claudeCliModel ? ['--model', claudeCliModel] : []),
           ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
           ...(effortLevel ? ['--effort', effortLevel] : []),
@@ -2022,6 +2037,10 @@ export function buildPtyCommand(
       };
     }
     case 'opencode': {
+      const compatibility = requireCapabilities([
+        ...(attachAddr ? ['attach' as const] : []),
+        ...(agentModel ? ['model' as const] : []),
+      ]);
       const env = buildGuardedAgentEnv(cwd, {
         ...buildCleanEnv(),
         ...buildOpenCodeReasoningEnv(agentModel, thinkingEnabled, thinkingBudget, effortLevel),
@@ -2041,9 +2060,8 @@ export function buildPtyCommand(
         }
         fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify({ ...existingConfig, mcp: mcpEntries }, null, 2), 'utf8');
       }
-      const status = detectOpenCode();
       return {
-        command: status.opencodeBinPath ?? 'opencode',
+        command: compatibility.binaryPath!,
         args: [
           ...(attachAddr ? ['--attach', attachAddr] : []),
           ...(agentModel ? ['--model', normalizeOpenCodeModel(agentModel)] : []),
@@ -2067,39 +2085,54 @@ export function buildPtyCommand(
       };
     }
     case 'codex': {
+      const compatibility = requireCapabilities(agentModel ? ['model'] : []);
       const env = buildGuardedAgentEnv(cwd);
       const codexMcpRegisteredNames: string[] = [];
       if (mcpServers && Object.keys(mcpServers).length > 0) {
         for (const [name, url] of Object.entries(mcpServers)) {
           try {
-            execSync(`${CODEX_BIN} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
+            execSync(`${compatibility.binaryPath} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
             codexMcpRegisteredNames.push(name);
           } catch { /* ignore registration failures in PTY mode */ }
         }
       }
       return {
-        command: CODEX_BIN,
-        args: ['--approval-mode', 'auto-edit', ...(agentModel ? ['--model', agentModel] : [])],
+        command: compatibility.binaryPath!,
+        // Codex 0.132+ rejects the old --approval-mode auto-edit spelling.
+        // Only add options that its own --help probe advertised.
+        args: [
+          ...(compatibility.capabilities.askForApproval ? ['--ask-for-approval', 'on-request'] : []),
+          ...(compatibility.capabilities.noAltScreen ? ['--no-alt-screen'] : []),
+          ...(agentModel ? ['--model', agentModel] : []),
+        ],
         env,
         prompt,
         cleanup: () => {
           for (const name of codexMcpRegisteredNames) {
-            try { execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
+            try { execSync(`${compatibility.binaryPath} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
           }
         },
       };
     }
     case 'pi': {
-      const piSelection = resolvePiCliSelection(agentModel);
+      const piSelection = resolvePiCliSelection(agentModel, verifiedCompatibility?.binaryPath ?? PI_BIN);
       const piThinkingLevel = resolvePiThinkingLevel(agentModel, effortLevel);
+      const compatibility = requireCapabilities([
+        'textMode',
+        ...(piSelection.provider ? ['provider' as const] : []),
+        ...(piSelection.model ? ['model' as const] : []),
+        ...(piThinkingLevel ? ['thinking' as const] : []),
+        ...(piServerSkillFiles.length > 0 ? ['skill' as const] : []),
+      ]);
+      const extensions = compatibility.capabilities.extension ? resolvePiExtensionPaths() : [];
       return {
-        command: PI_BIN,
+        command: compatibility.binaryPath!,
         args: [
           '--mode', 'text',
-          '--no-extensions',
-          '--tools', 'read,bash,edit,write,grep,find,ls',
-          '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
-          ...resolvePiExtensionPaths().flatMap(extensionPath => ['--extension', extensionPath]),
+          ...(compatibility.capabilities.noExtensions ? ['--no-extensions'] : []),
+          ...(compatibility.capabilities.tools ? ['--tools', 'read,bash,edit,write,grep,find,ls'] : []),
+          ...(compatibility.capabilities.appendSystemPrompt ? ['--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT] : []),
+          ...extensions.flatMap(extensionPath => ['--extension', extensionPath]),
           ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
           ...(piSelection.model ? ['--model', piSelection.model] : []),
           ...(piThinkingLevel ? ['--thinking', piThinkingLevel] : []),
@@ -6448,6 +6481,16 @@ async function main(): Promise<void> {
   // ── Scan per-story agent assignments ────────────────────────────────
   const requiredEngines = scanRequiredEngines(initialExecutableStories, config.agentType);
   const engineCounts = countStoriesByEngine(initialExecutableStories, config.agentType);
+
+  // A PTY has no safe ANSI/RPC fallback: verify every adapter which could be
+  // selected before any session or prompt is created. The probe is bounded and
+  // only invokes --version/--help, so it never changes CLI state or credentials.
+  if (config.terminalMode === 'pty') {
+    for (const requiredAgent of requiredEngines) {
+      const compatibility = assertPtyCliCompatible(requiredAgent);
+      logger.info(`[engine] PTY ${requiredAgent}: ${compatibility.version ?? 'unknown version'} at ${compatibility.binaryPath}`);
+    }
+  }
 
   if (config.agentType === 'opencode' || requiredEngines.has('opencode')) requireOpenCode();
   if (config.agentType === 'codex' || requiredEngines.has('codex')) requireCodex();

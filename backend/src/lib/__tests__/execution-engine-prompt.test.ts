@@ -2,8 +2,30 @@
  * Regression coverage for fail-closed prompt delivery in execution-engine.
  */
 
+import type { AgentType } from '../config';
+import type { PtyCliCapability, PtyCliCompatibility } from '../pty-cli-compat';
+
+const CAPABILITIES: PtyCliCapability[] = [
+  'permissionBypass', 'model', 'thinkingBudget', 'effort', 'mcpConfig', 'attach', 'askForApproval', 'noAltScreen',
+  'textMode', 'noExtensions', 'tools', 'appendSystemPrompt', 'extension', 'provider', 'thinking', 'skill',
+];
+
 describe('execution-engine prompt delivery hardening', () => {
   const previousPiBin = process.env.PI_BIN;
+
+  function verifiedCompatibility(agentType: AgentType, binaryPath: string, enabled: PtyCliCapability[] = []): PtyCliCompatibility {
+    return {
+      agentType,
+      binaryPath,
+      version: 'test',
+      ready: true,
+      interactive: true,
+      capabilities: Object.fromEntries(CAPABILITIES.map((key) => [key, enabled.includes(key)])) as PtyCliCompatibility['capabilities'],
+      diagnostics: [],
+      probes: { version: null, help: null },
+      checkedAt: new Date(0).toISOString(),
+    };
+  }
 
   function loadExecutionEngine(): typeof import('../execution-engine') {
     try {
@@ -12,7 +34,6 @@ describe('execution-engine prompt delivery hardening', () => {
       const message = error instanceof Error ? (error.stack || error.message) : String(error);
       // Keep this diagnostic in the test: ts-jest can otherwise report an empty
       // failure when a module-level import throws before assertions run.
-      // eslint-disable-next-line no-console
       console.error(message);
       throw error;
     }
@@ -42,6 +63,7 @@ describe('execution-engine prompt delivery hardening', () => {
       'xhigh',
       undefined,
       [],
+      verifiedCompatibility('pi', '/usr/bin/pi-test-double', ['textMode', 'model', 'thinking']),
     );
 
     expect(command.command.endsWith('/pi-test-double') || command.command === '/usr/bin/pi-test-double').toBe(true);
@@ -55,16 +77,18 @@ describe('execution-engine prompt delivery hardening', () => {
     const { buildPtyCommand } = loadExecutionEngine();
     const cwd = process.cwd();
 
-    const claude = buildPtyCommand('claude', 'prompt', cwd, null, null);
+    const claude = buildPtyCommand('claude', 'prompt', cwd, null, null, undefined, undefined, undefined, undefined, [], verifiedCompatibility('claude', '/fake/claude'));
     expect(claude.args).not.toContain('--print');
     expect(claude.args).not.toContain('--output-format');
 
-    const opencode = buildPtyCommand('opencode', 'prompt', cwd, null, null);
+    const opencode = buildPtyCommand('opencode', 'prompt', cwd, null, null, undefined, undefined, undefined, undefined, [], verifiedCompatibility('opencode', '/fake/opencode'));
     expect(opencode.args).not.toContain('run');
     expect(opencode.args).not.toContain('--format');
 
-    const codex = buildPtyCommand('codex', 'prompt', cwd, null, null);
+    const codex = buildPtyCommand('codex', 'prompt', cwd, null, null, undefined, undefined, undefined, undefined, [], verifiedCompatibility('codex', '/fake/codex', ['askForApproval', 'noAltScreen']));
     expect(codex.args).not.toContain('exec');
+    expect(codex.args).not.toContain('--approval-mode');
+    expect(codex.args).toEqual(expect.arrayContaining(['--ask-for-approval', 'on-request', '--no-alt-screen']));
   });
 
   test('recognizes the Pi CLI no-prompt message as prompt delivery failure', () => {
