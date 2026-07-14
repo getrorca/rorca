@@ -49,12 +49,15 @@ import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import {
   buildPtyCompletionMarker,
   buildPtyMarkerFilePath,
+  DEFAULT_PTY_READINESS_TIMEOUT_MS,
   createBaseInteractivePtyAdapter,
   createPtyCompletionState,
+  createPtyReadinessState,
   injectPromptWithChunkedTyping,
   type InteractivePtyAgentAdapter,
   type PtyCompletionState,
   type PtyLaunchCommand,
+  type PtyReadinessState,
 } from './interactive-pty-agent-adapter';
 import {
   PTY_AVAILABLE,
@@ -70,10 +73,14 @@ import {
   completeRunPtySession,
   initializeRunPtySequence,
   logRunPtyStoreError,
+  markRunPtyCompletionFileSeen,
   markRunPtyCompletionMarkerSeen,
+  recordRunPtyCompletionFileError,
   recordRunPtyHeartbeat,
+  recordRunPtyPromptReadiness,
   startRunPtySession,
 } from './run-pty-store';
+import { transitionRunLifecycle } from './run-lifecycle';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
@@ -2007,7 +2014,6 @@ export function buildPtyCommand(
         ],
         env,
         prompt,
-        startupDelayMs: 900,
         cleanup: () => {
           if (mcpConfigPath) {
             try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
@@ -2044,7 +2050,6 @@ export function buildPtyCommand(
         ],
         env,
         prompt,
-        startupDelayMs: 900,
         cleanup: () => {
           if (!openCodeMcpConfigPath) return;
           try {
@@ -2077,7 +2082,6 @@ export function buildPtyCommand(
         args: ['--approval-mode', 'auto-edit', ...(agentModel ? ['--model', agentModel] : [])],
         env,
         prompt,
-        startupDelayMs: 900,
         cleanup: () => {
           for (const name of codexMcpRegisteredNames) {
             try { execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
@@ -2103,7 +2107,6 @@ export function buildPtyCommand(
         ],
         env: buildGuardedAgentEnv(cwd),
         prompt,
-        startupDelayMs: 900,
       };
     }
   }
@@ -2157,13 +2160,20 @@ async function spawnAgentViaPty(
     let exitCode: number | null = null;
     let exitSignal: string | null = null;
     let watchdogFired = false;
-    let completionMarkerSeen = false;
+    // Marker-file evidence ends the interactive agent turn. A terminal marker
+    // is recorded separately and can never make an echoed prompt self-complete.
+    let completionFileSeen = false;
+    let completionShutdownRequested = false;
+    let terminalMarkerSeen = false;
     let completionState: PtyCompletionState | null = null;
+    let readinessState: PtyReadinessState | null = null;
     let adapter: InteractivePtyAgentAdapter | null = null;
     let outputBatcher: ReturnType<typeof createRunPtyOutputBatcher> | null = null;
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let completionFileTimer: ReturnType<typeof setInterval> | null = null;
+    let readinessTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let runTimer: ReturnType<typeof setTimeout> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2172,6 +2182,9 @@ async function spawnAgentViaPty(
     let finalizePromise: Promise<void> | null = null;
     let unregisterPtyCleanupTask: (() => void) | null = null;
     let inputPollInFlight = false;
+    let completionFileCheckInFlight = false;
+    let observedReadiness: { reason: string; timedOut: boolean } | null = null;
+    let resolveReadiness: ((result: { reason: string; timedOut: boolean }) => void) | null = null;
     let resolveExitObserved: (() => void) | null = null;
     const exitObserved = new Promise<void>((resolve) => {
       resolveExitObserved = resolve;
@@ -2184,6 +2197,8 @@ async function spawnAgentViaPty(
       if (resizeTimer) clearInterval(resizeTimer);
       if (inputTimer) clearInterval(inputTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (completionFileTimer) clearInterval(completionFileTimer);
+      if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
@@ -2194,7 +2209,11 @@ async function spawnAgentViaPty(
       }
       logStream.end();
       ptyCommand?.cleanup?.();
-      const status = completionMarkerSeen
+      // A file alone never erases an unexpected process failure. The only
+      // normalized non-zero exit is the SIGTERM we intentionally send after a
+      // valid file has ended the interactive turn.
+      const completionTurnExited = completionFileSeen && (exitCode === 0 || completionShutdownRequested);
+      const status = completionTurnExited
         ? 'exited'
         : watchdogFired
           ? 'timed_out'
@@ -2205,13 +2224,18 @@ async function spawnAgentViaPty(
               : 'failed';
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
+      if (!completionFileSeen) {
+        try { await recordRunPtyCompletionFileError(ptyOptions.runId, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
+      }
       try {
-        await completeRunPtySession(ptyOptions.runId, status, completionMarkerSeen ? 0 : exitCode, completionMarkerSeen ? null : exitSignal);
+        await completeRunPtySession(ptyOptions.runId, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
       }
       resolve({
-        exitCode: completionMarkerSeen ? 0 : watchdogFired ? 124 : (exitCode ?? 1),
+        // Completion permits orderly PTY cleanup only after process exit;
+        // executeStory still decides story outcome through validation/merge.
+        exitCode: completionTurnExited ? 0 : watchdogFired ? 124 : (exitCode ?? 1),
         stderrTail: Buffer.concat(stderrChunks).toString('utf8'),
         elapsedMs: Date.now() - startTime,
       });
@@ -2275,7 +2299,13 @@ async function spawnAgentViaPty(
       const storyIdForMarker = ptyOptions.storyId ?? 'run';
       const completionMarker = buildPtyCompletionMarker(ptyOptions.runId, storyIdForMarker);
       const markerFilePath = buildPtyMarkerFilePath(ptyOptions.runId, storyIdForMarker);
+      const markerFile = path.resolve(cwd, markerFilePath);
+      // A retry must not inherit a prior attempt's completion file.
+      try { fs.unlinkSync(markerFile); } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
       completionState = createPtyCompletionState(completionMarker);
+      readinessState = createPtyReadinessState(ptyOptions.agentType);
       adapter = buildInteractivePtyAgentAdapter(
         ptyOptions.agentType,
         agentModel,
@@ -2320,6 +2350,14 @@ async function spawnAgentViaPty(
         childPid: pty.pid ?? null,
         completionMarker,
       });
+      const ptyAttached = await transitionRunLifecycle(ptyOptions.runId, 'pty_attached', {
+        transport: 'pty_attached',
+        process: 'spawned',
+        agentType: ptyOptions.agentType,
+      });
+      if (!ptyAttached) {
+        throw new Error('PTY_LIFECYCLE_ATTACH_REJECTED: refusing to inject a prompt without an authoritative PTY-attached phase');
+      }
       unregisterPtyCleanupTask = registerPtyCleanupTask(`run-${ptyOptions.runId}`, () => requestPtyShutdown('SIGTERM'));
       resetInactivity();
       heartbeatTimer = setInterval(() => {
@@ -2373,31 +2411,68 @@ async function spawnAgentViaPty(
       }, 50);
       inputTimer.unref?.();
 
+      const observeCompletionFile = async (): Promise<void> => {
+        if (settled || completionFileSeen || completionFileCheckInFlight) return;
+        completionFileCheckInFlight = true;
+        try {
+          if (!fs.existsSync(markerFile)) return;
+          const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
+          const valid = parsed.storyId === storyIdForMarker
+            && Number(parsed.runId) === ptyOptions.runId
+            && parsed.marker === completionMarker;
+          if (!valid) {
+            await recordRunPtyCompletionFileError(ptyOptions.runId, 'marker_file_payload_mismatch');
+            return;
+          }
+          completionFileSeen = true;
+          await markRunPtyCompletionFileSeen(ptyOptions.runId, completionMarker);
+          if (ptyOptions.port && ptyOptions.storyId) {
+            await emitWalEvent(ptyOptions.port, 'story_completion_file', ptyOptions.workspaceId, {
+              run_id: ptyOptions.runId,
+              story_id: ptyOptions.storyId,
+              agent_type: ptyOptions.agentType,
+              terminal_mode: 'pty',
+              marker_file: markerFilePath,
+              terminal_marker_seen: terminalMarkerSeen,
+              message: 'Agent completion file observed; process exit plus merge and validation gates still determine story pass.',
+            }, ptyOptions.storyId);
+          }
+          // The agent turn is over, but completion is not a pass signal. Wait
+          // for the process cleanup/exit path before executeStory runs gates.
+          setTimeout(() => {
+            completionShutdownRequested = true;
+            void requestPtyShutdown('SIGTERM');
+          }, 250).unref?.();
+        } catch (err: unknown) {
+          const reason = err instanceof Error ? err.message : String(err);
+          await recordRunPtyCompletionFileError(ptyOptions.runId, reason);
+          logRunPtyStoreError('Failed to inspect PTY completion file', ptyOptions.runId, err);
+        } finally {
+          completionFileCheckInFlight = false;
+        }
+      };
+      completionFileTimer = setInterval(() => { void observeCompletionFile(); }, 100);
+      completionFileTimer.unref?.();
+
       pty.onData((chunk) => {
         const buf = toBuffer(chunk);
         if (buf.length === 0) return;
         resetInactivity();
         logStream.write(buf);
         recordStderr(buf);
-        if (adapter && completionState && !completionMarkerSeen) {
-          const signal = adapter.detectCompletion?.(buf.toString('utf8'), completionState) ?? null;
+        const text = buf.toString('utf8');
+        const ready = adapter?.detectReadiness?.(text, readinessState!) ?? null;
+        if (ready?.type === 'ready') {
+          observedReadiness = { reason: ready.reason, timedOut: false };
+          resolveReadiness?.(observedReadiness);
+          resolveReadiness = null;
+        }
+        if (adapter && completionState && !terminalMarkerSeen) {
+          const signal = adapter.detectCompletion?.(text, completionState) ?? null;
           if (signal?.type === 'marker') {
-            completionMarkerSeen = true;
+            terminalMarkerSeen = true;
             void markRunPtyCompletionMarkerSeen(ptyOptions.runId, signal.marker)
-              .catch((err: unknown) => logRunPtyStoreError('Failed to mark PTY completion marker', ptyOptions.runId, err));
-            if (ptyOptions.port && ptyOptions.storyId) {
-              void emitWalEvent(ptyOptions.port, 'story_completion_marker', ptyOptions.workspaceId, {
-                run_id: ptyOptions.runId,
-                story_id: ptyOptions.storyId,
-                agent_type: ptyOptions.agentType,
-                terminal_mode: 'pty',
-                marker: signal.marker,
-                message: 'Agent completion marker observed; merge and validation gates still determine story pass.',
-              }, ptyOptions.storyId).catch(() => { /* best effort */ });
-            }
-            setTimeout(() => {
-              void requestPtyShutdown('SIGTERM');
-            }, 250).unref?.();
+              .catch((err: unknown) => logRunPtyStoreError('Failed to record corroborating PTY terminal marker', ptyOptions.runId, err));
           }
         }
         // node-pty is push-only. The bounded single writer batches durable
@@ -2409,10 +2484,35 @@ async function spawnAgentViaPty(
       pty.onExit((event) => {
         exitCode = event.exitCode;
         exitSignal = event.signal != null ? String(event.signal) : exitSignal;
+        resolveReadiness?.({ reason: 'process_exited_before_prompt_injection', timedOut: true });
+        resolveReadiness = null;
         resolveExitObserved?.();
         finalizePromise = finalizePromise ?? finalize();
         void finalizePromise;
       });
+
+      const readiness = await new Promise<{ reason: string; timedOut: boolean }>((resolve) => {
+        if (observedReadiness) {
+          resolve(observedReadiness);
+          return;
+        }
+        resolveReadiness = resolve;
+        readinessTimeoutTimer = setTimeout(() => {
+          resolveReadiness?.({ reason: 'readiness_timeout_fallback', timedOut: true });
+          resolveReadiness = null;
+        }, DEFAULT_PTY_READINESS_TIMEOUT_MS);
+        readinessTimeoutTimer.unref?.();
+      });
+      if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
+      if (settled) return;
+      void recordRunPtyPromptReadiness(
+        ptyOptions.runId,
+        readiness.timedOut ? 'timeout_fallback' : 'ready',
+        readiness.reason,
+      ).catch((err) => logRunPtyStoreError('Failed to record PTY readiness', ptyOptions.runId, err));
+      if (readiness.timedOut) {
+        logger.warn(`[engine] PTY readiness timeout for ${ptyOptions.agentType}; injecting with bounded fallback`);
+      }
 
       try {
         await (adapter ?? buildInteractivePtyAgentAdapter(ptyOptions.agentType, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServers, piServerSkillFiles))
@@ -2420,7 +2520,30 @@ async function spawnAgentViaPty(
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         logger.warn(`[engine] Bracketed PTY prompt injection failed for ${ptyOptions.agentType}; falling back to chunked typing: ${message}`);
-        await injectPromptWithChunkedTyping(pty, ptyCommand.prompt, { startupDelayMs: 0 });
+        await injectPromptWithChunkedTyping(pty, ptyCommand.prompt);
+      }
+      void recordRunPtyPromptReadiness(ptyOptions.runId, 'injected', readiness.reason)
+        .catch((err) => logRunPtyStoreError('Failed to record PTY prompt injection', ptyOptions.runId, err));
+      const ptyRunning = await transitionRunLifecycle(ptyOptions.runId, 'running', {
+        transport: 'pty_attached',
+        process: 'alive',
+        semantic: 'prompt_injected',
+        promptReadiness: readiness.reason,
+        promptReadinessFallback: readiness.timedOut,
+      });
+      if (!ptyRunning) {
+        throw new Error('PTY_LIFECYCLE_RUNNING_REJECTED: refusing to run without an authoritative running phase');
+      }
+      if (ptyOptions.port && ptyOptions.storyId) {
+        void emitWalEvent(ptyOptions.port, 'story_pty_ready', ptyOptions.workspaceId, {
+          run_id: ptyOptions.runId,
+          story_id: ptyOptions.storyId,
+          agent_type: ptyOptions.agentType,
+          terminal_mode: 'pty',
+          lifecycle_status: 'running',
+          prompt_readiness: readiness.reason,
+          prompt_readiness_fallback: readiness.timedOut,
+        }, ptyOptions.storyId).catch(() => { /* lifecycle remains durable in DB */ });
       }
 
       runTimer = setTimeout(() => {
@@ -2459,6 +2582,8 @@ async function spawnAgentViaPty(
       if (resizeTimer) clearInterval(resizeTimer);
       if (inputTimer) clearInterval(inputTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (completionFileTimer) clearInterval(completionFileTimer);
+      if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);

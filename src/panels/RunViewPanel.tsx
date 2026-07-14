@@ -12,7 +12,6 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
-import { applyRunLifecycleEvent } from '../lib/run-lifecycle';
 import { pauseRun, resumeRun, cancelRun, injectContext, retryRun, getRunDlq, retryRunFromDlq, type DlqEntry } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
@@ -40,7 +39,10 @@ interface PipelineRun {
   id: number;
   spec_path: string;
   workspace_id: string;
-  status: 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
+  status: 'queued' | 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
+  /** Authoritative backend lifecycle; never derive this from WAL/output in UI. */
+  lifecycleStatus: 'queued' | 'starting' | 'pty_attached' | 'running' | 'validating' | 'finished' | 'failed' | 'cancelled';
+  lifecycle_status?: string;
   pid: number | null;
   branch_name: string | null;
   worktree_path: string | null;
@@ -153,7 +155,12 @@ const TABS: { id: RunViewTab; label: string; icon: typeof ScrollText }[] = [
 // ─── Status styling ─────────────────────────────────────────────────────────
 
 const STATUS_BADGE_STYLES: Record<string, string> = {
+  queued: 'bg-slate-500/10 text-slate-400',
+  starting: 'bg-blue-500/10 text-blue-500',
+  pty_attached: 'bg-blue-500/10 text-blue-500',
   running: 'bg-blue-500/10 text-blue-500',
+  validating: 'bg-violet-500/10 text-violet-500',
+  finished: 'bg-emerald-500/10 text-emerald-500',
   paused: 'bg-yellow-500/10 text-yellow-500',
   blocked: 'bg-amber-500/10 text-amber-500',
   done: 'bg-emerald-500/10 text-emerald-500',
@@ -163,7 +170,12 @@ const STATUS_BADGE_STYLES: Record<string, string> = {
 };
 
 const STATUS_BADGE_LABELS: Record<string, string> = {
+  queued: 'Queued',
+  starting: 'Starting',
+  pty_attached: 'PTY attached',
   running: 'Running',
+  validating: 'Validating',
+  finished: 'Finished',
   paused: 'Paused',
   blocked: 'Blocked',
   done: 'Passed',
@@ -1011,15 +1023,12 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return { continueFromId, resumedAfterId, carriedForwardCount };
   }, [runState, specStories, walEvents, dbStories, contextComparison]);
 
-  // Derive effective status from SSE events
-  const effectiveStatus = useMemo(() => {
-    if (!run) return 'running';
-    let status = run.status;
-    for (const evt of walEvents) {
-      status = applyRunLifecycleEvent(status, evt) as PipelineRun['status'];
-    }
-    return status;
-  }, [run, walEvents]);
+  // Lifecycle phase is backend-owned. WAL can enrich story detail, but cannot
+  // advance this run: a terminal echo, transport hiccup, or stale event must
+  // never make the UI guess that work has finished.
+  const effectiveStatus: string = useMemo(() => run?.lifecycleStatus ?? 'queued', [run]);
+  // Legacy result/control status remains available for pause/resume only.
+  const legacyStatus = run?.status ?? 'queued';
 
   // Derive setup phase state for wave parallel runs (worktree creation before stories start)
   const { isInSetupPhase, setupStoryCount } = useMemo(() => {
@@ -1315,6 +1324,13 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     fetchRun();
   }, [fetchRun]);
 
+  // WAL is only a refresh trigger. The API lifecycle is authoritative; never
+  // calculate a phase from event ordering or terminal bytes in the browser.
+  useEffect(() => {
+    if (walEvents.length === 0) return;
+    void fetchRun();
+  }, [walEvents.length, fetchRun]);
+
   // Dismiss resume badge when first real story_started WAL event fires
   useEffect(() => {
     if (!showResumeBadge || resumeBadgeDismissedRef.current) return;
@@ -1370,7 +1386,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   // Show merge section when run uses a worktree (auto-merge is always enabled for worktree runs)
   const showMergeStatus = mergeInfo !== null;
 
-  const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused' || effectiveStatus === 'blocked';
+  const isActive = ['starting', 'pty_attached', 'running', 'validating'].includes(effectiveStatus);
 
   // Detect if we should show multi-pane terminal (parallelism > 1 with 2+ concurrent stories)
   const useMultiPane = useMemo(() => {
@@ -1412,7 +1428,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     if (!isActive) return;
     setPauseLoading(true);
     try {
-      if (effectiveStatus === 'paused') {
+      if (legacyStatus === 'paused') {
         await resumeRun(runId);
       } else {
         await pauseRun(runId);
@@ -1423,7 +1439,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     } finally {
       setPauseLoading(false);
     }
-  }, [runId, effectiveStatus, isActive, fetchRun]);
+  }, [runId, legacyStatus, isActive, fetchRun]);
 
   const handleKill = useCallback(async () => {
     setShowKillConfirm(false);
@@ -1642,7 +1658,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         return (
           <ContextInspector
             runId={run.id}
-            runSettled={effectiveStatus !== 'running' && effectiveStatus !== 'paused' && effectiveStatus !== 'blocked'}
+            runSettled={!isActive}
           />
         );
       case 'graph':
@@ -1734,8 +1750,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
             <button
               onClick={handlePauseResume}
               disabled={!isActive || pauseLoading}
-              title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
-              aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
+              title={legacyStatus === 'paused' ? 'Resume run' : 'Pause run'}
+              aria-label={legacyStatus === 'paused' ? 'Resume run' : 'Pause run'}
               className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${isActive && !pauseLoading
                 ? 'hover:bg-bg text-muted hover:text-[var(--text)]'
                 : 'text-muted/30 cursor-not-allowed'
@@ -1743,7 +1759,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
             >
               {pauseLoading ? (
                 <Loader2 size={16} className="animate-spin" />
-              ) : effectiveStatus === 'paused' ? (
+              ) : legacyStatus === 'paused' ? (
                 <Play size={16} />
               ) : (
                 <Pause size={16} />

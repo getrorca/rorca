@@ -83,6 +83,13 @@ export interface RunPtySessionHealth {
   last_heartbeat_at: string | null;
   completion_marker: string | null;
   completion_marker_seen_at: string | null;
+  completion_file_seen_at: string | null;
+  completion_file_error: string | null;
+  terminal_marker_seen_at: string | null;
+  prompt_readiness_status: string | null;
+  prompt_readiness_reason: string | null;
+  prompt_ready_at: string | null;
+  prompt_injected_at: string | null;
   total_output_bytes: string | number;
   dropped_output_bytes: string | number;
   output_truncated_at: string | null;
@@ -117,8 +124,8 @@ export function getRunPtyRetentionDays(): number {
 export async function startRunPtySession(params: StartRunPtySessionParams): Promise<void> {
   await execute(
     `INSERT INTO run_pty_sessions
-      (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, completion_marker, completion_marker_seen_at, last_heartbeat_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NULL, $8, NULL, NULL, NOW())
+      (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, completion_marker, completion_marker_seen_at, completion_file_seen_at, completion_file_error, terminal_marker_seen_at, prompt_readiness_status, prompt_readiness_reason, prompt_ready_at, prompt_injected_at, last_heartbeat_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NULL, $8, NULL, NULL, NULL, NULL, 'waiting', 'awaiting_cli_readiness', NULL, NULL, NULL, NOW())
      ON CONFLICT (run_id) DO UPDATE SET
        workspace_id = EXCLUDED.workspace_id,
        cwd = EXCLUDED.cwd,
@@ -130,6 +137,13 @@ export async function startRunPtySession(params: StartRunPtySessionParams): Prom
        last_output_at = CASE WHEN run_pty_sessions.total_output_bytes > 0 THEN run_pty_sessions.last_output_at ELSE NULL END,
        completion_marker = EXCLUDED.completion_marker,
        completion_marker_seen_at = NULL,
+       completion_file_seen_at = NULL,
+       completion_file_error = NULL,
+       terminal_marker_seen_at = NULL,
+       prompt_readiness_status = 'waiting',
+       prompt_readiness_reason = 'awaiting_cli_readiness',
+       prompt_ready_at = NULL,
+       prompt_injected_at = NULL,
        last_heartbeat_at = NULL,
        exit_code = NULL,
        exit_signal = NULL,
@@ -328,14 +342,55 @@ export function createRunPtyOutputBatcher(
   };
 }
 
+/** Terminal marker is corroborating telemetry; it never completes a turn. */
 export async function markRunPtyCompletionMarkerSeen(runId: number, marker: string): Promise<void> {
   await execute(
     `UPDATE run_pty_sessions
      SET completion_marker = COALESCE(completion_marker, $2),
          completion_marker_seen_at = COALESCE(completion_marker_seen_at, NOW()),
+         terminal_marker_seen_at = COALESCE(terminal_marker_seen_at, NOW()),
          updated_at = NOW()
      WHERE run_id = $1`,
     [runId, marker],
+  );
+}
+
+/** The agent-written completion file is the primary PTY turn-completion evidence. */
+export async function markRunPtyCompletionFileSeen(runId: number, marker: string): Promise<void> {
+  await execute(
+    `UPDATE run_pty_sessions
+     SET completion_marker = COALESCE(completion_marker, $2),
+         completion_file_seen_at = COALESCE(completion_file_seen_at, NOW()),
+         completion_file_error = NULL,
+         updated_at = NOW()
+     WHERE run_id = $1`,
+    [runId, marker],
+  );
+}
+
+export async function recordRunPtyCompletionFileError(runId: number, reason: string): Promise<void> {
+  await execute(
+    `UPDATE run_pty_sessions
+     SET completion_file_error = $2, updated_at = NOW()
+     WHERE run_id = $1`,
+    [runId, reason.slice(0, 1000)],
+  );
+}
+
+export async function recordRunPtyPromptReadiness(
+  runId: number,
+  status: 'waiting' | 'ready' | 'timeout_fallback' | 'injected' | 'failed',
+  reason: string,
+): Promise<void> {
+  await execute(
+    `UPDATE run_pty_sessions
+     SET prompt_readiness_status = $2,
+         prompt_readiness_reason = $3,
+         prompt_ready_at = CASE WHEN $2 = 'ready' THEN COALESCE(prompt_ready_at, NOW()) ELSE prompt_ready_at END,
+         prompt_injected_at = CASE WHEN $2 = 'injected' THEN COALESCE(prompt_injected_at, NOW()) ELSE prompt_injected_at END,
+         updated_at = NOW()
+     WHERE run_id = $1`,
+    [runId, status, reason.slice(0, 1000)],
   );
 }
 
@@ -496,6 +551,13 @@ export async function getRunPtySessionHealth(runId: number): Promise<RunPtySessi
             last_heartbeat_at,
             completion_marker,
             completion_marker_seen_at,
+            completion_file_seen_at,
+            completion_file_error,
+            terminal_marker_seen_at,
+            prompt_readiness_status,
+            prompt_readiness_reason,
+            prompt_ready_at,
+            prompt_injected_at,
             total_output_bytes,
             dropped_output_bytes,
             output_truncated_at

@@ -54,6 +54,7 @@ import { authRequired } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
+import { lifecycleFromLegacyStatus, transitionRunLifecycle } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
   getRunPtySessionHealth,
@@ -284,6 +285,22 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_completion_marker_seen: Boolean(health.completion_marker_seen_at),
     ptyCompletionMarkerSeenAt: health.completion_marker_seen_at,
     pty_completion_marker_seen_at: health.completion_marker_seen_at,
+    ptyCompletionFileSeen: Boolean(health.completion_file_seen_at),
+    pty_completion_file_seen: Boolean(health.completion_file_seen_at),
+    ptyCompletionFileSeenAt: health.completion_file_seen_at,
+    pty_completion_file_seen_at: health.completion_file_seen_at,
+    ptyCompletionFileError: health.completion_file_error,
+    pty_completion_file_error: health.completion_file_error,
+    ptyTerminalMarkerSeen: Boolean(health.terminal_marker_seen_at),
+    pty_terminal_marker_seen: Boolean(health.terminal_marker_seen_at),
+    ptyPromptReadinessStatus: health.prompt_readiness_status,
+    pty_prompt_readiness_status: health.prompt_readiness_status,
+    ptyPromptReadinessReason: health.prompt_readiness_reason,
+    pty_prompt_readiness_reason: health.prompt_readiness_reason,
+    ptyPromptReadyAt: health.prompt_ready_at,
+    pty_prompt_ready_at: health.prompt_ready_at,
+    ptyPromptInjectedAt: health.prompt_injected_at,
+    pty_prompt_injected_at: health.prompt_injected_at,
     ptyTotalOutputBytes: totalOutputBytes,
     pty_total_output_bytes: totalOutputBytes,
     ptyDroppedOutputBytes: Number(health.dropped_output_bytes ?? 0),
@@ -1144,6 +1161,9 @@ interface PipelineRunRow {
   terminal_mode: TerminalMode | null;
   merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
   trigger_options?: Record<string, unknown> | string | null;
+  lifecycle_status?: string | null;
+  lifecycle_updated_at?: string | null;
+  lifecycle_diagnostics?: Record<string, unknown> | string | null;
 }
 
 function resolveRequestedTerminalMode(value: string | null | undefined): TerminalMode {
@@ -1171,10 +1191,15 @@ function assertTerminalModeAvailable(mode: TerminalMode): void {
   }
 }
 
-function normalizePipelineRun<T extends { terminal_mode?: string | null }>(run: T): Omit<T, 'terminal_mode'> & { terminal_mode: TerminalMode } {
+function normalizePipelineRun<T extends { terminal_mode?: string | null; status?: string | null; lifecycle_status?: string | null }>(run: T): Omit<T, 'terminal_mode' | 'lifecycle_status'> & { terminal_mode: TerminalMode; lifecycle_status: string; lifecycleStatus: string } {
+  // Historical rows are normalized here, in the backend, so API/UI consumers
+  // never infer lifecycle from terminal output, process state, or timing.
+  const lifecycleStatus = run.lifecycle_status ?? lifecycleFromLegacyStatus(run.status);
   return {
     ...run,
     terminal_mode: normalizeTerminalMode(run.terminal_mode),
+    lifecycle_status: lifecycleStatus,
+    lifecycleStatus,
   };
 }
 
@@ -2171,7 +2196,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       agentModel: finalAgentModel,
       terminalMode: resolvedTerminalMode,
       terminal_mode: resolvedTerminalMode,
-      ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
+      lifecycleStatus: 'queued',
+      lifecycle_status: 'queued',
+      ...(capWarnings ?  { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),
@@ -4950,6 +4977,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
         `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queue_position = NULL WHERE id = $1`,
         [runId],
       );
+      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_cancel' });
 
       // Recalculate queue positions for remaining queued runs
       const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
@@ -4980,6 +5008,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
         `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,
         [runId],
       );
+      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'pid_not_alive' });
       const walEvent = await queryOne<WalEvent>(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
         [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString(), reason: 'pid_not_alive' })],
@@ -5060,6 +5089,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
 
     // Mark as cancelled
     await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
+    await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_delete' });
 
     // Recalculate positions for remaining queued runs
     const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
@@ -5269,9 +5299,9 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // Resolve and authorize the run before committing SSE headers. This keeps
   // lookup failures as normal HTTP errors instead of half-open event streams.
   const runRow = await queryOne(
-    'SELECT workspace_id, agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1',
+    'SELECT workspace_id, agent_type, agent, agent_model, status, lifecycle_status, terminal_mode FROM pipeline_runs WHERE id = $1',
     [runId],
-  ) as { workspace_id: string; agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
+  ) as { workspace_id: string; agent_type: string; agent: string; agent_model: string | null; status: string; lifecycle_status: string | null; terminal_mode: string | null } | undefined;
   if (!runRow) throw new NotFoundError('Run not found');
 
   const wsId = req.query.workspaceId as string | undefined;
@@ -5361,6 +5391,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     agentModel: runRow.agent_model ?? null,
     terminalMode,
     terminal_mode: terminalMode,
+    lifecycleStatus: runRow.lifecycle_status ?? lifecycleFromLegacyStatus(runRow.status),
+    lifecycle_status: runRow.lifecycle_status ?? lifecycleFromLegacyStatus(runRow.status),
     requestedTerminalMode,
     requested_terminal_mode: requestedTerminalMode,
     isPty,

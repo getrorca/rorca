@@ -8,7 +8,9 @@ import {
   appendPtyCompletionInstructions,
   buildPtyCompletionMarker,
   createPtyCompletionState,
+  createPtyReadinessState,
   detectCompletionMarkerAcrossChunks,
+  detectPtyCliReadiness,
   injectPromptWithBracketedPaste,
 } from '../interactive-pty-agent-adapter';
 
@@ -39,6 +41,15 @@ describe('interactive PTY agent adapter primitives', () => {
     });
   });
 
+  it('waits for CLI-specific output readiness rather than a fixed spawn delay', () => {
+    const state = createPtyReadinessState('claude');
+    expect(detectPtyCliReadiness('spawned but silent', state)).toBeNull();
+    expect(detectPtyCliReadiness('Claude Code v2.1\\r\\n', state)).toEqual({
+      type: 'ready', reason: 'claude_banner_or_prompt',
+    });
+    expect(detectPtyCliReadiness('❯ ', state)).toBeNull();
+  });
+
   it('detects completion markers split across chunks', () => {
     const marker = buildPtyCompletionMarker(42, 'US-001');
     const state = createPtyCompletionState(marker);
@@ -67,6 +78,7 @@ describe('interactive PTY agent adapter primitives', () => {
     expect(prompt).not.toContain(marker);
     expect(prompt).toContain('Build it by concatenating these JSON string parts');
     expect(prompt).toContain('.rorca/progress/run-7/PTY-123.done.json');
+    expect(prompt).toContain('status file is Rorca\'s primary turn-completion signal');
     expect(prompt).toContain('does not mean the story passed');
     expect(prompt).toContain('merge and validation gates');
   });

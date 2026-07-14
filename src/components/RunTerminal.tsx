@@ -52,6 +52,11 @@ interface RunTerminalMetaState {
   ptyLastHeartbeatAt?: string | null;
   ptyCompletionMarkerSeen?: boolean;
   ptyCompletionMarkerSeenAt?: string | null;
+  ptyCompletionFileSeen?: boolean;
+  ptyCompletionFileSeenAt?: string | null;
+  ptyCompletionFileError?: string | null;
+  ptyPromptReadinessStatus?: string | null;
+  ptyPromptReadinessReason?: string | null;
   ptyTotalOutputBytes?: number;
 }
 
@@ -62,7 +67,7 @@ function coerceTerminalMode(value: unknown): TerminalMode | null {
 }
 
 function isTerminalRunStatus(status: RunLifecycleStatus | null | undefined): boolean {
-  return status === 'done' || status === 'failed' || status === 'cancelled' || status === 'partial_failure';
+  return status === 'finished' || status === 'done' || status === 'failed' || status === 'cancelled' || status === 'partial_failure';
 }
 
 function isoToMs(value?: string | null): number | null {
@@ -976,6 +981,16 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       pty_completion_marker_seen?: boolean;
       ptyCompletionMarkerSeenAt?: string | null;
       pty_completion_marker_seen_at?: string | null;
+      ptyCompletionFileSeen?: boolean;
+      pty_completion_file_seen?: boolean;
+      ptyCompletionFileSeenAt?: string | null;
+      pty_completion_file_seen_at?: string | null;
+      ptyCompletionFileError?: string | null;
+      pty_completion_file_error?: string | null;
+      ptyPromptReadinessStatus?: string | null;
+      pty_prompt_readiness_status?: string | null;
+      ptyPromptReadinessReason?: string | null;
+      pty_prompt_readiness_reason?: string | null;
       ptyTotalOutputBytes?: number;
       pty_total_output_bytes?: number;
     };
@@ -989,6 +1004,11 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         ptyLastHeartbeatAt: meta.ptyLastHeartbeatAt ?? meta.pty_last_heartbeat_at ?? prev.ptyLastHeartbeatAt ?? null,
         ptyCompletionMarkerSeen: meta.ptyCompletionMarkerSeen ?? meta.pty_completion_marker_seen ?? prev.ptyCompletionMarkerSeen ?? false,
         ptyCompletionMarkerSeenAt: meta.ptyCompletionMarkerSeenAt ?? meta.pty_completion_marker_seen_at ?? prev.ptyCompletionMarkerSeenAt ?? null,
+        ptyCompletionFileSeen: meta.ptyCompletionFileSeen ?? meta.pty_completion_file_seen ?? prev.ptyCompletionFileSeen ?? false,
+        ptyCompletionFileSeenAt: meta.ptyCompletionFileSeenAt ?? meta.pty_completion_file_seen_at ?? prev.ptyCompletionFileSeenAt ?? null,
+        ptyCompletionFileError: meta.ptyCompletionFileError ?? meta.pty_completion_file_error ?? prev.ptyCompletionFileError ?? null,
+        ptyPromptReadinessStatus: meta.ptyPromptReadinessStatus ?? meta.pty_prompt_readiness_status ?? prev.ptyPromptReadinessStatus ?? null,
+        ptyPromptReadinessReason: meta.ptyPromptReadinessReason ?? meta.pty_prompt_readiness_reason ?? prev.ptyPromptReadinessReason ?? null,
         ptyTotalOutputBytes: meta.ptyTotalOutputBytes ?? meta.pty_total_output_bytes ?? prev.ptyTotalOutputBytes ?? 0,
       }));
     };
@@ -1357,9 +1377,19 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
               title={`Raw node-pty bytes received/persisted. Total bytes: ${terminalMeta.ptyTotalOutputBytes ?? 0}. Last byte: ${formatAge(lastPtyOutputMs, nowTick)}.`}
             />
             <HealthPill
-              label={terminalMeta.ptyCompletionMarkerSeen ? 'completion marker seen' : 'completion marker pending'}
+              label={terminalMeta.ptyCompletionFileSeen ? 'completion file seen' : 'completion file pending'}
+              state={terminalMeta.ptyCompletionFileSeen ? 'ok' : streamEnded ? 'muted' : 'warn'}
+              title={`Primary agent-turn signal. ${terminalMeta.ptyCompletionFileError ? `Last file diagnostic: ${terminalMeta.ptyCompletionFileError}. ` : ''}Story pass still requires process exit, merge, and validation. Seen: ${formatAge(isoToMs(terminalMeta.ptyCompletionFileSeenAt), nowTick)}.`}
+            />
+            <HealthPill
+              label={terminalMeta.ptyCompletionMarkerSeen ? 'terminal marker corroborated' : 'terminal marker pending'}
               state={terminalMeta.ptyCompletionMarkerSeen ? 'ok' : streamEnded ? 'muted' : 'warn'}
-              title={`Completion marker only means the agent turn ended; story pass still requires merge + validation. Seen: ${formatAge(isoToMs(terminalMeta.ptyCompletionMarkerSeenAt), nowTick)}.`}
+              title={`Corroborating-only terminal signal; it cannot complete a story. Seen: ${formatAge(isoToMs(terminalMeta.ptyCompletionMarkerSeenAt), nowTick)}.`}
+            />
+            <HealthPill
+              label={terminalMeta.ptyPromptReadinessStatus ?? 'readiness pending'}
+              state={terminalMeta.ptyPromptReadinessStatus === 'ready' || terminalMeta.ptyPromptReadinessStatus === 'injected' ? 'ok' : terminalMeta.ptyPromptReadinessStatus === 'timeout_fallback' ? 'warn' : 'muted'}
+              title={`CLI prompt readiness: ${terminalMeta.ptyPromptReadinessReason ?? 'awaiting CLI output'}.`}
             />
           </>
         ) : null}

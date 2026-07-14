@@ -172,6 +172,8 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(res.status).toBe(201);
     expect(res.body.terminalMode).toBe('pty');
     expect(res.body.terminal_mode).toBe('pty');
+    expect(res.body.lifecycleStatus).toBe('queued');
+    expect(res.body.lifecycle_status).toBe('queued');
     expect(typeof res.body.runId).toBe('number');
 
     const run = await db.queryOne<PipelineRunModeRow>('SELECT terminal_mode FROM pipeline_runs WHERE id = $1', [res.body.runId]);
@@ -240,6 +242,7 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 
     expect(body).toContain('event: run_meta');
     expect(body).toContain('"terminalMode":"pty"');
+    expect(body).toContain('"lifecycleStatus":"finished"');
     expect(body).toContain('"isPty":true');
     expect(body).toContain('"ptyLiveTransport":"postgres-notify+db-replay"');
     expect(body).toContain('"ptyReplaySource":"run_pty_output_chunks"');

@@ -67,6 +67,7 @@ import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import { prepareRunSpecSnapshot } from './lib/run-spec-snapshot';
+import { transitionRunLifecycle } from './lib/run-lifecycle';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -934,6 +935,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
 
+    // Backend/engine own lifecycle phase; legacy status remains for existing
+    // queue/result consumers and must not be used by UI to infer phase.
+    await transitionRunLifecycle(runId, 'starting', {
+      owner: 'worker',
+      transport: terminalMode === 'pty' ? 'pty_pending' : 'pipe',
+      process: 'launching',
+    });
     // 2. Mark run as running — set worker_id so orphan sweep knows this run belongs to us
     await execute(
       `UPDATE pipeline_runs SET status = 'running', started_at = NOW(), worker_id = $2 WHERE id = $1`,
@@ -1051,6 +1059,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       env,
     });
 
+    if (terminalMode !== 'pty') {
+      await transitionRunLifecycle(runId, 'running', {
+        owner: 'worker', transport: 'pipe', process: 'spawned', semantic: 'engine_started',
+      });
+    }
+
     // 5. Record PID (tsx wrapper PID — will be overwritten by IPC message with inner Node PID)
     if (child.pid) {
       await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [child.pid, runId]);
@@ -1144,6 +1158,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         }
 
         logger.info({ runId, code, signal, status, wasCancelled }, '[worker] execution-engine exited');
+        await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : 'validating', {
+          owner: 'worker', process: 'exited', exitCode: code, exitSignal: signal,
+          semantic: 'engine_exit_observed',
+        });
 
         await synthesizeInterruptedStoryFailure({
           runId,
@@ -1381,11 +1399,28 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             }
           }
 
+          // A direct merge is a final gate, not optional presentation metadata.
+          // Do not expose a finished run when its required merge failed.
+          if (status === 'done' && worktreePath && effectiveMergeStrategy === 'direct') {
+            const merge = await queryOne<{ merge_status: string | null }>(
+              'SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId],
+            );
+            if (merge?.merge_status === 'failed') {
+              status = 'failed';
+              await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]);
+              logger.error({ runId }, '[worker] required direct merge failed; run outcome changed to failed');
+            }
+          }
+
           // Workflow dispatch (US-026)
           if (status === 'done') {
             await dispatchWorkflowIfConfigured(workspaceId, runId);
           }
         }
+
+        await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (status === 'done' ? 'finished' : 'failed'), {
+          owner: 'worker', outcome: status, mergeGate: payload.mergeStrategy ?? 'direct',
+        });
 
         // Advance run queue — promote next queued run for this workspace
         advanceQueue(String(workspaceId)).catch(err =>
@@ -1408,6 +1443,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
           [runId],
         );
+        await transitionRunLifecycle(runId, 'failed', {
+          owner: 'worker', process: 'spawn_failed', error: (err as Error).message,
+        });
         await emitWalEvent('run_finished', workspaceId, {
           run_id: runId,
           status: 'failed',
@@ -1502,7 +1540,12 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       }
     }
 
-    // 3. Mark the new run as running — set worker_id so orphan sweep knows this run belongs to us
+    // 3. Retry runs use the same authoritative lifecycle as fresh runs.
+    await transitionRunLifecycle(runId, 'starting', {
+      owner: 'worker_retry',
+      transport: effectiveTerminalMode === 'pty' ? 'pty_pending' : 'pipe',
+      process: 'launching',
+    });
     await execute(
       `UPDATE pipeline_runs SET status = 'running', started_at = NOW(), worker_id = $2 WHERE id = $1`,
       [runId, WORKER_ID],
@@ -1583,6 +1626,11 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       env,
     });
 
+    if (effectiveTerminalMode !== 'pty') {
+      await transitionRunLifecycle(runId, 'running', {
+        owner: 'worker_retry', transport: 'pipe', process: 'spawned', semantic: 'engine_started',
+      });
+    }
     if (child.pid) {
       await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [child.pid, runId]);
     }
@@ -1662,6 +1710,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         }
 
         logger.info({ runId, code, finalStatus, wasCancelled }, '[worker] retry execution-engine exited');
+        await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : 'validating', {
+          owner: 'worker_retry', process: 'exited', exitCode: code, semantic: 'engine_exit_observed',
+        });
 
         await synthesizeInterruptedStoryFailure({
           runId,
@@ -1678,6 +1729,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
             [finalStatus, runId],
           );
 
+          await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (finalStatus === 'done' ? 'finished' : 'failed'), {
+            owner: 'worker_retry', outcome: finalStatus,
+          });
           if (wasCancelled) {
             await emitWalEvent('run_cancelled', workspaceId, {
               run_id: runId,
@@ -1802,8 +1856,10 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
     const runId = parsed.data.runId;
     const child = activeProcesses.get(runId);
     if (child) {
-      // Mark as intentionally cancelled so the exit handler sets status='cancelled'
+      // Mark as intentionally cancelled so the exit handler sets status='cancelled'.
+      // Lifecycle is terminal immediately; cleanup still waits for the process group.
       cancellingRuns.add(runId);
+      await transitionRunLifecycle(runId, 'cancelled', { owner: 'worker_cancel', process: 'termination_requested' });
       child.kill('SIGTERM');
       setTimeout(() => {
         // Only SIGKILL if the process is still in the active map (not yet exited)

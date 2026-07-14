@@ -2,7 +2,6 @@
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
- * See LICENSE file in the project root for full license text.
  */
 
 import type { AgentType } from './config';
@@ -24,7 +23,6 @@ export interface PtyLaunchCommand {
   args: string[];
   env: Record<string, string>;
   prompt: string;
-  startupDelayMs?: number;
   injectionMode?: 'bracketed-paste' | 'chunked-typing';
   cleanup?: () => void;
 }
@@ -38,6 +36,7 @@ export interface PtyPromptInput {
   markerFilePath: string;
 }
 
+/** Terminal marker state is deliberately separate from marker-file completion. */
 export interface PtyCompletionState {
   completionMarker: string;
   tail: string;
@@ -47,6 +46,18 @@ export interface PtyCompletionState {
 export interface PtyCompletionSignal {
   type: 'marker';
   marker: string;
+}
+
+export interface PtyReadinessState {
+  agentType: AgentType;
+  tail: string;
+  ready: boolean;
+  readyReason: string | null;
+}
+
+export interface PtyReadinessSignal {
+  type: 'ready';
+  reason: string;
 }
 
 export interface PtyRunState {
@@ -60,15 +71,17 @@ export interface InteractivePtyAgentAdapter {
   resolveCommand(input: PtyLaunchInput): PtyLaunchCommand;
   preparePrompt(input: PtyPromptInput): string;
   injectPrompt(pty: InteractivePtyProcess, prompt: string): Promise<void>;
+  detectReadiness?(chunk: string, state: PtyReadinessState): PtyReadinessSignal | null;
   detectCompletion?(chunk: string, state: PtyCompletionState): PtyCompletionSignal | null;
   cleanup?(state: PtyRunState): Promise<void>;
 }
 
 export const BRACKETED_PASTE_START = '\x1b[200~';
 export const BRACKETED_PASTE_END = '\x1b[201~';
-export const DEFAULT_PTY_STARTUP_DELAY_MS = 700;
 export const DEFAULT_PTY_TYPE_CHUNK_SIZE = 4096;
 export const DEFAULT_PTY_TYPE_DELAY_MS = 5;
+export const DEFAULT_PTY_READINESS_TIMEOUT_MS = 12_000;
+const READINESS_TAIL_BYTES = 8 * 1024;
 
 function sanitizeMarkerComponent(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -86,6 +99,10 @@ export function createPtyCompletionState(completionMarker: string): PtyCompletio
   return { completionMarker, tail: '', markerSeen: false };
 }
 
+export function createPtyReadinessState(agentType: AgentType): PtyReadinessState {
+  return { agentType, tail: '', ready: false, readyReason: null };
+}
+
 function describeMarkerWithoutEcho(marker: string): string {
   const parts = marker.match(/.{1,12}/g) ?? [marker];
   return JSON.stringify(parts);
@@ -96,33 +113,68 @@ export function appendPtyCompletionInstructions(input: PtyPromptInput): string {
   const markerFileJson = JSON.stringify(input.markerFilePath);
   const instructions = [
     '## Rorca PTY Completion Contract',
-    'You are running inside a real interactive PTY. When your implementation turn is complete, do BOTH of the following as the final visible actions:',
-    `1. Print the completion marker on its own line. Build it by concatenating these JSON string parts in order, with no quotes, spaces, or separators: ${markerPartsJson}`,
-    `2. Write a small JSON status file at ${input.markerFilePath} with at least: {"storyId": ${JSON.stringify(input.storyId)}, "runId": ${input.runId}, "marker": "<the same concatenated completion marker>"}.`,
+    'You are running inside a real interactive PTY. When your implementation turn is complete, write the completion status file, then print the completion marker as your final visible action.',
+    `1. Build it by concatenating these JSON string parts in order, with no quotes, spaces, or separators: ${markerPartsJson}`,
+    `2. Create the parent directory and write a small JSON status file at ${input.markerFilePath} with storyId ${JSON.stringify(input.storyId)}, runId ${input.runId}, and marker equal to that constructed value.`,
+    'The status file is Rorca\'s primary turn-completion signal. The printed marker only corroborates it.',
     'The marker only tells Rorca that your agent turn is complete. It does not mean the story passed; Rorca will still run merge and validation gates before marking the story passed.',
-    'If you are blocked, still print the same completion marker after clearly explaining the blocker so Rorca can stop the interactive turn safely.',
+    'If you are blocked, explain the blocker, write the same status file, then print the constructed marker so Rorca can stop the interactive turn safely.',
     `Shell-safe marker path reference: ${markerFileJson}`,
   ].join('\n');
 
   return [input.basePrompt.trimEnd(), '', instructions].filter(Boolean).join('\n');
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Remove ANSI control sequences before looking for a visible interactive prompt. */
+function plainTerminalText(value: string): string {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
+/**
+ * CLI-specific readiness evidence. We deliberately require terminal output from
+ * the spawned CLI rather than sleeping after spawn: a slow banner is safe, and
+ * a missing banner degrades through the caller's bounded fallback timeout.
+ */
+export function detectPtyCliReadiness(
+  chunk: string,
+  state: PtyReadinessState,
+): PtyReadinessSignal | null {
+  if (state.ready) return null;
+  state.tail = `${state.tail}${plainTerminalText(chunk)}`.slice(-READINESS_TAIL_BYTES);
+  const tail = state.tail;
+  const promptAtEnd = /(?:^|[\r\n])\s*(?:[>❯›]|\$)\s*$/m.test(tail);
+  const rules: Record<AgentType, RegExp> = {
+    claude: /(?:claude\s+code|anthropic|❯)/i,
+    opencode: /(?:open\s*code|opencode|›)/i,
+    codex: /(?:openai\s+codex|codex|›)/i,
+    pi: /(?:\bpi\b|pi\s+coding|›)/i,
+  };
+  const matched = rules[state.agentType].test(tail);
+  if (!matched && !promptAtEnd) return null;
+
+  // A branded banner is enough for CLIs that render their input widget later;
+  // a visible prompt is accepted only after the CLI has emitted some bytes.
+  const reason = matched ? `${state.agentType}_banner_or_prompt` : `${state.agentType}_interactive_prompt`;
+  state.ready = true;
+  state.readyReason = reason;
+  return { type: 'ready', reason };
 }
 
 export async function injectPromptWithBracketedPaste(
   pty: InteractivePtyProcess,
   prompt: string,
-  opts: { startupDelayMs?: number } = {},
+  // Kept as a no-op compatibility option for adapters/tests built before
+  // readiness-driven injection. Delaying here would reintroduce blind timing.
+  _opts: { startupDelayMs?: number } = {},
 ): Promise<void> {
-  const startupDelayMs = opts.startupDelayMs ?? DEFAULT_PTY_STARTUP_DELAY_MS;
-  if (startupDelayMs > 0) await sleep(startupDelayMs);
-
   pty.write(BRACKETED_PASTE_START);
   pty.write(prompt);
   pty.write(BRACKETED_PASTE_END);
   pty.write('\r');
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function injectPromptWithChunkedTyping(
@@ -130,11 +182,8 @@ export async function injectPromptWithChunkedTyping(
   prompt: string,
   opts: { startupDelayMs?: number; chunkSize?: number; chunkDelayMs?: number } = {},
 ): Promise<void> {
-  const startupDelayMs = opts.startupDelayMs ?? DEFAULT_PTY_STARTUP_DELAY_MS;
   const chunkSize = opts.chunkSize ?? DEFAULT_PTY_TYPE_CHUNK_SIZE;
   const chunkDelayMs = opts.chunkDelayMs ?? DEFAULT_PTY_TYPE_DELAY_MS;
-  if (startupDelayMs > 0) await sleep(startupDelayMs);
-
   for (let offset = 0; offset < prompt.length; offset += chunkSize) {
     pty.write(prompt.slice(offset, offset + chunkSize));
     if (chunkDelayMs > 0) await sleep(chunkDelayMs);
@@ -142,6 +191,12 @@ export async function injectPromptWithChunkedTyping(
   pty.write('\r');
 }
 
+/**
+ * Detect a marker that an agent printed after completing its turn. This is
+ * corroborating telemetry only: the engine never resolves a turn from it.
+ * Because the prompt never contains the contiguous marker, terminal echo also
+ * cannot self-complete the turn.
+ */
 export function detectCompletionMarkerAcrossChunks(
   chunk: string,
   state: PtyCompletionState,
@@ -169,6 +224,7 @@ export function createBaseInteractivePtyAdapter(
     resolveCommand,
     preparePrompt: appendPtyCompletionInstructions,
     injectPrompt: (pty, prompt) => injectPromptWithBracketedPaste(pty, prompt),
+    detectReadiness: detectPtyCliReadiness,
     detectCompletion: detectCompletionMarkerAcrossChunks,
   };
 }

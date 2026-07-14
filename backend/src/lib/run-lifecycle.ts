@@ -1,0 +1,90 @@
+/**
+ * Backend-owned pipeline run lifecycle.
+ *
+ * `pipeline_runs.status` remains a compatibility/result field. This module is
+ * the only source for phase semantics exposed to API/UI: transports and the
+ * frontend never infer lifecycle from output timing or process state.
+ */
+import { execute, queryOne } from '../db/index';
+
+export const RUN_LIFECYCLE_STATES = [
+  'queued',
+  'starting',
+  'pty_attached',
+  'running',
+  'validating',
+  'finished',
+  'failed',
+  'cancelled',
+] as const;
+
+export type RunLifecycleStatus = typeof RUN_LIFECYCLE_STATES[number];
+
+type LifecycleRow = { lifecycle_status: RunLifecycleStatus };
+
+const ALLOWED_NEXT: Record<RunLifecycleStatus, readonly RunLifecycleStatus[]> = {
+  queued: ['starting', 'failed', 'cancelled'],
+  starting: ['pty_attached', 'running', 'validating', 'failed', 'cancelled'],
+  pty_attached: ['running', 'validating', 'failed', 'cancelled'],
+  running: ['validating', 'failed', 'cancelled'],
+  validating: ['finished', 'failed', 'cancelled'],
+  finished: [],
+  failed: [],
+  cancelled: [],
+};
+
+export function isTerminalRunLifecycle(status: RunLifecycleStatus | null | undefined): boolean {
+  return status === 'finished' || status === 'failed' || status === 'cancelled';
+}
+
+/** Derives a lifecycle for pre-v2 rows and test fixtures that lack the column. */
+export function lifecycleFromLegacyStatus(status: string | null | undefined): RunLifecycleStatus {
+  switch (status) {
+    case 'queued': return 'queued';
+    case 'cancelled': return 'cancelled';
+    case 'done': return 'finished';
+    case 'partial_failure':
+    case 'failed': return 'failed';
+    default: return 'running';
+  }
+}
+
+/**
+ * Advance exactly one backend-owned lifecycle. Repeated writes are idempotent;
+ * backward/terminal transitions fail closed rather than reviving a run.
+ */
+export async function transitionRunLifecycle(
+  runId: number,
+  next: RunLifecycleStatus,
+  diagnostics: Record<string, unknown> = {},
+): Promise<boolean> {
+  const row = await queryOne<LifecycleRow>(
+    'SELECT lifecycle_status FROM pipeline_runs WHERE id = $1',
+    [runId],
+  );
+  if (!row) return false;
+  const current = row.lifecycle_status;
+  if (current === next) {
+    if (Object.keys(diagnostics).length > 0) {
+      await execute(
+        `UPDATE pipeline_runs
+         SET lifecycle_diagnostics = lifecycle_diagnostics || $2::jsonb,
+             lifecycle_updated_at = NOW()
+         WHERE id = $1`,
+        [runId, JSON.stringify(diagnostics)],
+      );
+    }
+    return true;
+  }
+  if (!ALLOWED_NEXT[current]?.includes(next)) return false;
+
+  const result = await execute(
+    `UPDATE pipeline_runs
+     SET lifecycle_status = $2,
+         lifecycle_diagnostics = lifecycle_diagnostics || $3::jsonb,
+         lifecycle_updated_at = NOW()
+     WHERE id = $1 AND lifecycle_status = $4`,
+    [runId, next, JSON.stringify(diagnostics), current],
+  );
+  return result.rowCount === 1;
+}
