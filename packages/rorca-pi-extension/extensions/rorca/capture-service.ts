@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import type { ChildProcess, SpawnSyncOptions } from "node:child_process";
-import { DEFAULT_CAPTURE_POLICY, hashCaptureContent, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety.js";
+import { DEFAULT_CAPTURE_POLICY, capturePolicyRawContent, hashCaptureContent, normalizeCapturePolicyMode, sanitizeCapturePayload } from "../../../../backend/src/lib/context-safety.js";
 import type { Workspace } from "./types.js";
 
 export type CaptureServicePlatform = "darwin" | "linux" | "win32";
@@ -102,18 +102,19 @@ export function resolveCaptureServicePaths(workspace: Workspace, platform: Captu
   };
 }
 
-export function renderLaunchdPlist(input: { workspace: Workspace; command: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
+export function renderLaunchdPlist(input: { workspace: Workspace; command: string; nodePath?: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
   const config = defaultCaptureServiceConfig(input.config);
   const paths = input.paths ?? resolveCaptureServicePaths(input.workspace, "darwin");
   const label = `com.rorca.capture.${input.workspace.id}`;
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${escapeXml(label)}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${escapeXml(input.command)}</string>\n    <string>daemon</string>\n    <string>--workspace-id</string>\n    <string>${escapeXml(input.workspace.id)}</string>\n    <string>--cwd</string>\n    <string>${escapeXml(input.workspace.path)}</string>\n    <string>--scan-interval-ms</string>\n    <string>${config.scanIntervalMs}</string>\n    <string>--max-commits-per-scan</string>\n    <string>${config.maxCommitsPerScan}</string>\n    <string>--max-concurrency</string>\n    <string>${config.maxConcurrency}</string>\n    <string>--queue-warn-size</string>\n    <string>${config.queueWarnSize}</string>\n    <string>--queue-max-size</string>\n    <string>${config.queueMaxSize}</string>\n  </array>\n  <key>WorkingDirectory</key>\n  <string>${escapeXml(input.workspace.path)}</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict><key>Crashed</key><true/></dict>\n  <key>StandardOutPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n  <key>StandardErrorPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n</dict>\n</plist>\n`;
+  const [program, ...commandPrefix] = captureCommandArgs(input.command, input.nodePath);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${escapeXml(label)}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${escapeXml(program)}</string>\n${commandPrefix.map((argument) => `    <string>${escapeXml(argument)}</string>\n`).join('')}    <string>daemon</string>\n    <string>--workspace-id</string>\n    <string>${escapeXml(input.workspace.id)}</string>\n    <string>--cwd</string>\n    <string>${escapeXml(input.workspace.path)}</string>\n    <string>--scan-interval-ms</string>\n    <string>${config.scanIntervalMs}</string>\n    <string>--max-commits-per-scan</string>\n    <string>${config.maxCommitsPerScan}</string>\n    <string>--max-concurrency</string>\n    <string>${config.maxConcurrency}</string>\n    <string>--queue-warn-size</string>\n    <string>${config.queueWarnSize}</string>\n    <string>--queue-max-size</string>\n    <string>${config.queueMaxSize}</string>\n  </array>\n  <key>WorkingDirectory</key>\n  <string>${escapeXml(input.workspace.path)}</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict><key>Crashed</key><true/></dict>\n  <key>StandardOutPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n  <key>StandardErrorPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n</dict>\n</plist>\n`;
 }
 
-export function renderSystemdUserService(input: { workspace: Workspace; command: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
+export function renderSystemdUserService(input: { workspace: Workspace; command: string; nodePath?: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
   const config = defaultCaptureServiceConfig(input.config);
   const paths = input.paths ?? resolveCaptureServicePaths(input.workspace, "linux");
   const execArgs = [
-    input.command,
+    ...captureCommandArgs(input.command, input.nodePath),
     "daemon",
     "--workspace-id", input.workspace.id,
     "--cwd", input.workspace.path,
@@ -126,12 +127,13 @@ export function renderSystemdUserService(input: { workspace: Workspace; command:
   return `# rorca-managed: v1 | uninstall: rorca-capture service uninstall\n[Unit]\nDescription=Rorca always-on context capture for ${input.workspace.id}\nAfter=default.target\n\n[Service]\nType=simple\nWorkingDirectory=${input.workspace.path}\nExecStart=${execArgs}\nRestart=on-failure\nRestartSec=10\nEnvironment=RORCA_CAPTURE_API_URL=${config.apiBaseUrl}\nStandardOutput=append:${paths.logFile}\nStandardError=append:${paths.logFile}\n\n[Install]\nWantedBy=default.target\n`;
 }
 
-export function renderWindowsFallbackScript(input: { workspace: Workspace; command: string; config?: Partial<CaptureServiceConfig> }): string {
+export function renderWindowsFallbackScript(input: { workspace: Workspace; command: string; nodePath?: string; config?: Partial<CaptureServiceConfig> }): string {
   const config = defaultCaptureServiceConfig(input.config);
-  return `# rorca-managed: v1 | uninstall: rorca-capture service uninstall\n# Windows fallback: run this script from a user Startup shortcut or Task Scheduler at logon.\nSet-Location -LiteralPath ${powershellQuote(input.workspace.path)}\n& ${powershellQuote(input.command)} daemon --workspace-id ${powershellQuote(input.workspace.id)} --cwd ${powershellQuote(input.workspace.path)} --scan-interval-ms ${config.scanIntervalMs} --max-commits-per-scan ${config.maxCommitsPerScan} --max-concurrency ${config.maxConcurrency} --queue-warn-size ${config.queueWarnSize} --queue-max-size ${config.queueMaxSize}\n`;
+  const [program, ...commandPrefix] = captureCommandArgs(input.command, input.nodePath);
+  return `# rorca-managed: v1 | uninstall: rorca-capture service uninstall\n# Windows fallback: run this script from a user Startup shortcut or Task Scheduler at logon.\nSet-Location -LiteralPath ${powershellQuote(input.workspace.path)}\n& ${powershellQuote(program)}${commandPrefix.map((argument) => ` ${powershellQuote(argument)}`).join('')} daemon --workspace-id ${powershellQuote(input.workspace.id)} --cwd ${powershellQuote(input.workspace.path)} --scan-interval-ms ${config.scanIntervalMs} --max-commits-per-scan ${config.maxCommitsPerScan} --max-concurrency ${config.maxConcurrency} --queue-warn-size ${config.queueWarnSize} --queue-max-size ${config.queueMaxSize}\n`;
 }
 
-export function renderServiceFile(platform: CaptureServicePlatform, input: { workspace: Workspace; command: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
+export function renderServiceFile(platform: CaptureServicePlatform, input: { workspace: Workspace; command: string; nodePath?: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
   if (platform === "darwin") return renderLaunchdPlist(input);
   if (platform === "linux") return renderSystemdUserService(input);
   return renderWindowsFallbackScript(input);
@@ -161,7 +163,7 @@ export function runCaptureServiceLifecycle(input: { action: CaptureServiceAction
   if (input.action === "install") {
     if (!input.dryRun) {
       mkdirSync(paths.serviceDir, { recursive: true });
-      writeFileSync(paths.serviceFile, renderServiceFile(platform, { workspace: input.workspace, command, paths, config: input.config }), "utf8");
+      writeFileSync(paths.serviceFile, renderServiceFile(platform, { workspace: input.workspace, command, nodePath: process.execPath, paths, config: input.config }), "utf8");
     }
     if (platform === "darwin") run("launchctl", ["bootstrap", `gui/${process.getuid?.() ?? 501}`, paths.serviceFile]);
     else if (platform === "linux") { run("systemctl", ["--user", "daemon-reload"]); run("systemctl", ["--user", "enable", serviceName]); }
@@ -250,7 +252,7 @@ export async function runManagedCaptureDaemon(input: { workspace: Workspace; con
     state.last_seen = now().toISOString();
     const localPolicy = readLocalCapturePolicy(paths.captureDir);
     if (!localPolicy.paused && localPolicy.policyMode !== 'off') {
-      await scanRepository(input.workspace, paths, config, state, spawnSyncImpl, now);
+      await scanRepository(input.workspace, paths, config, state, spawnSyncImpl, now, localPolicy.policyMode);
       await flushQueue(input.workspace, paths, config, state, fetchImpl, now);
     }
     writeState(paths.stateFile, state);
@@ -259,11 +261,13 @@ export async function runManagedCaptureDaemon(input: { workspace: Workspace; con
 
   await tick();
   if (input.once) return;
-  setInterval(() => { void tick().catch((error) => appendLog(paths.logFile, `daemon tick failed: ${error instanceof Error ? error.message : String(error)}\n`)); }, config.scanIntervalMs).unref?.();
+  // Keep the service event loop referenced. An unref'ed timer makes launchd's
+  // daemon exit after its first tick even though the service is registered.
+  setInterval(() => { void tick().catch((error) => appendLog(paths.logFile, `daemon tick failed: ${error instanceof Error ? error.message : String(error)}\n`)); }, config.scanIntervalMs);
   await new Promise(() => undefined);
 }
 
-async function scanRepository(workspace: Workspace, paths: CaptureServicePaths, config: CaptureServiceConfig, state: CaptureState, spawnSyncImpl: typeof spawnSync, now: () => Date): Promise<void> {
+async function scanRepository(workspace: Workspace, paths: CaptureServicePaths, config: CaptureServiceConfig, state: CaptureState, spawnSyncImpl: typeof spawnSync, now: () => Date, policyMode?: string): Promise<void> {
   const args = ["log", `--max-count=${config.maxCommitsPerScan}`, "--format=%H%x09%ct%x09%s"];
   const result = spawnSyncImpl("git", args, { cwd: workspace.path, encoding: "utf8" });
   if (result.status !== 0 || typeof result.stdout !== "string") {
@@ -284,7 +288,7 @@ async function scanRepository(workspace: Workspace, paths: CaptureServicePaths, 
       subject: commit.subject,
       committedAt: new Date(Number(commit.timestamp) * 1000).toISOString(),
       workspacePath: workspace.path,
-    });
+    }, policyMode);
     enqueue(paths.queuePath, event, config);
     existing.add(event.id);
     state.cursor.lastCommit = commit.hash;
@@ -375,10 +379,15 @@ function writeState(filePath: string, state: CaptureState): void {
   writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
-function redactedEvent(workspaceId: string, workspacePath: string, id: string, occurredAt: string, payload: Record<string, unknown>): QueuedEvent {
+function redactedEvent(workspaceId: string, workspacePath: string, id: string, occurredAt: string, payload: Record<string, unknown>, policyMode?: string): QueuedEvent {
+  const normalizedPolicyMode = normalizeCapturePolicyMode(policyMode, "metadata-only");
   const redacted = sanitizeCapturePayload(payload, { ...DEFAULT_CAPTURE_POLICY, rawContentDefault: "explicit" });
   const safePayload = redacted.payload as Record<string, unknown>;
-  const commit = String(safePayload.commit ?? "");
+  // A Git object ID is public repository metadata, not a credential. Generic
+  // token redaction can otherwise collapse every 40-char SHA to one placeholder
+  // and destroy daemon idempotency/persistence.
+  const rawCommit = typeof payload.commit === 'string' ? payload.commit : '';
+  const commit = /^[0-9a-f]{7,64}$/i.test(rawCommit) ? rawCommit : String(safePayload.commit ?? "");
   const subject = typeof safePayload.subject === "string" ? safePayload.subject : null;
   const committedAt = typeof safePayload.committedAt === "string" ? safePayload.committedAt : null;
   const repoPathHash = `sha256:${sha256(path.resolve(workspacePath))}`;
@@ -403,11 +412,13 @@ function redactedEvent(workspaceId: string, workspacePath: string, id: string, o
       git_branch: null,
       git_sha: commit,
       related_files: [],
-      capture_policy: { policy_version: "2026-07-ucc-007", mode: "metadata-only", raw_content: "metadata" },
+      capture_policy: { policy_version: "2026-07-ucc-007", mode: normalizedPolicyMode, raw_content: capturePolicyRawContent(normalizedPolicyMode) },
       trust_tier: "local",
       idempotency_key: idempotencyKey,
       provenance: { capture_source: "repoDaemon", source_event_id: id, adapter_version: null, emitted_at: occurredAt, received_at: null, local_only: true },
-      commit_subject: subject,
+      // Commit subjects are human text and can expose issue/customer details. The
+      // metadata-only baseline stores the commit identity and timestamp, not text.
+      commit_subject: normalizedPolicyMode === "metadata-only" ? null : subject,
       committed_at: committedAt,
       author_hash: null,
       changed_files: [],
@@ -458,7 +469,8 @@ function readLocalCapturePolicy(captureDir: string): { policyMode?: string; mode
 function startFallbackProcess(workspace: Workspace, command: string, config?: Partial<CaptureServiceConfig>): ChildProcess {
   const paths = resolveCaptureServicePaths(workspace, "win32");
   const cfg = defaultCaptureServiceConfig(config);
-  const child = spawn(command, ["daemon", "--workspace-id", workspace.id, "--cwd", workspace.path, "--scan-interval-ms", String(cfg.scanIntervalMs), "--max-commits-per-scan", String(cfg.maxCommitsPerScan), "--max-concurrency", String(cfg.maxConcurrency), "--queue-warn-size", String(cfg.queueWarnSize), "--queue-max-size", String(cfg.queueMaxSize)], { cwd: workspace.path, detached: true, stdio: "ignore" });
+  const [program, ...commandPrefix] = captureCommandArgs(command, process.execPath);
+  const child = spawn(program, [...commandPrefix, "daemon", "--workspace-id", workspace.id, "--cwd", workspace.path, "--scan-interval-ms", String(cfg.scanIntervalMs), "--max-commits-per-scan", String(cfg.maxCommitsPerScan), "--max-concurrency", String(cfg.maxConcurrency), "--queue-warn-size", String(cfg.queueWarnSize), "--queue-max-size", String(cfg.queueMaxSize)], { cwd: workspace.path, detached: true, stdio: "ignore" });
   child.unref();
   writeFileSync(paths.pidFile, `${child.pid}\n`, "utf8");
   return child;
@@ -485,6 +497,12 @@ function isPidRunning(pid: number): boolean {
 function appendLog(filePath: string, text: string): void {
   mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileSync(filePath, text, { encoding: "utf8", flag: "a" });
+}
+
+function captureCommandArgs(command: string, nodePath?: string): string[] {
+  // launchd/systemd do not inherit an interactive shell or NVM PATH. Execute
+  // source-distributed JavaScript CLIs through the absolute current Node binary.
+  return command.endsWith('.js') ? [nodePath ?? process.execPath, command] : [command];
 }
 
 function escapeXml(value: string): string {
