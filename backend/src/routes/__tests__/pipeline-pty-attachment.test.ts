@@ -429,6 +429,30 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(response.text).toContain(Buffer.from('resume-here\n').toString('base64'));
   });
 
+  test('explicit afterSequence refresh cursor overrides Last-Event-ID and never replays from zero', async () => {
+    const runId = await seedRun('done', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
+      [runId, wsDir],
+    );
+    await db.execute(
+      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES
+       ($1, 1, $2), ($1, 2, $3), ($1, 3, $4)`,
+      [runId, Buffer.from('zero\n'), Buffer.from('old-event-source\n'), Buffer.from('refresh-resume\n')],
+    );
+
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach&afterSequence=2`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Last-Event-ID', '1');
+
+    expect(response.status).toBe(200);
+    expect(response.text).not.toContain(Buffer.from('zero\n').toString('base64'));
+    expect(response.text).not.toContain(Buffer.from('old-event-source\n').toString('base64'));
+    expect(response.text).toContain(Buffer.from('refresh-resume\n').toString('base64'));
+  });
+
   test('requested PTY without a PTY session demotes explicitly to ANSI fallback metadata', async () => {
     const runId = await seedRun('done', 'pty');
     const ansiChunk = Buffer.from('fallback transcript bytes\n', 'utf8');

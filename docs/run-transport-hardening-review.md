@@ -34,13 +34,20 @@ Run `20260316000487` requested Pi, `openai-codex/gpt-5.6-terra`, high effort, se
 - Keep terminal runs with no PTY session as explicit ANSI fallback with an accurate diagnostic.
 - Persist raw terminal bytes as the replay source of truth.
 - Use PostgreSQL `LISTEN/NOTIFY` only as a low-latency cross-process wake-up; SSE handlers fetch committed rows by sequence. Retain bounded polling as reconnect/notification-loss recovery.
-- Honor `Last-Event-ID` for exact SSE resume and suppress overlapping polls.
+- Honor `Last-Event-ID` for exact SSE resume; support explicit `afterSequence` refresh persistence (which intentionally overrides a stale EventSource header); fetch replay/poll rows in bounded sequence batches and suppress overlapping polls.
+- Bound node-pty persistence with a single batched writer, a bounded in-memory queue, a per-session PostgreSQL capture cap, and durable dropped-byte/truncation health metadata. This is intentionally lossy only after limits are reached; it never uses Redis, WebSockets, or a broker.
 - Distinguish retryable stream transport errors from true `done` events.
 - Terminate process groups when PTY setup fails after spawn.
 - Normalize agent/model fields once at the API and UI boundaries.
 - Read live run-state from `worktree_path` for isolated runs.
 - Disable archived PTY input and retry browser dimensions when a pending session becomes active.
 - Expose an explicit Interactive PTY option in normal web trigger flows; enabling it forces sequential execution.
+
+## Integration notes
+
+- The migration adds only application-table columns to `run_pty_sessions`; it deliberately does **not** touch the pg-boss schema or introduce a new transport service.
+- Operators should size `RORCA_PTY_MAX_CAPTURE_BYTES`, `RORCA_PTY_MAX_PENDING_BYTES`, `RORCA_PTY_OUTPUT_BATCH_BYTES`, and `RORCA_PTY_OUTPUT_BATCH_CHUNKS` together. When an agent is noisier than the configured capture/queue limits, `pty_health` reports `ptyOutputTruncated` and `ptyDroppedOutputBytes`; this is capture loss, not PTY success/failure or a completion marker.
+- Existing consumers that only use `Last-Event-ID` remain compatible. Refresh-capable clients should persist the latest `chunk` event id and send it as `afterSequence`; query precedence avoids a stale browser-managed event id replaying old output.
 
 ## Spec correction required
 

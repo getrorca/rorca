@@ -64,8 +64,8 @@ import {
   shutdownPtyProcess,
 } from './pty-manager';
 import {
-  appendRunPtyOutput,
   claimLatestRunPtyResize,
+  createRunPtyOutputBatcher,
   claimPendingRunPtyInput,
   completeRunPtySession,
   initializeRunPtySequence,
@@ -2160,7 +2160,7 @@ async function spawnAgentViaPty(
     let completionMarkerSeen = false;
     let completionState: PtyCompletionState | null = null;
     let adapter: InteractivePtyAgentAdapter | null = null;
-    let finishedWrites = Promise.resolve();
+    let outputBatcher: ReturnType<typeof createRunPtyOutputBatcher> | null = null;
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -2188,9 +2188,9 @@ async function spawnAgentViaPty(
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
       try {
-        await finishedWrites;
-      } catch {
-        // best effort — error already logged
+        await outputBatcher?.drain();
+      } catch (err: unknown) {
+        logRunPtyStoreError('Failed to drain bounded PTY output writer', ptyOptions.runId, err);
       }
       logStream.end();
       ptyCommand?.cleanup?.();
@@ -2271,6 +2271,7 @@ async function spawnAgentViaPty(
 
     try {
       sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
+      outputBatcher = createRunPtyOutputBatcher(ptyOptions.runId, sequenceRef);
       const storyIdForMarker = ptyOptions.storyId ?? 'run';
       const completionMarker = buildPtyCompletionMarker(ptyOptions.runId, storyIdForMarker);
       const markerFilePath = buildPtyMarkerFilePath(ptyOptions.runId, storyIdForMarker);
@@ -2399,11 +2400,10 @@ async function spawnAgentViaPty(
             }, 250).unref?.();
           }
         }
-        if (!sequenceRef) return;
-        const activeSequenceRef = sequenceRef;
-        finishedWrites = finishedWrites
-          .then(() => appendRunPtyOutput(ptyOptions.runId, buf, activeSequenceRef))
-          .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY output chunk', ptyOptions.runId, err));
+        // node-pty is push-only. The bounded single writer batches durable
+        // inserts and accounts for overflow instead of retaining an unbounded
+        // promise chain when terminal output outpaces PostgreSQL.
+        outputBatcher?.enqueue(buf);
       });
 
       pty.onExit((event) => {

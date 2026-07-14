@@ -5,6 +5,7 @@
 import { execute, queryOne } from '../../db/index';
 import {
   appendRunPtyOutput,
+  createRunPtyOutputBatcher,
   getRunPtySessionHealth,
   initializeRunPtySequence,
   listRunPtyChunks,
@@ -53,13 +54,47 @@ describe('run-pty-store', () => {
 
     await appendRunPtyOutput(runId, Buffer.from('first'), sequence);
     await appendRunPtyOutput(runId, Buffer.from('second'), sequence);
+    await appendRunPtyOutput(runId, Buffer.from('third'), sequence);
 
     const all = await listRunPtyChunks(runId);
-    expect(all.map(row => row.sequence)).toEqual([1, 2]);
-    expect(Buffer.concat(all.map(row => row.chunk)).toString('utf8')).toBe('firstsecond');
+    expect(all.map(row => row.sequence)).toEqual([1, 2, 3]);
+    expect(Buffer.concat(all.map(row => row.chunk)).toString('utf8')).toBe('firstsecondthird');
 
     const replayAfterOne = await listRunPtyChunks(runId, 1);
-    expect(replayAfterOne.map(row => row.chunk.toString('utf8'))).toEqual(['second']);
+    expect(replayAfterOne.map(row => row.chunk.toString('utf8'))).toEqual(['second', 'third']);
+    const boundedReplay = await listRunPtyChunks(runId, 0, 2);
+    expect(boundedReplay.map(row => row.sequence)).toEqual([1, 2]);
+  });
+
+  it('bounds a noisy output writer, batches persistence, and records loss explicitly', async () => {
+    await startRunPtySession({
+      runId,
+      workspaceId,
+      cwd: process.cwd(),
+      agentType: 'pi',
+      cols: 120,
+      rows: 36,
+      childPid: null,
+    });
+    const sequence = await initializeRunPtySequence(runId);
+    const writer = createRunPtyOutputBatcher(runId, sequence, {
+      maxCaptureBytes: 4,
+      maxPendingBytes: 4,
+      batchBytes: 4,
+      batchChunks: 1,
+    });
+
+    writer.enqueue(Buffer.from('keep'));
+    writer.enqueue(Buffer.from('drop'));
+    expect(writer.getPendingBytes()).toBeLessThanOrEqual(4);
+    await writer.drain();
+
+    const chunks = await listRunPtyChunks(runId, 0, 10);
+    const health = await getRunPtySessionHealth(runId);
+    expect(chunks.map((row) => row.chunk.toString('utf8'))).toEqual(['keep']);
+    expect(Number(health?.total_output_bytes)).toBe(8);
+    expect(Number(health?.dropped_output_bytes)).toBe(4);
+    expect(health?.output_truncated_at).toBeTruthy();
   });
 
   it('records completion markers as metadata, not pass state or terminal output chunks', async () => {

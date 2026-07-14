@@ -58,6 +58,7 @@ import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
   getRunPtySessionHealth,
   getRunPtySessionStatus,
+  getRunPtyOutputLimits,
   listRecentRunPtyChunks,
   listRunPtyChunks,
   requestRunPtyInput,
@@ -237,6 +238,18 @@ const RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS = RUN_OUTPUT_PTY_POLL_INTERVAL_MS *
 const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
 const RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS = Math.max(1_000, RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 5);
 const RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS = readBoundedIntegerEnv('RORCA_OUTPUT_REPLAY_MAX_CHUNKS', 2_048, 100, 25_000);
+const RUN_OUTPUT_REPLAY_BATCH_CHUNKS = getRunPtyOutputLimits().replayBatchChunks;
+
+function parseOutputResumeCursor(value: string, source: 'afterSequence' | 'Last-Event-ID'): number {
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    throw new ValidationError(`${source} must be a non-negative integer sequence`);
+  }
+  const sequence = Number(value);
+  if (!Number.isSafeInteger(sequence)) {
+    throw new ValidationError(`${source} must be a safe integer sequence`);
+  }
+  return sequence;
+}
 
 function isPtyPidAlive(pid: number | null | undefined): boolean {
   if (!pid || pid <= 0) return false;
@@ -273,6 +286,12 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_completion_marker_seen_at: health.completion_marker_seen_at,
     ptyTotalOutputBytes: totalOutputBytes,
     pty_total_output_bytes: totalOutputBytes,
+    ptyDroppedOutputBytes: Number(health.dropped_output_bytes ?? 0),
+    pty_dropped_output_bytes: Number(health.dropped_output_bytes ?? 0),
+    ptyOutputTruncated: Boolean(health.output_truncated_at),
+    pty_output_truncated: Boolean(health.output_truncated_at),
+    ptyOutputTruncatedAt: health.output_truncated_at,
+    pty_output_truncated_at: health.output_truncated_at,
   };
 }
 
@@ -5227,6 +5246,11 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *         name: runId
  *         required: true
  *         schema: { type: integer }
+ *       - in: query
+ *         name: afterSequence
+ *         required: false
+ *         schema: { type: integer, minimum: 0 }
+ *         description: Explicit durable output cursor for refresh persistence. Overrides Last-Event-ID when both are supplied.
  *     responses:
  *       200:
  *         description: SSE stream with chunk events (base64 data) and done event
@@ -5255,12 +5279,27 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     throw new ForbiddenError('Run does not belong to this workspace');
   }
 
+  // A query cursor survives explicit browser refresh/navigation. It deliberately
+  // overrides Last-Event-ID, which EventSource may retain from an older stream.
+  const afterSequenceQuery = req.query.afterSequence;
+  if (Array.isArray(afterSequenceQuery)) {
+    throw new ValidationError('afterSequence must be a single non-negative integer sequence');
+  }
+  const afterSequence = typeof afterSequenceQuery === 'string' ? afterSequenceQuery : null;
+  const lastEventId = req.get('Last-Event-ID');
+  const resumeSource = afterSequence !== null ? 'afterSequence' : lastEventId !== undefined ? 'Last-Event-ID' : null;
+  const hasResumeCursor = resumeSource !== null;
+  let lastSequence = hasResumeCursor
+    ? parseOutputResumeCursor(afterSequence ?? lastEventId!, resumeSource!)
+    : 0;
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
+  res.write('retry: 1000\n\n');
   res.write(': connected\n\n');
 
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
@@ -5343,25 +5382,20 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   writePtyHealthEvent(res, ptyHealthPayloadAtOpen);
 
   // ── Replay existing chunks (late-join/reconnect support) ──────────────────
-  // EventSource sends Last-Event-ID automatically after a disconnect. Honor it
-  // so reconnects resume instead of replaying an unbounded duplicate transcript.
+  // EventSource sends Last-Event-ID automatically after a disconnect. The
+  // validated cursor above resumes exactly after that sequence; first attaches
+  // get a bounded tail instead of an unbounded historical transcript.
   interface ChunkRow { sequence: number; chunk: Buffer }
-  const resumeHeader = req.get('Last-Event-ID');
-  const resumeQuery = typeof req.query.afterSequence === 'string' ? req.query.afterSequence : null;
-  const hasResumeCursor = resumeHeader != null || resumeQuery != null;
-  const resumeToken = resumeHeader ?? resumeQuery ?? '0';
-  const parsedResumeSequence = Number.parseInt(resumeToken, 10);
-  let lastSequence = Number.isSafeInteger(parsedResumeSequence) && parsedResumeSequence >= 0
-    ? parsedResumeSequence
-    : 0;
   let lastPtyHealthSignature = JSON.stringify(ptyHealthPayloadAtOpen ?? {});
   let lastPtyHealthEmitAt = Date.now();
   let pollInFlight = false;
 
+  let initialReplayMayHaveMore = false;
   if (usePtyCapture) {
     const existingChunks = hasResumeCursor
-      ? await listRunPtyChunks(runId, lastSequence)
+      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS)
       : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS);
+    initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
     if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
       res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
     }
@@ -5373,8 +5407,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   } else {
     const existingChunks = hasResumeCursor
       ? await query<ChunkRow>(
-          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
-          [runId, lastSequence],
+          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC LIMIT $3',
+          [runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS],
         )
       : await query<ChunkRow>(
           `SELECT sequence, chunk
@@ -5385,6 +5419,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
           [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
         );
 
+    initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
     if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
       res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
     }
@@ -5403,7 +5438,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 
   // ── If the run is already terminal, close immediately ────────────────────
-  if (terminalStatuses.includes(runRow.status)) {
+  if (terminalStatuses.includes(runRow.status) && !initialReplayMayHaveMore) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
     res.end();
@@ -5417,9 +5452,12 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     if (pollInFlight || streamClosed) return;
     pollInFlight = true;
     const pollStartedAt = Date.now();
+    let drainImmediately = false;
     try {
+      let fetchedBatchIsFull = false;
       if (usePtyCapture) {
-        const newChunks = await listRunPtyChunks(runId, lastSequence);
+        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS);
+        fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
           writeOutputChunkEvent(res, row.sequence, chunkBuf);
@@ -5427,9 +5465,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         }
       } else {
         const newChunks = await query<ChunkRow>(
-          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
-          [runId, lastSequence],
+          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC LIMIT $3',
+          [runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS],
         );
+        fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
 
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
@@ -5497,9 +5536,20 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       }
 
       if (!statusRow || runBecameTerminal || ptyTerminal) {
-        cleanupOutputStream();
-        res.write('event: done\ndata: \n\n');
-        res.end();
+        // Never emit done before a bounded cursor batch has fully drained.
+        // Queue another non-overlapping poll; an exact-multiple batch simply
+        // performs one empty confirmation read before closing.
+        if (fetchedBatchIsFull) {
+          drainImmediately = true;
+        } else {
+          cleanupOutputStream();
+          res.write('event: done\ndata: \n\n');
+          res.end();
+        }
+      } else if (fetchedBatchIsFull) {
+        // Active noisy streams drain in bounded slices without waiting for the
+        // recovery interval, while `pollInFlight` prevents overlap.
+        drainImmediately = true;
       }
       const elapsedMs = Date.now() - pollStartedAt;
       if (usePtyCapture && elapsedMs > RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS) {
@@ -5511,10 +5561,13 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       // A transport failure is not run completion. Emit a retryable error and
       // end the HTTP response without a `done` marker so EventSource reconnects
       // with Last-Event-ID and resumes exactly where it stopped.
-      res.write(`event: stream_error\ndata: ${JSON.stringify({ retryable: true, code: 'OUTPUT_POLL_FAILED' })}\n\n`);
+      res.write(`event: stream_error\ndata: ${JSON.stringify({ retryable: true, code: 'OUTPUT_POLL_FAILED', afterSequence: lastSequence })}\n\n`);
       res.end();
     } finally {
       pollInFlight = false;
+      if (drainImmediately && !streamClosed && !req.destroyed && !res.destroyed) {
+        queueMicrotask(() => { void pollOutput(); });
+      }
     }
   };
 
@@ -5522,6 +5575,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // chunk commits. The interval remains as loss/reconnect protection.
   unsubscribeOutputWakeup = subscribeRunOutput(runId, () => { void pollOutput(); });
   pollInterval = setInterval(() => { void pollOutput(); }, RUN_OUTPUT_PTY_POLL_INTERVAL_MS);
+  if (initialReplayMayHaveMore) void pollOutput();
 
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();

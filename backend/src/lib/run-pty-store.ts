@@ -6,13 +6,42 @@
  */
 
 import { gunzipSync, gzipSync } from 'zlib';
-import { execute, query, queryOne } from '../db/index';
+import { execute, query, queryOne, transaction } from '../db/index';
 import { logger } from './logger';
 
 const CHUNK_SIZE = 4 * 1024;
 const GZIP_COMPRESSION = 'gzip';
 const IDENTITY_COMPRESSION = 'identity';
 const DEFAULT_PTY_RETENTION_DAYS = 14;
+const DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_PENDING_BYTES = 1 * 1024 * 1024;
+const DEFAULT_BATCH_BYTES = 64 * 1024;
+const DEFAULT_BATCH_CHUNKS = 16;
+const DEFAULT_REPLAY_BATCH_CHUNKS = 512;
+
+function readBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+
+export interface RunPtyOutputLimits {
+  maxCaptureBytes: number;
+  maxPendingBytes: number;
+  batchBytes: number;
+  batchChunks: number;
+  replayBatchChunks: number;
+}
+
+/** Bounded limits keep terminal capture useful without making noisy agents unbounded. */
+export function getRunPtyOutputLimits(): RunPtyOutputLimits {
+  return {
+    maxCaptureBytes: readBoundedIntegerEnv('RORCA_PTY_MAX_CAPTURE_BYTES', DEFAULT_MAX_CAPTURE_BYTES, CHUNK_SIZE, 1024 * 1024 * 1024),
+    maxPendingBytes: readBoundedIntegerEnv('RORCA_PTY_MAX_PENDING_BYTES', DEFAULT_MAX_PENDING_BYTES, CHUNK_SIZE, 64 * 1024 * 1024),
+    batchBytes: readBoundedIntegerEnv('RORCA_PTY_OUTPUT_BATCH_BYTES', DEFAULT_BATCH_BYTES, CHUNK_SIZE, 1024 * 1024),
+    batchChunks: readBoundedIntegerEnv('RORCA_PTY_OUTPUT_BATCH_CHUNKS', DEFAULT_BATCH_CHUNKS, 1, 256),
+    replayBatchChunks: readBoundedIntegerEnv('RORCA_PTY_REPLAY_BATCH_CHUNKS', DEFAULT_REPLAY_BATCH_CHUNKS, 1, 4_096),
+  };
+}
 
 interface StoredRunPtyChunkRow {
   sequence: number | string;
@@ -55,6 +84,8 @@ export interface RunPtySessionHealth {
   completion_marker: string | null;
   completion_marker_seen_at: string | null;
   total_output_bytes: string | number;
+  dropped_output_bytes: string | number;
+  output_truncated_at: string | null;
 }
 
 function compressRunPtyChunk(chunk: Buffer): { chunk: Buffer; compression: string } {
@@ -115,39 +146,186 @@ export async function updateRunPtyDimensions(runId: number, cols: number, rows: 
   );
 }
 
+interface AppendRunPtyOutputOptions {
+  maxCaptureBytes?: number;
+  droppedBytes?: number;
+}
+
+interface RunPtyOutputSessionRow {
+  total_output_bytes: string | number;
+  dropped_output_bytes: string | number;
+}
+
+/**
+ * Commit a bounded batch atomically. `droppedBytes` represents bytes discarded
+ * before reaching this writer because its in-memory queue was full. They are
+ * accounted for durably so consumers can distinguish a truncated capture from
+ * a completed terminal session.
+ */
+export async function appendRunPtyOutputBatch(
+  runId: number,
+  buffers: readonly Buffer[],
+  sequenceRef: { value: number },
+  options: AppendRunPtyOutputOptions = {},
+): Promise<void> {
+  const maxCaptureBytes = options.maxCaptureBytes ?? getRunPtyOutputLimits().maxCaptureBytes;
+  const queueDroppedBytes = options.droppedBytes ?? 0;
+  const rawBytes = buffers.reduce((total, buffer) => total + buffer.length, 0);
+  if (rawBytes === 0 && queueDroppedBytes === 0) return;
+
+  await transaction(async (client) => {
+    const session = await client.query<RunPtyOutputSessionRow>(
+      `SELECT total_output_bytes, dropped_output_bytes
+       FROM run_pty_sessions WHERE run_id = $1 FOR UPDATE`,
+      [runId],
+    );
+    const row = session.rows[0];
+    if (!row) throw new Error(`PTY session ${runId} does not exist`);
+
+    const totalOutputBytes = Number(row.total_output_bytes) || 0;
+    const droppedOutputBytes = Number(row.dropped_output_bytes) || 0;
+    const capturedBytes = Math.max(0, totalOutputBytes - droppedOutputBytes);
+    let remainingCaptureBytes = Math.max(0, maxCaptureBytes - capturedBytes);
+    let acceptedBytes = 0;
+    let storedBytes = 0;
+
+    for (const buffer of buffers) {
+      let offset = 0;
+      while (offset < buffer.length && remainingCaptureBytes > 0) {
+        const length = Math.min(CHUNK_SIZE, buffer.length - offset, remainingCaptureBytes);
+        const slice = buffer.subarray(offset, offset + length);
+        const compressed = compressRunPtyChunk(slice);
+        await client.query(
+          `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk, compression, byte_length, stored_byte_length)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (run_id, sequence) DO NOTHING`,
+          [runId, sequenceRef.value, compressed.chunk, compressed.compression, slice.length, compressed.chunk.length],
+        );
+        sequenceRef.value += 1;
+        acceptedBytes += slice.length;
+        storedBytes += compressed.chunk.length;
+        remainingCaptureBytes -= slice.length;
+        offset += length;
+      }
+      if (remainingCaptureBytes === 0) break;
+    }
+
+    const captureDroppedBytes = rawBytes - acceptedBytes;
+    const droppedBytes = queueDroppedBytes + captureDroppedBytes;
+    await client.query(
+      `UPDATE run_pty_sessions
+       SET total_output_bytes = total_output_bytes + $2,
+           total_stored_bytes = total_stored_bytes + $3,
+           dropped_output_bytes = dropped_output_bytes + $4,
+           output_truncated_at = CASE WHEN $4 > 0 THEN COALESCE(output_truncated_at, NOW()) ELSE output_truncated_at END,
+           last_output_at = CASE WHEN $2 > $4 THEN NOW() ELSE last_output_at END,
+           updated_at = NOW()
+       WHERE run_id = $1`,
+      [runId, rawBytes + queueDroppedBytes, storedBytes, droppedBytes],
+    );
+  });
+}
+
 export async function appendRunPtyOutput(
   runId: number,
   data: Buffer,
   sequenceRef: { value: number },
 ): Promise<void> {
-  let offset = 0;
-  let storedBytes = 0;
+  await appendRunPtyOutputBatch(runId, [data], sequenceRef);
+}
 
-  while (offset < data.length) {
-    const slice = data.subarray(offset, offset + CHUNK_SIZE);
-    const compressed = compressRunPtyChunk(slice);
-    storedBytes += compressed.chunk.length;
+export interface RunPtyOutputBatcher {
+  enqueue(data: Buffer): void;
+  drain(): Promise<void>;
+  getPendingBytes(): number;
+}
 
-    await execute(
-      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk, compression, byte_length, stored_byte_length)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (run_id, sequence) DO NOTHING`,
-      [runId, sequenceRef.value, compressed.chunk, compressed.compression, slice.length, compressed.chunk.length],
-    );
+/**
+ * A small single-writer queue for node-pty's push-only data callback. It keeps
+ * only a bounded amount of raw data in memory, batches database work, and
+ * records overflow as durable truncation metadata instead of growing promises
+ * and buffers without bound under a noisy process or slow database.
+ */
+export function createRunPtyOutputBatcher(
+  runId: number,
+  sequenceRef: { value: number },
+  limits: Partial<RunPtyOutputLimits> = {},
+): RunPtyOutputBatcher {
+  const defaults = getRunPtyOutputLimits();
+  const maxPendingBytes = limits.maxPendingBytes ?? defaults.maxPendingBytes;
+  const batchBytes = limits.batchBytes ?? defaults.batchBytes;
+  const batchChunks = limits.batchChunks ?? defaults.batchChunks;
+  const maxCaptureBytes = limits.maxCaptureBytes ?? defaults.maxCaptureBytes;
+  const pending: Buffer[] = [];
+  let pendingBytes = 0;
+  let pendingDroppedBytes = 0;
+  let pumping: Promise<void> | null = null;
+  let retryRequired = false;
 
-    sequenceRef.value += 1;
-    offset += CHUNK_SIZE;
-  }
+  const takeBatch = (): Buffer[] => {
+    const batch: Buffer[] = [];
+    let bytes = 0;
+    while (pending.length > 0 && batch.length < batchChunks && bytes < batchBytes) {
+      const next = pending[0];
+      const remaining = batchBytes - bytes;
+      const take = Math.min(next.length, remaining);
+      batch.push(next.subarray(0, take));
+      bytes += take;
+      pendingBytes -= take;
+      if (take === next.length) pending.shift();
+      else pending[0] = next.subarray(take);
+    }
+    return batch;
+  };
 
-  await execute(
-    `UPDATE run_pty_sessions
-     SET total_output_bytes = total_output_bytes + $2,
-         total_stored_bytes = total_stored_bytes + $3,
-         last_output_at = NOW(),
-         updated_at = NOW()
-     WHERE run_id = $1`,
-    [runId, data.length, storedBytes],
-  );
+  const pump = async (): Promise<void> => {
+    retryRequired = false;
+    while (pending.length > 0 || pendingDroppedBytes > 0) {
+      const batch = takeBatch();
+      const droppedBytes = pendingDroppedBytes;
+      pendingDroppedBytes = 0;
+      try {
+        await appendRunPtyOutputBatch(runId, batch, sequenceRef, { maxCaptureBytes, droppedBytes });
+      } catch (err) {
+        // Do not put failed raw buffers back into the queue: doing so defeats
+        // the memory bound. Persist their loss on a later successful batch.
+        pendingDroppedBytes += droppedBytes + batch.reduce((total, buffer) => total + buffer.length, 0);
+        retryRequired = true;
+        logger.warn({ err, runId, pendingBytes, pendingDroppedBytes }, '[run-pty-store] PTY output batch persistence failed; capture will retry as truncation metadata');
+        return;
+      }
+    }
+  };
+
+  const schedulePump = (): void => {
+    if (pumping) return;
+    pumping = Promise.resolve()
+      .then(pump)
+      .finally(() => { pumping = null; });
+  };
+
+  return {
+    enqueue(data: Buffer): void {
+      if (data.length === 0) return;
+      const available = Math.max(0, maxPendingBytes - pendingBytes);
+      const accepted = Math.min(data.length, available);
+      if (accepted > 0) {
+        pending.push(Buffer.from(data.subarray(0, accepted)));
+        pendingBytes += accepted;
+      }
+      pendingDroppedBytes += data.length - accepted;
+      schedulePump();
+    },
+    async drain(): Promise<void> {
+      do {
+        schedulePump();
+        await pumping;
+      } while (!retryRequired && (pending.length > 0 || pendingDroppedBytes > 0));
+    },
+    getPendingBytes(): number {
+      return pendingBytes;
+    },
+  };
 }
 
 export async function markRunPtyCompletionMarkerSeen(runId: number, marker: string): Promise<void> {
@@ -259,13 +437,19 @@ function decodeRunPtyChunkRows(rows: StoredRunPtyChunkRow[]): RunPtyChunkRow[] {
   }));
 }
 
-export async function listRunPtyChunks(runId: number, afterSequence = 0): Promise<RunPtyChunkRow[]> {
+export async function listRunPtyChunks(
+  runId: number,
+  afterSequence = 0,
+  limit = getRunPtyOutputLimits().replayBatchChunks,
+): Promise<RunPtyChunkRow[]> {
+  const boundedLimit = Math.min(4_096, Math.max(1, Math.floor(limit)));
   const rows = await query<StoredRunPtyChunkRow>(
     `SELECT sequence, chunk, compression
      FROM run_pty_output_chunks
      WHERE run_id = $1 AND sequence > $2
-     ORDER BY sequence ASC`,
-    [runId, afterSequence],
+     ORDER BY sequence ASC
+     LIMIT $3`,
+    [runId, afterSequence, boundedLimit],
   );
 
   return decodeRunPtyChunkRows(rows);
@@ -312,7 +496,9 @@ export async function getRunPtySessionHealth(runId: number): Promise<RunPtySessi
             last_heartbeat_at,
             completion_marker,
             completion_marker_seen_at,
-            total_output_bytes
+            total_output_bytes,
+            dropped_output_bytes,
+            output_truncated_at
      FROM run_pty_sessions
      WHERE run_id = $1`,
     [runId],
