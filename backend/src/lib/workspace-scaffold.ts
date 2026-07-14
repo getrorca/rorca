@@ -297,7 +297,8 @@ Generate ALL of the following files. Each must be bespoke — reflect the ACTUAL
    - "routing" object with path glob patterns mapped to context slices
    - "thresholds" for model escalation
    ${isMonorepo ? `- Per-package scopes for: ${packages.join(', ')}` : ''}
-   Use this schema: { "routing": { "<glob>": { "context": ["<context-key>"], "priority": <1-10> } }, "thresholds": { "escalation": { "retries": 2, "fromTier": "sonnet", "toTier": "opus" } }, "execution": { "waveParallelism": false, "storyTimeoutMin": 45 } }
+   Use this schema: { "routing": { "<glob>": { "context": ["<context-key>"], "priority": <1-10> } }, "thresholds": { "escalation": { "retries": 2, "fromTier": "sonnet", "toTier": "opus" } }, "execution": { "waveParallelism": false, "storyTimeoutMin": 45, "gitreins": { "mode": "disabled", "timeoutMs": 120000, "maxEvidenceBytes": 32768 } } }
+   GitReins MUST remain disabled by default. Operators may explicitly select observe/enforce only after committing a trusted .gitreins/config.yaml.
 
 4. **Skill files** — One per detected stack component. Generate these files:
 ${skillFileList}
@@ -428,7 +429,11 @@ export async function generateScaffoldPreview(
     content: JSON.stringify(rorcaConfig ?? {
       routing: {},
       thresholds: { escalation: { retries: 2, fromTier: 'sonnet', toTier: 'opus' } },
-      execution: { waveParallelism: false, storyTimeoutMin: 45 },
+      execution: {
+        waveParallelism: false,
+        storyTimeoutMin: 45,
+        gitreins: { mode: 'disabled', timeoutMs: 120000, maxEvidenceBytes: 32768 },
+      },
     }, null, 2),
     alreadyExists: fs.existsSync(path.join(workspacePath, '.rorca/config.json')),
   });

@@ -112,6 +112,7 @@ import workspaceDriftRouter from './routes/workspace-drift';
 import graphRouter from './routes/graph';
 import specRelevanceGraphRouter from './routes/spec-relevance-graph';
 import workflowRouterRouter from './routes/workflow-router';
+import gitReinsEvidenceRouter from './routes/gitreins-evidence';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
 import { StoryLogFollower } from './lib/story-log-follower';
@@ -458,6 +459,7 @@ app.use('/api/spec-relevance-graph', specRelevanceGraphRouter);
 app.use('/api/workflow-router', workflowRouterRouter);
 app.use('/api/retrieval-traces', retrievalTracesRouter);
 app.use('/api/diagnostics', diagnosticsRouter);
+app.use('/api/gitreins', gitReinsEvidenceRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);

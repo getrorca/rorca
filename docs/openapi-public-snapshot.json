@@ -1,6 +1,6 @@
 {
-  "contractVersion": "3.2.0",
-  "generatedAt": "2026-07-09T06:54:23.781Z",
+  "contractVersion": "3.3.0",
+  "generatedAt": "2026-07-14T17:11:45.139Z",
   "routes": [
     {
       "method": "GET",
@@ -2155,6 +2155,102 @@
         }
       },
       "hash": "sha256:75873284be7dc38fb4be4e31bb0046daed356c3b0e11e20538ea6c744b2c81b4"
+    },
+    {
+      "method": "GET",
+      "path": "/api/gitreins/evidence",
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 20,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 0,
+            "maximum": 100000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "runId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "storyId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "maxLength": 256,
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "maxItems": 100,
+                    "type": "array"
+                  },
+                  "limit": {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "total": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "items",
+                  "total",
+                  "limit",
+                  "offset"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {}
+      },
+      "hash": "sha256:85b8020bcc61a740e19e1ab49c9e1620e021eec8f2044c7ed5f2668a2f6109b8"
     },
     {
       "method": "GET",
