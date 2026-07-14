@@ -213,7 +213,7 @@ describe('RunViewPanel', () => {
       <RunViewPanel runId={BASE_RUN.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
     );
 
-    expect((await screen.findAllByText('Pi')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Pi/Terra')).length).toBeGreaterThan(0);
     expect(screen.queryByText('Claude')).not.toBeInTheDocument();
   });
 

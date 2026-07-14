@@ -184,6 +184,22 @@ describe('RunTerminal PTY fallback UI', () => {
     await waitFor(() => expect(screen.getByText(/ansi fallback line/)).toBeInTheDocument());
   });
 
+  it('renders canonical Pi/Terra terminal metadata without a Claude placeholder', async () => {
+    renderTerminal('ansi-html');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        agentType: 'pi',
+        agentModel: 'openai-codex/gpt-5.6-terra',
+        terminalMode: 'ansi-html',
+      }));
+    });
+
+    expect(await screen.findByText('Pi/Terra')).toBeInTheDocument();
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
+  });
+
   it('makes semantic view available again when run_meta flips PTY to ANSI fallback', async () => {
     localStorage.setItem('rorca:terminal-mode:77', 'semantic');
     renderTerminal('pty');

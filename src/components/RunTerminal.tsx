@@ -630,6 +630,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   // Agent type detected from backend run_meta SSE event
   const [agentType, setAgentType] = useState<string>('unknown');
+  const [agentModel, setAgentModel] = useState<string | null>(null);
   const [terminalMode, setTerminalMode] = useState<TerminalMode>(rendererMode);
   const terminalModeRef = useRef<TerminalMode>(rendererMode);
   const [terminalMeta, setTerminalMeta] = useState<RunTerminalMetaState>(() => ({
@@ -1021,7 +1022,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       ptyDisplayDecoderRef.current = new TextDecoder();
       ansiDisplayDecoderRef.current = new TextDecoder();
       lastReceivedSequenceRef.current = loadReceivedSequence(runId);
-      setAgentType('claude');
+      setAgentType('unknown');
+      setAgentModel(null);
       setSteps([]);
       setExpandedSet(new Set());
       setStreamDone(false);
@@ -1130,6 +1132,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       try {
         const meta = JSON.parse(e.data) as PtyHealthMeta & {
           agentType?: string;
+          agentModel?: string | null;
           terminalMode?: string;
           terminal_mode?: string;
           requestedTerminalMode?: string;
@@ -1142,6 +1145,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         setRunMetaResolved(true);
         if (typeof meta.agentType === 'string' && meta.agentType.trim()) {
           setAgentType(meta.agentType);
+        }
+        if (typeof meta.agentModel === 'string' && meta.agentModel.trim()) {
+          setAgentModel(meta.agentModel);
         }
 
         const nextTerminalMode = coerceTerminalMode(meta.terminalMode ?? meta.terminal_mode);
@@ -1354,7 +1360,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const firstTs = steps.length > 0 ? steps[0].ts : null;
   const normalizedAgentType = normalizeAgentType(agentType);
   const isOpenCode = normalizedAgentType === 'opencode' || normalizedAgentType === 'codex';
-  const showAgentBadge = normalizedAgentType !== 'claude' && normalizedAgentType !== 'unknown';
+  const showAgentBadge = true;
   const ptyFallbackActive = terminalMeta.requestedTerminalMode === 'pty' && (!terminalMeta.isPty || terminalMode !== 'pty');
   const ptyFallbackReason = terminalMeta.ptyAvailable === false
     ? 'node-pty is unavailable on this server.'
@@ -1476,7 +1482,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         {/* Agent type badge (shown when not claude) */}
         {showAgentBadge && (
           <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded font-medium ${getAgentBadgeToneClassName(agentType)}`}>
-            {getAgentBadgeLabel(agentType, null, { showOpenCodeModel: false })}
+            {getAgentBadgeLabel(agentType, agentModel, { showOpenCodeModel: false })}
           </span>
         )}
         <span

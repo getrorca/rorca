@@ -102,6 +102,16 @@ const options: swaggerJsdoc.Options = {
             },
             branch_name: { type: 'string', nullable: true },
             worktree_path: { type: 'string', nullable: true },
+            // Canonical normalized metadata. Snake_case database fields remain
+            // available during the API compatibility window.
+            agentType: { type: 'string', enum: ['claude', 'opencode', 'codex', 'pi', 'unknown'] },
+            agentModel: { type: 'string', nullable: true },
+            terminalMode: { type: 'string', enum: ['ansi-html', 'pty'] },
+            lifecyclePhase: {
+              type: 'string',
+              nullable: true,
+              enum: ['queued', 'running', 'paused', 'blocked', 'done', 'failed', 'partial_failure', 'cancelled'],
+            },
           },
         },
         StoryResult: {

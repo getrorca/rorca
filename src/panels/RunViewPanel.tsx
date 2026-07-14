@@ -12,6 +12,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
+import { normalizePipelineRun, normalizeRunTokenTelemetry, type RunTokenTelemetry } from '../lib/run-metadata';
 import { pauseRun, resumeRun, cancelRun, injectContext, retryRun, getRunDlq, retryRunFromDlq, type DlqEntry } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
@@ -41,8 +42,10 @@ interface PipelineRun {
   workspace_id: string;
   status: 'queued' | 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
   /** Authoritative backend lifecycle; never derive this from WAL/output in UI. */
-  lifecycleStatus: 'queued' | 'starting' | 'pty_attached' | 'running' | 'validating' | 'finished' | 'failed' | 'cancelled';
+  lifecycleStatus: string;
   lifecycle_status?: string;
+  lifecyclePhase?: string;
+  lifecycle_phase?: string;
   pid: number | null;
   branch_name: string | null;
   worktree_path: string | null;
@@ -61,6 +64,7 @@ interface PipelineRun {
   pr_creation_error?: string | null;
   include_graph?: boolean;
   terminal_mode?: 'ansi-html' | 'pty';
+  terminalMode?: 'ansi-html' | 'pty';
 }
 
 interface StoryResultSeed {
@@ -76,10 +80,10 @@ interface StoryResultSeed {
 interface StoryTokenEntry {
   storyId: string;
   status: string;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
   modelUsed: string | null;
-  costUsd: number;
+  costUsd: number | null;
 }
 
 interface ContextComparisonData {
@@ -125,7 +129,12 @@ interface RunApiResponse {
   specModel?: string | null;
   agentType?: string;
   agentModel?: string | null;
-  tokenSummary?: { inputTokens: number; outputTokens: number };
+  terminalMode?: 'ansi-html' | 'pty';
+  lifecycleStatus?: string;
+  lifecycle_status?: string;
+  lifecyclePhase?: string;
+  lifecycle_phase?: string;
+  tokenSummary?: { inputTokens: number | null; outputTokens: number | null; totalCostUsd?: number | null };
   runState?: RunStateSnapshot | null;
   contextComparison?: ContextComparisonData | null;
   storyTokenBreakdown?: StoryTokenEntry[];
@@ -334,7 +343,7 @@ function StoriesListTab({ dbStories, specStories, liveStatuses, contextCompariso
 
           const hasSkills = activeSkillsWithRelevance.length > 0;
           const hasContextFiles = contextFiles.length > 0;
-          const hasTokens = tokenEntry != null && (tokenEntry.inputTokens > 0 || tokenEntry.outputTokens > 0);
+          const hasTokens = tokenEntry != null && ((tokenEntry.inputTokens ?? 0) > 0 || (tokenEntry.outputTokens ?? 0) > 0);
           const hasAnyData = hasSkills || hasContextFiles || hasTokens;
 
           return (
@@ -414,10 +423,10 @@ function StoriesListTab({ dbStories, specStories, liveStatuses, contextCompariso
                           <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1.5">Tokens</p>
                           <div className="flex items-center gap-4 text-xs">
                             <span className="text-muted">
-                              In: <span className="text-[var(--text)] font-mono">{tokenEntry.inputTokens.toLocaleString()}</span>
+                              In: <span className="text-[var(--text)] font-mono">{(tokenEntry.inputTokens ?? 0).toLocaleString()}</span>
                             </span>
                             <span className="text-muted">
-                              Out: <span className="text-[var(--text)] font-mono">{tokenEntry.outputTokens.toLocaleString()}</span>
+                              Out: <span className="text-[var(--text)] font-mono">{(tokenEntry.outputTokens ?? 0).toLocaleString()}</span>
                             </span>
                           </div>
                         </div>
@@ -630,9 +639,9 @@ function ContextSummaryBar({
     }
 
     // Avg input tokens for stories that actually ran (inputTokens > 0)
-    const tokenEntries = storyTokenBreakdown.filter(t => t.inputTokens > 0);
+    const tokenEntries = storyTokenBreakdown.filter(t => (t.inputTokens ?? 0) > 0);
     const avg = tokenEntries.length > 0
-      ? tokenEntries.reduce((sum, t) => sum + t.inputTokens, 0) / tokenEntries.length
+      ? tokenEntries.reduce((sum, t) => sum + (t.inputTokens ?? 0), 0) / tokenEntries.length
       : 0;
 
     return { skillCount: allSkills.size, fileCount: allFiles.size, avgTokens: avg };
@@ -950,7 +959,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const dlqCheckedRef = useRef(false);
 
   const [specModel, setSpecModel] = useState<string | null>(null);
-  const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
+  const [tokenSummary, setTokenSummary] = useState<RunTokenTelemetry>(() => normalizeRunTokenTelemetry());
   const [contextComparison, setContextComparison] = useState<ContextComparisonData | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   const [dbStories, setDbStories] = useState<StoryResultSeed[]>([]);
@@ -1023,9 +1032,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return { continueFromId, resumedAfterId, carriedForwardCount };
   }, [runState, specStories, walEvents, dbStories, contextComparison]);
 
-  // Lifecycle phase is backend-owned. WAL can enrich story detail, but cannot
-  // advance this run: a terminal echo, transport hiccup, or stale event must
-  // never make the UI guess that work has finished.
+  // Lifecycle phase is backend-owned. WAL enriches story detail only; it must
+  // not infer a run phase from terminal bytes, echo, or event ordering.
   const effectiveStatus: string = useMemo(() => run?.lifecycleStatus ?? 'queued', [run]);
   // Legacy result/control status remains available for pause/resume only.
   const legacyStatus = run?.status ?? 'queued';
@@ -1249,14 +1257,16 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         setLoading(false);
         return;
       }
-      // The canonical run row is snake_case while the endpoint also exposes
-      // top-level camelCase aliases. Normalize once so every badge/metadata
-      // surface renders the persisted engine instead of defaulting to Claude.
-      setRun({
+      // Normalize the API DTO once before it reaches the header, cards, terminal,
+      // or metadata rail. Never invent an engine/model for historical runs.
+      setRun(normalizePipelineRun({
         ...data.run,
-        agentType: data.run.agentType ?? data.run.agent_type ?? data.agentType,
-        agentModel: data.run.agentModel ?? data.run.agent_model ?? data.agentModel ?? null,
-      });
+        agentType: data.run.agentType ?? data.agentType,
+        agentModel: data.run.agentModel ?? data.agentModel,
+        terminalMode: data.run.terminalMode ?? data.terminalMode,
+        lifecycleStatus: data.run.lifecycleStatus ?? data.run.lifecycle_status ?? data.lifecycleStatus ?? data.lifecycle_status ?? data.run.lifecyclePhase ?? data.lifecyclePhase,
+        lifecyclePhase: data.run.lifecyclePhase ?? data.lifecyclePhase,
+      }));
       // Seed merge status from DB column or infer from worktree presence
       if (data.run.merge_status) {
         setMergeInfoBase({
@@ -1281,7 +1291,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         setPrInfoBase({ state: 'failed', errorMsg: data.run.pr_creation_error });
       }
       if (data.specModel !== undefined) setSpecModel(data.specModel);
-      if (data.tokenSummary) setTokenSummary(data.tokenSummary);
+      if (data.tokenSummary) setTokenSummary(normalizeRunTokenTelemetry(data.tokenSummary));
       if (data.runState !== undefined) setRunState(data.runState ?? null);
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
       if (data.specStories) { setTotalStories(data.specStories.length); setSpecStories(data.specStories); }
@@ -1390,7 +1400,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
   // Detect if we should show multi-pane terminal (parallelism > 1 with 2+ concurrent stories)
   const useMultiPane = useMemo(() => {
-    if (!run || run.terminal_mode === 'pty' || (run.parallelism ?? 1) <= 1) return false;
+    if (!run || run.terminalMode === 'pty' || (run.parallelism ?? 1) <= 1) return false;
     // Count stories that have started but not finished
     const started = new Set<string>();
     const finished = new Set<string>();
@@ -1604,7 +1614,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                         ref={terminalRef}
                         runId={run.id}
                         workspaceId={workspaceId}
-                        terminalMode={run.terminal_mode ?? 'ansi-html'}
+                        terminalMode={run.terminalMode}
                         runStatus={effectiveStatus}
                       />}
                 </div>

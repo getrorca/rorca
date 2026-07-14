@@ -7,28 +7,10 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiFetch } from '../lib/apiFetch';
+import type { PipelineRun } from '../api/types';
+import { normalizePipelineRun } from '../lib/run-metadata';
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-export interface PipelineRun {
-  id: number;
-  spec_path: string;
-  workspace_id: string;
-  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled' | 'queued';
-  pid: number | null;
-  started_at: string;
-  finished_at: string | null;
-  retried_from_run_id: number | null;
-  agent_type?: string;
-  agent_model?: string | null;
-  parallelism?: number;
-  branch_name?: string | null;
-  worktree_path?: string | null;
-  queue_position?: number | null;
-  queued_at?: string | null;
-  triggered_via?: 'queue' | 'run_now';
-  auto_worktree?: boolean;
-}
+export type { PipelineRun } from '../api/types';
 
 interface RunsResponse {
   items: PipelineRun[];
@@ -76,7 +58,7 @@ function fetchRuns(workspaceId: string): Promise<PipelineRun[]> {
 
   const promise = apiFetch<RunsResponse>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
     .then((resp) => {
-      entry.data = resp.items;
+      entry.data = resp.items.map(normalizePipelineRun);
       entry.timestamp = Date.now();
       entry.inflight = null;
       notifyListeners();

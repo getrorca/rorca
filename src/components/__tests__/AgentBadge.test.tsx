@@ -18,16 +18,16 @@ describe('AgentBadge', () => {
     expect(screen.getByText('OpenCode')).toBeInTheDocument();
   });
 
-  it('renders Codex and Pi labels explicitly', () => {
+  it('renders Codex and the persisted Pi/Terra identity explicitly', () => {
     render(
       <>
         <AgentBadge agentType="codex" />
-        <AgentBadge agentType="pi" />
+        <AgentBadge agentType="pi" agentModel="openai-codex/gpt-5.6-terra" />
       </>,
     );
 
     expect(screen.getByText('Codex')).toBeInTheDocument();
-    expect(screen.getByText('Pi')).toBeInTheDocument();
+    expect(screen.getByText('Pi/Terra')).toBeInTheDocument();
   });
 
   it('does not invent Claude when engine metadata is absent', () => {

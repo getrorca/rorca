@@ -53,8 +53,9 @@ import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-
 import { authRequired } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
+import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
-import { lifecycleFromLegacyStatus, transitionRunLifecycle } from '../lib/run-lifecycle';
+import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
   getRunPtySessionHealth,
@@ -1142,9 +1143,10 @@ interface PipelineRunRow {
   finished_at: string | null;
   retried_from_run_id: number | null;
   log_path: string | null;
-  agent: string;
-  agent_type: string;
+  agent: string | null;
+  agent_type: string | null;
   agent_model: string | null;
+  lifecycle_phase?: string | null;
   parallelism: number;
   opencode_server_pid: number | null;
   total_input_tokens: number | null;
@@ -1191,15 +1193,28 @@ function assertTerminalModeAvailable(mode: TerminalMode): void {
   }
 }
 
-function normalizePipelineRun<T extends { terminal_mode?: string | null; status?: string | null; lifecycle_status?: string | null }>(run: T): Omit<T, 'terminal_mode' | 'lifecycle_status'> & { terminal_mode: TerminalMode; lifecycle_status: string; lifecycleStatus: string } {
-  // Historical rows are normalized here, in the backend, so API/UI consumers
-  // never infer lifecycle from terminal output, process state, or timing.
-  const lifecycleStatus = run.lifecycle_status ?? lifecycleFromLegacyStatus(run.status);
+type CanonicalPipelineRun<T extends PipelineRunRow> = Omit<T, 'agent_type' | 'agent_model' | 'terminal_mode' | 'lifecycle_status'> & {
+  agent_type: NormalizedRunAgentType;
+  agent_model: string | null;
+  terminal_mode: TerminalMode;
+  lifecycle_status: RunLifecycleStatus;
+} & ReturnType<typeof normalizeRunMetadata>;
+
+function normalizePipelineRun<T extends PipelineRunRow>(run: T): CanonicalPipelineRun<T> {
+  const metadata = normalizeRunMetadata(run);
+  const lifecycleStatus = metadata.lifecyclePhase ?? lifecycleFromLegacyStatus(run.status);
   return {
     ...run,
-    terminal_mode: normalizeTerminalMode(run.terminal_mode),
+    // Missing historical agent telemetry remains Unknown. Lifecycle stays
+    // backend-owned and never comes from terminal/WAL inference.
+    agent_type: metadata.agentType,
+    agent_model: metadata.agentModel,
+    terminal_mode: metadata.terminalMode,
     lifecycle_status: lifecycleStatus,
     lifecycleStatus,
+    lifecyclePhase: lifecycleStatus,
+    lifecycle_phase: lifecycleStatus,
+    ...metadata,
   };
 }
 
@@ -2198,7 +2213,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       terminal_mode: resolvedTerminalMode,
       lifecycleStatus: 'queued',
       lifecycle_status: 'queued',
-      ...(capWarnings ?  { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
+      lifecyclePhase: 'queued',
+      lifecycle_phase: 'queued',
+      ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {})
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),
@@ -2942,7 +2959,15 @@ router.post('/runs', async (req: Request, res: Response) => {
 
     broadcastAll(walEvent!);
 
-    res.status(201).json({ run, terminalMode: run.terminal_mode, terminal_mode: run.terminal_mode });
+    res.status(201).json({
+      run,
+      agentType: run.agentType,
+      agentModel: run.agentModel,
+      terminalMode: run.terminalMode,
+      terminal_mode: run.terminalMode,
+      lifecyclePhase: run.lifecyclePhase,
+      lifecycle_phase: run.lifecyclePhase,
+    });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Create run');
   }
@@ -3252,7 +3277,8 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
 
     // Read spec JSON to return full userStories list (including pending ones)
     // OC-029: Include per-story engine assignment in response
-    const runAgentType = (run.agent_type || run.agent || 'claude') as AgentType;
+    const normalizedRunAgent = normalizeRunAgentType(run.agent_type);
+    const runAgentType: AgentType | null = normalizedRunAgent === 'unknown' ? null : normalizedRunAgent;
     let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean; agent?: string; reroute?: { fromEngine: string; toEngine: string; reason: string } }[] = [];
     let specModel: string | null = null;
     try {
@@ -3264,7 +3290,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
           specModel = specJson.model || null;
           if (Array.isArray(specJson.userStories)) {
             specStories = specJson.userStories.map((s: any) => {
-              const storyAgent = resolveStoryAgent(s, runAgentType);
+              const storyAgent = runAgentType ? resolveStoryAgent(s, runAgentType) : null;
               const reroute = reroutedStories.get(s.id);
               return {
                 id: s.id,
@@ -3300,19 +3326,31 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     }
 
     // Aggregate token counts and cost from story_results
-    const tokenRow = await queryOne(`SELECT COALESCE(SUM(input_tokens), 0) AS total_input,
-              COALESCE(SUM(output_tokens), 0) AS total_output,
-              COALESCE(SUM(cost_usd), 0) AS total_cost
-       FROM story_results WHERE run_id = $1`, [runId]) as { total_input: number; total_output: number; total_cost: number };
+    const tokenRow = await queryOne(`SELECT SUM(input_tokens) AS total_input,
+              SUM(output_tokens) AS total_output,
+              SUM(cost_usd) AS total_cost
+       FROM story_results WHERE run_id = $1`, [runId]) as { total_input: number | null; total_output: number | null; total_cost: number | null } | undefined;
 
-    // Per-story token breakdown
+    const nullableNumber = (value: unknown): number | null => {
+      if (value === null || value === undefined) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const tokenSummary = {
+      inputTokens: nullableNumber(tokenRow?.total_input),
+      outputTokens: nullableNumber(tokenRow?.total_output),
+      totalCostUsd: nullableNumber(tokenRow?.total_cost),
+    };
+
+    // Null means the transport never reported this telemetry. Do not turn an
+    // unknown PTY count/cost into a fabricated zero in the public DTO.
     const storyTokenBreakdown = stories.map((s) => ({
       storyId: s.story_id,
       status: s.status,
-      inputTokens: s.input_tokens ?? 0,
-      outputTokens: s.output_tokens ?? 0,
+      inputTokens: s.input_tokens,
+      outputTokens: s.output_tokens,
       modelUsed: s.model_used ?? null,
-      costUsd: s.cost_usd ?? 0,
+      costUsd: s.cost_usd,
     }));
 
     // CIE-007: Read run-state.json for real-time story progress fallback
@@ -3367,27 +3405,21 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     }
 
     res.json({
-      run: {
-        ...run,
-        agentType: run.agent_type ?? run.agent ?? null,
-        agentModel: run.agent_model ?? null,
-      },
+      run,
       stories,
       specStories,
       specModel,
-      agentType: run.agent_type ?? null,
-      agentModel: run.agent_model || null,
-      terminalMode: run.terminal_mode,
-      terminal_mode: run.terminal_mode,
+      agentType: run.agentType,
+      agentModel: run.agentModel,
+      terminalMode: run.terminalMode,
+      terminal_mode: run.terminalMode,
+      lifecyclePhase: run.lifecyclePhase,
+      lifecycle_phase: run.lifecyclePhase,
       // US-004: Expose worktree fields at top level for easy frontend access
       worktreePath: run.worktree_path || null,
       branchName: run.branch_name || null,
       includeGraph: run.include_graph ?? false,
-      tokenSummary: {
-        inputTokens: tokenRow.total_input,
-        outputTokens: tokenRow.total_output,
-        totalCostUsd: tokenRow.total_cost,
-      },
+      tokenSummary,
       storyTokenBreakdown,
       runState,
       contextComparison,
@@ -5348,9 +5380,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   };
   req.on('close', cleanupOutputStream);
 
-  // Resolve agent type for semantic parsing without inventing Claude metadata.
-  const agent = runRow.agent_type ?? runRow.agent ?? 'unknown';
-  const requestedTerminalMode = normalizeTerminalMode(runRow.terminal_mode);
+  // One canonical metadata source powers both this SSE DTO and HTTP DTOs.
+  const runMetadata = normalizeRunMetadata(runRow);
+  const agent = runMetadata.agentType;
+  const requestedTerminalMode = runMetadata.terminalMode;
   const terminalStatuses = ['done', 'failed', 'partial_failure', 'cancelled'];
   const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
   const ptyStatusAtOpen = requestedTerminalMode === 'pty'
@@ -5387,9 +5420,11 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // PTY stream has no PTY session, this is the canonical demotion signal for the
   // TUI: keep the ANSI replay stream open and label it as degraded/replay-only.
   res.write(`event: run_meta\ndata: ${JSON.stringify({
-    agentType: agent,
-    agentModel: runRow.agent_model ?? null,
+    agentType: runMetadata.agentType,
+    agentModel: runMetadata.agentModel,
     terminalMode,
+    lifecyclePhase: runMetadata.lifecyclePhase,
+    lifecycle_phase: runMetadata.lifecyclePhase,
     terminal_mode: terminalMode,
     lifecycleStatus: runRow.lifecycle_status ?? lifecycleFromLegacyStatus(runRow.status),
     lifecycle_status: runRow.lifecycle_status ?? lifecycleFromLegacyStatus(runRow.status),
@@ -5542,9 +5577,11 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
           [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
         );
         res.write(`event: run_meta\ndata: ${JSON.stringify({
-          agentType: agent,
-          agentModel: runRow.agent_model ?? null,
+          agentType: runMetadata.agentType,
+          agentModel: runMetadata.agentModel,
           terminalMode: 'ansi-html',
+          lifecyclePhase: runMetadata.lifecyclePhase,
+          lifecycle_phase: runMetadata.lifecyclePhase,
           terminal_mode: 'ansi-html',
           requestedTerminalMode: 'pty',
           requested_terminal_mode: 'pty',
@@ -6025,9 +6062,10 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
 
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
-  // Resolve agent type for semantic parsing
-  const runRow = await queryOne('SELECT agent, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { agent: string; workspace_id: string } | undefined;
-  const agent = runRow?.agent ?? 'claude';
+  // Semantic parsing may proceed with an explicit unknown engine, but never
+  // claim that missing historical metadata was Claude.
+  const runRow = await queryOne('SELECT agent, agent_type, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { agent: string | null; agent_type: string | null; workspace_id: string } | undefined;
+  const agent = normalizeRunMetadata(runRow ?? {}).agentType;
 
   // Find story log file: check WAL event payload first, then scan forge/logs/
   let storyLogPath: string | null = null;
@@ -6281,11 +6319,12 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
     if (pollInterval) clearInterval(pollInterval);
   });
 
-  // Resolve agent type for semantic parsing
-  const runRow = await queryOne<{ agent: string; workspace_id: string }>(
-    'SELECT agent, workspace_id FROM pipeline_runs WHERE id = $1', [runId]
+  // Semantic parsing may proceed with an explicit unknown engine, but never
+  // claim that missing historical metadata was Claude.
+  const runRow = await queryOne<{ agent: string | null; agent_type: string | null; workspace_id: string }>(
+    'SELECT agent, agent_type, workspace_id FROM pipeline_runs WHERE id = $1', [runId]
   );
-  const agent = runRow?.agent ?? 'claude';
+  const agent = normalizeRunMetadata(runRow ?? {}).agentType;
 
   // ── Replay phase: send all existing chunks ──
   // (may be empty if StoryLogFollower hasn't written yet — poll loop will pick them up)
@@ -6952,7 +6991,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
         status: 'failed',
         reason: 'orphan_cleanup',
         error: 'Run was still marked as running after backend restart — process likely crashed.',
-        agent_type: run.agent_type ?? 'claude',
+        agent_type: normalizeRunAgentType(run.agent_type),
       })]);
       broadcastAll(walEvent!);
     } catch {
@@ -6960,7 +6999,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
     }
 
     cleaned++;
-    logger.info(`[Cleanup] Run ${run.id} (agent: ${run.agent_type ?? 'claude'}) marked as failed (orphan cleanup)`);
+    logger.info(`[Cleanup] Run ${run.id} (agent: ${normalizeRunAgentType(run.agent_type)}) marked as failed (orphan cleanup)`);
   }
 
   if (cleaned > 0) {
@@ -7238,8 +7277,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       spec_path: string;
       workspace_id: string;
       status: string;
-      agent: string;
-      agent_type: string;
+      agent: string | null;
+      agent_type: string | null;
       agent_model: string | null;
       branch_name: string | null;
       worktree_path: string | null;
@@ -7270,6 +7309,11 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       return;
     }
 
+    const retryAgent = normalizeRunAgentType(originalRun.agent_type ?? originalRun.agent);
+    if (retryAgent === 'unknown') {
+      throw new UnprocessableError('Cannot retry a run without recorded agent metadata. Select an execution engine and trigger a new run.');
+    }
+
     // Create new pipeline_run linked to original
     const newRunRow = await queryOne<{ id: number }>(
       `INSERT INTO pipeline_runs
@@ -7280,8 +7324,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
         originalRun.spec_path,
         originalRun.workspace_id,
         originalRunId,
-        originalRun.agent,
-        originalRun.agent_type,
+        retryAgent,
+        retryAgent,
         originalRun.agent_model,
         normalizeTerminalMode(originalRun.terminal_mode),
       ],
@@ -7294,7 +7338,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       runId: newRunId,
       specPath: originalRun.spec_path,
       workspacePath: workspace.path,
-      agent: (originalRun.agent_type ?? originalRun.agent ?? 'claude') as 'claude' | 'opencode' | 'codex' | 'pi',
+      agent: retryAgent,
       model: originalRun.agent_model ?? null,
       worktreePath: originalRun.worktree_path ?? null,
       branchName: originalRun.branch_name ?? null,

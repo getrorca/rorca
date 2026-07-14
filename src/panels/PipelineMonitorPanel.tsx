@@ -16,7 +16,7 @@ import { usePipelineRuns, type PipelineRun } from '../hooks/usePipelineRuns';
 import { useWalSSE } from '../hooks/useWalSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
-import { applyRunLifecycleEvent } from '../lib/run-lifecycle';
+import { resolveRunLifecyclePhase } from '../lib/run-lifecycle';
 import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
 import SpecPickerModal from '../components/SpecPickerModal';
 import AgentBadge from '../components/AgentBadge';
@@ -231,14 +231,9 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   })();
 
   // Update active run status from SSE lifecycle events
-  const activeRunStatus = (() => {
-    if (!activeRun) return null;
-    let status: string = activeRun.status;
-    for (const e of sseEvents) {
-      status = applyRunLifecycleEvent(status, e);
-    }
-    return status;
-  })();
+  const activeRunStatus = activeRun
+    ? resolveRunLifecyclePhase(activeRun, sseEvents)
+    : null;
 
   // Re-fetch runs via shared hook when SSE delivers lifecycle events
   useEffect(() => {
@@ -530,7 +525,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                 <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-blue-500/20 text-blue-400">
                   {STATUS_LABELS[status] || status}
                 </span>
-                <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+                <AgentBadge agentType={run.agentType} agentModel={run.agentModel} />
                 <ChevronRight size={16} className="text-muted shrink-0" />
               </div>
 
@@ -716,7 +711,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                   </span>
                   <TriggeredViaBadge value={run.triggered_via} />
                   <WorktreeBadge branchName={run.branch_name} />
-                  <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+                  <AgentBadge agentType={run.agentType} agentModel={run.agentModel} />
                   <span className="text-[10px] text-[var(--text-muted)] shrink-0">
                     {elapsedTime(run.started_at, run.finished_at)}
                   </span>

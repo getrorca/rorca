@@ -1,4 +1,6 @@
-export type RunLifecycleStatus = 'queued' | 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled' | string;
+import { normalizeRunLifecyclePhase, type RunLifecyclePhase, type RunMetadataSource } from './run-metadata';
+
+export type RunLifecycleStatus = RunLifecyclePhase | string;
 
 interface LifecycleEvent {
   event_type: string;
@@ -32,4 +34,20 @@ export function applyRunLifecycleEvent(current: RunLifecycleStatus, event: Lifec
     case 'run_started': return 'running';
     default: return current;
   }
+}
+
+/**
+ * Start with the backend's authoritative lifecycle phase when it is present.
+ * For legacy DTOs, status is normalized once here; WAL events then provide the
+ * live overlay. No card or panel should infer run success from story events.
+ */
+export function resolveRunLifecyclePhase(
+  run: Pick<RunMetadataSource, 'lifecycleStatus' | 'lifecycle_status' | 'lifecyclePhase' | 'lifecycle_phase' | 'status'>,
+  events: LifecycleEvent[] = [],
+): RunLifecycleStatus {
+  let phase: RunLifecycleStatus = normalizeRunLifecyclePhase(run);
+  for (const event of events) {
+    phase = applyRunLifecycleEvent(phase, event);
+  }
+  return phase;
 }
