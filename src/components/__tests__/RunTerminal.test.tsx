@@ -125,10 +125,10 @@ class TestResizeObserver {
   }
 }
 
-function renderTerminal(terminalMode: 'ansi-html' | 'pty' = 'pty') {
+function renderTerminal(terminalMode: 'ansi-html' | 'pty' = 'pty', runStatus: string | null = null) {
   return render(
     <ThemeProvider>
-      <RunTerminal runId={77} workspaceId="ws-test" terminalMode={terminalMode} />
+      <RunTerminal runId={77} workspaceId="ws-test" terminalMode={terminalMode} runStatus={runStatus} />
     </ThemeProvider>,
   );
 }
@@ -161,9 +161,9 @@ describe('RunTerminal PTY fallback UI', () => {
       }));
     });
 
-    expect(await screen.findByText('PTY fallback • ANSI live')).toBeInTheDocument();
-    expect(screen.getByText('PTY unavailable — degraded ANSI mode')).toBeInTheDocument();
-    expect(screen.getAllByText(/live ANSI log stream/).length).toBeGreaterThan(0);
+    expect(await screen.findByText('PTY unavailable — ANSI transcript • live')).toBeInTheDocument();
+    expect(screen.getByText('PTY unavailable — ANSI transcript')).toBeInTheDocument();
+    expect(screen.getAllByText(/live ANSI transcript/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Run: cd backend && npm rebuild node-pty/).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: /Semantic/i })).toBeInTheDocument();
 
@@ -212,8 +212,25 @@ describe('RunTerminal PTY fallback UI', () => {
       }));
     });
 
-    expect(await screen.findByText('Full PTY • click to focus')).toBeInTheDocument();
+    expect(await screen.findByText('PTY live terminal • click to focus')).toBeInTheDocument();
     expect(screen.getByText(/real xterm\.js terminal with stdin\/stdout/)).toBeInTheDocument();
+
+    act(() => {
+      lastEventSource!.emit('pty_health', JSON.stringify({
+        ptySessionStatus: 'active',
+        ptyProcessAlive: true,
+        ptyLastOutputAt: new Date().toISOString(),
+        ptyTotalOutputBytes: 123,
+        ptyCompletionMarkerSeen: true,
+        ptyCompletionMarkerSeenAt: new Date().toISOString(),
+      }));
+    });
+
+    expect(await screen.findByText('SSE alive')).toBeInTheDocument();
+    expect(screen.getByText('PTY process alive')).toBeInTheDocument();
+    expect(screen.getByText('PTY bytes recent')).toBeInTheDocument();
+    expect(screen.getByText('completion marker seen')).toBeInTheDocument();
+    expect(screen.getByText(/semantic/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
   });
@@ -241,9 +258,9 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(terminal.focus).toHaveBeenCalledTimes(1);
 
     fireEvent.focusIn(pane);
-    expect(await screen.findByText('Full PTY • focused')).toBeInTheDocument();
+    expect(await screen.findByText('PTY live terminal • focused')).toBeInTheDocument();
     fireEvent.focusOut(pane);
-    expect(await screen.findByText('Full PTY • click to focus')).toBeInTheDocument();
+    expect(await screen.findByText('PTY live terminal • click to focus')).toBeInTheDocument();
 
     vi.mocked(apiFetch).mockClear();
     act(() => {
@@ -259,6 +276,45 @@ describe('RunTerminal PTY fallback UI', () => {
         silent: true,
       }),
     ));
+  });
+
+  it('surfaces bounded initial replay metadata without implying data loss on reconnect', async () => {
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true, ptyAvailable: true,
+      }));
+      lastEventSource!.emit('replay_truncated', JSON.stringify({ fromSequence: 25, maxChunks: 2048 }));
+    });
+
+    expect(await screen.findByText(/bounded recent replay from output sequence 25/i)).toBeInTheDocument();
+    expect(screen.getByText(/reconnect resume remain lossless/i)).toBeInTheDocument();
+  });
+
+  it('does not send keyboard input for terminal runs even if archived PTY health says active', async () => {
+    renderTerminal('pty', 'done');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    await waitFor(() => expect(xtermMockState.instances.length).toBe(1));
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty',
+        requestedTerminalMode: 'pty',
+        isPty: true,
+        ptyAvailable: true,
+        ptySessionStatus: 'active',
+      }));
+    });
+
+    vi.mocked(apiFetch).mockClear();
+    act(() => { xtermMockState.instances[0].emitData('should-not-send'); });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(apiFetch).not.toHaveBeenCalledWith(
+      '/api/pipeline/runs/77/input',
+      expect.anything(),
+    );
   });
 
   it('forwards initial and debounced PTY resize payloads to the backend', async () => {

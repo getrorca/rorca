@@ -12,6 +12,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
+import { applyRunLifecycleEvent } from '../lib/run-lifecycle';
 import { pauseRun, resumeRun, cancelRun, injectContext, retryRun, getRunDlq, retryRunFromDlq, type DlqEntry } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
@@ -46,6 +47,8 @@ interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   parallelism?: number;
+  agent_type?: string;
+  agent_model?: string | null;
   agentType?: string;
   agentModel?: string | null;
   merge_status?: 'pending' | 'merging' | 'merged' | 'failed' | null;
@@ -1013,12 +1016,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     if (!run) return 'running';
     let status = run.status;
     for (const evt of walEvents) {
-      if (evt.event_type === 'run_finished') status = 'done';
-      else if (evt.event_type === 'run_failed') status = 'failed';
-      else if (evt.event_type === 'run_paused') status = 'paused';
-      else if (evt.event_type === 'run_blocked') status = 'blocked';
-      else if (evt.event_type === 'run_resumed') status = 'running';
-      else if (evt.event_type === 'run_cancelled') status = 'cancelled';
+      status = applyRunLifecycleEvent(status, evt) as PipelineRun['status'];
     }
     return status;
   }, [run, walEvents]);
@@ -1242,7 +1240,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         setLoading(false);
         return;
       }
-      setRun(data.run);
+      // The canonical run row is snake_case while the endpoint also exposes
+      // top-level camelCase aliases. Normalize once so every badge/metadata
+      // surface renders the persisted engine instead of defaulting to Claude.
+      setRun({
+        ...data.run,
+        agentType: data.run.agentType ?? data.run.agent_type ?? data.agentType,
+        agentModel: data.run.agentModel ?? data.run.agent_model ?? data.agentModel ?? null,
+      });
       // Seed merge status from DB column or infer from worktree presence
       if (data.run.merge_status) {
         setMergeInfoBase({

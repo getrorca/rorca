@@ -28,7 +28,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
-import { activeAgent, activeModel, type AgentType } from '../lib/config';
+import { activeAgent, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
@@ -54,14 +54,18 @@ import { authRequired } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
+import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
+  getRunPtySessionHealth,
   getRunPtySessionStatus,
+  listRecentRunPtyChunks,
   listRunPtyChunks,
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
 import { validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
+import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
@@ -216,18 +220,65 @@ function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): 
   res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
 }
 
-function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function readBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
-async function waitForRunPtySessionStatus(runId: number, timeoutMs = 5_000): Promise<string | null> {
-  const deadline = Date.now() + timeoutMs;
-  let status = await getRunPtySessionStatus(runId);
-  while (status === null && Date.now() < deadline) {
-    await sleepMs(100);
-    status = await getRunPtySessionStatus(runId);
+// PTY output SSE is a durable event-driven transport. The execution engine
+// commits raw bytes to run_pty_output_chunks; PostgreSQL NOTIFY wakes Express
+// immediately, and Express reads those committed rows by sequence. Bounded
+// polling remains a recovery path for listener reconnects/notification loss.
+const RUN_OUTPUT_PTY_LIVE_TRANSPORT = 'postgres-notify+db-replay' as const;
+const RUN_OUTPUT_PTY_REPLAY_SOURCE = 'run_pty_output_chunks' as const;
+const RUN_OUTPUT_PTY_POLL_INTERVAL_MS = readBoundedIntegerEnv('RORCA_PTY_OUTPUT_POLL_INTERVAL_MS', 2_000, 250, 10_000);
+const RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS = RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 2;
+const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
+const RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS = Math.max(1_000, RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 5);
+const RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS = readBoundedIntegerEnv('RORCA_OUTPUT_REPLAY_MAX_CHUNKS', 2_048, 100, 25_000);
+
+function isPtyPidAlive(pid: number | null | undefined): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
-  return status;
+}
+
+function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySessionHealth>>): Record<string, unknown> | null {
+  if (!health) return null;
+  const totalOutputBytes = typeof health.total_output_bytes === 'number'
+    ? health.total_output_bytes
+    : Number.parseInt(String(health.total_output_bytes ?? 0), 10) || 0;
+  const processAlive = health.status === 'active' && isPtyPidAlive(health.child_pid);
+  return {
+    ptySessionStatus: health.status,
+    pty_session_status: health.status,
+    ptyChildPid: health.child_pid,
+    pty_child_pid: health.child_pid,
+    ptyProcessAlive: processAlive,
+    pty_process_alive: processAlive,
+    ptyLastOutputAt: health.last_output_at,
+    pty_last_output_at: health.last_output_at,
+    ptyLastHeartbeatAt: health.last_heartbeat_at,
+    pty_last_heartbeat_at: health.last_heartbeat_at,
+    ptyCompletionMarker: health.completion_marker,
+    pty_completion_marker: health.completion_marker,
+    ptyCompletionMarkerSeen: Boolean(health.completion_marker_seen_at),
+    pty_completion_marker_seen: Boolean(health.completion_marker_seen_at),
+    ptyCompletionMarkerSeenAt: health.completion_marker_seen_at,
+    pty_completion_marker_seen_at: health.completion_marker_seen_at,
+    ptyTotalOutputBytes: totalOutputBytes,
+    pty_total_output_bytes: totalOutputBytes,
+  };
+}
+
+function writePtyHealthEvent(res: Response, healthPayload: Record<string, unknown> | null): void {
+  if (!healthPayload) return;
+  res.write(`event: pty_health\ndata: ${JSON.stringify(healthPayload)}\n\n`);
 }
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
@@ -1072,6 +1123,8 @@ interface PipelineRunRow {
   auto_worktree: boolean;
   include_graph: boolean;
   terminal_mode: TerminalMode | null;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
+  trigger_options?: Record<string, unknown> | string | null;
 }
 
 function resolveRequestedTerminalMode(value: string | null | undefined): TerminalMode {
@@ -1082,6 +1135,15 @@ function resolveRequestedTerminalMode(value: string | null | undefined): Termina
     throw new ValidationError(invalidTerminalModeMessage(value));
   }
   return value;
+}
+
+/** Convert PostgreSQL BIGINT IDs to the strict numeric worker contract safely. */
+function normalizeWorkerRunId(value: unknown): number {
+  const runId = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(runId) || runId <= 0) {
+    throw new ServiceUnavailableError('Pipeline run ID cannot be represented safely by the execution worker.');
+  }
+  return runId;
 }
 
 function assertTerminalModeAvailable(mode: TerminalMode): void {
@@ -1272,6 +1334,7 @@ const PipelineTriggerSchema = z.object({
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
+  reasoning: z.object({ enabled: z.boolean(), effort: z.string().optional() }).optional(),
   forceRerun: z.boolean().optional(),
   rerunFromScratch: z.boolean().optional(),
   readinessOverride: z.boolean().optional(),
@@ -1283,7 +1346,7 @@ const PipelineTriggerSchema = z.object({
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1316,9 +1379,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       // Model comes from spec JSON only
       const model: string = specJson.model ?? DEFAULT_MODEL;
 
-      const dryRunReasoningOptions = thinkingEnabled !== undefined
-        ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
-        : undefined;
+      const dryRunReasoningOptions = reasoning !== undefined
+        ? { enabled: reasoning.enabled, effort: reasoning.effort ?? effortLevel ?? undefined }
+        : thinkingEnabled !== undefined
+          ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
+          : undefined;
       const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
       res.json({ dryRun: true, estimate });
       return;
@@ -1357,10 +1422,12 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
     // Read spec-level reasoning config — used as defaults when trigger request omits reasoning params
     const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
-    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
-    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
-    // Model comes from: request modelOverride > spec.model > null (no hidden DB/env fallbacks)
-    const resolvedAgentModel: string | null = modelOverride ?? specLevelModel;
+    const specEffortLevel: string | undefined = typeof specModelJson.effortLevel === 'string' ? specModelJson.effortLevel : undefined;
+    const specThinkingEnabled: boolean | undefined = typeof specModelJson.thinkingEnabled === 'boolean' ? specModelJson.thinkingEnabled : undefined;
+    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (reasoning?.enabled ?? specThinkingEnabled ?? specReasoning?.enabled ?? undefined);
+    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? reasoning?.effort ?? effortLevel ?? specReasoning?.effort ?? specEffortLevel;
+    // Model comes from: request modelOverride > spec.model > workflow router model > null
+    const resolvedAgentModel: string | null = modelOverride ?? specLevelModel ?? wfConfig.model ?? null;
 
     // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
     // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
@@ -1374,9 +1441,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       && resolvedAgentModel.includes('/')
       && !resolvedAgentModel.startsWith('claude-')
       && !resolvedAgentModel.startsWith('anthropic/claude-');
-    const runtimeAgent = activeAgent;
+    const runtimeAgent: AgentType = wfConfig.runtime === 'native'
+      ? activeAgent
+      : wfConfig.runtime as AgentType;
     const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && runtimeAgent === 'claude';
-    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > in-memory active agent
+    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > workflow router runtime > active agent fallback
     const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : runtimeAgent);
 
     // Translate model IDs for OpenCode execution.
@@ -1596,14 +1665,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
     }
 
-    const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
+    const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(path.join(__dirname, '..'));
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const hasExecutionEngine = fs.existsSync(executionEngineTs);
+    const hasExecutionEngine = executionEngineEntrypoint.exists;
     const hasBashRunLoop = fs.existsSync(runLoopSh);
-    const useExecutionEngine = hasExecutionEngine;
 
     if (!hasExecutionEngine && !hasBashRunLoop) {
-      throw new UnprocessableError(`No execution engine found — execution-engine.ts is missing`);
+      throw new UnprocessableError('No execution engine found — expected execution-engine.js or execution-engine.ts');
       return;
     }
 
@@ -1628,8 +1696,31 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode]);
+        const queuedTriggerOptions = Object.fromEntries(
+          Object.entries({
+            autoWorktree: !!autoWorktree,
+            autoMerge,
+            mergeStrategy,
+            triggerType: triggerType === 'scheduled' ? 'scheduled' : 'manual',
+            forceSequential,
+            agentOverride,
+            modelOverride,
+            storyId,
+            includeGraph,
+            thinkingEnabled,
+            thinkingBudget,
+            effortLevel,
+            reasoningEffort,
+            reasoning,
+            rerunFromScratch,
+            readinessOverride,
+            runAnywayOverride,
+            overrideReadinessGate,
+            terminal_mode: resolvedTerminalMode,
+          }).filter(([, value]) => value !== undefined)
+        );
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, auto_merge, include_graph, merge_strategy, agent, agent_type, agent_model, terminal_mode, trigger_options)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, autoMerge ?? true, includeGraph ?? false, mergeStrategy ?? null, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, JSON.stringify(queuedTriggerOptions)]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
@@ -1690,7 +1781,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
          RETURNING id`,
         [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode],
       );
-      const runId = runResult!.id;
+      const runId = normalizeWorkerRunId(runResult!.id);
 
       const walEvent = await queryOne<WalEvent>(
         `INSERT INTO wal_events (event_type, workspace_id, spec_id, payload)
@@ -1761,6 +1852,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     } catch {
       // Spec parse error — fall back to sequential
       logger.info('[orchestration] Using sequential (spec parse error, fallback)');
+    }
+
+    if (resolvedTerminalMode === 'pty' && parallelism > 1) {
+      parallelism = 1;
+      logger.info('[orchestration] Forced sequential because PTY sessions are run-scoped interactive terminals');
     }
 
     // 5. Determine CWD — main workspace or new worktree
@@ -1846,7 +1942,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       runId = queuedRunId;
     } else {
       const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode]);
-      runId = runResult!.id;
+      runId = normalizeWorkerRunId(runResult!.id);
     }
 
     // 7. Build env overrides — workspace-specific and vault key additions only.
@@ -1998,6 +2094,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // 10. Enqueue the pipeline run via pg-boss.
     //     The worker process picks it up and does the actual spawn / execution.
     //     Job ID = String(runId) for direct lookup by runId.
+    const resolvedJobEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(resolvedReasoningEffort ?? '')
+      ? resolvedReasoningEffort as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+      : effortLevel;
+
     const jobPayload = {
       runId,
       specPath,
@@ -2018,7 +2118,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(agentOverride ? { agentOverride } : {}),
       ...(resolvedThinkingEnabled !== undefined ? { thinkingEnabled: resolvedThinkingEnabled } : {}),
       ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
-      ...(effortLevel ? { effortLevel } : {}),
+      ...(resolvedJobEffortLevel ? { effortLevel: resolvedJobEffortLevel } : {}),
       ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
     };
 
@@ -2578,7 +2678,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
 
     const runResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES ($1, $2, 'running', 'quick-run') RETURNING id`, [relativeSpecPath, workspaceId]);
-    const runId = runResult!.id;
+    const runId = normalizeWorkerRunId(runResult!.id);
 
     // Build clean env
     const env: Record<string, string> = {};
@@ -2786,7 +2886,7 @@ router.post('/runs', async (req: Request, res: Response) => {
 
     const result = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode) VALUES ($1, $2, 'running', $3) RETURNING id`, [specPath, workspaceId, resolvedTerminalMode]);
 
-    const runId = result!.id;
+    const runId = normalizeWorkerRunId(result!.id);
 
     const runRow = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow;
     const run = normalizePipelineRun(runRow);
@@ -3174,7 +3274,10 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     try {
       const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
       if (workspace) {
-        runState = readRunState(workspace.path);
+        // Isolated runs write live state inside their worktree, not the dirty/main
+        // workspace. Reading only workspace.path makes active worktree runs appear
+        // stuck at 0/N even while stories complete.
+        runState = readRunState(run.worktree_path || workspace.path);
         // Only include if it belongs to this run
         if (runState && runState.runId !== runId) runState = null;
       }
@@ -3218,7 +3321,11 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     }
 
     res.json({
-      run,
+      run: {
+        ...run,
+        agentType: run.agent_type ?? run.agent ?? null,
+        agentModel: run.agent_model ?? null,
+      },
       stories,
       specStories,
       specModel,
@@ -3666,9 +3773,9 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
 
     // Verify run exists
     const run = await queryOne(
-      'SELECT id FROM pipeline_runs WHERE id = $1',
+      'SELECT id, workspace_id, spec_path, worktree_path FROM pipeline_runs WHERE id = $1',
       [runId]
-    ) as { id: number } | undefined;
+    ) as { id: number; workspace_id: string; spec_path: string; worktree_path: string | null } | undefined;
     if (!run) {
       throw new NotFoundError('Run not found');
     }
@@ -3730,6 +3837,19 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
       title?: string;
       snippet?: string;
       category?: string;
+      confidence?: string | null;
+      source?: string | null;
+      sourceStoryId?: string | null;
+      sourceSpecId?: string | null;
+      sourceRunId?: number | null;
+      relatedFiles?: string[];
+      canonicalKey?: string;
+      pinned?: boolean;
+      createdAt?: string | null;
+      updatedAt?: string | null;
+      decision?: 'keep' | 'drop' | 'needs-more' | 'conflict';
+      conflictsWith?: string[];
+      supersededBy?: string;
       selected: boolean;
       enteredPrompt?: boolean;
       relevanceScore: number;
@@ -3750,6 +3870,149 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
         : []
     );
 
+    const normalizeStringArray = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string')
+      : [];
+
+    const deriveMemoryTitle = (candidate: Record<string, any>): string | undefined => {
+      if (typeof candidate.title === 'string' && candidate.title.trim().length > 0) {
+        return candidate.title.trim();
+      }
+      const text = typeof candidate.snippet === 'string'
+        ? candidate.snippet
+        : typeof candidate.text === 'string'
+          ? candidate.text
+          : '';
+      const [title] = text.split(':', 1);
+      if (title.trim().length >= 4 && title.trim().length <= 120) return title.trim();
+      return undefined;
+    };
+
+    const deriveMemorySnippet = (candidate: Record<string, any>): string | undefined => {
+      if (typeof candidate.snippet === 'string' && candidate.snippet.trim().length > 0) {
+        return candidate.snippet.trim();
+      }
+      if (typeof candidate.text === 'string' && candidate.text.trim().length > 0) {
+        return candidate.text.trim();
+      }
+      return undefined;
+    };
+
+    interface ContextReceipt {
+      specPath: string | null;
+      specId: string | null;
+      specTitle: string | null;
+      storyId: string;
+      storyTitle: string | null;
+      storyDescription: string | null;
+      acceptanceCriteria: string[];
+      retrievalQuery: string;
+      promptRawRef: string | null;
+      promptExcerpt: string | null;
+      promptBytes: number | null;
+      promptUnavailableReason: string | null;
+      receiptSteps: string[];
+    }
+
+    const excerptText = (text: string, max = 1800): string => {
+      const compact = text.replace(/\r\n/g, '\n').trim();
+      if (compact.length <= max) return compact;
+      return `${compact.slice(0, max).trimEnd()}…`;
+    };
+
+    const normalizeStoryCriteria = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string')
+      : [];
+
+    const resolveStoryFromSpec = async (storyId: string): Promise<Pick<ContextReceipt, 'specPath' | 'specId' | 'specTitle' | 'storyTitle' | 'storyDescription' | 'acceptanceCriteria'>> => {
+      const fallback = {
+        specPath: run.spec_path ?? null,
+        specId: run.spec_path ? path.basename(run.spec_path, '.json') : null,
+        specTitle: null,
+        storyTitle: null,
+        storyDescription: null,
+        acceptanceCriteria: [],
+      };
+
+      try {
+        const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+        const roots = [run.worktree_path, workspace?.path].filter((value): value is string => Boolean(value));
+        for (const root of roots) {
+          const specPath = path.join(root, run.spec_path);
+          if (!fs.existsSync(specPath)) continue;
+          const spec = JSON.parse(fs.readFileSync(specPath, 'utf8')) as Record<string, any>;
+          const stories = Array.isArray(spec.userStories)
+            ? spec.userStories
+            : Array.isArray(spec.stories)
+              ? spec.stories
+              : [];
+          const story = stories.find((entry: any) => entry && String(entry.id) === storyId) as Record<string, any> | undefined;
+          return {
+            specPath: run.spec_path ?? null,
+            specId: typeof spec.id === 'string' ? spec.id : fallback.specId,
+            specTitle: typeof spec.title === 'string' ? spec.title : typeof spec.specName === 'string' ? spec.specName : null,
+            storyTitle: typeof story?.title === 'string' ? story.title : null,
+            storyDescription: typeof story?.description === 'string' ? story.description : null,
+            acceptanceCriteria: normalizeStoryCriteria(story?.acceptanceCriteria),
+          };
+        }
+      } catch {
+        // Receipt metadata is best-effort; retrieval detail should still render.
+      }
+      return fallback;
+    };
+
+    const resolvePromptReceipt = async (storyId: string): Promise<Pick<ContextReceipt, 'promptRawRef' | 'promptExcerpt' | 'promptBytes' | 'promptUnavailableReason'>> => {
+      try {
+        const promptRows = await query<{ payload: string | Record<string, any> }>(
+          `SELECT payload FROM wal_events
+           WHERE event_type = 'context_trace'
+             AND (payload->>'run_id')::bigint = $1
+             AND payload->>'phase' = 'prompt'
+             AND payload->>'storyId' = $2
+           ORDER BY id DESC
+           LIMIT 5`,
+          [runId, storyId],
+        );
+        const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+        const traceRoots = workspace ? await listContextTraceRoots(runId, workspace.path, run.worktree_path) : [];
+
+        for (const row of promptRows) {
+          const event = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+          const rawRef = event && typeof event.rawRef === 'string' ? event.rawRef : null;
+          if (!rawRef) continue;
+          for (const traceRoot of traceRoots) {
+            const record = lookupTraceRecord(traceRoot, rawRef);
+            const prompt = record?.payload && typeof record.payload === 'object' && typeof (record.payload as Record<string, unknown>).prompt === 'string'
+              ? (record.payload as Record<string, string>).prompt
+              : null;
+            if (prompt) {
+              return {
+                promptRawRef: rawRef,
+                promptExcerpt: excerptText(prompt),
+                promptBytes: Buffer.byteLength(prompt),
+                promptUnavailableReason: null,
+              };
+            }
+          }
+          return {
+            promptRawRef: rawRef,
+            promptExcerpt: null,
+            promptBytes: typeof event.metrics?.bytes === 'number' ? event.metrics.bytes : null,
+            promptUnavailableReason: 'Prompt trace metadata exists, but the raw prompt artifact is unavailable for this run.',
+          };
+        }
+      } catch {
+        // Prompt receipt is best-effort.
+      }
+      return {
+        promptRawRef: null,
+        promptExcerpt: null,
+        promptBytes: null,
+        promptUnavailableReason: 'No prompt trace was recorded for this story, likely because the run predates context tracing.',
+      };
+    };
+
     const selectedCandidates: NormalizedCandidate[] = [];
     const droppedCandidates: NormalizedCandidate[] = [];
 
@@ -3763,9 +4026,22 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
         key: candidate.key,
         origin: candidate.origin,
         sourceType: typeof candidate.sourceType === 'string' ? candidate.sourceType : undefined,
-        title: typeof candidate.title === 'string' ? candidate.title : undefined,
-        snippet: typeof candidate.snippet === 'string' ? candidate.snippet : undefined,
+        title: deriveMemoryTitle(candidate),
+        snippet: deriveMemorySnippet(candidate),
         category: typeof candidate.category === 'string' ? candidate.category : undefined,
+        confidence: typeof candidate.confidence === 'string' ? candidate.confidence : null,
+        source: typeof candidate.source === 'string' ? candidate.source : null,
+        sourceStoryId: typeof candidate.sourceStoryId === 'string' ? candidate.sourceStoryId : null,
+        sourceSpecId: typeof candidate.sourceSpecId === 'string' ? candidate.sourceSpecId : null,
+        sourceRunId: typeof candidate.sourceRunId === 'number' ? candidate.sourceRunId : null,
+        relatedFiles: normalizeStringArray(candidate.relatedFiles),
+        canonicalKey: typeof candidate.canonicalKey === 'string' ? candidate.canonicalKey : undefined,
+        pinned: typeof candidate.pinned === 'boolean' ? candidate.pinned : undefined,
+        createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : null,
+        updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : null,
+        decision: ['keep', 'drop', 'needs-more', 'conflict'].includes(candidate.decision) ? candidate.decision : undefined,
+        conflictsWith: normalizeStringArray(candidate.conflictsWith),
+        supersededBy: typeof candidate.supersededBy === 'string' ? candidate.supersededBy : undefined,
         selected: isSelected,
         enteredPrompt: isSelected,
         relevanceScore: typeof candidate.finalScore === 'number' ? candidate.finalScore : 0,
@@ -3778,7 +4054,9 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
         },
         matchedSkills: Array.isArray(candidate.matchedSkills)
           ? candidate.matchedSkills.filter((s: any) => typeof s === 'string')
-          : undefined,
+          : Array.isArray(candidate.scoring?.breakdown?.skillAlignment?.matchedSkills)
+            ? candidate.scoring.breakdown.skillAlignment.matchedSkills.filter((s: any) => typeof s === 'string')
+            : undefined,
         keptOrDroppedReason: Array.isArray(candidate.reasons) && candidate.reasons.length > 0
           ? candidate.reasons.join('; ')
           : (candidate.decision === 'keep' ? 'Selected' : 'Dropped'),
@@ -3814,11 +4092,31 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
       }
     }
 
+    const storyId = storyWithTelemetry.story_id;
+    const [storyReceipt, promptReceipt] = await Promise.all([
+      resolveStoryFromSpec(storyId),
+      resolvePromptReceipt(storyId),
+    ]);
+    const contextReceipt: ContextReceipt = {
+      ...storyReceipt,
+      ...promptReceipt,
+      storyId,
+      retrievalQuery: telemetryRow.query_preview,
+      receiptSteps: [
+        `Story ${storyId} triggered context retrieval.`,
+        `${selCount}/${candCount} memory candidates were selected for agent context.`,
+        promptReceipt.promptExcerpt
+          ? 'The selected context was assembled into the final agent prompt.'
+          : 'The final prompt excerpt is unavailable for this run, but retrieval metadata is still shown.',
+      ],
+    };
+
     res.json({
       telemetryId: telemetryRow.id,
       runId,
-      storyId: storyWithTelemetry.story_id,
+      storyId,
       query: telemetryRow.query_preview,
+      contextReceipt,
       selectedCandidates,
       droppedCandidates,
       candidateCount: candCount,
@@ -3994,24 +4292,79 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     );
     const sequenceOffset = seqRow?.max_seq ?? 0;
 
-    // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id
-    //    Hotfix: allow callers to explicitly force sequential retry execution.
-    const newRunResult = forceSequential
-      ? await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, parallelism, terminal_mode)
-         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, 1, $6) RETURNING id`, [originalRun.spec_path,
-        originalRun.workspace_id,
-        originalRun.branch_name,
-        originalRun.worktree_path,
-        originalRunId,
-        originalRun.terminal_mode,])
-      : await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, terminal_mode)
-         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6) RETURNING id`, [originalRun.spec_path,
-        originalRun.workspace_id,
-        originalRun.branch_name,
-        originalRun.worktree_path,
-        originalRunId,
-        originalRun.terminal_mode,]);
-    const newRunId = newRunResult!.id;
+    const originalTriggerOptions = (() => {
+      const raw = originalRun.trigger_options;
+      if (!raw) return {} as Record<string, unknown>;
+      if (typeof raw === 'string') {
+        try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {} as Record<string, unknown>; }
+      }
+      return raw;
+    })();
+    const isAgentType = (value: unknown): value is AgentType =>
+      value === 'claude' || value === 'opencode' || value === 'codex' || value === 'pi';
+    const isMergeStrategy = (value: unknown): value is 'direct' | 'pr' | 'draft-pr' | 'branch-only' =>
+      value === 'direct' || value === 'pr' || value === 'draft-pr' || value === 'branch-only';
+    const retryAgent: AgentType = isAgentType(originalRun.agent_type)
+      ? originalRun.agent_type
+      : isAgentType(originalRun.agent)
+        ? originalRun.agent
+        : 'claude';
+    const retryModel = originalRun.agent_model ?? null;
+    const retryTerminalMode = normalizeTerminalMode(originalRun.terminal_mode);
+    const retryParallelism = retryTerminalMode === 'pty' ? 1 : (forceSequential ? 1 : (originalRun.parallelism ?? 1));
+    const retryAutoWorktree = Boolean(originalRun.auto_worktree ?? originalRun.worktree_path);
+    const retryAutoMerge = Boolean(originalRun.auto_merge);
+    const retryIncludeGraph = Boolean(originalRun.include_graph);
+    const retryMergeStrategy = isMergeStrategy(originalRun.merge_strategy)
+      ? originalRun.merge_strategy
+      : 'direct';
+    const retryThinkingEnabled = typeof originalTriggerOptions.thinkingEnabled === 'boolean'
+      ? originalTriggerOptions.thinkingEnabled
+      : undefined;
+    const retryThinkingBudget = typeof originalTriggerOptions.thinkingBudget === 'number'
+      ? originalTriggerOptions.thinkingBudget
+      : undefined;
+    const retryEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(String(originalTriggerOptions.effortLevel ?? ''))
+      ? originalTriggerOptions.effortLevel as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+      : undefined;
+    const retryReasoningEffort = typeof originalTriggerOptions.reasoningEffort === 'string'
+      ? originalTriggerOptions.reasoningEffort
+      : undefined;
+
+    // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id.
+    //    Preserve the original run's engine/options so retry cannot silently fall
+    //    back to the process-global activeAgent/activeModel.
+    const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
+       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id,
+        parallelism, agent, agent_type, agent_model, auto_worktree, auto_merge, include_graph,
+        merge_strategy, terminal_mode, triggered_via, trigger_options)
+       VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'run_now', $15::jsonb)
+       RETURNING id`, [
+      originalRun.spec_path,
+      originalRun.workspace_id,
+      originalRun.branch_name,
+      originalRun.worktree_path,
+      originalRunId,
+      retryParallelism,
+      retryAgent,
+      retryAgent,
+      retryModel,
+      retryAutoWorktree,
+      retryAutoMerge,
+      retryIncludeGraph,
+      retryMergeStrategy,
+      retryTerminalMode,
+      JSON.stringify({
+        ...originalTriggerOptions,
+        forceSequential: forceSequential === true ? true : originalTriggerOptions.forceSequential,
+        agentOverride: retryAgent,
+        modelOverride: retryModel ?? undefined,
+        includeGraph: retryIncludeGraph,
+        terminal_mode: retryTerminalMode,
+        mergeStrategy: retryMergeStrategy,
+      }),
+    ]);
+    const newRunId = normalizeWorkerRunId(newRunResult!.id);
 
     // 8. Copy successful story results from the original run to the new run
     for (const passed of passedStories) {
@@ -4109,6 +4462,11 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       sequenceOffset: z.number().int().min(0),
       envOverrides: z.record(z.string(), z.string()),
       includeGraph: z.boolean().optional().default(false),
+      terminalMode: z.enum(['ansi-html', 'pty']).optional().default('ansi-html'),
+      thinkingEnabled: z.boolean().optional(),
+      thinkingBudget: z.number().int().positive().optional(),
+      effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
+      reasoningEffort: z.string().optional(),
     });
 
     const jobPayload = PipelineRetryJobPayloadSchema.parse({
@@ -4118,12 +4476,17 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
       retrySpecPath,
-      agent: activeAgent,
-      model: activeModel ?? null,
+      agent: retryAgent,
+      model: retryModel,
       worktreePath: originalRun.worktree_path ?? null,
       sequenceOffset,
       envOverrides,
-      includeGraph: originalRun.include_graph ?? false,
+      includeGraph: retryIncludeGraph,
+      terminalMode: retryTerminalMode,
+      ...(retryThinkingEnabled !== undefined ? { thinkingEnabled: retryThinkingEnabled } : {}),
+      ...(retryThinkingBudget !== undefined ? { thinkingBudget: retryThinkingBudget } : {}),
+      ...(retryEffortLevel ? { effortLevel: retryEffortLevel } : {}),
+      ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
     });
 
     // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
@@ -4858,7 +5221,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     operationId: streamPipelineOutput
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
- *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store so late joiners can rebuild the terminal from byte 0.
+ *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store. Committed PostgreSQL notifications wake streams immediately, durable sequence replay supports reconnects, and bounded polling recovers from notification loss.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4879,26 +5242,31 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     return;
   }
 
-  // Validate workspace ownership if workspaceId is provided
+  // Resolve and authorize the run before committing SSE headers. This keeps
+  // lookup failures as normal HTTP errors instead of half-open event streams.
+  const runRow = await queryOne(
+    'SELECT workspace_id, agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1',
+    [runId],
+  ) as { workspace_id: string; agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
+  if (!runRow) throw new NotFoundError('Run not found');
+
   const wsId = req.query.workspaceId as string | undefined;
-  if (wsId) {
-    const ownerCheck = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: number } | undefined;
-    if (ownerCheck && String(ownerCheck.workspace_id) !== wsId) {
-      throw new ForbiddenError('Run does not belong to this workspace');
-      return;
-    }
+  if (wsId && String(runRow.workspace_id) !== wsId) {
+    throw new ForbiddenError('Run does not belong to this workspace');
   }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
   res.write(': connected\n\n');
 
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
+  let unsubscribeOutputWakeup: (() => void) | null = null;
   const cleanupOutputStream = () => {
     streamClosed = true;
     clearInterval(hb);
@@ -4906,23 +5274,28 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       clearInterval(pollInterval);
       pollInterval = null;
     }
+    unsubscribeOutputWakeup?.();
+    unsubscribeOutputWakeup = null;
   };
   req.on('close', cleanupOutputStream);
 
-  // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = await queryOne('SELECT agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
-  const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
-  const requestedTerminalMode = normalizeTerminalMode(runRow?.terminal_mode);
-  const terminalStatuses = ['done', 'failed', 'cancelled'];
+  // Resolve agent type for semantic parsing without inventing Claude metadata.
+  const agent = runRow.agent_type ?? runRow.agent ?? 'unknown';
+  const requestedTerminalMode = normalizeTerminalMode(runRow.terminal_mode);
+  const terminalStatuses = ['done', 'failed', 'partial_failure', 'cancelled'];
+  const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
   const ptyStatusAtOpen = requestedTerminalMode === 'pty'
-    ? await waitForRunPtySessionStatus(runId, runRow && terminalStatuses.includes(runRow.status) ? 0 : 5_000)
+    ? await getRunPtySessionStatus(runId)
     : null;
-  // A run may be marked PTY before/without a PTY session if the child spawn fails
-  // early. In that case the engine still mirrors logs to run_output_chunks. Late
-  // joiners must see those chunks instead of a blank native terminal. The short
-  // wait above covers the normal startup race where the UI subscribes just before
-  // execution-engine has inserted run_pty_sessions.
-  const usePtyCapture = requestedTerminalMode === 'pty' && ptyStatusAtOpen !== null;
+  // An active PTY run is legitimately session-pending while context routing and
+  // prompt assembly run. Never permanently demote it because the browser attached
+  // before node-pty started. A terminal run with no session is a real fallback.
+  const usePtyCapture = requestedTerminalMode === 'pty'
+    && PTY_AVAILABLE
+    && (ptyStatusAtOpen !== null || !runIsTerminalAtOpen);
+  const ptyHealthPayloadAtOpen = usePtyCapture
+    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId))
+    : null;
   const terminalMode = usePtyCapture ? 'pty' : 'ansi-html';
   const isPty = usePtyCapture;
   const ptyFallbackActive = requestedTerminalMode === 'pty' && !isPty;
@@ -4931,6 +5304,11 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       ? 'pty-session-unavailable'
       : 'node-pty-unavailable'
     : null;
+  const ptyUnavailableHint = ptyFallbackReason === 'node-pty-unavailable'
+    ? PTY_UNAVAILABLE_HINT
+    : ptyFallbackReason === 'pty-session-unavailable'
+      ? 'Inspect engine startup logs; the requested PTY session was never created.'
+      : null;
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();
     return;
@@ -4941,7 +5319,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // TUI: keep the ANSI replay stream open and label it as degraded/replay-only.
   res.write(`event: run_meta\ndata: ${JSON.stringify({
     agentType: agent,
-    agentModel: runRow?.agent_model ?? null,
+    agentModel: runRow.agent_model ?? null,
     terminalMode,
     terminal_mode: terminalMode,
     requestedTerminalMode,
@@ -4950,27 +5328,66 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     ptyAvailable: PTY_AVAILABLE,
     ptyFallbackActive,
     ptyFallbackReason,
-    ptyUnavailableHint: ptyFallbackActive ? PTY_UNAVAILABLE_HINT : null,
-    pty_unavailable_hint: ptyFallbackActive ? PTY_UNAVAILABLE_HINT : null,
+    ptyLiveTransport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
+    pty_live_transport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
+    ptyReplaySource: isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : 'run_output_chunks',
+    pty_replay_source: isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : 'run_output_chunks',
+    ptyPollIntervalMs: isPty ? RUN_OUTPUT_PTY_POLL_INTERVAL_MS : null,
+    pty_poll_interval_ms: isPty ? RUN_OUTPUT_PTY_POLL_INTERVAL_MS : null,
+    ptyExpectedMaxLatencyMs: isPty ? RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS : null,
+    pty_expected_max_latency_ms: isPty ? RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS : null,
+    ptyUnavailableHint,
+    pty_unavailable_hint: ptyUnavailableHint,
+    ...(ptyHealthPayloadAtOpen ?? {}),
   })}\n\n`);
+  writePtyHealthEvent(res, ptyHealthPayloadAtOpen);
 
-  // ── Replay all existing chunks (late-join support) ────────────────────────
+  // ── Replay existing chunks (late-join/reconnect support) ──────────────────
+  // EventSource sends Last-Event-ID automatically after a disconnect. Honor it
+  // so reconnects resume instead of replaying an unbounded duplicate transcript.
   interface ChunkRow { sequence: number; chunk: Buffer }
-  let lastSequence = 0;
+  const resumeHeader = req.get('Last-Event-ID');
+  const resumeQuery = typeof req.query.afterSequence === 'string' ? req.query.afterSequence : null;
+  const hasResumeCursor = resumeHeader != null || resumeQuery != null;
+  const resumeToken = resumeHeader ?? resumeQuery ?? '0';
+  const parsedResumeSequence = Number.parseInt(resumeToken, 10);
+  let lastSequence = Number.isSafeInteger(parsedResumeSequence) && parsedResumeSequence >= 0
+    ? parsedResumeSequence
+    : 0;
+  let lastPtyHealthSignature = JSON.stringify(ptyHealthPayloadAtOpen ?? {});
+  let lastPtyHealthEmitAt = Date.now();
+  let pollInFlight = false;
 
   if (usePtyCapture) {
-    const existingChunks = await listRunPtyChunks(runId);
+    const existingChunks = hasResumeCursor
+      ? await listRunPtyChunks(runId, lastSequence)
+      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS);
+    if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
+      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+    }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
       writeOutputChunkEvent(res, row.sequence, chunkBuf);
       lastSequence = row.sequence;
     }
   } else {
-    const existingChunks = await query<ChunkRow>(
-      'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 ORDER BY sequence ASC',
-      [runId],
-    );
+    const existingChunks = hasResumeCursor
+      ? await query<ChunkRow>(
+          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
+          [runId, lastSequence],
+        )
+      : await query<ChunkRow>(
+          `SELECT sequence, chunk
+           FROM (
+             SELECT sequence, chunk FROM run_output_chunks
+             WHERE run_id = $1 ORDER BY sequence DESC LIMIT $2
+           ) recent ORDER BY sequence ASC`,
+          [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
+        );
 
+    if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
+      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+    }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
       writeOutputChunkEvent(res, row.sequence, chunkBuf);
@@ -4986,7 +5403,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 
   // ── If the run is already terminal, close immediately ────────────────────
-  if (runRow && terminalStatuses.includes(runRow.status)) {
+  if (terminalStatuses.includes(runRow.status)) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
     res.end();
@@ -4994,8 +5411,12 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 
   // ── Poll for new chunks while run is active ───────────────────────────────
-  // Checks every 200 ms; uses lastSequence to fetch only new rows efficiently.
-  pollInterval = setInterval(async () => {
+  // Uses lastSequence to fetch only new rows efficiently. PostgreSQL NOTIFY
+  // drives the normal path; this cadence is the bounded recovery fallback.
+  const pollOutput = async (): Promise<void> => {
+    if (pollInFlight || streamClosed) return;
+    pollInFlight = true;
+    const pollStartedAt = Date.now();
     try {
       if (usePtyCapture) {
         const newChunks = await listRunPtyChunks(runId, lastSequence);
@@ -5018,22 +5439,89 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         }
       }
 
-      const [statusRow, ptyStatus] = await Promise.all([
+      const [statusRow, ptyHealth] = await Promise.all([
         queryOne<{ status: string }>('SELECT status FROM pipeline_runs WHERE id = $1', [runId]),
-        usePtyCapture ? getRunPtySessionStatus(runId) : Promise.resolve(null),
+        usePtyCapture ? getRunPtySessionHealth(runId) : Promise.resolve(null),
       ]);
+      const ptyHealthPayload = normalizePtyHealthPayload(ptyHealth);
+      if (ptyHealthPayload) {
+        const now = Date.now();
+        const signature = JSON.stringify(ptyHealthPayload);
+        if (signature !== lastPtyHealthSignature || now - lastPtyHealthEmitAt > RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS) {
+          writePtyHealthEvent(res, ptyHealthPayload);
+          lastPtyHealthSignature = signature;
+          lastPtyHealthEmitAt = now;
+        }
+      }
+      const ptyStatus = ptyHealth?.status ?? null;
+      const runBecameTerminal = Boolean(statusRow && terminalStatuses.includes(statusRow.status));
       const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
-      if (!statusRow || terminalStatuses.includes(statusRow.status) || ptyTerminal) {
+
+      // An attached browser may have observed the legitimate PTY startup-pending
+      // state before the engine later failed to create any session. Demote that
+      // same stream at terminal state and replay the durable wrapper transcript,
+      // so the operator sees the startup diagnostic without reconnecting.
+      if (usePtyCapture && ptyStatus === null && runBecameTerminal) {
+        const fallbackChunks = await query<ChunkRow>(
+          `SELECT sequence, chunk
+           FROM (
+             SELECT sequence, chunk FROM run_output_chunks
+             WHERE run_id = $1 ORDER BY sequence DESC LIMIT $2
+           ) recent ORDER BY sequence ASC`,
+          [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
+        );
+        res.write(`event: run_meta\ndata: ${JSON.stringify({
+          agentType: agent,
+          agentModel: runRow.agent_model ?? null,
+          terminalMode: 'ansi-html',
+          terminal_mode: 'ansi-html',
+          requestedTerminalMode: 'pty',
+          requested_terminal_mode: 'pty',
+          isPty: false,
+          ptyAvailable: PTY_AVAILABLE,
+          ptyFallbackActive: true,
+          ptyFallbackReason: 'pty-session-unavailable',
+          ptyUnavailableHint: 'The requested PTY session was never created; showing the durable engine transcript.',
+          pty_unavailable_hint: 'The requested PTY session was never created; showing the durable engine transcript.',
+          ptyReplaySource: 'run_output_chunks',
+          pty_replay_source: 'run_output_chunks',
+        })}\n\n`);
+        if (fallbackChunks[0]?.sequence > 1) {
+          res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: fallbackChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+        }
+        for (const row of fallbackChunks) {
+          const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+          writeOutputChunkEvent(res, row.sequence, chunkBuf);
+          emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+        }
+      }
+
+      if (!statusRow || runBecameTerminal || ptyTerminal) {
         cleanupOutputStream();
         res.write('event: done\ndata: \n\n');
         res.end();
       }
-    } catch {
+      const elapsedMs = Date.now() - pollStartedAt;
+      if (usePtyCapture && elapsedMs > RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS) {
+        logger.warn({ runId, elapsedMs, pollIntervalMs: RUN_OUTPUT_PTY_POLL_INTERVAL_MS }, '[pipeline-output] slow PTY DB poll');
+      }
+    } catch (err: unknown) {
+      logger.warn({ err, runId, terminalMode }, '[pipeline-output] transient output poll failure; allowing SSE reconnect');
       cleanupOutputStream();
-      res.write('event: done\ndata: \n\n');
+      // A transport failure is not run completion. Emit a retryable error and
+      // end the HTTP response without a `done` marker so EventSource reconnects
+      // with Last-Event-ID and resumes exactly where it stopped.
+      res.write(`event: stream_error\ndata: ${JSON.stringify({ retryable: true, code: 'OUTPUT_POLL_FAILED' })}\n\n`);
       res.end();
+    } finally {
+      pollInFlight = false;
     }
-  }, 200);
+  };
+
+  // PostgreSQL NOTIFY provides immediate cross-process wakeups after durable
+  // chunk commits. The interval remains as loss/reconnect protection.
+  unsubscribeOutputWakeup = subscribeRunOutput(runId, () => { void pollOutput(); });
+  pollInterval = setInterval(() => { void pollOutput(); }, RUN_OUTPUT_PTY_POLL_INTERVAL_MS);
 
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();
@@ -6713,7 +7201,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       ],
     );
     if (!newRunRow) throw new Error('Failed to create new run row');
-    const newRunId = newRunRow.id;
+    const newRunId = normalizeWorkerRunId(newRunRow.id);
 
     // Build the job payload (mirrors pipeline:trigger payload shape)
     const jobPayload = {

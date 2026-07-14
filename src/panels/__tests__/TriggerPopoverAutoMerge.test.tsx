@@ -115,6 +115,23 @@ describe('TriggerPopover — autoMerge checkbox', () => {
     expect(options?.autoMerge).toBe(true);
   });
 
+  it('requests durable PTY mode and sequential execution when interactive terminal is enabled', () => {
+    const onTrigger = vi.fn();
+    render(
+      <TriggerPopover loading={false} onTrigger={onTrigger} onClose={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /interactive pty terminal/i }));
+    fireEvent.click(screen.getByRole('button', { name: /run now/i }));
+
+    expect(onTrigger).toHaveBeenCalledOnce();
+    const [, options] = onTrigger.mock.calls[0];
+    expect(options).toEqual(expect.objectContaining({
+      terminalMode: 'pty',
+      forceSequential: true,
+    }));
+  });
+
   it('completion action control is hidden again after autoWorktree is toggled back off', () => {
     const onTrigger = vi.fn();
     render(

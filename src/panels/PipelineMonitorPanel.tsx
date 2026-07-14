@@ -16,6 +16,7 @@ import { usePipelineRuns, type PipelineRun } from '../hooks/usePipelineRuns';
 import { useWalSSE } from '../hooks/useWalSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
+import { applyRunLifecycleEvent } from '../lib/run-lifecycle';
 import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
 import SpecPickerModal from '../components/SpecPickerModal';
 import AgentBadge from '../components/AgentBadge';
@@ -232,12 +233,9 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   // Update active run status from SSE lifecycle events
   const activeRunStatus = (() => {
     if (!activeRun) return null;
-    let status = activeRun.status;
+    let status: string = activeRun.status;
     for (const e of sseEvents) {
-      if (e.event_type === 'run_finished') status = 'done';
-      if (e.event_type === 'run_cancelled') status = 'cancelled';
-      if (e.event_type === 'run_paused') status = 'paused';
-      if (e.event_type === 'run_resumed') status = 'running';
+      status = applyRunLifecycleEvent(status, e);
     }
     return status;
   })();

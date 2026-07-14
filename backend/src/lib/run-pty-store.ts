@@ -15,7 +15,7 @@ const IDENTITY_COMPRESSION = 'identity';
 const DEFAULT_PTY_RETENTION_DAYS = 14;
 
 interface StoredRunPtyChunkRow {
-  sequence: number;
+  sequence: number | string;
   chunk: Buffer;
   compression: string | null;
 }
@@ -44,6 +44,17 @@ export interface StartRunPtySessionParams {
   cols: number;
   rows: number;
   childPid: number | null;
+  completionMarker?: string | null;
+}
+
+export interface RunPtySessionHealth {
+  status: string;
+  child_pid: number | null;
+  last_output_at: string | null;
+  last_heartbeat_at: string | null;
+  completion_marker: string | null;
+  completion_marker_seen_at: string | null;
+  total_output_bytes: string | number;
 }
 
 function compressRunPtyChunk(chunk: Buffer): { chunk: Buffer; compression: string } {
@@ -75,8 +86,8 @@ export function getRunPtyRetentionDays(): number {
 export async function startRunPtySession(params: StartRunPtySessionParams): Promise<void> {
   await execute(
     `INSERT INTO run_pty_sessions
-      (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NOW(), NOW())
+      (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, completion_marker, completion_marker_seen_at, last_heartbeat_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NULL, $8, NULL, NULL, NOW())
      ON CONFLICT (run_id) DO UPDATE SET
        workspace_id = EXCLUDED.workspace_id,
        cwd = EXCLUDED.cwd,
@@ -85,11 +96,15 @@ export async function startRunPtySession(params: StartRunPtySessionParams): Prom
        rows = EXCLUDED.rows,
        child_pid = EXCLUDED.child_pid,
        status = 'active',
+       last_output_at = CASE WHEN run_pty_sessions.total_output_bytes > 0 THEN run_pty_sessions.last_output_at ELSE NULL END,
+       completion_marker = EXCLUDED.completion_marker,
+       completion_marker_seen_at = NULL,
+       last_heartbeat_at = NULL,
        exit_code = NULL,
        exit_signal = NULL,
        exited_at = NULL,
        updated_at = NOW()`,
-    [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows, params.childPid],
+    [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows, params.childPid, params.completionMarker ?? null],
   );
 }
 
@@ -132,6 +147,26 @@ export async function appendRunPtyOutput(
          updated_at = NOW()
      WHERE run_id = $1`,
     [runId, data.length, storedBytes],
+  );
+}
+
+export async function markRunPtyCompletionMarkerSeen(runId: number, marker: string): Promise<void> {
+  await execute(
+    `UPDATE run_pty_sessions
+     SET completion_marker = COALESCE(completion_marker, $2),
+         completion_marker_seen_at = COALESCE(completion_marker_seen_at, NOW()),
+         updated_at = NOW()
+     WHERE run_id = $1`,
+    [runId, marker],
+  );
+}
+
+export async function recordRunPtyHeartbeat(runId: number): Promise<void> {
+  await execute(
+    `UPDATE run_pty_sessions
+     SET last_heartbeat_at = NOW(), updated_at = NOW()
+     WHERE run_id = $1 AND status = 'active'`,
+    [runId],
   );
 }
 
@@ -217,6 +252,13 @@ export async function claimPendingRunPtyInput(runId: number, limit = 100): Promi
   }));
 }
 
+function decodeRunPtyChunkRows(rows: StoredRunPtyChunkRow[]): RunPtyChunkRow[] {
+  return rows.map((row) => ({
+    sequence: Number(row.sequence),
+    chunk: decompressRunPtyChunk(Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk), row.compression),
+  }));
+}
+
 export async function listRunPtyChunks(runId: number, afterSequence = 0): Promise<RunPtyChunkRow[]> {
   const rows = await query<StoredRunPtyChunkRow>(
     `SELECT sequence, chunk, compression
@@ -226,18 +268,32 @@ export async function listRunPtyChunks(runId: number, afterSequence = 0): Promis
     [runId, afterSequence],
   );
 
-  return rows.map((row) => ({
-    sequence: row.sequence,
-    chunk: decompressRunPtyChunk(Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk), row.compression),
-  }));
+  return decodeRunPtyChunkRows(rows);
+}
+
+/** Bounded tail replay for first-time terminal attachments. */
+export async function listRecentRunPtyChunks(runId: number, limit: number): Promise<RunPtyChunkRow[]> {
+  const rows = await query<StoredRunPtyChunkRow>(
+    `SELECT sequence, chunk, compression
+     FROM (
+       SELECT sequence, chunk, compression
+       FROM run_pty_output_chunks
+       WHERE run_id = $1
+       ORDER BY sequence DESC
+       LIMIT $2
+     ) recent
+     ORDER BY sequence ASC`,
+    [runId, limit],
+  );
+  return decodeRunPtyChunkRows(rows);
 }
 
 export async function getRunPtySequence(runId: number): Promise<number> {
-  const row = await queryOne<{ max_sequence: number | null }>(
+  const row = await queryOne<{ max_sequence: number | string | null }>(
     'SELECT MAX(sequence) AS max_sequence FROM run_pty_output_chunks WHERE run_id = $1',
     [runId],
   );
-  return row?.max_sequence ?? 0;
+  return Number(row?.max_sequence ?? 0);
 }
 
 export async function getRunPtySessionStatus(runId: number): Promise<string | null> {
@@ -246,6 +302,22 @@ export async function getRunPtySessionStatus(runId: number): Promise<string | nu
     [runId],
   );
   return row?.status ?? null;
+}
+
+export async function getRunPtySessionHealth(runId: number): Promise<RunPtySessionHealth | null> {
+  const row = await queryOne<RunPtySessionHealth>(
+    `SELECT status,
+            child_pid,
+            last_output_at,
+            last_heartbeat_at,
+            completion_marker,
+            completion_marker_seen_at,
+            total_output_bytes
+     FROM run_pty_sessions
+     WHERE run_id = $1`,
+    [runId],
+  );
+  return row ?? null;
 }
 
 export async function initializeRunPtySequence(runId: number): Promise<{ value: number }> {

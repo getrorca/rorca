@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, Brain, DollarSign } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, Brain, DollarSign, SquareTerminal } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
@@ -40,7 +40,7 @@ interface HealthBadge {
 }
 
 interface AgentConfigSummary {
-  agentType: 'claude' | 'opencode' | 'codex';
+  agentType: 'claude' | 'opencode' | 'codex' | 'pi';
   agentModel: string | null;
   modelDisplayName: string | null;
   hasApiKey: boolean;
@@ -172,6 +172,7 @@ export interface TriggerOptions {
   autoMerge?: boolean;
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   includeGraph?: boolean;
+  terminalMode?: 'ansi-html' | 'pty';
   effortLevel?: EffortLevel;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
@@ -237,6 +238,7 @@ export default function TriggerPopover({
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const [forceSequential, setForceSequential] = useState(false);
   const [includeGraph, setIncludeGraph] = useState(false);
+  const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty'>('ansi-html');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
   const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
@@ -388,12 +390,15 @@ export default function TriggerPopover({
   const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey;
 
   const isCodex = agentConfig?.agentType === 'codex';
+  const isPi = agentConfig?.agentType === 'pi';
   const isOpenRouterModel = isOpenCode && agentConfig?.agentModel?.startsWith('openrouter/');
 
   const engineLabel = agentConfig
     ? isCodex
       ? 'Codex CLI (ChatGPT)'
-      : isOpenCode
+      : isPi
+        ? `Pi${agentConfig.modelDisplayName ? ` — ${agentConfig.modelDisplayName}` : ''}`
+        : isOpenCode
         ? isOpenRouterModel && agentConfig.modelDisplayName
           ? `OpenRouter — ${agentConfig.modelDisplayName}`
           : agentConfig.modelDisplayName
@@ -815,6 +820,34 @@ export default function TriggerPopover({
         {/* Divider */}
         <div className="border-t border-border/50" />
 
+        {/* Terminal transport */}
+        <label className="flex items-center gap-3 cursor-pointer group py-1">
+          <div className="relative flex items-center justify-center">
+            <input
+              type="checkbox"
+              checked={terminalMode === 'pty'}
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                setTerminalMode(enabled ? 'pty' : 'ansi-html');
+                if (enabled) setForceSequential(true);
+              }}
+              className="peer sr-only"
+            />
+            <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-accent transition-colors" />
+            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <SquareTerminal size={12} className="text-muted shrink-0" />
+              <span className="text-xs font-medium text-[var(--text)]">Interactive PTY terminal</span>
+            </div>
+            <p className="text-[10px] text-muted mt-0.5">Durable raw terminal replay, live input, and resize. PTY runs execute sequentially.</p>
+          </div>
+        </label>
+
+        {/* Divider */}
+        <div className="border-t border-border/50" />
+
         {/* Worktrees */}
         <label className="flex items-center gap-3 cursor-pointer group py-1">
           <div className="relative flex items-center justify-center">
@@ -943,12 +976,14 @@ export default function TriggerPopover({
             const isClaude = agentConfig?.agentType === 'claude';
             const m = agentConfig?.agentModel?.toLowerCase() ?? '';
             const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+            const effortApplies = thinkingApplies || agentConfig?.agentType === 'pi' || agentConfig?.agentType === 'codex' || modelCapability?.supportsReasoning;
             onTrigger(effectiveWorktree, {
               forceSequential: forceSequential || undefined,
               autoMerge: effectiveWorktree ? autoMerge : undefined,
               mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
-              effortLevel: thinkingApplies ? effortLevel : undefined,
+              terminalMode,
+              effortLevel: effortApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
               reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
@@ -972,12 +1007,14 @@ export default function TriggerPopover({
               const isClaude = agentConfig?.agentType === 'claude';
               const m = agentConfig?.agentModel?.toLowerCase() ?? '';
               const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+              const effortApplies = thinkingApplies || agentConfig?.agentType === 'pi' || agentConfig?.agentType === 'codex' || modelCapability?.supportsReasoning;
               onAddToQueue(effectiveWorktree, {
                 forceSequential: forceSequential || undefined,
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
                 mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,
-                effortLevel: thinkingApplies ? effortLevel : undefined,
+                terminalMode,
+                effortLevel: effortApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
                 reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,

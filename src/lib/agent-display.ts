@@ -32,7 +32,7 @@ export function getAgentBadgeLabel(
     case 'pi':
       return 'Pi';
     default:
-      return shortModelName(agentModel) ?? 'Claude';
+      return shortModelName(agentModel) ?? 'Unknown';
   }
 }
 

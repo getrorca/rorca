@@ -235,6 +235,8 @@ interface EngineConfig {
   jsonPath: string;
   cwd: string;
   runId: number;
+  /** Canonical workspace identity supplied by the worker; avoids an HTTP startup dependency. */
+  workspaceId: string | null;
   specificStory?: string;
   dryRun: boolean;
   port: number;
@@ -383,10 +385,14 @@ const reroutedStories = new Map<string, RerouteInfo>();
 function canUseEngineFallback(engine: AgentType): boolean {
   try {
     switch (engine) {
-      case 'codex':
-        return getCodexAuthState().connected;
-      case 'claude':
-        return getClaudeAuthState().connected;
+      case 'codex': {
+        const state = getCodexAuthState();
+        return state.connected && state.cliInstalled;
+      }
+      case 'claude': {
+        const state = getClaudeAuthState();
+        return state.connected && state.cliInstalled;
+      }
       case 'opencode':
         return detectOpenCode().opencodeInstalled;
       case 'pi':
@@ -2431,11 +2437,34 @@ async function spawnAgentViaPty(
       const message = err instanceof Error ? err.message : String(err);
       recordStderr(Buffer.from(message));
       logger.error(`[engine] Failed to spawn ${ptyOptions.agentType} PTY process: ${message}`);
-      try {
-        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
-      } catch { /* ignore */ }
+
+      // A failure after node-pty.spawn() (for example, session persistence)
+      // must never leave an untracked agent process running. Terminate and wait
+      // before resolving the failed attempt; onExit may finalize concurrently.
+      if (pty) {
+        try {
+          await shutdownPtyProcess(pty, {
+            signal: 'SIGTERM',
+            graceMs: 2_000,
+            postKillSettleMs: 250,
+            waitForExit: exitObserved,
+            killProcessGroup,
+          });
+        } catch { /* best effort — process-group kill already attempted */ }
+      }
+      if (settled) return;
+      settled = true;
       unregisterPtyCleanupTask?.();
       unregisterPtyCleanupTask = null;
+      if (resizeTimer) clearInterval(resizeTimer);
+      if (inputTimer) clearInterval(inputTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (runTimer) clearTimeout(runTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      try {
+        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
+      } catch { /* session may not have been persisted yet */ }
       logStream.end();
       ptyCommand?.cleanup?.();
       resolve({ exitCode: 1, stderrTail: message, elapsedMs: Date.now() - startTime });
@@ -6266,6 +6295,10 @@ async function main(): Promise<void> {
   if (config.terminalMode === 'pty' && !PTY_AVAILABLE) {
     throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
   }
+  if (config.terminalMode === 'pty' && config.parallelism > 1) {
+    logger.warn('[engine] PTY mode uses one run-scoped interactive terminal; forcing sequential story execution.');
+    config.parallelism = 1;
+  }
   if (config.attachAddr) logger.info(`[engine] OpenCode attach: ${config.attachAddr}`);
 
   if (!fs.existsSync(config.jsonPath)) {
@@ -6314,7 +6347,10 @@ async function main(): Promise<void> {
   }
   logger.info('');
 
-  const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
+  const workspaceId = config.workspaceId ?? await resolveWorkspaceId(config.port, config.cwd);
+  if (config.terminalMode === 'pty' && !workspaceId) {
+    throw new Error('PTY_WORKSPACE_ID_REQUIRED: PTY runs require a canonical workspace ID from the worker; refusing silent ANSI/RPC fallback.');
+  }
   const retryCounts = new Map<string, number>();
 
   // Set fallback context for emitWalEvent / postStoryResult fallback file writes
@@ -6851,6 +6887,7 @@ function parseArgs(): EngineConfig {
   let jsonPath = '';
   let cwd = '';
   let runId = 0;
+  let workspaceId: string | null = process.env.RORCA_WORKSPACE_ID?.trim() || null;
   let specificStory: string | undefined;
   let dryRun = false;
   let port = parseInt(process.env.PORT ?? '3030', 10);
@@ -6878,6 +6915,9 @@ function parseArgs(): EngineConfig {
         break;
       case '--run-id':
         runId = parseInt(args[++i], 10);
+        break;
+      case '--workspace-id':
+        workspaceId = args[++i]?.trim() || null;
         break;
       case '--story':
         specificStory = args[++i];
@@ -6943,7 +6983,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--workspace-id <id>] [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
     process.exit(1);
   }
 
@@ -6952,7 +6992,7 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
+  return { jsonPath, cwd, runId, workspaceId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

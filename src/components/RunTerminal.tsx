@@ -46,7 +46,16 @@ interface RunTerminalMetaState {
   isPty: boolean;
   ptyAvailable?: boolean;
   ptyUnavailableHint?: string | null;
+  ptySessionStatus?: string | null;
+  ptyProcessAlive?: boolean | null;
+  ptyLastOutputAt?: string | null;
+  ptyLastHeartbeatAt?: string | null;
+  ptyCompletionMarkerSeen?: boolean;
+  ptyCompletionMarkerSeenAt?: string | null;
+  ptyTotalOutputBytes?: number;
 }
+
+type SseConnectionState = 'connecting' | 'alive' | 'stale' | 'error' | 'closed';
 
 function coerceTerminalMode(value: unknown): TerminalMode | null {
   return value === 'pty' || value === 'ansi-html' ? value : null;
@@ -54,6 +63,45 @@ function coerceTerminalMode(value: unknown): TerminalMode | null {
 
 function isTerminalRunStatus(status: RunLifecycleStatus | null | undefined): boolean {
   return status === 'done' || status === 'failed' || status === 'cancelled' || status === 'partial_failure';
+}
+
+function isoToMs(value?: string | null): number | null {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isRecentMs(ts: number | null, now: number, windowMs: number): boolean {
+  return ts !== null && now - ts >= 0 && now - ts <= windowMs;
+}
+
+function formatAge(ts: number | null, now: number): string {
+  if (ts === null) return 'never';
+  const seconds = Math.max(0, Math.floor((now - ts) / 1000));
+  if (seconds < 2) return 'now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ago`;
+}
+
+function HealthPill({ label, state, title }: { label: string; state: 'ok' | 'warn' | 'muted' | 'bad'; title?: string }) {
+  const tone = state === 'ok'
+    ? 'var(--success)'
+    : state === 'warn'
+      ? 'var(--warning)'
+      : state === 'bad'
+        ? 'var(--error)'
+        : 'var(--text-muted)';
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
+      style={{ color: tone, borderColor: tone, background: 'color-mix(in srgb, currentColor 10%, transparent)' }}
+      title={title}
+    >
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: tone }} />
+      {label}
+    </span>
+  );
 }
 
 // ─── Semantic step type (mirrors backend SemanticStep) ────────────────────────
@@ -202,6 +250,83 @@ function loadMode(runId: number): 'raw' | 'semantic' {
   } catch {
     return 'raw';
   }
+}
+
+interface PtyDisplayScrubberState {
+  pendingLine: string;
+  suppressingInjectedContext: boolean;
+  noticeShown: boolean;
+}
+
+function createPtyDisplayScrubberState(): PtyDisplayScrubberState {
+  return {
+    pendingLine: '',
+    suppressingInjectedContext: false,
+    noticeShown: false,
+  };
+}
+
+const ANSI_ESCAPE_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+
+function normalizePtyDisplayLine(line: string): string {
+  return line.replace(ANSI_ESCAPE_PATTERN, '').replace(/\r/g, '').trim();
+}
+
+function isInjectedPromptContextStart(line: string): boolean {
+  return line === '=== RETRIEVED MEMORY CONTEXT ==='
+    || line === '## Retrieved Memory Context'
+    || line === '## Rorca Pi Story Context'
+    || line === '## Acceptance Criteria'
+    || line === '## Done Definition'
+    || line === '## Candidate Files'
+    || line === '## Candidate Tests'
+    || line === '## Expected Artifacts'
+    || line === '## Validation Plan'
+    || line === 'You are implementing a code change in this repository.'
+    || line.startsWith('Progress log path: ')
+    || line.startsWith('No prompt provided. Either specify one as an argument or pipe the prompt into stdin.');
+}
+
+function isInjectedPromptContextEnd(line: string): boolean {
+  return line.startsWith('{')
+    || line.startsWith('[')
+    || line.startsWith('Error:')
+    || line.startsWith('Launching ')
+    || line.startsWith('Running ')
+    || line.startsWith('Done.')
+    || line.startsWith('Attempt failed:')
+    || line.startsWith('Validation failed:');
+}
+
+function scrubPtyDisplayLine(lineWithNewline: string, state: PtyDisplayScrubberState): string {
+  const normalized = normalizePtyDisplayLine(lineWithNewline);
+
+  if (state.suppressingInjectedContext) {
+    if (isInjectedPromptContextEnd(normalized)) {
+      state.suppressingInjectedContext = false;
+      return scrubPtyDisplayLine(lineWithNewline, state);
+    }
+    return '';
+  }
+
+  if (isInjectedPromptContextStart(normalized)) {
+    state.suppressingInjectedContext = true;
+    if (state.noticeShown) return '';
+    state.noticeShown = true;
+    return '\r\n[Rorca] Suppressed injected prompt/context echo. Use Semantic/Context tabs for structured context.\r\n';
+  }
+
+  return lineWithNewline;
+}
+
+function scrubPtyDisplayText(input: string, state: PtyDisplayScrubberState): string {
+  state.pendingLine += input;
+  const pieces = state.pendingLine.split(/(?<=\n)/);
+  const last = pieces[pieces.length - 1] ?? '';
+  const hasOpenLine = last !== '' && !last.endsWith('\n');
+  state.pendingLine = hasOpenLine ? last : '';
+  const completeLines = hasOpenLine ? pieces.slice(0, -1) : pieces;
+  return completeLines.map(line => scrubPtyDisplayLine(line, state)).join('');
 }
 
 function formatRelativeTime(isoTs: string, baseTs: string | null): string {
@@ -444,6 +569,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const pendingPtyChunksRef = useRef<Uint8Array[]>([]);
+  const ptyDisplayScrubberRef = useRef<PtyDisplayScrubberState>(createPtyDisplayScrubberState());
+  const ptyDisplayDecoderRef = useRef(new TextDecoder());
+  const ptyDisplayEncoderRef = useRef(new TextEncoder());
   const pendingPtyInputRef = useRef('');
   const ptyInputFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ptyInputQueueRef = useRef(Promise.resolve());
@@ -466,17 +594,24 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const lineBufferRef = useRef('');
 
   // Agent type detected from backend run_meta SSE event
-  const [agentType, setAgentType] = useState<string>('claude');
+  const [agentType, setAgentType] = useState<string>('unknown');
   const [terminalMode, setTerminalMode] = useState<TerminalMode>(rendererMode);
   const terminalModeRef = useRef<TerminalMode>(rendererMode);
   const [terminalMeta, setTerminalMeta] = useState<RunTerminalMetaState>(() => ({
     requestedTerminalMode: rendererMode,
     isPty: rendererMode === 'pty',
   }));
+  const runStatusRef = useRef<RunLifecycleStatus | null>(runStatus);
+  const ptySessionStatusRef = useRef<string | null | undefined>(terminalMeta.ptySessionStatus);
   const [runMetaResolved, setRunMetaResolved] = useState(false);
   const [ptyReady, setPtyReady] = useState(rendererMode !== 'pty');
   const [ptyFocused, setPtyFocused] = useState(false);
   const [ptyInputHealthy, setPtyInputHealthy] = useState(true);
+  const [sseState, setSseState] = useState<SseConnectionState>('connecting');
+  const [lastSseAt, setLastSseAt] = useState<number | null>(null);
+  const [lastPtyByteAt, setLastPtyByteAt] = useState<number | null>(null);
+  const [lastSemanticAt, setLastSemanticAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   // Toggle state — persisted per run in localStorage
   const [mode, setMode] = useState<'raw' | 'semantic'>(() => loadMode(runId));
@@ -488,14 +623,25 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const stepListRef = useRef<HTMLDivElement>(null);
   const stepBottomRef = useRef<HTMLDivElement>(null);
   const [streamDone, setStreamDone] = useState(false);
+  const [replayTruncatedFrom, setReplayTruncatedFrom] = useState<number | null>(null);
 
   useEffect(() => {
     resolvedRef.current = resolved;
   }, [resolved]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setNowTick(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     terminalModeRef.current = terminalMode;
   }, [terminalMode]);
+
+  useEffect(() => {
+    runStatusRef.current = runStatus;
+    ptySessionStatusRef.current = terminalMeta.ptySessionStatus;
+  }, [runStatus, terminalMeta.ptySessionStatus]);
 
   useEffect(() => {
     terminalModeRef.current = rendererMode;
@@ -525,6 +671,13 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const ansiConverterNoEscape = useMemo(() => createAnsiConverter(resolved, false), [resolved]);
 
   const postPtyResize = useCallback(async (cols: number, rows: number) => {
+    // PTY resize is only valid while the backend PTY session is active. Finished
+    // runs still render replay output, but the backend correctly rejects resize
+    // mutations with 409; avoid spamming the console/network panel for archived
+    // run views. Preserve test/back-compat behavior when runStatus is omitted.
+    const canResize = runStatus == null || runStatus === 'running' || runStatus === 'paused' || runStatus === 'blocked';
+    if (!canResize) return;
+
     try {
       await apiFetch(`/api/pipeline/runs/${runId}/pty/resize`, {
         method: 'POST',
@@ -533,9 +686,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         silent: true,
       });
     } catch {
-      // best effort — resize retries on the next fit cycle
+      // best effort — resize retries on the next fit cycle while active
     }
-  }, [runId]);
+  }, [runId, runStatus]);
 
   const flushPtyInput = useCallback(() => {
     ptyInputFlushRef.current = null;
@@ -560,18 +713,35 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   }, [runId]);
 
   const queuePtyInput = useCallback((data: string) => {
+    const currentRunStatus = runStatusRef.current;
+    const currentSessionStatus = ptySessionStatusRef.current;
+    const runAllowsInput = currentRunStatus == null || currentRunStatus === 'running' || currentRunStatus === 'paused' || currentRunStatus === 'blocked';
+    const sessionAllowsInput = currentSessionStatus === 'active'
+      || (currentRunStatus == null && currentSessionStatus == null);
+    if (!runAllowsInput || !sessionAllowsInput) return;
     pendingPtyInputRef.current += data;
     if (ptyInputFlushRef.current === null) {
       ptyInputFlushRef.current = setTimeout(flushPtyInput, 20);
     }
   }, [flushPtyInput]);
 
+  const markSseEvent = useCallback(() => {
+    const now = Date.now();
+    setLastSseAt(now);
+    setSseState('alive');
+  }, []);
+
   const writePtyChunk = useCallback((chunk: Uint8Array) => {
+    const text = ptyDisplayDecoderRef.current.decode(chunk, { stream: true });
+    const scrubbed = scrubPtyDisplayText(text, ptyDisplayScrubberRef.current);
+    if (!scrubbed) return;
+
+    const displayChunk = ptyDisplayEncoderRef.current.encode(scrubbed);
     if (xtermRef.current) {
-      xtermRef.current.write(chunk as Parameters<Terminal['write']>[0]);
+      xtermRef.current.write(displayChunk as Parameters<Terminal['write']>[0]);
       return;
     }
-    pendingPtyChunksRef.current.push(chunk);
+    pendingPtyChunksRef.current.push(displayChunk);
   }, []);
 
   useEffect(() => {
@@ -648,6 +818,17 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       fitAddonRef.current?.fit();
     }
   }, [resolved, terminalMode]);
+
+  // Initial resize can race PTY creation. Retry once the backend confirms the
+  // session is active so the child starts with the browser's actual dimensions.
+  useEffect(() => {
+    if (terminalMode !== 'pty' || terminalMeta.ptySessionStatus !== 'active') return;
+    const terminal = xtermRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) return;
+    fitAddon.fit();
+    void postPtyResize(terminal.cols, terminal.rows);
+  }, [postPtyResize, terminalMeta.ptySessionStatus, terminalMode]);
 
   // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML.
   // Lines prefixed with HTML_LINE_PREFIX are pre-HTML (markdown already converted) — use no-escape converter.
@@ -747,11 +928,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     lineBufferRef.current = '';
     terminalModeRef.current = rendererMode;
     pendingPtyChunksRef.current = [];
+    ptyDisplayScrubberRef.current = createPtyDisplayScrubberState();
+    ptyDisplayDecoderRef.current = new TextDecoder();
     setAgentType('claude');
     setSteps([]);
     setExpandedSet(new Set());
     setStreamDone(false);
+    setReplayTruncatedFrom(null);
     setPtyInputHealthy(true);
+    setSseState('connecting');
+    setLastSseAt(null);
+    setLastPtyByteAt(null);
+    setLastSemanticAt(null);
     setTerminalMode(rendererMode);
     setTerminalMeta({
       requestedTerminalMode: rendererMode,
@@ -775,10 +963,43 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const es = new EventSource(outputUrl);
     esRef.current = es;
 
+    type PtyHealthMeta = {
+      ptySessionStatus?: string | null;
+      pty_session_status?: string | null;
+      ptyProcessAlive?: boolean | null;
+      pty_process_alive?: boolean | null;
+      ptyLastOutputAt?: string | null;
+      pty_last_output_at?: string | null;
+      ptyLastHeartbeatAt?: string | null;
+      pty_last_heartbeat_at?: string | null;
+      ptyCompletionMarkerSeen?: boolean;
+      pty_completion_marker_seen?: boolean;
+      ptyCompletionMarkerSeenAt?: string | null;
+      pty_completion_marker_seen_at?: string | null;
+      ptyTotalOutputBytes?: number;
+      pty_total_output_bytes?: number;
+    };
+
+    const applyPtyHealthMeta = (meta: PtyHealthMeta) => {
+      setTerminalMeta(prev => ({
+        ...prev,
+        ptySessionStatus: meta.ptySessionStatus ?? meta.pty_session_status ?? prev.ptySessionStatus ?? null,
+        ptyProcessAlive: meta.ptyProcessAlive ?? meta.pty_process_alive ?? prev.ptyProcessAlive ?? null,
+        ptyLastOutputAt: meta.ptyLastOutputAt ?? meta.pty_last_output_at ?? prev.ptyLastOutputAt ?? null,
+        ptyLastHeartbeatAt: meta.ptyLastHeartbeatAt ?? meta.pty_last_heartbeat_at ?? prev.ptyLastHeartbeatAt ?? null,
+        ptyCompletionMarkerSeen: meta.ptyCompletionMarkerSeen ?? meta.pty_completion_marker_seen ?? prev.ptyCompletionMarkerSeen ?? false,
+        ptyCompletionMarkerSeenAt: meta.ptyCompletionMarkerSeenAt ?? meta.pty_completion_marker_seen_at ?? prev.ptyCompletionMarkerSeenAt ?? null,
+        ptyTotalOutputBytes: meta.ptyTotalOutputBytes ?? meta.pty_total_output_bytes ?? prev.ptyTotalOutputBytes ?? 0,
+      }));
+    };
+
+    es.onopen = () => markSseEvent();
+
     // Listen for run metadata (agent type + authoritative renderer/fallback state)
     es.addEventListener('run_meta', (e: MessageEvent) => {
+      markSseEvent();
       try {
-        const meta = JSON.parse(e.data) as {
+        const meta = JSON.parse(e.data) as PtyHealthMeta & {
           agentType?: string;
           terminalMode?: string;
           terminal_mode?: string;
@@ -812,20 +1033,42 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const ptyUnavailableHint = typeof (meta.ptyUnavailableHint ?? meta.pty_unavailable_hint) === 'string'
           ? (meta.ptyUnavailableHint ?? meta.pty_unavailable_hint) as string
           : null;
-        setTerminalMeta({
+        setTerminalMeta(prev => ({
+          ...prev,
           requestedTerminalMode,
           isPty,
           ptyAvailable: typeof meta.ptyAvailable === 'boolean' ? meta.ptyAvailable : undefined,
           ptyUnavailableHint,
-        });
+        }));
+        applyPtyHealthMeta(meta);
       } catch { /* ignore */ }
     });
 
+    es.addEventListener('pty_health', (e: MessageEvent) => {
+      markSseEvent();
+      try {
+        applyPtyHealthMeta(JSON.parse(e.data) as PtyHealthMeta);
+      } catch { /* ignore malformed health */ }
+    });
+
+    es.addEventListener('replay_truncated', (e: MessageEvent) => {
+      markSseEvent();
+      try {
+        const payload = JSON.parse(e.data) as { fromSequence?: unknown };
+        const fromSequence = Number(payload.fromSequence);
+        if (Number.isSafeInteger(fromSequence) && fromSequence > 1) {
+          setReplayTruncatedFrom(fromSequence);
+        }
+      } catch { /* ignore malformed replay metadata */ }
+    });
+
     es.addEventListener('chunk', (e: MessageEvent) => {
+      markSseEvent();
       try {
         const bytes = decodeBase64Chunk(e.data);
 
         if (terminalModeRef.current === 'pty') {
+          setLastPtyByteAt(Date.now());
           writePtyChunk(bytes);
           return;
         }
@@ -856,6 +1099,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         }
 
         if (newSteps.length > 0) {
+          setLastSemanticAt(Date.now());
           setSteps(prev => [...prev, ...newSteps]);
         }
       } catch { /* ignore malformed chunk */ }
@@ -863,13 +1107,16 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
     // Also accept structured semantic_step events from backend if available
     es.addEventListener('semantic_step', (e: MessageEvent) => {
+      markSseEvent();
       try {
         const step: SemanticStep = JSON.parse(e.data);
+        setLastSemanticAt(Date.now());
         setSteps(prev => [...prev, step]);
       } catch { /* ignore malformed step */ }
     });
 
     es.addEventListener('done', () => {
+      markSseEvent();
       if (terminalModeRef.current !== 'pty') {
         if (flushTimerRef.current !== null) {
           clearTimeout(flushTimerRef.current);
@@ -916,6 +1163,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       // Don't close — EventSource auto-reconnects on transient errors.
       // The server's 'done' event is the proper signal that the stream ended.
       // Only mark done if the connection is permanently dead (readyState === CLOSED).
+      setSseState(es.readyState === EventSource.CLOSED ? 'closed' : 'error');
       if (es.readyState === EventSource.CLOSED) {
         setStreamDone(true);
       }
@@ -928,7 +1176,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         flushTimerRef.current = null;
       }
     };
-  }, [runId, ansiConverter, ansiConverterNoEscape, ptyReady, rendererMode, scheduleFlush, workspaceId, writePtyChunk]);
+  }, [runId, ansiConverter, ansiConverterNoEscape, markSseEvent, ptyReady, rendererMode, scheduleFlush, workspaceId, writePtyChunk]);
 
   // Track scroll position for auto-scroll on raw <pre>
   const handlePreScroll = useCallback(() => {
@@ -969,21 +1217,30 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     : 'The PTY session did not start or is no longer attachable.';
   const ptyFallbackHint = terminalMeta.ptyUnavailableHint?.trim();
   const streamEnded = streamDone || isTerminalRunStatus(runStatus);
+  const sseRecentlyAlive = isRecentMs(lastSseAt, nowTick, 10_000);
+  const effectiveSseState: SseConnectionState = streamEnded
+    ? 'closed'
+    : sseState === 'alive' && !sseRecentlyAlive
+      ? 'stale'
+      : sseState;
+  const lastPtyOutputMs = isoToMs(terminalMeta.ptyLastOutputAt) ?? lastPtyByteAt;
+  const ptyBytesRecent = isRecentMs(lastPtyByteAt ?? lastPtyOutputMs, nowTick, 10_000);
+  const semanticRecent = isRecentMs(lastSemanticAt, nowTick, 10_000);
+  const ptyProcessAlive = terminalMeta.ptyProcessAlive === true || (terminalMode === 'pty' && terminalMeta.ptySessionStatus === 'active' && !streamEnded);
   const resolvingEffectiveMode = terminalMeta.requestedTerminalMode === 'pty' && !runMetaResolved;
-  const ansiSurfaceKind = resolvedMode === 'semantic' ? 'ANSI summary' : 'ANSI log';
-  const fallbackAnsiState = streamEnded ? 'ANSI replay' : 'ANSI live';
+  const ansiSurfaceKind = resolvedMode === 'semantic' ? 'Semantic transcript' : 'ANSI transcript';
   const surfaceLabel = resolvingEffectiveMode
     ? 'Checking PTY support'
     : terminalMode === 'pty'
       ? streamEnded
-        ? 'PTY replay • detached'
+        ? 'PTY terminal replay'
         : !ptyInputHealthy
-          ? 'Full PTY • input issue'
+          ? 'PTY live terminal • input issue'
           : ptyFocused
-            ? 'Full PTY • focused'
-            : 'Full PTY • click to focus'
+            ? 'PTY live terminal • focused'
+            : 'PTY live terminal • click to focus'
       : ptyFallbackActive
-        ? `PTY fallback • ${fallbackAnsiState}`
+        ? `PTY unavailable — ANSI transcript • ${streamEnded ? 'replay' : 'live'}`
         : `${ansiSurfaceKind} • ${streamEnded ? 'replay' : 'live'}`;
   const surfaceTone = resolvingEffectiveMode
     ? 'var(--text-muted)'
@@ -999,7 +1256,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           ? 'Real xterm.js PTY attachment. Focus the pane to send keyboard input.'
           : 'PTY output is visible, but input delivery failed; this may be output-only until the connection recovers.'
       : ptyFallbackActive
-        ? `Requested full PTY, but ${ptyFallbackReason} Showing ${streamEnded ? 'ANSI replay' : 'a live ANSI log stream'} without terminal input.`
+        ? `Requested full PTY, but ${ptyFallbackReason} Showing ${streamEnded ? 'an ANSI transcript replay' : 'a live ANSI transcript'} without terminal input.`
         : `${ansiSurfaceKind} ${streamEnded ? 'replay from saved chunks' : 'live stream'}; this is not a PTY attachment.`;
   const modeHelpText = resolvingEffectiveMode
     ? 'Checking whether a real xterm.js PTY is available. Rorca will attach to the PTY when supported, or degrade to ANSI output when it is not.'
@@ -1008,8 +1265,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         ? 'This run used a real xterm.js PTY while active. The session is now detached or exited, so this view is replay-only.'
         : 'Full PTY attachment: Rorca is using a real xterm.js terminal with stdin/stdout when supported. If the PTY cannot start, this view degrades to ANSI output.'
       : ptyFallbackActive
-        ? `Requested full PTY, but Rorca degraded to ${streamEnded ? 'ANSI replay' : 'a live ANSI log stream'} because ${ptyFallbackReason.toLowerCase()} Keyboard input is not attached.${ptyFallbackHint ? ` PTY prerequisite: ${ptyFallbackHint}` : ''}`
-        : `${ansiSurfaceKind} ${streamEnded ? 'replay' : 'stream'}: captured output only, not a live PTY. Raw/Semantic controls are available only in ANSI mode; PTY-capable runs use xterm.js when supported and degrade here when not.`;
+        ? `PTY unavailable — ANSI transcript: Rorca degraded to ${streamEnded ? 'ANSI replay' : 'a live ANSI transcript'} because ${ptyFallbackReason.toLowerCase()} Keyboard input is not attached.${ptyFallbackHint ? ` PTY prerequisite: ${ptyFallbackHint}` : ''}`
+        : `${ansiSurfaceKind} ${streamEnded ? 'replay' : 'stream'}: captured transcript output only, not a live PTY. Raw/Semantic controls are available only in ANSI mode; PTY-capable runs use xterm.js when supported and degrade here when not.`;
 
   return (
     <div className="h-full w-full flex flex-col">
@@ -1081,14 +1338,52 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         {modeHelpText}
       </div>
 
+      <div className="shrink-0 border-b border-border/60 bg-panel/50 px-3 py-1.5 flex flex-wrap items-center gap-1.5">
+        <HealthPill
+          label={`SSE ${effectiveSseState}`}
+          state={effectiveSseState === 'alive' ? 'ok' : effectiveSseState === 'connecting' || effectiveSseState === 'stale' ? 'warn' : streamEnded ? 'muted' : 'bad'}
+          title={`Backend SSE connection; last event ${formatAge(lastSseAt, nowTick)}.`}
+        />
+        {terminalMeta.requestedTerminalMode === 'pty' ? (
+          <>
+            <HealthPill
+              label={ptyProcessAlive ? 'PTY process alive' : terminalMeta.ptySessionStatus ? `PTY ${terminalMeta.ptySessionStatus}` : 'PTY pending'}
+              state={ptyProcessAlive ? 'ok' : streamEnded ? 'muted' : 'warn'}
+              title={`PTY session status: ${terminalMeta.ptySessionStatus ?? 'unknown'}. Heartbeat: ${formatAge(isoToMs(terminalMeta.ptyLastHeartbeatAt), nowTick)}.`}
+            />
+            <HealthPill
+              label={ptyBytesRecent ? 'PTY bytes recent' : `PTY bytes ${formatAge(lastPtyOutputMs, nowTick)}`}
+              state={ptyBytesRecent ? 'ok' : streamEnded ? 'muted' : 'warn'}
+              title={`Raw node-pty bytes received/persisted. Total bytes: ${terminalMeta.ptyTotalOutputBytes ?? 0}. Last byte: ${formatAge(lastPtyOutputMs, nowTick)}.`}
+            />
+            <HealthPill
+              label={terminalMeta.ptyCompletionMarkerSeen ? 'completion marker seen' : 'completion marker pending'}
+              state={terminalMeta.ptyCompletionMarkerSeen ? 'ok' : streamEnded ? 'muted' : 'warn'}
+              title={`Completion marker only means the agent turn ended; story pass still requires merge + validation. Seen: ${formatAge(isoToMs(terminalMeta.ptyCompletionMarkerSeenAt), nowTick)}.`}
+            />
+          </>
+        ) : null}
+        <HealthPill
+          label={semanticRecent ? 'semantic recent' : `semantic ${formatAge(lastSemanticAt, nowTick)}`}
+          state={semanticRecent ? 'ok' : terminalMode === 'pty' ? 'muted' : streamEnded ? 'muted' : 'warn'}
+          title={terminalMode === 'pty' ? 'Semantic events are best-effort in PTY mode; raw PTY bytes are the activity source of truth.' : `Last semantic event ${formatAge(lastSemanticAt, nowTick)}.`}
+        />
+      </div>
+
+      {replayTruncatedFrom !== null && (
+        <div className="shrink-0 border-b border-border bg-[var(--bg)] px-3 py-1.5 text-[11px] text-muted" role="status">
+          Showing a bounded recent replay from output sequence {replayTruncatedFrom}. Live output and reconnect resume remain lossless.
+        </div>
+      )}
+
       {ptyFallbackActive && (
         <div className="shrink-0 border-b border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
           <div className="flex items-start gap-2">
             <AlertCircle size={14} className="mt-0.5 shrink-0" />
             <div className="space-y-0.5">
-              <div className="font-semibold">PTY unavailable — degraded ANSI mode</div>
+              <div className="font-semibold">PTY unavailable — ANSI transcript</div>
               <div className="text-[var(--text)]">
-                {ptyFallbackReason} Showing {streamEnded ? 'ANSI replay' : 'the live ANSI log stream'} instead of a full PTY attachment; keyboard input is not attached.
+                {ptyFallbackReason} Showing {streamEnded ? 'ANSI replay' : 'the live ANSI transcript'} instead of a full PTY attachment; keyboard input is not attached.
                 {ptyFallbackHint ? ` PTY prerequisite: ${ptyFallbackHint}` : ''}
               </div>
             </div>

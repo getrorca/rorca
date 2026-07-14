@@ -29,4 +29,10 @@ describe('AgentBadge', () => {
     expect(screen.getByText('Codex')).toBeInTheDocument();
     expect(screen.getByText('Pi')).toBeInTheDocument();
   });
+
+  it('does not invent Claude when engine metadata is absent', () => {
+    render(<AgentBadge />);
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
+  });
 });

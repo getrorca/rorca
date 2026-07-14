@@ -20,6 +20,7 @@
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { TerminalModeSchema } from './terminal-mode';
+import { ExecutionEnvironmentSchema } from './execution-environment';
 
 // ── pipeline:run ─────────────────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ export const PipelineRunJobPayload = z.object({
   worktreePath: z.string().nullable(),
   branchName: z.string().nullable(),
   terminalMode: TerminalModeSchema.optional().default('ansi-html'),
+  executionEnvironment: ExecutionEnvironmentSchema.optional().default('remote-rorca'),
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
@@ -57,8 +59,18 @@ export const PipelineRunJobPayload = z.object({
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
-  effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
+  idempotencyKey: z.string().optional(),
+  manifestId: z.string().optional(),
+  taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
+  taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  executionEnvironmentId: z.string().optional(),
+  // Full trigger options are persisted on pipeline_runs and passed through the
+  // queue for provenance. The worker consumes normalized top-level fields, but
+  // the strict payload schema must accept this envelope to avoid server/worker
+  // drift when new trigger metadata is added.
+  triggerOptions: z.record(z.string(), z.unknown()).optional(),
 }).strict();
 
 export type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;
@@ -82,6 +94,11 @@ export const PipelineRetryJobPayload = z.object({
   sequenceOffset: z.number().int().min(0),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   includeGraph: z.boolean().optional().default(false),
+  terminalMode: TerminalModeSchema.optional().default('ansi-html'),
+  thinkingEnabled: z.boolean().optional(),
+  thinkingBudget: z.number().int().positive().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
+  reasoningEffort: z.string().optional(),
 }).strict();
 
 export type PipelineRetryJobPayloadType = z.infer<typeof PipelineRetryJobPayload>;
