@@ -195,7 +195,11 @@ describe("managed capture daemon", () => {
     await runManagedCaptureDaemon({ workspace: ws, once: true, fetchImpl, spawnSyncImpl: gitLog(commits) });
     expect(posted).toHaveLength(0);
     const queued = readFileSync(path.join(ws.path, ".rorca", "capture", "queue", "offline.ndjson"), "utf8");
-    expect(queued).toContain("[REDACTED_ENV]");
+    // Metadata-only retains no commit subject, including a redacted placeholder.
+    // The diagnostic proves it was detected without persisting the secret.
+    expect(queued).not.toContain("super-secret");
+    expect(queued).toContain('"commit_subject":null');
+    expect(queued).toContain('"redactionCount":1');
     expect(queued).toContain('"contextSafetyModule":"backend/src/lib/context-safety.ts"');
 
     online = true;
