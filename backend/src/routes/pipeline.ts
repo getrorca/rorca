@@ -2965,6 +2965,8 @@ router.post('/runs', async (req: Request, res: Response) => {
       agentModel: run.agentModel,
       terminalMode: run.terminalMode,
       terminal_mode: run.terminalMode,
+      lifecycleStatus: run.lifecycleStatus,
+      lifecycle_status: run.lifecycleStatus,
       lifecyclePhase: run.lifecyclePhase,
       lifecycle_phase: run.lifecyclePhase,
     });
@@ -3413,6 +3415,8 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       agentModel: run.agentModel,
       terminalMode: run.terminalMode,
       terminal_mode: run.terminalMode,
+      lifecycleStatus: run.lifecycleStatus,
+      lifecycle_status: run.lifecycleStatus,
       lifecyclePhase: run.lifecyclePhase,
       lifecycle_phase: run.lifecyclePhase,
       // US-004: Expose worktree fields at top level for easy frontend access
