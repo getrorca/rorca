@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `3.2.0`
+Contract version: `3.3.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -33,6 +33,7 @@ Contract version: `3.2.0`
 | PUT | `/api/direction` | body:contentYaml (required), body:domain (optional), body:layer (required), body:preferredModel (optional), body:skipValidation (optional), body:workspaceId (optional) | `sha256:4e42d254170ffb19033989ac588090aad9aa68f2c07ddece726f79ef87a03f0e` |
 | POST | `/api/direction/synthesize` | body:l4SpecBrief (optional), body:l5Annotations (optional), body:workspaceId (optional) | `sha256:ab4353f2a3ac535ce7500a755268a556bc29030597e7ae77933e8e20fac9966b` |
 | POST | `/api/events` | body:actor (optional), body:event_type (required), body:idempotency_key (required), body:occurred_at (required), body:payload (optional), body:schema_version (optional), body:source_ref (optional), body:source_system (required), body:summary (optional), body:workspace_id (required) | `sha256:75873284be7dc38fb4be4e31bb0046daed356c3b0e11e20538ea6c744b2c81b4` |
+| GET | `/api/gitreins/evidence` | query:limit (optional), query:offset (optional), query:runId (optional), query:storyId (optional), query:workspaceId (required) | `sha256:85b8020bcc61a740e19e1ab49c9e1620e021eec8f2044c7ed5f2668a2f6109b8` |
 | GET | `/api/graph/stats` | - | `sha256:67d4045f25d255406761e8330744a3594264c4412921837ec8216f4ea76e2b55` |
 | GET | `/api/health` | - | `sha256:7e6377c00dcc39b43b5ee72a3748d8238299b9497e892bc649d5f43ee4e15f6c` |
 | GET | `/api/health/detailed` | - | `sha256:6987aae3d184fc6c71d49977f02db8b9d1320ceb1d79fda382d96a857216d22b` |

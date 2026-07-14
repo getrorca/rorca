@@ -143,6 +143,13 @@ const GatesSchema = z.object({
   mode: z.enum(['blocking', 'warning']).default('warning'),
 });
 
+const GitReinsGateSchema = z.object({
+  /** Disabled by default. Observe records evidence; enforce blocks a story on any non-pass. */
+  mode: z.enum(['disabled', 'observe', 'enforce']).default('disabled'),
+  timeoutMs: z.number().int().min(1000).max(15 * 60 * 1000).default(120000),
+  maxEvidenceBytes: z.number().int().min(4096).max(32 * 1024).default(32 * 1024),
+});
+
 const ExecutionSchema = z.object({
   waveParallelism: z.boolean().default(false),
   storyTimeoutMin: z.number().int().min(1).default(45),
@@ -150,6 +157,7 @@ const ExecutionSchema = z.object({
   autoCommit: z.boolean().default(true),
   adversarialReview: AdversarialReviewSchema.default(() => AdversarialReviewSchema.parse({})),
   gates: GatesSchema.default(() => GatesSchema.parse({})),
+  gitreins: GitReinsGateSchema.default(() => GitReinsGateSchema.parse({})),
 });
 
 const PersonasConfigSchema = z.object({
@@ -194,6 +202,7 @@ export type TeleologyConfig = z.infer<typeof TeleologySchema>;
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
 export type ExecutionConfig = z.infer<typeof ExecutionSchema>;
 export type GatesConfig = z.infer<typeof GatesSchema>;
+export type GitReinsGateConfig = z.infer<typeof GitReinsGateSchema>;
 export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
 export type PersonasConfig = z.infer<typeof PersonasConfigSchema>;
 export type EmbeddingConfig = z.infer<typeof EmbeddingSchema>;

@@ -135,6 +135,9 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { runGitReinsJudge } from './gitreins-runner';
+import { appendGitReinsEvidence } from './gitreins-evidence-store';
+import { decideGitReinsGateAction } from './gitreins-gate';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -5210,6 +5213,7 @@ async function executeStory(
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
+  let gitReinsRetryContext = '';
   if (effectiveAgent === 'pi') {
     logger.info(`[pi] Session options ready for ${story.id}`);
   }
@@ -5252,9 +5256,12 @@ async function executeStory(
       const piRetryContext: PiRetryContext | undefined = effectiveAgent === 'pi'
         ? { isRetry: retryAttempt > 0, attempt: retryAttempt }
         : undefined;
-      const prompt = effectiveAgent === 'pi' && piSessionOptions
+      const baseAttemptPrompt = effectiveAgent === 'pi' && piSessionOptions
         ? `${buildPiStoryPromptContext({ ...piSessionOptions, attempt: retryAttempt + 1, maxAttempts: MAX_RETRIES })}\n\n${promptBody}`
         : promptBody;
+      const prompt = gitReinsRetryContext
+        ? `${baseAttemptPrompt}\n\n${gitReinsRetryContext}`
+        : baseAttemptPrompt;
       const attemptPrompt = effectiveAgent === 'pi' && retryAttempt > 0
         ? [
             prompt,
@@ -5715,24 +5722,6 @@ async function executeStory(
         return 'failed';
       }
 
-      // All checks passed — mark story as done
-      markStoryPassed(config.jsonPath, story.id);
-      retryCounts.delete(story.id);
-      retryCounts.delete(rateLimitKey);
-
-      // CIE-007: Record story completion in run-state.json
-      rsMarkStoryCompleted(effectiveCwd, {
-        storyId: story.id,
-        title: story.title,
-        status: 'passed',
-        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
-        finishedAt: new Date().toISOString(),
-        agentType: effectiveAgent,
-        model: currentModel ?? undefined,
-        elapsedMs: result.elapsedMs,
-      });
-      writeProgressTxt(effectiveCwd);
-
       // CIE-006: Post-commit violation detection
       if (assignedRole) {
         try {
@@ -5798,6 +5787,161 @@ async function executeStory(
           logger.warn(`  [review] Adversarial review failed: ${err.message} — proceeding with pass`);
         }
       }
+
+      // GitReins blocking gate: runs for every agent symmetrically after optional
+      // adversarial review and before any local/canonical pass finalization.
+      const gitReinsConfig = loadRorcaConfig(config.cwd).execution.gitreins;
+      const gitReinsAttempt = (retryCounts.get(story.id) ?? 0) + 1;
+      let gitReinsResult = await runGitReinsJudge({
+        cwd: effectiveCwd,
+        mode: gitReinsConfig.mode,
+        timeoutMs: gitReinsConfig.timeoutMs,
+        maxEvidenceBytes: gitReinsConfig.maxEvidenceBytes,
+        runId: config.runId,
+        storyId: story.id,
+        title: story.title,
+        criteria: [story.description, ...(story.acceptanceCriteria ?? [])].filter(Boolean),
+        attempt: gitReinsAttempt,
+      });
+
+      let gitReinsEvidenceId: number | null = null;
+      if (gitReinsResult.mode !== 'disabled') {
+        try {
+          if (!workspaceId) throw new Error('workspace id unavailable');
+          const saved = await appendGitReinsEvidence({
+            workspaceId,
+            runId: config.runId,
+            storyId: story.id,
+            result: gitReinsResult,
+          });
+          gitReinsEvidenceId = saved.id;
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(`  [gitreins] Evidence persistence failed for ${story.id}: ${message}`);
+          gitReinsResult = {
+            ...gitReinsResult,
+            status: 'error',
+            reasonCode: 'evidence_store_failed',
+            passed: false,
+            shouldBlock: gitReinsResult.mode === 'enforce',
+            diagnostics: '',
+          };
+        }
+
+        logger.info(
+          `  [gitreins] ${story.id}: ${gitReinsResult.status} (${gitReinsResult.reasonCode}, mode=${gitReinsResult.mode}, attempt=${gitReinsAttempt})`,
+        );
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_gitreins_evaluated', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            mode: gitReinsResult.mode,
+            status: gitReinsResult.status,
+            reason_code: gitReinsResult.reasonCode,
+            should_block: gitReinsResult.shouldBlock,
+            attempt: gitReinsAttempt,
+            duration_ms: gitReinsResult.durationMs,
+            worktree: gitReinsResult.worktree,
+            evidence_id: gitReinsEvidenceId,
+            schema_version: gitReinsResult.evidence?.schemaVersion ?? '1.0',
+          }, story.id);
+        }
+      }
+
+      if (gitReinsResult.shouldBlock) {
+        retryCounts.set(story.id, gitReinsAttempt);
+        const action = decideGitReinsGateAction(gitReinsResult, gitReinsAttempt, MAX_RETRIES);
+        recordPiProgress({
+          knownIssues: [`GitReins enforce gate blocked: ${gitReinsResult.reasonCode}.`],
+          validationResults: [`GitReins attempt ${gitReinsAttempt}/${MAX_RETRIES}: ${gitReinsResult.status}.`],
+          remainingWork: action === 'retry'
+            ? ['Address GitReins findings and rerun the story validation.']
+            : ['Inspect persisted GitReins evidence before a scoped manual retry.'],
+        });
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: `gitreins_${gitReinsResult.reasonCode}`,
+            attempt: gitReinsAttempt,
+            max_attempts: MAX_RETRIES,
+            evidence_id: gitReinsEvidenceId,
+            worktree: gitReinsResult.worktree,
+            log_file: storyLogFile,
+          }, story.id);
+          await postStoryResult(config.port, {
+            runId: config.runId,
+            storyId: story.id,
+            status: 'fail',
+            reason: `gitreins_${gitReinsResult.reasonCode}`,
+            logPath: storyLogFile,
+            gitReinsEvidenceId,
+            ...storyResultExtra,
+            ...activeSkillsExtra,
+            ...tokenPayload,
+          });
+        }
+
+        if (action === 'retry') {
+          const findingSummaries = gitReinsResult.evidence?.checks
+            .filter(check => check.passed !== true)
+            .slice(0, 8)
+            .map(check => `- ${check.id}: ${check.summary}`) ?? [];
+          gitReinsRetryContext = [
+            '## GitReins retry evidence',
+            `The enforce gate blocked the prior attempt (${gitReinsResult.reasonCode}).`,
+            gitReinsResult.evidence?.summary ?? 'No valid judge summary was available.',
+            ...findingSummaries,
+            'Address this evidence, rerun relevant validation, and do not bypass or disable the gate.',
+          ].join('\n');
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_retry', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              story_title: story.title,
+              attempt: gitReinsAttempt + 1,
+              max_attempts: MAX_RETRIES,
+              reason: `gitreins_${gitReinsResult.reasonCode}`,
+            }, story.id);
+            if (effectiveAgent !== 'pi') await emitStoryStarted();
+          }
+          continue;
+        }
+
+        markStorySkipped(config.jsonPath, story.id);
+        rsMarkStoryFailed(effectiveCwd, {
+          storyId: story.id,
+          title: story.title,
+          status: 'failed',
+          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+          finishedAt: new Date().toISOString(),
+          agentType: effectiveAgent,
+          failReason: `gitreins_${gitReinsResult.reasonCode}`,
+          retries: gitReinsAttempt,
+        });
+        writeProgressTxt(effectiveCwd);
+        await persistRetrievalOutcome(false);
+        return 'failed';
+      }
+
+      // All checks passed — mark story as done only after the GitReins gate.
+      markStoryPassed(config.jsonPath, story.id);
+      retryCounts.delete(story.id);
+      retryCounts.delete(rateLimitKey);
+
+      // CIE-007: Record story completion in run-state.json
+      rsMarkStoryCompleted(effectiveCwd, {
+        storyId: story.id,
+        title: story.title,
+        status: 'passed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: effectiveAgent,
+        model: currentModel ?? undefined,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_passed', workspaceId, {
