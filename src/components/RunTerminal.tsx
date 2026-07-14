@@ -52,6 +52,7 @@ interface RunTerminalMetaState {
   ptyLastHeartbeatAt?: string | null;
   ptyCompletionMarkerSeen?: boolean;
   ptyCompletionMarkerSeenAt?: string | null;
+  /** Primary turn-completion evidence; never a story pass/fail signal. */
   ptyCompletionFileSeen?: boolean;
   ptyCompletionFileSeenAt?: string | null;
   ptyCompletionFileError?: string | null;
@@ -60,7 +61,8 @@ interface RunTerminalMetaState {
   ptyTotalOutputBytes?: number;
 }
 
-type SseConnectionState = 'connecting' | 'alive' | 'stale' | 'error' | 'closed';
+type SseConnectionState = 'connecting' | 'alive' | 'reconnecting' | 'closed';
+type TerminalConnectionState = 'Live' | 'Reconnecting' | 'Degraded' | 'Ended';
 
 function coerceTerminalMode(value: unknown): TerminalMode | null {
   return value === 'pty' || value === 'ansi-html' ? value : null;
@@ -77,7 +79,9 @@ function isoToMs(value?: string | null): number | null {
 }
 
 function isRecentMs(ts: number | null, now: number, windowMs: number): boolean {
-  return ts !== null && now - ts >= 0 && now - ts <= windowMs;
+  // `nowTick` updates once per second, so a just-arrived server timestamp can
+  // be slightly ahead of it. Treat that as current rather than falsely stale.
+  return ts !== null && now - ts >= -1_000 && now - ts <= windowMs;
 }
 
 function formatAge(ts: number | null, now: number): string {
@@ -87,26 +91,6 @@ function formatAge(ts: number | null, now: number): string {
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ago`;
-}
-
-function HealthPill({ label, state, title }: { label: string; state: 'ok' | 'warn' | 'muted' | 'bad'; title?: string }) {
-  const tone = state === 'ok'
-    ? 'var(--success)'
-    : state === 'warn'
-      ? 'var(--warning)'
-      : state === 'bad'
-        ? 'var(--error)'
-        : 'var(--text-muted)';
-  return (
-    <span
-      className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
-      style={{ color: tone, borderColor: tone, background: 'color-mix(in srgb, currentColor 10%, transparent)' }}
-      title={title}
-    >
-      <span className="h-1.5 w-1.5 rounded-full" style={{ background: tone }} />
-      {label}
-    </span>
-  );
 }
 
 // ─── Semantic step type (mirrors backend SemanticStep) ────────────────────────
@@ -248,6 +232,33 @@ function lsKey(runId: number): string {
   return `rorca:terminal-mode:${runId}`;
 }
 
+function sequenceStorageKey(runId: number): string {
+  return `rorca:terminal-output-sequence:${runId}`;
+}
+
+function loadReceivedSequence(runId: number): number {
+  try {
+    const value = Number(sessionStorage.getItem(sequenceStorageKey(runId)) ?? '');
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function persistReceivedSequence(runId: number, sequence: number): void {
+  if (!Number.isSafeInteger(sequence) || sequence <= 0) return;
+  try {
+    sessionStorage.setItem(sequenceStorageKey(runId), String(sequence));
+  } catch {
+    // Session storage is an optimization for durable SSE replay, never a requirement.
+  }
+}
+
+function readChunkSequence(event: MessageEvent): number | null {
+  const sequence = Number(event.lastEventId);
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : null;
+}
+
 function loadMode(runId: number): 'raw' | 'semantic' {
   try {
     const v = localStorage.getItem(lsKey(runId));
@@ -329,8 +340,14 @@ function scrubPtyDisplayText(input: string, state: PtyDisplayScrubberState): str
   const pieces = state.pendingLine.split(/(?<=\n)/);
   const last = pieces[pieces.length - 1] ?? '';
   const hasOpenLine = last !== '' && !last.endsWith('\n');
-  state.pendingLine = hasOpenLine ? last : '';
-  const completeLines = hasOpenLine ? pieces.slice(0, -1) : pieces;
+  const shouldHoldOpenLine = hasOpenLine && (
+    state.suppressingInjectedContext || isInjectedPromptContextStart(normalizePtyDisplayLine(last))
+  );
+  state.pendingLine = shouldHoldOpenLine ? last : '';
+  // PTYs frequently update prompts and progress without newlines. Do not hold
+  // ordinary terminal bytes until a line terminator arrives: it looks like a
+  // stalled terminal and can leave a split UTF-8 sequence out of order.
+  const completeLines = shouldHoldOpenLine ? pieces.slice(0, -1) : pieces;
   return completeLines.map(line => scrubPtyDisplayLine(line, state)).join('');
 }
 
@@ -533,6 +550,12 @@ function createAnsiConverter(theme: 'light' | 'dark', escapeXml = true): AnsiToH
 
 const FLUSH_INTERVAL_MS = 80;
 const PTY_RESIZE_DEBOUNCE_MS = 100;
+const PTY_RECONNECT_DELAY_MS = 500;
+const PTY_WRITE_FRAME_BUDGET_BYTES = 64 * 1024;
+const MAX_PENDING_PTY_BYTES = 1024 * 1024;
+const PTY_SCRUBBER_EXPANSION_HEADROOM_BYTES = 512;
+const MAX_PENDING_ANSI_CHARS = 512 * 1024;
+const MAX_ANSI_FLUSH_CHARS = 64 * 1024;
 const SCROLL_LOCK_THRESHOLD = 50;
 const MAX_LINES = 20_000;
 
@@ -574,14 +597,21 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const pendingPtyChunksRef = useRef<Uint8Array[]>([]);
+  const pendingPtyBytesRef = useRef(0);
+  const ptyWriteFrameRef = useRef<number | null>(null);
   const ptyDisplayScrubberRef = useRef<PtyDisplayScrubberState>(createPtyDisplayScrubberState());
   const ptyDisplayDecoderRef = useRef(new TextDecoder());
   const ptyDisplayEncoderRef = useRef(new TextEncoder());
+  const ansiDisplayDecoderRef = useRef(new TextDecoder());
   const pendingPtyInputRef = useRef('');
   const ptyInputFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ptyInputQueueRef = useRef(Promise.resolve());
   const resizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamKeyRef = useRef<string | null>(null);
+  const lastReceivedSequenceRef = useRef(0);
+  const activeResizeRetryRef = useRef(false);
   const { resolved } = useTheme();
   const resolvedRef = useRef(resolved);
   const [copied, setCopied] = useState(false);
@@ -613,6 +643,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const [ptyFocused, setPtyFocused] = useState(false);
   const [ptyInputHealthy, setPtyInputHealthy] = useState(true);
   const [sseState, setSseState] = useState<SseConnectionState>('connecting');
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [ptyRenderBackpressure, setPtyRenderBackpressure] = useState(false);
   const [lastSseAt, setLastSseAt] = useState<number | null>(null);
   const [lastPtyByteAt, setLastPtyByteAt] = useState<number | null>(null);
   const [lastSemanticAt, setLastSemanticAt] = useState<number | null>(null);
@@ -736,18 +768,54 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setSseState('alive');
   }, []);
 
-  const writePtyChunk = useCallback((chunk: Uint8Array) => {
+  const schedulePtyWriteFlush = useCallback(() => {
+    if (ptyWriteFrameRef.current !== null) return;
+    ptyWriteFrameRef.current = window.requestAnimationFrame(() => {
+      ptyWriteFrameRef.current = null;
+      const terminal = xtermRef.current;
+      if (!terminal) return;
+
+      let written = 0;
+      while (pendingPtyChunksRef.current.length > 0 && written < PTY_WRITE_FRAME_BUDGET_BYTES) {
+        const chunk = pendingPtyChunksRef.current.shift()!;
+        pendingPtyBytesRef.current -= chunk.byteLength;
+        written += chunk.byteLength;
+        terminal.write(chunk as Parameters<Terminal['write']>[0]);
+      }
+
+      if (pendingPtyChunksRef.current.length > 0) schedulePtyWriteFlush();
+    });
+  }, []);
+
+  /**
+   * xterm writes are intentionally frame-coalesced. EventSource can dispatch a
+   * durable replay much faster than xterm can parse it; writing one chunk per
+   * SSE callback starves input and paint. The byte cap gives the stream a
+   * bounded, ordered backpressure boundary instead of an unbounded JS queue.
+   */
+  const writePtyChunk = useCallback((chunk: Uint8Array): boolean => {
+    // Reject before advancing TextDecoder state so a durable replay starts at a
+    // UTF-8 boundary identical to the one this terminal has already accepted.
+    if (pendingPtyBytesRef.current + chunk.byteLength + PTY_SCRUBBER_EXPANSION_HEADROOM_BYTES > MAX_PENDING_PTY_BYTES) {
+      setPtyRenderBackpressure(true);
+      return false;
+    }
+
     const text = ptyDisplayDecoderRef.current.decode(chunk, { stream: true });
     const scrubbed = scrubPtyDisplayText(text, ptyDisplayScrubberRef.current);
-    if (!scrubbed) return;
+    if (!scrubbed) return true;
 
     const displayChunk = ptyDisplayEncoderRef.current.encode(scrubbed);
-    if (xtermRef.current) {
-      xtermRef.current.write(displayChunk as Parameters<Terminal['write']>[0]);
-      return;
+    if (pendingPtyBytesRef.current + displayChunk.byteLength > MAX_PENDING_PTY_BYTES) {
+      setPtyRenderBackpressure(true);
+      return false;
     }
+
     pendingPtyChunksRef.current.push(displayChunk);
-  }, []);
+    pendingPtyBytesRef.current += displayChunk.byteLength;
+    schedulePtyWriteFlush();
+    return true;
+  }, [schedulePtyWriteFlush]);
 
   useEffect(() => {
     if (terminalMode !== 'pty' || !ptyContainerRef.current) return;
@@ -774,10 +842,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     container.addEventListener('focusout', handleFocusOut);
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
-    for (const chunk of pendingPtyChunksRef.current) {
-      terminal.write(chunk as Parameters<Terminal['write']>[0]);
-    }
-    pendingPtyChunksRef.current = [];
+    schedulePtyWriteFlush();
     setPtyReady(true);
 
     const syncSize = () => {
@@ -807,6 +872,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         clearTimeout(ptyInputFlushRef.current);
         flushPtyInput();
       }
+      if (ptyWriteFrameRef.current !== null) {
+        window.cancelAnimationFrame(ptyWriteFrameRef.current);
+        ptyWriteFrameRef.current = null;
+      }
       inputDisposable.dispose();
       container.removeEventListener('focusin', handleFocusIn);
       container.removeEventListener('focusout', handleFocusOut);
@@ -815,7 +884,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       setPtyFocused(false);
       terminal.dispose();
     };
-  }, [flushPtyInput, postPtyResize, queuePtyInput, terminalMode]);
+  }, [flushPtyInput, postPtyResize, queuePtyInput, schedulePtyWriteFlush, terminalMode]);
 
   useEffect(() => {
     if (terminalMode === 'pty' && xtermRef.current) {
@@ -824,24 +893,29 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     }
   }, [resolved, terminalMode]);
 
-  // Initial resize can race PTY creation. Retry once the backend confirms the
-  // session is active so the child starts with the browser's actual dimensions.
   useEffect(() => {
-    if (terminalMode !== 'pty' || terminalMeta.ptySessionStatus !== 'active') return;
+    activeResizeRetryRef.current = false;
+  }, [runId, rendererMode]);
+
+  // Initial resize can race PTY creation. Retry exactly once after authoritative
+  // active health arrives so the child starts with the browser's actual size.
+  useEffect(() => {
+    if (activeResizeRetryRef.current || terminalMode !== 'pty' || terminalMeta.ptySessionStatus !== 'active') return;
     const terminal = xtermRef.current;
     const fitAddon = fitAddonRef.current;
     if (!terminal || !fitAddon) return;
+    activeResizeRetryRef.current = true;
     fitAddon.fit();
     void postPtyResize(terminal.cols, terminal.rows);
-  }, [postPtyResize, terminalMeta.ptySessionStatus, terminalMode]);
+  }, [postPtyResize, ptyReady, terminalMeta.ptySessionStatus, terminalMode]);
 
   // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML.
   // Lines prefixed with HTML_LINE_PREFIX are pre-HTML (markdown already converted) — use no-escape converter.
   const flushBuffer = useCallback(() => {
     flushTimerRef.current = null;
-    const pending = pendingTextRef.current;
+    const pending = pendingTextRef.current.slice(0, MAX_ANSI_FLUSH_CHARS);
     if (!pending) return;
-    pendingTextRef.current = '';
+    pendingTextRef.current = pendingTextRef.current.slice(pending.length);
 
     // Process line by line: pre-HTML lines go through no-escape converter, raw lines escape normally.
     const lines = pending.split('\n');
@@ -865,6 +939,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       if (autoScrollRef.current) {
         pre.scrollTop = pre.scrollHeight;
       }
+    }
+
+    if (pendingTextRef.current && flushTimerRef.current === null) {
+      flushTimerRef.current = setTimeout(flushBuffer, 0);
     }
   }, [ansiConverter, ansiConverterNoEscape]);
 
@@ -899,7 +977,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         xtermRef.current?.writeln(text);
         return;
       }
-      const markerHtml = `<div style="padding:4px 8px;margin:4px 0;background:rgba(59,130,246,0.15);border-left:3px solid #3b82f6;color:#93c5fd;font-size:11px;font-family:monospace;">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
+      const markerHtml = `<div style="padding:4px 8px;margin:4px 0;background:color-mix(in srgb, var(--accent) 15%, transparent);border-left:3px solid var(--accent);color:var(--text);font-size:11px;font-family:monospace;">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
       accumulatedHtmlRef.current += markerHtml;
       accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
       const pre = preRef.current;
@@ -924,49 +1002,77 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     } catch { /* clipboard not available */ }
   }, []);
 
-  // SSE setup — streams output chunks into pending buffer, flushes every 80ms
+  // SSE setup — durable replay resumes after the last committed chunk sequence.
+  // With no session cursor the backend intentionally supplies only a bounded tail.
   useEffect(() => {
     esRef.current?.close();
-    pendingTextRef.current = '';
-    accumulatedHtmlRef.current = '';
-    seenStoryIdsRef.current = new Set();
-    lineBufferRef.current = '';
-    terminalModeRef.current = rendererMode;
-    pendingPtyChunksRef.current = [];
-    ptyDisplayScrubberRef.current = createPtyDisplayScrubberState();
-    ptyDisplayDecoderRef.current = new TextDecoder();
-    setAgentType('claude');
-    setSteps([]);
-    setExpandedSet(new Set());
-    setStreamDone(false);
-    setReplayTruncatedFrom(null);
-    setPtyInputHealthy(true);
-    setSseState('connecting');
-    setLastSseAt(null);
-    setLastPtyByteAt(null);
-    setLastSemanticAt(null);
-    setTerminalMode(rendererMode);
-    setTerminalMeta({
-      requestedTerminalMode: rendererMode,
-      isPty: rendererMode === 'pty',
-      ptyAvailable: undefined,
-      ptyUnavailableHint: null,
-    });
-    setRunMetaResolved(false);
-    if (rendererMode === 'pty' && !ptyReady) return;
-    xtermRef.current?.clear();
-    if (flushTimerRef.current !== null) {
-      clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
+    const streamKey = `${runId}:${rendererMode}`;
+    const isNewTerminal = streamKeyRef.current !== streamKey;
+    if (isNewTerminal) {
+      streamKeyRef.current = streamKey;
+      pendingTextRef.current = '';
+      accumulatedHtmlRef.current = '';
+      seenStoryIdsRef.current = new Set();
+      lineBufferRef.current = '';
+      terminalModeRef.current = rendererMode;
+      pendingPtyChunksRef.current = [];
+      pendingPtyBytesRef.current = 0;
+      ptyDisplayScrubberRef.current = createPtyDisplayScrubberState();
+      ptyDisplayDecoderRef.current = new TextDecoder();
+      ansiDisplayDecoderRef.current = new TextDecoder();
+      lastReceivedSequenceRef.current = loadReceivedSequence(runId);
+      setAgentType('claude');
+      setSteps([]);
+      setExpandedSet(new Set());
+      setStreamDone(false);
+      setReplayTruncatedFrom(null);
+      setPtyInputHealthy(true);
+      setPtyRenderBackpressure(false);
+      setLastSseAt(null);
+      setLastPtyByteAt(null);
+      setLastSemanticAt(null);
+      setTerminalMode(rendererMode);
+      setTerminalMeta({
+        requestedTerminalMode: rendererMode,
+        isPty: rendererMode === 'pty',
+        ptyAvailable: undefined,
+        ptyUnavailableHint: null,
+      });
+      setRunMetaResolved(false);
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      xtermRef.current?.clear();
+      if (preRef.current) preRef.current.innerHTML = '';
     }
-    if (preRef.current) preRef.current.innerHTML = '';
+    if (rendererMode === 'pty' && !ptyReady) return;
 
-    // Connect to live output stream — scoped to workspace
+    setSseState(reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
     const outputParams = new URLSearchParams();
     if (workspaceId) outputParams.set('workspaceId', workspaceId);
+    if (lastReceivedSequenceRef.current > 0) outputParams.set('afterSequence', String(lastReceivedSequenceRef.current));
     const outputUrl = `${BASE_URL}/api/pipeline/runs/${runId}/output${outputParams.toString() ? '?' + outputParams : ''}`;
     const es = new EventSource(outputUrl);
     esRef.current = es;
+    let disposed = false;
+    let receivedDone = false;
+    const scheduleReconnect = () => {
+      if (disposed || receivedDone || reconnectTimerRef.current !== null) return;
+      es.close();
+      setSseState('reconnecting');
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (!disposed && !receivedDone) setReconnectAttempt(previous => previous + 1);
+      }, PTY_RECONNECT_DELAY_MS);
+    };
+    const commitChunkSequence = (event: MessageEvent) => {
+      const sequence = readChunkSequence(event);
+      if (sequence !== null && sequence > lastReceivedSequenceRef.current) {
+        lastReceivedSequenceRef.current = sequence;
+        persistReceivedSequence(runId, sequence);
+      }
+    };
 
     type PtyHealthMeta = {
       ptySessionStatus?: string | null;
@@ -1013,7 +1119,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       }));
     };
 
-    es.onopen = () => markSseEvent();
+    es.onopen = () => {
+      setPtyRenderBackpressure(false);
+      markSseEvent();
+    };
 
     // Listen for run metadata (agent type + authoritative renderer/fallback state)
     es.addEventListener('run_meta', (e: MessageEvent) => {
@@ -1084,18 +1193,26 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
     es.addEventListener('chunk', (e: MessageEvent) => {
       markSseEvent();
+      const sequence = readChunkSequence(e);
+      if (sequence !== null && sequence <= lastReceivedSequenceRef.current) return;
       try {
         const bytes = decodeBase64Chunk(e.data);
 
         if (terminalModeRef.current === 'pty') {
+          if (!writePtyChunk(bytes)) {
+            // Do not advance the durable cursor for an unadmitted chunk. A fresh
+            // EventSource with afterSequence will replay it after xterm catches up.
+            scheduleReconnect();
+            return;
+          }
           setLastPtyByteAt(Date.now());
-          writePtyChunk(bytes);
+          commitChunkSequence(e);
           return;
         }
 
-        const text = new TextDecoder().decode(bytes);
+        const text = ansiDisplayDecoderRef.current.decode(bytes, { stream: true });
 
-        // Split into lines for semantic parsing and stream-json formatting
+        // Split into lines for semantic parsing and stream-json formatting.
         lineBufferRef.current += text;
         const parts = lineBufferRef.current.split('\n');
         lineBufferRef.current = parts.pop() ?? '';
@@ -1114,7 +1231,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         }
 
         if (displayLines.length > 0) {
-          pendingTextRef.current += displayLines.join('\n') + '\n';
+          const displayText = displayLines.join('\n') + '\n';
+          if (pendingTextRef.current.length + displayText.length > MAX_PENDING_ANSI_CHARS) flushBuffer();
+          pendingTextRef.current += displayText;
           scheduleFlush();
         }
 
@@ -1122,6 +1241,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           setLastSemanticAt(Date.now());
           setSteps(prev => [...prev, ...newSteps]);
         }
+        commitChunkSequence(e);
       } catch { /* ignore malformed chunk */ }
     });
 
@@ -1136,8 +1256,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     });
 
     es.addEventListener('done', () => {
+      receivedDone = true;
       markSseEvent();
       if (terminalModeRef.current !== 'pty') {
+        lineBufferRef.current += ansiDisplayDecoderRef.current.decode();
         if (flushTimerRef.current !== null) {
           clearTimeout(flushTimerRef.current);
           flushTimerRef.current = null;
@@ -1180,23 +1302,25 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     });
 
     es.onerror = () => {
-      // Don't close — EventSource auto-reconnects on transient errors.
-      // The server's 'done' event is the proper signal that the stream ended.
-      // Only mark done if the connection is permanently dead (readyState === CLOSED).
-      setSseState(es.readyState === EventSource.CLOSED ? 'closed' : 'error');
-      if (es.readyState === EventSource.CLOSED) {
-        setStreamDone(true);
-      }
+      // Recreate with the persisted cursor rather than relying only on browser
+      // Last-Event-ID behavior. This also covers a page refresh and proxies that
+      // discard SSE resume headers.
+      scheduleReconnect();
     };
 
     return () => {
+      disposed = true;
       es.close();
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       if (flushTimerRef.current !== null) {
         clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
       }
     };
-  }, [runId, ansiConverter, ansiConverterNoEscape, markSseEvent, ptyReady, rendererMode, scheduleFlush, workspaceId, writePtyChunk]);
+  }, [reconnectAttempt, runId, ansiConverter, ansiConverterNoEscape, flushBuffer, markSseEvent, ptyReady, rendererMode, scheduleFlush, workspaceId, writePtyChunk]);
 
   // Track scroll position for auto-scroll on raw <pre>
   const handlePreScroll = useCallback(() => {
@@ -1238,16 +1362,45 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const ptyFallbackHint = terminalMeta.ptyUnavailableHint?.trim();
   const streamEnded = streamDone || isTerminalRunStatus(runStatus);
   const sseRecentlyAlive = isRecentMs(lastSseAt, nowTick, 10_000);
+  const heartbeatMs = isoToMs(terminalMeta.ptyLastHeartbeatAt);
+  const heartbeatRecent = isRecentMs(heartbeatMs, nowTick, 10_000);
+  // PTY heartbeats are transport metadata, not output. A current heartbeat
+  // therefore keeps the connection Live even while the CLI is intentionally quiet.
+  const transportRecentlyAlive = sseRecentlyAlive || heartbeatRecent;
   const effectiveSseState: SseConnectionState = streamEnded
     ? 'closed'
-    : sseState === 'alive' && !sseRecentlyAlive
-      ? 'stale'
+    : sseState === 'alive' && !transportRecentlyAlive
+      ? 'reconnecting'
       : sseState;
   const lastPtyOutputMs = isoToMs(terminalMeta.ptyLastOutputAt) ?? lastPtyByteAt;
   const ptyBytesRecent = isRecentMs(lastPtyByteAt ?? lastPtyOutputMs, nowTick, 10_000);
+  const ptySilent = terminalMode === 'pty' && heartbeatRecent && !ptyBytesRecent && !streamEnded;
   const semanticRecent = isRecentMs(lastSemanticAt, nowTick, 10_000);
   const ptyProcessAlive = terminalMeta.ptyProcessAlive === true || (terminalMode === 'pty' && terminalMeta.ptySessionStatus === 'active' && !streamEnded);
   const resolvingEffectiveMode = terminalMeta.requestedTerminalMode === 'pty' && !runMetaResolved;
+  const connectionState: TerminalConnectionState = streamEnded
+    ? 'Ended'
+    : ptyFallbackActive || !ptyInputHealthy || ptyRenderBackpressure
+      ? 'Degraded'
+      : effectiveSseState === 'alive' || heartbeatRecent
+        ? 'Live'
+        : 'Reconnecting';
+  const connectionTone = connectionState === 'Live'
+    ? 'var(--success)'
+    : connectionState === 'Degraded' || connectionState === 'Reconnecting'
+      ? 'var(--warning)'
+      : 'var(--text-muted)';
+  const connectionTitle = connectionState === 'Live'
+    ? ptySilent
+      ? `PTY transport is connected; CLI has been silent since ${formatAge(lastPtyOutputMs, nowTick)}.`
+      : 'Durable output transport is connected.'
+    : connectionState === 'Reconnecting'
+      ? lastReceivedSequenceRef.current > 0
+        ? `Reconnecting from output sequence ${lastReceivedSequenceRef.current}.`
+        : 'Reconnecting from the bounded recent tail.'
+      : connectionState === 'Degraded'
+        ? 'The terminal remains usable with a reduced capability; inspect diagnostics for the exact signal.'
+        : 'The run or output stream has ended.';
   const ansiSurfaceKind = resolvedMode === 'semantic' ? 'Semantic transcript' : 'ANSI transcript';
   const surfaceLabel = resolvingEffectiveMode
     ? 'Checking PTY support'
@@ -1255,18 +1408,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       ? streamEnded
         ? 'PTY terminal replay'
         : !ptyInputHealthy
-          ? 'PTY live terminal • input issue'
-          : ptyFocused
-            ? 'PTY live terminal • focused'
-            : 'PTY live terminal • click to focus'
+          ? 'PTY terminal · input issue'
+          : ptySilent
+            ? `PTY terminal · CLI silent ${formatAge(lastPtyOutputMs, nowTick)}`
+            : ptyFocused
+              ? 'PTY terminal · focused'
+              : 'PTY terminal · click to focus'
       : ptyFallbackActive
-        ? `PTY unavailable — ANSI transcript • ${streamEnded ? 'replay' : 'live'}`
-        : `${ansiSurfaceKind} • ${streamEnded ? 'replay' : 'live'}`;
-  const surfaceTone = resolvingEffectiveMode
-    ? 'var(--text-muted)'
-    : terminalMode === 'pty'
-      ? streamEnded ? 'var(--text-muted)' : ptyInputHealthy ? 'var(--success)' : 'var(--warning)'
-      : ptyFallbackActive ? 'var(--warning)' : resolvedMode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)';
+        ? 'PTY unavailable · ANSI transcript'
+        : `${ansiSurfaceKind} · ${streamEnded ? 'replay' : 'stream'}`;
   const surfaceTitle = resolvingEffectiveMode
     ? 'Waiting for backend metadata before choosing full PTY attachment or ANSI fallback.'
     : terminalMode === 'pty'
@@ -1332,10 +1482,17 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         <span
           className="ml-1 text-[10px] px-1.5 py-0.5 rounded border font-medium"
           style={{
-            color: surfaceTone,
-            borderColor: surfaceTone,
+            color: connectionTone,
+            borderColor: connectionTone,
             background: 'color-mix(in srgb, currentColor 12%, transparent)',
           }}
+          title={connectionTitle}
+          aria-label={`Terminal connection: ${connectionState}. ${connectionTitle}`}
+        >
+          {connectionState}
+        </span>
+        <span
+          className="text-[10px] text-muted truncate"
           title={surfaceTitle}
         >
           {surfaceLabel}
@@ -1358,51 +1515,38 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         {modeHelpText}
       </div>
 
-      <div className="shrink-0 border-b border-border/60 bg-panel/50 px-3 py-1.5 flex flex-wrap items-center gap-1.5">
-        <HealthPill
-          label={`SSE ${effectiveSseState}`}
-          state={effectiveSseState === 'alive' ? 'ok' : effectiveSseState === 'connecting' || effectiveSseState === 'stale' ? 'warn' : streamEnded ? 'muted' : 'bad'}
-          title={`Backend SSE connection; last event ${formatAge(lastSseAt, nowTick)}.`}
-        />
-        {terminalMeta.requestedTerminalMode === 'pty' ? (
-          <>
-            <HealthPill
-              label={ptyProcessAlive ? 'PTY process alive' : terminalMeta.ptySessionStatus ? `PTY ${terminalMeta.ptySessionStatus}` : 'PTY pending'}
-              state={ptyProcessAlive ? 'ok' : streamEnded ? 'muted' : 'warn'}
-              title={`PTY session status: ${terminalMeta.ptySessionStatus ?? 'unknown'}. Heartbeat: ${formatAge(isoToMs(terminalMeta.ptyLastHeartbeatAt), nowTick)}.`}
-            />
-            <HealthPill
-              label={ptyBytesRecent ? 'PTY bytes recent' : `PTY bytes ${formatAge(lastPtyOutputMs, nowTick)}`}
-              state={ptyBytesRecent ? 'ok' : streamEnded ? 'muted' : 'warn'}
-              title={`Raw node-pty bytes received/persisted. Total bytes: ${terminalMeta.ptyTotalOutputBytes ?? 0}. Last byte: ${formatAge(lastPtyOutputMs, nowTick)}.`}
-            />
-            <HealthPill
-              label={terminalMeta.ptyCompletionFileSeen ? 'completion file seen' : 'completion file pending'}
-              state={terminalMeta.ptyCompletionFileSeen ? 'ok' : streamEnded ? 'muted' : 'warn'}
-              title={`Primary agent-turn signal. ${terminalMeta.ptyCompletionFileError ? `Last file diagnostic: ${terminalMeta.ptyCompletionFileError}. ` : ''}Story pass still requires process exit, merge, and validation. Seen: ${formatAge(isoToMs(terminalMeta.ptyCompletionFileSeenAt), nowTick)}.`}
-            />
-            <HealthPill
-              label={terminalMeta.ptyCompletionMarkerSeen ? 'terminal marker corroborated' : 'terminal marker pending'}
-              state={terminalMeta.ptyCompletionMarkerSeen ? 'ok' : streamEnded ? 'muted' : 'warn'}
-              title={`Corroborating-only terminal signal; it cannot complete a story. Seen: ${formatAge(isoToMs(terminalMeta.ptyCompletionMarkerSeenAt), nowTick)}.`}
-            />
-            <HealthPill
-              label={terminalMeta.ptyPromptReadinessStatus ?? 'readiness pending'}
-              state={terminalMeta.ptyPromptReadinessStatus === 'ready' || terminalMeta.ptyPromptReadinessStatus === 'injected' ? 'ok' : terminalMeta.ptyPromptReadinessStatus === 'timeout_fallback' ? 'warn' : 'muted'}
-              title={`CLI prompt readiness: ${terminalMeta.ptyPromptReadinessReason ?? 'awaiting CLI output'}.`}
-            />
-          </>
-        ) : null}
-        <HealthPill
-          label={semanticRecent ? 'semantic recent' : `semantic ${formatAge(lastSemanticAt, nowTick)}`}
-          state={semanticRecent ? 'ok' : terminalMode === 'pty' ? 'muted' : streamEnded ? 'muted' : 'warn'}
-          title={terminalMode === 'pty' ? 'Semantic events are best-effort in PTY mode; raw PTY bytes are the activity source of truth.' : `Last semantic event ${formatAge(lastSemanticAt, nowTick)}.`}
-        />
-      </div>
+      <details className="shrink-0 border-b border-border/60 bg-panel/50 px-3 py-1.5 text-[11px] text-muted">
+        <summary className="cursor-pointer select-none">Connection diagnostics</summary>
+        <dl className="mt-1 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 leading-snug">
+          <dt>SSE transport</dt>
+          <dd>{effectiveSseState}; last event {formatAge(lastSseAt, nowTick)}.</dd>
+          <dt>Resume cursor</dt>
+          <dd>{lastReceivedSequenceRef.current > 0 ? `after sequence ${lastReceivedSequenceRef.current}` : 'none — bounded recent-tail replay on this fresh terminal.'}</dd>
+          {terminalMeta.requestedTerminalMode === 'pty' ? (
+            <>
+              <dt>PTY process</dt>
+              <dd>{ptyProcessAlive ? 'alive' : terminalMeta.ptySessionStatus ?? 'pending'}; heartbeat {formatAge(heartbeatMs, nowTick)}.</dd>
+              <dt>Raw PTY bytes</dt>
+              <dd>{ptyBytesRecent ? 'recent' : `last byte ${formatAge(lastPtyOutputMs, nowTick)}`}; {terminalMeta.ptyTotalOutputBytes ?? 0} total bytes.</dd>
+              <dt>Completion file</dt>
+              <dd>{terminalMeta.ptyCompletionFileSeen ? `seen ${formatAge(isoToMs(terminalMeta.ptyCompletionFileSeenAt), nowTick)}` : 'not seen'}; primary turn-completion evidence only, never story pass/fail.{terminalMeta.ptyCompletionFileError ? ` Last file diagnostic: ${terminalMeta.ptyCompletionFileError}.` : ''}</dd>
+              <dt>Terminal marker</dt>
+              <dd>{terminalMeta.ptyCompletionMarkerSeen ? `seen ${formatAge(isoToMs(terminalMeta.ptyCompletionMarkerSeenAt), nowTick)}` : 'not seen'}; corroborating only, never story pass/fail.</dd>
+              <dt>Prompt readiness</dt>
+              <dd>{terminalMeta.ptyPromptReadinessStatus ?? 'pending'}; {terminalMeta.ptyPromptReadinessReason ?? 'awaiting CLI output'}.</dd>
+            </>
+          ) : null}
+          <dt>Semantic events</dt>
+          <dd>{terminalMode === 'pty' ? 'best-effort; raw PTY bytes are authoritative.' : `${semanticRecent ? 'recent' : 'last event ' + formatAge(lastSemanticAt, nowTick)}.`}</dd>
+          {ptyRenderBackpressure ? (
+            <><dt>Renderer</dt><dd>Output was paused and will resume from the durable cursor after xterm catches up.</dd></>
+          ) : null}
+        </dl>
+      </details>
 
       {replayTruncatedFrom !== null && (
-        <div className="shrink-0 border-b border-border bg-[var(--bg)] px-3 py-1.5 text-[11px] text-muted" role="status">
-          Showing a bounded recent replay from output sequence {replayTruncatedFrom}. Live output and reconnect resume remain lossless.
+        <div className="shrink-0 border-b border-warning/30 bg-warning/10 px-3 py-1.5 text-[11px] text-warning" role="status">
+          Earlier output is not loaded in this fresh terminal. Showing the bounded recent replay from output sequence {replayTruncatedFrom}; reconnects resume after the received cursor.
         </div>
       )}
 
