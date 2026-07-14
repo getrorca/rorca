@@ -1345,7 +1345,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.agentType).toBe('unknown');
     expect(res.body.agentModel).toBeNull();
     expect(res.body.terminalMode).toBe('ansi-html');
-    expect(res.body.lifecyclePhase).toBe('done');
+    expect(res.body.lifecyclePhase).toBe('finished');
+    expect(res.body.lifecycleStatus).toBe('finished');
     expect(res.body.run.agentType).toBe('unknown');
     expect(res.body.run.terminalMode).toBe('ansi-html');
   });

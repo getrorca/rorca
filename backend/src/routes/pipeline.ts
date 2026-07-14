@@ -1210,11 +1210,11 @@ function normalizePipelineRun<T extends PipelineRunRow>(run: T): CanonicalPipeli
     agent_type: metadata.agentType,
     agent_model: metadata.agentModel,
     terminal_mode: metadata.terminalMode,
+    ...metadata,
     lifecycle_status: lifecycleStatus,
     lifecycleStatus,
     lifecyclePhase: lifecycleStatus,
     lifecycle_phase: lifecycleStatus,
-    ...metadata,
   };
 }
 
@@ -2215,7 +2215,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       lifecycle_status: 'queued',
       lifecyclePhase: 'queued',
       lifecycle_phase: 'queued',
-      ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {})
+      ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),

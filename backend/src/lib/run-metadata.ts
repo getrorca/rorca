@@ -44,6 +44,7 @@ export interface CanonicalRunMetadata {
   agentModel: string | null;
   terminalMode: TerminalMode;
   lifecyclePhase: RunLifecyclePhase | null;
+  lifecycleStatus: RunLifecyclePhase | null;
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -59,20 +60,28 @@ export function normalizeRunAgentType(value: unknown): NormalizedRunAgentType {
 
 function normalizeLifecyclePhase(value: unknown): RunLifecyclePhase | null {
   const normalized = nonEmptyString(value)?.toLowerCase();
-  return normalized && (RUN_LIFECYCLE_PHASES as readonly string[]).includes(normalized)
-    ? normalized as RunLifecyclePhase
-    : null;
+  if (normalized && (RUN_LIFECYCLE_PHASES as readonly string[]).includes(normalized)) {
+    return normalized as RunLifecyclePhase;
+  }
+  // Pre-v2 rows persist only the legacy result/status vocabulary.
+  switch (normalized) {
+    case 'done': return 'finished';
+    case 'partial_failure': return 'failed';
+    default: return null;
+  }
 }
 
 export function normalizeRunMetadata(source: RunMetadataSource): CanonicalRunMetadata {
   const rawAgent = nonEmptyString(source.agent_type) ?? nonEmptyString(source.agent);
+  // lifecycle_status is authoritative. Legacy status is normalized only for
+  // historical rows; frontend transport/WAL must never infer this phase.
+  const lifecycleStatus = normalizeLifecyclePhase(source.lifecycle_status ?? source.lifecycle_phase)
+    ?? normalizeLifecyclePhase(source.status);
   return {
     agentType: normalizeRunAgentType(rawAgent),
     agentModel: nonEmptyString(source.agent_model),
     terminalMode: normalizeTerminalMode(nonEmptyString(source.terminal_mode)),
-    // lifecycle_status is authoritative. Legacy status is only normalized for
-    // pre-v2 rows; frontend transport/WAL must never infer this phase.
-    lifecyclePhase: normalizeLifecyclePhase(source.lifecycle_status ?? source.lifecycle_phase)
-      ?? normalizeLifecyclePhase(source.status),
+    lifecyclePhase: lifecycleStatus,
+    lifecycleStatus,
   };
 }

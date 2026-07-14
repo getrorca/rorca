@@ -12,7 +12,8 @@ describe('normalizeRunMetadata', () => {
       agentType: 'unknown',
       agentModel: null,
       terminalMode: 'ansi-html',
-      lifecyclePhase: 'done',
+      lifecyclePhase: 'finished',
+      lifecycleStatus: 'finished',
     });
   });
 
@@ -27,15 +28,16 @@ describe('normalizeRunMetadata', () => {
       agentModel: 'openai-codex/gpt-5.6-terra',
       terminalMode: 'pty',
       lifecyclePhase: 'running',
+      lifecycleStatus: 'running',
     });
   });
 
-  it('prefers a supplied authoritative lifecycle phase over the row status', () => {
+  it('prefers the canonical lifecycle status over legacy status', () => {
     expect(normalizeRunMetadata({
       agent_type: 'codex',
-      lifecycle_phase: 'paused',
+      lifecycle_status: 'pty_attached',
       status: 'running',
-    }).lifecyclePhase).toBe('paused');
+    }).lifecyclePhase).toBe('pty_attached');
   });
 
   it('only falls back to the legacy agent column when agent_type is absent', () => {

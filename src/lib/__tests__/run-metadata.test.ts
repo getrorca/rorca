@@ -14,7 +14,8 @@ describe('run metadata normalization', () => {
       agentType: 'unknown',
       agentModel: null,
       terminalMode: 'pty',
-      lifecyclePhase: 'done',
+      lifecyclePhase: 'finished',
+      lifecycleStatus: 'finished',
     });
   });
 
@@ -29,11 +30,11 @@ describe('run metadata normalization', () => {
     });
   });
 
-  it('uses an authoritative lifecycle phase instead of guessing from stale status', () => {
+  it('uses the backend lifecycle status instead of guessing from stale status', () => {
     expect(normalizePipelineRun({
       status: 'running',
-      lifecycle_phase: 'paused',
-    }).lifecyclePhase).toBe('paused');
+      lifecycle_status: 'pty_attached',
+    }).lifecycleStatus).toBe('pty_attached');
   });
 
   it('renders unavailable interactive telemetry honestly and retains real zeroes', () => {
