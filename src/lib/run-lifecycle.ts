@@ -37,17 +37,13 @@ export function applyRunLifecycleEvent(current: RunLifecycleStatus, event: Lifec
 }
 
 /**
- * Start with the backend's authoritative lifecycle phase when it is present.
- * For legacy DTOs, status is normalized once here; WAL events then provide the
- * live overlay. No card or panel should infer run success from story events.
+ * Normalize the backend-owned lifecycle. The optional event parameter remains
+ * for source compatibility, but is intentionally ignored: browser WAL/output
+ * can request a refresh, never advance a primary run phase.
  */
 export function resolveRunLifecyclePhase(
   run: Pick<RunMetadataSource, 'lifecycleStatus' | 'lifecycle_status' | 'lifecyclePhase' | 'lifecycle_phase' | 'status'>,
-  events: LifecycleEvent[] = [],
+  _events: LifecycleEvent[] = [],
 ): RunLifecycleStatus {
-  let phase: RunLifecycleStatus = normalizeRunLifecyclePhase(run);
-  for (const event of events) {
-    phase = applyRunLifecycleEvent(phase, event);
-  }
-  return phase;
+  return normalizeRunLifecyclePhase(run);
 }

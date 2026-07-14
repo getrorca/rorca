@@ -107,10 +107,15 @@ const options: swaggerJsdoc.Options = {
             agentType: { type: 'string', enum: ['claude', 'opencode', 'codex', 'pi', 'unknown'] },
             agentModel: { type: 'string', nullable: true },
             terminalMode: { type: 'string', enum: ['ansi-html', 'pty'] },
+            lifecycleStatus: {
+              type: 'string',
+              enum: ['queued', 'starting', 'pty_attached', 'running', 'validating', 'finished', 'failed', 'cancelled'],
+            },
+            // Compatibility alias for clients that adopted metadata v1 first.
             lifecyclePhase: {
               type: 'string',
               nullable: true,
-              enum: ['queued', 'running', 'paused', 'blocked', 'done', 'failed', 'partial_failure', 'cancelled'],
+              enum: ['queued', 'starting', 'pty_attached', 'running', 'validating', 'finished', 'failed', 'cancelled'],
             },
           },
         },

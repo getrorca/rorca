@@ -24,14 +24,14 @@ describe('applyRunLifecycleEvent', () => {
     })).toBe('done');
   });
 
-  it('prefers the authoritative backend lifecycle phase over a stale status', () => {
-    expect(resolveRunLifecyclePhase({ status: 'running', lifecyclePhase: 'paused' })).toBe('paused');
+  it('prefers the canonical backend lifecycle status over a stale legacy status', () => {
+    expect(resolveRunLifecyclePhase({ status: 'running', lifecycleStatus: 'pty_attached' })).toBe('pty_attached');
   });
 
-  it('uses the centralized status fallback, then applies newer WAL lifecycle events', () => {
+  it('does not let browser WAL events override the backend lifecycle', () => {
     expect(resolveRunLifecyclePhase(
-      { status: 'running' },
+      { status: 'running', lifecycleStatus: 'running' },
       [{ event_type: 'run_finished', payload: { status: 'partial_failure' } }],
-    )).toBe('partial_failure');
+    )).toBe('running');
   });
 });

@@ -16,7 +16,6 @@ import { usePipelineRuns, type PipelineRun } from '../hooks/usePipelineRuns';
 import { useWalSSE } from '../hooks/useWalSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
-import { resolveRunLifecyclePhase } from '../lib/run-lifecycle';
 import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
 import SpecPickerModal from '../components/SpecPickerModal';
 import AgentBadge from '../components/AgentBadge';
@@ -211,8 +210,9 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
 
   const { show: showGlobalToast } = useGlobalToast();
 
-  // SSE for live updates on the active run
-  const activeRun = runs.find(r => r.status === 'running' || r.status === 'paused');
+  // Lifecycle is backend-owned; select active work from that persisted phase,
+  // never from terminal output or browser-side WAL ordering.
+  const activeRun = runs.find((run) => ['starting', 'pty_attached', 'running', 'validating'].includes(run.lifecycleStatus ?? run.lifecyclePhase ?? ''));
   const sseEvents = usePipelineSSE(activeRun ? String(activeRun.id) : null, workspaceId);
 
   // Derive story progress from SSE for the active run
@@ -230,10 +230,8 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
     return { passed: passed.size, failed: failed.size, total: all.size };
   })();
 
-  // Update active run status from SSE lifecycle events
-  const activeRunStatus = activeRun
-    ? resolveRunLifecyclePhase(activeRun, sseEvents)
-    : null;
+  // WAL still refreshes the canonical API row but cannot author a lifecycle.
+  const activeRunStatus = activeRun?.lifecycleStatus ?? activeRun?.lifecyclePhase ?? null;
 
   // Re-fetch runs via shared hook when SSE delivers lifecycle events
   useEffect(() => {

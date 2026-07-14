@@ -106,6 +106,8 @@ export interface StoryComment {
 // ─── Pipeline types ───────────────────────────────────────────────────────────
 
 export type RunStatus = 'queued' | 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
+/** Backend-owned phase contract; `status` remains compatibility/result state. */
+export type RunLifecycleStatus = 'queued' | 'starting' | 'pty_attached' | 'running' | 'validating' | 'finished' | 'failed' | 'cancelled' | 'unknown';
 export type RunAgentType = 'claude' | 'opencode' | 'codex' | 'pi' | 'unknown';
 export type RunTerminalMode = 'ansi-html' | 'pty';
 
@@ -124,11 +126,14 @@ export interface PipelineRun {
   agentType?: RunAgentType;
   agentModel?: string | null;
   terminalMode?: RunTerminalMode;
-  lifecyclePhase?: RunStatus | 'unknown';
+  /** Authoritative lifecycle phase. Never infer this from browser SSE/WAL. */
+  lifecycleStatus?: RunLifecycleStatus;
+  lifecyclePhase?: RunLifecycleStatus;
   /** Legacy backend aliases retained while clients migrate. */
   agent_type?: string | null;
   agent_model?: string | null;
-  lifecycle_phase?: RunStatus | null;
+  lifecycle_status?: RunLifecycleStatus | null;
+  lifecycle_phase?: RunLifecycleStatus | null;
   parallelism?: number;
   branch_name?: string | null;
   worktree_path?: string | null;
