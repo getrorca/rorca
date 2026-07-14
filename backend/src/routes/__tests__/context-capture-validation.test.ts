@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ValidationError } from '../../lib/errors';
+import { ContextCaptureEventJobPayload } from '../../lib/pg-boss-schemas';
 import { normalizeContextEventPayload } from '../context-capture';
 
 const baseInput = {
@@ -46,6 +47,37 @@ describe('context-capture route validation helpers', () => {
     expect(payload.idempotency_key).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(payload.provenance.capture_source).toBe('shellIntegration');
     expect(payload.trust_tier).toBe('local');
+  });
+
+  test('accepts canonical safety diagnostics from daemon and shell clients', () => {
+    const payload = normalizeContextEventPayload({
+      ...baseInput,
+      source: 'repoDaemon',
+      payload: {
+        eventType: 'git_commit',
+        source_system: 'daemon',
+        tool_name: 'rorca-capture-daemon',
+        git_sha: 'c'.repeat(40),
+      },
+    });
+
+    expect(ContextCaptureEventJobPayload.safeParse({
+      workspaceId: 'rorca',
+      source: 'repoDaemon',
+      occurredAt: baseInput.occurredAt,
+      payload,
+      safety: {
+        contextSafetyModule: 'backend/src/lib/context-safety.ts',
+        policyVersion: '2026-07-ucc-007',
+        redactionCount: 1,
+        ignoredPathCount: 0,
+        truncated: false,
+        hashAlgorithm: 'sha256',
+        contentHash: 'a'.repeat(64),
+        redactionTypes: ['api_key'],
+        regulatedSignals: ['possible_credit_card'],
+      },
+    }).success).toBe(true);
   });
 
   test('preserves agent adapter source metadata for remember events', () => {

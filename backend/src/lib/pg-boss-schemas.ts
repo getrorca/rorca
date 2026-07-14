@@ -329,6 +329,10 @@ export const ContextCaptureEventJobPayload = z.object({
     truncated: z.boolean(),
     hashAlgorithm: z.literal('sha256'),
     contentHash: z.string().min(16),
+    // Diagnostics are names/counts only (never matched values) and are emitted
+    // by the canonical context-safety module used by daemon and shell clients.
+    redactionTypes: z.array(z.string()).optional(),
+    regulatedSignals: z.array(z.string()).optional(),
   }).strict(),
 }).strict();
 
