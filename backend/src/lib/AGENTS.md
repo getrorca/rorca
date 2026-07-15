@@ -117,7 +117,7 @@ Creates directories if missing. Overwrites if exists (used on regenerate).
 Planned canonical execution engine — replaces the legacy bash runner entirely. Built by `rorca-opencode-integration` spec.
 
 **Responsibilities**:
-- Per-story process spawning (`claude --print`, `opencode run`, or `codex --approval-mode auto-edit`) based on `RORCA_AGENT` env var
+- Per-story process spawning (`claude --print`, `opencode run`, or `codex exec`) based on `RORCA_AGENT` env var; PTY-only flags are capability-probed at launch
 - Strips 4 Claude Code env vars before spawning nested processes
 - Selective retry: skip already-passed stories on re-run
 - WAL events emitted: `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `run_blocked`, `story_escalated`

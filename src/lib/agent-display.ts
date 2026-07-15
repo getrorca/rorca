@@ -1,17 +1,19 @@
-export type AgentTypeName = 'claude' | 'opencode' | 'codex' | 'pi' | 'unknown';
+import { normalizeAgentType, type AgentTypeName } from './run-metadata';
 
-export function normalizeAgentType(agentType?: string | null): AgentTypeName {
-  const value = (agentType ?? '').trim().toLowerCase();
-  if (value === 'claude' || value === 'opencode' || value === 'codex' || value === 'pi') {
-    return value;
-  }
-  return 'unknown';
-}
+export type { AgentTypeName } from './run-metadata';
+export { normalizeAgentType } from './run-metadata';
 
 function shortModelName(agentModel?: string | null): string | null {
   const trimmed = agentModel?.trim();
   if (!trimmed) return null;
   return trimmed.split('/').pop() || trimmed;
+}
+
+/** Human-readable persisted model name without assuming a provider or tier. */
+export function getAgentModelLabel(agentModel?: string | null): string | null {
+  const short = shortModelName(agentModel);
+  if (!short) return null;
+  return short.toLowerCase().includes('terra') ? 'Terra' : short;
 }
 
 export function getAgentBadgeLabel(
@@ -26,13 +28,15 @@ export function getAgentBadgeLabel(
     case 'claude':
       return 'Claude';
     case 'opencode':
-      return showOpenCodeModel ? (shortModelName(agentModel) ?? 'OpenCode') : 'OpenCode';
+      return showOpenCodeModel ? (getAgentModelLabel(agentModel) ?? 'OpenCode') : 'OpenCode';
     case 'codex':
       return 'Codex';
-    case 'pi':
-      return 'Pi';
+    case 'pi': {
+      const model = getAgentModelLabel(agentModel);
+      return model ? `Pi/${model}` : 'Pi';
+    }
     default:
-      return shortModelName(agentModel) ?? 'Claude';
+      return getAgentModelLabel(agentModel) ?? 'Unknown';
   }
 }
 

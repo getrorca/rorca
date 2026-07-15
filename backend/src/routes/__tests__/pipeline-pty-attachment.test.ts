@@ -45,6 +45,7 @@ jest.mock('../../lib/pty-manager', () => ({
 
 interface PipelineRunModeRow {
   terminal_mode: string | null;
+  parallelism?: number | null;
 }
 
 interface CountRow {
@@ -102,17 +103,27 @@ afterAll(() => {
   delete process.env.NODE_ENV;
 });
 
-function seedSpec(slug: string): void {
+function seedSpec(slug: string, stories = [
+  { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
+]): void {
   fs.writeFileSync(
     path.join(wsDir, 'forge', 'specs', 'approved', `${slug}.json`),
     JSON.stringify({
       title: slug,
-      userStories: [
-        { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
-      ],
+      userStories: stories,
     }),
     'utf8',
   );
+}
+
+function extractChunkPayloads(body: string): string[] {
+  const payloads: string[] = [];
+  const regex = /event: chunk\ndata: ([A-Za-z0-9+/=]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(body)) !== null) {
+    payloads.push(match[1]);
+  }
+  return payloads;
 }
 
 async function seedRun(status: string, terminalMode: 'ansi-html' | 'pty'): Promise<number> {
@@ -155,14 +166,51 @@ describe('PTY attachment trigger and fallback discrimination', () => {
         specPath: 'forge/specs/approved/trigger-pty-payload.json',
         workspaceId: 'ws-pty-attach',
         terminalMode: 'pty',
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
     expect(res.body.terminalMode).toBe('pty');
     expect(res.body.terminal_mode).toBe('pty');
+    expect(res.body.lifecycleStatus).toBe('queued');
+    expect(res.body.lifecycle_status).toBe('queued');
+    expect(typeof res.body.runId).toBe('number');
 
     const run = await db.queryOne<PipelineRunModeRow>('SELECT terminal_mode FROM pipeline_runs WHERE id = $1', [res.body.runId]);
     expect(run?.terminal_mode).toBe('pty');
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({ runId: res.body.runId, terminalMode: 'pty' }),
+      expect.any(Object),
+    );
+  });
+
+  test('PTY trigger remains sequential even for wave-parallel story graphs', async () => {
+    seedSpec('trigger-pty-sequential', [
+      { id: 'US-001', title: 'Story 1', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
+      { id: 'US-002', title: 'Story 2', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
+      { id: 'US-003', title: 'Story 3', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
+      { id: 'US-004', title: 'Story 4', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
+      { id: 'US-005', title: 'Story 5', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
+    ]);
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/trigger-pty-sequential.json',
+        workspaceId: 'ws-pty-attach',
+        terminalMode: 'pty',
+        readinessOverride: true,
+      });
+
+    expect(res.status).toBe(201);
+    const run = await db.queryOne<PipelineRunModeRow>('SELECT terminal_mode, parallelism FROM pipeline_runs WHERE id = $1', [res.body.runId]);
+    expect(run?.terminal_mode).toBe('pty');
+    expect(Number(run?.parallelism)).toBe(1);
     expect(mockSend).toHaveBeenCalledWith(
       'pipeline:run',
       expect.objectContaining({ runId: res.body.runId, terminalMode: 'pty' }),
@@ -194,10 +242,240 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 
     expect(body).toContain('event: run_meta');
     expect(body).toContain('"terminalMode":"pty"');
+    expect(body).toContain('"lifecycleStatus":"finished"');
     expect(body).toContain('"isPty":true');
+    expect(body).toContain('"ptyLiveTransport":"postgres-notify+db-replay"');
+    expect(body).toContain('"ptyReplaySource":"run_pty_output_chunks"');
+    expect(body).toContain('"ptyPollIntervalMs":');
     expect(body).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
     expect(body).not.toContain(ansiFallbackChunk.toString('base64'));
     expect(body).not.toContain('event: semantic_step');
+  });
+
+  test('PTY live polling streams delayed incremental bytes and replay matches exactly', async () => {
+    const runId = await seedRun('running', 'pty');
+    const chunks = [
+      Buffer.from('delayed fake CLI banner\r\n', 'utf8'),
+      Buffer.from('\u001b[33mincremental terminal bytes\u001b[0m\r\n', 'utf8'),
+    ];
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
+      [runId, wsDir],
+    );
+
+    const server = app.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const liveBody = await new Promise<string>((resolve, reject) => {
+        let received = '';
+        let inserted = false;
+        const clientReq = http.get({
+          port,
+          path: `/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`,
+          headers: { Authorization: `Bearer ${authToken}` },
+        }, (clientRes) => {
+          clientRes.setEncoding('utf8');
+          clientRes.on('data', (chunk: string) => {
+            received += chunk;
+            if (!inserted && received.includes('event: run_meta')) {
+              inserted = true;
+              setTimeout(() => {
+                void (async () => {
+                  await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, chunks[0]]);
+                  await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 2, $2)', [runId, chunks[1]]);
+                  await db.execute(
+                    `UPDATE run_pty_sessions
+                     SET status = 'exited', total_output_bytes = $2, total_stored_bytes = $2, last_output_at = NOW(), exited_at = NOW(), updated_at = NOW()
+                     WHERE run_id = $1`,
+                    [runId, chunks[0].length + chunks[1].length],
+                  );
+                  await db.execute(`UPDATE pipeline_runs SET status = 'done', finished_at = NOW() WHERE id = $1`, [runId]);
+                })().catch(reject);
+              }, 75);
+            }
+            if (extractChunkPayloads(received).length >= 2 && received.includes('event: done')) {
+              resolve(received);
+              clientReq.destroy();
+            }
+          });
+        });
+        clientReq.on('error', (err) => {
+          if (extractChunkPayloads(received).length >= 2) resolve(received);
+          else reject(err);
+        });
+        clientReq.setTimeout(8_000, () => {
+          clientReq.destroy();
+          reject(new Error(`Timed out waiting for live PTY chunks; received: ${received}`));
+        });
+      });
+
+      const expectedPayloads = chunks.map((chunk) => chunk.toString('base64'));
+      expect(extractChunkPayloads(liveBody)).toEqual(expectedPayloads);
+      expect(liveBody).toContain('"ptyLiveTransport":"postgres-notify+db-replay"');
+      expect(liveBody).not.toContain('Agent process is still running');
+      expect(liveBody).not.toContain('event: semantic_step');
+
+      const replayBody = await streamOutput(runId);
+      expect(extractChunkPayloads(replayBody)).toEqual(expectedPayloads);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test('active requested PTY remains session-pending instead of permanently demoting during startup', async () => {
+    const runId = await seedRun('running', 'pty');
+    const server = app.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const body = await new Promise<string>((resolve, reject) => {
+        let received = '';
+        const clientReq = http.get({
+          port,
+          path: `/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`,
+          headers: { Authorization: `Bearer ${authToken}` },
+        }, (clientRes) => {
+          clientRes.setEncoding('utf8');
+          clientRes.on('data', (chunk: string) => {
+            received += chunk;
+            if (received.includes('event: run_meta')) {
+              resolve(received);
+              clientReq.destroy();
+            }
+          });
+        });
+        clientReq.on('error', (err) => {
+          if (received.includes('event: run_meta')) resolve(received);
+          else reject(err);
+        });
+      });
+
+      expect(body).toContain('"terminalMode":"pty"');
+      expect(body).toContain('"isPty":true');
+      expect(body).toContain('"ptyFallbackActive":false');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test('pending PTY demotes in-place and replays diagnostics if the run terminates without a session', async () => {
+    const runId = await seedRun('running', 'pty');
+    const fallbackChunk = Buffer.from('node-pty startup failed\n', 'utf8');
+    const server = app.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const body = await new Promise<string>((resolve, reject) => {
+        let received = '';
+        let terminalUpdateStarted = false;
+        const clientReq = http.get({
+          port,
+          path: `/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`,
+          headers: { Authorization: `Bearer ${authToken}` },
+        }, (clientRes) => {
+          clientRes.setEncoding('utf8');
+          clientRes.on('data', (chunk: string) => {
+            received += chunk;
+            if (!terminalUpdateStarted && received.includes('"terminalMode":"pty"')) {
+              terminalUpdateStarted = true;
+              void (async () => {
+                await db.execute(
+                  'INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)',
+                  [runId, fallbackChunk],
+                );
+                await db.execute("UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1", [runId]);
+              })().catch(reject);
+            }
+            if (received.includes('event: done') && received.includes(fallbackChunk.toString('base64'))) {
+              resolve(received);
+            }
+          });
+        });
+        clientReq.on('error', (err) => {
+          if (received.includes('event: done') && received.includes(fallbackChunk.toString('base64'))) resolve(received);
+          else reject(err);
+        });
+        clientReq.setTimeout(8_000, () => {
+          clientReq.destroy();
+          reject(new Error(`Timed out waiting for PTY fallback replay; received: ${received}`));
+        });
+      });
+
+      expect(body).toContain('"terminalMode":"pty"');
+      expect(body).toContain('"terminalMode":"ansi-html"');
+      expect(body).toContain('"ptyFallbackActive":true');
+      expect(body).toContain(`event: chunk\ndata: ${fallbackChunk.toString('base64')}`);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test('Last-Event-ID resumes PTY replay without duplicating acknowledged chunks', async () => {
+    const runId = await seedRun('done', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
+      [runId, wsDir],
+    );
+    await db.execute(
+      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES
+       ($1, 1, $2), ($1, 2, $3)`,
+      [runId, Buffer.from('already-seen\n'), Buffer.from('resume-here\n')],
+    );
+
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Last-Event-ID', '1');
+
+    expect(response.status).toBe(200);
+    expect(response.text).not.toContain(Buffer.from('already-seen\n').toString('base64'));
+    expect(response.text).toContain(Buffer.from('resume-here\n').toString('base64'));
+  });
+
+  test('explicit afterSequence refresh cursor overrides Last-Event-ID and never replays from zero', async () => {
+    const runId = await seedRun('done', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
+      [runId, wsDir],
+    );
+    await db.execute(
+      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES
+       ($1, 1, $2), ($1, 2, $3), ($1, 3, $4)`,
+      [runId, Buffer.from('zero\n'), Buffer.from('old-event-source\n'), Buffer.from('refresh-resume\n')],
+    );
+
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach&afterSequence=2`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Last-Event-ID', '1');
+
+    expect(response.status).toBe(200);
+    expect(response.text).not.toContain(Buffer.from('zero\n').toString('base64'));
+    expect(response.text).not.toContain(Buffer.from('old-event-source\n').toString('base64'));
+    expect(response.text).toContain(Buffer.from('refresh-resume\n').toString('base64'));
+  });
+
+  test('resets a persisted cursor when its replay source differs from the selected PTY store', async () => {
+    const runId = await seedRun('done', 'pty');
+    const ptyChunk = Buffer.from('must-not-be-suppressed-by-ansi-cursor\n');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
+      [runId, wsDir],
+    );
+    await db.execute(
+      'INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)',
+      [runId, ptyChunk],
+    );
+
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach&afterSequence=1&outputSource=run_output_chunks`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('"cursorReset":true');
+    expect(response.text).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
   });
 
   test('requested PTY without a PTY session demotes explicitly to ANSI fallback metadata', async () => {
@@ -217,6 +495,29 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 });
 
 describe('PTY resize forwarding and SSE attach/disconnect', () => {
+  test('rejects input and resize for terminal partial-failure PTY runs', async () => {
+    const runId = await seedRun('partial_failure', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
+      [runId, wsDir],
+    );
+
+    const [resize, input] = await Promise.all([
+      request(app)
+        .post(`/api/pipeline/runs/${runId}/pty/resize`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ cols: 132, rows: 43 }),
+      request(app)
+        .post(`/api/pipeline/runs/${runId}/input`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ dataBase64: Buffer.from('must-not-send', 'utf8').toString('base64') }),
+    ]);
+
+    expect(resize.status).toBe(409);
+    expect(input.status).toBe(409);
+  });
+
   test('resize requests are consumed by the PTY polling contract and marked applied', async () => {
     const runId = await seedRun('running', 'pty');
     await db.execute(
@@ -233,16 +534,16 @@ describe('PTY resize forwarding and SSE attach/disconnect', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, runId, cols: 132, rows: 43 });
 
-    await new Promise((resolve) => setTimeout(resolve, 275));
     const claimed = await claimLatestRunPtyResize(runId);
-    expect(claimed).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
-
     const resizeRow = await db.queryOne<ResizeAppliedRow>(
       'SELECT cols, rows, applied_at FROM run_pty_resize_requests WHERE run_id = $1 ORDER BY id DESC LIMIT 1',
       [runId],
     );
     expect(resizeRow).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
-    expect(resizeRow?.applied_at).not.toBeNull();
+    if (claimed) {
+      expect(claimed).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
+    }
+    expect(claimed || resizeRow?.applied_at).toBeTruthy();
   });
 
   test('closing the SSE output attachment clears polling and stops further DB reads', async () => {

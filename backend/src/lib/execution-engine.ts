@@ -13,7 +13,7 @@
  * uses interactive node-pty adapters and bracketed-paste prompt injection.
  *   - claude:   semantic `claude --print ...`; PTY interactive `claude ...`
  *   - opencode: semantic `opencode run --format json ...`; PTY interactive `opencode ...`
- *   - codex:    semantic `codex exec ...`; PTY interactive `codex --approval-mode auto-edit`
+ *   - codex:    semantic `codex exec ...`; PTY interactive flags verified from `codex --help`
  *   - pi:       semantic Pi RPC; PTY interactive `pi --mode text ...`
  *
  * Agent type is read from config (RORCA_AGENT env var via config.ts, default: claude).
@@ -49,12 +49,15 @@ import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import {
   buildPtyCompletionMarker,
   buildPtyMarkerFilePath,
+  DEFAULT_PTY_READINESS_TIMEOUT_MS,
   createBaseInteractivePtyAdapter,
   createPtyCompletionState,
+  createPtyReadinessState,
   injectPromptWithChunkedTyping,
   type InteractivePtyAgentAdapter,
   type PtyCompletionState,
   type PtyLaunchCommand,
+  type PtyReadinessState,
 } from './interactive-pty-agent-adapter';
 import {
   PTY_AVAILABLE,
@@ -64,19 +67,28 @@ import {
   shutdownPtyProcess,
 } from './pty-manager';
 import {
-  appendRunPtyOutput,
   claimLatestRunPtyResize,
+  createRunPtyOutputBatcher,
   claimPendingRunPtyInput,
   completeRunPtySession,
   initializeRunPtySequence,
   logRunPtyStoreError,
+  markRunPtyCompletionFileSeen,
   markRunPtyCompletionMarkerSeen,
+  recordRunPtyCompletionFileError,
   recordRunPtyHeartbeat,
+  recordRunPtyPromptReadiness,
   startRunPtySession,
 } from './run-pty-store';
+import { transitionRunLifecycle } from './run-lifecycle';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
+import {
+  assertPtyCliCompatible,
+  type PtyCliCapability,
+  type PtyCliCompatibility,
+} from './pty-cli-compat';
 import {
   buildPiProgressLogPath,
   buildPiServerSkillFiles,
@@ -235,6 +247,8 @@ interface EngineConfig {
   jsonPath: string;
   cwd: string;
   runId: number;
+  /** Canonical workspace identity supplied by the worker; avoids an HTTP startup dependency. */
+  workspaceId: string | null;
   specificStory?: string;
   dryRun: boolean;
   port: number;
@@ -383,10 +397,14 @@ const reroutedStories = new Map<string, RerouteInfo>();
 function canUseEngineFallback(engine: AgentType): boolean {
   try {
     switch (engine) {
-      case 'codex':
-        return getCodexAuthState().connected;
-      case 'claude':
-        return getClaudeAuthState().connected;
+      case 'codex': {
+        const state = getCodexAuthState();
+        return state.connected && state.cliInstalled;
+      }
+      case 'claude': {
+        const state = getClaudeAuthState();
+        return state.connected && state.cliInstalled;
+      }
       case 'opencode':
         return detectOpenCode().opencodeInstalled;
       case 'pi':
@@ -526,7 +544,7 @@ function resolvePiThinkingLevel(requestedModel: string | null, effortLevel?: 'lo
   return effortLevel;
 }
 
-function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
+function resolvePiCliSelection(requestedModel: string | null, piBin = PI_BIN): PiCliSelection {
   if (!requestedModel) return { provider: null, model: null };
 
   const trimmed = requestedModel.trim();
@@ -540,7 +558,7 @@ function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
     };
   }
 
-  const available = listPiModels(PI_BIN);
+  const available = listPiModels(piBin);
 
   const slashIndex = trimmed.indexOf('/');
   if (slashIndex !== -1) {
@@ -1966,9 +1984,20 @@ export function buildPtyCommand(
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
   piServerSkillFiles: string[] = [],
+  verifiedCompatibility?: PtyCliCompatibility,
 ): PtyCommand {
+  const requireCapabilities = (capabilities: PtyCliCapability[] = []): PtyCliCompatibility =>
+    assertPtyCliCompatible(agentType, capabilities, verifiedCompatibility);
+
   switch (agentType) {
     case 'claude': {
+      const claudeCliModel = resolveClaudeCliModelId(agentModel);
+      const compatibility = requireCapabilities([
+        ...(claudeCliModel ? ['model' as const] : []),
+        ...(thinkingBudget && thinkingBudget > 0 ? ['thinkingBudget' as const] : []),
+        ...(effortLevel ? ['effort' as const] : []),
+        ...(mcpServers && Object.keys(mcpServers).length > 0 ? ['mcpConfig' as const] : []),
+      ]);
       const env = buildGuardedAgentEnv(cwd);
       let mcpConfigPath: string | null = null;
       if (mcpServers && Object.keys(mcpServers).length > 0) {
@@ -1989,11 +2018,10 @@ export function buildPtyCommand(
           fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
         }
       }
-      const claudeCliModel = resolveClaudeCliModelId(agentModel);
       return {
-        command: CLAUDE_BIN,
+        command: compatibility.binaryPath!,
         args: [
-          '--dangerously-skip-permissions',
+          ...(compatibility.capabilities.permissionBypass ? ['--dangerously-skip-permissions'] : []),
           ...(claudeCliModel ? ['--model', claudeCliModel] : []),
           ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
           ...(effortLevel ? ['--effort', effortLevel] : []),
@@ -2001,7 +2029,6 @@ export function buildPtyCommand(
         ],
         env,
         prompt,
-        startupDelayMs: 900,
         cleanup: () => {
           if (mcpConfigPath) {
             try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
@@ -2010,6 +2037,10 @@ export function buildPtyCommand(
       };
     }
     case 'opencode': {
+      const compatibility = requireCapabilities([
+        ...(attachAddr ? ['attach' as const] : []),
+        ...(agentModel ? ['model' as const] : []),
+      ]);
       const env = buildGuardedAgentEnv(cwd, {
         ...buildCleanEnv(),
         ...buildOpenCodeReasoningEnv(agentModel, thinkingEnabled, thinkingBudget, effortLevel),
@@ -2029,16 +2060,14 @@ export function buildPtyCommand(
         }
         fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify({ ...existingConfig, mcp: mcpEntries }, null, 2), 'utf8');
       }
-      const status = detectOpenCode();
       return {
-        command: status.opencodeBinPath ?? 'opencode',
+        command: compatibility.binaryPath!,
         args: [
           ...(attachAddr ? ['--attach', attachAddr] : []),
           ...(agentModel ? ['--model', normalizeOpenCodeModel(agentModel)] : []),
         ],
         env,
         prompt,
-        startupDelayMs: 900,
         cleanup: () => {
           if (!openCodeMcpConfigPath) return;
           try {
@@ -2056,40 +2085,54 @@ export function buildPtyCommand(
       };
     }
     case 'codex': {
+      const compatibility = requireCapabilities(agentModel ? ['model'] : []);
       const env = buildGuardedAgentEnv(cwd);
       const codexMcpRegisteredNames: string[] = [];
       if (mcpServers && Object.keys(mcpServers).length > 0) {
         for (const [name, url] of Object.entries(mcpServers)) {
           try {
-            execSync(`${CODEX_BIN} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
+            execSync(`${compatibility.binaryPath} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
             codexMcpRegisteredNames.push(name);
           } catch { /* ignore registration failures in PTY mode */ }
         }
       }
       return {
-        command: CODEX_BIN,
-        args: ['--approval-mode', 'auto-edit', ...(agentModel ? ['--model', agentModel] : [])],
+        command: compatibility.binaryPath!,
+        // Codex 0.132+ rejects the old --approval-mode auto-edit spelling.
+        // Only add options that its own --help probe advertised.
+        args: [
+          ...(compatibility.capabilities.askForApproval ? ['--ask-for-approval', 'on-request'] : []),
+          ...(compatibility.capabilities.noAltScreen ? ['--no-alt-screen'] : []),
+          ...(agentModel ? ['--model', agentModel] : []),
+        ],
         env,
         prompt,
-        startupDelayMs: 900,
         cleanup: () => {
           for (const name of codexMcpRegisteredNames) {
-            try { execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
+            try { execSync(`${compatibility.binaryPath} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
           }
         },
       };
     }
     case 'pi': {
-      const piSelection = resolvePiCliSelection(agentModel);
+      const piSelection = resolvePiCliSelection(agentModel, verifiedCompatibility?.binaryPath ?? PI_BIN);
       const piThinkingLevel = resolvePiThinkingLevel(agentModel, effortLevel);
+      const compatibility = requireCapabilities([
+        'textMode',
+        ...(piSelection.provider ? ['provider' as const] : []),
+        ...(piSelection.model ? ['model' as const] : []),
+        ...(piThinkingLevel ? ['thinking' as const] : []),
+        ...(piServerSkillFiles.length > 0 ? ['skill' as const] : []),
+      ]);
+      const extensions = compatibility.capabilities.extension ? resolvePiExtensionPaths() : [];
       return {
-        command: PI_BIN,
+        command: compatibility.binaryPath!,
         args: [
           '--mode', 'text',
-          '--no-extensions',
-          '--tools', 'read,bash,edit,write,grep,find,ls',
-          '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
-          ...resolvePiExtensionPaths().flatMap(extensionPath => ['--extension', extensionPath]),
+          ...(compatibility.capabilities.noExtensions ? ['--no-extensions'] : []),
+          ...(compatibility.capabilities.tools ? ['--tools', 'read,bash,edit,write,grep,find,ls'] : []),
+          ...(compatibility.capabilities.appendSystemPrompt ? ['--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT] : []),
+          ...extensions.flatMap(extensionPath => ['--extension', extensionPath]),
           ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
           ...(piSelection.model ? ['--model', piSelection.model] : []),
           ...(piThinkingLevel ? ['--thinking', piThinkingLevel] : []),
@@ -2097,7 +2140,6 @@ export function buildPtyCommand(
         ],
         env: buildGuardedAgentEnv(cwd),
         prompt,
-        startupDelayMs: 900,
       };
     }
   }
@@ -2151,13 +2193,20 @@ async function spawnAgentViaPty(
     let exitCode: number | null = null;
     let exitSignal: string | null = null;
     let watchdogFired = false;
-    let completionMarkerSeen = false;
+    // Marker-file evidence ends the interactive agent turn. A terminal marker
+    // is recorded separately and can never make an echoed prompt self-complete.
+    let completionFileSeen = false;
+    let completionShutdownRequested = false;
+    let terminalMarkerSeen = false;
     let completionState: PtyCompletionState | null = null;
+    let readinessState: PtyReadinessState | null = null;
     let adapter: InteractivePtyAgentAdapter | null = null;
-    let finishedWrites = Promise.resolve();
+    let outputBatcher: ReturnType<typeof createRunPtyOutputBatcher> | null = null;
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let completionFileTimer: ReturnType<typeof setInterval> | null = null;
+    let readinessTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let runTimer: ReturnType<typeof setTimeout> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2166,6 +2215,9 @@ async function spawnAgentViaPty(
     let finalizePromise: Promise<void> | null = null;
     let unregisterPtyCleanupTask: (() => void) | null = null;
     let inputPollInFlight = false;
+    let completionFileCheckInFlight = false;
+    let observedReadiness: { reason: string; timedOut: boolean } | null = null;
+    let resolveReadiness: ((result: { reason: string; timedOut: boolean }) => void) | null = null;
     let resolveExitObserved: (() => void) | null = null;
     const exitObserved = new Promise<void>((resolve) => {
       resolveExitObserved = resolve;
@@ -2178,17 +2230,23 @@ async function spawnAgentViaPty(
       if (resizeTimer) clearInterval(resizeTimer);
       if (inputTimer) clearInterval(inputTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (completionFileTimer) clearInterval(completionFileTimer);
+      if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
       try {
-        await finishedWrites;
-      } catch {
-        // best effort — error already logged
+        await outputBatcher?.drain();
+      } catch (err: unknown) {
+        logRunPtyStoreError('Failed to drain bounded PTY output writer', ptyOptions.runId, err);
       }
       logStream.end();
       ptyCommand?.cleanup?.();
-      const status = completionMarkerSeen
+      // A file alone never erases an unexpected process failure. The only
+      // normalized non-zero exit is the SIGTERM we intentionally send after a
+      // valid file has ended the interactive turn.
+      const completionTurnExited = completionFileSeen && (exitCode === 0 || completionShutdownRequested);
+      const status = completionTurnExited
         ? 'exited'
         : watchdogFired
           ? 'timed_out'
@@ -2199,13 +2257,18 @@ async function spawnAgentViaPty(
               : 'failed';
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
+      if (!completionFileSeen) {
+        try { await recordRunPtyCompletionFileError(ptyOptions.runId, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
+      }
       try {
-        await completeRunPtySession(ptyOptions.runId, status, completionMarkerSeen ? 0 : exitCode, completionMarkerSeen ? null : exitSignal);
+        await completeRunPtySession(ptyOptions.runId, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
       }
       resolve({
-        exitCode: completionMarkerSeen ? 0 : watchdogFired ? 124 : (exitCode ?? 1),
+        // Completion permits orderly PTY cleanup only after process exit;
+        // executeStory still decides story outcome through validation/merge.
+        exitCode: completionTurnExited ? 0 : watchdogFired ? 124 : (exitCode ?? 1),
         stderrTail: Buffer.concat(stderrChunks).toString('utf8'),
         elapsedMs: Date.now() - startTime,
       });
@@ -2265,10 +2328,17 @@ async function spawnAgentViaPty(
 
     try {
       sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
+      outputBatcher = createRunPtyOutputBatcher(ptyOptions.runId, sequenceRef);
       const storyIdForMarker = ptyOptions.storyId ?? 'run';
       const completionMarker = buildPtyCompletionMarker(ptyOptions.runId, storyIdForMarker);
       const markerFilePath = buildPtyMarkerFilePath(ptyOptions.runId, storyIdForMarker);
+      const markerFile = path.resolve(cwd, markerFilePath);
+      // A retry must not inherit a prior attempt's completion file.
+      try { fs.unlinkSync(markerFile); } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
       completionState = createPtyCompletionState(completionMarker);
+      readinessState = createPtyReadinessState(ptyOptions.agentType);
       adapter = buildInteractivePtyAgentAdapter(
         ptyOptions.agentType,
         agentModel,
@@ -2313,6 +2383,14 @@ async function spawnAgentViaPty(
         childPid: pty.pid ?? null,
         completionMarker,
       });
+      const ptyAttached = await transitionRunLifecycle(ptyOptions.runId, 'pty_attached', {
+        transport: 'pty_attached',
+        process: 'spawned',
+        agentType: ptyOptions.agentType,
+      });
+      if (!ptyAttached) {
+        throw new Error('PTY_LIFECYCLE_ATTACH_REJECTED: refusing to inject a prompt without an authoritative PTY-attached phase');
+      }
       unregisterPtyCleanupTask = registerPtyCleanupTask(`run-${ptyOptions.runId}`, () => requestPtyShutdown('SIGTERM'));
       resetInactivity();
       heartbeatTimer = setInterval(() => {
@@ -2366,47 +2444,108 @@ async function spawnAgentViaPty(
       }, 50);
       inputTimer.unref?.();
 
+      const observeCompletionFile = async (): Promise<void> => {
+        if (settled || completionFileSeen || completionFileCheckInFlight) return;
+        completionFileCheckInFlight = true;
+        try {
+          if (!fs.existsSync(markerFile)) return;
+          const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
+          const valid = parsed.storyId === storyIdForMarker
+            && Number(parsed.runId) === ptyOptions.runId
+            && parsed.marker === completionMarker;
+          if (!valid) {
+            await recordRunPtyCompletionFileError(ptyOptions.runId, 'marker_file_payload_mismatch');
+            return;
+          }
+          completionFileSeen = true;
+          await markRunPtyCompletionFileSeen(ptyOptions.runId, completionMarker);
+          if (ptyOptions.port && ptyOptions.storyId) {
+            await emitWalEvent(ptyOptions.port, 'story_completion_file', ptyOptions.workspaceId, {
+              run_id: ptyOptions.runId,
+              story_id: ptyOptions.storyId,
+              agent_type: ptyOptions.agentType,
+              terminal_mode: 'pty',
+              marker_file: markerFilePath,
+              terminal_marker_seen: terminalMarkerSeen,
+              message: 'Agent completion file observed; process exit plus merge and validation gates still determine story pass.',
+            }, ptyOptions.storyId);
+          }
+          // The agent turn is over, but completion is not a pass signal. Wait
+          // for the process cleanup/exit path before executeStory runs gates.
+          setTimeout(() => {
+            completionShutdownRequested = true;
+            void requestPtyShutdown('SIGTERM');
+          }, 250).unref?.();
+        } catch (err: unknown) {
+          const reason = err instanceof Error ? err.message : String(err);
+          await recordRunPtyCompletionFileError(ptyOptions.runId, reason);
+          logRunPtyStoreError('Failed to inspect PTY completion file', ptyOptions.runId, err);
+        } finally {
+          completionFileCheckInFlight = false;
+        }
+      };
+      completionFileTimer = setInterval(() => { void observeCompletionFile(); }, 100);
+      completionFileTimer.unref?.();
+
       pty.onData((chunk) => {
         const buf = toBuffer(chunk);
         if (buf.length === 0) return;
         resetInactivity();
         logStream.write(buf);
         recordStderr(buf);
-        if (adapter && completionState && !completionMarkerSeen) {
-          const signal = adapter.detectCompletion?.(buf.toString('utf8'), completionState) ?? null;
+        const text = buf.toString('utf8');
+        const ready = adapter?.detectReadiness?.(text, readinessState!) ?? null;
+        if (ready?.type === 'ready') {
+          observedReadiness = { reason: ready.reason, timedOut: false };
+          resolveReadiness?.(observedReadiness);
+          resolveReadiness = null;
+        }
+        if (adapter && completionState && !terminalMarkerSeen) {
+          const signal = adapter.detectCompletion?.(text, completionState) ?? null;
           if (signal?.type === 'marker') {
-            completionMarkerSeen = true;
+            terminalMarkerSeen = true;
             void markRunPtyCompletionMarkerSeen(ptyOptions.runId, signal.marker)
-              .catch((err: unknown) => logRunPtyStoreError('Failed to mark PTY completion marker', ptyOptions.runId, err));
-            if (ptyOptions.port && ptyOptions.storyId) {
-              void emitWalEvent(ptyOptions.port, 'story_completion_marker', ptyOptions.workspaceId, {
-                run_id: ptyOptions.runId,
-                story_id: ptyOptions.storyId,
-                agent_type: ptyOptions.agentType,
-                terminal_mode: 'pty',
-                marker: signal.marker,
-                message: 'Agent completion marker observed; merge and validation gates still determine story pass.',
-              }, ptyOptions.storyId).catch(() => { /* best effort */ });
-            }
-            setTimeout(() => {
-              void requestPtyShutdown('SIGTERM');
-            }, 250).unref?.();
+              .catch((err: unknown) => logRunPtyStoreError('Failed to record corroborating PTY terminal marker', ptyOptions.runId, err));
           }
         }
-        if (!sequenceRef) return;
-        const activeSequenceRef = sequenceRef;
-        finishedWrites = finishedWrites
-          .then(() => appendRunPtyOutput(ptyOptions.runId, buf, activeSequenceRef))
-          .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY output chunk', ptyOptions.runId, err));
+        // node-pty is push-only. The bounded single writer batches durable
+        // inserts and accounts for overflow instead of retaining an unbounded
+        // promise chain when terminal output outpaces PostgreSQL.
+        outputBatcher?.enqueue(buf);
       });
 
       pty.onExit((event) => {
         exitCode = event.exitCode;
         exitSignal = event.signal != null ? String(event.signal) : exitSignal;
+        resolveReadiness?.({ reason: 'process_exited_before_prompt_injection', timedOut: true });
+        resolveReadiness = null;
         resolveExitObserved?.();
         finalizePromise = finalizePromise ?? finalize();
         void finalizePromise;
       });
+
+      const readiness = await new Promise<{ reason: string; timedOut: boolean }>((resolve) => {
+        if (observedReadiness) {
+          resolve(observedReadiness);
+          return;
+        }
+        resolveReadiness = resolve;
+        readinessTimeoutTimer = setTimeout(() => {
+          resolveReadiness?.({ reason: 'readiness_timeout_fallback', timedOut: true });
+          resolveReadiness = null;
+        }, DEFAULT_PTY_READINESS_TIMEOUT_MS);
+        readinessTimeoutTimer.unref?.();
+      });
+      if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
+      if (settled) return;
+      void recordRunPtyPromptReadiness(
+        ptyOptions.runId,
+        readiness.timedOut ? 'timeout_fallback' : 'ready',
+        readiness.reason,
+      ).catch((err) => logRunPtyStoreError('Failed to record PTY readiness', ptyOptions.runId, err));
+      if (readiness.timedOut) {
+        logger.warn(`[engine] PTY readiness timeout for ${ptyOptions.agentType}; injecting with bounded fallback`);
+      }
 
       try {
         await (adapter ?? buildInteractivePtyAgentAdapter(ptyOptions.agentType, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServers, piServerSkillFiles))
@@ -2414,7 +2553,30 @@ async function spawnAgentViaPty(
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         logger.warn(`[engine] Bracketed PTY prompt injection failed for ${ptyOptions.agentType}; falling back to chunked typing: ${message}`);
-        await injectPromptWithChunkedTyping(pty, ptyCommand.prompt, { startupDelayMs: 0 });
+        await injectPromptWithChunkedTyping(pty, ptyCommand.prompt);
+      }
+      void recordRunPtyPromptReadiness(ptyOptions.runId, 'injected', readiness.reason)
+        .catch((err) => logRunPtyStoreError('Failed to record PTY prompt injection', ptyOptions.runId, err));
+      const ptyRunning = await transitionRunLifecycle(ptyOptions.runId, 'running', {
+        transport: 'pty_attached',
+        process: 'alive',
+        semantic: 'prompt_injected',
+        promptReadiness: readiness.reason,
+        promptReadinessFallback: readiness.timedOut,
+      });
+      if (!ptyRunning) {
+        throw new Error('PTY_LIFECYCLE_RUNNING_REJECTED: refusing to run without an authoritative running phase');
+      }
+      if (ptyOptions.port && ptyOptions.storyId) {
+        void emitWalEvent(ptyOptions.port, 'story_pty_ready', ptyOptions.workspaceId, {
+          run_id: ptyOptions.runId,
+          story_id: ptyOptions.storyId,
+          agent_type: ptyOptions.agentType,
+          terminal_mode: 'pty',
+          lifecycle_status: 'running',
+          prompt_readiness: readiness.reason,
+          prompt_readiness_fallback: readiness.timedOut,
+        }, ptyOptions.storyId).catch(() => { /* lifecycle remains durable in DB */ });
       }
 
       runTimer = setTimeout(() => {
@@ -2431,11 +2593,36 @@ async function spawnAgentViaPty(
       const message = err instanceof Error ? err.message : String(err);
       recordStderr(Buffer.from(message));
       logger.error(`[engine] Failed to spawn ${ptyOptions.agentType} PTY process: ${message}`);
-      try {
-        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
-      } catch { /* ignore */ }
+
+      // A failure after node-pty.spawn() (for example, session persistence)
+      // must never leave an untracked agent process running. Terminate and wait
+      // before resolving the failed attempt; onExit may finalize concurrently.
+      if (pty) {
+        try {
+          await shutdownPtyProcess(pty, {
+            signal: 'SIGTERM',
+            graceMs: 2_000,
+            postKillSettleMs: 250,
+            waitForExit: exitObserved,
+            killProcessGroup,
+          });
+        } catch { /* best effort — process-group kill already attempted */ }
+      }
+      if (settled) return;
+      settled = true;
       unregisterPtyCleanupTask?.();
       unregisterPtyCleanupTask = null;
+      if (resizeTimer) clearInterval(resizeTimer);
+      if (inputTimer) clearInterval(inputTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (completionFileTimer) clearInterval(completionFileTimer);
+      if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
+      if (runTimer) clearTimeout(runTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      try {
+        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
+      } catch { /* session may not have been persisted yet */ }
       logStream.end();
       ptyCommand?.cleanup?.();
       resolve({ exitCode: 1, stderrTail: message, elapsedMs: Date.now() - startTime });
@@ -6266,6 +6453,10 @@ async function main(): Promise<void> {
   if (config.terminalMode === 'pty' && !PTY_AVAILABLE) {
     throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
   }
+  if (config.terminalMode === 'pty' && config.parallelism > 1) {
+    logger.warn('[engine] PTY mode uses one run-scoped interactive terminal; forcing sequential story execution.');
+    config.parallelism = 1;
+  }
   if (config.attachAddr) logger.info(`[engine] OpenCode attach: ${config.attachAddr}`);
 
   if (!fs.existsSync(config.jsonPath)) {
@@ -6291,6 +6482,16 @@ async function main(): Promise<void> {
   const requiredEngines = scanRequiredEngines(initialExecutableStories, config.agentType);
   const engineCounts = countStoriesByEngine(initialExecutableStories, config.agentType);
 
+  // A PTY has no safe ANSI/RPC fallback: verify every adapter which could be
+  // selected before any session or prompt is created. The probe is bounded and
+  // only invokes --version/--help, so it never changes CLI state or credentials.
+  if (config.terminalMode === 'pty') {
+    for (const requiredAgent of requiredEngines) {
+      const compatibility = assertPtyCliCompatible(requiredAgent);
+      logger.info(`[engine] PTY ${requiredAgent}: ${compatibility.version ?? 'unknown version'} at ${compatibility.binaryPath}`);
+    }
+  }
+
   if (config.agentType === 'opencode' || requiredEngines.has('opencode')) requireOpenCode();
   if (config.agentType === 'codex' || requiredEngines.has('codex')) requireCodex();
   if (config.agentType === 'pi' || requiredEngines.has('pi')) requirePi();
@@ -6314,7 +6515,10 @@ async function main(): Promise<void> {
   }
   logger.info('');
 
-  const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
+  const workspaceId = config.workspaceId ?? await resolveWorkspaceId(config.port, config.cwd);
+  if (config.terminalMode === 'pty' && !workspaceId) {
+    throw new Error('PTY_WORKSPACE_ID_REQUIRED: PTY runs require a canonical workspace ID from the worker; refusing silent ANSI/RPC fallback.');
+  }
   const retryCounts = new Map<string, number>();
 
   // Set fallback context for emitWalEvent / postStoryResult fallback file writes
@@ -6851,6 +7055,7 @@ function parseArgs(): EngineConfig {
   let jsonPath = '';
   let cwd = '';
   let runId = 0;
+  let workspaceId: string | null = process.env.RORCA_WORKSPACE_ID?.trim() || null;
   let specificStory: string | undefined;
   let dryRun = false;
   let port = parseInt(process.env.PORT ?? '3030', 10);
@@ -6878,6 +7083,9 @@ function parseArgs(): EngineConfig {
         break;
       case '--run-id':
         runId = parseInt(args[++i], 10);
+        break;
+      case '--workspace-id':
+        workspaceId = args[++i]?.trim() || null;
         break;
       case '--story':
         specificStory = args[++i];
@@ -6943,7 +7151,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--workspace-id <id>] [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
     process.exit(1);
   }
 
@@ -6952,7 +7160,7 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
+  return { jsonPath, cwd, runId, workspaceId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

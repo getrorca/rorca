@@ -45,9 +45,9 @@ vi.mock('../../components/MultiPaneTerminal', () => ({
 }));
 
 vi.mock('../../components/AppHeader', () => ({
-  default: vi.fn(({ title, actions }: { title?: React.ReactNode; actions?: React.ReactNode }) => (
+  default: vi.fn(({ title, breadcrumbs, actions }: { title?: React.ReactNode; breadcrumbs?: React.ReactNode; actions?: React.ReactNode }) => (
     <div data-testid="app-header">
-      <div>{title}</div>
+      <div>{breadcrumbs ?? title}</div>
       <div>{actions}</div>
     </div>
   )),
@@ -189,6 +189,32 @@ describe('RunViewPanel', () => {
         document.querySelector('[data-testid="run-terminal"]');
       expect(specEl).toBeInTheDocument();
     }, { timeout: 3000 });
+  });
+
+  it('normalizes the persisted Pi engine instead of defaulting the header badge to Claude', async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${BASE_RUN.id}`)) {
+        return {
+          ...MOCK_RUN_RESPONSE,
+          run: {
+            ...BASE_RUN,
+            agent_type: 'pi',
+            agent_model: 'openai-codex/gpt-5.6-terra',
+          },
+          agentType: 'pi',
+          agentModel: 'openai-codex/gpt-5.6-terra',
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={BASE_RUN.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    expect((await screen.findAllByText('Pi/Terra')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
   });
 
   it('renders tab navigation', async () => {

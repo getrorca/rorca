@@ -210,8 +210,9 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
 
   const { show: showGlobalToast } = useGlobalToast();
 
-  // SSE for live updates on the active run
-  const activeRun = runs.find(r => r.status === 'running' || r.status === 'paused');
+  // Lifecycle is backend-owned; select active work from that persisted phase,
+  // never from terminal output or browser-side WAL ordering.
+  const activeRun = runs.find((run) => ['starting', 'pty_attached', 'running', 'validating'].includes(run.lifecycleStatus ?? run.lifecyclePhase ?? ''));
   const sseEvents = usePipelineSSE(activeRun ? String(activeRun.id) : null, workspaceId);
 
   // Derive story progress from SSE for the active run
@@ -229,18 +230,8 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
     return { passed: passed.size, failed: failed.size, total: all.size };
   })();
 
-  // Update active run status from SSE lifecycle events
-  const activeRunStatus = (() => {
-    if (!activeRun) return null;
-    let status = activeRun.status;
-    for (const e of sseEvents) {
-      if (e.event_type === 'run_finished') status = 'done';
-      if (e.event_type === 'run_cancelled') status = 'cancelled';
-      if (e.event_type === 'run_paused') status = 'paused';
-      if (e.event_type === 'run_resumed') status = 'running';
-    }
-    return status;
-  })();
+  // WAL still refreshes the canonical API row but cannot author a lifecycle.
+  const activeRunStatus = activeRun?.lifecycleStatus ?? activeRun?.lifecyclePhase ?? null;
 
   // Re-fetch runs via shared hook when SSE delivers lifecycle events
   useEffect(() => {
@@ -532,7 +523,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                 <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-blue-500/20 text-blue-400">
                   {STATUS_LABELS[status] || status}
                 </span>
-                <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+                <AgentBadge agentType={run.agentType} agentModel={run.agentModel} />
                 <ChevronRight size={16} className="text-muted shrink-0" />
               </div>
 
@@ -718,7 +709,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                   </span>
                   <TriggeredViaBadge value={run.triggered_via} />
                   <WorktreeBadge branchName={run.branch_name} />
-                  <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+                  <AgentBadge agentType={run.agentType} agentModel={run.agentModel} />
                   <span className="text-[10px] text-[var(--text-muted)] shrink-0">
                     {elapsedTime(run.started_at, run.finished_at)}
                   </span>

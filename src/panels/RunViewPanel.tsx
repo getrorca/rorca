@@ -12,6 +12,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
+import { normalizePipelineRun, normalizeRunTokenTelemetry, type RunTokenTelemetry } from '../lib/run-metadata';
 import { pauseRun, resumeRun, cancelRun, injectContext, retryRun, getRunDlq, retryRunFromDlq, type DlqEntry } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
@@ -39,13 +40,20 @@ interface PipelineRun {
   id: number;
   spec_path: string;
   workspace_id: string;
-  status: 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
+  status: 'queued' | 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
+  /** Authoritative backend lifecycle; never derive this from WAL/output in UI. */
+  lifecycleStatus: string;
+  lifecycle_status?: string;
+  lifecyclePhase?: string;
+  lifecycle_phase?: string;
   pid: number | null;
   branch_name: string | null;
   worktree_path: string | null;
   started_at: string;
   finished_at: string | null;
   parallelism?: number;
+  agent_type?: string;
+  agent_model?: string | null;
   agentType?: string;
   agentModel?: string | null;
   merge_status?: 'pending' | 'merging' | 'merged' | 'failed' | null;
@@ -56,6 +64,7 @@ interface PipelineRun {
   pr_creation_error?: string | null;
   include_graph?: boolean;
   terminal_mode?: 'ansi-html' | 'pty';
+  terminalMode?: 'ansi-html' | 'pty';
 }
 
 interface StoryResultSeed {
@@ -71,10 +80,10 @@ interface StoryResultSeed {
 interface StoryTokenEntry {
   storyId: string;
   status: string;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
   modelUsed: string | null;
-  costUsd: number;
+  costUsd: number | null;
 }
 
 interface ContextComparisonData {
@@ -120,7 +129,12 @@ interface RunApiResponse {
   specModel?: string | null;
   agentType?: string;
   agentModel?: string | null;
-  tokenSummary?: { inputTokens: number; outputTokens: number };
+  terminalMode?: 'ansi-html' | 'pty';
+  lifecycleStatus?: string;
+  lifecycle_status?: string;
+  lifecyclePhase?: string;
+  lifecycle_phase?: string;
+  tokenSummary?: { inputTokens: number | null; outputTokens: number | null; totalCostUsd?: number | null };
   runState?: RunStateSnapshot | null;
   contextComparison?: ContextComparisonData | null;
   storyTokenBreakdown?: StoryTokenEntry[];
@@ -150,7 +164,12 @@ const TABS: { id: RunViewTab; label: string; icon: typeof ScrollText }[] = [
 // ─── Status styling ─────────────────────────────────────────────────────────
 
 const STATUS_BADGE_STYLES: Record<string, string> = {
+  queued: 'bg-slate-500/10 text-slate-400',
+  starting: 'bg-blue-500/10 text-blue-500',
+  pty_attached: 'bg-blue-500/10 text-blue-500',
   running: 'bg-blue-500/10 text-blue-500',
+  validating: 'bg-violet-500/10 text-violet-500',
+  finished: 'bg-emerald-500/10 text-emerald-500',
   paused: 'bg-yellow-500/10 text-yellow-500',
   blocked: 'bg-amber-500/10 text-amber-500',
   done: 'bg-emerald-500/10 text-emerald-500',
@@ -160,7 +179,12 @@ const STATUS_BADGE_STYLES: Record<string, string> = {
 };
 
 const STATUS_BADGE_LABELS: Record<string, string> = {
+  queued: 'Queued',
+  starting: 'Starting',
+  pty_attached: 'PTY attached',
   running: 'Running',
+  validating: 'Validating',
+  finished: 'Finished',
   paused: 'Paused',
   blocked: 'Blocked',
   done: 'Passed',
@@ -319,7 +343,7 @@ function StoriesListTab({ dbStories, specStories, liveStatuses, contextCompariso
 
           const hasSkills = activeSkillsWithRelevance.length > 0;
           const hasContextFiles = contextFiles.length > 0;
-          const hasTokens = tokenEntry != null && (tokenEntry.inputTokens > 0 || tokenEntry.outputTokens > 0);
+          const hasTokens = tokenEntry != null && ((tokenEntry.inputTokens ?? 0) > 0 || (tokenEntry.outputTokens ?? 0) > 0);
           const hasAnyData = hasSkills || hasContextFiles || hasTokens;
 
           return (
@@ -399,10 +423,10 @@ function StoriesListTab({ dbStories, specStories, liveStatuses, contextCompariso
                           <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1.5">Tokens</p>
                           <div className="flex items-center gap-4 text-xs">
                             <span className="text-muted">
-                              In: <span className="text-[var(--text)] font-mono">{tokenEntry.inputTokens.toLocaleString()}</span>
+                              In: <span className="text-[var(--text)] font-mono">{(tokenEntry.inputTokens ?? 0).toLocaleString()}</span>
                             </span>
                             <span className="text-muted">
-                              Out: <span className="text-[var(--text)] font-mono">{tokenEntry.outputTokens.toLocaleString()}</span>
+                              Out: <span className="text-[var(--text)] font-mono">{(tokenEntry.outputTokens ?? 0).toLocaleString()}</span>
                             </span>
                           </div>
                         </div>
@@ -615,9 +639,9 @@ function ContextSummaryBar({
     }
 
     // Avg input tokens for stories that actually ran (inputTokens > 0)
-    const tokenEntries = storyTokenBreakdown.filter(t => t.inputTokens > 0);
+    const tokenEntries = storyTokenBreakdown.filter(t => (t.inputTokens ?? 0) > 0);
     const avg = tokenEntries.length > 0
-      ? tokenEntries.reduce((sum, t) => sum + t.inputTokens, 0) / tokenEntries.length
+      ? tokenEntries.reduce((sum, t) => sum + (t.inputTokens ?? 0), 0) / tokenEntries.length
       : 0;
 
     return { skillCount: allSkills.size, fileCount: allFiles.size, avgTokens: avg };
@@ -935,7 +959,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const dlqCheckedRef = useRef(false);
 
   const [specModel, setSpecModel] = useState<string | null>(null);
-  const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
+  const [tokenSummary, setTokenSummary] = useState<RunTokenTelemetry>(() => normalizeRunTokenTelemetry());
   const [contextComparison, setContextComparison] = useState<ContextComparisonData | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   const [dbStories, setDbStories] = useState<StoryResultSeed[]>([]);
@@ -1008,20 +1032,11 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return { continueFromId, resumedAfterId, carriedForwardCount };
   }, [runState, specStories, walEvents, dbStories, contextComparison]);
 
-  // Derive effective status from SSE events
-  const effectiveStatus = useMemo(() => {
-    if (!run) return 'running';
-    let status = run.status;
-    for (const evt of walEvents) {
-      if (evt.event_type === 'run_finished') status = 'done';
-      else if (evt.event_type === 'run_failed') status = 'failed';
-      else if (evt.event_type === 'run_paused') status = 'paused';
-      else if (evt.event_type === 'run_blocked') status = 'blocked';
-      else if (evt.event_type === 'run_resumed') status = 'running';
-      else if (evt.event_type === 'run_cancelled') status = 'cancelled';
-    }
-    return status;
-  }, [run, walEvents]);
+  // Lifecycle phase is backend-owned. WAL enriches story detail only; it must
+  // not infer a run phase from terminal bytes, echo, or event ordering.
+  const effectiveStatus: string = useMemo(() => run?.lifecycleStatus ?? 'queued', [run]);
+  // Legacy result/control status remains available for pause/resume only.
+  const legacyStatus = run?.status ?? 'queued';
 
   // Derive setup phase state for wave parallel runs (worktree creation before stories start)
   const { isInSetupPhase, setupStoryCount } = useMemo(() => {
@@ -1242,7 +1257,16 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         setLoading(false);
         return;
       }
-      setRun(data.run);
+      // Normalize the API DTO once before it reaches the header, cards, terminal,
+      // or metadata rail. Never invent an engine/model for historical runs.
+      setRun(normalizePipelineRun({
+        ...data.run,
+        agentType: data.run.agentType ?? data.agentType,
+        agentModel: data.run.agentModel ?? data.agentModel,
+        terminalMode: data.run.terminalMode ?? data.terminalMode,
+        lifecycleStatus: data.run.lifecycleStatus ?? data.run.lifecycle_status ?? data.lifecycleStatus ?? data.lifecycle_status ?? data.run.lifecyclePhase ?? data.lifecyclePhase,
+        lifecyclePhase: data.run.lifecyclePhase ?? data.lifecyclePhase,
+      }));
       // Seed merge status from DB column or infer from worktree presence
       if (data.run.merge_status) {
         setMergeInfoBase({
@@ -1267,7 +1291,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         setPrInfoBase({ state: 'failed', errorMsg: data.run.pr_creation_error });
       }
       if (data.specModel !== undefined) setSpecModel(data.specModel);
-      if (data.tokenSummary) setTokenSummary(data.tokenSummary);
+      if (data.tokenSummary) setTokenSummary(normalizeRunTokenTelemetry(data.tokenSummary));
       if (data.runState !== undefined) setRunState(data.runState ?? null);
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
       if (data.specStories) { setTotalStories(data.specStories.length); setSpecStories(data.specStories); }
@@ -1309,6 +1333,13 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   useEffect(() => {
     fetchRun();
   }, [fetchRun]);
+
+  // WAL is only a refresh trigger. The API lifecycle is authoritative; never
+  // calculate a phase from event ordering or terminal bytes in the browser.
+  useEffect(() => {
+    if (walEvents.length === 0) return;
+    void fetchRun();
+  }, [walEvents.length, fetchRun]);
 
   // Dismiss resume badge when first real story_started WAL event fires
   useEffect(() => {
@@ -1365,11 +1396,11 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   // Show merge section when run uses a worktree (auto-merge is always enabled for worktree runs)
   const showMergeStatus = mergeInfo !== null;
 
-  const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused' || effectiveStatus === 'blocked';
+  const isActive = ['starting', 'pty_attached', 'running', 'validating'].includes(effectiveStatus);
 
   // Detect if we should show multi-pane terminal (parallelism > 1 with 2+ concurrent stories)
   const useMultiPane = useMemo(() => {
-    if (!run || run.terminal_mode === 'pty' || (run.parallelism ?? 1) <= 1) return false;
+    if (!run || run.terminalMode === 'pty' || (run.parallelism ?? 1) <= 1) return false;
     // Count stories that have started but not finished
     const started = new Set<string>();
     const finished = new Set<string>();
@@ -1407,7 +1438,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     if (!isActive) return;
     setPauseLoading(true);
     try {
-      if (effectiveStatus === 'paused') {
+      if (legacyStatus === 'paused') {
         await resumeRun(runId);
       } else {
         await pauseRun(runId);
@@ -1418,7 +1449,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     } finally {
       setPauseLoading(false);
     }
-  }, [runId, effectiveStatus, isActive, fetchRun]);
+  }, [runId, legacyStatus, isActive, fetchRun]);
 
   const handleKill = useCallback(async () => {
     setShowKillConfirm(false);
@@ -1583,7 +1614,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                         ref={terminalRef}
                         runId={run.id}
                         workspaceId={workspaceId}
-                        terminalMode={run.terminal_mode ?? 'ansi-html'}
+                        terminalMode={run.terminalMode}
                         runStatus={effectiveStatus}
                       />}
                 </div>
@@ -1637,7 +1668,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         return (
           <ContextInspector
             runId={run.id}
-            runSettled={effectiveStatus !== 'running' && effectiveStatus !== 'paused' && effectiveStatus !== 'blocked'}
+            runSettled={!isActive}
           />
         );
       case 'graph':
@@ -1729,8 +1760,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
             <button
               onClick={handlePauseResume}
               disabled={!isActive || pauseLoading}
-              title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
-              aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
+              title={legacyStatus === 'paused' ? 'Resume run' : 'Pause run'}
+              aria-label={legacyStatus === 'paused' ? 'Resume run' : 'Pause run'}
               className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${isActive && !pauseLoading
                 ? 'hover:bg-bg text-muted hover:text-[var(--text)]'
                 : 'text-muted/30 cursor-not-allowed'
@@ -1738,7 +1769,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
             >
               {pauseLoading ? (
                 <Loader2 size={16} className="animate-spin" />
-              ) : effectiveStatus === 'paused' ? (
+              ) : legacyStatus === 'paused' ? (
                 <Play size={16} />
               ) : (
                 <Pause size={16} />
