@@ -130,6 +130,9 @@ const CONTEXT_BOOSTS: Record<string, string[]> = {
   specs: [
     'action:new-spec', 'action:search-archive', 'action:review',
   ],
+  lifecycle: [
+    'panel:lifecycle',
+  ],
   runs: [
     'action:trigger-pipeline', 'action:view-active-run', 'panel:runs',
   ],
@@ -192,6 +195,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
         label: nav.label,
         category: 'panel',
         description: `Go to ${nav.label}`,
+        icon: nav.icon,
         action: () => { onNavigate(nav.id); onClose(); },
       });
     }
@@ -608,6 +612,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
                 const isSelected = currentIdx === selectedIdx;
                 const recentIds = getRecent();
                 const isRecent = recentIds.includes(item.id);
+                const ItemIcon = item.icon;
                 const isForgeFallback = item.id === 'forge-fallback';
                 const isClearHistory = item.id === 'clear-history';
 
@@ -630,6 +635,8 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
                       <Menu size={14} className="text-muted shrink-0" />
                     ) : isRecent && !query.trim() ? (
                       <Clock size={14} className="text-muted shrink-0" />
+                    ) : ItemIcon ? (
+                      <ItemIcon size={14} className="text-muted shrink-0" aria-hidden="true" />
                     ) : (
                       <ArrowRight size={14} className="text-muted shrink-0" />
                     )}

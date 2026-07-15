@@ -28,6 +28,7 @@ const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
  */
 export const PANEL_ROUTES: Record<PanelId, string> = {
   specs: '/specs',
+  lifecycle: '/lifecycle',
   runs: '/runs',
   analytics: '/analytics',
   direction: '/direction',
@@ -42,6 +43,7 @@ export function pathToPanelId(pathname: string): PanelId {
   if (/^\/runs\/\d+/.test(pathname)) return 'runs';
   if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'specs';
   if (pathname === '/analytics') return 'analytics';
+  if (pathname === '/lifecycle') return 'lifecycle';
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
   if (pathname === '/specs') return 'specs';
   if (pathname === '/runs') return 'runs';

@@ -11,7 +11,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Settings,
   Search, PlayCircle, Compass,
-  BarChart3, Package,
+  BarChart3, Package, ShieldCheck,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -23,7 +23,7 @@ import { useBreakpoint } from '../hooks/useBreakpoint';
 
 // ULT-022: primary panels + run-view + spec-review slide-over
 export type PanelId =
-  | 'specs' | 'runs' | 'analytics' | 'direction' | 'settings' | 'marketplace'
+  | 'specs' | 'lifecycle' | 'runs' | 'analytics' | 'direction' | 'settings' | 'marketplace'
   | 'run-view'
   | 'spec-review';
 
@@ -42,8 +42,9 @@ interface NavSection {
 // ─── ULT-006: 5-item sidebar ────────────────────────────────────────────────
 
 const SIDEBAR_ITEMS: NavItem[] = [
-  { id: 'specs',       label: 'Specs',       icon: Layers },
-  { id: 'runs',        label: 'Runs',        icon: PlayCircle },
+  { id: 'specs',       label: 'Specs',             icon: Layers },
+  { id: 'lifecycle',   label: 'Lifecycle Control', icon: ShieldCheck },
+  { id: 'runs',        label: 'Runs',              icon: PlayCircle },
   { id: 'marketplace', label: 'Marketplace', icon: Package },
   { id: 'analytics',   label: 'Analytics',   icon: BarChart3 },
   { id: 'direction',   label: 'Direction',   icon: Compass },
@@ -59,6 +60,13 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Specs',
     items: [
       { id: 'specs', label: 'Specs', icon: Layers },
+    ],
+  },
+  {
+    id: 'lifecycle',
+    label: 'Lifecycle Control',
+    items: [
+      { id: 'lifecycle', label: 'Lifecycle Control', icon: ShieldCheck },
     ],
   },
   {
@@ -213,7 +221,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
                     onMobileClose?.();
                   }}
                   className={({ isActive }) =>
-                    `relative flex items-center justify-center w-9 h-9 rounded transition-colors ${isActive
+                    `relative flex items-center justify-center w-9 h-9 rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${isActive
                       ? 'text-accent bg-surface-200'
                       : 'text-muted/70 hover:bg-surface-100 hover:text-[var(--text)]'
                     }`
@@ -234,12 +242,13 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
                 to={PANEL_ROUTES[item.id]}
                 end={false}
                 role="listitem"
+                aria-label={item.label}
                 onClick={(e) => {
                   e.preventDefault();
                   onNavigate(item.id);
                   onMobileClose?.();
                 }}
-                className={({ isActive }) => `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1.5 rounded text-[13px] transition-colors ${isActive
+                className={({ isActive }) => `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1.5 rounded text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${isActive
                   ? 'text-[var(--text)] bg-surface-200 font-medium'
                   : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
                   }`}
@@ -289,12 +298,13 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
               key={item.id}
               to={PANEL_ROUTES[item.id]}
               end={false}
+              aria-label={item.label}
               onClick={(e) => {
                 e.preventDefault();
                 onNavigate(item.id);
               }}
               className={({ isActive }) =>
-                `flex flex-col items-center justify-center gap-0.5 min-w-[44px] min-h-[44px] px-2 py-1 rounded text-[10px] transition-colors relative
+                `flex flex-col items-center justify-center gap-0.5 min-w-[44px] min-h-[44px] px-2 py-1 rounded text-[10px] transition-colors relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
                 ${isActive ? 'text-accent' : 'text-muted'}`
               }
             >
@@ -350,8 +360,9 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
                     onNavigate(item.id);
                   }}
                   title={tabletExpanded ? undefined : item.label}
+                  aria-label={item.label}
                   className={({ isActive }) =>
-                    `flex items-center gap-2 mx-1 rounded transition-colors relative min-h-[44px]
+                    `flex items-center gap-2 mx-1 rounded transition-colors relative min-h-[44px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
                     ${tabletExpanded ? 'px-3' : 'justify-center px-0'}
                     ${isActive
                       ? 'text-[var(--text)] bg-surface-200 font-medium'

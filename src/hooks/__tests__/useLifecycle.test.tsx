@@ -172,6 +172,23 @@ describe('lifecycle URL and saved display state', () => {
 });
 
 describe('useLifecycle controller', () => {
+  it('opens canonical spec and phase deep links after lifecycle data loads', async () => {
+    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?spec=spec-a&phase=qa') });
+    await waitFor(() => expect(mockPhase).toHaveBeenCalledWith(
+      'ws-1', 'spec-a', 'qa', expect.any(Object), expect.any(String), expect.any(Object),
+    ));
+    await waitFor(() => expect(result.current.phase.data?.phaseId).toBe('qa'));
+    expect(result.current.urlState.selectedSpecId).toBe('spec-a');
+    expect(result.current.urlState.selectedPhaseId).toBe('qa');
+  });
+
+  it('clears an invalid phase selection without requesting phase data', async () => {
+    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?spec=spec-a&phase=unknown') });
+    await waitFor(() => expect(result.current.urlState.selectedSpecId).toBeNull());
+    expect(result.current.urlState.selectedPhaseId).toBeNull();
+    expect(mockPhase).not.toHaveBeenCalled();
+  });
+
   it('drives pagination from the URL', async () => {
     renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?page=3&limit=10') });
     await waitFor(() => expect(mockPortfolio).toHaveBeenCalled());
@@ -181,7 +198,7 @@ describe('useLifecycle controller', () => {
   it('clears drawer selections on workspace switching and ignores the obsolete response', async () => {
     const old = deferred<LifecyclePortfolioResponse>();
     mockPortfolio.mockImplementationOnce(() => old.promise).mockImplementation(async (workspaceId) => portfolio(workspaceId));
-    const { result, rerender } = renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?spec=spec-a&phaseDetail=qa') });
+    const { result, rerender } = renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?spec=spec-a&phase=qa') });
     act(() => result.current.openEvidence('7'));
 
     mocks.workspaceId = 'ws-2';
@@ -209,7 +226,7 @@ describe('useLifecycle controller', () => {
   });
 
   it('coalesces duplicate SSE events and refetches only selected queries', async () => {
-    renderHook(() => useLifecycle({ sseDebounceMs: 0 }), { wrapper: wrapper('/lifecycle?spec=spec-a&phaseDetail=qa') });
+    renderHook(() => useLifecycle({ sseDebounceMs: 0 }), { wrapper: wrapper('/lifecycle?spec=spec-a&phase=qa') });
     await waitFor(() => expect(mockPhase).toHaveBeenCalled());
     const before = {
       portfolio: mockPortfolio.mock.calls.length,
@@ -229,7 +246,7 @@ describe('useLifecycle controller', () => {
 
   it('discards a mixed phase snapshot and performs one bounded coordinated refetch', async () => {
     mockPhase.mockResolvedValue(phase('sha256:mixed'));
-    const { result } = renderHook(() => useLifecycle({ sseDebounceMs: 0 }), { wrapper: wrapper('/lifecycle?spec=spec-a&phaseDetail=qa') });
+    const { result } = renderHook(() => useLifecycle({ sseDebounceMs: 0 }), { wrapper: wrapper('/lifecycle?spec=spec-a&phase=qa') });
     await waitFor(() => expect(mockPortfolio).toHaveBeenCalledTimes(2));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(mockPortfolio).toHaveBeenCalledTimes(2);

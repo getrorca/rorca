@@ -66,18 +66,23 @@ function positiveInteger(value: string | null, fallback: number, maximum: number
 }
 
 export function parseLifecycleUrlState(params: URLSearchParams): LifecycleUrlState {
+  const selectedSpecId = params.get('spec')?.slice(0, 128) || null;
+  const phaseValue = params.get('phase');
+  const filterPhaseValue = params.get('phaseFilter') ?? (!selectedSpecId ? phaseValue : null);
+  const legacyPhaseDetail = params.get('phaseDetail');
+  const selectedPhaseValue = selectedSpecId ? (legacyPhaseDetail ?? phaseValue) : legacyPhaseDetail;
   const state: LifecycleUrlState = {
     ...DEFAULT_LIFECYCLE_URL_STATE,
     page: positiveInteger(params.get('page'), 1, 10_000),
     limit: positiveInteger(params.get('limit'), DEFAULT_LIMIT, 100),
     compact: params.get('compact') === '1' || params.get('compact') === 'true',
-    selectedSpecId: params.get('spec')?.slice(0, 128) || null,
-    selectedPhaseId: PHASES.has(params.get('phaseDetail') ?? '') ? params.get('phaseDetail') as LifecyclePhaseId : null,
+    selectedSpecId,
+    selectedPhaseId: PHASES.has(selectedPhaseValue ?? '') ? selectedPhaseValue as LifecyclePhaseId : null,
   };
   const search = params.get('search')?.trim();
   const status = params.get('status');
   const specStatus = params.get('specStatus');
-  const phase = params.get('phase');
+  const phase = filterPhaseValue;
   const risk = params.get('risk');
   const owner = params.get('owner')?.trim();
   const disposition = params.get('disposition');
@@ -86,6 +91,8 @@ export function parseLifecycleUrlState(params: URLSearchParams): LifecycleUrlSta
   if (search) state.search = search.slice(0, 200);
   if (status && STATUSES.has(status)) state.status = status as LifecyclePortfolioFilters['status'];
   if (specStatus && SPEC_STATUSES.has(specStatus)) state.specStatus = specStatus as LifecyclePortfolioFilters['specStatus'];
+  // `phase` is the canonical drawer selection when `spec` is present; without
+  // a selected spec it remains the portfolio phase filter for compatibility.
   if (phase && PHASES.has(phase)) state.phase = phase as LifecyclePhaseId;
   if (risk && RISKS.has(risk)) state.risk = risk as LifecyclePortfolioFilters['risk'];
   if (owner) state.owner = owner.slice(0, 256);
@@ -98,13 +105,13 @@ export function parseLifecycleUrlState(params: URLSearchParams): LifecycleUrlSta
 /** Serializes only lifecycle view state; caller-owned route parameters may be supplied as base. */
 export function serializeLifecycleUrlState(state: LifecycleUrlState, base = new URLSearchParams()): URLSearchParams {
   const params = new URLSearchParams(base);
-  for (const key of ['search', 'status', 'specStatus', 'phase', 'risk', 'owner', 'blocked', 'disposition', 'sort', 'page', 'limit', 'compact', 'spec', 'phaseDetail']) {
+  for (const key of ['search', 'status', 'specStatus', 'phase', 'phaseFilter', 'risk', 'owner', 'blocked', 'disposition', 'sort', 'page', 'limit', 'compact', 'spec', 'phaseDetail']) {
     params.delete(key);
   }
   if (state.search) params.set('search', state.search);
   if (state.status) params.set('status', state.status);
   if (state.specStatus) params.set('specStatus', state.specStatus);
-  if (state.phase) params.set('phase', state.phase);
+  if (state.phase) params.set(state.selectedSpecId ? 'phaseFilter' : 'phase', state.phase);
   if (state.risk) params.set('risk', state.risk);
   if (state.owner) params.set('owner', state.owner);
   if (state.blocked !== undefined) params.set('blocked', String(state.blocked));
@@ -114,7 +121,7 @@ export function serializeLifecycleUrlState(state: LifecycleUrlState, base = new 
   if (state.limit !== DEFAULT_LIMIT) params.set('limit', String(state.limit));
   if (state.compact) params.set('compact', '1');
   if (state.selectedSpecId) params.set('spec', state.selectedSpecId);
-  if (state.selectedPhaseId) params.set('phaseDetail', state.selectedPhaseId);
+  if (state.selectedSpecId && state.selectedPhaseId) params.set('phase', state.selectedPhaseId);
   return params;
 }
 
@@ -320,6 +327,21 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   const updateFilters = useCallback((patch: Partial<LifecyclePortfolioFilters>, replace = false) => {
     updateUrlState({ ...patch, page: 1 }, replace);
   }, [updateUrlState]);
+
+  // Normalize malformed drawer links and migrate the legacy `phaseDetail`
+  // parameter without ever attempting a request for an unknown phase.
+  useEffect(() => {
+    const rawSpec = searchParams.get('spec');
+    const rawPhase = searchParams.get('phaseDetail') ?? searchParams.get('phase');
+    const invalidSelection = Boolean(rawSpec && rawPhase && !PHASES.has(rawPhase));
+    const incompleteLegacySelection = Boolean(!rawSpec && searchParams.has('phaseDetail'));
+    const needsMigration = Boolean(rawSpec && searchParams.has('phaseDetail') && rawPhase && PHASES.has(rawPhase));
+    if (invalidSelection || incompleteLegacySelection) {
+      updateUrlState({ selectedSpecId: null, selectedPhaseId: null }, true);
+    } else if (needsMigration) {
+      updateUrlState({ selectedSpecId: rawSpec, selectedPhaseId: rawPhase as LifecyclePhaseId }, true);
+    }
+  }, [searchParams, updateUrlState]);
 
   const coordinatedRefetch = useCallback((key: string) => {
     if (recoveryKeyRef.current === key) return;

@@ -13,6 +13,7 @@ export { SkeletonForm } from './SkeletonForm';
 export { SkeletonMetricCard } from './SkeletonMetricCard';
 export {
   BoardSkeleton,
+  LifecycleMatrixSkeleton,
   ListSkeleton,
   AnalyticsSkeleton,
   DirectionSkeleton,

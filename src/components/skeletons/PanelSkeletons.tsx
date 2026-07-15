@@ -43,6 +43,35 @@ export function BoardSkeleton() {
   );
 }
 
+/** Lifecycle matrix skeleton: KPI cards, filters, phase headers, and rows. */
+export function LifecycleMatrixSkeleton() {
+  return (
+    <div className="h-full flex flex-col" aria-label="Loading Lifecycle Control">
+      <div className="shrink-0 px-4 py-3 border-b border-border flex items-center gap-3">
+        <span className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</span>
+        <div className="flex-1" />
+        <div className="skeleton-shimmer rounded-md h-8 w-20" />
+      </div>
+      <div className="flex-1 overflow-hidden p-4 space-y-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {Array.from({ length: 4 }).map((_, index) => <SkeletonMetricCard key={index} />)}
+        </div>
+        <div className="skeleton-shimmer rounded-lg h-10 w-full" />
+        <div className="border border-border rounded-lg overflow-hidden">
+          <div className="grid grid-cols-[minmax(180px,2fr)_repeat(6,minmax(64px,1fr))] gap-px bg-border p-px">
+            {Array.from({ length: 7 }).map((_, index) => (
+              <div key={index} className="skeleton-shimmer h-9 bg-panel" />
+            ))}
+            {Array.from({ length: 28 }).map((_, index) => (
+              <div key={index} className="skeleton-shimmer h-12 bg-bg" />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /**
  * List skeleton: table header + 8 grey row rectangles with varying widths.
  * Matches SpecsPanel list view / archive table.
