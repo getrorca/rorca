@@ -7,8 +7,10 @@
 // ─── Pi CLI Binary Detection ────────────────────────────────────────────────
 // Detect whether the Pi CLI binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
-import { execSync, spawnSync } from 'child_process';
+import { execFile, execSync, spawnSync } from 'child_process';
+import { promisify } from 'util';
 import { logger } from './logger';
+const execFileAsync = promisify(execFile);
 export const PI_INSTALL_METHODS = {
     npm: 'npm install -g @mariozechner/pi-coding-agent',
     pnpm: 'pnpm add -g @mariozechner/pi-coding-agent',
@@ -83,6 +85,29 @@ export function detectPi() {
             piVersion: version,
             piBinPath: binPath,
         };
+    }
+    catch {
+        return { piInstalled: false, piVersion: null, piBinPath: null };
+    }
+}
+/** Non-blocking detector for request/diagnostic paths. */
+export async function detectPiAsync(timeoutMs = 1_000) {
+    let binPath = process.env.PI_BIN?.trim() || null;
+    if (!binPath) {
+        try {
+            const result = await execFileAsync('which', ['pi'], { encoding: 'utf8', timeout: timeoutMs });
+            binPath = result.stdout.trim() || null;
+        }
+        catch {
+            return { piInstalled: false, piVersion: null, piBinPath: null };
+        }
+    }
+    if (!binPath)
+        return { piInstalled: false, piVersion: null, piBinPath: null };
+    try {
+        const result = await execFileAsync(binPath, ['--version'], { encoding: 'utf8', timeout: timeoutMs });
+        const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+        return { piInstalled: true, piVersion: parseVersion(raw), piBinPath: binPath };
     }
     catch {
         return { piInstalled: false, piVersion: null, piBinPath: null };
