@@ -10,7 +10,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { query, queryOne } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
-import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 

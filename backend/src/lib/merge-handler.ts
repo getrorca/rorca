@@ -19,7 +19,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import simpleGit from 'simple-git';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 
@@ -54,7 +54,7 @@ export interface MergeResult {
  *   8. Update pipeline_runs.merge_status accordingly
  */
 export async function performMerge(
-  runId: number,
+  runId: number | string,
   branchName: string,
   workspacePath: string,
 ): Promise<MergeResult> {
@@ -137,7 +137,7 @@ async function executeMerge(
   worktreePath: string | null,
   workspacePath: string,
   workspaceId: string,
-  runId: number,
+  runId: number | string,
 ): Promise<MergeResult> {
   // 2. Safety pre-check: dry-run merge
   let preCheckConflictFiles: string[] = [];

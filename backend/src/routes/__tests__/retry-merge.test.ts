@@ -95,9 +95,9 @@ async function seedRunWithMerge(overrides: {
       'forge/specs/approved/test-spec.json',
       'ws-merge',
       overrides.status ?? 'done',
-      overrides.branch_name ?? 'feat/test-branch-123',
-      overrides.worktree_path ?? '/tmp/worktree-test',
-      overrides.merge_status ?? 'failed',
+      overrides.branch_name === undefined ? 'feat/test-branch-123' : overrides.branch_name,
+      overrides.worktree_path === undefined ? '/tmp/worktree-test' : overrides.worktree_path,
+      overrides.merge_status === undefined ? 'failed' : overrides.merge_status,
     ],
   );
   return result!.id;

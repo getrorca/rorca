@@ -81,10 +81,6 @@ router.get('/me', async (req: Request, res: Response) => {
   }
 });
 
-const deleteMeSchema = z.object({
-  confirmation: z.string().min(1),
-});
-
 /**
  * @swagger
  * /api/users/me:

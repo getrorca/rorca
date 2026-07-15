@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { execute, queryOne } from '../db/index';
+import { queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 
@@ -15,20 +15,20 @@ export type MergeEventType =
   | 'worktree_merge_failed';
 
 export interface MergeStartedPayload {
-  runId: number;
+  runId: number | string;
   branch: string;
   targetBranch: 'main';
 }
 
 export interface MergedPayload {
-  runId: number;
+  runId: number | string;
   branch: string;
   targetBranch: 'main';
   mergeCommitSha: string;
 }
 
 export interface MergeFailedPayload {
-  runId: number;
+  runId: number | string;
   branch: string;
   targetBranch: 'main';
   conflictSummary: string;
@@ -52,7 +52,7 @@ export function truncateConflictSummary(summary: string | null | undefined): str
  * Uses direct DB insert (no HTTP round-trip) since this runs in worker context.
  */
 export async function emitMergeEvent(
-  runId: number,
+  runId: number | string,
   eventType: MergeEventType,
   payload: MergeEventPayload,
 ): Promise<void> {

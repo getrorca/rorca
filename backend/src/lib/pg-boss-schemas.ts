@@ -122,7 +122,7 @@ export type PipelineCancelJobPayloadType = z.infer<typeof PipelineCancelJobPaylo
  * Sent by POST /api/pipeline/runs/:id/retry-merge, consumed by worker handlePipelineMerge.
  */
 export const PipelineMergeJobPayload = z.object({
-  runId: z.number().int().positive(),
+  runId: z.union([z.number().int().positive(), z.string().regex(/^[1-9][0-9]*$/)]),
   branch: z.string().min(1),
   workspaceId: z.string().min(1),
 }).strict();

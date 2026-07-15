@@ -12,7 +12,6 @@ import type { PipelineHookRow } from '../lib/hook-runner';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { encryptToken } from '../lib/auth-utils';
 import { handleRouteError } from '../lib/async-handler';
-import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();

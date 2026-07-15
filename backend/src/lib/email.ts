@@ -30,7 +30,6 @@ const smtpTransport = SMTP_HOST && SMTP_USER && SMTP_PASS
   : null;
 
 const FROM = SMTP_FROM || process.env.RORCA_EMAIL_FROM || 'Rorca <no-reply@rorca.ai>';
-const BASE_URL = process.env.RORCA_BASE_URL || 'http://localhost:5210';
 
 async function sendEmail(to: string, subject: string, html: string): Promise<void> {
   if (smtpTransport) {

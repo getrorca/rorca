@@ -11,7 +11,6 @@ import { query, queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
-import { logger } from '../lib/logger';
 import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();

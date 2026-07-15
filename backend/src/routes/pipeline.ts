@@ -6,14 +6,13 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
-import { query, queryOne, execute, transaction } from '../db/index';
-import { withUserClient } from '../db/user-client';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
@@ -22,25 +21,22 @@ import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-cl
 import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
-import type { AuthUser } from '../lib/auth-utils';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
-import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { parsePaginationParams } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
-import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
+import { parseLine } from '../lib/semantic-log-parser';
 import { activeAgent, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
 import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
-import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
+import { checkSpec, type CapabilityStory } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
-import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
@@ -66,7 +62,7 @@ import {
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
-import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
+import { sweepOrphanProcesses } from '../worker';
 import { validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import {
@@ -74,30 +70,6 @@ import {
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
-
-// ── Claude binary + env-var stripping for agentic conflict resolution ─────────
-// Same pattern as execution-engine.ts — strips nested-session detection vars.
-const CLAUDE_BIN_PIPELINE = process.env.CLAUDE_BIN ||
-  (() => {
-    try { return execSync('which claude', { encoding: 'utf8' }).trim(); } catch { return 'claude'; }
-  })();
-
-const CLAUDE_ENV_VARS_STRIP = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_AGENT_SDK_VERSION',
-  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
-];
-
-function buildCleanEnvForMerge(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_STRIP.includes(k)) {
-      env[k] = v;
-    }
-  }
-  return env;
-}
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -400,65 +372,6 @@ function buildExecutionReadinessSummary(
   };
 }
 
-// ─── Fallback Result Syncer ──────────────────────────────────────────────────
-// When execution-engine.ts / run-loop.ts can't POST results to the backend
-// (backend down, restart, port mismatch), they write to .rorca-results.jsonl.
-// This function reads that file and replays entries into the DB.
-
-async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
-  const entries = readFallbackResults(cwd);
-  if (entries.length === 0) return 0;
-
-  let synced = 0;
-  for (const entry of entries) {
-    try {
-      if (entry.type === 'wal') {
-        // Replay WAL event directly into DB
-        const p = entry.payload as Record<string, unknown>;
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [p.event_type ?? entry.status,
-          p.workspace_id ?? workspaceId,
-          p.spec_id ?? null,
-          p.story_id ?? entry.storyId,
-          JSON.stringify(p.payload ?? p),]);
-        broadcastAll(walEvent!);
-        synced++;
-      } else if (entry.type === 'story_result') {
-        // Replay story_result into DB
-        const p = entry.payload as Record<string, unknown>;
-        const runId = (p.runId as number) ?? entry.runId;
-        const storyId = (p.storyId as string) ?? entry.storyId;
-        const status = (p.status as string) ?? entry.status;
-
-        if (!runId || !storyId || !status) continue;
-
-        // Check if already synced (idempotent — don't double-insert)
-        const existing = await queryOne('SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2', [runId, storyId]);
-
-        if (!existing) {
-          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
-            ? JSON.stringify(p.activeSkills)
-            : null;
-          await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills)
-             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10)`, [runId, storyId, status,
-            (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
-            (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
-            (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
-            activeSkillsVal,]);
-        }
-        synced++;
-      }
-    } catch (err: any) {
-      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
-    }
-  }
-
-  if (synced > 0) {
-    deleteFallbackFile(cwd);
-    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
-  }
-  return synced;
-}
-
 // All Claude Code env vars that block nested invocation (same as llm-client.ts)
 const CLAUDE_ENV_VARS_TO_REMOVE = [
   'CLAUDECODE',
@@ -502,216 +415,6 @@ function assertReusableBranchFresh(workspacePath: string, branchName: string): v
   );
 }
 
-/**
- * Write synthesized direction stack to `.opencode/skills/rorca.md` in the workspace.
- * OpenCode reads skill files from this directory automatically.
- * Returns the absolute path of the written file (for cleanup), or null if nothing to write.
- */
-async function writeOpenCodeSkillFile(workspaceCwd: string, workspaceId: string, specBrief: string): Promise<string | null> {
-  // Fetch direction layers from DB
-  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
-
-  const wsRow = await queryOne('SELECT domain FROM workspaces WHERE id = $1', [workspaceId]) as { domain: string | null } | undefined;
-  const domain = wsRow?.domain;
-
-  const l2Row = domain
-    ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
-    : undefined;
-
-  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
-
-  // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null } | undefined;
-
-  // Fetch team layers
-  const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
-
-  let teamL1: string | undefined;
-  let teamL2: string | undefined;
-  if (access) {
-    const tl1 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    const tl2 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    teamL1 = tl1?.content_yaml;
-    teamL2 = tl2?.content_yaml;
-  }
-
-  const synthesized = synthesize({
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    l3: l3Row?.content_yaml,
-    teamL1,
-    teamL2,
-    schemaSnapshot: ctx?.schema_snapshot || undefined,
-    specBrief,
-  });
-
-  // Write to .opencode/skills/rorca/SKILL.md (OpenCode requires skills/<name>/SKILL.md structure)
-  const skillDir = path.join(workspaceCwd, '.opencode', 'skills', 'rorca');
-  fs.mkdirSync(skillDir, { recursive: true });
-  const skillPath = path.join(skillDir, 'SKILL.md');
-
-  const content = [
-    '---',
-    'name: rorca',
-    'description: Rorca direction stack context — synthesized project standards, domain profile, and workspace context for this pipeline run.',
-    '---',
-    '',
-    '# Rorca Direction Stack',
-    '',
-    'This file is auto-generated by Rorca before each pipeline run.',
-    'It contains the synthesized direction stack context for this workspace.',
-    'Do NOT edit manually — it will be overwritten on the next run.',
-    '',
-    synthesized,
-  ].join('\n');
-
-  fs.writeFileSync(skillPath, content);
-  return skillPath;
-}
-
-/** Remove the OpenCode skill file and clean up empty parent dirs. */
-function removeOpenCodeSkillFile(skillPath: string): void {
-  try {
-    fs.unlinkSync(skillPath);
-    // Clean up .opencode/skills/rorca/ directory, then .opencode/skills/, then .opencode/
-    const rorcaDir = path.dirname(skillPath);  // .opencode/skills/rorca/
-    const rorcaRemaining = fs.readdirSync(rorcaDir);
-    if (rorcaRemaining.length === 0) {
-      fs.rmdirSync(rorcaDir);
-      const skillsDir = path.dirname(rorcaDir);  // .opencode/skills/
-      const skillsRemaining = fs.readdirSync(skillsDir);
-      if (skillsRemaining.length === 0) {
-        fs.rmdirSync(skillsDir);
-        const ocDir = path.dirname(skillsDir);  // .opencode/
-        const ocRemaining = fs.readdirSync(ocDir);
-        if (ocRemaining.length === 0) {
-          fs.rmdirSync(ocDir);
-        }
-      }
-    }
-  } catch { /* best-effort cleanup */ }
-}
-
-// ─── Codex AGENTS.md Direction Stack Injection ──────────────────────────────
-
-const RORCA_MARKER_START = '# === RORCA DIRECTION START ===';
-const RORCA_MARKER_END = '# === RORCA DIRECTION END ===';
-
-/**
- * Write synthesized direction stack to workspace root `AGENTS.md` for Codex CLI.
- *
- * Codex CLI auto-discovers AGENTS.md files from the Git root down and injects them
- * as context before the user prompt. By writing direction stack to AGENTS.md in the
- * workspace root, Codex stories get the full L1-L5 direction context automatically.
- *
- * If AGENTS.md already exists, appends a clearly delimited section. If not, creates it.
- * Returns metadata needed for cleanup: path, whether file existed, and original content.
- */
-interface CodexAgentsMdState {
-  agentsMdPath: string;
-  existed: boolean;
-  originalContent: string | null;
-}
-
-async function writeCodexAgentsMd(workspaceCwd: string, workspaceId: string, specBrief: string): Promise<CodexAgentsMdState | null> {
-  // Fetch direction layers from DB (same pattern as writeOpenCodeSkillFile)
-  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
-
-  const wsRow = await queryOne('SELECT domain FROM workspaces WHERE id = $1', [workspaceId]) as { domain: string | null } | undefined;
-  const domain = wsRow?.domain;
-
-  const l2Row = domain
-    ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
-    : undefined;
-
-  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
-
-  // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null } | undefined;
-
-  // Fetch team layers
-  const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
-
-  let teamL1: string | undefined;
-  let teamL2: string | undefined;
-  if (access) {
-    const tl1 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    const tl2 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    teamL1 = tl1?.content_yaml;
-    teamL2 = tl2?.content_yaml;
-  }
-
-  const synthesized = synthesize({
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    l3: l3Row?.content_yaml,
-    teamL1,
-    teamL2,
-    schemaSnapshot: ctx?.schema_snapshot || undefined,
-    specBrief,
-  });
-
-  const agentsMdPath = path.join(workspaceCwd, 'AGENTS.md');
-  let existed = false;
-  let originalContent: string | null = null;
-
-  try {
-    originalContent = fs.readFileSync(agentsMdPath, 'utf8');
-    existed = true;
-  } catch { /* file doesn't exist */ }
-
-  const rorcaSection = [
-    '',
-    RORCA_MARKER_START,
-    '',
-    '# Rorca Direction Stack',
-    '',
-    'This section is auto-generated by Rorca before each pipeline run.',
-    'It contains the synthesized direction stack context for this workspace.',
-    'Do NOT edit manually — it will be overwritten on the next run.',
-    '',
-    synthesized,
-    '',
-    RORCA_MARKER_END,
-    '',
-  ].join('\n');
-
-  if (existed && originalContent !== null) {
-    // Remove any existing Rorca section first (stale from previous run)
-    const cleaned = stripRorcaSection(originalContent);
-    fs.writeFileSync(agentsMdPath, cleaned + rorcaSection);
-  } else {
-    fs.writeFileSync(agentsMdPath, rorcaSection.trimStart());
-  }
-
-  return { agentsMdPath, existed, originalContent };
-}
-
-/** Remove Rorca markers section from content string. */
-function stripRorcaSection(content: string): string {
-  const startIdx = content.indexOf(RORCA_MARKER_START);
-  const endIdx = content.indexOf(RORCA_MARKER_END);
-  if (startIdx === -1 || endIdx === -1) return content;
-
-  const before = content.substring(0, startIdx);
-  const after = content.substring(endIdx + RORCA_MARKER_END.length);
-  // Trim trailing newlines from the join point to avoid double blank lines
-  return before.replace(/\n+$/, '\n') + after.replace(/^\n+/, '');
-}
-
-/** Remove Rorca direction stack from AGENTS.md, restoring original state. */
-function removeCodexAgentsMd(state: CodexAgentsMdState): void {
-  try {
-    if (!state.existed) {
-      // Rorca created this file — delete it entirely
-      fs.unlinkSync(state.agentsMdPath);
-    } else if (state.originalContent !== null) {
-      // Restore the original content
-      fs.writeFileSync(state.agentsMdPath, state.originalContent);
-    }
-  } catch { /* best-effort cleanup */ }
-}
-
 /** FR-005: When a pipeline run finishes with status='done', snapshot spec version as 'completed'. */
 async function markSpecCompleted(specPath: string): Promise<void> {
   try {
@@ -737,393 +440,6 @@ async function markSpecCompleted(specPath: string): Promise<void> {
     await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, 'completed')`, [slug, nextVer, content]);
   } catch {
     // Non-fatal — completed status is also derived from pipeline_runs at query time
-  }
-}
-
-// ─── Auto-merge worktree on run completion ─────────────────────────────────────
-// Called after run_finished WAL event. Merges the run-level worktree branch back
-// into the main workspace branch automatically. Zero user action required.
-//
-// Strategy:
-//   1. Stash any uncommitted workspace changes
-//   2. Dry-run merge (safety pre-check) — bail out if real code conflicts detected
-//   3. Try --ff-only (no merge commit, cleanest)
-//   4. Fall back to --no-ff; auto-resolve tracking files (.rorca/run-state.json, progress.txt)
-//   5. If real code conflicts: abort + emit worktree_merge_failed WAL event (no merge attempted)
-//   6. On success: emit worktree_merged WAL event + remove the worktree directory
-//   7. Always restore stash
-
-// ─── Agentic conflict resolution via claude --print ────────────────────────────
-// Called when git merge --no-ff produces real code conflicts.
-// Spawns a claude session with the conflict diff and instructions to resolve.
-// Returns true if resolution succeeded (no conflict markers remain), false otherwise.
-
-const AGENTIC_RESOLVE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const AGENTIC_RESOLVE_SIGKILL_DELAY_MS = 10_000;   // 10s after SIGTERM
-
-async function attemptAgenticConflictResolution(
-  workspacePath: string,
-  branchName: string,
-  runId: number,
-  workspaceId: string,
-  appendLog: (msg: string, color?: string) => void,
-): Promise<boolean> {
-  const simpleGitForResolve = simpleGit(workspacePath);
-
-  // 1. Start the real --no-ff merge to enter the conflicted state
-  appendLog(`Starting merge of ${branchName} for agentic resolution...`, '\x1b[33m');
-  try {
-    await simpleGitForResolve.merge([branchName, '--no-ff', '--no-commit']);
-    // Merged cleanly — commit and return success (shouldn't happen after pre-check, but handle it)
-    await simpleGitForResolve.commit(`merge: ${branchName} (auto)`);
-    appendLog('Merged cleanly without conflicts — committed.', '\x1b[32m');
-    return true;
-  } catch (mergeErr: any) {
-    const msg: string = mergeErr?.message ?? String(mergeErr);
-    if (
-      !msg.includes('CONFLICT') &&
-      !msg.includes('Automatic merge failed') &&
-      !msg.includes('fix conflicts')
-    ) {
-      // Unexpected error — abort and fail
-      appendLog(`Unexpected merge error: ${msg}`, '\x1b[31m');
-      try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-      return false;
-    }
-    // Expected: we're now in a conflicted state
-  }
-
-  // 2. Capture the conflict diff (working tree after failed merge)
-  let conflictDiff = '';
-  try {
-    conflictDiff = await simpleGitForResolve.raw(['diff']);
-  } catch { /* non-fatal — proceed with empty diff */ }
-  // Truncate to 50KB to avoid prompt bloat
-  if (conflictDiff.length > 50_000) {
-    conflictDiff = conflictDiff.slice(0, 50_000) + '\n... (diff truncated at 50KB)';
-  }
-
-  // 3. Build the resolution prompt
-  const resolutionPrompt = [
-    `You are resolving git merge conflicts. The feature branch "${branchName}" is being merged into main for run #${runId}.`,
-    '',
-    'Here is the current conflict diff (conflict markers in working tree):',
-    '```diff',
-    conflictDiff || '(no diff output available)',
-    '```',
-    '',
-    'Your task:',
-    '1. Examine the conflicted files using the bash and read tools.',
-    '2. Resolve each conflict intelligently — understand the intent of both sides. Do NOT blindly take one side.',
-    '3. After resolving ALL conflicts, stage all files with: git add -A',
-    '4. Commit the merge with: git commit --no-edit',
-    '   (The merge commit message is already staged — --no-edit preserves it.)',
-    '',
-    `Working directory: ${workspacePath}`,
-    '',
-    'Critical: Do not exit until all conflict markers (<<<<<<<, =======, >>>>>>>) have been removed from ALL files and the commit has been made.',
-  ].join('\n');
-
-  // 4. Spawn claude --print with clean env
-  appendLog('Spawning claude to resolve conflicts...', '\x1b[33m');
-  const env = buildCleanEnvForMerge();
-
-  return new Promise<boolean>((resolve) => {
-    const child = spawn(
-      CLAUDE_BIN_PIPELINE,
-      ['--print', '--dangerously-skip-permissions', '--output-format', 'stream-json'],
-      { cwd: workspacePath, env, stdio: ['pipe', 'pipe', 'pipe'] },
-    );
-
-    // Write prompt to stdin then close it
-    child.stdin?.write(resolutionPrompt);
-    child.stdin?.end();
-
-    let timedOut = false;
-    let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // 5-minute timeout → SIGTERM, then 10s → SIGKILL
-    const sigtermTimer = setTimeout(() => {
-      timedOut = true;
-      appendLog('Agentic resolution timed out (5 min) — sending SIGTERM', '\x1b[31m');
-      child.kill('SIGTERM');
-      sigkillTimer = setTimeout(() => {
-        appendLog('Claude did not exit — sending SIGKILL', '\x1b[31m');
-        child.kill('SIGKILL');
-      }, AGENTIC_RESOLVE_SIGKILL_DELAY_MS);
-    }, AGENTIC_RESOLVE_TIMEOUT_MS);
-
-    child.stdout?.on('data', (data: Buffer) => {
-      // Log claude output summary (truncated)
-      const text = data.toString('utf8').slice(0, 200).replace(/\n/g, ' ');
-      if (text.trim()) appendLog(`[claude] ${text}`, '\x1b[90m');
-    });
-
-    child.on('exit', async (code) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-
-      if (timedOut) {
-        appendLog('Agentic resolution timed out — aborting merge', '\x1b[31m');
-        try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      if (code !== 0) {
-        appendLog(`Claude exited with code ${code} — aborting merge`, '\x1b[31m');
-        try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      // 5. Verify no conflict markers remain using git diff --check
-      try {
-        await simpleGitForResolve.raw(['diff', '--check']);
-        // git diff --check exits 0 if no conflict markers — resolution succeeded
-        appendLog('Agentic resolution succeeded — no conflict markers remain', '\x1b[32m');
-        resolve(true);
-      } catch {
-        // Conflict markers remain — abort
-        appendLog('Conflict markers still present after claude resolution — aborting', '\x1b[31m');
-        try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-      }
-    });
-
-    child.on('error', async (err) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-      appendLog(`Claude spawn error: ${err.message} — aborting merge`, '\x1b[31m');
-      try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-      resolve(false);
-    });
-  });
-}
-
-// OutputBuffer is declared after the router — forward-declare the type here for use in autoMergeWorktree
-type MergeOutputBuffer = { chunks: string[]; done: boolean; subscribers: Set<(chunk: string) => void> };
-
-async function autoMergeWorktree(
-  workspacePath: string,
-  worktreePath: string,
-  branchName: string,
-  workspaceId: string,
-  runId: number,
-  buf: MergeOutputBuffer,
-  logPath: string,
-): Promise<void> {
-  const appendLog = (msg: string, color = '\x1b[36m') => {
-    const line = `\r\n${color}[auto-merge] ${msg}\x1b[0m\r\n`;
-    buf.chunks.push(line);
-    buf.subscribers.forEach(cb => cb(line));
-    try { fs.appendFileSync(logPath, line); } catch { /* best-effort */ }
-  };
-
-  // Skip if the worktree directory no longer exists (already manually merged/removed)
-  if (!fs.existsSync(worktreePath)) {
-    appendLog('Worktree already removed — skipping auto-merge', '\x1b[90m');
-    return;
-  }
-
-  const git = simpleGit(workspacePath);
-
-  // 1. Stash any uncommitted workspace changes so the merge can proceed
-  let stashed = false;
-  try {
-    const status = await git.status();
-    if (status.files.length > 0) {
-      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
-      stashed = true;
-      appendLog('Stashed uncommitted workspace changes');
-    }
-  } catch (err: any) {
-    appendLog(`Stash failed — proceeding without stash: ${err.message}`, '\x1b[33m');
-  }
-
-  // ── Tracking-only files that are always safe to resolve with --theirs ──────
-  const TRACKING_PATTERNS = [
-    '.rorca/run-state.json',
-    'progress.txt',
-    '.rorca/memory/runs/',
-  ];
-
-  // 2. Safety pre-check: dry-run merge to detect any conflicts BEFORE touching main
-  appendLog(`Pre-checking merge safety for ${branchName}...`);
-  let preCheckConflictFiles: string[] = [];
-  let preCheckIsClean = false;
-  try {
-    await git.merge([branchName, '--no-commit', '--no-ff']);
-    // Merged cleanly in dry-run (no CONFLICT markers) — abort it, proceed with real merge
-    preCheckIsClean = true;
-    try { await git.merge(['--abort']); } catch { /* nothing to abort on clean ff */ }
-  } catch (dryRunErr: any) {
-    if (
-      dryRunErr.message?.includes('CONFLICT') ||
-      dryRunErr.message?.includes('Automatic merge failed') ||
-      dryRunErr.message?.includes('fix conflicts')
-    ) {
-      // Collect conflict files before aborting
-      try {
-        const diffOut = await git.raw(['diff', '--name-only', '--diff-filter=U']);
-        preCheckConflictFiles = diffOut.trim().split('\n').filter(Boolean);
-      } catch { /* continue */ }
-      try { await git.merge(['--abort']); } catch { /* already clean */ }
-
-      // Only auto-resolve tracking files — real code conflicts block the merge
-      const realConflicts = preCheckConflictFiles.filter(
-        f => !TRACKING_PATTERNS.some(tp => f.includes(tp))
-      );
-
-      if (realConflicts.length === 0) {
-        // Only tracking files conflict — safe to merge with auto-resolution
-        preCheckIsClean = true;
-        appendLog(
-          `Pre-check: only tracking file conflicts (${preCheckConflictFiles.join(', ')}) — auto-resolvable`,
-          '\x1b[33m',
-        );
-      } else {
-        // Real code conflicts — attempt agentic resolution via claude --print
-        appendLog(
-          `Pre-check: code conflicts detected in: ${realConflicts.join(', ')} — attempting agentic resolution`,
-          '\x1b[33m',
-        );
-        const agenticResolved = await attemptAgenticConflictResolution(
-          workspacePath, branchName, runId, workspaceId, appendLog,
-        );
-        if (agenticResolved) {
-          // Claude resolved the conflicts — merge succeeded
-          preCheckIsClean = true; // skip the normal merge path below — already committed
-          // Emit success WAL event and clean up (skip to the merge-success block)
-          let sha = '';
-          try { sha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
-          const walEvt = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merged', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, branchName, mergeCommitSha: sha, resolvedBy: 'agentic' })]);
-          broadcastAll(walEvt!);
-          try { await git.raw(['worktree', 'remove', '--force', worktreePath]); appendLog(`Worktree removed: ${path.basename(worktreePath)}`, '\x1b[32m'); } catch { /* non-fatal */ }
-          try { await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-          // Restore stash and return — no further merge needed
-          if (stashed) {
-            try { await git.stash(['pop']); appendLog('Restored stashed workspace changes'); } catch (popErr: any) { appendLog(`Stash pop conflict — run 'git stash pop' manually: ${popErr.message}`, '\x1b[33m'); }
-          }
-          return;
-        } else {
-          // Agentic resolution failed — emit failure WAL event
-          appendLog('Agentic resolution failed — worktree preserved for manual resolution', '\x1b[31m');
-          let conflictDiff = '';
-          try { conflictDiff = (await git.raw(['diff'])).slice(0, 2048); } catch { /* non-fatal */ }
-          const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merge_failed', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
-            run_id: runId,
-            branchName,
-            worktreePath,
-            conflictFiles: realConflicts,
-            conflictSummary: conflictDiff,
-            message: 'Agentic merge resolution failed — resolve conflicts manually via the Worktrees panel.',
-          })]);
-          broadcastAll(walEvent!);
-          if (stashed) {
-            try { await git.stash(['pop']); appendLog('Restored stashed workspace changes'); } catch (popErr: any) { appendLog(`Stash pop conflict — run 'git stash pop' manually: ${popErr.message}`, '\x1b[33m'); }
-          }
-          return;
-        }
-      }
-    } else if (dryRunErr.message?.includes('Already up to date')) {
-      preCheckIsClean = true;
-      appendLog('Already up to date — nothing to merge', '\x1b[32m');
-    } else {
-      appendLog(`Pre-check error: ${dryRunErr.message}`, '\x1b[31m');
-      return; // unknown error — don't attempt the merge
-    }
-  }
-
-  if (!preCheckIsClean) return;
-
-  // 3. Pre-check passed — execute the real merge
-  let mergeSuccess = false;
-  try {
-    appendLog(`Merging ${branchName} into workspace...`);
-
-    // Try fast-forward first (no merge commit, cleanest)
-    try {
-      await git.merge([branchName, '--ff-only']);
-      appendLog('Merged via fast-forward — no conflicts', '\x1b[32m');
-      mergeSuccess = true;
-    } catch {
-      // ff-only failed — do no-ff merge with tracking-file auto-resolution
-      try {
-        await git.merge([branchName, '--no-ff', '--no-commit']);
-      } catch (mergeErr: any) {
-        // Expected if tracking files conflict — resolve them now
-        if (
-          mergeErr.message?.includes('CONFLICT') ||
-          mergeErr.message?.includes('Automatic merge failed')
-        ) {
-          // Auto-resolve tracking files (pre-check already confirmed only these conflict)
-          for (const file of preCheckConflictFiles) {
-            try {
-              await git.raw(['checkout', '--theirs', '--', file]);
-              await git.add(file);
-              appendLog(`Auto-resolved tracking file: ${file}`);
-            } catch { /* best-effort */ }
-          }
-        } else {
-          throw mergeErr;
-        }
-      }
-
-      // Commit the merge
-      try {
-        await git.commit(`merge: ${branchName} (auto)`);
-        appendLog('Merged (no-ff) — no conflicts', '\x1b[32m');
-        mergeSuccess = true;
-      } catch (commitErr: any) {
-        if (commitErr.message?.includes('nothing to commit') || commitErr.message?.includes('nothing added')) {
-          appendLog('Merged — already up to date', '\x1b[32m');
-          mergeSuccess = true;
-        } else {
-          try { await git.merge(['--abort']); } catch { /* already clean */ }
-          appendLog(`Commit failed: ${commitErr.message}`, '\x1b[31m');
-        }
-      }
-    }
-  } catch (unexpectedErr: any) {
-    try { await git.merge(['--abort']); } catch { /* already clean */ }
-    appendLog(`Unexpected merge error: ${unexpectedErr.message}`, '\x1b[31m');
-  } finally {
-    // 4. Always restore stash — even if merge failed
-    if (stashed) {
-      try {
-        await git.stash(['pop']);
-        appendLog('Restored stashed workspace changes');
-      } catch (popErr: any) {
-        appendLog(
-          `Stash pop conflict — run 'git stash pop' manually to restore your changes: ${popErr.message}`,
-          '\x1b[33m',
-        );
-      }
-    }
-  }
-
-  // 5. On success: emit WAL event + remove worktree directory
-  if (mergeSuccess) {
-    let mergeCommitSha = '';
-    try { mergeCommitSha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
-
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merged', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, branchName, mergeCommitSha })]);
-    broadcastAll(walEvent!);
-
-    // Remove the worktree directory — run is done, branch merged
-    try {
-      await git.raw(['worktree', 'remove', '--force', worktreePath]);
-      appendLog(`Worktree removed: ${path.basename(worktreePath)}`, '\x1b[32m');
-    } catch (rmErr: any) {
-      // Worktree removal is best-effort — not a failure
-      appendLog(`Worktree removal skipped: ${(rmErr as Error).message}`, '\x1b[33m');
-    }
-
-    // Clear worktree_path from pipeline_runs so UI knows it's merged
-    try {
-      await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]);
-    } catch { /* non-fatal */ }
   }
 }
 
@@ -1631,7 +947,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           throw new ForbiddenError('engine_auth_required');
           return;
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof ForbiddenError) throw error;
         // Spec parse error — non-fatal for auth scanning, let the trigger proceed
       }
     }
@@ -1655,7 +972,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
               missingTools: s.result.missingTools,
               warnings: s.result.warnings,
             }));
-            throw new ValidationError('capability_mismatch');
+            throw new ValidationError('capability_mismatch', { incompatible });
             return;
           }
 
@@ -1670,8 +987,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           }));
           (req as any)._capabilityMismatchMode = mismatchMode;
         }
-      } catch {
-        // Non-fatal — let the trigger proceed
+      } catch (error) {
+        if (error instanceof ValidationError) throw error;
+        // Spec parse or capability inspection errors are non-fatal.
       }
     }
 
@@ -4619,22 +3937,21 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
  *       - in: path
  *         name: runId
  *         required: true
- *         schema: { type: integer }
+ *         schema: { type: string, pattern: '^[0-9]+$' }
  *     responses:
- *       200: { description: "Merge job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, queued: { type: boolean } } } } } }
+ *       200: { description: "Merge job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: string }, queued: { type: boolean } } } } } }
  *       404: { description: "Run not found" }
  *       409: { description: "merge_status is not failed" }
  */
 router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
   try {
-    const runId = parseInt(String(req.params.runId), 10);
-    if (isNaN(runId)) {
+    const runId = String(req.params.runId);
+    if (!/^[1-9][0-9]*$/.test(runId)) {
       throw new ValidationError('Invalid runId');
-      return;
     }
 
     const run = await queryOne<{
-      id: number;
+      id: string;
       merge_status: string | null;
       branch_name: string | null;
       worktree_path: string | null;
@@ -6218,7 +5535,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
           res.write('event: done\ndata: \n\n');
           res.end();
         }
-      } catch (err) {
+      } catch {
         // Swallow DB connection errors — they're transient under heavy load.
         // The next poll tick will retry.
       }
@@ -6444,7 +5761,7 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
       // Swallow transient DB errors — next tick retries
     }
   }, 200);
-  } catch (err) {
+  } catch {
     clearInterval(hb);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Stream setup failed' });
@@ -6461,50 +5778,6 @@ async function isStoryDone(runId: number, storyId: string): Promise<boolean> {
     [storyId, runId]
   );
   return !!row;
-}
-
-/** Resolve story log file path from WAL event or filesystem scan. Returns path or triggers waiting-mode SSE. */
-async function resolveStoryLogPath(runId: number, storyId: string, workspaceId: string | null): Promise<string> {
-  // 1. Check story_started WAL event for log_file path
-  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(
-    `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`,
-    [storyId, runId]
-  );
-  if (walRow?.payload) {
-    try {
-      const payload = typeof walRow.payload === 'string' ? JSON.parse(walRow.payload) : walRow.payload;
-      if (payload.log_file && fs.existsSync(String(payload.log_file))) {
-        return String(payload.log_file);
-      }
-    } catch { /* ignore */ }
-  }
-
-  // 2. Filesystem fallback: scan forge/specs/logs/ and forge/logs/
-  if (workspaceId) {
-    const workspace = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
-    if (workspace) {
-      const logDirs = [
-        path.join(workspace.path, 'forge', 'specs', 'logs'),
-        path.join(workspace.path, 'forge', 'logs'),
-      ];
-      for (const logDir of logDirs) {
-        if (fs.existsSync(logDir)) {
-          try {
-            const files = fs.readdirSync(logDir)
-              .filter(f => f.startsWith(`${storyId}_`) && f.endsWith('.log'))
-              .sort()
-              .reverse();
-            if (files.length > 0) {
-              return path.join(logDir, files[0]);
-            }
-          } catch { /* ignore */ }
-        }
-      }
-    }
-  }
-
-  // 3. No log file found — return a placeholder that startTailing handles gracefully
-  return path.join(os.tmpdir(), `rorca-story-${runId}-${storyId}.log`);
 }
 
 // ─── GET /api/pipeline/stream — SSE event stream ─────────────────────────────
@@ -6719,7 +5992,6 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
           }
         }
 
-        const range = baseRef ? `${baseRef}..${branchName}` : branchName;
         const log = await git.log({ from: baseRef || undefined, to: branchName, maxCount: 100 });
         commits = log.all.map((c) => ({
           sha: c.hash,

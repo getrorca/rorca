@@ -13,7 +13,7 @@ import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
-import { query, queryOne, execute, transaction, pool } from '../db/index';
+import { query, queryOne, execute, transaction } from '../db/index';
 import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
@@ -22,7 +22,7 @@ import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, g
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey, getOpenRouterPrefs } from './vault';
-import { authRequired, type AuthUser } from '../lib/auth-utils';
+import { authRequired } from '../lib/auth-utils';
 import { getEffectiveUser } from '../lib/get-user';
 import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
@@ -3013,21 +3013,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // Base JSON schema and rules used by multi-pass Pass 1 (simpler format without skill/persona fields)
     const baseJsonSchema = `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`;
-
-    const baseRules = [
-      storyCount === 0
-        ? `- Number stories sequentially starting from ${storyPrefix}-001`
-        : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
-      '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
-      '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
-      '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
-      '- Stories should be concrete and implementable, not vague',
-      '- Each story must have a "complexity" field: integer 1-5 (1=trivial one-liner, 2=simple, 3=moderate, 4=complex multi-file, 5=epic cross-cutting). Base on acceptance criteria count, description scope, and dependency depth',
-      '- Your entire response must be valid JSON parseable by JSON.parse()',
-      '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
-      '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
-      '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
-    ];
 
     // Pre-compute slug — needed for attachment lookup and multi-pass version snapshots
     const slug = title
@@ -9766,11 +9751,6 @@ interface GraphResponse {
   parallelGroups: string[][];
 }
 
-interface GraphErrorResponse {
-  error: string;
-  cycle?: string[];
-}
-
 /**
  * Detect cycles in the dependency graph using DFS.
  * Returns the cycle path if found, null otherwise.
@@ -10879,7 +10859,6 @@ router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Respon
  */
 router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Response) => {
   try {
-    const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
     const { workspaceId } = req.body;
 
@@ -11095,10 +11074,6 @@ interface GitHubIssue {
   html_url: string;
   labels: Array<{ name: string }>;
   state: string;
-}
-
-interface GitHubConnectionRow {
-  encrypted_token: string;
 }
 
 interface GithubWebhookRow {
@@ -12056,16 +12031,6 @@ router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
 });
 
 // ─── V2-042: PUT /:specId/assign — Assign spec to a user ──────────────────────
-
-interface AssignmentRow {
-  id: number;
-  spec_id: string;
-  story_id: string;
-  workspace_id: string;
-  assignee_id: string;
-  assigned_at: string;
-  assigned_by: string | null;
-}
 
 /**
  * @swagger
@@ -14765,7 +14730,7 @@ router.post('/:specId/enrich/async', async (req: Request, res: Response) => {
 router.post('/:id/assign-models', async (req: Request, res: Response) => {
   try {
     const specId = req.params.id;
-    const { workspaceId, dryRun = false } = req.body;
+    const { workspaceId } = req.body;
 
     if (!workspaceId) {
       throw new ValidationError('Missing required field: workspaceId');

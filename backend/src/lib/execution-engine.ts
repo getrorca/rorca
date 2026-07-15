@@ -797,17 +797,11 @@ async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
 
   try {
     // Lazy-load MCP SDK to avoid importing at module level (keeps startup fast when not needed).
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { Client } = require('@modelcontextprotocol/sdk/client/index.js') as typeof import('@modelcontextprotocol/sdk/client/index.js');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js') as typeof import('@modelcontextprotocol/sdk/client/stdio.js');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { Server } = require('@modelcontextprotocol/sdk/server/index.js') as typeof import('@modelcontextprotocol/sdk/server/index.js');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js') as typeof import('@modelcontextprotocol/sdk/server/streamableHttp.js');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js') as typeof import('@modelcontextprotocol/sdk/types.js');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const expressLib = require('express') as typeof import('express');
 
     // 1. Connect to chrome-devtools-mcp via stdio

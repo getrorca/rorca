@@ -60,7 +60,6 @@ import { registerContextCaptureHandlers } from './lib/context-distillation';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { advanceQueue } from './lib/run-queue';
-import { FlushBuffer } from './lib/flush-buffer';
 import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
@@ -283,11 +282,6 @@ const activeProcesses = new Map<number, ChildProcess>();
 // writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
 
 const cancellingRuns = new Set<number>();
-
-// ── Reconciliation error counter (updated by reconcileState) ─────────────────
-// Surfaced on the health endpoint as lastReconciliationErrors.
-
-let lastReconciliationErrors = 0;
 
 // ── pg-boss self-check (consecutive failure counter) ─────────────────────────
 // If boss.getQueueSize throws 3 consecutive times the pg-boss connection is
@@ -1045,9 +1039,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
     // Then strip the 4 Claude vars that must not propagate to nested invocations.
-    const { CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_SDK_VERSION, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING, ...inheritedEnv } = process.env as Record<string, string>;
     const env: Record<string, string> = {
-      ...inheritedEnv,
+      ...buildCleanEnv(),
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
       RORCA_WORKSPACE_ID: workspaceId,
@@ -1290,6 +1283,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                   mergeLog(`[merge-strategy:pr] PR created (#${prNumber})`);
                 } catch (prErr: any) {
                   // Fallback: try gh CLI if GitHub API integration isn't configured
+                  mergeLog(`[merge-strategy:pr] GitHub integration failed: ${prErr.message}; trying gh CLI fallback`);
                   try {
                     const specSlug = path.basename(specPath, '.json');
                     execSync(
@@ -1346,6 +1340,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                   mergeLog(`[merge-strategy:draft-pr] Draft PR created (#${prNumber})`);
                 } catch (prErr: any) {
                   // Fallback: try gh CLI
+                  mergeLog(`[merge-strategy:draft-pr] GitHub integration failed: ${prErr.message}; trying gh CLI fallback`);
                   try {
                     const specSlug = path.basename(specPath, '.json');
                     execSync(
@@ -2425,7 +2420,6 @@ async function reconcileState(): Promise<void> {
   }
 
   const totalFixed = stuckRuns.length + orphanJobs.length;
-  lastReconciliationErrors = totalFixed;
 
   if (totalFixed > 0) {
     logger.warn({ caseA: stuckRuns.length, caseB: orphanJobs.length }, '[worker] reconcileState — mismatches resolved');

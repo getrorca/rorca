@@ -7,9 +7,8 @@
 
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
-import { query, queryOne } from '../db/index';
+import { query } from '../db/index';
 import { encryptToken, decryptToken } from '../lib/auth-utils';
-import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { withUserClient } from '../db/user-client';

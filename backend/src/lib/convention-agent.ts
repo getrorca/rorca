@@ -454,7 +454,7 @@ function inferFileGovernance(
   for (const dir of directories) {
     const entry: FileGovernanceEntry = {
       glob: `${dir.path}/**`,
-      owner: inferOwner(dir.path, dir.purpose, stackNames),
+      owner: inferOwner(dir.path),
       rules: inferRules(dir.path, dir.purpose, stackNames),
     };
     if (entry.rules.length > 0) {
@@ -465,7 +465,7 @@ function inferFileGovernance(
   return governance;
 }
 
-function inferOwner(dirPath: string, purpose: string, stackNames: Set<string>): string {
+function inferOwner(dirPath: string): string {
   const name = dirPath.toLowerCase();
   if (name.includes('component') || name.includes('page') || name.includes('panel') || name.includes('hook') || name.includes('context')) {
     return 'Frontend specialist';

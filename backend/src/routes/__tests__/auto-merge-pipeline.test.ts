@@ -228,14 +228,14 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     );
   });
 
-  test('payload runId is a positive integer', async () => {
+  test('payload preserves the positive BIGINT runId as a decimal string', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
     await postRetryMerge(runId);
 
     const payload = mockBossSend.mock.calls[0][1];
-    expect(typeof payload.runId).toBe('number');
-    expect(Number.isInteger(payload.runId)).toBe(true);
-    expect(payload.runId).toBeGreaterThan(0);
+    expect(typeof payload.runId).toBe('string');
+    expect(payload.runId).toBe(runId);
+    expect(payload.runId).toMatch(/^[1-9][0-9]*$/);
   });
 
   test('payload branch matches run branch_name', async () => {
