@@ -135,4 +135,23 @@ describe('Always-On Context mainline reconciliation', () => {
       expect(operation).not.toContain('x-rorca-public-api: true');
     }
   });
+
+  test('pg-boss queues are created explicitly and uninstall cancels through the pg-boss API', () => {
+    const boss = fs.readFileSync(path.resolve(__dirname, '../pg-boss.ts'), 'utf8');
+    const route = fs.readFileSync(path.resolve(__dirname, '../../routes/context-capture.ts'), 'utf8');
+    expect(boss).toContain("await boss.createQueue('context:capture')");
+    expect(boss).toContain("await boss.createQueue('context:distill')");
+    expect(boss).not.toContain("createQueue('capture:ingest')");
+    expect(route).toContain("await boss.createQueue('context:capture')");
+    expect(route).toContain("await boss.cancel('context:capture', job.id)");
+    expect(route).not.toMatch(/DELETE\s+FROM\s+pgboss\./i);
+  });
+
+  test('mainline keeps CCS public ingestion/governance routes mounted beside operator controls', () => {
+    const server = fs.readFileSync(path.resolve(__dirname, '../../server.ts'), 'utf8');
+    expect(server).toContain("app.use('/api/context-events', contextEventsRouter)");
+    expect(server).toContain("app.use('/api/context-candidates', contextCandidatesRouter)");
+    expect(server).toContain("app.use('/api/memory/candidates', memoryCandidatesRouter)");
+    expect(server).toContain("app.use('/api/context-capture', contextCaptureRouter)");
+  });
 });
