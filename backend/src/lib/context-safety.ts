@@ -1593,3 +1593,320 @@ function globToRegexSource(pattern: string): string {
   }
   return source;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Always-on capture policy envelope (UCC mainline reconciliation)
+// ════════════════════════════════════════════════════════════════════════════
+
+export type CapturePolicyMode =
+  | 'off'
+  | 'metadata-only'
+  | 'repo-and-command'
+  | 'ide-assisted'
+  | 'full'
+  /** @deprecated use repo-and-command */
+  | 'command-summary'
+  /** @deprecated use full */
+  | 'explicit-transcript-import';
+
+export type CanonicalCapturePolicyMode = 'off' | 'metadata-only' | 'repo-and-command' | 'ide-assisted' | 'full';
+
+export const CANONICAL_CAPTURE_POLICY_MODES: CanonicalCapturePolicyMode[] = [
+  'off',
+  'metadata-only',
+  'repo-and-command',
+  'ide-assisted',
+  'full',
+];
+
+export function normalizeCapturePolicyMode(
+  value: unknown,
+  fallback: CanonicalCapturePolicyMode = 'metadata-only',
+): CanonicalCapturePolicyMode {
+  if (CANONICAL_CAPTURE_POLICY_MODES.includes(value as CanonicalCapturePolicyMode)) {
+    return value as CanonicalCapturePolicyMode;
+  }
+  if (value === 'command-summary') return 'repo-and-command';
+  if (value === 'explicit-transcript-import') return 'full';
+  return fallback;
+}
+
+export function capturePolicyRawContent(mode: CapturePolicyMode): 'off' | 'metadata' | 'summary' | 'explicit' {
+  const normalized = normalizeCapturePolicyMode(mode);
+  if (normalized === 'off') return 'off';
+  if (normalized === 'metadata-only') return 'metadata';
+  if (normalized === 'full') return 'explicit';
+  return 'summary';
+}
+
+export type CapturePolicy = {
+  version: string;
+  maxStringBytes: number;
+  maxPayloadBytes: number;
+  rawContentDefault: 'off' | 'metadata+hash' | 'explicit';
+  hashAlgorithm: 'sha256';
+};
+
+export type CaptureSafetyReport = {
+  contextSafetyModule: 'backend/src/lib/context-safety.ts';
+  policyVersion: string;
+  redactionCount: number;
+  ignoredPathCount: number;
+  truncated: boolean;
+  hashAlgorithm: 'sha256';
+  contentHash: string;
+  redactionTypes: string[];
+  regulatedSignals: string[];
+};
+
+export type RedactionDiagnostics = {
+  redactionCount: number;
+  ignoredPathCount: number;
+  redactionTypes: string[];
+  regulatedSignals: string[];
+  regulatedDomainFlags: string[];
+  truncated: boolean;
+};
+
+export type AgentBinaryDetection = {
+  recognized: boolean;
+  binary: 'claude' | 'codex' | 'opencode' | 'pi' | 'aider' | 'cursor' | 'custom' | 'unknown';
+  matchedPattern?: string;
+};
+
+export type CliCommandSafetyInput = {
+  eventType?: 'cli_command' | 'shell_command' | 'agent_cli_session';
+  source_system?: string;
+  tool_name?: string;
+  session_id?: string;
+  phase?: 'start' | 'end';
+  command?: string;
+  cwd?: string;
+  workspacePath?: string;
+  exitCode?: number | null;
+  durationMs?: number | null;
+  gitBranch?: string | null;
+  gitSha?: string | null;
+  customAgentPatterns?: string[];
+  captureIgnorePatterns?: string[];
+  policyMode?: CapturePolicyMode;
+  transcript?: unknown;
+};
+
+export const DEFAULT_CAPTURE_POLICY: CapturePolicy = {
+  version: '2026-07-ucc-007',
+  maxStringBytes: 16_384,
+  maxPayloadBytes: 128_000,
+  rawContentDefault: 'metadata+hash',
+  hashAlgorithm: 'sha256',
+};
+
+export const BUILTIN_AGENT_BINARIES = ['claude', 'codex', 'opencode', 'pi', 'aider', 'cursor'] as const;
+
+const CAPTURE_REGULATED_SIGNALS: Array<{ name: string; pattern: RegExp }> = [
+  { name: 'possible_ssn', pattern: /\b\d{3}-\d{2}-\d{4}\b/ },
+  { name: 'possible_credit_card', pattern: /\b(?:\d[ -]*?){13,19}\b/ },
+  { name: 'regulated_domain_keyword', pattern: /\b(hipaa|phi|pci|cardholder|ssn|medical\s+record|patient)\b/i },
+];
+
+export function hashCaptureContent(value: unknown): string {
+  return createHash('sha256').update(stableCaptureStringify(value)).digest('hex');
+}
+
+export function sanitizeCapturePayload(
+  input: unknown,
+  policy: CapturePolicy = DEFAULT_CAPTURE_POLICY,
+): { payload: unknown; safety: CaptureSafetyReport } {
+  const diagnostics = analyzeContextSafety(input, {});
+  const redacted = redactContextPayload(input, {}, {});
+  let payload = redactCaptureRawFields(redacted, policy);
+  let truncated = false;
+  const encoded = stableCaptureStringify(payload);
+  if (Buffer.byteLength(encoded) > policy.maxPayloadBytes) {
+    payload = {
+      truncated: true,
+      hash: hashCaptureContent(payload),
+      byteLength: Buffer.byteLength(encoded),
+      preview: encoded.slice(0, policy.maxStringBytes),
+    };
+    truncated = true;
+  }
+  const regulatedSignals = diagnostics.findings
+    .filter((finding) => finding.category === 'regulated-domain')
+    .map((finding) => finding.name)
+    .sort();
+  const redactionTypes = diagnostics.findings
+    .filter((finding) => finding.category === 'secret')
+    .map((finding) => finding.name)
+    .sort();
+  return {
+    payload,
+    safety: {
+      contextSafetyModule: 'backend/src/lib/context-safety.ts',
+      policyVersion: policy.version,
+      redactionCount: redactionTypes.length,
+      ignoredPathCount: 0,
+      truncated,
+      hashAlgorithm: 'sha256',
+      contentHash: hashCaptureContent(payload),
+      redactionTypes: [...new Set(redactionTypes)],
+      regulatedSignals: [...new Set(regulatedSignals)],
+    },
+  };
+}
+
+function redactCaptureRawFields(value: unknown, policy: CapturePolicy): unknown {
+  if (Array.isArray(value)) return value.slice(0, 200).map((item) => redactCaptureRawFields(item, policy));
+  if (!value || typeof value !== 'object') {
+    if (typeof value === 'string' && Buffer.byteLength(value) > policy.maxStringBytes) {
+      return `${Buffer.from(value).subarray(0, policy.maxStringBytes).toString('utf8')}…[TRUNCATED]`;
+    }
+    return value;
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (/^(raw|content|text|stdout|stderr|transcript)$/i.test(key) && policy.rawContentDefault !== 'explicit') {
+      output[key] = typeof child === 'string'
+        ? { hash: hashCaptureContent(child), byteLength: Buffer.byteLength(child), redacted: true }
+        : '[REDACTED_RAW_CONTENT]';
+    } else {
+      output[key] = redactCaptureRawFields(child, policy);
+    }
+  }
+  return output;
+}
+
+export function detectAgentBinary(commandText: string, customPatterns: string[] = []): AgentBinaryDetection {
+  const token = commandText.trim().match(/^(?:env\s+)?(?:[A-Z0-9_]+=[^\s]+\s+)*(?:command\s+)?(?:npx\s+)?(?:["']?)([^\s"']+)/i)?.[1] ?? '';
+  const basename = token.split(/[\\/]/).pop()?.replace(/\.(cmd|exe|ps1)$/i, '').toLowerCase() ?? '';
+  if ((BUILTIN_AGENT_BINARIES as readonly string[]).includes(basename)) {
+    return { recognized: true, binary: basename as AgentBinaryDetection['binary'], matchedPattern: basename };
+  }
+  for (const pattern of customPatterns) {
+    try {
+      if (new RegExp(pattern, 'i').test(commandText)) return { recognized: true, binary: 'custom', matchedPattern: pattern };
+    } catch {
+      if (commandText.toLowerCase().includes(pattern.toLowerCase())) return { recognized: true, binary: 'custom', matchedPattern: pattern };
+    }
+  }
+  return { recognized: false, binary: 'unknown' };
+}
+
+export function isCaptureIgnoredPath(candidatePath: string, workspacePath?: string, patterns: string[] = []): boolean {
+  if (!candidatePath || patterns.length === 0) return false;
+  const root = path.resolve(workspacePath || process.cwd());
+  const absolute = path.isAbsolute(candidatePath) ? path.resolve(candidatePath) : path.resolve(root, candidatePath);
+  const relative = normalizeContextPath(path.relative(root, absolute));
+  return isContextPathIgnored(relative, { paths: patterns });
+}
+
+export function redactCommandText(
+  commandText: string,
+  input: { workspacePath?: string; captureIgnorePatterns?: string[]; policy?: CapturePolicy } = {},
+): { text: string; redactionCount: number; ignoredPathCount: number; truncated: boolean; regulatedSignals: string[]; redactionTypes: string[] } {
+  const diagnostics = analyzeContextSafety(commandText, {});
+  let text = redactContextText(commandText, {});
+  let ignoredPathCount = 0;
+  for (const match of text.matchAll(/(?:^|\s)(['"]?)([^\s'"<>|;&]+(?:[\\/][^\s'"<>|;&]*)+)\1/g)) {
+    const token = match[2];
+    if (isCaptureIgnoredPath(token, input.workspacePath, input.captureIgnorePatterns)) {
+      text = text.split(token).join('[REDACTED_PATH]');
+      ignoredPathCount += 1;
+    }
+  }
+  const maxBytes = input.policy?.maxStringBytes ?? DEFAULT_CAPTURE_POLICY.maxStringBytes;
+  const truncated = Buffer.byteLength(text) > maxBytes;
+  if (truncated) text = `${Buffer.from(text).subarray(0, maxBytes).toString('utf8')}…[TRUNCATED]`;
+  const regulatedSignals = CAPTURE_REGULATED_SIGNALS.filter((rule) => rule.pattern.test(commandText)).map((rule) => rule.name);
+  return {
+    text,
+    redactionCount: diagnostics.findings.filter((finding) => finding.category === 'secret').length + ignoredPathCount,
+    ignoredPathCount,
+    truncated,
+    regulatedSignals,
+    redactionTypes: [...new Set([
+      ...diagnostics.findings.filter((finding) => finding.category === 'secret').map((finding) => finding.name),
+      ...(ignoredPathCount > 0 ? ['ignored_path'] : []),
+    ])].sort(),
+  };
+}
+
+export function sanitizeCliCommandEvent(
+  input: CliCommandSafetyInput,
+  policy: CapturePolicy = DEFAULT_CAPTURE_POLICY,
+): { payload: Record<string, unknown> | null; safety: CaptureSafetyReport } {
+  const policyMode = normalizeCapturePolicyMode(input.policyMode);
+  if (policyMode === 'off') return { payload: null, safety: sanitizeCapturePayload({ skipped: 'policy_off' }, policy).safety };
+  if (input.transcript !== undefined && policyMode !== 'full') {
+    throw new ValidationError('Transcript capture requires full explicit-session summary policy');
+  }
+  if (input.cwd && isCaptureIgnoredPath(input.cwd, input.workspacePath, input.captureIgnorePatterns)) {
+    const safety = sanitizeCapturePayload({ skipped: 'capture_ignore' }, policy).safety;
+    return { payload: null, safety: { ...safety, ignoredPathCount: safety.ignoredPathCount + 1 } };
+  }
+  const command = input.command ?? '';
+  const redacted = redactCommandText(command, {
+    workspacePath: input.workspacePath,
+    captureIgnorePatterns: input.captureIgnorePatterns,
+    policy,
+  });
+  const agent = detectAgentBinary(command, input.customAgentPatterns);
+  const event = {
+    eventType: input.eventType === 'cli_command' ? 'shell_command' : input.eventType ?? (agent.recognized ? 'agent_cli_session' : 'shell_command'),
+    source_system: input.source_system?.trim() || 'shell',
+    tool_name: input.tool_name?.trim() || (agent.recognized ? agent.binary : 'shell'),
+    session_id: input.session_id?.trim() || 'shell',
+    phase: input.phase ?? 'end',
+    policyMode,
+    command_summary: policyMode === 'metadata-only' ? null : redacted.text,
+    command_hash: hashCaptureContent(command),
+    cwd: input.cwd ? redactCommandText(input.cwd, { workspacePath: input.workspacePath, captureIgnorePatterns: input.captureIgnorePatterns, policy }).text : null,
+    exit_code: typeof input.exitCode === 'number' && Number.isFinite(input.exitCode) ? input.exitCode : null,
+    duration_ms: typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) ? input.durationMs : null,
+    git_branch: input.gitBranch ?? null,
+    git_sha: input.gitSha ?? null,
+    agent,
+    regulated_signals: redacted.regulatedSignals,
+    ...(policyMode === 'full' && input.transcript !== undefined ? { transcript: input.transcript } : {}),
+  };
+  const sanitized = sanitizeCapturePayload(event, {
+    ...policy,
+    rawContentDefault: policyMode === 'full' ? 'explicit' : policy.rawContentDefault,
+  });
+  return {
+    payload: sanitized.payload as Record<string, unknown>,
+    safety: {
+      ...sanitized.safety,
+      redactionCount: sanitized.safety.redactionCount + redacted.redactionCount,
+      ignoredPathCount: sanitized.safety.ignoredPathCount + redacted.ignoredPathCount,
+      truncated: sanitized.safety.truncated || redacted.truncated,
+      redactionTypes: [...new Set([...sanitized.safety.redactionTypes, ...redacted.redactionTypes])].sort(),
+      regulatedSignals: [...new Set([...sanitized.safety.regulatedSignals, ...redacted.regulatedSignals])].sort(),
+    },
+  };
+}
+
+export function formatRedactionDiagnostics(
+  input: Partial<CaptureSafetyReport> & { regulatedSignals?: string[] } = {},
+): RedactionDiagnostics {
+  const regulatedSignals = [...new Set(input.regulatedSignals ?? [])].sort();
+  return {
+    redactionCount: Number(input.redactionCount ?? 0),
+    ignoredPathCount: Number(input.ignoredPathCount ?? 0),
+    redactionTypes: [...new Set(input.redactionTypes ?? [])].sort(),
+    regulatedSignals,
+    regulatedDomainFlags: regulatedSignals,
+    truncated: Boolean(input.truncated),
+  };
+}
+
+function stableCaptureStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableCaptureStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableCaptureStringify(child)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
