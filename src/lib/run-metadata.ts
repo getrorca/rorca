@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Canonical browser-side normalization for pipeline-run metadata. API DTOs may
  * carry legacy snake_case fields, but UI surfaces must consume this shape only.
  */
