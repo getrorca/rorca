@@ -160,10 +160,16 @@ describe('PipelineRunJobPayload', () => {
     expect(() => PipelineRunJobPayload.parse(withBadEnv)).toThrow(z.ZodError);
   });
 
-  test('all four agent enum values are accepted', () => {
+  test('all four agent enum values and Pi xhigh effort are accepted', () => {
     for (const agent of ['claude', 'opencode', 'codex', 'pi'] as const) {
       expect(() => PipelineRunJobPayload.parse({ ...validRunPayload, agent })).not.toThrow();
     }
+    expect(PipelineRunJobPayload.parse({
+      ...validRunPayload,
+      agent: 'pi',
+      model: 'openai-codex/gpt-5.6-sol',
+      effortLevel: 'xhigh',
+    })).toMatchObject({ model: 'openai-codex/gpt-5.6-sol', effortLevel: 'xhigh' });
   });
 
   // ── TypeScript compile-time type test ───────────────────────────────────
@@ -210,6 +216,15 @@ describe('PipelineRetryJobPayload', () => {
     expect(result.originalRunId).toBe(42);
     expect(result.storyIds).toEqual(['US-001', 'US-002']);
     expect(result.sequenceOffset).toBe(100);
+  });
+
+  test('preserves xhigh effort for Pi retry resume', () => {
+    expect(PipelineRetryJobPayload.parse({
+      ...validRetryPayload,
+      agent: 'pi',
+      model: 'openai-codex/gpt-5.6-sol',
+      effortLevel: 'xhigh',
+    })).toMatchObject({ model: 'openai-codex/gpt-5.6-sol', effortLevel: 'xhigh' });
   });
 
   test('missing originalRunId throws ZodError mentioning "originalRunId"', () => {

@@ -44,6 +44,7 @@ export interface StartRunPtySessionParams {
   cols: number;
   rows: number;
   childPid: number | null;
+  completionMarker?: string | null;
 }
 
 function compressRunPtyChunk(chunk: Buffer): { chunk: Buffer; compression: string } {
@@ -75,8 +76,9 @@ export function getRunPtyRetentionDays(): number {
 export async function startRunPtySession(params: StartRunPtySessionParams): Promise<void> {
   await execute(
     `INSERT INTO run_pty_sessions
-      (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NOW(), NOW())
+      (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at,
+       last_output_at, completion_marker, completion_marker_seen_at, last_heartbeat_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NULL, $8, NULL, NOW(), NOW())
      ON CONFLICT (run_id) DO UPDATE SET
        workspace_id = EXCLUDED.workspace_id,
        cwd = EXCLUDED.cwd,
@@ -85,11 +87,15 @@ export async function startRunPtySession(params: StartRunPtySessionParams): Prom
        rows = EXCLUDED.rows,
        child_pid = EXCLUDED.child_pid,
        status = 'active',
+       last_output_at = NULL,
+       completion_marker = EXCLUDED.completion_marker,
+       completion_marker_seen_at = NULL,
+       last_heartbeat_at = NOW(),
        exit_code = NULL,
        exit_signal = NULL,
        exited_at = NULL,
        updated_at = NOW()`,
-    [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows, params.childPid],
+    [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows, params.childPid, params.completionMarker ?? null],
   );
 }
 
@@ -132,6 +138,27 @@ export async function appendRunPtyOutput(
          updated_at = NOW()
      WHERE run_id = $1`,
     [runId, data.length, storedBytes],
+  );
+}
+
+/** Terminal completion markers are telemetry; shared host closeout remains authoritative. */
+export async function markRunPtyCompletionMarkerSeen(runId: number, marker: string): Promise<void> {
+  await execute(
+    `UPDATE run_pty_sessions
+     SET completion_marker = COALESCE(completion_marker, $2),
+         completion_marker_seen_at = COALESCE(completion_marker_seen_at, NOW()),
+         updated_at = NOW()
+     WHERE run_id = $1`,
+    [runId, marker],
+  );
+}
+
+export async function recordRunPtyHeartbeat(runId: number): Promise<void> {
+  await execute(
+    `UPDATE run_pty_sessions
+     SET last_heartbeat_at = NOW(), updated_at = NOW()
+     WHERE run_id = $1 AND status = 'active'`,
+    [runId],
   );
 }
 

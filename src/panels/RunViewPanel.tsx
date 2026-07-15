@@ -21,7 +21,7 @@ import MultiPaneTerminal from '../components/MultiPaneTerminal';
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
 import type { StoryContextInfo } from '../components/RunStoryList';
-import RunMetadataPanel from '../components/RunMetadataPanel';
+import RunMetadataPanel, { type EffectiveRunOptions } from '../components/RunMetadataPanel';
 import AgentBadge from '../components/AgentBadge';
 import { getAgentModelDisplayName, normalizeAgentType } from '../lib/agent-display';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
@@ -58,6 +58,7 @@ interface PipelineRun {
   pr_creation_error?: string | null;
   include_graph?: boolean;
   terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
+  effective_options?: EffectiveRunOptions | null;
 }
 
 interface StoryResultSeed {

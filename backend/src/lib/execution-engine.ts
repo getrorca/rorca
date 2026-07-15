@@ -62,13 +62,22 @@ import {
 } from './run-pty-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
-import { detectPi, requirePi, listPiModels } from './pi-detector';
+import { detectPi, requirePi } from './pi-detector';
 import {
+  buildPiCliModelEffortArgs,
+  buildPiCompletionPacket,
+  buildPiModeExecutionGuidance,
   buildPiProgressLogPath,
   buildPiServerSkillFiles,
   buildPiStoryPromptContext,
+  cleanupPiRunTempArtifacts,
+  deletePiGeneratedSkillFile,
   ensurePiStoryProgressLog,
+  flushActivePiStoryProgressLogs,
   recordPiStoryProgressLog,
+  registerPiStoryProgressLog,
+  terminatePiOwnedProcessTree,
+  type PiCompletionPacket,
 } from './pi-autonomous-runner';
 import {
   buildExecutionPacketPromptSection,
@@ -146,13 +155,10 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
-<<<<<<< HEAD
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
-=======
 import { sanitizeCapturePayload } from './context-safety';
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
 import { runHostValidationRequirement } from './story-host-validation';
 import {
   adaptStoryCloseoutEvidence,
@@ -468,6 +474,7 @@ interface PiRpcServer {
   model: string | null;
   skillFiles: string[];
   mcpServersSignature: string;
+  detachedProcessGroup: boolean;
 }
 let _piRpcServer: PiRpcServer | null = null;
 let _piRpcExitCleanupRegistered = false;
@@ -507,7 +514,7 @@ const PI_BIN = process.env.PI_BIN || (() => {
   try { return execSync('which pi', { encoding: 'utf8' }).trim(); } catch { return 'pi'; }
 })();
 
-interface PiCliSelection {
+export interface PiCliSelection {
   provider: string | null;
   model: string | null;
 }
@@ -528,37 +535,18 @@ export function resolveClaudeCliModelId(requestedModel: string | null): string |
   return trimmed.replace(/-(\d+)\.(\d+)(?:(-\d{8})?)$/, '-$1-$2$3');
 }
 
-function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
+function resolvePiThinkingLevel(requestedModel: string | null, effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'): string | null {
+  return buildPiCliModelEffortArgs(requestedModel, effortLevel).thinking;
+}
+
+export function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
   if (!requestedModel) return { provider: null, model: null };
 
   const trimmed = requestedModel.trim();
   if (!trimmed) return { provider: null, model: null };
 
-  if (trimmed.startsWith('pi/')) {
-    const [, provider, ...rest] = trimmed.split('/');
-    return {
-      provider: provider || null,
-      model: rest.length > 0 ? rest.join('/') : null,
-    };
-  }
-
-  const available = listPiModels(PI_BIN);
-
-  const slashIndex = trimmed.indexOf('/');
-  if (slashIndex !== -1) {
-    const provider = trimmed.slice(0, slashIndex);
-    const model = trimmed.slice(slashIndex + 1);
-    if (available.some(entry => entry.provider === provider && entry.model === model)) {
-      return { provider, model };
-    }
-  }
-
-  const matching = available.filter(entry => entry.model === trimmed);
-  if (matching.length === 1) {
-    return { provider: matching[0].provider, model: matching[0].model };
-  }
-
-  return { provider: null, model: trimmed };
+  const selection = buildPiCliModelEffortArgs(trimmed);
+  return { provider: selection.provider, model: selection.model };
 }
 
 function resolvePiExtensionPaths(): string[] {
@@ -1306,10 +1294,12 @@ async function startPiRpcServer(
   }
   if (mcpServers?.playwright) env.RORCA_PI_PLAYWRIGHT_MCP_URL = mcpServers.playwright;
   if (mcpServers?.['chrome-devtools']) env.RORCA_PI_CHROME_MCP_URL = mcpServers['chrome-devtools'];
+  const detachedProcessGroup = process.platform !== 'win32';
   const child = spawn(PI_BIN, args, {
     cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: detachedProcessGroup,
   });
 
   const server: PiRpcServer = {
@@ -1323,6 +1313,7 @@ async function startPiRpcServer(
     model,
     skillFiles,
     mcpServersSignature,
+    detachedProcessGroup,
   };
 
   child.stderr?.on('data', (chunk: Buffer | string) => {
@@ -1429,8 +1420,14 @@ async function startPiRpcServer(
   if (!_piRpcExitCleanupRegistered) {
     _piRpcExitCleanupRegistered = true;
     process.on('exit', () => {
-      if (_piRpcServer) {
-        try { _piRpcServer.process.kill('SIGTERM'); } catch { /* already gone */ }
+      for (const activeServer of _piRpcServers) {
+        try {
+          if (activeServer.detachedProcessGroup && process.platform !== 'win32' && activeServer.process.pid) {
+            process.kill(-activeServer.process.pid, 'SIGTERM');
+          } else {
+            activeServer.process.kill('SIGTERM');
+          }
+        } catch { /* already gone */ }
       }
     });
   }
@@ -1444,30 +1441,10 @@ async function stopPiRpcServer(): Promise<void> {
 
   _piRpcServer = null;
   server.ready = false;
-
-  const exitPromise = new Promise<void>((resolve) => {
-    if (server.process.exitCode !== null) {
-      resolve();
-      return;
-    }
-    server.process.once('exit', () => resolve());
+  await terminatePiOwnedProcessTree(server.process, {
+    detachedProcessGroup: server.detachedProcessGroup,
+    graceMs: 10_000,
   });
-
-  try {
-    server.process.kill('SIGTERM');
-  } catch {
-    return;
-  }
-
-  const finished = await Promise.race([
-    exitPromise.then(() => true),
-    new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000)),
-  ]);
-
-  if (!finished) {
-    try { server.process.kill('SIGKILL'); } catch { /* already gone */ }
-    await exitPromise.catch(() => {});
-  }
 }
 
 function sendPiRpcCommand(server: PiRpcServer, command: object): Promise<unknown> {
@@ -1550,24 +1527,28 @@ async function buildPiSessionOptions(
   mode: 'impl' | 'qa' | 'journey',
   packet: StoryExecutionPacket,
   spec?: SpecJson,
-): Promise<PiSessionOptions | undefined> {
-  if (!workspaceId) return undefined;
+  progressCwd: string = cwd,
+): Promise<PiSessionOptions> {
+  let directionText = '';
+  if (workspaceId) {
+    logger.info(`[pi] Building session options for ${story.id} in workspace ${workspaceId}`);
+    const layers = await getDirectionLayers(workspaceId);
+    logger.info(`[pi] Loaded direction layers for ${story.id}`);
+    directionText = synthesize({
+      l1: layers.l1,
+      l2: layers.l2,
+      l3: layers.l3,
+      teamL1: layers.teamL1,
+      teamL2: layers.teamL2,
+      schemaSnapshot: layers.schemaSnapshot,
+      specBrief: spec?.brief ?? spec?.title ?? story.title,
+      storyAnnotations: getStoryAnnotationText(spec, story),
+    });
+  } else {
+    logger.warn(`[pi] Workspace id unavailable for ${story.id}; continuing with the canonical progress log and no direction-stack overlay.`);
+  }
 
-  logger.info(`[pi] Building session options for ${story.id} in workspace ${workspaceId}`);
-  const layers = await getDirectionLayers(workspaceId);
-  logger.info(`[pi] Loaded direction layers for ${story.id}`);
-  const directionText = synthesize({
-    l1: layers.l1,
-    l2: layers.l2,
-    l3: layers.l3,
-    teamL1: layers.teamL1,
-    teamL2: layers.teamL2,
-    schemaSnapshot: layers.schemaSnapshot,
-    specBrief: spec?.brief ?? spec?.title ?? story.title,
-    storyAnnotations: getStoryAnnotationText(spec, story),
-  });
-
-  const progressLogPath = buildPiProgressLogPath(cwd, runId, story.id);
+  const progressLogPath = buildPiProgressLogPath(progressCwd, runId, story.id);
 
   ensurePiStoryProgressLog(progressLogPath, {
     runId,
@@ -1595,18 +1576,6 @@ async function buildPiSessionOptions(
   };
 }
 
-
-async function deleteFileIfExists(filePath?: string): Promise<void> {
-  if (!filePath) return;
-  try {
-    await fs.promises.unlink(filePath);
-  } catch (error: unknown) {
-    const code = typeof error === 'object' && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
-    if (code !== 'ENOENT') {
-      logger.warn(`  [pi] Failed to delete temp skill file ${filePath}: ${String(error)}`);
-    }
-  }
-}
 
 // ─── SK-003: Skill Loading & Injection ──────────────────────────────────────
 
@@ -1815,6 +1784,10 @@ function buildPrompt(
     ? `\n=== RELATED HISTORY (from knowledge graph) ===\n${graphSection}\n=== END RELATED HISTORY ===\n`
     : '';
 
+  const piAutonomyInstruction = agentType === 'pi'
+    ? buildPiModeExecutionGuidance(mode)
+    : '';
+
   if (mode === 'qa') {
     const playbookInstruction = playbook && fs.existsSync(path.join(cwd, playbook))
       ? `IMPORTANT: Read ${playbook} first for test patterns, conventions, and section references mentioned in the description.`
@@ -1828,6 +1801,7 @@ function buildPrompt(
       matchedSkills,
       memoryBlock,
       graphBlock,
+      piAutonomyInstruction,
       '', playbookInstruction, '',
       '## Workflow',
       '1. Read the relevant AGENTS.md in each directory you\'ll modify',
@@ -1848,20 +1822,12 @@ function buildPrompt(
     ].filter(Boolean).join('\n');
   }
 
-  const piAutonomyInstruction = agentType === 'pi'
-    ? [
-      '## Pi Execution Requirements',
-      '- You are running inside a non-interactive autonomous pipeline.',
-      '- Do not stop after only reading files or planning.',
-      '- If the task is feasible, make the required file edits in this turn before ending.',
-      '- Ending the turn with zero code changes will be treated as a failed run unless you are concretely blocked.',
-      '- If blocked, say exactly what blocked you and cite the file or command that proved it.',
-    ].join('\n')
-    : '';
-
   if (agentType === 'pi') {
+    const modeOpening = mode === 'journey'
+      ? 'Execute this user journey now. This is an autonomous verification and repair run, not a planning pass.'
+      : 'Implement this task now. This is an autonomous coding run, not a planning pass.';
     return [
-      'Implement this task now. This is an autonomous coding run, not a planning pass.',
+      modeOpening,
       piAutonomyInstruction,
       '## Required execution behavior',
       '- Start by reading the primary files listed below, not generic project docs.',
@@ -1870,7 +1836,7 @@ function buildPrompt(
       '- Do not stop after reading AGENTS.md/CLAUDE.md unless a concrete blocker forces you to.',
       '- Prefer direct file edits over long explanations.',
       '- If a target file does not need changes, move to the next listed file.',
-      '- Before ending, run a minimal validation command if you changed code.',
+      '- Before ending, run focused validation, self-review/fix, and then the broad safe validation required by the external manifest.',
       personaSection,
       memoryInstruction,
       '', '---', '',
@@ -3586,13 +3552,18 @@ async function spawnPiRpc(
       boundListener = null;
     };
 
+    let rejectStory: ((error: Error) => void) | undefined;
     const storyDone = new Promise<void>((resolve, reject) => {
+      rejectStory = reject;
       boundListener = (event: unknown): void => listener(event, resolve, reject);
       server.eventListeners.push(boundListener);
     });
 
     const timeout = setTimeout(() => {
+      if (settled) return;
       storyTimedOut = true;
+      settled = true;
+      rejectStory?.(new Error(`pi RPC story timed out after ${timeoutMs}ms`));
       void sendPiRpcCommand(server, { type: 'abort' }).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         writeOutput(`[System] Failed to abort pi RPC story cleanly: ${message}\n`);
@@ -4323,6 +4294,7 @@ interface StoryCloseoutEnforcementInput {
   attemptElapsedMs: number;
   requestedAttempt: number;
   validations: HostValidationObservation[];
+  completionPacket?: PiCompletionPacket;
 }
 
 export interface StoryCloseoutEnforcementResult {
@@ -4441,6 +4413,15 @@ function buildStoryCloseoutBundleInput(
     : null;
   const startedAt = new Date(input.attemptStartedAt).toISOString();
   const finishedAt = new Date(input.attemptStartedAt + Math.max(0, input.attemptElapsedMs)).toISOString();
+  const proposedSummary = input.completionPacket
+    ? [
+        input.completionPacket.summary,
+        `Implementation: ${input.completionPacket.implementation.join('; ') || 'not reported'}`,
+        `Changed files: ${input.completionPacket.changedFiles.join(', ') || 'none reported'}`,
+        `Commands/results: ${input.completionPacket.commandsAndResults.join('; ') || 'not reported'}`,
+        `Unresolved risks: ${input.completionPacket.unresolvedRisks.join('; ') || 'none reported'}`,
+      ].join('\n').slice(0, 3_900)
+    : 'Agent process exited successfully and proposed story completion.';
   const attempt = createStoryAttemptResult({
     identity: { ...manifest.identity },
     revisions: { ...manifest.revisions },
@@ -4471,7 +4452,7 @@ function buildStoryCloseoutBundleInput(
       identity: { ...manifest.identity },
       revisions: { ...manifest.revisions },
       proposal: 'complete',
-      summary: 'Agent process exited successfully and proposed story completion.',
+      summary: proposedSummary,
       criterionEvidence: manifest.evidenceExpectations.map((expectation) => ({
         criterionId: expectation.criterionId,
         evidenceReferences: [],
@@ -4485,7 +4466,7 @@ function buildStoryCloseoutBundleInput(
     })),
     observedCommits: storyCommits,
     hostValidationObservations: [...input.validations],
-    knownIssues: [],
+    knownIssues: input.completionPacket?.unresolvedRisks ?? [],
   });
 
   return { attempt, host, evidence };
@@ -4550,6 +4531,7 @@ interface PendingIntegratedPass {
   graphHits?: number;
   commitSha: string | null;
   commitBranch: string | null;
+  completionPacket?: PiCompletionPacket;
 }
 
 interface IntegrationValidationResult {
@@ -4658,6 +4640,7 @@ async function finalizeIntegratedStoryPass(
     cost_usd: pending.tokenPayload.costUsd,
     integrated: true,
     ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
+    ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
   }, pending.story.id);
   await postStoryResult(config.port, {
     runId: config.runId,
@@ -4670,6 +4653,7 @@ async function finalizeIntegratedStoryPass(
     ...pending.storyResultExtra,
     ...pending.activeSkillsExtra,
     ...pending.tokenPayload,
+    ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
   });
 
   await autoSynthesizeMemory(
@@ -5412,12 +5396,8 @@ async function executeStory(
   personaRegistry?: PersonaRegistry,
   waveIndex?: number,
   spec?: SpecJson,
-<<<<<<< HEAD
-): Promise<'passed' | 'failed' | 'skipped'> {
-=======
   pendingIntegratedPasses?: Map<string, PendingIntegratedPass>,
 ): Promise<StoryExecutionOutcome> {
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
   const effectiveCwd = storyCwd ?? config.cwd;
   const executionManifest = config.executionManifests.get(story.id);
   if (config.executionManifests.size > 0 && !executionManifest) {
@@ -5434,8 +5414,6 @@ async function executeStory(
     }
   }
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
-<<<<<<< HEAD
-=======
   const storyStartHead = getGitHead(effectiveCwd);
   const allowsNoCodeChanges = executionManifest
     ? executionManifest.repositoryProfile.changePolicy === 'no_code_allowed'
@@ -5443,7 +5421,6 @@ async function executeStory(
 
   // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
   setFallbackContext(effectiveCwd, config.runId);
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
 
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
   // stable workspace/run artifact root, not ephemeral story worktrees, so the
@@ -5575,7 +5552,7 @@ async function executeStory(
   const SKILL_TOKEN_BUDGET = 4000; // ~16KB of skill content max
   let resolvedSkills: ResolvedSkill[] = [];
   let skillsSection = '';
-  if (story.suggestedSkills && story.suggestedSkills.length > 0) {
+  if (effectiveAgent !== 'pi' && story.suggestedSkills && story.suggestedSkills.length > 0) {
     resolvedSkills = loadMatchedSkills(effectiveCwd, story.suggestedSkills, effectiveAgent, SKILL_TOKEN_BUDGET);
     skillsSection = formatSkillsSection(resolvedSkills);
     if (resolvedSkills.length > 0) {
@@ -5583,7 +5560,7 @@ async function executeStory(
       logger.info(`  [skills] Injected ${resolvedSkills.length} skill(s): ${resolvedSkills.map(s => `${s.name}(${s.relevance})`).join(', ')} (${totalSkillTokens} tokens)`);
     }
   }
-  const activeSkillNames = resolvedSkills.map(s => s.name);
+  let activeSkillNames = resolvedSkills.map(s => s.name);
 
   const inferredExecutionPacket = buildStoryExecutionPacket(effectiveCwd, story, mode);
   const executionPacket: StoryExecutionPacket = executionManifest
@@ -5683,11 +5660,22 @@ async function executeStory(
   }
 
   const piSessionOptions = effectiveAgent === 'pi'
-    ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, executionPacket, spec)
+    ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, executionPacket, spec, traceArtifactCwd)
     : undefined;
-  const piServerSkillFiles = effectiveAgent === 'pi'
-    ? buildPiServerSkillFiles(effectiveCwd, config.runId).skillFiles
-    : [];
+  const piSkillBundle = effectiveAgent === 'pi'
+    ? buildPiServerSkillFiles(effectiveCwd, config.runId, story.id)
+    : undefined;
+  const piServerSkillFiles = piSkillBundle?.skillFiles ?? [];
+  if (piSkillBundle) {
+    activeSkillNames.push(
+      'rorca-autonomous-runner',
+      ...piSkillBundle.workspaceSkillFiles.map(file => path.basename(file, path.extname(file))),
+    );
+    activeSkillNames = [...new Set(activeSkillNames)];
+  }
+  const unregisterPiProgressLog = piSessionOptions?.progressLogPath
+    ? registerPiStoryProgressLog(`${config.runId}:${story.id}`, piSessionOptions.progressLogPath)
+    : () => {};
 
   // CTM-002: arbiter trace point — the synthesized L1→L5 direction stack. Only
   // produced for the pi agent (buildPiSessionOptions runs synthesize()).
@@ -5780,6 +5768,7 @@ async function executeStory(
     modifiedFiles?: string[];
     knownIssues?: string[];
     validationResults?: string[];
+    closeoutState?: string[];
   }): void => {
     if (!piSessionOptions?.progressLogPath) return;
     recordPiStoryProgressLog(piSessionOptions.progressLogPath, update);
@@ -5798,6 +5787,16 @@ async function executeStory(
       log_file: storyLogFile,
       browser_mcp: wantsBrowser,
       piSessionId: piSessionId ?? null,
+      effective_model: currentModel,
+      effective_effort: currentEffort ?? null,
+      effective_terminal: executionManifest?.execution.terminal ?? config.terminalMode,
+      effective_graph: config.includeGraph,
+      effective_worktree: executionManifest?.execution.worktree ?? (worktreeInfo ? {
+        enabled: true,
+        path: worktreeInfo.worktreePath,
+        branch: worktreeInfo.branchName,
+      } : { enabled: false, path: null, branch: null }),
+      effective_merge: executionManifest?.execution.merge ?? null,
       ...(waveIndex != null ? { wave_index: waveIndex } : {}),
       ...(currentModel !== config.agentModel ? { model_override: currentModel } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
@@ -5827,7 +5826,12 @@ async function executeStory(
   // CIE-007: Mark story started in run-state.json
   rsMarkStoryStarted(effectiveCwd, story.id);
 
-  const storyResultExtra = worktreeInfo
+  const currentPiCompletionPacket = (status: Parameters<typeof buildPiCompletionPacket>[1], summary: string): PiCompletionPacket | undefined =>
+    piSessionOptions?.progressLogPath
+      ? buildPiCompletionPacket(piSessionOptions.progressLogPath, status, summary)
+      : undefined;
+
+  const storyResultExtra: Record<string, unknown> = worktreeInfo
     ? { worktreePath: worktreeInfo.worktreePath, worktreeBranch: worktreeInfo.branchName }
     : {};
   const activeSkillsExtra = activeSkillNames.length > 0 ? { activeSkills: activeSkillNames } : {};
@@ -6164,14 +6168,25 @@ async function executeStory(
           writeProgressTxt(effectiveCwd);
         }
 
-        if (workspaceId) {
+        if (workspaceId && currentRetries >= MAX_RETRIES) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id, reason: gate.reason,
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'max_retries',
+            blocker_reason: gate.reason,
             ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
           await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        } else if (workspaceId) {
+          await emitWalEvent(config.port, 'story_retry', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            attempt: currentRetries + 1,
+            max_attempts: MAX_RETRIES,
+            reason: gate.reason,
+          }, story.id);
         }
 
         if (currentRetries >= MAX_RETRIES) {
@@ -6186,6 +6201,7 @@ async function executeStory(
           }
         }
         await persistRetrievalOutcome(false);
+        if (currentRetries < MAX_RETRIES) continue;
         return 'failed';
       }
 
@@ -6196,13 +6212,12 @@ async function executeStory(
           ? { meaningfulFiles: [] }
           : getStoryWorkingTreeChanges(effectiveCwd);
 
-<<<<<<< HEAD
-        if (mode !== 'journey' && meaningfulFiles.length === 0) {
-          if (storyAllowsNoCodeChanges(story, mode)) {
-=======
+        const committedMeaningfulFiles = mode === 'journey'
+          ? []
+          : getCommittedStoryChangesSince(effectiveCwd, storyStartHead).meaningfulFiles;
+
         if (mode !== 'journey' && meaningfulFiles.length === 0 && committedMeaningfulFiles.length === 0) {
           if (allowsNoCodeChanges) {
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
             logger.info(`${story.id}: No meaningful file changes detected, but the story is validation/documentation-only — allowing pass`);
           } else {
             const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
@@ -6255,15 +6270,31 @@ async function executeStory(
             }
 
             logger.warn(`${story.id}: Agent exited 0 but only changed runtime metadata — treating as failure`);
+            recordPiProgress({ closeoutState: ['blocked: max_retries after no_code_changes'] });
+            const noCodeCompletionPacket = currentPiCompletionPacket(
+              'blocked',
+              'Maximum repair attempts produced no meaningful implementation change.',
+            );
             if (workspaceId) {
               await emitWalEvent(config.port, 'story_failed', workspaceId, {
                 run_id: config.runId,
                 story_id: story.id,
-                reason: 'no_code_changes',
+                reason: 'max_retries',
+                blocker_reason: 'no_code_changes',
                 summary: 'Agent subprocess exited successfully but only changed runtime/metadata files.',
                 log_file: storyLogFile,
+                ...(noCodeCompletionPacket ? { completion_packet: noCodeCompletionPacket } : {}),
               }, story.id);
-              await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+              await postStoryResult(config.port, {
+                runId: config.runId,
+                storyId: story.id,
+                status: 'fail',
+                logPath: storyLogFile,
+                ...storyResultExtra,
+                ...activeSkillsExtra,
+                ...tokenPayload,
+                ...(noCodeCompletionPacket ? { completionPacket: noCodeCompletionPacket } : {}),
+              });
             }
             markStorySkipped(config.jsonPath, story.id);
             rsMarkStoryFailed(effectiveCwd, {
@@ -6350,14 +6381,6 @@ async function executeStory(
       const commitResult = gitCommitStory(effectiveCwd, story.id, story.title, mode);
 
       if (mode !== 'journey' && !commitResult.committed) {
-<<<<<<< HEAD
-        const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
-        retryCounts.set(story.id, noChangeRetries);
-        const failureReason = commitResult.reason === 'git_error' ? 'commit_verification_failed' : 'no_code_changes';
-        const failureSummary = commitResult.reason === 'git_error'
-          ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
-          : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
-=======
         const committedChanges = getCommittedStoryChangesSince(effectiveCwd, storyStartHead);
         if (committedChanges.meaningfulFiles.length > 0) {
           logger.info(`${story.id}: Agent already committed meaningful story changes (${committedChanges.meaningfulFiles.join(', ')})`);
@@ -6370,73 +6393,89 @@ async function executeStory(
           const failureSummary = commitResult.reason === 'git_error'
             ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
             : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
 
-        const noopFallback = resolveNoopRecoveryEngine(config.cwd, effectiveAgent, executionPacket);
-        if (
-          effectiveAgent === 'pi'
-          && noChangeRetries >= 2
-          && noopFallback
-          && !reroutedStories.has(story.id)
-        ) {
-          logger.warn(`${story.id}: Pi produced commit-stage no-op twice — rerouting to ${noopFallback}`);
-          reroutedStories.set(story.id, {
-            storyId: story.id,
-            fromEngine: effectiveAgent,
-            toEngine: noopFallback,
-            reason: failureReason,
-          });
-          retryCounts.delete(story.id);
-          if (workspaceId) {
-            await emitWalEvent(config.port, 'story_rerouted', workspaceId, {
-              run_id: config.runId,
-              story_id: story.id,
-              story_title: story.title,
+          const noopFallback = resolveNoopRecoveryEngine(config.cwd, effectiveAgent, executionPacket);
+          if (
+            effectiveAgent === 'pi'
+            && noChangeRetries >= 2
+            && noopFallback
+            && !reroutedStories.has(story.id)
+          ) {
+            logger.warn(`${story.id}: Pi produced commit-stage no-op twice — rerouting to ${noopFallback}`);
+            reroutedStories.set(story.id, {
+              storyId: story.id,
               fromEngine: effectiveAgent,
               toEngine: noopFallback,
               reason: failureReason,
-              attempt: noChangeRetries,
-              readiness_score: executionPacket.readiness.score,
-            }, story.id);
+            });
+            retryCounts.delete(story.id);
+            if (workspaceId) {
+              await emitWalEvent(config.port, 'story_rerouted', workspaceId, {
+                run_id: config.runId,
+                story_id: story.id,
+                story_title: story.title,
+                fromEngine: effectiveAgent,
+                toEngine: noopFallback,
+                reason: failureReason,
+                attempt: noChangeRetries,
+                readiness_score: executionPacket.readiness.score,
+              }, story.id);
+            }
+            return executeStory(
+              story, config, mode, playbook, logDir, workspaceId, retryCounts,
+              storyCwd, worktreeInfo, undefined, allStories,
+              noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
+              personaRegistry, waveIndex, spec, pendingIntegratedPasses,
+            );
           }
-          return executeStory(
-            story, config, mode, playbook, logDir, workspaceId, retryCounts,
-            storyCwd, worktreeInfo, undefined, allStories,
-            noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
-            personaRegistry, waveIndex, spec,
-          );
-        }
 
-        if (noChangeRetries < MAX_RETRIES) {
-          logger.warn(`${story.id}: ${failureSummary} — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);
-          continue;
-        }
+          if (noChangeRetries < MAX_RETRIES) {
+            logger.warn(`${story.id}: ${failureSummary} — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);
+            continue;
+          }
 
-        logger.warn(`${story.id}: ${failureSummary} — treating as failure`);
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId,
-            story_id: story.id,
-            reason: failureReason,
-            summary: failureSummary,
-            log_file: storyLogFile,
-          }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+          logger.warn(`${story.id}: ${failureSummary} — treating as failure`);
+          recordPiProgress({
+            knownIssues: [failureSummary],
+            closeoutState: [`blocked: max_retries after ${failureReason}`],
+          });
+          const commitFailurePacket = currentPiCompletionPacket('blocked', failureSummary);
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              reason: effectiveAgent === 'pi' ? 'max_retries' : failureReason,
+              blocker_reason: failureReason,
+              summary: failureSummary,
+              log_file: storyLogFile,
+              ...(commitFailurePacket ? { completion_packet: commitFailurePacket } : {}),
+            }, story.id);
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+              ...(commitFailurePacket ? { completionPacket: commitFailurePacket } : {}),
+            });
+          }
+          markStorySkipped(config.jsonPath, story.id);
+          rsMarkStoryFailed(effectiveCwd, {
+            storyId: story.id,
+            title: story.title,
+            status: 'failed',
+            startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+            finishedAt: new Date().toISOString(),
+            agentType: effectiveAgent,
+            failReason: failureReason,
+            retries: noChangeRetries,
+          });
+          writeProgressTxt(effectiveCwd);
+          await persistRetrievalOutcome(false);
+          return 'failed';
         }
-        markStorySkipped(config.jsonPath, story.id);
-        rsMarkStoryFailed(effectiveCwd, {
-          storyId: story.id,
-          title: story.title,
-          status: 'failed',
-          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
-          finishedAt: new Date().toISOString(),
-          agentType: effectiveAgent,
-          failReason: failureReason,
-          retries: noChangeRetries,
-        });
-        writeProgressTxt(effectiveCwd);
-        await persistRetrievalOutcome(false);
-        return 'failed';
       }
 
       // Manifest-backed host validation runs after commit so revision-sensitive
@@ -6478,11 +6517,12 @@ async function executeStory(
             });
             writeProgressTxt(effectiveCwd);
           }
-          if (workspaceId) {
+          if (workspaceId && currentRetries >= MAX_RETRIES) {
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
-              reason: 'manifest_validation',
+              reason: 'max_retries',
+              blocker_reason: 'manifest_validation',
               summary: manifestGate.output,
               log_file: storyLogFile,
             }, story.id);
@@ -6495,8 +6535,17 @@ async function executeStory(
               ...activeSkillsExtra,
               ...tokenPayload,
             });
+          } else if (workspaceId) {
+            await emitWalEvent(config.port, 'story_retry', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              attempt: currentRetries + 1,
+              max_attempts: MAX_RETRIES,
+              reason: 'manifest_validation',
+            }, story.id);
           }
           await persistRetrievalOutcome(false);
+          if (currentRetries < MAX_RETRIES) continue;
           return 'failed';
         }
       }
@@ -6567,7 +6616,6 @@ async function executeStory(
         }
       }
 
-<<<<<<< HEAD
       // GitReins blocking gate: runs for every agent symmetrically after optional
       // adversarial review and before any local/canonical pass finalization.
       const gitReinsConfig = loadRorcaConfig(config.cwd).execution.gitreins;
@@ -6705,9 +6753,7 @@ async function executeStory(
         return 'failed';
       }
 
-      // All checks passed — mark story as done only after the GitReins gate.
-      markStoryPassed(config.jsonPath, story.id);
-=======
+
       // LFC-031: one common closeout seam for every mode and provider. This is
       // deliberately after agent/host observations and before the first local or
       // canonical pass projection. Legacy pre-manifest runs retain their bounded
@@ -6716,6 +6762,10 @@ async function executeStory(
         let closeout: StoryCloseoutEnforcementResult | null = null;
         let closeoutException: string | null = null;
         try {
+          const proposedCompletionPacket = currentPiCompletionPacket(
+            'agent_proposed',
+            'Agent completed its execution turn; host validation and reconciliation are pending.',
+          );
           closeout = await enforceStoryCloseout({
             manifest: executionManifest,
             cwd: effectiveCwd,
@@ -6729,6 +6779,7 @@ async function executeStory(
             attemptElapsedMs: result.elapsedMs,
             requestedAttempt: executionManifest.identity.attempt + (retryCounts.get(story.id) ?? 0),
             validations: hostValidationObservations,
+            completionPacket: proposedCompletionPacket,
           });
         } catch (error: unknown) {
           closeoutException = error instanceof Error ? error.message : String(error);
@@ -6746,7 +6797,9 @@ async function executeStory(
             knownIssues: [`Story closeout blocked: ${reasonCodes.join(', ')}${closeoutException ? ` — ${closeoutException}` : ''}`],
             validationResults: [`Closeout decision: ${reason}; no pass state was written.`],
             remainingWork: [remediation],
+            closeoutState: [`blocked: ${reasonCodes.join(', ')}`],
           });
+          const blockedCompletionPacket = currentPiCompletionPacket('blocked', remediation);
 
           if (currentRetries >= MAX_RETRIES) {
             await markStorySkipped(config.jsonPath, story.id);
@@ -6768,7 +6821,10 @@ async function executeStory(
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
-              reason,
+              reason: effectiveAgent === 'pi'
+                ? (currentRetries >= MAX_RETRIES ? 'max_retries' : 'blocked')
+                : reason,
+              blocker_reason: reason,
               closeout_reason_codes: reasonCodes,
               closeout_decision_id: closeout?.decision.decisionId ?? null,
               attempt_result_id: closeout?.attempt.attemptResultId ?? null,
@@ -6783,6 +6839,7 @@ async function executeStory(
                 worktree_preserved: true,
               } : {}),
               ...(graphHits != null ? { graph_hits: graphHits } : {}),
+              ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
             }, story.id);
             await postStoryResult(config.port, {
               runId: config.runId,
@@ -6797,6 +6854,7 @@ async function executeStory(
               ...storyResultExtra,
               ...activeSkillsExtra,
               ...tokenPayload,
+              ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
             });
           }
           if (currentRetries >= MAX_RETRIES && workspaceId) {
@@ -6811,16 +6869,68 @@ async function executeStory(
             );
           }
           await persistRetrievalOutcome(false);
+          if (currentRetries < MAX_RETRIES) {
+            if (workspaceId) {
+              await emitWalEvent(config.port, 'story_retry', workspaceId, {
+                run_id: config.runId,
+                story_id: story.id,
+                attempt: currentRetries + 1,
+                max_attempts: MAX_RETRIES,
+                reason: 'closeout_blocked',
+              }, story.id);
+            }
+            continue;
+          }
           return 'closeout_blocked';
         }
         logger.info(`${story.id} closeout accepted (${closeout.decision.decisionId})`);
+      } else if (effectiveAgent === 'pi') {
+        const remediation = 'Re-dispatch the Pi story with a valid immutable execution manifest; process exit cannot authorize pass.';
+        recordPiProgress({
+          knownIssues: ['Pi closeout blocked because the immutable execution manifest is missing.'],
+          remainingWork: [remediation],
+          closeoutState: ['blocked: missing_execution_manifest'],
+        });
+        const blockedCompletionPacket = currentPiCompletionPacket('blocked', remediation);
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'blocked',
+            blocker_reason: 'missing_execution_manifest',
+            ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
+          }, story.id);
+          await postStoryResult(config.port, {
+            runId: config.runId,
+            storyId: story.id,
+            status: 'fail',
+            reason: 'missing_execution_manifest',
+            logPath: storyLogFile,
+            ...storyResultExtra,
+            ...activeSkillsExtra,
+            ...tokenPayload,
+            ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+          });
+        }
+        await persistRetrievalOutcome(false);
+        return 'closeout_blocked';
       }
 
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
+      recordPiProgress({
+        completedWork: ['Host validation and shared closeout reconciliation accepted the agent proposal.'],
+        remainingWork: ['None; host-validated closeout is complete.'],
+        closeoutState: ['validated: shared LFC-031 closeout accepted'],
+      });
+      const validatedCompletionPacket = currentPiCompletionPacket(
+        'validated',
+        'Agent proposal was accepted by host validation and shared closeout reconciliation.',
+      );
+
       retryCounts.delete(story.id);
       retryCounts.delete(rateLimitKey);
 
-      // CIE-007: Record story completion in run-state.json
+      // CIE-007: Record local implementation completion. In parallel worktree mode,
+      // this is intentionally not the canonical pass gate — merge finalization below is.
       rsMarkStoryCompleted(effectiveCwd, {
         storyId: story.id,
         title: story.title,
@@ -6833,23 +6943,42 @@ async function executeStory(
       });
       writeProgressTxt(effectiveCwd);
 
-      if (workspaceId) {
-        await emitWalEvent(config.port, 'story_passed', workspaceId, {
-          run_id: config.runId, story_id: story.id, story_title: story.title,
-          agent_type: effectiveAgent,
-          input_tokens: tokenPayload.inputTokens,
-          output_tokens: tokenPayload.outputTokens,
-          cost_usd: tokenPayload.costUsd,
-          ...(graphHits != null ? { graph_hits: graphHits } : {}),
-        }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+      const pendingPass: PendingIntegratedPass = {
+        story,
+        agentType: effectiveAgent,
+        logPath: storyLogFile,
+        storyResultExtra,
+        activeSkillsExtra,
+        tokenPayload,
+        ...(graphHits != null ? { graphHits } : {}),
+        commitSha: getGitHead(effectiveCwd),
+        commitBranch: getGitBranch(effectiveCwd),
+        ...(validatedCompletionPacket ? { completionPacket: validatedCompletionPacket } : {}),
+      };
 
-        // PG-020: Auto-synthesize memory from passed story
-        await autoSynthesizeMemory(
-          story.id, workspaceId, buildStoryText(story),
-          readLogTail(storyLogFile), 'passed', config.runId, config.port,
-        );
+      if (worktreeInfo && pendingIntegratedPasses) {
+        pendingIntegratedPasses.set(story.id, pendingPass);
+        logger.info(`${story.id} implementation validated; awaiting merge before canonical pass`);
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_implemented', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            story_title: story.title,
+            agent_type: effectiveAgent,
+            merge_pending: true,
+            worktree_path: worktreeInfo.worktreePath,
+            worktree_branch: worktreeInfo.branchName,
+            log_file: storyLogFile,
+            input_tokens: tokenPayload.inputTokens,
+            output_tokens: tokenPayload.outputTokens,
+            cost_usd: tokenPayload.costUsd,
+            ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          }, story.id);
+        }
+      } else {
+        await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
       }
+
       await persistRetrievalOutcome(true);
       return 'passed';
     }
@@ -6862,7 +6991,12 @@ async function executeStory(
         knownIssues: [`Story timed out after ${timeoutMin} minutes.`],
         validationResults: [`Attempt timed out after ${timeoutMin}m.`],
         remainingWork: ['Investigate the timeout, split the work, or run narrower checks before retrying.'],
+        closeoutState: ['timeout: story-owned Pi process tree cleanup requested'],
       });
+      const timeoutCompletionPacket = currentPiCompletionPacket(
+        'timeout',
+        `Story timed out after ${timeoutMin} minutes; host did not accept completion.`,
+      );
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -6881,8 +7015,18 @@ async function executeStory(
           output_tokens: tokenPayload.outputTokens,
           cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          ...(timeoutCompletionPacket ? { completion_packet: timeoutCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(timeoutCompletionPacket ? { completionPacket: timeoutCompletionPacket } : {}),
+        });
 
         // PG-020: Auto-synthesize memory from timed-out story
         await autoSynthesizeMemory(
@@ -6966,7 +7110,12 @@ async function executeStory(
         knownIssues: [`Non-retryable ${effectiveAgent} failure: ${classified.category}.`],
         validationResults: [`Attempt failed: ${classified.category} — ${classified.message}`],
         remainingWork: ['Resolve the configuration or runtime issue before rerunning.'],
+        closeoutState: [`blocked: ${classified.category}`],
       });
+      const blockedCompletionPacket = currentPiCompletionPacket(
+        'blocked',
+        `${classified.category}: ${classified.message}`,
+      );
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -6979,12 +7128,24 @@ async function executeStory(
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
-          reason: classified.category, error_message: classified.message,
+          reason: effectiveAgent === 'pi' ? 'blocked' : classified.category,
+          blocker_reason: classified.category,
+          error_message: classified.message,
           agent_type: effectiveAgent, exit_code: result.exitCode,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+        });
 
         // PG-020: Auto-synthesize memory from non-retryable failure
         await autoSynthesizeMemory(
@@ -7008,7 +7169,12 @@ async function executeStory(
         knownIssues: [`Engine exhausted retries due to ${classified.category}.`],
         validationResults: [`Max retries reached: ${classified.message}`],
         remainingWork: ['Inspect the logs and resolve the underlying failure before rerunning.'],
+        closeoutState: ['blocked: max_retries'],
       });
+      const maxRetriesCompletionPacket = currentPiCompletionPacket(
+        'blocked',
+        `Maximum retries reached after ${classified.category}: ${classified.message}`,
+      );
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -7027,8 +7193,18 @@ async function executeStory(
           agent_type: effectiveAgent,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          ...(maxRetriesCompletionPacket ? { completion_packet: maxRetriesCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(maxRetriesCompletionPacket ? { completionPacket: maxRetriesCompletionPacket } : {}),
+        });
 
         // PG-020: Auto-synthesize memory from max-retries failure
         await autoSynthesizeMemory(
@@ -7059,10 +7235,16 @@ async function executeStory(
       }, story.id);
     }
     await persistRetrievalOutcome(false);
-    return 'failed';
+    continue;
     }
   } finally {
-    // Pi story progress logs are intentionally persistent across retries and compaction.
+    // Progress is intentionally persistent; transient skill/process ownership is not.
+    unregisterPiProgressLog();
+    try {
+      await deletePiGeneratedSkillFile(piSkillBundle?.generatedSkillFile);
+    } catch (error: unknown) {
+      logger.warn(`  [pi] Failed to delete generated story skill: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 
@@ -7077,11 +7259,8 @@ export {
   preparePiRpcSession,
   isMeaningfulStoryChange,
   classifyStoryWorkingTreeChanges,
-<<<<<<< HEAD
-=======
   getCommittedStoryChangesSince,
   storyAllowsNoCodeChanges,
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
   formatRetrievedMemorySection,
   buildRetrievalSelectionsFromContext as buildStoryRetrievalSelections,
 };
@@ -7256,17 +7435,13 @@ async function main(): Promise<void> {
   initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
-  const piServerSkillBundle = requiredEngines.has('pi')
-    ? buildPiServerSkillFiles(config.cwd, config.runId)
-    : null;
-
   if (requiredEngines.has('pi')) {
     await startPiRpcServer(config.cwd, config.agentModel, piServerSkillBundle?.skillFiles ?? []);
   }
 
   async function cleanupBrowserServers(): Promise<void> {
     await stopPiRpcServer();
-    await deleteFileIfExists(piServerSkillBundle?.generatedSkillFile);
+    await cleanupPiRunTempArtifacts(config.runId);
     if (_playwrightMcpServerPid) {
       try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
     }
@@ -7282,10 +7457,36 @@ async function main(): Promise<void> {
     }
   }
 
+  const flushPiShutdownCloseout = async (
+    status: 'cancelled' | 'worker_shutdown',
+    summary: string,
+  ): Promise<void> => {
+    const packets = flushActivePiStoryProgressLogs(status, summary);
+    if (!workspaceId) return;
+    for (const { ownerId, packet } of packets) {
+      const storyId = ownerId.slice(ownerId.indexOf(':') + 1);
+      await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        run_id: config.runId,
+        story_id: storyId,
+        reason: 'blocked',
+        blocker_reason: status,
+        completion_packet: packet,
+      }, storyId);
+      await postStoryResult(config.port, {
+        runId: config.runId,
+        storyId,
+        status: 'fail',
+        reason: status,
+        completionPacket: packet,
+      });
+    }
+  };
+
   process.on('SIGINT', () => {
     void (async () => {
       logger.info('');
       logger.info('[engine] Received SIGINT — stopping run');
+      await flushPiShutdownCloseout('cancelled', 'Engine received SIGINT; progress was flushed before process cleanup.');
       await runRegisteredPtyCleanupTasks();
       await shutdownWalTelemetry();
       await cleanupBrowserServers();
@@ -7296,6 +7497,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     void (async () => {
       logger.error('[engine] Received SIGTERM — terminating run before completion');
+      await flushPiShutdownCloseout('worker_shutdown', 'Engine received SIGTERM from cancellation or worker shutdown; progress was flushed before process cleanup.');
       await runRegisteredPtyCleanupTasks();
       await shutdownWalTelemetry();
       await cleanupBrowserServers();
@@ -7615,23 +7817,10 @@ async function runParallel(
         logger.info(`  [worktree] Single-story wave — direct merge`);
         const wt = passedInWave[0];
         const merged = mergeStoryWorktree(config.cwd, wt);
+        const pendingPass = pendingIntegratedPasses.get(wt.storyId);
         if (!merged) {
-          logger.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
+          logger.error(`  [worktree] ${wt.storyId} passed implementation but merge failed — marking as merge_conflict`);
           failedIds.add(wt.storyId);
-<<<<<<< HEAD
-          markStoryMergeFailed(config.jsonPath, wt.storyId);
-          if (workspaceId) {
-            await emitWalEvent(config.port, 'story_failed', workspaceId, {
-              run_id: config.runId, story_id: wt.storyId,
-              reason: 'merge_conflict', worktree_branch: wt.branchName,
-            }, wt.storyId);
-          }
-        } else {
-          // Force-update spec JSON in main workspace after merge.
-          // The merge may conflict on the spec JSON and lose the passes:true written
-          // in the worktree — writing it directly here ensures it is never lost.
-          try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
-=======
           await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
           logger.info(`  [worktree] Preserving failed merge worktree for inspection: ${wt.worktreePath}`);
         } else {
@@ -7641,9 +7830,7 @@ async function runParallel(
           await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
           pendingIntegratedPasses.delete(wt.storyId);
           removeStoryWorktree(config.cwd, wt);
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
         }
-        removeStoryWorktree(config.cwd, wt);
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
         const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir);
@@ -7656,19 +7843,13 @@ async function runParallel(
             });
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
-          // Force-update spec JSON for every story that passed — merge can conflict on
-          // this file and lose the passes:true that was written inside each worktree.
           for (const wt of passedInWave) {
-<<<<<<< HEAD
-            try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
-=======
             const pendingPass = pendingIntegratedPasses.get(wt.storyId);
             if (!pendingPass) {
               throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
             }
             await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
             pendingIntegratedPasses.delete(wt.storyId);
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
           }
           for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
         } else {
@@ -7679,29 +7860,30 @@ async function runParallel(
           for (const failure of failures) {
             logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
             failedIds.add(failure.storyId);
-            markStoryMergeFailed(config.jsonPath, failure.storyId);
-
-            if (workspaceId) {
-              await emitWalEvent(config.port, 'story_failed', workspaceId, {
-                run_id: config.runId, story_id: failure.storyId,
-                reason: 'merge_conflict', conflictingFiles: failure.conflictingFiles,
-                wave: wave.index,
-              }, failure.storyId);
+            const wt = worktreeMap.get(failure.storyId);
+            if (wt) {
+              await recordStoryMergeConflict(
+                config,
+                workspaceId,
+                wt,
+                failure.conflictingFiles,
+                pendingIntegratedPasses.get(failure.storyId),
+                wave.index,
+              );
+            } else {
+              await markStoryMergeFailed(config.jsonPath, failure.storyId);
             }
           }
 
-          // Clean up successfully merged worktrees (those NOT in the failure set)
+          // Finalize and clean up successfully merged worktrees (those NOT in the failure set).
           for (const wt of passedInWave) {
             if (!failedStoryIds.has(wt.storyId)) {
-<<<<<<< HEAD
-=======
               const pendingPass = pendingIntegratedPasses.get(wt.storyId);
               if (!pendingPass) {
                 throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
               }
               await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
               pendingIntegratedPasses.delete(wt.storyId);
->>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
               removeStoryWorktree(config.cwd, wt);
             }
           }

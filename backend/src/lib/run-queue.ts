@@ -16,6 +16,13 @@ interface QueuedRunRow {
   queued_at: string;
   queue_position: number;
   auto_worktree: boolean;
+  auto_merge: boolean;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
+  include_graph: boolean;
+  terminal_mode: 'ansi-html' | 'pty' | null;
+  agent_type: 'claude' | 'opencode' | 'codex' | 'pi';
+  agent_model: string | null;
+  effective_options: { effort?: string | null } | null;
 }
 
 const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
@@ -68,7 +75,10 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
 
     // Find the next queued run (oldest first), including auto_worktree
     const nextQueued = await queryOne<QueuedRunRow>(
-      `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree FROM pipeline_runs
+      `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree,
+              auto_merge, merge_strategy, include_graph, terminal_mode, agent_type,
+              agent_model, effective_options
+         FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
        ORDER BY queued_at ASC LIMIT 1`,
       [workspaceId],
@@ -109,6 +119,13 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
         workspaceId: nextQueued.workspace_id,
         queuedRunId: nextQueued.id,
         autoWorktree: nextQueued.auto_worktree,
+        autoMerge: nextQueued.auto_merge,
+        mergeStrategy: nextQueued.merge_strategy ?? 'branch-only',
+        includeGraph: nextQueued.include_graph,
+        terminalMode: nextQueued.terminal_mode ?? 'ansi-html',
+        agentOverride: nextQueued.agent_type,
+        modelOverride: nextQueued.agent_model ?? undefined,
+        effortLevel: nextQueued.effective_options?.effort ?? undefined,
       }),
     }).then(async (resp) => {
       if (!resp.ok) {

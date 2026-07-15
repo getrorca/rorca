@@ -50,6 +50,11 @@ export const PipelineRunJobPayload = z.object({
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
+  safetyOptions: z.object({
+    deploy: z.boolean(),
+    externalSend: z.boolean(),
+    policyLocked: z.boolean(),
+  }).strict().optional().default({ deploy: true, externalSend: true, policyLocked: false }),
   /** Host-resolved immutable story manifests. Optional only for audited legacy jobs. */
   executionManifestPath: z.string().min(1).optional(),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),

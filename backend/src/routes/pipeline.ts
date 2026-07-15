@@ -28,7 +28,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
-import { activeAgent, activeModel, type AgentType } from '../lib/config';
+import { activeAgent, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
@@ -59,6 +59,12 @@ import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import { synthesizeRunMemory } from '../lib/auto-memory';
+import * as piDetector from '../lib/pi-detector';
+import {
+  PiExecutionPreflightError,
+  preflightPiModelAndEffort,
+  resolvePiRunSafetyOptions,
+} from '../lib/pi-autonomous-runner';
 import { logger } from '../lib/logger';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
@@ -126,6 +132,8 @@ function buildCleanEnvForMerge(): Record<string, string> {
   }
   return env;
 }
+
+const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -451,6 +459,66 @@ function buildExecutionReadinessSummary(
     riskyStoryCount: stories.filter(story => story.grade === 'weak').length,
     stories,
   };
+}
+
+// ─── Fallback Result Syncer ──────────────────────────────────────────────────
+// When execution-engine.ts / run-loop.ts can't POST results to the backend
+// (backend down, restart, port mismatch), they write to .rorca-results.jsonl.
+// This function reads that file and replays entries into the DB.
+
+async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
+  const entries = readFallbackResults(cwd);
+  if (entries.length === 0) return 0;
+
+  let synced = 0;
+  for (const entry of entries) {
+    try {
+      if (entry.type === 'wal') {
+        // Replay WAL event directly into DB
+        const p = entry.payload as Record<string, unknown>;
+        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [p.event_type ?? entry.status,
+          p.workspace_id ?? workspaceId,
+          p.spec_id ?? null,
+          p.story_id ?? entry.storyId,
+          JSON.stringify(p.payload ?? p),]);
+        broadcastAll(walEvent!);
+        synced++;
+      } else if (entry.type === 'story_result') {
+        // Replay story_result into DB
+        const p = entry.payload as Record<string, unknown>;
+        const runId = (p.runId as number) ?? entry.runId;
+        const storyId = (p.storyId as string) ?? entry.storyId;
+        const status = (p.status as string) ?? entry.status;
+
+        if (!runId || !storyId || !status) continue;
+
+        // Check if already synced (idempotent — don't double-insert)
+        const existing = await queryOne('SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2', [runId, storyId]);
+
+        if (!existing) {
+          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
+            ? JSON.stringify(p.activeSkills)
+            : null;
+          await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills, completion_packet)
+             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`, [runId, storyId, status,
+            (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
+            (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
+            (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
+            activeSkillsVal,
+            p.completionPacket && typeof p.completionPacket === 'object' ? JSON.stringify(p.completionPacket) : null,]);
+        }
+        synced++;
+      }
+    } catch (err: any) {
+      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
+    }
+  }
+
+  if (synced > 0) {
+    deleteFallbackFile(cwd);
+    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
+  }
+  return synced;
 }
 
 // All Claude Code env vars that block nested invocation (same as llm-client.ts)
@@ -1134,6 +1202,53 @@ const outputBuffers = new Map<number, OutputBuffer>();
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+interface EffectiveRunOptions {
+  model: string | null;
+  effort: string | null;
+  worktree: { enabled: boolean; path: string | null; branch: string | null };
+  merge: { strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; autoMerge: boolean };
+  graph: { enabled: boolean };
+  terminal: TerminalMode;
+  safety: {
+    guard: 'autonomous-command-guard-v1';
+    allowBackendJest: false;
+    deploy: boolean;
+    externalSend: boolean;
+    policyLocked: boolean;
+  };
+}
+
+function buildEffectiveRunOptions(input: {
+  model: string | null;
+  effort: string | null | undefined;
+  autoWorktree: boolean;
+  worktreePath: string | null;
+  branchName: string | null;
+  mergeStrategy: EffectiveRunOptions['merge']['strategy'];
+  autoMerge: boolean;
+  includeGraph: boolean;
+  terminal: TerminalMode;
+  policyLocked: boolean;
+  deploy: boolean;
+  externalSend: boolean;
+}): EffectiveRunOptions {
+  return {
+    model: input.model,
+    effort: input.effort ?? null,
+    worktree: { enabled: input.autoWorktree, path: input.worktreePath, branch: input.branchName },
+    merge: { strategy: input.mergeStrategy, autoMerge: input.autoMerge },
+    graph: { enabled: input.includeGraph },
+    terminal: input.terminal,
+    safety: {
+      guard: 'autonomous-command-guard-v1',
+      allowBackendJest: false,
+      deploy: input.deploy,
+      externalSend: input.externalSend,
+      policyLocked: input.policyLocked,
+    },
+  };
+}
+
 interface PipelineRunRow {
   id: number;
   spec_path: string;
@@ -1164,15 +1279,12 @@ interface PipelineRunRow {
   pr_number?: number | null;
   pr_creating?: boolean | null;
   pr_creation_error?: string | null;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
   triggered_via: 'queue' | 'run_now';
   auto_worktree: boolean;
   include_graph: boolean;
   terminal_mode: TerminalMode | null;
-  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
-  idempotency_key?: string | null;
-  task_manifest_id?: string | null;
-  task_manifest_artifacts?: Record<string, unknown> | string | null;
-  trigger_options?: Record<string, unknown> | string | null;
+  effective_options: EffectiveRunOptions | null;
 }
 
 function resolveRequestedTerminalMode(value: string | null | undefined): TerminalMode {
@@ -1558,10 +1670,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       specId: specIdForReadiness,
       specPath,
     });
-    assertSpecReadinessAllowsMutation(specReadiness, readinessOverrideRequested);
-    if (specReadiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
-      await recordSpecReadinessOverride({ workspaceId, specId: specIdForReadiness, action: 'run', readiness: specReadiness });
-    }
+    // Do not record overrides yet. Agent/model/effort preflight below must fail
+    // before any run/readiness mutation is persisted.
     (req as any)._specReadiness = specReadiness;
 
     // 2. Budget cap guard — block if hard cap exceeded for this period
@@ -1584,9 +1694,15 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
     // Read spec-level reasoning config — used as defaults when trigger request omits reasoning params
     const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
-    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
-    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
+    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined
+      ? thinkingEnabled
+      : (specReasoning?.enabled ?? specModelJson.thinkingEnabled ?? undefined);
+    let resolvedReasoningEffort: string | undefined = reasoningEffort
+      ?? effortLevel
+      ?? specReasoning?.effort
+      ?? specModelJson.effortLevel;
 
+    // Preserve the canonical execution-option precedence shared with task-manifest dispatch.
     const executionOptions = resolveExecutionOptions({
       requestAgentOverride: agentOverride,
       manifestAgentOverride: manifestExecutionAgentOverride,
@@ -1600,7 +1716,64 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       log: logger,
     });
     const resolvedAgentType: AgentType = executionOptions.resolvedAgentType;
-    const finalAgentModel = executionOptions.finalAgentModel;
+    let finalAgentModel = executionOptions.finalAgentModel;
+
+    let piCatalog: piDetector.PiModel[] | null = null;
+    const preflightPiSelection = (model: string | null, effort: string | null | undefined) => {
+      if (!piCatalog) {
+        const piStatus = piDetector.detectPi();
+        if (!piStatus.piInstalled || !piStatus.piBinPath) {
+          throw new ValidationError('pi_preflight:not_installed');
+        }
+        piCatalog = piDetector.listPiModels(piStatus.piBinPath);
+      }
+      try {
+        return preflightPiModelAndEffort(model, effort, piCatalog, DEFAULT_PI_MODEL);
+      } catch (error: unknown) {
+        if (error instanceof PiExecutionPreflightError) {
+          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+        }
+        throw error;
+      }
+    };
+
+    if (resolvedAgentType === 'pi') {
+      const selection = preflightPiSelection(finalAgentModel, resolvedReasoningEffort);
+      finalAgentModel = selection.model;
+      resolvedReasoningEffort = selection.effort ?? undefined;
+    }
+
+    // Per-story Pi assignments use the same model/effort mechanism and must be
+    // validated before readiness, run-row, worktree, hook, or queue mutation.
+    const phaseStoriesForPreflight = Array.isArray(specModelJson.phases)
+      ? (specModelJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap(phase => phase.stories ?? [])
+      : [];
+    const storiesForPreflight = (Array.isArray(specModelJson.userStories)
+      ? specModelJson.userStories
+      : phaseStoriesForPreflight) as DispatchManifestStory[];
+    for (const dispatchStory of storiesForPreflight) {
+      if (dispatchStory.excluded) continue;
+      if (resolveStoryAgent(dispatchStory as EngineUserStory, resolvedAgentType) !== 'pi') continue;
+      preflightPiSelection(
+        dispatchStory.model ?? resolvedAgentModel,
+        dispatchStory.effort ?? resolvedReasoningEffort,
+      );
+    }
+
+    // Lock initial SSDLC safety before the first mutation. Prose/_notes cannot
+    // weaken these values; retries consume the persisted structured options.
+    const autonomousSafety = resolvePiRunSafetyOptions(specPath, specModelJson, {
+      autoWorktree: Boolean(autoWorktree),
+      autoMerge: Boolean(autoWorktree) && autoMerge !== false,
+      mergeStrategy: mergeStrategy ?? 'direct',
+    });
+
+    // All model/effort/safety preflight has succeeded. Readiness override audit
+    // is the first intentional mutation in this trigger path.
+    assertSpecReadinessAllowsMutation(specReadiness, readinessOverrideRequested);
+    if (specReadiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
+      await recordSpecReadinessOverride({ workspaceId, specId: specIdForReadiness, action: 'run', readiness: specReadiness });
+    }
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedExecutionEnvironment.effective === 'remote-rorca' && resolvedAgentType === 'claude') {
@@ -1794,7 +1967,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
     //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
     const { queue } = req.body;
-    const useExternalPiOrchestration = resolvedAgentType === 'pi' && isPiExternalOrchestrationEnabled();
+    const effectiveAutoWorktreeRequest = autonomousSafety.policyLocked
+      ? autonomousSafety.autoWorktree
+      : Boolean(autoWorktree);
+    // The locked SSDLC policy must use the canonical in-engine Pi runner; the
+    // optional external orchestration mode would bypass its cleanup/closeout seam.
+    const useExternalPiOrchestration = resolvedAgentType === 'pi'
+      && isPiExternalOrchestrationEnabled()
+      && !autonomousSafety.policyLocked;
 
     if (!queuedRunId && !reservedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
@@ -1812,36 +1992,58 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queuedBaseTriggerOptions = Object.fromEntries(
-          Object.entries({
-            autoWorktree: !!autoWorktree,
-            autoMerge,
-            mergeStrategy,
-            triggerType: triggerType === 'scheduled' ? 'scheduled' : 'manual',
-            forceSequential,
-            agentOverride,
-            modelOverride,
-            storyId,
-            includeGraph,
-            thinkingEnabled,
-            thinkingBudget,
-            effortLevel,
-            reasoningEffort,
-            rerunFromScratch,
-            readinessOverride,
-            runAnywayOverride,
-            overrideReadinessGate,
-            terminal_mode: resolvedTerminalMode,
-            executionEnvironment: resolvedExecutionEnvironment.effective,
-          }).filter(([, value]) => value !== undefined)
-        );
-        const queuedTaskManifestArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
-        const queuedTriggerOptions = JSON.stringify({
-          ...queuedBaseTriggerOptions,
-          ...(triggerOptions ?? {}),
+        const queuedSpecSlug = path.basename(specPath, '.json').replace(/[^a-z0-9-]/gi, '-');
+        const queuedBranchName = effectiveAutoWorktreeRequest ? `feat/${queuedSpecSlug}` : null;
+        const queuedWorktreePath = queuedBranchName
+          ? path.resolve(workspace.path, '..', `${path.basename(workspace.path)}-${queuedBranchName.replace(/\//g, '-')}`)
+          : null;
+        const queuedMergeStrategy = autonomousSafety.policyLocked
+          ? 'branch-only'
+          : (mergeStrategy ?? 'direct');
+        const queuedAutoMerge = autonomousSafety.policyLocked
+          ? false
+          : effectiveAutoWorktreeRequest && autoMerge !== false;
+        const queuedEffectiveOptions = buildEffectiveRunOptions({
+          model: finalAgentModel,
+          effort: resolvedReasoningEffort,
+          autoWorktree: effectiveAutoWorktreeRequest,
+          worktreePath: queuedWorktreePath,
+          branchName: queuedBranchName,
+          mergeStrategy: queuedMergeStrategy,
+          autoMerge: queuedAutoMerge,
+          includeGraph: includeGraph ?? false,
+          terminal: resolvedTerminalMode,
+          policyLocked: autonomousSafety.policyLocked,
+          deploy: autonomousSafety.deploy,
+          externalSend: autonomousSafety.externalSend,
         });
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, queuedTaskManifestArtifacts, queuedTriggerOptions]);
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
+          (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via,
+           auto_worktree, auto_merge, merge_strategy, include_graph, agent, agent_type, agent_model,
+           terminal_mode, branch_name, worktree_path, effective_options,
+          idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+          VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18::jsonb, $19::jsonb)
+          RETURNING id`, [
+          specPath,
+          workspaceId,
+          triggerType === 'scheduled' ? 'scheduled' : 'manual',
+          position,
+          effectiveAutoWorktreeRequest,
+          queuedAutoMerge,
+          queuedMergeStrategy,
+          includeGraph ?? false,
+          resolvedAgentType,
+          resolvedAgentType,
+          finalAgentModel,
+          resolvedTerminalMode,
+          queuedBranchName,
+          queuedWorktreePath,
+          JSON.stringify(queuedEffectiveOptions),
+          idempotencyKey ?? null,
+          manifestId ?? null,
+          taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null,
+          JSON.stringify(triggerOptions ?? {}),
+        ]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
@@ -1852,17 +2054,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           queuePosition: position,
           terminalMode: resolvedTerminalMode,
           terminal_mode: resolvedTerminalMode,
-          executionEnvironment: resolvedExecutionEnvironment.effective,
+          effectiveOptions: queuedEffectiveOptions,
           ...(idempotencyKey ? { idempotencyKey } : {}),
           ...(manifestId ? { manifestId } : {}),
           ...(taskManifestArtifacts ? { artifacts: taskManifestArtifacts } : {}),
           ...(taskManifestArtifactRefs ? { artifactRefs: taskManifestArtifactRefs } : {}),
-          ...(triggerOptions ? { manifestSource: buildManifestSourceFromRun({
-            idempotency_key: idempotencyKey ?? null,
-            task_manifest_id: manifestId ?? null,
-            task_manifest_artifacts: taskManifestArtifacts ?? null,
-            trigger_options: triggerOptions,
-          }) } : {}),
           ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
           ...(executionReadiness ? { executionReadiness } : {}),
           ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
@@ -1871,7 +2067,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       }
 
       // ── 4b. Run Now with autoWorktree: allow up to run_now_max_concurrent ──
-      if (autoWorktree) {
+      if (effectiveAutoWorktreeRequest) {
         const concurrencyRows = await query<{ key: string; value: string }>(
           `SELECT key, value FROM worker_settings WHERE key = 'run_now_max_concurrent'`,
         );
@@ -1914,36 +2110,51 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       if (existingRunId) {
         await execute(
           `UPDATE pipeline_runs
-              SET spec_path = $1,
-                  workspace_id = $2,
-                  status = 'pi_native',
-                  trigger_type = $3,
-                  agent = $4,
-                  agent_type = $5,
-                  agent_model = $6,
-                  started_at = NULL,
-                  finished_at = NULL,
-                  pid = NULL,
-                  triggered_via = $7,
-                  terminal_mode = $8,
+              SET spec_path = $1, workspace_id = $2, status = 'pi_native', trigger_type = $3,
+                  agent = $4, agent_type = $5, agent_model = $6, started_at = NULL,
+                  finished_at = NULL, pid = NULL, triggered_via = $7, terminal_mode = $8,
                   idempotency_key = COALESCE($9, idempotency_key),
                   task_manifest_id = COALESCE($10, task_manifest_id),
                   task_manifest_artifacts = COALESCE($11::jsonb, task_manifest_artifacts),
                   trigger_options = COALESCE($12::jsonb, trigger_options)
             WHERE id = $13`,
-          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions, existingRunId],
+          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel,
+            triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null,
+            serializedExternalArtifacts, serializedExternalTriggerOptions, existingRunId],
         );
         runId = Number(existingRunId);
       } else {
         const runResult = await queryOne<{ id: number }>(
           `INSERT INTO pipeline_runs
-             (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+             (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model,
+              started_at, finished_at, pid, triggered_via, terminal_mode, idempotency_key,
+              task_manifest_id, task_manifest_artifacts, trigger_options)
            VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11::jsonb, COALESCE($12::jsonb, '{}'::jsonb))
            RETURNING id`,
-          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions],
+          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel,
+            triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null,
+            serializedExternalArtifacts, serializedExternalTriggerOptions],
         );
         runId = normalizePipelineRunId(runResult?.id);
       }
+      const piNativeEffectiveOptions = buildEffectiveRunOptions({
+        model: finalAgentModel,
+        effort: resolvedReasoningEffort,
+        autoWorktree: false,
+        worktreePath: null,
+        branchName: null,
+        mergeStrategy: mergeStrategy ?? 'branch-only',
+        autoMerge: false,
+        includeGraph: includeGraph ?? false,
+        terminal: resolvedTerminalMode,
+        policyLocked: false,
+        deploy: true,
+        externalSend: true,
+      });
+      await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
+        JSON.stringify(piNativeEffectiveOptions),
+        runId,
+      ]);
       const piNativeSpec = JSON.parse(fs.readFileSync(path.join(workspace.path, specPath), 'utf8')) as Record<string, unknown>;
       const piNativeManifests = await resolveAndPersistDispatchManifests({
         workspaceId: workspace.id,
@@ -1996,6 +2207,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         }) } : {}),
         executionManifestPath: piNativeManifests.path,
         executionManifestHashes: piNativeManifests.manifests.map((manifest) => manifest.manifestHash),
+        effectiveOptions: piNativeEffectiveOptions,
         specReadiness: (req as any)._specReadiness,
       });
       return;
@@ -2048,7 +2260,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     }
 
     // 5. Determine CWD — main workspace or new worktree
-    const needsWorktree = autoWorktree || orchestration?.mode === 'wave-parallel';
+    const needsWorktree = effectiveAutoWorktreeRequest || orchestration?.mode === 'wave-parallel';
     let cwd = workspace.path;
     let branchName: string | null = null;
     let worktreePath: string | null = null;
@@ -2093,7 +2305,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     //    If queuedRunId is provided, promote the existing queued row instead of inserting
     // Enforce constraint: auto_merge is only true when autoWorktree is true
-    const computedAutoMerge = needsWorktree && (autoMerge !== false);
+    const computedAutoMerge = autonomousSafety.policyLocked
+      ? false
+      : needsWorktree && (autoMerge !== false);
 
     // Resolve merge strategy: request param > spec JSON > workspace config > 'direct'
     let resolvedMergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' = 'direct';
@@ -2117,6 +2331,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           }
         } catch { /* non-fatal */ }
       }
+    }
+
+    if (autonomousSafety.policyLocked) {
+      resolvedMergeStrategy = 'branch-only';
     }
 
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
@@ -2181,6 +2399,25 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
       runId = normalizePipelineRunId(runResult?.id);
     }
+
+    const effectiveRunOptions = buildEffectiveRunOptions({
+      model: finalAgentModel,
+      effort: resolvedReasoningEffort,
+      autoWorktree: needsWorktree,
+      worktreePath,
+      branchName,
+      mergeStrategy: resolvedMergeStrategy,
+      autoMerge: computedAutoMerge,
+      includeGraph: includeGraph ?? false,
+      terminal: resolvedTerminalMode,
+      policyLocked: autonomousSafety.policyLocked,
+      deploy: autonomousSafety.deploy,
+      externalSend: autonomousSafety.externalSend,
+    });
+    await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
+      JSON.stringify(effectiveRunOptions),
+      runId,
+    ]);
 
     // 7. Build env overrides — workspace-specific and vault key additions only.
     //    The worker already inherits its own process.env when spawning the execution engine,
@@ -2364,6 +2601,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
+      safetyOptions: {
+        deploy: autonomousSafety.deploy,
+        externalSend: autonomousSafety.externalSend,
+        policyLocked: autonomousSafety.policyLocked,
+      },
       executionManifestPath: manifestBundle.path,
       envOverrides,
       ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
@@ -2434,19 +2676,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       agentModel: finalAgentModel,
       terminalMode: resolvedTerminalMode,
       terminal_mode: resolvedTerminalMode,
-      executionEnvironment: resolvedExecutionEnvironment.effective,
-      ...(runnerJobId ? { runnerJobId } : {}),
-      ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
-      ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
-      ...(effectiveTaskManifestArtifacts ? { artifacts: effectiveTaskManifestArtifacts } : {}),
-      ...(effectiveTaskManifestArtifactRefs ? { artifactRefs: effectiveTaskManifestArtifactRefs } : {}),
-      ...(effectiveTriggerOptions ? { manifestSource: buildManifestSourceFromRun({
-        idempotency_key: effectiveIdempotencyKey ?? null,
-        task_manifest_id: effectiveManifestId ?? null,
-        task_manifest_artifacts: effectiveTaskManifestArtifacts ?? null,
-        trigger_options: effectiveTriggerOptions,
-      }) } : {}),
-      ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
+      effectiveOptions: effectiveRunOptions,
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
@@ -4638,6 +4868,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       agentModel: run.agent_model || null,
       terminalMode: run.terminal_mode,
       terminal_mode: run.terminal_mode,
+      effectiveOptions: run.effective_options ?? null,
       // US-004: Expose worktree fields at top level for easy frontend access
       worktreePath: run.worktree_path || null,
       branchName: run.branch_name || null,
@@ -5386,6 +5617,43 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       );
     }
 
+    const originalEffectiveOptions = originalRun.effective_options ?? buildEffectiveRunOptions({
+      model: originalRun.agent_model ?? null,
+      effort: null,
+      autoWorktree: originalRun.auto_worktree ?? Boolean(originalRun.worktree_path),
+      worktreePath: originalRun.worktree_path ?? null,
+      branchName: originalRun.branch_name ?? null,
+      mergeStrategy: originalRun.merge_strategy ?? 'branch-only',
+      autoMerge: originalRun.auto_merge ?? false,
+      includeGraph: originalRun.include_graph ?? false,
+      terminal: originalRun.terminal_mode,
+      policyLocked: false,
+      deploy: true,
+      externalSend: true,
+    });
+    const retryAgent = (originalRun.agent_type ?? originalRun.agent ?? activeAgent) as AgentType;
+    let retryModel = originalEffectiveOptions.model ?? originalRun.agent_model ?? null;
+    let retryEffort = originalEffectiveOptions.effort;
+    if (retryAgent === 'pi') {
+      const piStatus = piDetector.detectPi();
+      if (!piStatus.piInstalled || !piStatus.piBinPath) throw new ValidationError('pi_preflight:not_installed');
+      try {
+        const selection = preflightPiModelAndEffort(
+          retryModel,
+          retryEffort,
+          piDetector.listPiModels(piStatus.piBinPath),
+          DEFAULT_PI_MODEL,
+        );
+        retryModel = selection.model;
+        retryEffort = selection.effort;
+      } catch (error: unknown) {
+        if (error instanceof PiExecutionPreflightError) {
+          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+        }
+        throw error;
+      }
+    }
+
     // 5. Duplicate-job guard — check for an active pipeline:retry job for this runId.
     //    Job IDs are retry-<runId>-<timestamp> so uniqueness alone won't block duplicates.
     //    We query pgboss.job directly to find any active/created job for this runId.
@@ -5407,79 +5675,36 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     );
     const sequenceOffset = seqRow?.max_seq ?? 0;
 
-    const originalTriggerOptions = (() => {
-      const raw = originalRun.trigger_options;
-      if (!raw) return {} as Record<string, unknown>;
-      if (typeof raw === 'string') {
-        try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {} as Record<string, unknown>; }
-      }
-      return raw;
-    })();
-    const isAgentType = (value: unknown): value is AgentType =>
-      value === 'claude' || value === 'opencode' || value === 'codex' || value === 'pi';
-    const isMergeStrategy = (value: unknown): value is 'direct' | 'pr' | 'draft-pr' | 'branch-only' =>
-      value === 'direct' || value === 'pr' || value === 'draft-pr' || value === 'branch-only';
-    const retryAgent: AgentType = isAgentType(originalRun.agent_type)
-      ? originalRun.agent_type
-      : isAgentType(originalRun.agent)
-        ? originalRun.agent
-        : 'claude';
-    const retryModel = originalRun.agent_model ?? null;
+    // 7. Create a NEW pipeline_run linked to the original while preserving the
+    // host-enforced model, effort, worktree, merge, graph, terminal, and safety options.
     const retryParallelism = forceSequential ? 1 : (originalRun.parallelism ?? 1);
-    const retryTerminalMode = normalizeTerminalMode(originalRun.terminal_mode);
-    const retryAutoWorktree = Boolean(originalRun.auto_worktree ?? originalRun.worktree_path);
-    const retryAutoMerge = Boolean(originalRun.auto_merge);
-    const retryIncludeGraph = Boolean(originalRun.include_graph);
-    const retryMergeStrategy = isMergeStrategy(originalRun.merge_strategy)
-      ? originalRun.merge_strategy
-      : 'direct';
-    const retryThinkingEnabled = typeof originalTriggerOptions.thinkingEnabled === 'boolean'
-      ? originalTriggerOptions.thinkingEnabled
-      : undefined;
-    const retryThinkingBudget = typeof originalTriggerOptions.thinkingBudget === 'number'
-      ? originalTriggerOptions.thinkingBudget
-      : undefined;
-    const retryEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(String(originalTriggerOptions.effortLevel ?? ''))
-      ? originalTriggerOptions.effortLevel as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
-      : undefined;
-    const retryReasoningEffort = typeof originalTriggerOptions.reasoningEffort === 'string'
-      ? originalTriggerOptions.reasoningEffort
-      : undefined;
-    const retryBaseTriggerOptions = { ...originalTriggerOptions };
-    delete retryBaseTriggerOptions.orchestration;
-
-    // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id.
-    //    Preserve the original run's engine/options so retry cannot silently fall
-    //    back to the process-global activeAgent/activeModel.
+    const retryEffectiveOptions: EffectiveRunOptions = {
+      ...originalEffectiveOptions,
+      model: retryModel,
+      effort: retryEffort,
+      merge: { ...originalEffectiveOptions.merge, autoMerge: false, strategy: 'branch-only' },
+      safety: { ...originalEffectiveOptions.safety, deploy: false, externalSend: false },
+    };
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
-       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id,
-        parallelism, agent, agent_type, agent_model, auto_worktree, auto_merge, include_graph,
-        merge_strategy, terminal_mode, triggered_via, trigger_options)
-       VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'run_now', $15::jsonb)
-       RETURNING id`, [
+      (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
+       retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
+       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options)
+      VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
+              $11, FALSE, $12, 'branch-only', $13::jsonb)
+      RETURNING id`, [
       originalRun.spec_path,
       originalRun.workspace_id,
       originalRun.branch_name,
       originalRun.worktree_path,
       originalRunId,
       retryParallelism,
+      originalRun.terminal_mode,
       retryAgent,
       retryAgent,
       retryModel,
-      retryAutoWorktree,
-      retryAutoMerge,
-      retryIncludeGraph,
-      retryMergeStrategy,
-      retryTerminalMode,
-      JSON.stringify({
-        ...retryBaseTriggerOptions,
-        forceSequential: forceSequential === true ? true : originalTriggerOptions.forceSequential,
-        agentOverride: retryAgent,
-        modelOverride: retryModel ?? undefined,
-        includeGraph: retryIncludeGraph,
-        terminal_mode: retryTerminalMode,
-        mergeStrategy: retryMergeStrategy,
-      }),
+      originalRun.auto_worktree ?? Boolean(originalRun.worktree_path),
+      originalRun.include_graph ?? false,
+      JSON.stringify(retryEffectiveOptions),
     ]);
     const newRunId = newRunResult!.id;
 
@@ -5574,15 +5799,15 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       runId: Number(newRunId),
       specJson,
       cwd: retryCwd,
-      agent: activeAgent,
-      model: activeModel ?? null,
-      effort: null,
+      agent: retryAgent,
+      model: retryModel,
+      effort: retryEffort,
       terminalMode: normalizeTerminalMode(originalRun.terminal_mode),
       worktreePath: originalRun.worktree_path ?? null,
       branchName: originalRun.branch_name ?? null,
       autoMerge: false,
       mergeStrategy: 'branch-only',
-      parallelism: forceSequential ? 1 : (originalRun.parallelism ?? 1),
+      parallelism: retryParallelism,
     });
 
     // 13. Validate job payload with Zod before sending to pg-boss.
@@ -5601,11 +5826,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       executionManifestPath: z.string().min(1),
       envOverrides: z.record(z.string(), z.string()),
       includeGraph: z.boolean().optional().default(false),
-      terminalMode: z.enum(['ansi-html', 'pty', 'native-pty']).optional().default('ansi-html'),
-      thinkingEnabled: z.boolean().optional(),
-      thinkingBudget: z.number().int().positive().optional(),
       effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
-      reasoningEffort: z.string().optional(),
     });
 
     const jobPayload = PipelineRetryJobPayloadSchema.parse({
@@ -5621,12 +5842,8 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       sequenceOffset,
       executionManifestPath: retryManifests.path,
       envOverrides,
-      includeGraph: retryIncludeGraph,
-      terminalMode: retryTerminalMode,
-      ...(retryThinkingEnabled !== undefined ? { thinkingEnabled: retryThinkingEnabled } : {}),
-      ...(retryThinkingBudget !== undefined ? { thinkingBudget: retryThinkingBudget } : {}),
-      ...(retryEffortLevel ? { effortLevel: retryEffortLevel } : {}),
-      ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
+      includeGraph: originalRun.include_graph ?? false,
+      ...(retryEffort ? { effortLevel: retryEffort } : {}),
     });
 
     // 14. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
@@ -5645,6 +5862,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       queuePosition: 1,
       retriedStories: retriedStoryInfo,
       copiedStories: passedStories.map(s => s.story_id),
+      effectiveOptions: retryEffectiveOptions,
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Retry');
@@ -6594,6 +6812,8 @@ async function recordTokenUsage(
  *     tags: [Pipeline]
  *     summary: Record a story outcome from the execution engine
  *     operationId: recordStoryResult
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Internal execution-engine closeout write — operator-only because it mutates canonical story result metadata."
  *     description: Called by run-loop.ts or execution-engine.ts to insert a story_results row after a story finishes. Also records token usage into the analytics table when tokens are present.
  *     requestBody:
  *       required: true
@@ -6617,6 +6837,7 @@ async function recordTokenUsage(
  *               logPath: { type: string, nullable: true }
  *               blockedBy: { type: array, items: { type: string }, nullable: true }
  *               activeSkills: { type: array, items: { type: string }, nullable: true }
+ *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
  *     responses:
  *       201: { description: "Story result recorded" }
  *       400: { description: "Missing required fields or invalid status" }
@@ -6627,12 +6848,13 @@ router.post('/story-result', async (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills, idempotencyKey,
+      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
       inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
+      completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
     };
 
@@ -6649,9 +6871,12 @@ router.post('/story-result', async (req: Request, res: Response) => {
     if (commitSha && !/^[0-9a-f]{40}$/i.test(commitSha)) {
       throw new ValidationError('commitSha must be a full git SHA');
     }
+    if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
+      throw new ValidationError('completionPacket must be an object');
+    }
 
-    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills, ingest_key)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills, completion_packet, ingest_key)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
        RETURNING id`, [runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
@@ -6660,6 +6885,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
       activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
+      completionPacket ? JSON.stringify(completionPacket) : null,
       idempotencyKey ?? null,]);
 
     if (inserted && status === 'pass' && commitSha) {

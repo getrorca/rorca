@@ -20,6 +20,8 @@ import {
   Zap,
   FileText,
   RotateCcw,
+  ShieldCheck,
+  SlidersHorizontal,
 } from 'lucide-react';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 import AgentBadge from './AgentBadge';
@@ -38,6 +40,22 @@ interface ResumeSummary {
   carriedForwardCount: number;
 }
 
+export interface EffectiveRunOptions {
+  model: string | null;
+  effort: string | null;
+  worktree: { enabled: boolean; path: string | null; branch: string | null };
+  merge: { strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; autoMerge: boolean };
+  graph: { enabled: boolean };
+  terminal: 'ansi-html' | 'pty' | 'native-pty';
+  safety: {
+    guard: string;
+    allowBackendJest: boolean;
+    deploy: boolean;
+    externalSend: boolean;
+    policyLocked: boolean;
+  };
+}
+
 interface RunMetadataPanelProps {
   run: {
     id: number;
@@ -47,8 +65,11 @@ interface RunMetadataPanelProps {
     worktree_path: string | null;
     started_at: string;
     finished_at: string | null;
+    agent_type?: string;
+    agent_model?: string | null;
     agentType: string | null;
     agentModel: string | null;
+    effective_options?: EffectiveRunOptions | null;
   };
   tokenSummary: { inputTokens: number; outputTokens: number };
   specModel: string | null;
@@ -280,6 +301,32 @@ export default function RunMetadataPanel({
         </div>
       </MetaRow>
 
+      {run.effective_options && (
+        <>
+          <MetaRow icon={SlidersHorizontal} label="Options">
+            <span className="font-mono text-[10px]" data-testid="effective-run-options">
+              {run.effective_options.worktree.enabled ? 'worktree' : 'workspace'}
+              {' · '}{run.effective_options.merge.strategy}
+              {' · '}merge {run.effective_options.merge.autoMerge ? 'on' : 'off'}
+              {' · '}graph {run.effective_options.graph.enabled ? 'on' : 'off'}
+              {' · '}{run.effective_options.terminal}
+            </span>
+          </MetaRow>
+          {run.effective_options.effort && (
+            <MetaRow icon={Cpu} label="Effort">
+              <span className="font-mono text-[10px]">{run.effective_options.effort}</span>
+            </MetaRow>
+          )}
+          <MetaRow icon={ShieldCheck} label="Safety">
+            <span className="font-mono text-[10px]" data-testid="effective-run-safety">
+              guarded · backend Jest {run.effective_options.safety.allowBackendJest ? 'allowed' : 'blocked'}
+              {' · '}deploy {run.effective_options.safety.deploy ? 'on' : 'off'}
+              {' · '}external send {run.effective_options.safety.externalSend ? 'on' : 'off'}
+              {run.effective_options.safety.policyLocked ? ' · policy locked' : ''}
+            </span>
+          </MetaRow>
+        </>
+      )}
 
       {/* CIE-016: Context — predicted vs actual */}
       {contextComparison && (() => {

@@ -1355,8 +1355,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               }
 
               case 'branch-only': {
-                // Just ensure branch is on remote — no PR, no merge
+                // Locked autonomous safety retains the branch locally. It cannot
+                // push or create any other external-send side effect.
                 try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                if (!payload.safetyOptions.externalSend) {
+                  mergeLog(`[merge-strategy:branch-only] Branch retained locally: ${payload.branchName}. External send is disabled by enforced run policy.`);
+                  break;
+                }
                 try {
                   const git = simpleGit(worktreePath);
                   await git.push('origin', payload.branchName, ['--set-upstream']);
@@ -1370,7 +1375,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           }
 
           // US-034: Finalize existing draft PR on run completion (for runs that started with a draft PR).
-          if (payload.branchName && effectiveMergeStrategy === 'direct') {
+          if (payload.safetyOptions.externalSend && payload.branchName && effectiveMergeStrategy === 'direct') {
             try {
               const prRow = await queryOne<{ pr_number: number | null }>(
                 'SELECT pr_number FROM pipeline_runs WHERE id = $1',
@@ -1391,8 +1396,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           }
 
           // Workflow dispatch (US-026)
-          if (status === 'done') {
+          if (status === 'done' && payload.safetyOptions.deploy && payload.safetyOptions.externalSend) {
             await dispatchWorkflowIfConfigured(workspaceId, runId);
+          } else if (status === 'done' && (!payload.safetyOptions.deploy || !payload.safetyOptions.externalSend)) {
+            logger.info({ runId, safetyOptions: payload.safetyOptions }, '[worker] workflow dispatch skipped by enforced run safety policy');
           }
         }
 
@@ -1498,9 +1505,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     const {
       runId,
       originalRunId,
-      storyIds,
       workspacePath,
-      specPath,
       retrySpecPath,
       agent,
       model,
@@ -1616,9 +1621,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     if (reasoningEffort) {
       engineArgs.push('--reasoning-effort', reasoningEffort);
+    }
     if (executionManifestPath) {
       engineArgs.push('--execution-manifests', executionManifestPath);
-    }
     }
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
@@ -2530,8 +2535,8 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  // 2. Wait up to 15s for child processes to exit (poll every 500ms)
-  const DRAIN_TIMEOUT_MS = 15_000;
+  // 2. Wait up to 30s for child processes to flush closeout state and exit (poll every 500ms)
+  const DRAIN_TIMEOUT_MS = 30_000;
   const DRAIN_POLL_MS = 500;
   const drainDeadline = Date.now() + DRAIN_TIMEOUT_MS;
 
@@ -2542,7 +2547,7 @@ async function shutdown(signal: string): Promise<void> {
   // 3. SIGKILL any remaining child processes that did not exit in time
   if (activeProcesses.size > 0) {
     const remaining = Array.from(activeProcesses.keys());
-    logger.warn({ remaining }, '[worker] shutdown — children did not exit in 15s, sending SIGKILL');
+    logger.warn({ remaining }, '[worker] shutdown — children did not exit in 30s, sending SIGKILL');
     for (const [, child] of activeProcesses) {
       try { child.kill('SIGKILL'); } catch { /* best-effort */ }
     }

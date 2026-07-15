@@ -1333,7 +1333,7 @@ function redactCaptureRawFields(value, policy) {
     }
     const output = {};
     for (const [key, child] of Object.entries(value)) {
-        if (/^(raw|content|text|stdout|stderr|transcript)$/i.test(key) && policy.rawContentDefault !== 'explicit') {
+        if (/^(raw|content|text|stdout|stderr|transcript|output|commandOutput|unsafeCommandOutput)$/i.test(key) && policy.rawContentDefault !== 'explicit') {
             output[key] = typeof child === 'string'
                 ? { hash: hashCaptureContent(child), byteLength: Buffer.byteLength(child), redacted: true }
                 : '[REDACTED_RAW_CONTENT]';
@@ -1460,6 +1460,42 @@ export function formatRedactionDiagnostics(input = {}) {
         regulatedDomainFlags: regulatedSignals,
         truncated: Boolean(input.truncated),
     };
+}
+export function resolveWorkspaceRelativePath(workspacePath, candidatePath) {
+    const root = path.resolve(workspacePath);
+    const relativePath = safeNormalizeWorkspaceRelativePath(root, candidatePath);
+    return { absolutePath: path.resolve(root, relativePath), relativePath };
+}
+export async function readSafeContextFilePreview(workspacePath, candidatePath, options = {}) {
+    const policy = options.policy ?? DEFAULT_CAPTURE_POLICY;
+    const maxBytes = Math.min(Math.max(options.maxBytes ?? 32_768, 1), 128_000);
+    const { absolutePath, relativePath } = resolveWorkspaceRelativePath(workspacePath, candidatePath);
+    const stat = await fs.promises.stat(absolutePath);
+    if (!stat.isFile())
+        throw new Error('Preview path must be a file');
+    const handle = await fs.promises.open(absolutePath, 'r');
+    try {
+        const bytesToRead = Math.min(stat.size, maxBytes);
+        const buffer = Buffer.alloc(bytesToRead);
+        await handle.read(buffer, 0, bytesToRead, 0);
+        if (buffer.includes(0))
+            throw new Error('Binary file previews are not supported');
+        const raw = buffer.toString('utf8');
+        const sanitized = sanitizeCapturePayload({ preview: raw }, policy);
+        const payload = sanitized.payload && typeof sanitized.payload === 'object' ? sanitized.payload : {};
+        return {
+            path: candidatePath,
+            workspaceRelativePath: relativePath,
+            byteLength: stat.size,
+            truncated: stat.size > maxBytes || sanitized.safety.truncated,
+            contentHash: hashCaptureContent(raw),
+            content: typeof payload.preview === 'string' ? payload.preview : '',
+            redactionDiagnostics: formatRedactionDiagnostics(sanitized.safety),
+        };
+    }
+    finally {
+        await handle.close();
+    }
 }
 function stableCaptureStringify(value) {
     if (Array.isArray(value))
