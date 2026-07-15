@@ -13,7 +13,7 @@ import { listBackups } from '../lib/backup';
 import { activeAgent, activeModel, agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
-import { detectPi } from '../lib/pi-detector';
+import { detectPiAvailability, type PiStatus } from '../lib/pi-detector';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
@@ -35,7 +35,12 @@ interface EnginesStatus {
   pi: { installed: boolean; version?: string };
 }
 
-let enginesCache: EnginesStatus | null = null;
+interface EngineDetection {
+  engines: EnginesStatus;
+  pi: PiStatus;
+}
+
+let enginesCache: EngineDetection | null = null;
 let enginesCacheAt = 0;
 const ENGINES_CACHE_TTL_MS = 30_000;
 
@@ -53,7 +58,7 @@ function detectClaudeBinary(): boolean {
   }
 }
 
-function detectEngines(): EnginesStatus {
+function detectEngines(): EngineDetection {
   const now = Date.now();
   if (enginesCache && now - enginesCacheAt < ENGINES_CACHE_TTL_MS) {
     return enginesCache;
@@ -75,28 +80,31 @@ function detectEngines(): EnginesStatus {
       return { codexInstalled: false, codexVersion: undefined };
     }
   })();
-  const pi = (() => {
+  const pi: PiStatus = (() => {
     try {
-      return detectPi();
+      return detectPiAvailability();
     } catch {
-      return { piInstalled: false, piVersion: undefined };
+      return { piInstalled: false, piVersion: null, piBinPath: null };
     }
   })();
 
-  const result: EnginesStatus = {
-    claude: { installed: claudeInstalled },
-    opencode: {
-      installed: opencode.opencodeInstalled,
-      ...(opencode.opencodeVersion ? { version: opencode.opencodeVersion } : {}),
+  const result: EngineDetection = {
+    engines: {
+      claude: { installed: claudeInstalled },
+      opencode: {
+        installed: opencode.opencodeInstalled,
+        ...(opencode.opencodeVersion ? { version: opencode.opencodeVersion } : {}),
+      },
+      codex: {
+        installed: codex.codexInstalled,
+        ...(codex.codexVersion ? { version: codex.codexVersion } : {}),
+      },
+      pi: {
+        installed: pi.piInstalled,
+        ...(pi.piVersion ? { version: pi.piVersion } : {}),
+      },
     },
-    codex: {
-      installed: codex.codexInstalled,
-      ...(codex.codexVersion ? { version: codex.codexVersion } : {}),
-    },
-    pi: {
-      installed: pi.piInstalled,
-      ...(pi.piVersion ? { version: pi.piVersion } : {}),
-    },
+    pi,
   };
 
   enginesCache = result;
@@ -289,24 +297,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       // DB query failed — already captured by dbConnected
     }
 
-    // OC-002: Include opencode status when agentType=opencode
-    const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
-    // OC-024: Include codex status when agentType=codex
-    const codex = agentType === 'codex' ? detectCodex() : undefined;
-    const pi = (() => {
-      try {
-        return detectPi();
-      } catch {
-        return {
-          piInstalled: false,
-          piVersion: null,
-          piBinPath: null,
-        };
-      }
-    })();
-
-    // MP-009: Detect all engines (cached 30s) for EngineSelector availability dots
-    const engines = detectEngines();
+    // MP-009: Detect all engines once per cache window. Reuse the same Pi
+    // result for legacy top-level fields instead of spawning a second probe.
+    const { engines, pi } = detectEngines();
     const mcp = getMcpBridgeHealth();
     const databaseSetup = buildDatabaseSetupGuidance(databaseCapability.dbMode);
 
@@ -342,13 +335,13 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       telemetryEnabled: isTelemetryEnabled(),
       // PR-009: Report auth enforcement status
       authRequired: process.env.AUTH_REQUIRED === 'true',
-      ...(agentType === 'opencode' && opencode ? {
-        opencodeInstalled: opencode.opencodeInstalled,
-        opencodeVersion: opencode.opencodeVersion,
+      ...(agentType === 'opencode' ? {
+        opencodeInstalled: engines.opencode.installed,
+        opencodeVersion: engines.opencode.version,
       } : {}),
-      ...(agentType === 'codex' && codex ? {
-        codexInstalled: codex.codexInstalled,
-        codexVersion: codex.codexVersion,
+      ...(agentType === 'codex' ? {
+        codexInstalled: engines.codex.installed,
+        codexVersion: engines.codex.version,
       } : {}),
       piInstalled: pi.piInstalled,
       piVersion: pi.piVersion,

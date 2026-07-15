@@ -10,6 +10,8 @@
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
 import { execSync, spawnSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import { logger } from './logger';
 
 export interface PiStatus {
@@ -35,6 +37,9 @@ export const PI_INSTALL_METHODS = {
 } as const;
 
 export const MIN_PI_VERSION = '0.67.0';
+
+const PI_VERSION_ARGS = ['--no-extensions', '--offline', '--version'] as const;
+const PI_PROBE_TIMEOUT_MS = 2_000;
 
 /**
  * Resolve the pi binary path.
@@ -83,6 +88,32 @@ function parseTokenCount(value: string): number {
 }
 
 /**
+ * Fast, process-free Pi availability check for request paths such as health.
+ * Version probing is intentionally excluded so a Pi extension can never call
+ * back into a backend that is synchronously waiting for another Pi process.
+ */
+export function detectPiAvailability(): PiStatus {
+  const configuredPath = process.env.PI_BIN?.trim();
+  const candidates = configuredPath
+    ? [configuredPath]
+    : (process.env.PATH ?? '')
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((entry) => path.join(entry, process.platform === 'win32' ? 'pi.cmd' : 'pi'));
+
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return { piInstalled: true, piVersion: null, piBinPath: candidate };
+    } catch {
+      // Continue searching PATH entries.
+    }
+  }
+
+  return { piInstalled: false, piVersion: null, piBinPath: null };
+}
+
+/**
  * Detect pi binary: resolve path, run --version, parse output.
  * Never throws — returns a status object.
  */
@@ -93,9 +124,12 @@ export function detectPi(): PiStatus {
   }
 
   try {
-    const result = spawnSync(binPath, ['--version'], {
+    // Explicit diagnostics must never load the Rorca extension and call back
+    // into a backend that is synchronously waiting for this probe.
+    const result = spawnSync(binPath, PI_VERSION_ARGS, {
       encoding: 'utf8',
-      timeout: 5000,
+      timeout: PI_PROBE_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (result.status !== 0) {

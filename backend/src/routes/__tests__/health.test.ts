@@ -43,6 +43,11 @@ beforeEach(() => {
       piVersion: null,
       piBinPath: null,
     }),
+    detectPiAvailability: jest.fn().mockReturnValue({
+      piInstalled: false,
+      piVersion: null,
+      piBinPath: null,
+    }),
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-test-'));
@@ -91,6 +96,15 @@ describe('GET /api/health', () => {
     expect(res.body.dbMode).toBe(res.body.databaseCapability.dbMode);
     expect(res.body.graphMode).toBe(res.body.databaseCapability.graphMode);
     expect(String(res.body.databaseCapability.connection.url ?? '')).not.toContain('@');
+  });
+
+  it('runs the process-free Pi availability check only once per engine-cache refresh', async () => {
+    const { detectPiAvailability } = require('../../lib/pi-detector') as { detectPiAvailability: jest.Mock };
+
+    const res = await request(app).get('/api/health');
+
+    expect(res.status).toBe(200);
+    expect(detectPiAvailability).toHaveBeenCalledTimes(1);
   });
 
   it('returns no-cache headers', async () => {
@@ -268,6 +282,11 @@ describe('GET /api/health (agentType=opencode)', () => {
         piVersion: '1.2.3',
         piBinPath: '/usr/local/bin/pi',
       }),
+      detectPiAvailability: jest.fn().mockReturnValue({
+        piInstalled: true,
+        piVersion: null,
+        piBinPath: '/usr/local/bin/pi',
+      }),
     }));
 
     ocTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-oc-test-'));
@@ -289,7 +308,7 @@ fs.rmSync(ocTmpDir, { recursive: true, force: true });
     expect(res.body.opencodeInstalled).toBe(true);
     expect(res.body.opencodeVersion).toBe('0.2.0');
     expect(res.body.piInstalled).toBe(true);
-    expect(res.body.piVersion).toBe('1.2.3');
+    expect(res.body.piVersion).toBeNull();
     expect(res.body.piBinPath).toBe('/usr/local/bin/pi');
   });
 
@@ -302,7 +321,7 @@ fs.rmSync(ocTmpDir, { recursive: true, force: true });
   });
 });
 
-describe('GET /api/health (pi detector failure)', () => {
+describe('GET /api/health (pi availability check failure)', () => {
   let failApp: Express;
   let failTmpDir: string;
 
@@ -322,6 +341,9 @@ describe('GET /api/health (pi detector failure)', () => {
       detectPi: jest.fn(() => {
         throw new Error('pi detector failed');
       }),
+      detectPiAvailability: jest.fn(() => {
+        throw new Error('pi availability check failed');
+      }),
     }));
 
     failTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-pi-fail-test-'));
@@ -336,7 +358,7 @@ process.env.NODE_ENV = 'test';
 fs.rmSync(failTmpDir, { recursive: true, force: true });
   });
 
-  it('returns 200 and null pi fields when detectPi throws', async () => {
+  it('returns 200 and null pi fields when the availability check throws', async () => {
     const res = await request(failApp).get('/api/health');
 
     expect(res.status).toBe(200);
