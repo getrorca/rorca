@@ -13,6 +13,7 @@ import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
 import { pauseRun, resumeRun, cancelRun, injectContext, retryRun, getRunDlq, retryRunFromDlq, type DlqEntry } from '../api/pipeline';
+import { normalizePipelineRunDetailResponse, type RunEngineWireFields } from '../api/run-dto';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
 import MultiPaneTerminal from '../components/MultiPaneTerminal';
@@ -46,8 +47,8 @@ interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   parallelism?: number;
-  agentType?: string;
-  agentModel?: string | null;
+  agentType: string | null;
+  agentModel: string | null;
   merge_status?: 'pending' | 'merging' | 'merged' | 'failed' | null;
   merge_commit_sha?: string | null;
   merge_error?: string | null;
@@ -113,8 +114,10 @@ interface ResumeSummary {
   carriedForwardCount: number;
 }
 
-interface RunApiResponse {
-  run: PipelineRun;
+type PipelineRunWire = Omit<PipelineRun, 'agentType' | 'agentModel'> & RunEngineWireFields;
+
+interface RunApiResponse extends RunEngineWireFields {
+  run: PipelineRunWire;
   stories: StoryResultSeed[];
   specStories: { id: string; title: string; suggestedSkills?: Array<{ name: string; relevance: number; reason: string }> }[];
   specModel?: string | null;
@@ -1242,7 +1245,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const fetchRun = useCallback(async () => {
     if (!workspaceId) return;
     try {
-      const data = await apiFetch<RunApiResponse>(`/api/pipeline/runs/${runId}`);
+      const response = await apiFetch<RunApiResponse>(`/api/pipeline/runs/${runId}`);
+      const data = normalizePipelineRunDetailResponse(response);
       // Validate the run belongs to the current workspace
       if (data.run.workspace_id && String(data.run.workspace_id) !== String(workspaceId)) {
         setLoading(false);
