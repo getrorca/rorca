@@ -136,6 +136,7 @@ import {
 import { summarizeRorcaTiers } from './lib/tier-auth';
 import { planGate } from './lib/plan-gate';
 import lifecycleEvidenceRouter from './routes/lifecycle-evidence';
+import lifecycleDecisionsRouter from './routes/lifecycle-decisions';
 import { startSsdlcEvidenceNormalizer } from './lib/ssdlc-evidence-subscriber';
 import { randomUUID } from 'crypto';
 
@@ -465,6 +466,7 @@ app.use('/api/retrieval-traces', retrievalTracesRouter);
 app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/gitreins', gitReinsEvidenceRouter);
 app.use('/api/lifecycle', lifecycleEvidenceRouter);
+app.use('/api/lifecycle', lifecycleDecisionsRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);

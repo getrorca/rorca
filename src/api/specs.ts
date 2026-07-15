@@ -347,7 +347,6 @@ export function getSpecGenerationContext(p: SpecGenerationContextParams): Promis
   });
 }
 
-<<<<<<< HEAD
 // ─── Context Preview (US-023) ────────────────────────────────────────────────
 
 export interface ContextPreviewParams extends ApiOptions {
