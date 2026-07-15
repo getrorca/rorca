@@ -791,6 +791,33 @@ describe("rorca-capture CLI", () => {
     expect(queued.payload.idempotencyKey).toMatch(/^memory-candidate:ws-offline:content:/);
   });
 
+  it("queues policy-redacted shell events when the API is offline", async () => {
+    const repo = tempRepo();
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    const queuePath = path.join(repo, ".rorca", "shell-offline.ndjson");
+
+    const code = await runCli([
+      "emit", "shell", "--workspace", "ws-shell-offline", "--queue-path", queuePath,
+      "--policy", "metadata-only", "--phase", "end", "--command", "deploy --token super-secret-value",
+      "--json",
+    ], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: async () => { throw new TypeError("fetch failed"); },
+    });
+
+    expect(code).toBe(0);
+    const queued = JSON.parse(readFileSync(queuePath, "utf8").trim()) as { endpoint: string; payload: any };
+    expect(queued.endpoint).toBe("/api/context-capture/events");
+    expect(queued.payload.workspaceId).toBe("ws-shell-offline");
+    expect(queued.payload.payload.command_summary).toBeNull();
+    expect(JSON.stringify(queued)).not.toContain("super-secret-value");
+  });
+
   it("uses deterministic source and content idempotency keys", async () => {
     const repo = tempRepo();
     const tokenPath = tokenFile(repo);

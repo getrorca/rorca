@@ -649,7 +649,7 @@ async function runManagedServiceCommand(parsed: ParsedArgs, deps: CliDeps, io: C
 
 async function runEmitCommand(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
   if (parsed.rest[0] !== "shell") throw new Error("emit currently supports only `emit shell`.");
-  const runtime = await resolveRuntime(parsed, deps);
+  const runtime = await resolveIngestRuntime(parsed, deps);
   const command = commandOption(parsed.rest, "--command") ?? "";
   const phase = commandOption(parsed.rest, "--phase") === "start" ? "start" : "end";
   const policyMode = parseCapturePolicyMode(commandOption(parsed.rest, "--policy") ?? (deps.env ?? process.env).RORCA_CAPTURE_POLICY ?? "metadata-only");
