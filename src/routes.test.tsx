@@ -9,7 +9,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
-import { PANEL_ROUTES, pathToPanelId, useAppNavigate } from './routes';
+import { PANEL_ROUTES, pathToPanelId, safeInternalReturnTo, useAppNavigate } from './routes';
 
 function NavigationHarness() {
   const location = useLocation();
@@ -34,6 +34,12 @@ describe('panel routing', () => {
     expect(pathToPanelId('/specs')).toBe('specs');
     expect(pathToPanelId('/runs/42')).toBe('runs');
     expect(pathToPanelId('/specs/a-spec/review')).toBe('specs');
+  });
+
+  it('accepts only internal return links and preserves the lifecycle phase deep link', () => {
+    expect(safeInternalReturnTo('?returnTo=%2Flifecycle%3Fspec%3Da%26phase%3Dqa', '/runs')).toBe('/lifecycle?spec=a&phase=qa');
+    expect(safeInternalReturnTo('?returnTo=https%3A%2F%2Fevil.example', '/runs')).toBe('/runs');
+    expect(safeInternalReturnTo('?returnTo=%2F%2Fevil.example', '/specs')).toBe('/specs');
   });
 
   it('preserves direct deep-link query state and browser back-forward history', async () => {

@@ -22,6 +22,7 @@ function renderMatrix(overrides: Partial<React.ComponentProps<typeof LifecycleMa
     selectedPhaseId: 'validation',
     pagination: { page: 1, limit: 25, total: 1, hasMore: false },
     onSelect: vi.fn(),
+    onOpenSpec: vi.fn(),
     onPageChange: vi.fn(),
     ...overrides,
   };
@@ -35,6 +36,14 @@ function cellButton(phase: string, status?: string) {
 }
 
 describe('LifecycleMatrix', () => {
+  it('opens the existing spec review adapter when the spec title is clicked', async () => {
+    const user = userEvent.setup();
+    const onOpenSpec = vi.fn();
+    renderMatrix({ onOpenSpec });
+    await user.click(screen.getByRole('button', { name: 'Billing anomaly alerts' }));
+    expect(onOpenSpec).toHaveBeenCalledWith('billing-anomaly-alerts');
+  });
+
   it('renders Spec plus the eleven canonical phase headers in exact order', () => {
     renderMatrix();
     expect(screen.getAllByRole('columnheader').map((header) => header.textContent)).toEqual([

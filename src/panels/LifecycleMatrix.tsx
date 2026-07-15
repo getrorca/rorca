@@ -20,6 +20,7 @@ interface LifecycleMatrixProps {
   compact?: boolean;
   pagination: { page: number; limit: number; total: number; hasMore: boolean };
   onSelect: (specId: string, phaseId: LifecyclePhaseId) => void;
+  onOpenSpec: (specId: string) => void;
   onPageChange: (page: number) => void;
 }
 
@@ -47,6 +48,7 @@ interface LifecycleMatrixRowProps {
   compact: boolean;
   registerButton: (key: string, node: HTMLButtonElement | null) => void;
   onCellSelect: (specId: string, phaseId: LifecyclePhaseId) => void;
+  onOpenSpec: (specId: string) => void;
   onCellKeyDown: (event: KeyboardEvent<HTMLButtonElement>, row: number, column: number) => void;
 }
 
@@ -58,12 +60,17 @@ const LifecycleMatrixRow = memo(function LifecycleMatrixRow({
   compact,
   registerButton,
   onCellSelect,
+  onOpenSpec,
   onCellKeyDown,
 }: LifecycleMatrixRowProps) {
   return (
     <tr data-spec-id={item.specId}>
       <th scope="row" className="lifecycle-matrix-spec-cell">
-        <span className="lifecycle-matrix-spec-title">{item.title}</span>
+        <button
+          type="button"
+          className="lifecycle-matrix-spec-title rounded-sm text-left hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          onClick={() => onOpenSpec(item.specId)}
+        >{item.title}</button>
         <span className="lifecycle-matrix-spec-meta">
           {riskLabel(item.risk)} · {item.storySummary.total} {item.storySummary.total === 1 ? 'story' : 'stories'}
           {item.owner ? ` · Owner: ${item.owner.label}` : ''}
@@ -108,6 +115,7 @@ export default function LifecycleMatrix({
   compact = false,
   pagination,
   onSelect,
+  onOpenSpec,
   onPageChange,
 }: LifecycleMatrixProps) {
   const firstCoordinate = useMemo<CellCoordinate | null>(() => (
@@ -206,6 +214,7 @@ export default function LifecycleMatrix({
                 compact={compact}
                 registerButton={registerButton}
                 onCellSelect={onCellSelect}
+                onOpenSpec={onOpenSpec}
                 onCellKeyDown={handleKeyDown}
               />
             ))}

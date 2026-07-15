@@ -36,6 +36,7 @@ import { classifySSDLCLiveness, type SSDLCLivenessReport } from './ssdlc-livenes
 import { getSpecPlanCompilationState, type SpecPlanCompilationState } from './ssdlc-plan-service';
 import { inspectApprovedSpecPasses } from './ssdlc-pass-reconciler';
 import { getNormalizedEvidenceById } from './ssdlc-evidence';
+import { isHardDenyGate } from './ssdlc-decisions';
 
 export const LIFECYCLE_PORTFOLIO_MAX_SPECS = 500;
 export const LIFECYCLE_EVALUATION_EVIDENCE_LIMIT = 500;
@@ -1113,7 +1114,7 @@ function evidenceSummary(row: EvidenceRow, phase: PhaseEvaluation) {
 
 function permittedActions(phase: PhaseEvaluation, stalePlan: boolean): string[] {
   if (stalePlan || phase.status === 'stale') return ['inspect_evidence', 'recompile_plan'];
-  if (phase.status === 'blocked') return ['inspect_evidence', 'retry_smallest_scope'];
+  if (phase.status === 'blocked') return ['inspect_evidence', 'retry_smallest_scope', 'reopen_disposition'];
   if (phase.status === 'awaiting_approval') return ['inspect_evidence', 'request_approval'];
   if (phase.status === 'not_started' || phase.status === 'in_progress') return ['inspect_evidence', 'run_phase'];
   if (phase.status === 'passed') return ['inspect_evidence'];
@@ -1183,6 +1184,8 @@ export async function getLifecyclePhase(input: LifecyclePhaseInput) {
       const evaluation = phase.gates.find((item) => item.gateId === gate.gateId);
       return {
         ...gate,
+        hardDeny: isHardDenyGate(gate),
+        authorizedApprovers: ['local_admin', 'authenticated_admin', 'hermes_delegated'],
         evaluation: evaluation ? {
           status: evaluation.status,
           rationale: evaluation.rationale,

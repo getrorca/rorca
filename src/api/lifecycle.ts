@@ -13,6 +13,8 @@ import type {
   LifecycleEvidenceListItem,
   LifecycleMutationResult,
   LifecyclePaginated,
+  LifecycleRetryDispatchResult,
+  LifecycleRetryPreviewResponse,
   LifecyclePaginationRequest,
   LifecyclePhaseId,
   LifecyclePhaseResponse,
@@ -134,6 +136,36 @@ export function recompileLifecycleSpec(
   return apiFetch<LifecycleMutationResult>(
     `/api/lifecycle/specs/${encodeURIComponent(specId)}/recompile`,
     mutationInit(idempotencyKey, { workspaceId, expectedSaveGeneration }, options),
+  );
+}
+
+export function previewLifecycleRetry(
+  workspaceId: string,
+  runId: number,
+  storyIds?: string[],
+  options?: LifecycleRequestOptions,
+): Promise<LifecycleRetryPreviewResponse> {
+  return apiFetch<LifecycleRetryPreviewResponse>(
+    `/api/lifecycle/runs/${runId}/retry-preview`,
+    mutationInit(`preview-only-${runId}`, { workspaceId, ...(storyIds ? { storyIds } : {}) }, options),
+  );
+}
+
+export function dispatchLifecycleRetry(
+  workspaceId: string,
+  runId: number,
+  preview: LifecycleRetryPreviewResponse,
+  idempotencyKey: string,
+  options?: LifecycleRequestOptions,
+): Promise<LifecycleRetryDispatchResult> {
+  return apiFetch<LifecycleRetryDispatchResult>(
+    `/api/lifecycle/runs/${runId}/retry-dispatch`,
+    mutationInit(idempotencyKey, {
+      workspaceId,
+      previewHash: preview.preview.previewHash,
+      approvedPreview: preview.preview,
+      previewIdentity: preview.previewIdentity,
+    }, options),
   );
 }
 

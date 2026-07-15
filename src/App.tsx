@@ -37,7 +37,7 @@ import {
 import SlideOver from './components/SlideOver';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { usePipelineRuns } from './hooks/usePipelineRuns';
-import { useAppNavigate, useActivePanel } from './routes';
+import { safeInternalReturnTo, useAppNavigate, useActivePanel } from './routes';
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
@@ -460,8 +460,12 @@ function AppLayout() {
   }, [routerNavigate]);
 
   const navigateBackFromRun = useCallback(() => {
-    routerNavigate('/runs');
-  }, [routerNavigate]);
+    routerNavigate(safeInternalReturnTo(location.search, '/runs'));
+  }, [location.search, routerNavigate]);
+
+  const navigateBackFromSpecReview = useCallback(() => {
+    routerNavigate(safeInternalReturnTo(location.search, '/specs'));
+  }, [location.search, routerNavigate]);
 
   const navigateToSpecReview = useCallback((specId: string) => {
     routerNavigate(`/specs/${specId}/review`);
@@ -563,9 +567,15 @@ function AppLayout() {
         <Outlet />
 
         {/* Slide-over Overlays */}
-        <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>
+        <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromSpecReview} hideHeader={true}>
           {reviewSpecId !== null && (
-            <SpecReviewPanel specId={reviewSpecId} onBack={navigateBackFromRun} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} />
+            <SpecReviewPanel
+              specId={reviewSpecId}
+              initialTab={new URLSearchParams(location.search).get('tab') === 'lifecycle' ? 'lifecycle' : 'stories'}
+              onBack={navigateBackFromSpecReview}
+              onNavigate={handleNavigate}
+              onNavigateToRun={navigateToRun}
+            />
           )}
         </SlideOver>
 

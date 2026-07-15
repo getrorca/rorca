@@ -24,6 +24,7 @@ import {
   Wrench,
   Layers,
   Check,
+  ShieldCheck,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -32,6 +33,7 @@ import { ReadinessRing } from '../components/ReadinessRing';
 import { SpecConfirmDialog } from '../components/SpecConfirmDialog';
 import { useHotkeys, modLabel } from '../hooks/useHotkeys';
 import { AnimatedModal } from '../components/AnimatedModal';
+import LifecycleSpecReviewTab from '../components/LifecycleSpecReviewTab';
 import type { PanelId } from '../components/Sidebar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -639,15 +641,18 @@ export default function SpecReviewPanel({
   onBack,
   onNavigate,
   onNavigateToRun,
+  initialTab = 'stories',
 }: {
   specId: string;
   onBack: () => void;
   onNavigate: (panel: PanelId) => void;
   onNavigateToRun?: (runId: number) => void;
+  initialTab?: 'stories' | 'lifecycle';
 }) {
   const { workspaceId } = useWorkspace();
   const toast = useGlobalToast();
   const [spec, setSpec] = useState<SpecDetail | null>(null);
+  const [activeReviewTab, setActiveReviewTab] = useState<'stories' | 'lifecycle'>(initialTab);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -676,6 +681,8 @@ export default function SpecReviewPanel({
     { key: 'mod+enter', handler: () => { if (!dialogMode && spec) setDialogMode('approve'); } },
     { key: 'mod+backspace', handler: () => { if (!dialogMode && spec) setDialogMode('reject'); } },
   ], [dialogMode, spec]));
+
+  useEffect(() => setActiveReviewTab(initialTab), [initialTab, specId]);
 
   // Fetch spec detail
   useEffect(() => {
@@ -1103,6 +1110,25 @@ export default function SpecReviewPanel({
 
   const specTitle = spec?.title ?? spec?.specName ?? specId;
 
+  if (activeReviewTab === 'lifecycle' && workspaceId) {
+    return (
+      <div className="h-full flex flex-col">
+        <header className="shrink-0 border-b border-border bg-bg px-4 py-4 sm:px-6">
+          <div className="mx-auto flex max-w-3xl items-center gap-3">
+            <ShieldCheck size={18} className="text-accent" aria-hidden="true" />
+            <h1 className="min-w-0 flex-1 truncate text-lg font-semibold text-text">{specTitle}</h1>
+            <button type="button" onClick={onBack} aria-label="Close review" className="rounded-md p-2 text-muted hover:bg-panel hover:text-text"><X size={18} /></button>
+          </div>
+        </header>
+        <nav className="flex shrink-0 border-b border-border bg-bg" aria-label="Spec Review tabs">
+          <button type="button" onClick={() => setActiveReviewTab('stories')} className="border-b-2 border-transparent px-4 py-2 text-xs font-medium text-muted hover:text-text">Stories</button>
+          <button type="button" aria-current="page" className="border-b-2 border-accent px-4 py-2 text-xs font-medium text-accent">Lifecycle Control</button>
+        </nav>
+        <main className="flex-1 overflow-y-auto"><LifecycleSpecReviewTab workspaceId={workspaceId} specId={specId} /></main>
+      </div>
+    );
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* ─── Header ──────────────────────────────────────────────────── */}
@@ -1196,6 +1222,11 @@ export default function SpecReviewPanel({
           )}
         </div>
       </div>
+
+      <nav className="flex shrink-0 border-b border-border bg-bg" aria-label="Spec Review tabs">
+        <button type="button" aria-current="page" className="border-b-2 border-accent px-4 py-2 text-xs font-medium text-accent">Stories</button>
+        <button type="button" onClick={() => setActiveReviewTab('lifecycle')} className="border-b-2 border-transparent px-4 py-2 text-xs font-medium text-muted hover:text-text">Lifecycle Control</button>
+      </nav>
 
       {/* ─── Filter bar ─────────────────────────────────────────────── */}
       <div className="px-4 sm:px-6 py-3 border-b border-border/50 shrink-0 bg-bg">

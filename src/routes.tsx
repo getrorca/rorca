@@ -38,6 +38,12 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   'spec-review': '/specs',
 };
 
+/** Accept only same-origin app paths for drill-down return links. */
+export function safeInternalReturnTo(search: string, fallback: string): string {
+  const value = new URLSearchParams(search).get('returnTo');
+  return value && value.startsWith('/') && !value.startsWith('//') ? value : fallback;
+}
+
 /** Resolve current URL path to a PanelId. Returns 'specs' for unknown paths. */
 export function pathToPanelId(pathname: string): PanelId {
   if (/^\/runs\/\d+/.test(pathname)) return 'runs';

@@ -364,6 +364,10 @@ export interface LifecyclePlan {
 
 export interface LifecycleGate {
   gateId: string;
+  /** Server policy classification; clients must not infer bypassability from presentation text. */
+  hardDeny?: boolean;
+  /** Server-recognized approver classes. Identity is still verified during mutation. */
+  authorizedApprovers?: Array<'local_admin' | 'authenticated_admin' | 'hermes_delegated'>;
   phaseId: LifecyclePhaseId;
   title: string;
   evidenceKind: LifecycleGateEvidenceKind;
@@ -580,6 +584,58 @@ export interface RecordLifecycleDecisionInput {
   evidenceGap?: string | null;
   subject?: { type: 'commit_sha' | 'artifact_digest'; value: string } | null;
   delegatedOnBehalfOf?: { principalId: string; displayLabel: string };
+}
+
+export interface LifecycleRetryScopeStory {
+  storyId: string;
+  reasonCode: string;
+}
+
+export interface LifecycleRetryPreviewPacket {
+  schemaVersion: 'retry-preview.v1';
+  originalRunId: number;
+  scope: Record<'requested' | 'requiredDependency' | 'copiedPassed' | 'skipped' | 'executable' | 'remaining' | 'excluded', LifecycleRetryScopeStory[]>;
+  options: {
+    agent: 'claude' | 'opencode' | 'codex' | 'pi';
+    model: string | null;
+    effort: string | null;
+    terminalMode: string;
+    includeGraph: boolean;
+    worktree: { enabled: boolean; path: string | null; branch: string | null };
+    merge: { strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; autoMerge: boolean };
+    safety: { deploy: boolean; externalSend: boolean; policyLocked: boolean; allowBackendJest: false };
+  };
+  forceSequential: boolean;
+  requiresApproval: boolean;
+  destructiveOperations: readonly ['reset', 'branch_delete', 'force_push', 'auto_merge', 'deploy', 'external_send'];
+  previewHash: string;
+}
+
+export interface LifecycleRetryPreviewIdentity {
+  schemaVersion: 'retry-preview-identity.v1';
+  previewHash: string;
+  originalRunId: number;
+  expiresAt: string;
+  signature: string;
+}
+
+export interface LifecycleRetryPreviewResponse {
+  ok: true;
+  preview: LifecycleRetryPreviewPacket;
+  previewIdentity: LifecycleRetryPreviewIdentity;
+  worktreePreflight: { classification: string; ok: boolean; detail?: string; remediation?: string } | null;
+  passReconciliation?: Record<string, unknown> | null;
+}
+
+export interface LifecycleRetryDispatchResult {
+  ok: true;
+  queued: true;
+  duplicate?: boolean;
+  runId: number;
+  originalRunId: number;
+  previewHash: string;
+  retriedStories?: Array<{ storyId: string; attempt: number }>;
+  copiedStories?: string[];
 }
 
 export type LifecycleMutationResult = ({

@@ -16,11 +16,22 @@ const mocks = vi.hoisted(() => ({
   selectedWorkspace: { id: 'ws-1', name: 'Hermes', git_path: '/tmp/hermes' } as { id: string; name: string; git_path: string } | null,
   lifecycle: {} as Record<string, any>,
   navigate: vi.fn(),
+  previewRetry: vi.fn(),
+  dispatchRetry: vi.fn(),
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(), show: vi.fn() },
 }));
 
 vi.mock('react-router-dom', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react-router-dom')>()),
   useNavigate: () => mocks.navigate,
+  useLocation: () => ({ pathname: '/lifecycle', search: '?spec=spec-a&phase=qa', hash: '', state: null, key: 'test' }),
+}));
+vi.mock('../../api/lifecycle', () => ({
+  previewLifecycleRetry: (...args: unknown[]) => mocks.previewRetry(...args),
+  dispatchLifecycleRetry: (...args: unknown[]) => mocks.dispatchRetry(...args),
+}));
+vi.mock('../../contexts/ToastContext', () => ({
+  useGlobalToast: () => mocks.toast,
 }));
 vi.mock('../../contexts/WorkspaceContext', () => ({
   useWorkspace: () => ({ workspaceId: mocks.workspaceId, selectedWorkspace: mocks.selectedWorkspace }),
@@ -81,6 +92,9 @@ beforeEach(() => {
   mocks.selectedWorkspace = { id: 'ws-1', name: 'Hermes', git_path: '/tmp/hermes' };
   mocks.lifecycle = lifecycleState();
   mocks.navigate.mockReset();
+  mocks.previewRetry.mockReset();
+  mocks.dispatchRetry.mockReset();
+  Object.values(mocks.toast).forEach((mock) => mock.mockReset());
 });
 
 describe('LifecyclePanel', () => {
@@ -240,12 +254,50 @@ describe('LifecyclePanel', () => {
     expect(mocks.lifecycle.updateUrlState).toHaveBeenLastCalledWith({ selectedSpecId: null, selectedPhaseId: null }, true);
   });
 
-  it('routes the server-permitted Open run action without inferring it from status', async () => {
+  it('opens Spec Review on Lifecycle Control and preserves the selected phase return URL', async () => {
+    const user = userEvent.setup();
+    render(<LifecyclePanel />);
+    await user.click(screen.getByRole('button', { name: 'Spec A' }));
+    expect(mocks.navigate).toHaveBeenCalledWith('/specs/spec-a/review?tab=lifecycle&returnTo=%2Flifecycle%3Fspec%3Dspec-a%26phase%3Dqa');
+  });
+
+  it('routes the server-permitted Open run action with a deep-link return to the selected phase', async () => {
     const user = userEvent.setup();
     mocks.lifecycle.selectedSpec.data.currentRun = { id: 913 };
     render(<LifecyclePanel />);
     await user.click(screen.getByRole('button', { name: /Open run/ }));
-    expect(mocks.navigate).toHaveBeenCalledWith('/runs/913');
+    expect(mocks.navigate).toHaveBeenCalledWith('/runs/913?returnTo=%2Flifecycle%3Fspec%3Dspec-a%26phase%3Dqa');
+  });
+
+  it('queues an exact current retry only after confirmation and suppresses duplicate submit', async () => {
+    const user = userEvent.setup();
+    const hash = `sha256:${'a'.repeat(64)}`;
+    const preview = {
+      ok: true,
+      preview: {
+        schemaVersion: 'retry-preview.v1', originalRunId: 913, previewHash: hash, requiresApproval: false, forceSequential: true,
+        scope: { requested: [{ storyId: 'US-6', reasonCode: 'REQUESTED_FAILED_STORY' }], requiredDependency: [], copiedPassed: [], skipped: [], executable: [{ storyId: 'US-6', reasonCode: 'EXECUTABLE_RETRY_WORK' }], remaining: [], excluded: [] },
+        options: { agent: 'pi', model: null, effort: 'high', terminalMode: 'headless', includeGraph: true, worktree: { enabled: true, path: '/tmp/wt', branch: 'retry/us-6' }, merge: { strategy: 'branch-only', autoMerge: false }, safety: { deploy: false, externalSend: false, policyLocked: true, allowBackendJest: false } },
+        destructiveOperations: ['reset', 'branch_delete', 'force_push', 'auto_merge', 'deploy', 'external_send'],
+      },
+      previewIdentity: { schemaVersion: 'retry-preview-identity.v1', previewHash: hash, originalRunId: 913, expiresAt: '2999-01-01T00:00:00.000Z', signature: hash },
+      worktreePreflight: { classification: 'fresh', ok: true },
+    };
+    mocks.lifecycle.phase.data.permittedActions = ['retry_smallest_scope'];
+    mocks.lifecycle.selectedSpec.data.currentRun = { id: 913 };
+    mocks.previewRetry.mockResolvedValue(preview);
+    mocks.dispatchRetry.mockResolvedValue({ ok: true, queued: true, runId: 914, originalRunId: 913, previewHash: hash });
+    render(<LifecyclePanel />);
+
+    await user.click(screen.getByRole('button', { name: /Retry story/ }));
+    expect(await screen.findByRole('heading', { name: 'Retry preview' })).toBeInTheDocument();
+    expect(mocks.dispatchRetry).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('checkbox'));
+    const submit = screen.getByRole('button', { name: 'Queue exact retry' });
+    await user.dblClick(submit);
+    await waitFor(() => expect(mocks.dispatchRetry).toHaveBeenCalledOnce());
+    expect(mocks.lifecycle.refresh).toHaveBeenCalled();
+    expect(mocks.toast.success).toHaveBeenCalledWith(expect.stringContaining('durably queued'), expect.objectContaining({ persistent: true }));
   });
 
   it('never flashes a prior phase response while a different selected cell is loading', () => {

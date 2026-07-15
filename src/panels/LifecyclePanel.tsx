@@ -7,23 +7,30 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react';
 import LifecyclePhaseDrawer from '../components/LifecyclePhaseDrawer';
+import LifecycleGovernedActionDialog, { type LifecycleGovernedDialog } from '../components/LifecycleGovernedActionDialog';
 import SlideOver from '../components/SlideOver';
 import { LifecycleMatrixSkeleton } from '../components/skeletons';
 import { LIFECYCLE_STATUS_LABELS, LifecycleStatusIcon } from './LifecycleCell';
 import LifecycleMatrix from './LifecycleMatrix';
 import LifecycleMetrics from './LifecycleMetrics';
 import LifecycleToolbar from './LifecycleToolbar';
+import { dispatchLifecycleRetry, previewLifecycleRetry } from '../api/lifecycle';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useLifecycle } from '../hooks/useLifecycle';
 import { ApiError } from '../lib/apiFetch';
-import { LIFECYCLE_PHASES, type LifecyclePermittedAction } from '../types/lifecycle';
+import {
+  LIFECYCLE_PHASES,
+  type LifecycleDecisionType,
+  type LifecyclePermittedAction,
+} from '../types/lifecycle';
 
 function LifecycleEmptyState({ hasWorkspace }: { hasWorkspace: boolean }) {
   return (
@@ -46,6 +53,8 @@ function LifecycleEmptyState({ hasWorkspace }: { hasWorkspace: boolean }) {
 export default function LifecyclePanel() {
   const { workspaceId, selectedWorkspace } = useWorkspace();
   const navigate = useNavigate();
+  const location = useLocation();
+  const toast = useGlobalToast();
   const lifecycle = useLifecycle();
   const selectedSpecError = lifecycle.selectedSpec.error;
   const selectedPhaseError = lifecycle.phase.error;
@@ -54,11 +63,17 @@ export default function LifecyclePanel() {
     { specId: string; phaseId: (typeof LIFECYCLE_PHASES)[number]['id'] } | { closed: true } | null
   >(null);
   const [actionPending, setActionPending] = useState<LifecyclePermittedAction | null>(null);
+  const [governedDialog, setGovernedDialog] = useState<LifecycleGovernedDialog | null>(null);
+  const [governedPending, setGovernedPending] = useState(false);
+  const [governedError, setGovernedError] = useState<string | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     setOptimisticSelection(null);
     setActionPending(null);
+    setGovernedDialog(null);
+    setGovernedPending(false);
+    setGovernedError(null);
     restoreFocusRef.current = null;
   }, [workspaceId]);
 
@@ -118,15 +133,55 @@ export default function LifecyclePanel() {
     lifecycle.updateUrlState({ selectedSpecId: null, selectedPhaseId: null }, true);
   };
 
+  const returnTo = `${location.pathname}${location.search}`;
+  const openSpecReview = (specId: string) => {
+    navigate(`/specs/${encodeURIComponent(specId)}/review?tab=lifecycle&returnTo=${encodeURIComponent(returnTo)}`);
+  };
+
   const handleDrawerAction = async (action: LifecyclePermittedAction) => {
-    if (!activeSelection) return;
+    if (!activeSelection || actionPending || governedPending) return;
     const runId = lifecycle.selectedSpec.data?.currentRun?.id;
-    if (action === 'retry_smallest_scope' || action === 'run_phase') {
-      navigate(runId ? `/runs/${runId}` : '/runs');
+    if (action === 'run_phase') {
+      navigate(runId ? `/runs/${runId}?returnTo=${encodeURIComponent(returnTo)}` : `/runs?returnTo=${encodeURIComponent(returnTo)}`);
       return;
     }
-    if (action === 'request_approval' || action === 'reopen_disposition') {
-      navigate(`/specs/${encodeURIComponent(activeSelection.specId)}/review`);
+    if (action === 'retry_smallest_scope') {
+      if (!runId || !workspaceId) {
+        toast.error('Retry preview is unavailable because the server reported no current run. Open Runs and select a retryable run.');
+        return;
+      }
+      setActionPending(action);
+      setGovernedError(null);
+      try {
+        const preview = await previewLifecycleRetry(workspaceId, runId);
+        setGovernedDialog({ kind: 'retry', preview });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Retry preview failed');
+      } finally {
+        setActionPending(null);
+      }
+      return;
+    }
+    if (action === 'reopen_disposition') {
+      setGovernedError(null);
+      setGovernedDialog({ kind: 'decision', decisionType: 'gate_override' });
+      return;
+    }
+    if (action === 'request_approval') {
+      const decisionType: LifecycleDecisionType | null = activeSelection.phaseId === 'qa'
+        ? 'qa_approval'
+        : activeSelection.phaseId === 'merge'
+          ? 'merge_approval'
+          : activeSelection.phaseId === 'production'
+            ? 'production_approval'
+            : null;
+      if (!decisionType) {
+        toast.warning('This phase uses an approval workflow outside Lifecycle Control. Open Spec Review for the server-authorized next action.');
+        openSpecReview(activeSelection.specId);
+        return;
+      }
+      setGovernedError(null);
+      setGovernedDialog({ kind: 'decision', decisionType });
       return;
     }
     if (action !== 'recompile_plan') return;
@@ -134,8 +189,75 @@ export default function LifecyclePanel() {
     try {
       const idempotencyKey = globalThis.crypto?.randomUUID?.() ?? `lifecycle-recompile-${Date.now()}`;
       await lifecycle.mutations.recompile(activeSelection.specId, idempotencyKey);
+      toast.success('Lifecycle plan was durably recompiled.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Lifecycle recompile failed');
     } finally {
       setActionPending(null);
+    }
+  };
+
+  const confirmRetry = async () => {
+    if (governedPending || governedDialog?.kind !== 'retry' || !workspaceId) return;
+    setGovernedPending(true);
+    setGovernedError(null);
+    try {
+      const result = await dispatchLifecycleRetry(
+        workspaceId,
+        governedDialog.preview.preview.originalRunId,
+        governedDialog.preview,
+        globalThis.crypto?.randomUUID?.() ?? `lifecycle-retry-${governedDialog.preview.preview.previewHash}`,
+      );
+      setGovernedDialog(null);
+      lifecycle.refresh();
+      toast.success(result.duplicate ? `Retry run #${result.runId} was already queued.` : `Retry run #${result.runId} was durably queued.`, {
+        action: { label: 'Open run', onClick: () => navigate(`/runs/${result.runId}?returnTo=${encodeURIComponent(returnTo)}`) },
+        persistent: true,
+      });
+    } catch (error) {
+      setGovernedError(`${error instanceof Error ? error.message : 'Retry dispatch failed'} Next action: generate a current preview after resolving the reported server blocker.`);
+    } finally {
+      setGovernedPending(false);
+    }
+  };
+
+  const confirmDecision = async (input: { rationale: string; evidenceGap?: string; expiresAt?: string }) => {
+    if (governedPending || governedDialog?.kind !== 'decision' || !activeSelection) return;
+    const phaseData = lifecycle.phase.data;
+    if (!phaseData) return;
+    const gate = phaseData.requiredGates.items.find((item) => item.gateId === phaseData.blocker?.gateId)
+      ?? phaseData.requiredGates.items.find((item) => item.evaluation?.status !== 'passed');
+    const releaseSubject = 'activeReleaseSubject' in phaseData.evaluationSnapshot
+      ? phaseData.evaluationSnapshot.activeReleaseSubject
+      : null;
+    const approvalSubject: { type: 'commit_sha' | 'artifact_digest'; value: string } | undefined =
+      releaseSubject?.type === 'commit_sha' || releaseSubject?.type === 'artifact_digest'
+        ? { type: releaseSubject.type, value: releaseSubject.value }
+        : undefined;
+    setGovernedPending(true);
+    setGovernedError(null);
+    try {
+      const result = await lifecycle.mutations.recordDecision({
+        specSlug: activeSelection.specId,
+        phaseId: activeSelection.phaseId,
+        decisionType: governedDialog.decisionType,
+        rationale: input.rationale,
+        evidenceGap: input.evidenceGap,
+        expiresAt: input.expiresAt,
+        gateId: gate?.gateId,
+        specVersion: lifecycle.selectedSpec.data?.plan?.specVersion,
+        runId: lifecycle.selectedSpec.data?.currentRun?.id,
+        ...(approvalSubject ? { subject: approvalSubject } : {}),
+      }, globalThis.crypto?.randomUUID?.() ?? `lifecycle-decision-${Date.now()}`);
+      setGovernedDialog(null);
+      toast.success(`Decision ${result.decision.id} was durably recorded; lifecycle state will refresh from server evidence.`, {
+        action: { label: 'View decision', onClick: () => lifecycle.refresh() },
+        persistent: true,
+      });
+    } catch (error) {
+      setGovernedError(`${error instanceof Error ? error.message : 'Decision was denied'} No approval was recorded. Correct the server-reported scope, identity, evidence, or revision and try again.`);
+    } finally {
+      setGovernedPending(false);
     }
   };
 
@@ -224,6 +346,7 @@ export default function LifecyclePanel() {
             compact={lifecycle.urlState.compact}
             pagination={lifecycle.pagination}
             onSelect={selectCell}
+            onOpenSpec={openSpecReview}
             onPageChange={lifecycle.setPage}
           />
         )}
@@ -280,6 +403,25 @@ export default function LifecyclePanel() {
           </div>
         )}
       </SlideOver>
+
+      {governedDialog && drawerPhaseData && (
+        <LifecycleGovernedActionDialog
+          dialog={governedDialog}
+          phase={drawerPhaseData}
+          spec={selectedSpecData}
+          portfolioItem={selectedPortfolioItem}
+          pending={governedPending}
+          error={governedError}
+          onCancel={() => {
+            if (!governedPending) {
+              setGovernedDialog(null);
+              setGovernedError(null);
+            }
+          }}
+          onRetryConfirm={() => { void confirmRetry(); }}
+          onDecisionConfirm={(input) => { void confirmDecision(input); }}
+        />
+      )}
     </section>
   );
 }
