@@ -236,6 +236,41 @@ function sequenceStorageKey(runId: number): string {
   return `rorca:terminal-output-sequence:${runId}`;
 }
 
+type OutputReplaySource = 'run_pty_output_chunks' | 'run_output_chunks';
+
+function sourceStorageKey(runId: number): string {
+  return `rorca:terminal-output-source:${runId}`;
+}
+
+function isOutputReplaySource(value: unknown): value is OutputReplaySource {
+  return value === 'run_pty_output_chunks' || value === 'run_output_chunks';
+}
+
+function loadReceivedOutputSource(runId: number): OutputReplaySource | null {
+  try {
+    const value = sessionStorage.getItem(sourceStorageKey(runId));
+    return isOutputReplaySource(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistReceivedOutputSource(runId: number, source: OutputReplaySource): void {
+  try {
+    sessionStorage.setItem(sourceStorageKey(runId), source);
+  } catch {
+    // Session storage is an optimization for durable SSE replay, never a requirement.
+  }
+}
+
+function clearReceivedSequence(runId: number): void {
+  try {
+    sessionStorage.removeItem(sequenceStorageKey(runId));
+  } catch {
+    // Session storage is an optimization for durable SSE replay, never a requirement.
+  }
+}
+
 function loadReceivedSequence(runId: number): number {
   try {
     const value = Number(sessionStorage.getItem(sequenceStorageKey(runId)) ?? '');
@@ -611,6 +646,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamKeyRef = useRef<string | null>(null);
   const lastReceivedSequenceRef = useRef(0);
+  const outputReplaySourceRef = useRef<OutputReplaySource | null>(null);
   const activeResizeRetryRef = useRef(false);
   const { resolved } = useTheme();
   const resolvedRef = useRef(resolved);
@@ -1022,6 +1058,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       ptyDisplayDecoderRef.current = new TextDecoder();
       ansiDisplayDecoderRef.current = new TextDecoder();
       lastReceivedSequenceRef.current = loadReceivedSequence(runId);
+      outputReplaySourceRef.current = loadReceivedOutputSource(runId);
       setAgentType('unknown');
       setAgentModel(null);
       setSteps([]);
@@ -1053,7 +1090,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setSseState(reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
     const outputParams = new URLSearchParams();
     if (workspaceId) outputParams.set('workspaceId', workspaceId);
-    if (lastReceivedSequenceRef.current > 0) outputParams.set('afterSequence', String(lastReceivedSequenceRef.current));
+    if (lastReceivedSequenceRef.current > 0) {
+      outputParams.set('afterSequence', String(lastReceivedSequenceRef.current));
+      if (outputReplaySourceRef.current) outputParams.set('outputSource', outputReplaySourceRef.current);
+    }
     const outputUrl = `${BASE_URL}/api/pipeline/runs/${runId}/output${outputParams.toString() ? '?' + outputParams : ''}`;
     const es = new EventSource(outputUrl);
     esRef.current = es;
@@ -1141,7 +1181,28 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           ptyAvailable?: boolean;
           ptyUnavailableHint?: string | null;
           pty_unavailable_hint?: string | null;
+          outputSource?: unknown;
+          output_source?: unknown;
+          ptyReplaySource?: unknown;
+          pty_replay_source?: unknown;
+          cursorReset?: boolean;
+          cursor_reset?: boolean;
         };
+        const nextReplaySource = meta.outputSource ?? meta.output_source ?? meta.ptyReplaySource ?? meta.pty_replay_source;
+        const cursorReset = meta.cursorReset === true || meta.cursor_reset === true;
+        if (cursorReset || (isOutputReplaySource(nextReplaySource)
+          && outputReplaySourceRef.current !== null
+          && outputReplaySourceRef.current !== nextReplaySource)) {
+          // The backend selected a different durable table. Sequence IDs are
+          // scoped to that source, so accepting the old cursor would drop new
+          // fallback bytes. This runs synchronously before subsequent chunks.
+          lastReceivedSequenceRef.current = 0;
+          clearReceivedSequence(runId);
+        }
+        if (isOutputReplaySource(nextReplaySource)) {
+          outputReplaySourceRef.current = nextReplaySource;
+          persistReceivedOutputSource(runId, nextReplaySource);
+        }
         setRunMetaResolved(true);
         if (typeof meta.agentType === 'string' && meta.agentType.trim()) {
           setAgentType(meta.agentType);

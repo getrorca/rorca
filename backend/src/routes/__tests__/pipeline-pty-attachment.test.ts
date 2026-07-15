@@ -456,6 +456,28 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(response.text).toContain(Buffer.from('refresh-resume\n').toString('base64'));
   });
 
+  test('resets a persisted cursor when its replay source differs from the selected PTY store', async () => {
+    const runId = await seedRun('done', 'pty');
+    const ptyChunk = Buffer.from('must-not-be-suppressed-by-ansi-cursor\n');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
+      [runId, wsDir],
+    );
+    await db.execute(
+      'INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)',
+      [runId, ptyChunk],
+    );
+
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach&afterSequence=1&outputSource=run_output_chunks`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('"cursorReset":true');
+    expect(response.text).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
+  });
+
   test('requested PTY without a PTY session demotes explicitly to ANSI fallback metadata', async () => {
     const runId = await seedRun('done', 'pty');
     const ansiChunk = Buffer.from('fallback transcript bytes\n', 'utf8');
@@ -473,6 +495,29 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 });
 
 describe('PTY resize forwarding and SSE attach/disconnect', () => {
+  test('rejects input and resize for terminal partial-failure PTY runs', async () => {
+    const runId = await seedRun('partial_failure', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
+      [runId, wsDir],
+    );
+
+    const [resize, input] = await Promise.all([
+      request(app)
+        .post(`/api/pipeline/runs/${runId}/pty/resize`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ cols: 132, rows: 43 }),
+      request(app)
+        .post(`/api/pipeline/runs/${runId}/input`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ dataBase64: Buffer.from('must-not-send', 'utf8').toString('base64') }),
+    ]);
+
+    expect(resize.status).toBe(409);
+    expect(input.status).toBe(409);
+  });
+
   test('resize requests are consumed by the PTY polling contract and marked applied', async () => {
     const runId = await seedRun('running', 'pty');
     await db.execute(

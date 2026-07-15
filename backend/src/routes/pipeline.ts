@@ -235,6 +235,8 @@ function readBoundedIntegerEnv(name: string, fallback: number, min: number, max:
 // polling remains a recovery path for listener reconnects/notification loss.
 const RUN_OUTPUT_PTY_LIVE_TRANSPORT = 'postgres-notify+db-replay' as const;
 const RUN_OUTPUT_PTY_REPLAY_SOURCE = 'run_pty_output_chunks' as const;
+const RUN_OUTPUT_ANSI_REPLAY_SOURCE = 'run_output_chunks' as const;
+type RunOutputReplaySource = typeof RUN_OUTPUT_PTY_REPLAY_SOURCE | typeof RUN_OUTPUT_ANSI_REPLAY_SOURCE;
 const RUN_OUTPUT_PTY_POLL_INTERVAL_MS = readBoundedIntegerEnv('RORCA_PTY_OUTPUT_POLL_INTERVAL_MS', 2_000, 250, 10_000);
 const RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS = RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 2;
 const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
@@ -251,6 +253,14 @@ function parseOutputResumeCursor(value: string, source: 'afterSequence' | 'Last-
     throw new ValidationError(`${source} must be a safe integer sequence`);
   }
   return sequence;
+}
+
+/** A durable cursor is valid only within one output store's sequence space. */
+function parseOutputReplaySource(value: string): RunOutputReplaySource {
+  if (value === RUN_OUTPUT_PTY_REPLAY_SOURCE || value === RUN_OUTPUT_ANSI_REPLAY_SOURCE) {
+    return value;
+  }
+  throw new ValidationError('outputSource must be run_pty_output_chunks or run_output_chunks');
 }
 
 function isPtyPidAlive(pid: number | null | undefined): boolean {
@@ -5188,7 +5198,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
-    if (['done', 'failed', 'cancelled'].includes(run.status)) {
+    if (['done', 'failed', 'partial_failure', 'cancelled'].includes(run.status)) {
       throw new ConflictError('Run is no longer active');
     }
 
@@ -5276,7 +5286,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
     if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
-    if (['done', 'failed', 'cancelled'].includes(run.status)) {
+    if (['done', 'failed', 'partial_failure', 'cancelled'].includes(run.status)) {
       throw new ConflictError('Run is no longer active');
     }
 
@@ -5317,6 +5327,11 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *         required: false
  *         schema: { type: integer, minimum: 0 }
  *         description: Explicit durable output cursor for refresh persistence. Overrides Last-Event-ID when both are supplied.
+ *       - in: query
+ *         name: outputSource
+ *         required: false
+ *         schema: { type: string, enum: [run_pty_output_chunks, run_output_chunks] }
+ *         description: Optional durable store identity paired with afterSequence. A changed source resets the cursor so independent PTY and ANSI sequence spaces cannot suppress fallback output.
  *     responses:
  *       200:
  *         description: SSE stream with chunk events (base64 data) and done event
@@ -5352,9 +5367,16 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     throw new ValidationError('afterSequence must be a single non-negative integer sequence');
   }
   const afterSequence = typeof afterSequenceQuery === 'string' ? afterSequenceQuery : null;
+  const outputSourceQuery = req.query.outputSource;
+  if (Array.isArray(outputSourceQuery)) {
+    throw new ValidationError('outputSource must be a single replay source');
+  }
+  const requestedReplaySource = typeof outputSourceQuery === 'string'
+    ? parseOutputReplaySource(outputSourceQuery)
+    : null;
   const lastEventId = req.get('Last-Event-ID');
   const resumeSource = afterSequence !== null ? 'afterSequence' : lastEventId !== undefined ? 'Last-Event-ID' : null;
-  const hasResumeCursor = resumeSource !== null;
+  let hasResumeCursor = resumeSource !== null;
   let lastSequence = hasResumeCursor
     ? parseOutputResumeCursor(afterSequence ?? lastEventId!, resumeSource!)
     : 0;
@@ -5404,6 +5426,15 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     : null;
   const terminalMode = usePtyCapture ? 'pty' : 'ansi-html';
   const isPty = usePtyCapture;
+  const replaySource: RunOutputReplaySource = isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : RUN_OUTPUT_ANSI_REPLAY_SOURCE;
+  // PTY and ANSI captures intentionally have independent sequence spaces. A
+  // resume cursor from the other source must never suppress freshly selected
+  // fallback output; force the same bounded first-attach semantics instead.
+  const cursorReset = hasResumeCursor && requestedReplaySource !== null && requestedReplaySource !== replaySource;
+  if (cursorReset) {
+    hasResumeCursor = false;
+    lastSequence = 0;
+  }
   const ptyFallbackActive = requestedTerminalMode === 'pty' && !isPty;
   const ptyFallbackReason = ptyFallbackActive
     ? PTY_AVAILABLE
@@ -5440,8 +5471,12 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     ptyFallbackReason,
     ptyLiveTransport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
     pty_live_transport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
-    ptyReplaySource: isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : 'run_output_chunks',
-    pty_replay_source: isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : 'run_output_chunks',
+    outputSource: replaySource,
+    output_source: replaySource,
+    cursorReset,
+    cursor_reset: cursorReset,
+    ptyReplaySource: replaySource,
+    pty_replay_source: replaySource,
     ptyPollIntervalMs: isPty ? RUN_OUTPUT_PTY_POLL_INTERVAL_MS : null,
     pty_poll_interval_ms: isPty ? RUN_OUTPUT_PTY_POLL_INTERVAL_MS : null,
     ptyExpectedMaxLatencyMs: isPty ? RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS : null,
@@ -5550,7 +5585,9 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       }
 
       const [statusRow, ptyHealth] = await Promise.all([
-        queryOne<{ status: string }>('SELECT status FROM pipeline_runs WHERE id = $1', [runId]),
+        queryOne<{ status: string; lifecycle_status: string | null }>(
+          'SELECT status, lifecycle_status FROM pipeline_runs WHERE id = $1', [runId],
+        ),
         usePtyCapture ? getRunPtySessionHealth(runId) : Promise.resolve(null),
       ]);
       const ptyHealthPayload = normalizePtyHealthPayload(ptyHealth);
@@ -5584,8 +5621,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
           agentType: runMetadata.agentType,
           agentModel: runMetadata.agentModel,
           terminalMode: 'ansi-html',
-          lifecyclePhase: runMetadata.lifecyclePhase,
-          lifecycle_phase: runMetadata.lifecyclePhase,
+          lifecyclePhase: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
+          lifecycle_phase: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
+          lifecycleStatus: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
+          lifecycle_status: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
           terminal_mode: 'ansi-html',
           requestedTerminalMode: 'pty',
           requested_terminal_mode: 'pty',
@@ -5595,8 +5634,14 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
           ptyFallbackReason: 'pty-session-unavailable',
           ptyUnavailableHint: 'The requested PTY session was never created; showing the durable engine transcript.',
           pty_unavailable_hint: 'The requested PTY session was never created; showing the durable engine transcript.',
-          ptyReplaySource: 'run_output_chunks',
-          pty_replay_source: 'run_output_chunks',
+          outputSource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+          output_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+          // This stream previously emitted PTY IDs. Tell the browser to reset
+          // its persisted cursor before accepting ANSI IDs from a new source.
+          cursorReset: true,
+          cursor_reset: true,
+          ptyReplaySource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+          pty_replay_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
         })}\n\n`);
         if (fallbackChunks[0]?.sequence > 1) {
           res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: fallbackChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);

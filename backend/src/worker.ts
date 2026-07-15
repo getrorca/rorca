@@ -891,6 +891,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = $2 WHERE id = $1`,
           [runId, `worktree_guard:${worktreeValidation.reason}`],
         );
+        await transitionRunLifecycle(runId, 'failed', {
+          owner: 'worker', process: 'worktree_guard_rejected', reason: worktreeValidation.reason,
+        });
         await emitWalEvent('run_finished', workspaceId, {
           run_id: runId,
           status: 'failed',
@@ -1528,6 +1531,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = $2 WHERE id = $1`,
           [runId, `worktree_guard:${worktreeValidation.reason}`],
         );
+        await transitionRunLifecycle(runId, 'failed', {
+          owner: 'worker_retry', process: 'worktree_guard_rejected', reason: worktreeValidation.reason,
+        });
         await emitWalEvent('run_finished', workspaceId, {
           run_id: runId,
           original_run_id: originalRunId,
@@ -1572,6 +1578,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
         [runId],
       );
+      await transitionRunLifecycle(runId, 'failed', {
+        owner: 'worker_retry', process: 'retry_spec_missing', reason: 'retry_spec_missing',
+      });
       await emitWalEvent('run_finished', workspaceId, { run_id: runId, status: 'failed', reason: 'retry_spec_missing' });
       return;
     }
@@ -1773,6 +1782,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
             `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
             [runId],
           );
+          await transitionRunLifecycle(runId, 'failed', {
+            owner: 'worker_retry', process: 'spawn_failed', error: (err as Error).message,
+          });
           await emitWalEvent('run_finished', workspaceId, {
             run_id: runId,
             original_run_id: originalRunId,
@@ -1998,6 +2010,9 @@ export async function recoverStaleJobs(): Promise<void> {
         `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1 AND status = 'running'`,
         [runId],
       );
+      await transitionRunLifecycle(runId, 'failed', {
+        owner: 'worker_crash_recovery', process: 'stale_pgboss_job', pgbossJobId: job.id,
+      });
     } catch (err) {
       logger.warn({ err, runId }, '[worker] recoverStaleJobs — failed to update pipeline_runs');
     }
@@ -2187,6 +2202,10 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
          WHERE id = $1 AND status = 'running'`,
         [runId],
       );
+      await transitionRunLifecycle(runId, 'failed', {
+        owner: 'worker_orphan_sweep', process: 'orphan_swept',
+        enginePid: pid, ptyPid: ptyChildPid, ptyKilled,
+      });
 
       if (ptyStatus === 'active') {
         const ptyExitSignal = ptyKilled ? 'SIGKILL' : ptyAlive ? 'SIGTERM' : null;
@@ -2331,6 +2350,9 @@ async function reconcileState(): Promise<void> {
          WHERE id = $1 AND status = 'running'`,
         [run.id],
       );
+      await transitionRunLifecycle(run.id, 'failed', {
+        owner: 'worker_reconciliation', process: 'heartbeat_stale_or_pid_dead',
+      });
 
       await emitWalEvent('run_finished', run.workspace_id, {
         run_id: run.id,
@@ -2527,6 +2549,9 @@ async function shutdown(signal: string): Promise<void> {
           `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1 AND status = 'running'`,
           [runId],
         );
+        await transitionRunLifecycle(runId, 'failed', {
+          owner: 'worker_shutdown', process: 'shutdown_timeout', signal,
+        });
       } catch (err) {
         logger.warn({ err, runId }, '[worker] shutdown — failed to update pipeline_run status');
       }

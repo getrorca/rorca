@@ -325,14 +325,20 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(lastEventSource!.url).not.toContain('afterSequence');
 
     act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks',
+      }));
       lastEventSource!.emit('chunk', Buffer.from('first durable chunk', 'utf8').toString('base64'), '17');
     });
     expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('17');
+    expect(sessionStorage.getItem('rorca:terminal-output-source:77')).toBe('run_pty_output_chunks');
 
     first.unmount();
     renderTerminal('pty');
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(2));
     expect(lastEventSource!.url).toContain('afterSequence=17');
+    expect(lastEventSource!.url).toContain('outputSource=run_pty_output_chunks');
   });
 
   it('reconnects with afterSequence after an SSE failure instead of replaying the fresh tail', async () => {
@@ -349,6 +355,35 @@ describe('RunTerminal PTY fallback UI', () => {
     await new Promise((resolve) => setTimeout(resolve, 550));
     expect(TestEventSource.instances).toHaveLength(2);
     expect(lastEventSource!.url).toContain('afterSequence=23');
+  });
+
+  it('resets the durable cursor before accepting ANSI fallback IDs from a different replay store', async () => {
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', cursorReset: false,
+      }));
+      lastEventSource!.emit('chunk', Buffer.from('pty bytes', 'utf8').toString('base64'), '17');
+    });
+    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('17');
+    expect(sessionStorage.getItem('rorca:terminal-output-source:77')).toBe('run_pty_output_chunks');
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'ansi-html', requestedTerminalMode: 'pty', isPty: false,
+        outputSource: 'run_output_chunks', cursorReset: true,
+      }));
+      // Both tables may legitimately start at sequence 1. The fallback row
+      // must not be dropped merely because PTY sequence 17 was acknowledged.
+      lastEventSource!.emit('chunk', Buffer.from('ansi fallback preserved\n', 'utf8').toString('base64'), '1');
+    });
+
+    expect(await screen.findByText(/ansi fallback preserved/)).toBeInTheDocument();
+    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('1');
+    expect(sessionStorage.getItem('rorca:terminal-output-source:77')).toBe('run_output_chunks');
   });
 
   it('coalesces ordered UTF-8 PTY writes into animation frames', async () => {
