@@ -10,6 +10,7 @@
   --accent: #0a6963;
   --accent-hover: #0c7f7a;
   --accent-border: #0a6963;
+  --accent-contrast: #ffffff;
   --success: #047857;
   --warning: #a14807;
   --error: #b91c1c;
@@ -52,6 +53,7 @@
   --accent: #3a9996;
   --accent-hover: #4db5b1;
   --accent-border: #5dd4cf;
+  --accent-contrast: #ffffff;
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;

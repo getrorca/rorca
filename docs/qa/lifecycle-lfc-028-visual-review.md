@@ -13,7 +13,7 @@ The runtime sequence diagram was not used as a layout source. Runtime contracts 
 
 ## Review matrix
 
-The stable capture contract is `src/fixtures/lifecycleVisualRegression.ts`. It defines every required state in light theme with reduced motion at 1440×900, 1024×768, and 390×844. It also adds the permission-restricted state required by the operational-state acceptance criterion. CI or a human capture session must use these IDs verbatim so baseline names remain deterministic.
+The stable capture contract is `src/fixtures/lifecycleVisualRegression.ts`. It defines every required state in light theme with reduced motion at 1440×900, 1024×768, and 390×844, plus desktop dark-theme parity for default, blocked drawer, retry preview, empty, loading, recoverable error, and stale states. It also adds the permission-restricted state required by the operational-state acceptance criterion. CI or a human capture session must use each fixture's `screenshot` path verbatim so baseline names remain deterministic.
 
 | Area | Source intent | Implementation comparison | Result |
 | --- | --- | --- | --- |
@@ -50,4 +50,6 @@ The stable capture contract is `src/fixtures/lifecycleVisualRegression.ts`. It d
 
 ## Human visual QA handoff
 
-Use the 36 light-theme capture entries in `LIFECYCLE_VISUAL_FIXTURES` as the sign-off checklist. For each capture, confirm no clipped labels, ambiguous icon-only state, horizontal layout shift, hidden close/action, or mismatched selected cell. Repeat the default, blocked drawer, evidence inspector, and approval captures in dark theme and at browser 200% zoom. Any screenshot delta must be reviewed against the two UI sources above rather than the runtime sequence diagram.
+Use the 36 light-theme entries in `LIFECYCLE_VISUAL_FIXTURES` and seven entries in `LIFECYCLE_DARK_VISUAL_FIXTURES` as the sign-off checklist. At browser 200% zoom, repeat default, blocked drawer, retry preview, and mobile navigation; required actions must remain visible and the page must not gain two-dimensional scrolling outside the intentionally horizontal matrix.
+
+Reject a baseline for any item in `LIFECYCLE_VISUAL_QA_REJECTIONS`: placeholder copy, uneven spacing, clipped labels, layout shift, nested-card clutter, heavy shadows, uncontrolled gradients, low-contrast status tints, or ambiguous primary actions. Also reject ambiguous icon-only state, hidden close/action controls, or a mismatched selected cell. Any screenshot delta must be reviewed against both UI sources above rather than the runtime sequence diagram.

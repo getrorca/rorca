@@ -8,10 +8,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, apiFetch } from '../../lib/apiFetch';
 import {
+  dispatchLifecycleRetry,
+  getLifecycleDecisionState,
   getLifecycleEvidence,
   getLifecyclePhase,
   getLifecyclePortfolio,
+  getLifecycleSpec,
+  listLifecycleEvidence,
+  previewLifecycleRetry,
+  recompileLifecycleSpec,
   recordLifecycleDecision,
+  revokeLifecycleDecision,
 } from '../lifecycle';
 
 vi.mock('../../lib/apiFetch', async (importOriginal) => {
@@ -60,6 +67,38 @@ describe('lifecycle API clients', () => {
     expect(path).toContain('/api/lifecycle/evidence/7?');
     expect(path).toContain('workspaceId=ws-1');
     expect(path).toContain('snapshotId=sha256%3Apinned');
+  });
+
+  it('routes every client through apiFetch with explicit active-workspace scope', async () => {
+    const rawFetch = vi.spyOn(globalThis, 'fetch');
+    mockApiFetch.mockResolvedValue({});
+    const preview = {
+      preview: { previewHash: 'sha256:preview' },
+      previewIdentity: { signature: 'signed-preview' },
+    } as Parameters<typeof dispatchLifecycleRetry>[2];
+
+    await getLifecyclePortfolio('active-ws', { sort: 'current_view' });
+    await getLifecycleSpec('active-ws', 'spec-a');
+    await getLifecyclePhase('active-ws', 'spec-a', 'qa');
+    await getLifecycleEvidence('active-ws', 'ev-1');
+    await listLifecycleEvidence('active-ws', { specSlug: 'spec-a' });
+    await recompileLifecycleSpec('active-ws', 'spec-a', 'compile-key');
+    await previewLifecycleRetry('active-ws', 42, ['US-1']);
+    await dispatchLifecycleRetry('active-ws', 42, preview, 'retry-key');
+    await getLifecycleDecisionState('active-ws', 'spec-a', 'qa');
+    await recordLifecycleDecision({
+      workspaceId: 'active-ws', specSlug: 'spec-a', phaseId: 'qa', decisionType: 'qa_approval', rationale: 'Current evidence reviewed.',
+    }, 'decision-key');
+    await revokeLifecycleDecision('active-ws', 'decision-1', 'No longer valid.', 'revoke-key');
+
+    expect(mockApiFetch).toHaveBeenCalledTimes(11);
+    for (const [path, init] of mockApiFetch.mock.calls) {
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null;
+      const queryWorkspace = new URL(path, 'https://rorca.test').searchParams.get('workspaceId');
+      expect(queryWorkspace === 'active-ws' || body?.workspaceId === 'active-ws').toBe(true);
+    }
+    expect(rawFetch).not.toHaveBeenCalled();
+    rawFetch.mockRestore();
   });
 
   it('preserves typed ApiError failures from mutations', async () => {

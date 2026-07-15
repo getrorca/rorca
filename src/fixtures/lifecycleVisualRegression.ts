@@ -5,7 +5,17 @@
  * See LICENSE file in the project root for full license text.
  */
 
-/** Stable capture contract consumed by Lifecycle screenshot harnesses and human QA. */
+/**
+ * Stable capture contract consumed by Lifecycle screenshot harnesses and human QA.
+ * Layout comparison sources (behavior remains governed by canonical contracts):
+ * - docs/diagrams/rorca-ssdlc-lifecycle-board-wireframe.excalidraw
+ * - docs/diagrams/rorca-ssdlc-lifecycle-board-wireframe.png
+ */
+export const LIFECYCLE_VISUAL_SOURCES = [
+  'docs/diagrams/rorca-ssdlc-lifecycle-board-wireframe.excalidraw',
+  'docs/diagrams/rorca-ssdlc-lifecycle-board-wireframe.png',
+] as const;
+
 export const LIFECYCLE_VISUAL_VIEWPORTS = [
   { id: 'desktop', width: 1440, height: 900 },
   { id: 'tablet', width: 1024, height: 768 },
@@ -29,7 +39,8 @@ export const LIFECYCLE_VISUAL_SCENARIOS = [
 
 export const LIFECYCLE_VISUAL_FIXTURES = LIFECYCLE_VISUAL_SCENARIOS.flatMap((scenario) => (
   LIFECYCLE_VISUAL_VIEWPORTS.map((viewport) => ({
-    id: `${scenario.id}-${viewport.id}`,
+    id: `${scenario.id}-${viewport.id}-light`,
+    screenshot: `tests/lifecycle-visual.spec.ts-snapshots/${scenario.id}-${viewport.id}-light-chromium.png`,
     scenario: scenario.id,
     viewport,
     theme: 'light' as const,
@@ -39,3 +50,42 @@ export const LIFECYCLE_VISUAL_FIXTURES = LIFECYCLE_VISUAL_SCENARIOS.flatMap((sce
     textScalePercent: 100,
   }))
 ));
+
+/** Representative dark parity keeps state semantics stable without tripling every baseline. */
+export const LIFECYCLE_DARK_VISUAL_SCENARIOS = [
+  'default-portfolio',
+  'blocked-validation-drawer',
+  'retry-preview',
+  'empty-portfolio',
+  'loading-portfolio',
+  'recoverable-error',
+  'stale-revision',
+] as const;
+
+export const LIFECYCLE_DARK_VISUAL_FIXTURES = LIFECYCLE_DARK_VISUAL_SCENARIOS.map((scenario) => {
+  const definition = LIFECYCLE_VISUAL_SCENARIOS.find((candidate) => candidate.id === scenario);
+  if (!definition) throw new Error(`Unknown Lifecycle visual scenario: ${scenario}`);
+  return {
+    id: `${scenario}-desktop-dark`,
+    screenshot: `tests/lifecycle-visual.spec.ts-snapshots/${scenario}-desktop-dark-chromium.png`,
+    scenario,
+    viewport: LIFECYCLE_VISUAL_VIEWPORTS[0],
+    theme: 'dark' as const,
+    selection: definition.selection,
+    expected: definition.expected,
+    reducedMotion: true,
+    textScalePercent: 100,
+  };
+});
+
+export const LIFECYCLE_VISUAL_QA_REJECTIONS = [
+  'placeholder copy',
+  'uneven spacing',
+  'clipped labels',
+  'layout shift',
+  'nested-card clutter',
+  'heavy shadows',
+  'uncontrolled gradients',
+  'low-contrast status tints',
+  'ambiguous primary actions',
+] as const;

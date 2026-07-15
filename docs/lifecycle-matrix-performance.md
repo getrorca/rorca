@@ -5,9 +5,10 @@
 ## CI profile
 
 - Playwright project: `chromium` from `playwright.config.ts` (`Desktop Chrome`)
+- Viewport/theme motion profile: 1440×900 with reduced motion, default browser zoom, no CPU/network throttling
 - Dataset: deterministic 50 specs × 11 canonical phases from `src/fixtures/lifecycleMatrix.ts`
-- Pagination request: `limit=50`; the mocked server response contains all 50 stable spec IDs
-- Run mode: one worker, no retries
+- Pagination request: `limit=50`; the mocked server response contains all 50 stable spec IDs and rejects a missing/non-active `workspaceId`
+- Run mode: one worker, no retries; one excluded warm-up followed by 20 measured open/close cycles
 - Command (with the normal frontend dev server available on port 5210):
 
   ```bash
@@ -17,7 +18,7 @@
 ## Budgets
 
 1. **Interactive matrix:** after the lifecycle portfolio response is available, the selected seeded cell, all 50 rows, and all 550 phase controls are interactive within **1,000 ms**.
-2. **Existing-cell feedback:** opening `Billing anomaly alerts → Validation` inserts a visible phase drawer within **100 ms**. The test performs one excluded warm-up, then measures 20 open/close runs and requires the slowest run to meet the budget.
+2. **Existing-cell feedback:** opening `Billing anomaly alerts → Validation` marks the rendered cell selected and inserts a visible phase drawer within **100 ms**. The test performs one excluded warm-up, then measures 20 open/close runs and requires the slowest run to meet the budget.
 
 The selection fixture is blocked with **2/4 gates passed**, matching the lifecycle wireframe. The drawer opens from URL-backed selection immediately; phase evidence may continue loading inside it.
 

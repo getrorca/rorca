@@ -44,6 +44,13 @@ vi.mock('../../components/SlideOver', () => ({
     isOpen ? <aside role="dialog" aria-label={title}>{children}</aside> : null,
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 function lifecycleState() {
   const marks = { snapshotId: 'snapshot', evidenceHighWaterMark: 'e:1', decisionHighWaterMark: 'd:1' };
   const item = {
@@ -315,6 +322,51 @@ describe('LifecyclePanel', () => {
     await waitFor(() => expect(mocks.dispatchRetry).toHaveBeenCalledOnce());
     expect(mocks.lifecycle.refresh).toHaveBeenCalled();
     expect(mocks.toast.success).toHaveBeenCalledWith(expect.stringContaining('durably queued'), expect.objectContaining({ persistent: true }));
+  });
+
+  it('does not optimistically approve, suppresses duplicate decisions, and recovers after a server denial', async () => {
+    const user = userEvent.setup();
+    const request = deferred<{ decision: { id: string } }>();
+    const recordDecision = vi.fn()
+      .mockImplementationOnce(() => request.promise)
+      .mockResolvedValueOnce({ decision: { id: 'decision-2' } });
+    const qaCell = mocks.lifecycle.portfolio.data.items[0].phases[0];
+    Object.assign(qaCell, { status: 'blocked', blocker: 'QA evidence is missing.' });
+    Object.assign(mocks.lifecycle.phase.data, {
+      status: 'blocked',
+      blocker: { gateId: 'qa-gate', reason: 'QA evidence is missing.' },
+      permittedActions: ['request_approval'],
+      requiredGates: {
+        items: [{
+          gateId: 'qa-gate', title: 'Immutable QA evidence', blockingSeverity: 'release_blocking',
+          evaluation: { status: 'blocked', blockerReason: 'QA evidence is missing.' },
+        }],
+        total: 1,
+        truncated: false,
+      },
+    });
+    mocks.lifecycle.mutations.recordDecision = recordDecision;
+    render(<LifecyclePanel />);
+
+    await user.click(screen.getByRole('button', { name: /Request approval/ }));
+    expect(screen.getByRole('heading', { name: 'QA approval' })).toBeInTheDocument();
+    await user.type(screen.getByLabelText(/Rationale/), 'Reviewed the immutable QA evidence packet.');
+    await user.click(screen.getByRole('checkbox'));
+    await user.dblClick(screen.getByRole('button', { name: 'Record QA approval' }));
+
+    expect(recordDecision).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Submitting…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Spec A, QA: Blocked/i })).toBeInTheDocument();
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+
+    request.reject(new ApiError(409, 'STALE_REVISION', 'Preview is stale'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('No approval was recorded');
+    expect(screen.getByRole('heading', { name: 'QA approval' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Spec A, QA: Blocked/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Record QA approval' }));
+    await waitFor(() => expect(recordDecision).toHaveBeenCalledTimes(2));
+    expect(mocks.toast.success).toHaveBeenCalledWith(expect.stringContaining('durably recorded'), expect.objectContaining({ persistent: true }));
   });
 
   it('never flashes a prior phase response while a different selected cell is loading', () => {

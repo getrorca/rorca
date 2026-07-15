@@ -166,7 +166,7 @@ export default function LifecycleGovernedActionDialog({
             type="button"
             disabled={pending || !confirmed || Boolean(retryDenial) || Boolean(decisionDenied) || (dialog.kind === 'decision' && !decisionReady)}
             onClick={() => dialog.kind === 'retry' ? onRetryConfirm() : onDecisionConfirm({ rationale: rationale.trim(), ...(evidenceGap.trim() ? { evidenceGap: evidenceGap.trim() } : {}), ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}) })}
-            className="inline-flex min-h-11 items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="inline-flex min-h-11 items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-[var(--accent-contrast)] hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             {pending && <Loader2 size={14} className="animate-spin" />}
             {pending ? 'Submitting…' : dialog.kind === 'retry' ? 'Queue exact retry' : dialog.decisionType === 'gate_override' ? 'Submit override decision' : `Record ${decisionLabel(dialog.decisionType)}`}

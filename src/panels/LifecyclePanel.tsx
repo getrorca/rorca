@@ -300,7 +300,7 @@ export default function LifecyclePanel() {
             <button
               type="button"
               onClick={lifecycle.refresh}
-              className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-[var(--accent-contrast)] hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               <RefreshCw size={15} aria-hidden="true" /> {errorState.action}
             </button>
@@ -367,10 +367,10 @@ export default function LifecyclePanel() {
                 <button
                   type="button"
                   onClick={() => lifecycle.updateFilters({ search: undefined, status: undefined, specStatus: undefined, phase: undefined, risk: undefined, owner: undefined, blocked: undefined, disposition: undefined, sort: 'current_view' })}
-                  className="mt-4 min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="mt-4 min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-[var(--accent-contrast)] hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 >Clear filters</button>
               ) : (
-                <button type="button" onClick={() => navigate('/specs')} className="mt-4 min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Open Specs</button>
+                <button type="button" onClick={() => navigate('/specs')} className="mt-4 min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-[var(--accent-contrast)] hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Open Specs</button>
               )}
             </div>
           </div>
@@ -433,7 +433,7 @@ export default function LifecyclePanel() {
                 <div className="border-l-2 border-error pl-3" role="alert">
                   <p className="text-sm text-[var(--text)]">Phase details could not load.</p>
                   <p className="mt-1 text-xs text-muted">{lifecycle.phase.error.message}</p>
-                  <button type="button" onClick={lifecycle.refresh} className="mt-3 rounded-md bg-accent px-3 py-2 text-sm text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Retry</button>
+                  <button type="button" onClick={lifecycle.refresh} className="mt-3 rounded-md bg-accent px-3 py-2 text-sm text-[var(--accent-contrast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Retry</button>
                 </div>
               ) : <div className="text-sm text-muted" role="status">Loading phase evidence…</div>}
             </div>

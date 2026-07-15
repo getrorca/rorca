@@ -8,6 +8,8 @@ const marks = {
   decisionHighWaterMark: 'decision:4',
 };
 
+test.use({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+
 const items = createLifecycleMatrixFixture(50).map((item) => ({ ...item, ...marks }));
 
 const portfolio = {
@@ -88,7 +90,14 @@ test('50-row lifecycle matrix meets the documented interaction budget', async ({
   }));
   await page.route('**/api/pipeline/runs?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"items":[]}' }));
   await page.route('**/api/workspaces/ws-1/pipeline-config', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"config":{}}' }));
-  await page.route('**/api/lifecycle?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(portfolio) }));
+  await page.route('**/api/lifecycle?*', (route) => {
+    const workspaceId = new URL(route.request().url()).searchParams.get('workspaceId');
+    return route.fulfill({
+      status: workspaceId === 'ws-1' ? 200 : 400,
+      contentType: 'application/json',
+      body: workspaceId === 'ws-1' ? JSON.stringify(portfolio) : JSON.stringify({ error: 'Missing active workspace scope' }),
+    });
+  });
   await page.route('**/api/lifecycle/specs/billing-anomaly-alerts/phases/validation?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(phaseDetail) }));
   await page.route('**/api/lifecycle/specs/billing-anomaly-alerts?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(detail) }));
 
@@ -111,7 +120,8 @@ test('50-row lifecycle matrix meets the documented interaction budget', async ({
         const deadline = start + 1_000;
         const inspect = () => {
           const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
-          if (dialog && dialog.getBoundingClientRect().width > 0) return resolve();
+          const selected = button.getAttribute('data-selected') === 'true';
+          if (selected && dialog && dialog.getBoundingClientRect().width > 0) return resolve();
           if (performance.now() > deadline) return reject(new Error('Phase drawer did not become visible'));
           requestAnimationFrame(inspect);
         };

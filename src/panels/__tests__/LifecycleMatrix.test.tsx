@@ -12,6 +12,7 @@ import {
   BILLING_ANOMALY_LIFECYCLE_ITEM,
   createLifecycleMatrixFixture,
 } from '../../fixtures/lifecycleMatrix';
+import { testA11y } from '../../test/a11y-helpers';
 import { LIFECYCLE_PHASES, type LifecyclePortfolioItem } from '../../types/lifecycle';
 import LifecycleMatrix from '../LifecycleMatrix';
 
@@ -36,6 +37,14 @@ function cellButton(phase: string, status?: string) {
 }
 
 describe('LifecycleMatrix', () => {
+  it('has no critical or serious axe violations and preserves native table semantics', async () => {
+    const { container } = renderMatrix();
+    await testA11y(container);
+    expect(screen.getByRole('table', { name: 'Lifecycle Control delivery phase matrix' })).toBeInTheDocument();
+    expect(screen.getByRole('rowheader', { name: /Billing anomaly alerts/ })).toBeInTheDocument();
+    expect(screen.getAllByRole('columnheader')).toHaveLength(12);
+  });
+
   it('opens the existing spec review adapter when the spec title is clicked', async () => {
     const user = userEvent.setup();
     const onOpenSpec = vi.fn();
@@ -85,6 +94,9 @@ describe('LifecycleMatrix', () => {
     });
     expect(cellButton('Validation', 'Blocked')).toHaveAccessibleName(/2 of 4 required gates passed/i);
     expect(cellButton('Validation', 'Blocked')).toHaveAccessibleName(/Blocker: Tenant-isolation integration test is failing/i);
+    expect(screen.getByRole('row', { name: /Billing anomaly alerts/ })).toHaveTextContent('6 stories');
+    expect(cellButton('Validation', 'Blocked')).toHaveTextContent('2/4 gates');
+    expect(document.body).not.toHaveTextContent(/\bcomplete\b/i);
   });
 
   it('renders gate counts while excluded dispositions report rationale and never look passed', () => {

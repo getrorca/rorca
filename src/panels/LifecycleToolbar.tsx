@@ -315,7 +315,7 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
               placeholder="My delivery view"
             />
           </label>
-          <button type="button" onClick={createView} className="h-9 rounded-md bg-accent px-3 text-xs font-medium text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Save current</button>
+          <button type="button" onClick={createView} className="h-9 rounded-md bg-accent px-3 text-xs font-medium text-[var(--accent-contrast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Save current</button>
           <button type="button" disabled={!selectedView} onClick={renameView} className="h-9 rounded-md border border-border px-3 text-xs text-muted disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Rename</button>
           <button type="button" disabled={!selectedView} onClick={deleteView} className="h-9 rounded-md border border-border px-3 text-xs text-error disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Delete</button>
           {viewError && <p className="w-full text-xs text-error" role="alert">{viewError}</p>}

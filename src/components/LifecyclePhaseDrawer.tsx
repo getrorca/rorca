@@ -371,7 +371,7 @@ export default function LifecyclePhaseDrawer({
                 type="button"
                 disabled={actionPending !== null}
                 onClick={() => onAction(action.id)}
-                className={`${index === 0 ? 'bg-accent text-white hover:bg-accent-hover' : 'border border-border bg-bg text-[var(--text)] hover:bg-surface-200'} inline-flex min-h-11 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-60`}
+                className={`${index === 0 ? 'bg-accent text-[var(--accent-contrast)] hover:bg-accent-hover' : 'border border-border bg-bg text-[var(--text)] hover:bg-surface-200'} inline-flex min-h-11 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-60`}
               >
                 {actionPending === action.id ? 'Working…' : action.label}
                 {action.id !== 'recompile_plan' && <ExternalLink size={13} aria-hidden="true" />}

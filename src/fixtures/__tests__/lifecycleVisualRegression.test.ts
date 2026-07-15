@@ -7,8 +7,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  LIFECYCLE_DARK_VISUAL_FIXTURES,
+  LIFECYCLE_DARK_VISUAL_SCENARIOS,
   LIFECYCLE_VISUAL_FIXTURES,
+  LIFECYCLE_VISUAL_QA_REJECTIONS,
   LIFECYCLE_VISUAL_SCENARIOS,
+  LIFECYCLE_VISUAL_SOURCES,
   LIFECYCLE_VISUAL_VIEWPORTS,
 } from '../lifecycleVisualRegression';
 
@@ -27,8 +31,46 @@ describe('Lifecycle visual regression capture contract', () => {
       const captures = LIFECYCLE_VISUAL_FIXTURES.filter((fixture) => fixture.scenario === scenario.id);
       expect(captures.map((fixture) => fixture.viewport.id)).toEqual(['desktop', 'tablet', 'mobile']);
       expect(captures.every((fixture) => fixture.theme === 'light' && fixture.reducedMotion)).toBe(true);
+      expect(captures.every((fixture) => fixture.screenshot.endsWith('-light-chromium.png'))).toBe(true);
       expect(scenario.expected.length).toBeGreaterThan(20);
     }
+  });
+
+  it('defines representative dark parity for every mandatory visual state', () => {
+    expect(LIFECYCLE_DARK_VISUAL_SCENARIOS).toEqual([
+      'default-portfolio',
+      'blocked-validation-drawer',
+      'retry-preview',
+      'empty-portfolio',
+      'loading-portfolio',
+      'recoverable-error',
+      'stale-revision',
+    ]);
+    expect(LIFECYCLE_DARK_VISUAL_FIXTURES).toHaveLength(LIFECYCLE_DARK_VISUAL_SCENARIOS.length);
+    expect(LIFECYCLE_DARK_VISUAL_FIXTURES.every((fixture) => (
+      fixture.theme === 'dark'
+      && fixture.viewport.id === 'desktop'
+      && fixture.reducedMotion
+      && fixture.screenshot.endsWith('-dark-chromium.png')
+    ))).toBe(true);
+  });
+
+  it('pins wireframe comparison sources and the visual rejection checklist', () => {
+    expect(LIFECYCLE_VISUAL_SOURCES).toEqual([
+      'docs/diagrams/rorca-ssdlc-lifecycle-board-wireframe.excalidraw',
+      'docs/diagrams/rorca-ssdlc-lifecycle-board-wireframe.png',
+    ]);
+    expect(LIFECYCLE_VISUAL_QA_REJECTIONS).toEqual([
+      'placeholder copy',
+      'uneven spacing',
+      'clipped labels',
+      'layout shift',
+      'nested-card clutter',
+      'heavy shadows',
+      'uncontrolled gradients',
+      'low-contrast status tints',
+      'ambiguous primary actions',
+    ]);
   });
 
   it('keeps operational states and governed task surfaces in the stable scenario set', () => {
