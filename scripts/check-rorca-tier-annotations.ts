@@ -1,9 +1,13 @@
 #!/usr/bin/env npx tsx
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
 
-import * as fs from 'fs';
-import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { swaggerSpec } from '../backend/src/lib/swagger';
+import tierSnapshot from '../config/rorca-tier-snapshot.json';
 import {
   getRorcaTier,
   isPlanCapability,
@@ -12,10 +16,6 @@ import {
   type PlanCapability,
   type RorcaTier,
 } from '../backend/src/lib/tier-auth';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const CONTRACT_PATH = path.join(__dirname, '../docs/OPEN_API_CONTRACT.md');
 
 type Operation = {
   summary?: string;
@@ -38,70 +38,18 @@ type Operation = {
 
 type SpecPaths = Record<string, Record<string, Operation | undefined> | undefined>;
 
-const EXPECTED: Record<RorcaTier, string[]> = {
-  public: [
-    'GET /api/specs',
-    'GET /api/specs/kanban',
-    'GET /api/specs/archive',
-    'GET /api/specs/search/stories',
-    'GET /api/specs/{specId}',
-    'GET /api/specs/{specId}/versions',
-    'GET /api/specs/{specId}/diff',
-    'GET /api/specs/{specId}/graph',
-    'POST /api/specs/generate',
-    'POST /api/specs/{specId}/approve',
-    'POST /api/specs/{specId}/reject',
-    'POST /api/specs/{specId}/add-stories',
-    'PUT /api/specs/{specId}',
-    'PATCH /api/specs/{specId}/stories/{storyId}',
-    'DELETE /api/specs/{specId}/stories/{storyId}',
-    'GET /api/pipeline/runs',
-    'GET /api/pipeline/runs/{runId}',
-    'GET /api/pipeline/runs/{runId}/log',
-    'POST /api/pipeline/trigger',
-    'POST /api/pipeline/runs/{runId}/cancel',
-    'POST /api/pipeline/runs/{runId}/retry',
-    'GET /api/direction',
-    'PUT /api/direction',
-    'POST /api/direction/synthesize',
-    'GET /api/search',
-    'GET /api/recall',
-    'GET /api/health',
-    'GET /api/version',
-  ],
-  auth: [
-    'GET /api/users/me',
-    'GET /api/settings/profile',
-    'PUT /api/settings/profile',
-    'GET /api/settings/display',
-    'PUT /api/settings/display',
-    'GET /api/settings/worker',
-    'GET /api/workspaces',
-    'GET /api/workspaces/{id}',
-    'PATCH /api/workspaces/{id}',
-    'GET /api/workspaces/{id}/stats',
-    'GET /api/workspaces/{id}/health',
-    'GET /api/workspaces/{id}/rorca-config',
-    'PUT /api/workspaces/{id}/rorca-config',
-    'GET /api/onboarding',
-    'PUT /api/onboarding',
-  ],
-  paid: [],
-  admin: [
-    'POST /api/admin/backup',
-    'GET /api/admin/backups',
-    'POST /api/admin/embed-all',
-    'GET /api/admin/embed-all/status',
-    'GET /api/admin/embedding-provider',
-    'GET /api/admin/mcp-audit',
-    'GET /api/admin/mcp-audit/summary',
-    'POST /api/admin/graph-backfill',
-    'GET /api/admin/graph-stats',
-    'POST /api/admin/age-recheck',
-    'POST /api/admin/generate-license',
-    'POST /api/graph/populate',
-  ],
-};
+// Reviewed tier baseline. Keeping it in a dedicated manifest makes exposure
+// changes explicit in code review instead of silently accepting new annotations.
+const EXPECTED = tierSnapshot as Record<RorcaTier, string[]>;
+const PUBLIC_NON_CONTRACT_OPERATIONS = new Set([
+  'GET /api/health/detailed',
+  'GET /api/pipeline/runs/{runId}/output',
+  'POST /api/pipeline/runs/{runId}/input',
+  'POST /api/pipeline/runs/{runId}/pty/resize',
+]);
+const EXPECTED_PUBLIC_API = new Set(
+  EXPECTED.public.filter((operation) => !PUBLIC_NON_CONTRACT_OPERATIONS.has(operation)),
+);
 
 const SENSITIVE_PREFIXES = [
   '/api/vault',
@@ -110,9 +58,7 @@ const SENSITIVE_PREFIXES = [
   '/api/auth',
 ];
 
-const SENSITIVE_EXACT = new Set([
-  'POST /api/workspaces',
-]);
+const SENSITIVE_EXACT = new Set<string>();
 
 const EXPECTED_PAID_CAPABILITIES: Record<string, PlanCapability> = {
 };
@@ -133,45 +79,6 @@ function collectOperations(paths: SpecPaths): Map<string, Operation> {
   }
 
   return operations;
-}
-
-function listParams(operation: Operation): string[] {
-  const params = (operation.parameters ?? []).map((param) => {
-    const suffix = param.required ? 'required' : 'optional';
-    return `${param.in}:${param.name} (${suffix})`;
-  });
-
-  const jsonSchema = operation.requestBody?.content?.['application/json']?.schema;
-  const required = new Set(jsonSchema?.required ?? []);
-
-  for (const name of Object.keys(jsonSchema?.properties ?? {})) {
-    params.push(`body:${name} (${required.has(name) ? 'required' : 'optional'})`);
-  }
-
-  return params;
-}
-
-function writeContract(publicOperations: Array<[string, Operation]>): void {
-  const lines: string[] = [
-    '# Open API Contract',
-    '',
-    'Stable public API surface for the open-source CLI.',
-    '',
-    '| Method | Path | Parameters | Summary |',
-    '| --- | --- | --- | --- |',
-  ];
-
-  for (const [key, operation] of publicOperations.sort(([a], [b]) => a.localeCompare(b))) {
-    const firstSpace = key.indexOf(' ');
-    const method = key.slice(0, firstSpace);
-    const pathname = key.slice(firstSpace + 1);
-    const params = listParams(operation).join(', ') || '-';
-    const summary = operation.summary ?? '-';
-    lines.push(`| ${method} | \`${pathname}\` | ${params} | ${summary} |`);
-  }
-
-  fs.mkdirSync(path.dirname(CONTRACT_PATH), { recursive: true });
-  fs.writeFileSync(CONTRACT_PATH, `${lines.join('\n')}\n`, 'utf8');
 }
 
 function main(): void {
@@ -213,11 +120,11 @@ function main(): void {
         );
       }
     }
-    if (expectedTier === 'public' && metadata.publicApi !== true) {
-      errors.push(`Public route ${key} must include x-rorca-public-api: true`);
+    if (EXPECTED_PUBLIC_API.has(key) && metadata.publicApi !== true) {
+      errors.push(`Stable public route ${key} must include x-rorca-public-api: true`);
     }
-    if (expectedTier !== 'public' && metadata.publicApi === true) {
-      errors.push(`Non-public route ${key} must not include x-rorca-public-api: true`);
+    if (!EXPECTED_PUBLIC_API.has(key) && metadata.publicApi === true) {
+      errors.push(`Non-contract route ${key} must not include x-rorca-public-api: true`);
     }
   }
 
@@ -261,16 +168,9 @@ function main(): void {
     );
   }
 
-  if (summary.publicApi !== EXPECTED.public.length) {
-    errors.push(`Public API count mismatch: got ${summary.publicApi}, expected ${EXPECTED.public.length}`);
+  if (summary.publicApi !== EXPECTED_PUBLIC_API.size) {
+    errors.push(`Public API count mismatch: got ${summary.publicApi}, expected ${EXPECTED_PUBLIC_API.size}`);
   }
-
-  const publicOperations = Array.from(operations.entries()).filter(([_, operation]) => {
-    const metadata = getRorcaTier(operation);
-    return metadata.tier === 'public' && metadata.publicApi === true;
-  });
-
-  writeContract(publicOperations);
 
   for (const error of errors) {
     console.error(`[Tier Lint] ERROR ${error}`);

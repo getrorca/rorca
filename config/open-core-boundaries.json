@@ -33,6 +33,10 @@
       "reason": "Public contract generation is shared release infrastructure."
     },
     {
+      "path": "scripts/openapi-source.ts",
+      "reason": "Current-checkout OpenAPI loading prevents cross-worktree contract contamination in both repositories."
+    },
+    {
       "path": "scripts/check-contract-stability.ts",
       "reason": "Public contract validation is shared release infrastructure."
     },
@@ -69,8 +73,20 @@
       "reason": "Contract break markers inform both repos."
     },
     {
+      "path": "docs/pty-v2-production-readiness-report.md",
+      "reason": "PTY release evidence and remaining manual gates apply to both repositories."
+    },
+    {
       "path": ".github/workflows/secret-scan.yml",
       "reason": "Shared repo safety automation can be imported into OpenCore if desired."
+    },
+    {
+      "path": ".github/workflows/contract-check.yml",
+      "reason": "Public contract CI is shared release automation."
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "reason": "Public contract contribution rules must stay synchronized across repositories."
     },
     {
       "path": "eslint.config.js",
