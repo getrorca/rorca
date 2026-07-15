@@ -4,7 +4,7 @@ Date: 2026-07-15
 
 Branch: `release/pty-v2-production-ready`
 
-Starting SHA: `6e7bc30b5337d99e54b0e2d85b8a17447fe27a23`
+Starting SHA: `89aa93b40b05e5dca4a77ba22a4c5cf38cdd3a6f`
 
 Merge base: `f6ad9aa763b8f5c8c7159f7766576619c03c35b4`
 
@@ -122,6 +122,78 @@ Observed non-PTY failures include:
 
 None of those failures intersects the PTY candidate hunks. Focused PTY gates pass with isolated DB and fake CLI. The frontend monolithic suite likewise has unrelated pre-existing failures outside `RunTerminal`; only the PTY frontend suite is a release gate here.
 
+## Linux/Docker production validation (2026-07-15)
+
+**Result: PASS — advance only to GO FOR MANUAL PROVIDER CANARIES.** This validates Linux containers and a fake interactive CLI only. It is not a production GO and did not invoke Pi, Claude, Codex, OpenCode, or any paid provider.
+
+### Isolation and cleanup contract
+
+All runtime work used Compose project `rorca_ptyv2_cert`, whose only network and volume were `rorca_ptyv2_cert_default` and `rorca_ptyv2_cert_rorca_pgdata`. No host ports were published (the Compose services expose only internal `5432`/`3030`); existing host services and ports `3030`, `5210`, and `5433` were untouched. The validation used an absent `.env` file and empty provider-key substitutions. The backend health capability report showed all real CLIs unavailable, which was expected and prevented provider execution.
+
+Commands (run from the candidate worktree) included:
+
+```bash
+DOCKER_BUILDKIT=1 docker build --no-cache -t rorca-ptyv2-cert:backend -f Dockerfile.backend .
+DOCKER_BUILDKIT=1 docker build --no-cache -t rorca-ptyv2-cert:frontend -f Dockerfile.frontend .
+DOCKER_BUILDKIT=1 docker build --no-cache -t rorca-ptyv2-cert:full -f Dockerfile .
+DOCKER_BUILDKIT=1 docker compose -p rorca_ptyv2_cert -f docker-compose.yml build --no-cache db
+docker compose -p rorca_ptyv2_cert -f docker-compose.yml up -d --no-build
+```
+
+Final image IDs were `rorca-ptyv2-cert:full` `sha256:5efa04126e9bea8be7bdccf63f10391ebc356737011e893d3181580b572e9aec`, backend `sha256:413ca3d047b77c0b8eef0eed26a5df0ae9d21a634843b31b77914ad1a7c6dde9`, frontend `sha256:706d149248459fb6960bc1b9d4bb120f44a4b4aaef89bae29d203e7375cd3964`, and isolated PostgreSQL/AGE `sha256:4d1ea020594e01702b596dd6115ef06e19b2d4ad7a9e6092c579d9604b1dc7b9`.
+
+`docker image inspect` reported Linux/arm64 for all candidate images. The Node runtime is Alpine Linux with Node `v20.20.2` and npm `10.8.2`; `node-pty` is `1.1.0`. The Dockerfiles currently define no `USER`, so image `Config.User` is empty (root default); no non-root posture is claimed beyond the upstream image defaults. Docker history confirmed the build compiler toolchain is absent from the final Node runtime (the final runtime contains only the copied production dependency tree plus `postgresql16-client`). `docker scout` was not installed, so no vulnerability scan result is claimed.
+
+### Packaging fixes discovered and verified
+
+The clean Linux/arm64 builds initially exposed three packaging defects:
+
+1. `Dockerfile.backend` ran `npm ci --omit=dev` in its runtime stage. `node-pty` has no musl/linux-arm64 prebuild, so npm attempted node-gyp without Python or a compiler.
+2. Both backend build paths invoked the node-pty postinstall verifier before its script had been copied into the build context.
+3. The standalone frontend image omitted `backend/src/reason-codes.ts`, which the frontend imports, and did not apply the repository's `legacy-peer-deps` install setting.
+
+The backend now compiles and verifies `node-pty` in a build stage, prunes production dependencies, and copies the verified addon into the minimal runtime. The final runtime retains the verifier for deployment certification. The frontend copies its shared readiness module and installs reproducibly. The combined Compose service now runs `node backend/dist/server.js`; this prevents the image CLI from starting an embedded worker alongside Compose's dedicated worker.
+
+### Native-addon and PTY evidence
+
+Inside the assembled full Linux backend image:
+
+```text
+node-pty verified (linux/arm64); spawn-helper executable; require+spawn passed
+minimal raw PTY: exitCode=0, rawHex=726f7263612d7074792d76322d6c696e75782d7261770d0a
+```
+
+The compiled native module was `/app/backend/node_modules/node-pty/build/Release/pty.node`, mode `0755`, root-owned and readable/executable in the image. The package's Darwin `spawn-helper` fixtures were also mode `0755`; on Linux/arm64 node-pty used the compiled `pty.node` path. The repository verifier and a separate `/bin/sh` PTY spawn both passed after the final image was assembled.
+
+### Isolated stack, migrations, and worker evidence
+
+`db`, `rorca`, and `worker` all reached Docker health `healthy`. On the fresh isolated volume, the worker applied 45 migrations and skipped 102 already represented by the packaged seed, reporting `Total: 147`; the API's immediate idempotent migration run applied 0 and skipped 147. Database inspection recorded 105 schema-migration rows through `20260319200000` and the four PTY tables: `run_pty_sessions`, `run_pty_output_chunks`, `run_pty_input_requests`, and `run_pty_resize_requests`.
+
+`GET /api/health` from inside the API container returned database connected, PostgreSQL 16.14/arm64, AGE/pgvector available, worker `status: ok` with PID 1, and all four external PTY CLI compatibility probes `ready: false`/`binary_not_found`. Worker logs confirmed pg-boss startup, registration of pipeline/spec handlers, startup orphan sweep with no existing orphans, and `ready — listening for pipeline and spec job queues`. Two pre-existing non-fatal scheduler warnings reported missing `queue-snapshot-prune` and `integration:health-check` queues; worker health and the Compose health check remained green.
+
+### Containerized fake interactive PTY/API integration
+
+A disposable `fake` PTY was created only inside the isolated worker container. Its raw output and control requests used the compiled `run-pty-store` while the containerized API handled the public PTY routes using its internal service header. No real provider binary or credential was present.
+
+- Valid API resize returned `{ ok: true, cols: 100, rows: 40 }`; the worker-side PTY applied it.
+- Invalid base64 input returned HTTP 400. Valid UTF-8 base64 input returned `{ ok: true, bytes: 15 }`.
+- The real PTY persisted and emitted `hello-from-api\r\nECHO:hello-from-api\r\n` in two raw chunks (37 bytes). A late API SSE attachment replayed both base64 chunks from `run_pty_output_chunks` and emitted `done`; reconnecting from `afterSequence=2` emitted no duplicate chunk and still emitted `done`.
+- The recorded child PID was absent after normal completion.
+- A second fake PTY intentionally ignored SIGTERM. This exposed a container-boundary cancellation bug: the API could not see a worker-container PID and prematurely marked the run cancelled. The API now defers any durable active PTY session to the worker. The focused unit test covers that policy. In the rebuilt stack, cancel returned `cancelling`; the worker changed the run to `cancelled`, PTY session to `killed`, and no child PID remained.
+
+### Validation limitation / incident disclosure
+
+The focused policy Jest invocation ran without an isolated `DATABASE_URL_TEST` guard and its global setup recreated the local `rorca_test` test database. It did not access the active `rorca` database, any active pipeline run, the main `/Users/dimitriteravanessian/rorca` worktree, or non-project Docker containers, but this was outside the intended Docker-only isolation boundary. No further local database tests were run; all remaining runtime/migration/integration evidence above is confined to `rorca_ptyv2_cert`.
+
+Before handoff, stop and remove **only** this project with:
+
+```bash
+docker compose -p rorca_ptyv2_cert -f docker-compose.yml down -v --remove-orphans
+docker ps -a --filter label=com.docker.compose.project=rorca_ptyv2_cert
+```
+
+The final command must return no project-specific containers; it removes only `rorca_ptyv2_cert_default` and `rorca_ptyv2_cert_rorca_pgdata`.
+
 ## Rollback plan
 
 1. Stop or drain candidate workers before changing versions; do not leave two worker versions claiming the same PTY controls.
@@ -134,7 +206,7 @@ None of those failures intersects the PTY candidate hunks. Focused PTY gates pas
 
 1. Run one branch-only PTY canary each for Pi, Claude, Codex, and OpenCode with paid/subscription use explicitly approved.
 2. For every provider verify prompt startup, stdin, live resize, reconnect/durable replay, sequential-story handoff, cancellation, terminal completion, worker restart/recovery, and no orphan process group.
-3. Run Linux/Docker package and native-addon validation on a host with a working Docker daemon.
+3. ~~Run Linux/Docker package and native-addon validation on a host with a working Docker daemon.~~ **Complete 2026-07-15**; see Linux/Docker production validation above.
 4. Record the clean candidate SHA with `git rev-parse HEAD`, review this report and canary artifacts, and issue a separate explicit production GO.
 
 Until those steps pass, the only authorized conclusion is **GO FOR MANUAL PROVIDER CANARIES**.

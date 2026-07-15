@@ -52,6 +52,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, 
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
+import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
@@ -4415,9 +4416,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     // may still be alive and must remain visible to the worker cancellation job.
     const ptyHealth = await getRunPtySessionHealth(runId);
     const pidAlive = run.pid ? isPidAlive(run.pid) : false;
-    const ptyPidAlive = ptyHealth?.status === 'active' && isPtyPidAlive(ptyHealth.child_pid);
-
-    if (!pidAlive && !ptyPidAlive) {
+    if (mayFinalizePtyCancellationInline(pidAlive, ptyHealth?.status)) {
       // Process is already gone — handle cancellation inline
       await execute(
         `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,

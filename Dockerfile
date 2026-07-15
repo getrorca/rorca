@@ -7,10 +7,14 @@ RUN apk add --no-cache python3 make g++
 
 # Root deps (frontend)
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps
+# Backend is installed and verified explicitly below; avoid the root postinstall
+# before its scripts and package manifest are available in this build stage.
+RUN npm ci --legacy-peer-deps --ignore-scripts
 
-# Backend deps
+# Backend deps. The backend postinstall runs the node-pty verifier, so make
+# that script available before npm invokes lifecycle hooks.
 COPY backend/package.json backend/package-lock.json ./backend/
+COPY backend/scripts/verify-node-pty-install.js ./backend/scripts/
 RUN cd backend && npm ci
 
 # Copy source
@@ -33,6 +37,9 @@ WORKDIR /app
 # Copy pruned production node_modules (includes native addons built in stage 1)
 COPY --from=build /app/backend/node_modules ./backend/node_modules
 COPY --from=build /app/backend/package.json ./backend/
+# Retain the verifier so Linux runtime certification can exercise the same
+# require/helper/spawn contract after the production image is assembled.
+COPY --from=build /app/backend/scripts/verify-node-pty-install.js ./backend/scripts/
 
 # Copy built frontend
 COPY --from=build /app/dist ./dist
