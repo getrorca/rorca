@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `3.3.0`
+Contract version: `3.4.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -37,6 +37,8 @@ Contract version: `3.3.0`
 | GET | `/api/graph/stats` | - | `sha256:67d4045f25d255406761e8330744a3594264c4412921837ec8216f4ea76e2b55` |
 | GET | `/api/health` | - | `sha256:7e6377c00dcc39b43b5ee72a3748d8238299b9497e892bc649d5f43ee4e15f6c` |
 | GET | `/api/health/detailed` | - | `sha256:6987aae3d184fc6c71d49977f02db8b9d1320ceb1d79fda382d96a857216d22b` |
+| GET | `/api/health/live` | - | `sha256:772e7e716666897606c64ab853f56c3b255328398a8cd9691260ff2c1bc246d9` |
+| GET | `/api/health/ready` | - | `sha256:dc8d9411e04c8501fbb1d607b826ea500f0e53963d2e4a7e0e63117829896281` |
 | GET | `/api/mcp/tools` | - | `sha256:cf01b2af54b29212534ae9119064951a1115503359aa8bb0e51f47981757965d` |
 | GET | `/api/memory` | query:category (optional), query:limit (optional), query:workspaceId (required) | `sha256:608cefe732994ac87d10942235aed8ee90afa9276c49c649001547e4a98c7546` |
 | POST | `/api/memory` | body:category (required), body:context (optional), body:relatedFiles (optional), body:rule (required), body:source (optional), body:sourceRunId (optional), body:sourceSpecId (optional), body:title (required), body:workspaceId (required) | `sha256:e4569960c6f8e24d96030581c4327dabcb8568f934383f011f398bd49a98f896` |
