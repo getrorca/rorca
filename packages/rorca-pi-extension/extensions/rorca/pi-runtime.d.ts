@@ -1,4 +1,4 @@
-declare module "@mariozechner/pi-coding-agent" {
+declare module "@earendil-works/pi-coding-agent" {
   export interface ExtensionUi {
     notify(message: string, level?: "info" | "success" | "warning" | "error"): void;
     setStatus(key: string, value?: string): void;
