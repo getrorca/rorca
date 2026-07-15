@@ -2282,7 +2282,8 @@ function printPiInstallMethods() {
     console.log(`CURL  ${PI_INSTALL_METHODS.curl}`);
 }
 async function fetchPiHealth() {
-    return fetchBackendHealth();
+    // Executable diagnostics deliberately live off the bounded readiness route.
+    return fetchJson('/api/health/detailed');
 }
 async function fetchPiModels() {
     return fetchJson('/api/config/pi-models');
