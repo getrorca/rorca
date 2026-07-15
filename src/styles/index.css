@@ -209,8 +209,12 @@
 }
 
 .lifecycle-matrix-spec-title {
+  max-width: 100%;
+  overflow: hidden;
   font-size: 0.8125rem;
   font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lifecycle-matrix-spec-meta,
@@ -244,18 +248,14 @@
   background: transparent;
   color: var(--text);
   text-align: left;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  transition: border-color var(--motion-duration-feedback) var(--motion-ease-out),
+    background-color var(--motion-duration-feedback) var(--motion-ease-out),
+    box-shadow var(--motion-duration-feedback) var(--motion-ease-out);
 }
 
 .lifecycle-cell:hover {
   border-color: var(--border);
   background: var(--surface-200);
-}
-
-.lifecycle-cell[data-selected='true'] {
-  border-color: var(--accent-border);
-  background: color-mix(in srgb, var(--accent) 11%, var(--panel));
-  box-shadow: inset 0 0 0 1px var(--accent-border);
 }
 
 .lifecycle-cell__status {
@@ -278,7 +278,7 @@
 }
 
 .lifecycle-cell[data-status='passed'] {
-  background: var(--status-healthy-bg);
+  background: transparent;
 }
 .lifecycle-cell[data-status='passed'] svg { color: var(--status-healthy); }
 .lifecycle-cell[data-status='blocked'] { background: var(--status-offline-bg); }
@@ -293,6 +293,12 @@
 .lifecycle-cell[data-status='deferred'] svg,
 .lifecycle-cell[data-status='not_applicable'] svg,
 .lifecycle-cell[data-status='not_started'] svg { color: var(--text-muted); }
+
+.lifecycle-cell[data-selected='true'] {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 11%, var(--panel));
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
 
 .lifecycle-cell--compact {
   min-height: 2.5rem;
@@ -325,10 +331,72 @@
   opacity: 0.45;
 }
 
+.lifecycle-control :is(button, a, input, select, textarea, summary),
+.lifecycle-governed-dialog :is(button, a, input, textarea) {
+  transition-property: background-color, border-color, box-shadow, color, transform;
+  transition-duration: var(--motion-duration-feedback);
+  transition-timing-function: var(--motion-ease-out);
+}
+
+.lifecycle-control :is(button, a):active,
+.lifecycle-governed-dialog button:active {
+  transform: scale(0.99);
+}
+
+.lifecycle-phase-sheet {
+  background: var(--bg);
+}
+
+.pointer-events-auto:has(> .lifecycle-phase-sheet) {
+  box-shadow: 0 0 16px color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.lifecycle-governed-dialog {
+  background: color-mix(in srgb, var(--text) 55%, transparent);
+}
+
+.lifecycle-governed-dialog__surface {
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--text) 14%, transparent);
+}
+
 @media (max-width: 640px) {
   .lifecycle-matrix-scroll {
     max-height: 58vh;
   }
+
+  .lifecycle-matrix-table .lifecycle-matrix-spec-header,
+  .lifecycle-matrix-spec-cell {
+    width: min(220px, 56vw);
+    min-width: min(220px, 56vw);
+  }
+
+  .lifecycle-skeleton-matrix {
+    grid-template-columns: min(220px, 56vw) repeat(11, 130px);
+  }
+
+  .lifecycle-governed-dialog {
+    align-items: stretch;
+    padding: 0;
+  }
+
+  .lifecycle-governed-dialog__surface {
+    width: 100%;
+    max-width: none;
+    max-height: 100dvh;
+    min-height: 100dvh;
+    border-radius: 0;
+  }
+}
+
+@media (pointer: coarse) {
+  .lifecycle-control :is(button, input, select, summary),
+  .lifecycle-governed-dialog :is(button, input, textarea, label) {
+    min-height: 44px;
+  }
+}
+
+.lifecycle-skeleton-block {
+  background: var(--skeleton);
 }
 
 /* ─── ULT-017: Skeleton shimmer animation ─────────────────────────────── */

@@ -34,7 +34,7 @@ function EvidenceButton({ evidence, historical, onOpen }: {
       <LifecycleStatusIcon status={historical ? 'stale' : evidence.status === 'passed' ? 'passed' : 'blocked'} size={14} />
       <span className="min-w-0 flex-1">
         <span className="block text-xs font-medium text-[var(--text)]">{evidence.evidenceType} · {evidence.sourceSystem}</span>
-        <span className={`mt-0.5 block text-[11px] ${historical ? 'text-warning' : 'text-muted'}`}>
+        <span className={`mt-0.5 block text-xs ${historical ? 'text-warning' : 'text-muted'}`}>
           {historical ? 'Historical — excluded from active gate' : 'Eligible for bound revision'} · {evidence.sourceEventId}
         </span>
       </span>
@@ -56,7 +56,7 @@ export default function LifecycleTraceability({ traceability, snapshotId, onOpen
         <div className="mt-1 break-all text-muted">
           {revision ? `Spec ${revision.specVersion ?? 'unknown'} · Plan ${revision.planVersion} · ${revision.inputHash}` : 'Revision link absent — recompile the lifecycle plan.'}
         </div>
-        <div className="mt-1 break-all text-[11px] text-muted">Evaluation snapshot: {snapshotId}</div>
+        <div className="mt-1 break-all text-xs text-muted">Evaluation snapshot: {snapshotId}</div>
       </div>
 
       {blockers.length > 0 && (
@@ -125,13 +125,13 @@ export default function LifecycleTraceability({ traceability, snapshotId, onOpen
       {coherence && (
         <div className={`rounded-md border p-3 ${coherence.status === 'mismatch' ? 'border-error/40 bg-error/10' : 'border-border'}`}>
           <div className="text-xs font-semibold text-[var(--text)]">QA → merge → production identity: {readable(coherence.status)}</div>
-          <ul className="mt-2 space-y-1 text-[11px] text-muted">
+          <ul className="mt-2 space-y-1 text-xs text-muted">
             {coherence.bindings.map((binding) => <li key={binding.phaseId} className="break-all"><span className="font-medium text-[var(--text)]">{binding.phaseId.toUpperCase()}</span> · commit {binding.commitSha ?? 'absent'} · image {binding.artifactDigest ?? 'absent'} · deployment {binding.deploymentId ?? 'absent'}</li>)}
           </ul>
         </div>
       )}
 
-      <p className="text-[11px] text-muted">
+      <p className="text-xs text-muted">
         {traceability.graphContext?.mode === 'full'
           ? `Knowledge graph enrichment: ${traceability.graphContext.relatedEvidenceLabels.join(', ') || 'no related labels'}.`
           : 'Canonical relational provenance is active; graph enrichment is unavailable or not required.'}

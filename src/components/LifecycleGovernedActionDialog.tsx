@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Loader2, ShieldAlert, X } from 'lucide-react';
 import type {
   LifecycleDecisionType,
@@ -15,6 +15,7 @@ import type {
   LifecycleRetryPreviewResponse,
   LifecycleSpecResponse,
 } from '../types/lifecycle';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 export type LifecycleGovernedDialog =
   | { kind: 'retry'; preview: LifecycleRetryPreviewResponse }
@@ -65,6 +66,14 @@ export default function LifecycleGovernedActionDialog({
   const [rationale, setRationale] = useState('');
   const [evidenceGap, setEvidenceGap] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
+  const dialogRef = useFocusTrap<HTMLDivElement>();
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !pending) onCancel();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onCancel, pending]);
   const gate = serverGate(phase);
   const revision = portfolioItem?.currentRevision ?? (spec?.plan ? {
     specVersion: spec.plan.specVersion,
@@ -94,12 +103,12 @@ export default function LifecycleGovernedActionDialog({
 
   const title = dialog.kind === 'retry' ? 'Retry preview' : decisionLabel(dialog.decisionType);
   return (
-    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-labelledby="lifecycle-action-title">
-      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-border bg-bg shadow-2xl">
-        <header className="flex items-start gap-3 border-b border-border px-5 py-4">
+    <div ref={dialogRef} className="lifecycle-governed-dialog fixed inset-0 z-[140] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="lifecycle-action-title">
+      <div className="lifecycle-governed-dialog__surface flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-border bg-bg">
+        <header className="sticky top-0 z-10 flex items-start gap-3 border-b border-border bg-bg px-5 py-4">
           <ShieldAlert size={20} className="mt-0.5 shrink-0 text-warning" aria-hidden="true" />
           <div className="min-w-0 flex-1"><h2 id="lifecycle-action-title" className="font-semibold text-[var(--text)]">{title}</h2><p className="mt-1 text-xs text-muted">Preview first. Closing or cancelling records no decision and queues no work.</p></div>
-          <button type="button" onClick={onCancel} disabled={pending} aria-label={`Close ${title}`} className="rounded-md p-2 text-muted hover:bg-panel hover:text-[var(--text)] disabled:opacity-50"><X size={18} /></button>
+          <button type="button" onClick={onCancel} disabled={pending} aria-label={`Close ${title}`} className="flex min-h-11 min-w-11 items-center justify-center rounded-md p-2 text-muted hover:bg-panel hover:text-[var(--text)] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"><X size={18} aria-hidden="true" /></button>
         </header>
 
         <main className="space-y-4 overflow-y-auto p-5 text-sm">
@@ -151,13 +160,13 @@ export default function LifecycleGovernedActionDialog({
           </label>
         </main>
 
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-5 py-4">
-          <button type="button" onClick={onCancel} disabled={pending} className="rounded-md border border-border bg-bg px-4 py-2 text-sm font-medium text-[var(--text)] hover:bg-panel disabled:opacity-50">Cancel</button>
+        <footer className="sticky bottom-0 flex flex-wrap items-center justify-end gap-2 border-t border-border bg-bg px-5 py-4">
+          <button type="button" onClick={onCancel} disabled={pending} className="min-h-11 rounded-md border border-border bg-bg px-4 py-2 text-sm font-medium text-[var(--text)] hover:bg-panel disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Cancel</button>
           <button
             type="button"
             disabled={pending || !confirmed || Boolean(retryDenial) || Boolean(decisionDenied) || (dialog.kind === 'decision' && !decisionReady)}
             onClick={() => dialog.kind === 'retry' ? onRetryConfirm() : onDecisionConfirm({ rationale: rationale.trim(), ...(evidenceGap.trim() ? { evidenceGap: evidenceGap.trim() } : {}), ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}) })}
-            className="inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-h-11 items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             {pending && <Loader2 size={14} className="animate-spin" />}
             {pending ? 'Submitting…' : dialog.kind === 'retry' ? 'Queue exact retry' : dialog.decisionType === 'gate_override' ? 'Submit override decision' : `Record ${decisionLabel(dialog.decisionType)}`}

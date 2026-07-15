@@ -59,11 +59,15 @@ export default function SlideOver({
     useEffect(() => {
         if (!isOpen) return;
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') onClose();
+            if (e.key !== 'Escape') return;
+            const anotherModalIsOpen = Array.from(document.querySelectorAll<HTMLElement>('[aria-modal="true"]'))
+                .some((modal) => modal !== focusTrapRef.current);
+            if (anotherModalIsOpen) return;
+            onClose();
         };
         document.addEventListener('keydown', handleKeyDown);
         return () => document.removeEventListener('keydown', handleKeyDown);
-    }, [isOpen, onClose]);
+    }, [focusTrapRef, isOpen, onClose]);
 
     // Prevent body scroll while open
     useEffect(() => {

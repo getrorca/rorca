@@ -130,6 +130,23 @@ describe('LifecyclePanel', () => {
     expect(refresh).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    [new ApiError(501, 'ADAPTER_UNAVAILABLE', 'Git adapter unavailable'), 'Lifecycle adapter is unavailable', 'Retry connection'],
+    [new ApiError(403, 'FORBIDDEN', 'Denied'), 'Lifecycle access is restricted', null],
+  ] as const)('shows an actionable operational state for %s', async (error, heading, action) => {
+    const user = userEvent.setup();
+    mocks.lifecycle.portfolio = { data: null, loading: false, error };
+    render(<LifecyclePanel />);
+    expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
+    expect(screen.queryByText('Active specs')).not.toBeInTheDocument();
+    if (action) {
+      await user.click(screen.getByRole('button', { name: action }));
+      expect(mocks.lifecycle.refresh).toHaveBeenCalledOnce();
+    } else {
+      expect(screen.getByText(/Ask a workspace administrator/)).toBeInTheDocument();
+    }
+  });
+
   it('shows workspace context and all compact API KPI totals', () => {
     render(<LifecyclePanel />);
     expect(screen.getByLabelText('Current workspace: Hermes')).toBeInTheDocument();

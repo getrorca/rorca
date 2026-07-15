@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -35,19 +35,41 @@ import {
 function LifecycleEmptyState({ hasWorkspace }: { hasWorkspace: boolean }) {
   return (
     <div className="flex-1 flex items-center justify-center p-8" role="status">
-      <div className="max-w-md text-center rounded-xl border border-border bg-panel p-8">
+      <div className="lifecycle-state-card max-w-md text-center rounded-xl border border-border bg-panel p-8">
         <ShieldCheck size={32} className="mx-auto mb-3 text-accent" aria-hidden="true" />
         <h2 className="text-base font-semibold text-[var(--text)]">
           {hasWorkspace ? 'No lifecycle plans yet' : 'Select a workspace'}
         </h2>
         <p className="mt-2 text-sm text-muted">
           {hasWorkspace
-            ? 'Lifecycle plans appear here after specs are compiled. Specs remains your backlog and authoring workspace.'
+            ? 'Open Specs and compile an approved spec to create its lifecycle plan.'
             : 'Choose a workspace from the main sidebar to load Lifecycle Control.'}
         </p>
       </div>
     </div>
   );
+}
+
+function lifecycleErrorState(error: Error): { title: string; explanation: string; action: string | null } {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+    return {
+      title: 'Lifecycle access is restricted',
+      explanation: 'Your current workspace permission does not allow lifecycle evidence to be viewed. Ask a workspace administrator for access.',
+      action: null,
+    };
+  }
+  if (error instanceof ApiError && (error.status === 501 || /adapter/i.test(`${error.code} ${error.message}`))) {
+    return {
+      title: 'Lifecycle adapter is unavailable',
+      explanation: 'Check the workspace adapter configuration, then retry without losing your current view.',
+      action: 'Retry connection',
+    };
+  }
+  return {
+    title: 'Lifecycle Control could not load',
+    explanation: `${error.message} Check the connection, then retry.`,
+    action: 'Retry',
+  };
 }
 
 export default function LifecyclePanel() {
@@ -101,11 +123,13 @@ export default function LifecyclePanel() {
     ) setOptimisticSelection(null);
   }, [lifecycle.urlState.selectedPhaseId, lifecycle.urlState.selectedSpecId, optimisticSelection]);
 
-  const activeSelection = optimisticSelection && 'closed' in optimisticSelection
-    ? null
-    : optimisticSelection ?? (lifecycle.urlState.selectedSpecId && lifecycle.urlState.selectedPhaseId
-      ? { specId: lifecycle.urlState.selectedSpecId, phaseId: lifecycle.urlState.selectedPhaseId }
-      : null);
+  const activeSelection = useMemo(() => (
+    optimisticSelection && 'closed' in optimisticSelection
+      ? null
+      : optimisticSelection ?? (lifecycle.urlState.selectedSpecId && lifecycle.urlState.selectedPhaseId
+        ? { specId: lifecycle.urlState.selectedSpecId, phaseId: lifecycle.urlState.selectedPhaseId }
+        : null)
+  ), [lifecycle.urlState.selectedPhaseId, lifecycle.urlState.selectedSpecId, optimisticSelection]);
 
   useEffect(() => {
     if (!activeSelection) return;
@@ -265,19 +289,22 @@ export default function LifecyclePanel() {
   if (lifecycle.portfolio.loading && !lifecycle.portfolio.data) return <LifecycleMatrixSkeleton />;
 
   if (lifecycle.portfolio.error && !lifecycle.portfolio.data) {
+    const errorState = lifecycleErrorState(lifecycle.portfolio.error);
     return (
-      <div className="flex-1 flex items-center justify-center p-8" role="alert">
-        <div className="max-w-md text-center rounded-xl border border-error/30 bg-panel p-8">
+      <div className="lifecycle-control flex-1 flex items-center justify-center p-8" role="alert">
+        <div className="lifecycle-state-card max-w-md text-center rounded-xl border border-error/30 bg-panel p-8">
           <AlertTriangle size={30} className="mx-auto mb-3 text-error" aria-hidden="true" />
-          <h2 className="text-base font-semibold text-[var(--text)]">Lifecycle Control could not load</h2>
-          <p className="mt-2 text-sm text-muted">{lifecycle.portfolio.error.message}</p>
-          <button
-            type="button"
-            onClick={lifecycle.refresh}
-            className="mt-4 inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            <RefreshCw size={15} aria-hidden="true" /> Retry
-          </button>
+          <h2 className="text-base font-semibold text-[var(--text)]">{errorState.title}</h2>
+          <p className="mt-2 text-sm text-muted">{errorState.explanation}</p>
+          {errorState.action && (
+            <button
+              type="button"
+              onClick={lifecycle.refresh}
+              className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <RefreshCw size={15} aria-hidden="true" /> {errorState.action}
+            </button>
+          )}
         </div>
       </div>
     );
@@ -298,16 +325,16 @@ export default function LifecyclePanel() {
   const drawerTitle = `${selectedPortfolioItem?.title ?? selectedSpecData?.title ?? 'Spec'} — ${LIFECYCLE_PHASES.find((phase) => phase.id === activeSelection?.phaseId)?.displayName ?? 'Phase'}`;
 
   return (
-    <section className="h-full min-h-0 flex flex-col bg-bg" aria-labelledby="lifecycle-control-heading">
+    <section className="lifecycle-control h-full min-h-0 flex flex-col bg-bg" aria-labelledby="lifecycle-control-heading">
       <header className="flex min-h-[72px] shrink-0 items-center border-b border-border bg-panel px-4 sm:px-6">
         <ShieldCheck size={22} className="mr-3 shrink-0 text-accent" aria-hidden="true" />
         <div className="min-w-0">
           <h1 id="lifecycle-control-heading" className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</h1>
-          <p className="truncate text-xs text-muted">End-to-end delivery completeness and evidence</p>
+          <p className="truncate text-xs text-muted" title="End-to-end delivery completeness and evidence">End-to-end delivery completeness and evidence</p>
         </div>
         <div className="ml-auto min-w-0 rounded-md border border-border bg-bg px-3 py-1.5 text-right" aria-label={`Current workspace: ${selectedWorkspace?.name ?? data.workspace.label}`}>
-          <div className="text-[10px] uppercase tracking-wide text-muted">Current workspace</div>
-          <div className="max-w-[240px] truncate text-xs font-medium text-[var(--text)]">{selectedWorkspace?.name ?? data.workspace.label}</div>
+          <div className="text-xs uppercase tracking-wide text-muted">Current workspace</div>
+          <div className="max-w-[240px] truncate text-xs font-medium text-[var(--text)]" title={selectedWorkspace?.name ?? data.workspace.label}>{selectedWorkspace?.name ?? data.workspace.label}</div>
         </div>
       </header>
 
@@ -334,8 +361,17 @@ export default function LifecyclePanel() {
                 {Object.entries(lifecycle.filters)
                   .filter(([key, value]) => key !== 'sort' && value !== undefined)
                   .map(([key, value]) => `${key}: ${String(value).replace(/_/g, ' ')}`).join(' · ')
-                  || 'Lifecycle plans appear after specs are compiled.'}
+                  || 'Open Specs and compile an approved spec to create its lifecycle plan.'}
               </p>
+              {Object.keys(lifecycle.filters).some((key) => key !== 'sort' && lifecycle.filters[key as keyof typeof lifecycle.filters] !== undefined) ? (
+                <button
+                  type="button"
+                  onClick={() => lifecycle.updateFilters({ search: undefined, status: undefined, specStatus: undefined, phase: undefined, risk: undefined, owner: undefined, blocked: undefined, disposition: undefined, sort: 'current_view' })}
+                  className="mt-4 min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >Clear filters</button>
+              ) : (
+                <button type="button" onClick={() => navigate('/specs')} className="mt-4 min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Open Specs</button>
+              )}
             </div>
           </div>
         ) : (
@@ -365,6 +401,7 @@ export default function LifecyclePanel() {
         fullScreenBelowDesktop
         allowBackgroundInteraction
         restoreFocusRef={restoreFocusRef}
+        contentClassName="lifecycle-phase-sheet"
         hideHeader
         ariaLabel={drawerTitle}
         title={drawerTitle}

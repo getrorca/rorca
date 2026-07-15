@@ -104,7 +104,7 @@ describe('LifecyclePhaseDrawer', () => {
     expect(screen.getByText(/Revision: Spec 7 · Plan 3 · sha256:input/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Close phase details' })).toBeInTheDocument();
 
-    const headings = ['Why required', 'Mapped requirements, decisions, and stories', 'Requirement-to-evidence traceability', 'Required gates', 'Bounded evidence', 'Blocker', 'Liveness', 'Next safe action'];
+    const headings = ['Blocker', 'Next safe action', 'Why required', 'Mapped requirements, decisions, and stories', 'Requirement-to-evidence traceability', 'Required gates', 'Bounded evidence', 'Liveness'];
     const positions = headings.map((name) => screen.getByRole('heading', { name }).compareDocumentPosition(document.body));
     expect(positions).toHaveLength(8);
     const ordered = headings.map((name) => screen.getByRole('heading', { name }));

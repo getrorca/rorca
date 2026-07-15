@@ -46,6 +46,20 @@ describe('SlideOver focus and responsive behavior', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Selected lifecycle cell' })).toHaveFocus());
   });
 
+  it('defers Escape to a nested governed modal instead of closing twice', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <>
+        <SlideOver isOpen onClose={onClose} title="Phase details"><button>Drawer action</button></SlideOver>
+        <div role="dialog" aria-modal="true" aria-label="Governed action"><button>Cancel governed action</button></div>
+      </>,
+    );
+    screen.getByRole('button', { name: 'Cancel governed action' }).focus();
+    await user.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('keeps the desktop board pointer-accessible and uses the 520px wireframe bound', () => {
     render(
       <SlideOver isOpen onClose={() => undefined} title="Phase details" desktopMaxWidth={520} allowBackgroundInteraction>

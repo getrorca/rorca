@@ -8,7 +8,6 @@
 import { useRef } from 'react';
 import {
   Activity,
-  AlertTriangle,
   ChevronRight,
   Clock3,
   ExternalLink,
@@ -178,6 +177,28 @@ export default function LifecyclePhaseDrawer({
       </header>
 
       <main className="flex-1 space-y-5 px-5 py-5 sm:px-6" aria-live="polite">
+        <section className="rounded-lg border border-border bg-panel p-4" aria-labelledby="phase-state-heading">
+          <SectionHeading id="phase-state-heading">Current phase state</SectionHeading>
+          <div className="flex items-start gap-2 text-sm">
+            <LifecycleStatusIcon status={phase.status} size={16} />
+            <div>
+              <p className="font-semibold text-[var(--text)]">{LIFECYCLE_STATUS_LABELS[phase.status]} · {passedGates} of {gates.length} gates passed</p>
+              <h3 className={`mt-3 text-xs font-semibold uppercase tracking-wide ${phase.blocker ? 'text-error' : 'text-muted'}`}>Blocker</h3>
+              <p className={`mt-1 ${phase.blocker ? 'text-error' : 'text-muted'}`}>{phase.blocker?.reason ?? 'No blocker is reported for the current snapshot.'}</p>
+            </div>
+          </div>
+          <div className="mt-4 border-l-2 border-accent pl-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Next safe action</h3>
+            {guidance ? (
+              <>
+                <p className="mt-1 text-sm font-medium text-[var(--text)]">{guidance.action}</p>
+                <p className="mt-1 text-sm text-muted">{guidance.rationale}</p>
+                <p className="mt-2 text-xs text-muted">Backend classifier: {readable(guidance.classifier)} · {Math.round(guidance.confidence * 100)}% confidence</p>
+              </>
+            ) : <p className="mt-1 text-sm text-warning">Classifier guidance is unavailable. No client-inferred action is shown.</p>}
+          </div>
+        </section>
+
         <section aria-labelledby="phase-why-heading">
           <SectionHeading id="phase-why-heading">Why required</SectionHeading>
           <p className="text-sm leading-6 text-[var(--text)]">{phase.whyRequired ?? 'No requirement rationale was supplied.'}</p>
@@ -322,14 +343,6 @@ export default function LifecyclePhaseDrawer({
           </section>
         )}
 
-        <section aria-labelledby="phase-blocker-heading">
-          <SectionHeading id="phase-blocker-heading">Blocker</SectionHeading>
-          <div className={`flex items-start gap-2 text-sm ${phase.blocker ? 'text-error' : 'text-muted'}`}>
-            {phase.blocker && <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />}
-            <p>{phase.blocker?.reason ?? 'No blocker is reported for the current snapshot.'}</p>
-          </div>
-        </section>
-
         <section aria-labelledby="phase-liveness-heading">
           <SectionHeading id="phase-liveness-heading">Liveness</SectionHeading>
           {liveness ? (
@@ -347,21 +360,9 @@ export default function LifecyclePhaseDrawer({
           ) : <p className="text-sm text-muted">Run liveness is unknown; no current run evidence is available.</p>}
         </section>
 
-        <section aria-labelledby="phase-next-action-heading" className="border-l-2 border-accent pl-3">
-          <SectionHeading id="phase-next-action-heading">Next safe action</SectionHeading>
-          {guidance ? (
-            <>
-              <p className="text-sm font-medium text-[var(--text)]">{guidance.action}</p>
-              <p className="mt-2 text-sm text-muted">{guidance.rationale}</p>
-              <p className="mt-2 text-xs text-muted">Backend classifier: {readable(guidance.classifier)} · {Math.round(guidance.confidence * 100)}% confidence</p>
-            </>
-          ) : (
-            <p className="text-sm text-warning">Classifier guidance is unavailable. No client-inferred action is shown.</p>
-          )}
-        </section>
       </main>
 
-      <footer className="sticky bottom-0 z-10 mt-auto border-t border-border bg-panel/95 px-5 py-3 backdrop-blur sm:px-6" aria-label="Server-permitted phase actions">
+      <footer className="sticky bottom-0 z-10 mt-auto border-t border-border bg-panel px-5 py-3 sm:px-6" aria-label="Server-permitted phase actions">
         {actions.length > 0 ? (
           <div className="flex flex-wrap gap-2">
             {actions.map((action, index) => (
@@ -370,7 +371,7 @@ export default function LifecyclePhaseDrawer({
                 type="button"
                 disabled={actionPending !== null}
                 onClick={() => onAction(action.id)}
-                className={`${index === 0 ? 'bg-accent text-white hover:bg-accent-hover' : 'border border-border bg-bg text-[var(--text)] hover:bg-surface-200'} inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-60`}
+                className={`${index === 0 ? 'bg-accent text-white hover:bg-accent-hover' : 'border border-border bg-bg text-[var(--text)] hover:bg-surface-200'} inline-flex min-h-11 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-60`}
               >
                 {actionPending === action.id ? 'Working…' : action.label}
                 {action.id !== 'recompile_plan' && <ExternalLink size={13} aria-hidden="true" />}

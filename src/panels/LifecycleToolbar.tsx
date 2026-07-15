@@ -60,7 +60,7 @@ function SelectFilter({
 }) {
   return (
     <label className="relative flex min-w-[142px] items-center gap-2 rounded-md border border-border bg-bg px-2">
-      <span className="shrink-0 text-[11px] font-medium text-muted">{label}</span>
+      <span className="shrink-0 text-xs font-medium text-muted">{label}</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -223,7 +223,7 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
         >Blocked only</button>
 
         <label className="relative flex min-w-[150px] items-center gap-2 rounded-md border border-border bg-bg px-2">
-          <span className="text-[11px] font-medium text-muted">View</span>
+          <span className="text-xs font-medium text-muted">View</span>
           <select
             value={lifecycle.filters.sort}
             onChange={(event) => setFilter('sort', event.target.value as LifecyclePortfolioFilters['sort'])}
@@ -271,7 +271,7 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
         </button>
       </div>
 
-      <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted" aria-live="polite">
+      <div className="border-t border-border px-3 py-1.5 text-xs text-muted" aria-live="polite">
         <span className={lifecycle.portfolio.error && lifecycle.portfolio.data ? 'text-error' : ''}>{refreshStatus}</span>
         <span className="sr-only">{activeCount} active filters. {summaries.join('. ')}</span>
       </div>
@@ -294,7 +294,7 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
           />
 
           <label className="min-w-[180px] flex-1 sm:max-w-[240px]">
-            <span className="mb-1 block text-[11px] font-medium text-muted">Saved view</span>
+            <span className="mb-1 block text-xs font-medium text-muted">Saved view</span>
             <select
               value={selectedViewId}
               onChange={(event) => selectSavedView(event.target.value)}
@@ -306,7 +306,7 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
             </select>
           </label>
           <label className="min-w-[170px] flex-1 sm:max-w-[230px]">
-            <span className="mb-1 block text-[11px] font-medium text-muted">View name</span>
+            <span className="mb-1 block text-xs font-medium text-muted">View name</span>
             <input
               value={viewName}
               maxLength={80}

@@ -25,10 +25,10 @@ export default function LifecycleMetrics({ kpis }: LifecycleMetricsProps) {
   return (
     <section className="grid min-h-[88px] grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6" aria-label="Lifecycle totals">
       {metrics.map((metric) => (
-        <div key={metric.label} className="min-w-0 rounded-lg border border-border bg-panel px-3 py-2.5">
-          <div className="truncate text-xl font-semibold leading-none text-[var(--text)]">{metric.value}</div>
+        <div key={metric.label} className="min-w-0 rounded-lg border border-border bg-panel px-3 py-2.5" title={`${metric.label}: ${metric.value}. ${metric.detail}`}>
+          <div className="truncate text-xl font-semibold leading-none tabular-nums text-[var(--text)]">{metric.value}</div>
           <div className="mt-2 truncate text-xs font-medium text-[var(--text)]">{metric.label}</div>
-          <div className="mt-0.5 truncate text-[11px] text-muted">{metric.detail}</div>
+          <div className="mt-0.5 truncate text-xs tabular-nums text-muted">{metric.detail}</div>
         </div>
       ))}
     </section>

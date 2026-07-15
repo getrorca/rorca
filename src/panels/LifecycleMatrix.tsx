@@ -70,8 +70,9 @@ const LifecycleMatrixRow = memo(function LifecycleMatrixRow({
           type="button"
           className="lifecycle-matrix-spec-title rounded-sm text-left hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           onClick={() => onOpenSpec(item.specId)}
+          title={item.title}
         >{item.title}</button>
-        <span className="lifecycle-matrix-spec-meta">
+        <span className="lifecycle-matrix-spec-meta tabular-nums">
           {riskLabel(item.risk)} · {item.storySummary.total} {item.storySummary.total === 1 ? 'story' : 'stories'}
           {item.owner ? ` · Owner: ${item.owner.label}` : ''}
         </span>

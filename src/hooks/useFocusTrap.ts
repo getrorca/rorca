@@ -55,6 +55,8 @@ export function useFocusTrap<T extends HTMLElement = HTMLElement>(
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key !== 'Tab' || !containerRef.current) return;
+    const topmostModal = (e.target as HTMLElement | null)?.closest<HTMLElement>('[aria-modal="true"]');
+    if (topmostModal && topmostModal !== containerRef.current && !containerRef.current.contains(topmostModal)) return;
 
     const focusable = Array.from(
       containerRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)

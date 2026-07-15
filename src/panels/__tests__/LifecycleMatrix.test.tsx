@@ -60,6 +60,11 @@ describe('LifecycleMatrix', () => {
     expect(row).toHaveTextContent('Run: Active');
   });
 
+  it('keeps the full spec name accessible when deterministic CSS truncation is applied', () => {
+    renderMatrix();
+    expect(screen.getByRole('button', { name: 'Billing anomaly alerts' })).toHaveAttribute('title', 'Billing anomaly alerts');
+  });
+
   it('exposes every status with visible text, an icon, and a full accessible explanation', () => {
     renderMatrix();
     const expected = [
@@ -152,7 +157,7 @@ describe('LifecycleMatrix', () => {
 
     const scroll = screen.getByTestId('lifecycle-matrix-scroll');
     expect(scroll).toHaveAttribute('data-scroll-affordance', 'horizontal-and-vertical');
-    expect(within(screen.getByRole('row', { name: /Partial spec/ })).getAllByRole('button')).toHaveLength(11);
+    expect(within(screen.getByRole('row', { name: /Partial spec/ })).getAllByRole('button')).toHaveLength(12); // Spec Review link + 11 phases.
     expect(screen.getByRole('button', { name: /Partial spec, Intake: Not started.*0 of 0 required gates passed/i })).toBeInTheDocument();
     expect(document.querySelector('tr[data-spec-id="partial-spec"]')).toBeInTheDocument();
 

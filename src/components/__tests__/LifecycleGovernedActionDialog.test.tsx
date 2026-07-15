@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import LifecycleGovernedActionDialog from '../LifecycleGovernedActionDialog';
@@ -82,6 +82,15 @@ describe('LifecycleGovernedActionDialog', () => {
     expect(policy).toHaveTextContent('isolated worktree · /tmp/wt · retry/us-006');
     expect(policy).toHaveTextContent('branch-only · auto-merge=false · deploy=false · external-send=false');
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(props.onCancel).toHaveBeenCalledOnce();
+    expect(props.onRetryConfirm).not.toHaveBeenCalled();
+    expect(props.onDecisionConfirm).not.toHaveBeenCalled();
+  });
+
+  it('closes on Escape without recording a decision or queueing work', async () => {
+    const user = userEvent.setup();
+    const { props } = renderDialog({ kind: 'retry', preview: retryPreview() });
+    await user.keyboard('{Escape}');
     expect(props.onCancel).toHaveBeenCalledOnce();
     expect(props.onRetryConfirm).not.toHaveBeenCalled();
     expect(props.onDecisionConfirm).not.toHaveBeenCalled();
