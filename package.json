@@ -32,6 +32,7 @@
     "test:pi-extension": "npx vitest run --config packages/rorca-pi-extension/vitest.config.ts",
     "test:capture": "npx vitest run --config packages/rorca-capture/vitest.config.ts",
     "test:reboot-smoke": "node --test scripts/__tests__/always-on-reboot-smoke.test.mjs",
+    "test:final-macos-recert": "node scripts/wave3-macos-recert-lifecycle.mjs",
     "test:health-operations": "node --test scripts/__tests__/always-on-monitor.test.mjs scripts/__tests__/log-retention.test.mjs scripts/__tests__/restart-safety.test.mjs",
     "test:packaging": "node scripts/test-packed-capture-lifecycle.mjs",
     "test:capture-platform": "node scripts/capture-platform-smoke.mjs",
