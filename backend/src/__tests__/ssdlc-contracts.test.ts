@@ -111,10 +111,10 @@ describe('canonical SSDLC contract', () => {
       'stale',
       'blocked',
       'awaiting_approval',
+      'in_progress',
+      'passed',
       'deferred',
       'not_applicable',
-      'passed',
-      'in_progress',
       'not_started',
     ]);
     expect(RELEASE_SUBJECT_TYPES).toEqual([

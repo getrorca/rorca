@@ -63,16 +63,17 @@ export const EVALUATED_STATUSES = [
 /**
  * Evaluators apply the first matching status in this strongest-first order.
  * `stale` wins when an input changed; then hard blockers; then an approval-only
- * wait; governed dispositions; completed gates; observed progress; no activity.
+ * wait; partial work; completed gates; and governed completion exclusions.
+ * `not_started` remains a wire status for historical compatibility.
  */
 export const STATUS_PRECEDENCE = [
   'stale',
   'blocked',
   'awaiting_approval',
+  'in_progress',
+  'passed',
   'deferred',
   'not_applicable',
-  'passed',
-  'in_progress',
   'not_started',
 ] as const satisfies readonly (typeof EVALUATED_STATUSES)[number][];
 
