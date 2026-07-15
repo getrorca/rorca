@@ -38,6 +38,7 @@ import {
   appendContextCaptureAudit,
   drainContextCaptureQueue,
   getContextCaptureControlState,
+  getContextCaptureMonitoring,
   getContextCaptureQueueDepth,
   listContextCaptureAudit,
   recordContextCaptureSubmission,
@@ -412,6 +413,72 @@ function readCaptureIgnorePatterns(workspacePath: string): string[] {
   return fs.readFileSync(ignorePath, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
+function readCaptureDaemonMonitoring(workspacePath: string): {
+  status: 'ok' | 'stale' | 'missing' | 'invalid';
+  lastSeen: string | null;
+  lastFlush: string | null;
+  lastScan: string | null;
+  seenAgeSeconds: number | null;
+  flushAgeSeconds: number | null;
+  queueDepth: number;
+  backoffMs: number;
+  freshnessThresholdSeconds: number;
+  processHealth: { manager: string | null; running: boolean; pid: number | null };
+} {
+  const missing = {
+    status: 'missing' as const,
+    lastSeen: null,
+    lastFlush: null,
+    lastScan: null,
+    seenAgeSeconds: null,
+    flushAgeSeconds: null,
+    queueDepth: 0,
+    backoffMs: 0,
+    freshnessThresholdSeconds: 180,
+    processHealth: { manager: null, running: false, pid: null },
+  };
+  const statusPath = path.join(workspacePath, '.rorca', 'capture', 'status.json');
+  if (!fs.existsSync(statusPath)) return missing;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statusPath, 'utf8')) as Record<string, unknown>;
+    const bounds = parsed.resourceBounds && typeof parsed.resourceBounds === 'object' ? parsed.resourceBounds as Record<string, unknown> : {};
+    const processState = parsed.processHealth && typeof parsed.processHealth === 'object' ? parsed.processHealth as Record<string, unknown> : {};
+    const scanIntervalMs = typeof bounds.scanIntervalMs === 'number' && Number.isFinite(bounds.scanIntervalMs) ? bounds.scanIntervalMs : 60_000;
+    const freshnessThresholdSeconds = Math.max(180, Math.ceil(scanIntervalMs * 3 / 1000));
+    const lastSeen = typeof parsed.last_seen === 'string' ? parsed.last_seen : null;
+    const lastFlush = typeof parsed.lastFlush === 'string' ? parsed.lastFlush : null;
+    const age = (value: string | null): number | null => {
+      if (!value) return null;
+      const timestamp = new Date(value).getTime();
+      return Number.isFinite(timestamp) ? Math.max(0, Math.round((Date.now() - timestamp) / 1000)) : null;
+    };
+    const seenAgeSeconds = age(lastSeen);
+    const flushAgeSeconds = age(lastFlush);
+    const queueDepth = typeof parsed.queueDepth === 'number' && Number.isFinite(parsed.queueDepth) ? Math.max(0, Math.trunc(parsed.queueDepth)) : 0;
+    const backoffMs = typeof parsed.backoffMs === 'number' && Number.isFinite(parsed.backoffMs) ? Math.max(0, Math.trunc(parsed.backoffMs)) : 0;
+    const running = processState.running === true;
+    const isStale = !running || seenAgeSeconds === null || seenAgeSeconds > freshnessThresholdSeconds || (queueDepth > 0 && (flushAgeSeconds === null || flushAgeSeconds > freshnessThresholdSeconds));
+    return {
+      status: isStale ? 'stale' : 'ok',
+      lastSeen,
+      lastFlush,
+      lastScan: typeof parsed.lastScan === 'string' ? parsed.lastScan : null,
+      seenAgeSeconds,
+      flushAgeSeconds,
+      queueDepth,
+      backoffMs,
+      freshnessThresholdSeconds,
+      processHealth: {
+        manager: typeof processState.manager === 'string' ? processState.manager : null,
+        running,
+        pid: typeof processState.pid === 'number' && Number.isInteger(processState.pid) ? processState.pid : null,
+      },
+    };
+  } catch {
+    return { ...missing, status: 'invalid' };
+  }
+}
+
 function captureCapability() {
   return {
     overall: 'active',
@@ -727,6 +794,63 @@ router.get('/:workspaceId/status', async (req, res, next) => {
         auditLog,
       },
       capability: captureCapability(),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/monitoring:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: Get production monitoring signals for always-on capture
+ *     operationId: getContextCaptureMonitoring
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Aggregated capture queue, distillation, redaction audit, daemon freshness, and local runtime health are operator-only diagnostics with no write side effects."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: windowHours
+ *         schema: { type: integer, minimum: 1, maximum: 720, default: 24 }
+ *     responses:
+ *       200: { description: Aggregate always-on capture monitoring signals }
+ *       404: { description: Workspace not found }
+ */
+router.get('/:workspaceId/monitoring', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const windowHours = parsePositiveInt(req.query.windowHours, 'windowHours', 24, 24 * 30);
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+
+    const monitoring = await getContextCaptureMonitoring(workspaceId, windowHours);
+    const daemon = readCaptureDaemonMonitoring(workspace.path);
+    const reasons: string[] = [];
+    const advisories: string[] = [];
+    if (daemon.status !== 'ok') reasons.push(`capture_daemon_${daemon.status}`);
+    if (!monitoring.queues.capture.available || !monitoring.queues.distillation.available) reasons.push('queue_metrics_unavailable');
+    if (!monitoring.distillation.available) reasons.push('distillation_metrics_unavailable');
+    if (!monitoring.audit.available) reasons.push('audit_metrics_unavailable');
+    if (monitoring.queues.capture.failed > 0) reasons.push('capture_jobs_failed');
+    if (monitoring.queues.distillation.failed > 0) reasons.push('distillation_jobs_failed');
+    if (monitoring.distillation.activeErrors > 0) reasons.push('distillation_events_error');
+    if (monitoring.distillation.acceptedHistoricalErrors > 0) advisories.push('distillation_historical_errors_accepted');
+    if (monitoring.worker.status !== 'ok') reasons.push(`worker_${monitoring.worker.status}`);
+
+    res.json({
+      ok: true,
+      status: reasons.length === 0 ? 'healthy' : 'degraded',
+      reasons,
+      advisories,
+      workspace: { id: workspace.id, label: workspace.label },
+      daemon,
+      backend: { status: 'ok', pid: process.pid, uptimeSeconds: Math.round(process.uptime()) },
+      ...monitoring,
     });
   } catch (err) {
     next(err);

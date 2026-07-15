@@ -160,6 +160,29 @@ describe('context-capture route validation helpers', () => {
     expect(handler).not.toMatch(/INSERT\s+INTO\s+context_events/i);
   });
 
+  test('monitoring route is admin-only and covers production capture signals', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'context-capture.ts'), 'utf8');
+    const monitoring = source.slice(source.indexOf('/api/context-capture/{workspaceId}/monitoring'), source.indexOf("router.get('/:workspaceId/stream'"));
+    expect(monitoring).toContain('x-rorca-tier: admin');
+    expect(monitoring).toContain('getContextCaptureMonitoring');
+    expect(monitoring).toContain('readCaptureDaemonMonitoring');
+    expect(monitoring).toContain('monitoring.distillation.activeErrors > 0');
+    expect(monitoring).toContain('distillation_events_error');
+    expect(monitoring).toContain('distillation_historical_errors_accepted');
+    expect(monitoring).toContain("backend: { status: 'ok'");
+  });
+
+  test('candidate compatibility migration and inserts satisfy canonical brownfield required fields', () => {
+    const migration = fs.readFileSync(path.join(__dirname, '..', '..', 'db', 'pg-migrations', '20260714143000_context_capture_candidate_compatibility.sql'), 'utf8');
+    const distillation = fs.readFileSync(path.join(__dirname, '..', '..', 'lib', 'context-distillation.ts'), 'utf8');
+    const imports = fs.readFileSync(path.join(__dirname, '..', '..', 'lib', 'external-memory-import-adapters.ts'), 'utf8');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS payload JSONB');
+    expect(migration).toContain("ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''");
+    expect(migration).toContain("ADD COLUMN IF NOT EXISTS rule TEXT NOT NULL DEFAULT ''");
+    expect(distillation).toMatch(/payload, title, rule, status, category/);
+    expect(imports).toMatch(/payload, title, rule, status, category/);
+  });
+
   test('bootstrap verification locks queue, redaction, and ignore paths to canonical locations', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'context-capture.ts'), 'utf8');
     const verifyHandler = source.slice(source.indexOf('/api/context-capture/bootstrap/verify'), source.indexOf("router.post('/events'"));

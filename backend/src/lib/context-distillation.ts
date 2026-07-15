@@ -361,19 +361,20 @@ async function insertMemoryCandidate(candidate: MemoryCandidateDraft, settings: 
     evidenceSnippets: candidate.evidenceSnippets,
     defaultRetrievalEligible: false,
   };
+  const candidateTitle = `${candidate.category}: ${candidate.content}`.slice(0, 240).trim();
   const inserted = await queryOne<{ id: number }>(
     `INSERT INTO memory_candidates (
        context_event_id, workspace_id, event_type, payload_schema_version, source_system, tool_name,
        host_application, session_id, repo_path_hash, git_branch, git_sha, related_files,
-       capture_policy, trust_tier, idempotency_key, provenance, payload, status, category,
+       capture_policy, trust_tier, idempotency_key, provenance, payload, title, rule, status, category,
        content, confidence, candidate_hash, source_content_hash, source_event_id, source_session_id,
        evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible, dedupe_key
      ) VALUES (
        $1, $2, $3, $4, $5, $6,
        $7, $8, $9, $10, $11, $12::jsonb,
-       $13::jsonb, $14, $15, $16::jsonb, $17::jsonb, $18, $19,
-       $20, $21, $22, $23, $24, $25,
-       $26::jsonb, $27, $28, $29, $30
+       $13::jsonb, $14, $15, $16::jsonb, $17::jsonb, $18, $19, $20, $21,
+       $22, $23, $24, $25, $26, $27,
+       $28::jsonb, $29, $30, $31, $32
      )
      ON CONFLICT (workspace_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
      RETURNING id`,
@@ -395,6 +396,8 @@ async function insertMemoryCandidate(candidate: MemoryCandidateDraft, settings: 
       candidate.provenance.sourceIdempotencyKey,
       JSON.stringify(candidate.provenance),
       JSON.stringify(payload),
+      candidateTitle || 'Captured context candidate',
+      candidate.content,
       initialStatus,
       candidate.category,
       candidate.content,
@@ -419,7 +422,8 @@ async function insertMemoryCandidate(candidate: MemoryCandidateDraft, settings: 
   if (approved.status === 'auto_approved') {
     await execute(
       `UPDATE memory_candidates
-          SET status = 'auto_approved', approved_memory_id = $2, resolved_at = NOW(), default_retrieval_eligible = true
+          SET status = 'auto_approved', review_status = 'approved', approved_memory_id = $2,
+              resolved_at = NOW(), default_retrieval_eligible = true, updated_at = NOW()
         WHERE id = $1`,
       [inserted.id, approved.memoryId],
     );
@@ -696,7 +700,8 @@ export async function approveMemoryCandidate(workspaceId: string, candidateId: n
   if (!inserted) return null;
   await execute(
     `UPDATE memory_candidates
-        SET status = 'approved', approved_memory_id = $2, resolved_at = NOW(), default_retrieval_eligible = true
+        SET status = 'approved', review_status = 'approved', approved_memory_id = $2,
+            resolved_at = NOW(), default_retrieval_eligible = true, updated_at = NOW()
       WHERE id = $1`,
     [candidateId, inserted.id],
   );
@@ -706,7 +711,8 @@ export async function approveMemoryCandidate(workspaceId: string, candidateId: n
 export async function rejectMemoryCandidate(workspaceId: string, candidateId: number): Promise<boolean> {
   const result = await execute(
     `UPDATE memory_candidates
-        SET status = 'rejected', resolved_at = NOW(), default_retrieval_eligible = false
+        SET status = 'rejected', review_status = 'rejected', resolved_at = NOW(),
+            default_retrieval_eligible = false, updated_at = NOW()
       WHERE id = $1 AND workspace_id = $2 AND status IN ('pending', 'review_required')`,
     [candidateId, workspaceId],
   );
@@ -738,9 +744,9 @@ export async function applyMemoryCandidateReviewAction(input: {
     const confidence = input.confidence ?? (stringValue(candidate.confidence) as 'high' | 'medium' | 'low' | null) ?? 'medium';
     await execute(
       `UPDATE memory_candidates
-          SET content = $3, category = $4, confidence = $5,
+          SET content = $3, rule = $3, category = $4, confidence = $5,
               payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object('content', $3, 'category', $4, 'confidence', $5),
-              review_reason = NULL
+              review_reason = NULL, updated_at = NOW()
         WHERE id = $1 AND workspace_id = $2`,
       [input.candidateId, input.workspaceId, content, category, confidence],
     );
@@ -750,7 +756,8 @@ export async function applyMemoryCandidateReviewAction(input: {
   if (input.action === 'defer') {
     await execute(
       `UPDATE memory_candidates
-          SET status = 'review_required', review_reason = $3, resolved_at = NULL, default_retrieval_eligible = false
+          SET status = 'review_required', review_status = 'deferred', review_reason = $3,
+              resolved_at = NULL, default_retrieval_eligible = false, updated_at = NOW()
         WHERE id = $1 AND workspace_id = $2`,
       [input.candidateId, input.workspaceId, input.note ? `deferred: ${input.note}` : 'deferred_for_later_review'],
     );
@@ -760,8 +767,8 @@ export async function applyMemoryCandidateReviewAction(input: {
   if (input.action === 'duplicate') {
     await execute(
       `UPDATE memory_candidates
-          SET status = 'rejected', resolved_at = NOW(), default_retrieval_eligible = false,
-              review_reason = $3
+          SET status = 'rejected', review_status = 'duplicate', resolved_at = NOW(), default_retrieval_eligible = false,
+              review_reason = $3, updated_at = NOW()
         WHERE id = $1 AND workspace_id = $2`,
       [input.candidateId, input.workspaceId, input.note ? `duplicate: ${input.note}` : 'duplicate_candidate_rejected'],
     );
@@ -769,13 +776,14 @@ export async function applyMemoryCandidateReviewAction(input: {
   }
 
   const relationLabel = input.action === 'supersede' ? 'superseded_by_candidate' : 'conflicts_with_candidate';
+  const reviewStatus = input.action === 'supersede' ? 'superseded' : 'conflict';
   const relationNote = input.targetCandidateId ? `${relationLabel}:${input.targetCandidateId}` : relationLabel;
   await execute(
     `UPDATE memory_candidates
-        SET status = 'rejected', resolved_at = NOW(), default_retrieval_eligible = false,
-            review_reason = $3
+        SET status = 'rejected', review_status = $4, resolved_at = NOW(), default_retrieval_eligible = false,
+            review_reason = $3, updated_at = NOW()
       WHERE id = $1 AND workspace_id = $2`,
-    [input.candidateId, input.workspaceId, input.note ? `${relationNote} ${input.note}` : relationNote],
+    [input.candidateId, input.workspaceId, input.note ? `${relationNote} ${input.note}` : relationNote, reviewStatus],
   );
   return { candidateId: input.candidateId, action: input.action, status: 'rejected', targetCandidateId: input.targetCandidateId ?? null };
 }

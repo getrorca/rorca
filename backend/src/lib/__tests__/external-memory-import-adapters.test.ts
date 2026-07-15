@@ -93,6 +93,7 @@ describe('external memory import adapters', () => {
         ].join('\n'),
         format: 'jsonl',
       },
+      importedAt: '2026-07-06T00:00:00Z',
     });
 
     expect(first.candidates).toHaveLength(1);
@@ -105,10 +106,24 @@ describe('external memory import adapters', () => {
       dryRun: true,
       existingDedupeKeys: [first.candidates[0].dedupeKey],
       source: { rawText: JSON.stringify({ id: 'same-id', text: 'Prefer repository-native validation.' }), format: 'json' },
+      importedAt: '2026-07-07T00:00:00Z',
     });
 
     expect(second.candidates).toHaveLength(0);
     expect(second.skipped).toEqual([{ originalId: 'same-id', reason: 'duplicate' }]);
+
+    const changed = await importExternalMemoryCandidates({
+      workspaceId: 'ws-1',
+      vendor: 'cursor',
+      adapter: 'memory-bank-file',
+      dryRun: true,
+      existingDedupeKeys: [first.candidates[0].dedupeKey],
+      source: { rawText: JSON.stringify({ id: 'same-id', text: 'Prefer the canonical project validation command.' }), format: 'json' },
+      importedAt: '2026-07-08T00:00:00Z',
+    });
+
+    expect(changed.candidates).toHaveLength(1);
+    expect(changed.candidates[0].dedupeKey).not.toBe(first.candidates[0].dedupeKey);
   });
 
   test('markdown memory-bank imports preserve tags and related files', async () => {

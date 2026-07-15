@@ -404,7 +404,10 @@ function rawItemToCandidate(request: ExternalMemoryImportRequest, item: External
     content_hash: sanitized.contentHash,
   };
   const provenanceHash = prefixedHash(provenance);
-  const dedupeKey = prefixedHash({ externalId, provenanceHash });
+  // Import time is audit provenance, not source identity. Keep idempotency stable
+  // across repeated imports while still allowing a changed source item to stage
+  // a new candidate under the same vendor/original id.
+  const dedupeKey = prefixedHash({ externalId, contentHash: sanitized.contentHash });
   const securitySensitive = sanitized.diagnostics.redactionCount > 0 || sanitized.diagnostics.regulatedSignals.length > 0;
   return {
     workspaceId: request.workspaceId,
@@ -574,17 +577,17 @@ export async function stageExternalMemoryImportCandidates(candidates: ExternalMe
       `INSERT INTO memory_candidates (
          workspace_id, event_type, payload_schema_version, source_system, tool_name,
          host_application, session_id, related_files, capture_policy, trust_tier,
-         idempotency_key, provenance, payload, status, category, content, confidence,
+         idempotency_key, provenance, payload, title, rule, status, category, content, confidence,
          candidate_hash, source_content_hash, source_event_id, source_session_id,
          evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible,
          dedupe_key, external_import_id, source_vendor, source_original_id, import_adapter
        ) VALUES (
          $1, 'explicit_memory', '2026-07-ucc-007.v1', 'external_import', $2,
          $3, $4, $5::jsonb, $6::jsonb, $7,
-         $8, $9::jsonb, $10::jsonb, $11, 'Pattern', $12, $13,
-         $14, $15, $16, $17,
-         $18::jsonb, $19, $20, false,
-         $21, $22, $23, $24, $25
+         $8, $9::jsonb, $10::jsonb, $11, $12, $13, 'Pattern', $14, $15,
+         $16, $17, $18, $19,
+         $20::jsonb, $21, $22, false,
+         $23, $24, $25, $26, $27
        )
        ON CONFLICT (workspace_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
        RETURNING id`,
@@ -599,6 +602,8 @@ export async function stageExternalMemoryImportCandidates(candidates: ExternalMe
         candidate.idempotencyKey,
         JSON.stringify(candidate.payload.provenance ?? candidate.payload),
         JSON.stringify(candidate.payload),
+        `Imported ${candidate.vendor} memory: ${candidate.content}`.slice(0, 240).trim() || 'Imported memory candidate',
+        candidate.content,
         candidate.status,
         candidate.content,
         candidate.confidence,

@@ -201,6 +201,375 @@ export async function listContextCaptureAudit(workspaceId: string, limit = 50): 
   }));
 }
 
+export type ContextCaptureQueueMetrics = {
+  available: boolean;
+  depth: number;
+  created: number;
+  retry: number;
+  active: number;
+  failed: number;
+  completed: number;
+  oldestPendingAt: string | null;
+  lastCompletedAt: string | null;
+};
+
+export type ContextCaptureMonitoring = {
+  generatedAt: string;
+  windowHours: number;
+  queues: {
+    capture: ContextCaptureQueueMetrics;
+    distillation: ContextCaptureQueueMetrics;
+    recentFailures: Array<{ id: string; queue: 'context:capture' | 'context:distill'; failedAt: string | null; retryCount: number }>;
+  };
+  distillation: {
+    available: boolean;
+    total: number;
+    pending: number;
+    skipped: number;
+    candidates: number;
+    autoApproved: number;
+    errors: number;
+    activeErrors: number;
+    acceptedHistoricalErrors: number;
+    lastAttemptedAt: string | null;
+    lastErrorAt: string | null;
+    lastActiveErrorAt: string | null;
+    acceptedBaseline: {
+      id: 'brownfield_candidate_payload_compatibility';
+      migrationVersion: number;
+      appliedAt: string;
+      errorClass: 'schema_error';
+    } | null;
+    recentErrors: Array<{
+      eventId: string;
+      eventType: string | null;
+      attemptedAt: string | null;
+      errorClass: string;
+      disposition: 'active' | 'accepted_historical';
+    }>;
+  };
+  audit: {
+    available: boolean;
+    events: number;
+    submitted: number;
+    suppressed: number;
+    redactions: number;
+    ignoredPaths: number;
+    truncated: number;
+    regulatedEvents: number;
+    lastAuditAt: string | null;
+  };
+  worker: {
+    status: 'ok' | 'stale' | 'not_running' | 'unknown';
+    pid: number | null;
+    lastSeen: string | null;
+    ageSeconds: number | null;
+  };
+};
+
+const emptyQueueMetrics = (): ContextCaptureQueueMetrics => ({
+  available: false,
+  depth: 0,
+  created: 0,
+  retry: 0,
+  active: 0,
+  failed: 0,
+  completed: 0,
+  oldestPendingAt: null,
+  lastCompletedAt: null,
+});
+
+const BROWNFIELD_CANDIDATE_COMPATIBILITY_MIGRATION = 20260714143000;
+const BROWNFIELD_MISSING_CANDIDATE_PAYLOAD_ERROR = 'column "payload" of relation "memory_candidates" does not exist';
+
+function classifyDistillationError(message: string): string {
+  const value = message.toLowerCase();
+  if (value.includes('column') || value.includes('relation') || value.includes('schema')) return 'schema_error';
+  if (value.includes('constraint') || value.includes('violates')) return 'constraint_error';
+  if (value.includes('invalid') || value.includes('validation')) return 'validation_error';
+  if (value.includes('timeout')) return 'timeout';
+  return 'processing_error';
+}
+
+export async function getContextCaptureMonitoring(workspaceId: string, windowHours = 24): Promise<ContextCaptureMonitoring> {
+  const boundedWindowHours = Math.min(Math.max(Math.trunc(windowHours), 1), 24 * 30);
+  const capture = emptyQueueMetrics();
+  const distillationQueue = emptyQueueMetrics();
+  const recentFailures: ContextCaptureMonitoring['queues']['recentFailures'] = [];
+
+  try {
+    const rows = await query<{
+      name: 'context:capture' | 'context:distill';
+      state: string;
+      count: string;
+      oldest_pending_at: string | null;
+      last_completed_at: string | null;
+    }>(
+      `WITH relevant_jobs AS (
+         SELECT id, name, state::text, data, retry_count, created_on, completed_on, completed_on AS terminal_at
+           FROM pgboss.job
+          WHERE name IN ('context:capture', 'context:distill')
+         UNION ALL
+         SELECT id, name, state::text, data, retry_count, created_on, completed_on, COALESCE(completed_on, archived_on) AS terminal_at
+           FROM pgboss.archive
+          WHERE name IN ('context:capture', 'context:distill')
+            AND archived_on >= NOW() - ($2::int * INTERVAL '1 hour')
+       )
+       SELECT name, state, COUNT(*)::text AS count,
+              MIN(created_on) FILTER (WHERE state IN ('created', 'retry', 'active'))::text AS oldest_pending_at,
+              MAX(terminal_at) FILTER (WHERE state = 'completed')::text AS last_completed_at
+         FROM relevant_jobs
+        WHERE COALESCE(data->>'workspaceId', data->'data'->>'workspaceId') = $1
+        GROUP BY name, state`,
+      [workspaceId, boundedWindowHours],
+    );
+    capture.available = true;
+    distillationQueue.available = true;
+    for (const row of rows) {
+      const target = row.name === 'context:capture' ? capture : distillationQueue;
+      const count = Number(row.count || 0);
+      if (row.state === 'created') target.created += count;
+      else if (row.state === 'retry') target.retry += count;
+      else if (row.state === 'active') target.active += count;
+      else if (row.state === 'failed') target.failed += count;
+      else if (row.state === 'completed') target.completed += count;
+      if (row.oldest_pending_at && (!target.oldestPendingAt || row.oldest_pending_at < target.oldestPendingAt)) target.oldestPendingAt = row.oldest_pending_at;
+      if (row.last_completed_at && (!target.lastCompletedAt || row.last_completed_at > target.lastCompletedAt)) target.lastCompletedAt = row.last_completed_at;
+    }
+    capture.depth = capture.created + capture.retry + capture.active;
+    distillationQueue.depth = distillationQueue.created + distillationQueue.retry + distillationQueue.active;
+
+    const failureRows = await query<{ id: string; name: 'context:capture' | 'context:distill'; failed_at: string | null; retry_count: number }>(
+      `WITH failed_jobs AS (
+         SELECT id, name, state::text, data, retry_count, COALESCE(completed_on, created_on) AS failed_at
+           FROM pgboss.job
+          WHERE name IN ('context:capture', 'context:distill') AND state = 'failed'
+         UNION ALL
+         SELECT id, name, state::text, data, retry_count, COALESCE(completed_on, archived_on) AS failed_at
+           FROM pgboss.archive
+          WHERE name IN ('context:capture', 'context:distill')
+            AND state = 'failed'
+            AND archived_on >= NOW() - ($2::int * INTERVAL '1 hour')
+       )
+       SELECT id::text, name, failed_at::text, retry_count
+         FROM failed_jobs
+        WHERE COALESCE(data->>'workspaceId', data->'data'->>'workspaceId') = $1
+        ORDER BY failed_at DESC NULLS LAST
+        LIMIT 20`,
+      [workspaceId, boundedWindowHours],
+    );
+    recentFailures.push(...failureRows.map((row) => ({ id: row.id, queue: row.name, failedAt: row.failed_at, retryCount: row.retry_count })));
+  } catch {
+    // pg-boss may not be initialised yet. Preserve explicit availability=false.
+  }
+
+  const distillation: ContextCaptureMonitoring['distillation'] = {
+    available: false,
+    total: 0,
+    pending: 0,
+    skipped: 0,
+    candidates: 0,
+    autoApproved: 0,
+    errors: 0,
+    activeErrors: 0,
+    acceptedHistoricalErrors: 0,
+    lastAttemptedAt: null,
+    lastErrorAt: null,
+    lastActiveErrorAt: null,
+    acceptedBaseline: null,
+    recentErrors: [],
+  };
+  try {
+    const row = await queryOne<{
+      total: string;
+      pending: string;
+      skipped: string;
+      candidates: string;
+      auto_approved: string;
+      errors: string;
+      active_errors: string;
+      accepted_historical_errors: string;
+      last_attempted_at: string | null;
+      last_error_at: string | null;
+      last_active_error_at: string | null;
+      accepted_baseline_applied_at: string | null;
+    }>(
+      `WITH accepted_baseline AS (
+         SELECT sm.applied_at
+           FROM public.schema_migrations sm
+          WHERE sm.version = $2::bigint
+            AND EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema = 'rorca'
+                 AND table_name = 'memory_candidates'
+                 AND column_name = 'payload'
+            )
+       ), event_outcomes AS (
+         SELECT ce.distillation_status, ce.distillation_attempted_at,
+                COALESCE(
+                  ce.distillation_error = $3
+                  AND ce.distillation_attempted_at <= (SELECT applied_at FROM accepted_baseline),
+                  false
+                ) AS accepted_historical_error
+           FROM context_events ce
+          WHERE ce.workspace_id = $1
+       )
+       SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE distillation_status IS NULL)::text AS pending,
+              COUNT(*) FILTER (WHERE distillation_status = 'skipped')::text AS skipped,
+              COUNT(*) FILTER (WHERE distillation_status = 'candidate')::text AS candidates,
+              COUNT(*) FILTER (WHERE distillation_status = 'auto_approved')::text AS auto_approved,
+              COUNT(*) FILTER (WHERE distillation_status = 'error')::text AS errors,
+              COUNT(*) FILTER (WHERE distillation_status = 'error' AND NOT accepted_historical_error)::text AS active_errors,
+              COUNT(*) FILTER (WHERE distillation_status = 'error' AND accepted_historical_error)::text AS accepted_historical_errors,
+              MAX(distillation_attempted_at)::text AS last_attempted_at,
+              MAX(distillation_attempted_at) FILTER (WHERE distillation_status = 'error')::text AS last_error_at,
+              MAX(distillation_attempted_at) FILTER (WHERE distillation_status = 'error' AND NOT accepted_historical_error)::text AS last_active_error_at,
+              (SELECT applied_at::text FROM accepted_baseline) AS accepted_baseline_applied_at
+         FROM event_outcomes`,
+      [workspaceId, BROWNFIELD_CANDIDATE_COMPATIBILITY_MIGRATION, BROWNFIELD_MISSING_CANDIDATE_PAYLOAD_ERROR],
+    );
+    if (row) {
+      distillation.available = true;
+      distillation.total = Number(row.total || 0);
+      distillation.pending = Number(row.pending || 0);
+      distillation.skipped = Number(row.skipped || 0);
+      distillation.candidates = Number(row.candidates || 0);
+      distillation.autoApproved = Number(row.auto_approved || 0);
+      distillation.errors = Number(row.errors || 0);
+      distillation.activeErrors = Number(row.active_errors || 0);
+      distillation.acceptedHistoricalErrors = Number(row.accepted_historical_errors || 0);
+      distillation.lastAttemptedAt = row.last_attempted_at;
+      distillation.lastErrorAt = row.last_error_at;
+      distillation.lastActiveErrorAt = row.last_active_error_at;
+      distillation.acceptedBaseline = row.accepted_baseline_applied_at ? {
+        id: 'brownfield_candidate_payload_compatibility',
+        migrationVersion: BROWNFIELD_CANDIDATE_COMPATIBILITY_MIGRATION,
+        appliedAt: row.accepted_baseline_applied_at,
+        errorClass: 'schema_error',
+      } : null;
+    }
+    const errorRows = await query<{
+      id: string;
+      event_type: string | null;
+      attempted_at: string | null;
+      distillation_error: string | null;
+      accepted_historical: boolean;
+    }>(
+      `WITH accepted_baseline AS (
+         SELECT sm.applied_at
+           FROM public.schema_migrations sm
+          WHERE sm.version = $2::bigint
+            AND EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema = 'rorca'
+                 AND table_name = 'memory_candidates'
+                 AND column_name = 'payload'
+            )
+       )
+       SELECT ce.id::text, ce.event_type, ce.distillation_attempted_at::text AS attempted_at, ce.distillation_error,
+              COALESCE(
+                ce.distillation_error = $3
+                AND ce.distillation_attempted_at <= (SELECT applied_at FROM accepted_baseline),
+                false
+              ) AS accepted_historical
+         FROM context_events ce
+        WHERE ce.workspace_id = $1 AND ce.distillation_status = 'error'
+        ORDER BY ce.distillation_attempted_at DESC NULLS LAST, ce.id DESC
+        LIMIT 20`,
+      [workspaceId, BROWNFIELD_CANDIDATE_COMPATIBILITY_MIGRATION, BROWNFIELD_MISSING_CANDIDATE_PAYLOAD_ERROR],
+    );
+    distillation.recentErrors = errorRows.map((errorRow) => ({
+      eventId: errorRow.id,
+      eventType: errorRow.event_type,
+      attemptedAt: errorRow.attempted_at,
+      errorClass: classifyDistillationError(errorRow.distillation_error ?? ''),
+      disposition: errorRow.accepted_historical ? 'accepted_historical' : 'active',
+    }));
+  } catch {
+    // Capture migrations may not be applied yet. Preserve explicit availability=false.
+  }
+
+  const audit: ContextCaptureMonitoring['audit'] = {
+    available: false,
+    events: 0,
+    submitted: 0,
+    suppressed: 0,
+    redactions: 0,
+    ignoredPaths: 0,
+    truncated: 0,
+    regulatedEvents: 0,
+    lastAuditAt: null,
+  };
+  try {
+    const row = await queryOne<{
+      events: string;
+      submitted: string;
+      suppressed: string;
+      redactions: string;
+      ignored_paths: string;
+      truncated: string;
+      regulated_events: string;
+      last_audit_at: string | null;
+    }>(
+      `SELECT COUNT(*)::text AS events,
+              COUNT(*) FILTER (WHERE event_type = 'capture_submitted')::text AS submitted,
+              COUNT(*) FILTER (WHERE event_type = 'capture_suppressed')::text AS suppressed,
+              COALESCE(SUM((redaction_summary->>'redactionCount')::int), 0)::text AS redactions,
+              COALESCE(SUM((redaction_summary->>'ignoredPathCount')::int), 0)::text AS ignored_paths,
+              COUNT(*) FILTER (WHERE COALESCE((redaction_summary->>'truncated')::boolean, false))::text AS truncated,
+              COUNT(*) FILTER (WHERE COALESCE(array_length(regulated_flags, 1), 0) > 0)::text AS regulated_events,
+              MAX(occurred_at)::text AS last_audit_at
+         FROM context_capture_audit_log
+        WHERE workspace_id = $1
+          AND occurred_at >= NOW() - ($2::int * INTERVAL '1 hour')`,
+      [workspaceId, boundedWindowHours],
+    );
+    if (row) {
+      audit.available = true;
+      audit.events = Number(row.events || 0);
+      audit.submitted = Number(row.submitted || 0);
+      audit.suppressed = Number(row.suppressed || 0);
+      audit.redactions = Number(row.redactions || 0);
+      audit.ignoredPaths = Number(row.ignored_paths || 0);
+      audit.truncated = Number(row.truncated || 0);
+      audit.regulatedEvents = Number(row.regulated_events || 0);
+      audit.lastAuditAt = row.last_audit_at;
+    }
+  } catch {
+    // Capture audit migrations may not be applied yet. Preserve availability=false.
+  }
+
+  let worker: ContextCaptureMonitoring['worker'] = { status: 'not_running', pid: null, lastSeen: null, ageSeconds: null };
+  try {
+    const row = await queryOne<{ pid: number | null; last_seen: string }>(
+      `SELECT pid, last_seen::text FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1`,
+    );
+    if (row) {
+      const lastSeenMs = new Date(row.last_seen).getTime();
+      if (Number.isFinite(lastSeenMs)) {
+        const ageSeconds = Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000));
+        worker = { status: ageSeconds > 90 ? 'stale' : 'ok', pid: row.pid, lastSeen: row.last_seen, ageSeconds };
+      } else {
+        worker = { status: 'unknown', pid: row.pid, lastSeen: row.last_seen, ageSeconds: null };
+      }
+    }
+  } catch {
+    worker = { status: 'unknown', pid: null, lastSeen: null, ageSeconds: null };
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    windowHours: boundedWindowHours,
+    queues: { capture, distillation: distillationQueue, recentFailures },
+    distillation,
+    audit,
+    worker,
+  };
+}
+
 export async function getContextCaptureQueueDepth(workspaceId: string): Promise<number> {
   try {
     const row = await queryOne<{ count: string }>(
