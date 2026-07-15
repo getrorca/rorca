@@ -5,65 +5,23 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   AlertTriangle,
-  Ban,
-  CheckCircle2,
-  Circle,
-  Clock3,
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react';
 import SlideOver from '../components/SlideOver';
 import { LifecycleMatrixSkeleton } from '../components/skeletons';
+import { LIFECYCLE_STATUS_LABELS, LifecycleStatusIcon } from './LifecycleCell';
+import LifecycleMatrix from './LifecycleMatrix';
 import LifecycleMetrics from './LifecycleMetrics';
 import LifecycleToolbar from './LifecycleToolbar';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useLifecycle } from '../hooks/useLifecycle';
 import { ApiError } from '../lib/apiFetch';
-import {
-  LIFECYCLE_PHASE_IDS,
-  type LifecycleEvaluatedStatus,
-  type LifecyclePhaseCell,
-  type LifecyclePhaseId,
-} from '../types/lifecycle';
-
-const FALLBACK_PHASES = LIFECYCLE_PHASE_IDS.map((id) => ({
-  id,
-  displayName: id.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()),
-}));
-
-const STATUS_LABELS: Record<LifecycleEvaluatedStatus, string> = {
-  not_started: 'Not started',
-  in_progress: 'In progress',
-  blocked: 'Blocked',
-  awaiting_approval: 'Awaiting approval',
-  passed: 'Passed',
-  deferred: 'Deferred',
-  not_applicable: 'Not applicable',
-  stale: 'Stale',
-};
-
-function StatusIcon({ status }: { status: LifecycleEvaluatedStatus }) {
-  if (status === 'passed') return <CheckCircle2 size={16} className="text-success" aria-hidden="true" />;
-  if (status === 'blocked') return <AlertTriangle size={16} className="text-error" aria-hidden="true" />;
-  if (status === 'in_progress') return <Clock3 size={16} className="text-accent" aria-hidden="true" />;
-  if (status === 'awaiting_approval' || status === 'stale') return <AlertTriangle size={16} className="text-warning" aria-hidden="true" />;
-  if (status === 'not_applicable' || status === 'deferred') return <Ban size={16} className="text-muted" aria-hidden="true" />;
-  return <Circle size={14} className="text-muted" aria-hidden="true" />;
-}
-
-function phaseFor(itemPhases: LifecyclePhaseCell[], phaseId: LifecyclePhaseId): LifecyclePhaseCell {
-  return itemPhases.find((phase) => phase.phaseId === phaseId) ?? {
-    phaseId,
-    displayName: FALLBACK_PHASES.find((phase) => phase.id === phaseId)?.displayName ?? phaseId,
-    status: 'not_started',
-    disposition: null,
-    blocker: null,
-    nextSafeAction: null,
-  };
-}
+import { LIFECYCLE_PHASES } from '../types/lifecycle';
 
 function LifecycleEmptyState({ hasWorkspace }: { hasWorkspace: boolean }) {
   return (
@@ -89,6 +47,9 @@ export default function LifecyclePanel() {
   const selectedSpecError = lifecycle.selectedSpec.error;
   const selectedPhaseError = lifecycle.phase.error;
   const updateUrlState = lifecycle.updateUrlState;
+  const [optimisticSelection, setOptimisticSelection] = useState<
+    { specId: string; phaseId: (typeof LIFECYCLE_PHASES)[number]['id'] } | { closed: true } | null
+  >(null);
 
   // A malformed enum is normalized by useLifecycle. A syntactically valid but
   // nonexistent spec/phase is only known after the API responds, so clear that
@@ -102,15 +63,34 @@ export default function LifecyclePanel() {
     }
   }, [selectedSpecError, selectedPhaseError, updateUrlState]);
 
-  const phaseOrder = useMemo(
-    () => lifecycle.portfolio.data?.phaseOrder.length
-      ? lifecycle.portfolio.data.phaseOrder
-      : FALLBACK_PHASES,
-    [lifecycle.portfolio.data?.phaseOrder],
-  );
+  useEffect(() => {
+    if (!optimisticSelection) return;
+    if ('closed' in optimisticSelection) {
+      if (!lifecycle.urlState.selectedSpecId) setOptimisticSelection(null);
+      return;
+    }
+    if (
+      lifecycle.urlState.selectedSpecId === optimisticSelection.specId
+      && lifecycle.urlState.selectedPhaseId === optimisticSelection.phaseId
+    ) setOptimisticSelection(null);
+  }, [lifecycle.urlState.selectedPhaseId, lifecycle.urlState.selectedSpecId, optimisticSelection]);
+
+  const activeSelection = optimisticSelection && 'closed' in optimisticSelection
+    ? null
+    : optimisticSelection ?? (lifecycle.urlState.selectedSpecId && lifecycle.urlState.selectedPhaseId
+      ? { specId: lifecycle.urlState.selectedSpecId, phaseId: lifecycle.urlState.selectedPhaseId }
+      : null);
+
+  const selectCell = (specId: string, phaseId: (typeof LIFECYCLE_PHASES)[number]['id']) => {
+    // Selection feedback is a strict interaction budget. Commit the visible
+    // highlight/drawer before React Router performs the shareable URL update.
+    flushSync(() => setOptimisticSelection({ specId, phaseId }));
+    lifecycle.updateUrlState({ selectedSpecId: specId, selectedPhaseId: phaseId });
+  };
 
   const closeDrawer = () => {
     lifecycle.closeEvidence();
+    flushSync(() => setOptimisticSelection({ closed: true }));
     lifecycle.updateUrlState({ selectedSpecId: null, selectedPhaseId: null });
   };
 
@@ -138,11 +118,8 @@ export default function LifecyclePanel() {
 
   const data = lifecycle.portfolio.data;
   if (!data) return <LifecycleMatrixSkeleton />;
-  const drawerOpen = Boolean(
-    lifecycle.urlState.selectedSpecId
-    && lifecycle.urlState.selectedPhaseId
-    && lifecycle.selectedSpec.data,
-  );
+  const drawerOpen = Boolean(activeSelection);
+  const selectedPortfolioItem = data.items.find((item) => item.specId === activeSelection?.specId);
 
   return (
     <section className="h-full min-h-0 flex flex-col bg-bg" aria-labelledby="lifecycle-control-heading">
@@ -166,7 +143,7 @@ export default function LifecyclePanel() {
         )}
 
         <LifecycleMetrics kpis={data.kpis} />
-        <LifecycleToolbar lifecycle={lifecycle} phaseOrder={phaseOrder} />
+        <LifecycleToolbar lifecycle={lifecycle} phaseOrder={LIFECYCLE_PHASES} />
 
         {data.items.length === 0 ? (
           <div className="flex min-h-[260px] items-center justify-center rounded-lg border border-border bg-panel p-8 text-center" role="status">
@@ -185,77 +162,22 @@ export default function LifecyclePanel() {
               </p>
             </div>
           </div>
-        ) : <div className="overflow-x-auto rounded-lg border border-border bg-panel">
-          <table className="w-full min-w-[980px] border-collapse text-left text-xs">
-            <caption className="sr-only">Lifecycle Control delivery phase matrix</caption>
-            <thead className="bg-surface-100 text-muted">
-              <tr>
-                <th scope="col" className="sticky left-0 z-10 min-w-[230px] border-b border-r border-border bg-surface-100 px-3 py-3 font-medium">Spec</th>
-                {phaseOrder.map((phase) => (
-                  <th key={phase.id} scope="col" className="min-w-[76px] border-b border-border px-2 py-3 text-center font-medium">
-                    {phase.displayName}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {data.items.map((item) => (
-                <tr key={item.specId} className="border-b border-border last:border-b-0 hover:bg-surface-100/60">
-                  <th scope="row" className="sticky left-0 z-10 border-r border-border bg-panel px-3 py-3 font-normal">
-                    <div className="font-medium text-[var(--text)]">{item.title}</div>
-                    {!lifecycle.urlState.compact && <div className="mt-1 text-muted">{item.risk} risk · {item.storySummary.total} stories</div>}
-                  </th>
-                  {phaseOrder.map(({ id: phaseId, displayName }) => {
-                    const cell = phaseFor(item.phases, phaseId);
-                    const selected = item.specId === lifecycle.urlState.selectedSpecId && phaseId === lifecycle.urlState.selectedPhaseId;
-                    return (
-                      <td key={phaseId} className="px-1 py-1 text-center">
-                        <button
-                          type="button"
-                          onClick={() => lifecycle.updateUrlState({ selectedSpecId: item.specId, selectedPhaseId: phaseId })}
-                          className={`mx-auto flex ${lifecycle.urlState.compact ? 'min-h-8 min-w-8' : 'min-h-10 min-w-10'} items-center justify-center rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                            selected
-                              ? 'border-accent bg-accent/15 text-accent'
-                              : 'border-transparent hover:border-border hover:bg-surface-200'
-                          }`}
-                          aria-label={`${item.title}, ${displayName}: ${STATUS_LABELS[cell.status]}`}
-                          title={`${displayName}: ${STATUS_LABELS[cell.status]}`}
-                        >
-                          <StatusIcon status={cell.status} />
-                        </button>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>}
-
-        {lifecycle.pagination.total > lifecycle.pagination.limit && (
-          <nav className="flex items-center justify-end gap-2" aria-label="Lifecycle pagination">
-            <button
-              type="button"
-              disabled={lifecycle.pagination.page === 1}
-              onClick={() => lifecycle.setPage(lifecycle.pagination.page - 1)}
-              className="rounded-md border border-border px-3 py-2 text-sm text-muted disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >Previous</button>
-            <span className="text-xs text-muted">Page {lifecycle.pagination.page}</span>
-            <button
-              type="button"
-              disabled={!lifecycle.pagination.hasMore}
-              onClick={() => lifecycle.setPage(lifecycle.pagination.page + 1)}
-              className="rounded-md border border-border px-3 py-2 text-sm text-muted disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >Next</button>
-          </nav>
+        ) : (
+          <LifecycleMatrix
+            items={data.items}
+            selectedSpecId={activeSelection?.specId ?? null}
+            selectedPhaseId={activeSelection?.phaseId ?? null}
+            compact={lifecycle.urlState.compact}
+            pagination={lifecycle.pagination}
+            onSelect={selectCell}
+            onPageChange={lifecycle.setPage}
+          />
         )}
 
-        <footer className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-t border-border px-1 text-[11px] text-muted" aria-label="Lifecycle status legend">
-          <span><CheckCircle2 size={12} className="mr-1 inline text-success" aria-hidden="true" />Passed</span>
-          <span><Clock3 size={12} className="mr-1 inline text-accent" aria-hidden="true" />In progress</span>
-          <span><AlertTriangle size={12} className="mr-1 inline text-error" aria-hidden="true" />Blocked</span>
-          <span><Circle size={11} className="mr-1 inline" aria-hidden="true" />Not started</span>
-          <span><Ban size={12} className="mr-1 inline" aria-hidden="true" />Deferred / N/A</span>
+        <footer className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-2 border-t border-border px-1 text-xs text-muted" aria-label="Lifecycle status legend">
+          {(Object.entries(LIFECYCLE_STATUS_LABELS) as Array<[keyof typeof LIFECYCLE_STATUS_LABELS, string]>).map(([status, label]) => (
+            <span key={status} className="inline-flex items-center gap-1"><LifecycleStatusIcon status={status} size={13} />{label}</span>
+          ))}
         </footer>
       </div>
 
@@ -263,7 +185,7 @@ export default function LifecyclePanel() {
         isOpen={drawerOpen}
         onClose={closeDrawer}
         desktopMaxWidth={520}
-        title={`${lifecycle.selectedSpec.data?.title ?? 'Spec'} — ${lifecycle.urlState.selectedPhaseId ?? 'Phase'}`}
+        title={`${selectedPortfolioItem?.title ?? lifecycle.selectedSpec.data?.title ?? 'Spec'} — ${LIFECYCLE_PHASES.find((phase) => phase.id === activeSelection?.phaseId)?.displayName ?? 'Phase'}`}
       >
         <div className="space-y-5 p-5 sm:p-6">
           {lifecycle.phase.loading && <div className="text-sm text-muted" role="status">Loading phase evidence…</div>}
@@ -277,8 +199,8 @@ export default function LifecyclePanel() {
             <>
               <div className="rounded-lg border border-border bg-panel p-4">
                 <div className="flex items-center gap-2">
-                  <StatusIcon status={lifecycle.phase.data.status} />
-                  <span className="font-medium text-[var(--text)]">{STATUS_LABELS[lifecycle.phase.data.status]}</span>
+                  <LifecycleStatusIcon status={lifecycle.phase.data.status} />
+                  <span className="font-medium text-[var(--text)]">{LIFECYCLE_STATUS_LABELS[lifecycle.phase.data.status]}</span>
                 </div>
                 {lifecycle.phase.data.whyRequired && <p className="mt-3 text-sm text-muted">{lifecycle.phase.data.whyRequired}</p>}
                 {lifecycle.phase.data.blocker && <p className="mt-3 text-sm text-error">{lifecycle.phase.data.blocker.reason}</p>}
@@ -300,7 +222,7 @@ export default function LifecyclePanel() {
                   {lifecycle.phase.data.requiredGates.items.length === 0 && <p className="text-sm text-muted">No gates are required for this phase.</p>}
                   {lifecycle.phase.data.requiredGates.items.map((gate) => (
                     <div key={gate.gateId} className="flex items-center gap-2 rounded-lg border border-border bg-panel p-3 text-sm">
-                      {gate.evaluation ? <StatusIcon status={gate.evaluation.status} /> : <Circle size={14} className="text-muted" aria-hidden="true" />}
+                      <LifecycleStatusIcon status={gate.evaluation?.status ?? 'not_started'} size={14} />
                       <span className="text-[var(--text)]">{gate.title}</span>
                     </div>
                   ))}

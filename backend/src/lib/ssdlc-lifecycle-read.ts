@@ -558,6 +558,8 @@ function phaseCells(evaluation: LifecycleEvaluation) {
       displayName: canonical.displayName,
       status: phase.status,
       disposition: phase.disposition.disposition,
+      gateProgress: { passed: phase.counts.passed, required: phase.counts.total },
+      rationale: phase.disposition.rationale,
       blocker: phase.blockerReason ?? null,
       nextSafeAction: phase.nextSafeAction ?? phase.nextUnmetGate?.nextSafeAction ?? null,
     };
@@ -666,6 +668,8 @@ function missingPlanItem(candidate: CandidateRow) {
       displayName: phase.displayName,
       status: 'not_started' as const,
       disposition: null,
+      gateProgress: { passed: 0, required: 0 },
+      rationale: null,
       blocker: null,
       nextSafeAction: 'Compile the lifecycle plan.',
     })),

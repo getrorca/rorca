@@ -13,6 +13,26 @@ export const LIFECYCLE_PHASE_IDS = [
 ] as const;
 
 export type LifecyclePhaseId = typeof LIFECYCLE_PHASE_IDS[number];
+
+const LIFECYCLE_PHASE_LABELS: Record<LifecyclePhaseId, string> = {
+  intake: 'Intake',
+  requirements: 'Requirements',
+  architecture: 'Architecture',
+  implementation: 'Implementation',
+  validation: 'Validation',
+  security: 'Security',
+  staging: 'Staging',
+  qa: 'QA',
+  merge: 'Merge',
+  production: 'Production',
+  learn: 'Learn',
+};
+
+/** Canonical matrix columns. UI code must not reorder these from API metadata. */
+export const LIFECYCLE_PHASES: readonly Readonly<LifecyclePhaseDescriptor>[] = LIFECYCLE_PHASE_IDS.map((id) => ({
+  id,
+  displayName: LIFECYCLE_PHASE_LABELS[id],
+}));
 export type LifecycleEvaluatedStatus =
   | 'not_started'
   | 'in_progress'
@@ -107,6 +127,9 @@ export interface LifecyclePhaseCell {
   displayName: string;
   status: LifecycleEvaluatedStatus;
   disposition: LifecycleDisposition | null;
+  /** Gate progress excludes disposition from success semantics; deferred/N/A cells show rationale instead. */
+  gateProgress?: { passed: number; required: number };
+  rationale?: string | null;
   blocker: string | null;
   nextSafeAction: string | null;
 }

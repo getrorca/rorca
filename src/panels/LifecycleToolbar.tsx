@@ -18,7 +18,7 @@ type LifecycleController = ReturnType<typeof useLifecycle>;
 
 interface LifecycleToolbarProps {
   lifecycle: LifecycleController;
-  phaseOrder: LifecyclePhaseDescriptor[];
+  phaseOrder: readonly LifecyclePhaseDescriptor[];
 }
 
 const STATUS_OPTIONS = [

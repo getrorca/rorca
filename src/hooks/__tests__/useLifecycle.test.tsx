@@ -219,13 +219,18 @@ describe('useLifecycle controller', () => {
     expect(mockPhase).not.toHaveBeenCalled();
   });
 
-  it('drives pagination from the URL and resets it for every filter change', async () => {
-    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?page=3&limit=10') });
+  it('drives pagination from the URL, preserves filters across pages, and resets page for filter changes', async () => {
+    const { result } = renderHook(() => useLifecycle(), {
+      wrapper: wrapper('/lifecycle?page=3&limit=10&status=blocked&risk=high'),
+    });
     await waitFor(() => expect(mockPortfolio).toHaveBeenCalled());
     expect(mockPortfolio.mock.calls[0][2]).toEqual({ page: 3, limit: 10 });
-    act(() => result.current.updateFilters({ status: 'blocked', phase: 'qa' }));
+    act(() => result.current.setPage(4));
+    await waitFor(() => expect(result.current.pagination.page).toBe(4));
+    expect(result.current.filters).toEqual(expect.objectContaining({ status: 'blocked', risk: 'high' }));
+    act(() => result.current.updateFilters({ phase: 'qa' }));
     await waitFor(() => expect(result.current.pagination.page).toBe(1));
-    expect(result.current.filters).toEqual(expect.objectContaining({ status: 'blocked', phase: 'qa' }));
+    expect(result.current.filters).toEqual(expect.objectContaining({ status: 'blocked', risk: 'high', phase: 'qa' }));
   });
 
   it('clears drawer selections on workspace switching and ignores the obsolete response', async () => {

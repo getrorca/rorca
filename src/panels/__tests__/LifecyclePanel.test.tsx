@@ -78,8 +78,8 @@ describe('LifecyclePanel', () => {
   it('renders the phase matrix and opens a deep-linked phase drawer after spec data loads', () => {
     render(<LifecyclePanel />);
     expect(screen.getByRole('heading', { name: 'Lifecycle Control' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Spec A, QA: In progress' })).toBeInTheDocument();
-    expect(screen.getByRole('dialog', { name: 'Spec A — qa' })).toHaveTextContent('QA is required');
+    expect(screen.getByRole('button', { name: /Spec A, QA: In progress.*0 of 0 required gates passed/i })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Spec A — QA' })).toHaveTextContent('QA is required');
     expect(screen.getByText('No evidence has been recorded.')).toBeInTheDocument();
   });
 
