@@ -55,6 +55,7 @@ import {
 } from '../lib/story-execution-packet';
 import { persistStoryExecutionManifest } from '../lib/story-closeout';
 import { reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
+import { classifyRunLiveness } from '../lib/ssdlc-liveness';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
@@ -4942,6 +4943,44 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Get run');
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/liveness:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Classify a run from bounded runtime evidence
+ *     operationId: getPipelineRunLiveness
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only, run-scoped lifecycle evidence helps local CLI and MCP operators choose a safe recovery action."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: storyId
+ *         schema: { type: string }
+ *         description: Optionally limit story and completion evidence to one story.
+ *     responses:
+ *       200: { description: Bounded liveness classification and next safe action }
+ *       404: { description: Run not found }
+ */
+router.get('/runs/:runId/liveness', async (req: Request, res: Response) => {
+  try {
+    const runId = Number(req.params.runId);
+    if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+    const storyId = typeof req.query.storyId === 'string' && req.query.storyId.trim()
+      ? req.query.storyId.trim().slice(0, 200)
+      : undefined;
+    const classification = await classifyRunLiveness(runId, { storyId });
+    if (!classification) throw new NotFoundError('Run not found');
+    res.json(classification);
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Pipeline] Get run liveness');
   }
 });
 
