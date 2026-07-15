@@ -415,6 +415,21 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('32');
   });
 
+  it('closes and replays from the prior cursor when xterm backpressure rejects a chunk', async () => {
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    const source = lastEventSource!;
+
+    act(() => {
+      source.emit('chunk', Buffer.from('accepted').toString('base64'), '41');
+      source.emit('chunk', Buffer.alloc(1024 * 1024, 0x61).toString('base64'), '42');
+    });
+
+    expect(source.readyState).toBe(TestEventSource.CLOSED);
+    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('41');
+    expect(screen.getByText(/Output was paused and will resume from the durable cursor/i)).toBeInTheDocument();
+  });
+
   it('reports Live plus CLI silence when PTY heartbeats continue without bytes', async () => {
     renderTerminal('pty');
     await waitFor(() => expect(lastEventSource).not.toBeNull());
@@ -468,6 +483,18 @@ describe('RunTerminal PTY fallback UI', () => {
       '/api/pipeline/runs/77/pty/resize',
       expect.objectContaining({ body: JSON.stringify({ cols: 80, rows: 24 }) }),
     );
+  });
+
+  it('releases EventSource, ResizeObserver, input listener, and xterm on repeated attach/detach', async () => {
+    for (let index = 0; index < 10; index += 1) {
+      const mounted = renderTerminal('pty');
+      await waitFor(() => expect(lastEventSource).not.toBeNull());
+      const source = lastEventSource!;
+      const terminal = xtermMockState.instances.at(-1)!;
+      mounted.unmount();
+      expect(source.readyState).toBe(TestEventSource.CLOSED);
+      expect(terminal.dispose).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('forwards initial and debounced PTY resize payloads to the backend', async () => {

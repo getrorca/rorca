@@ -585,6 +585,9 @@ function createAnsiConverter(theme: 'light' | 'dark', escapeXml = true): AnsiToH
 
 const FLUSH_INTERVAL_MS = 80;
 const PTY_RESIZE_DEBOUNCE_MS = 100;
+const PTY_INPUT_FLUSH_MS = 100;
+const MAX_QUEUED_PTY_INPUT_BYTES = 256 * 1024;
+const MAX_PTY_INPUT_REQUEST_BYTES = 64 * 1024;
 const PTY_RECONNECT_DELAY_MS = 500;
 const PTY_WRITE_FRAME_BUDGET_BYTES = 64 * 1024;
 const MAX_PENDING_PTY_BYTES = 1024 * 1024;
@@ -639,6 +642,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const ptyDisplayEncoderRef = useRef(new TextEncoder());
   const ansiDisplayDecoderRef = useRef(new TextDecoder());
   const pendingPtyInputRef = useRef('');
+  const queuedPtyInputBytesRef = useRef(0);
   const ptyInputFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ptyInputQueueRef = useRef(Promise.resolve());
   const resizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -769,21 +773,43 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const data = pendingPtyInputRef.current;
     if (!data) return;
     pendingPtyInputRef.current = '';
-    const dataBase64 = encodeUtf8Base64(data);
-    ptyInputQueueRef.current = ptyInputQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        await apiFetch(`/api/pipeline/runs/${runId}/input`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dataBase64 }),
-          silent: true,
+    const chunks: string[] = [];
+    let chunk = '';
+    let chunkBytes = 0;
+    const encoder = new TextEncoder();
+    for (const symbol of data) {
+      const symbolBytes = encoder.encode(symbol).byteLength;
+      if (chunk && chunkBytes + symbolBytes > MAX_PTY_INPUT_REQUEST_BYTES) {
+        chunks.push(chunk);
+        chunk = '';
+        chunkBytes = 0;
+      }
+      chunk += symbol;
+      chunkBytes += symbolBytes;
+    }
+    if (chunk) chunks.push(chunk);
+
+    for (const inputChunk of chunks) {
+      const dataBase64 = encodeUtf8Base64(inputChunk);
+      const dataBytes = encoder.encode(inputChunk).byteLength;
+      ptyInputQueueRef.current = ptyInputQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await apiFetch(`/api/pipeline/runs/${runId}/input`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dataBase64 }),
+            silent: true,
+          });
+          setPtyInputHealthy(true);
+        })
+        .catch(() => {
+          setPtyInputHealthy(false);
+        })
+        .finally(() => {
+          queuedPtyInputBytesRef.current = Math.max(0, queuedPtyInputBytesRef.current - dataBytes);
         });
-        setPtyInputHealthy(true);
-      })
-      .catch(() => {
-        setPtyInputHealthy(false);
-      });
+    }
   }, [runId]);
 
   const queuePtyInput = useCallback((data: string) => {
@@ -793,9 +819,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const sessionAllowsInput = currentSessionStatus === 'active'
       || (currentRunStatus == null && currentSessionStatus == null);
     if (!runAllowsInput || !sessionAllowsInput) return;
+    const dataBytes = new TextEncoder().encode(data).byteLength;
+    if (queuedPtyInputBytesRef.current + dataBytes > MAX_QUEUED_PTY_INPUT_BYTES) {
+      setPtyInputHealthy(false);
+      return;
+    }
+    queuedPtyInputBytesRef.current += dataBytes;
     pendingPtyInputRef.current += data;
     if (ptyInputFlushRef.current === null) {
-      ptyInputFlushRef.current = setTimeout(flushPtyInput, 20);
+      ptyInputFlushRef.current = setTimeout(flushPtyInput, PTY_INPUT_FLUSH_MS);
     }
   }, [flushPtyInput]);
 
@@ -1054,6 +1086,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       terminalModeRef.current = rendererMode;
       pendingPtyChunksRef.current = [];
       pendingPtyBytesRef.current = 0;
+      pendingPtyInputRef.current = '';
+      queuedPtyInputBytesRef.current = 0;
       ptyDisplayScrubberRef.current = createPtyDisplayScrubberState();
       ptyDisplayDecoderRef.current = new TextDecoder();
       ansiDisplayDecoderRef.current = new TextDecoder();

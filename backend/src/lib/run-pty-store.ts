@@ -18,6 +18,7 @@ const DEFAULT_MAX_PENDING_BYTES = 1 * 1024 * 1024;
 const DEFAULT_BATCH_BYTES = 64 * 1024;
 const DEFAULT_BATCH_CHUNKS = 16;
 const DEFAULT_REPLAY_BATCH_CHUNKS = 512;
+export const MAX_PTY_PENDING_INPUT_BYTES = 256 * 1024;
 
 function readBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(process.env[name] ?? '', 10);
@@ -122,35 +123,45 @@ export function getRunPtyRetentionDays(): number {
 }
 
 export async function startRunPtySession(params: StartRunPtySessionParams): Promise<void> {
-  await execute(
-    `INSERT INTO run_pty_sessions
-      (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, completion_marker, completion_marker_seen_at, completion_file_seen_at, completion_file_error, terminal_marker_seen_at, prompt_readiness_status, prompt_readiness_reason, prompt_ready_at, prompt_injected_at, last_heartbeat_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NULL, $8, NULL, NULL, NULL, NULL, 'waiting', 'awaiting_cli_readiness', NULL, NULL, NULL, NOW())
-     ON CONFLICT (run_id) DO UPDATE SET
-       workspace_id = EXCLUDED.workspace_id,
-       cwd = EXCLUDED.cwd,
-       agent_type = EXCLUDED.agent_type,
-       cols = EXCLUDED.cols,
-       rows = EXCLUDED.rows,
-       child_pid = EXCLUDED.child_pid,
-       status = 'active',
-       last_output_at = CASE WHEN run_pty_sessions.total_output_bytes > 0 THEN run_pty_sessions.last_output_at ELSE NULL END,
-       completion_marker = EXCLUDED.completion_marker,
-       completion_marker_seen_at = NULL,
-       completion_file_seen_at = NULL,
-       completion_file_error = NULL,
-       terminal_marker_seen_at = NULL,
-       prompt_readiness_status = 'waiting',
-       prompt_readiness_reason = 'awaiting_cli_readiness',
-       prompt_ready_at = NULL,
-       prompt_injected_at = NULL,
-       last_heartbeat_at = NULL,
-       exit_code = NULL,
-       exit_signal = NULL,
-       exited_at = NULL,
-       updated_at = NOW()`,
-    [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows, params.childPid, params.completionMarker ?? null],
-  );
+  await transaction(async (client) => {
+    // Serialize the session generation boundary with input admission. If an
+    // old-session input transaction wins the lock, its row is deleted below;
+    // if this transaction wins, later input is admitted to the new session.
+    await client.query('SELECT run_id FROM run_pty_sessions WHERE run_id = $1 FOR UPDATE', [params.runId]);
+    // Input/resize requests are scoped to one sequential story attachment. A
+    // request left behind by an exited story must never reach the next agent.
+    await client.query('DELETE FROM run_pty_input_requests WHERE run_id = $1', [params.runId]);
+    await client.query('DELETE FROM run_pty_resize_requests WHERE run_id = $1', [params.runId]);
+    await client.query(
+      `INSERT INTO run_pty_sessions
+        (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, completion_marker, completion_marker_seen_at, completion_file_seen_at, completion_file_error, terminal_marker_seen_at, prompt_readiness_status, prompt_readiness_reason, prompt_ready_at, prompt_injected_at, last_heartbeat_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NULL, $8, NULL, NULL, NULL, NULL, 'waiting', 'awaiting_cli_readiness', NULL, NULL, NULL, NOW())
+       ON CONFLICT (run_id) DO UPDATE SET
+         workspace_id = EXCLUDED.workspace_id,
+         cwd = EXCLUDED.cwd,
+         agent_type = EXCLUDED.agent_type,
+         cols = EXCLUDED.cols,
+         rows = EXCLUDED.rows,
+         child_pid = EXCLUDED.child_pid,
+         status = 'active',
+         last_output_at = CASE WHEN run_pty_sessions.total_output_bytes > 0 THEN run_pty_sessions.last_output_at ELSE NULL END,
+         completion_marker = EXCLUDED.completion_marker,
+         completion_marker_seen_at = NULL,
+         completion_file_seen_at = NULL,
+         completion_file_error = NULL,
+         terminal_marker_seen_at = NULL,
+         prompt_readiness_status = 'waiting',
+         prompt_readiness_reason = 'awaiting_cli_readiness',
+         prompt_ready_at = NULL,
+         prompt_injected_at = NULL,
+         last_heartbeat_at = NULL,
+         exit_code = NULL,
+         exit_signal = NULL,
+         exited_at = NULL,
+         updated_at = NOW()`,
+      [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows, params.childPid, params.completionMarker ?? null],
+    );
+  });
 }
 
 export async function updateRunPtyDimensions(runId: number, cols: number, rows: number): Promise<void> {
@@ -203,25 +214,26 @@ export async function appendRunPtyOutputBatch(
     let acceptedBytes = 0;
     let storedBytes = 0;
 
-    for (const buffer of buffers) {
-      let offset = 0;
-      while (offset < buffer.length && remainingCaptureBytes > 0) {
-        const length = Math.min(CHUNK_SIZE, buffer.length - offset, remainingCaptureBytes);
-        const slice = buffer.subarray(offset, offset + length);
-        const compressed = compressRunPtyChunk(slice);
-        await client.query(
-          `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk, compression, byte_length, stored_byte_length)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (run_id, sequence) DO NOTHING`,
-          [runId, sequenceRef.value, compressed.chunk, compressed.compression, slice.length, compressed.chunk.length],
-        );
-        sequenceRef.value += 1;
-        acceptedBytes += slice.length;
-        storedBytes += compressed.chunk.length;
-        remainingCaptureBytes -= slice.length;
-        offset += length;
-      }
-      if (remainingCaptureBytes === 0) break;
+    // Coalesce callback-sized fragments before the durable 4 KiB split. This
+    // preserves byte order while preventing a small-chunk flood from creating
+    // one PostgreSQL row per keystroke/terminal callback.
+    const combined = buffers.length === 1 ? buffers[0] : Buffer.concat(buffers, rawBytes);
+    let offset = 0;
+    while (offset < combined.length && remainingCaptureBytes > 0) {
+      const length = Math.min(CHUNK_SIZE, combined.length - offset, remainingCaptureBytes);
+      const slice = combined.subarray(offset, offset + length);
+      const compressed = compressRunPtyChunk(slice);
+      await client.query(
+        `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk, compression, byte_length, stored_byte_length)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (run_id, sequence) DO NOTHING`,
+        [runId, sequenceRef.value, compressed.chunk, compressed.compression, slice.length, compressed.chunk.length],
+      );
+      sequenceRef.value += 1;
+      acceptedBytes += slice.length;
+      storedBytes += compressed.chunk.length;
+      remainingCaptureBytes -= slice.length;
+      offset += length;
     }
 
     const captureDroppedBytes = rawBytes - acceptedBytes;
@@ -430,55 +442,70 @@ export async function requestRunPtyResize(runId: number, cols: number, rows: num
 }
 
 export async function claimLatestRunPtyResize(runId: number): Promise<RunPtyResizeRequest | null> {
-  const latest = await queryOne<RunPtyResizeRequest>(
-    `SELECT r.id, r.cols, r.rows
-     FROM run_pty_resize_requests r
-     JOIN run_pty_sessions s ON s.run_id = r.run_id
-     WHERE r.run_id = $1 AND r.applied_at IS NULL AND s.status = 'active'
-     ORDER BY r.id DESC
-     LIMIT 1`,
-    [runId],
-  );
+  return transaction(async (client) => {
+    const result = await client.query<RunPtyResizeRequest>(
+      `SELECT r.id, r.cols, r.rows
+       FROM run_pty_resize_requests r
+       JOIN run_pty_sessions s ON s.run_id = r.run_id
+       WHERE r.run_id = $1 AND r.applied_at IS NULL AND s.status = 'active'
+       ORDER BY r.id DESC
+       LIMIT 1
+       FOR UPDATE OF r`,
+      [runId],
+    );
+    const latest = result.rows[0];
+    if (!latest) return null;
 
-  if (!latest) return null;
-
-  await execute(
-    `UPDATE run_pty_resize_requests
-     SET applied_at = NOW()
-     WHERE run_id = $1 AND applied_at IS NULL AND id <= $2`,
-    [runId, latest.id],
-  );
-
-  return latest;
+    // Only the newest dimensions matter. Delete consumed/coalesced requests so
+    // a long-running attached terminal cannot grow this table without bound.
+    await client.query(
+      'DELETE FROM run_pty_resize_requests WHERE run_id = $1 AND applied_at IS NULL AND id <= $2',
+      [runId, latest.id],
+    );
+    return latest;
+  });
 }
 
-export async function requestRunPtyInput(runId: number, input: Buffer): Promise<void> {
-  await execute(
-    `INSERT INTO run_pty_input_requests (run_id, input, byte_length)
-     VALUES ($1, $2, $3)`,
-    [runId, input, input.length],
-  );
+/** Returns false when the per-run pending-input budget is exhausted. */
+export async function requestRunPtyInput(runId: number, input: Buffer): Promise<boolean> {
+  return transaction(async (client) => {
+    const session = await client.query<{ status: string }>(
+      'SELECT status FROM run_pty_sessions WHERE run_id = $1 FOR UPDATE',
+      [runId],
+    );
+    if (session.rows[0]?.status !== 'active') return false;
+    const pending = await client.query<{ bytes: string }>(
+      `SELECT COALESCE(SUM(byte_length), 0)::text AS bytes
+       FROM run_pty_input_requests WHERE run_id = $1 AND applied_at IS NULL`,
+      [runId],
+    );
+    const pendingBytes = Number(pending.rows[0]?.bytes ?? 0);
+    if (pendingBytes + input.length > MAX_PTY_PENDING_INPUT_BYTES) return false;
+    await client.query(
+      `INSERT INTO run_pty_input_requests (run_id, input, byte_length)
+       VALUES ($1, $2, $3)`,
+      [runId, input, input.length],
+    );
+    return true;
+  });
 }
 
 export async function claimPendingRunPtyInput(runId: number, limit = 100): Promise<RunPtyInputRequest[]> {
+  const boundedLimit = Math.min(100, Math.max(1, Math.floor(limit)));
   const rows = await query<RunPtyInputRequest>(
-    `SELECT id, input
-     FROM run_pty_input_requests
-     WHERE run_id = $1 AND applied_at IS NULL
-     ORDER BY id ASC
-     LIMIT $2`,
-    [runId, limit],
+    `DELETE FROM run_pty_input_requests
+     WHERE id IN (
+       SELECT id FROM run_pty_input_requests
+       WHERE run_id = $1 AND applied_at IS NULL
+       ORDER BY id ASC
+       LIMIT $2
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING id, input`,
+    [runId, boundedLimit],
   );
 
-  if (rows.length === 0) return [];
-
-  await execute(
-    `UPDATE run_pty_input_requests
-     SET applied_at = NOW()
-     WHERE run_id = $1 AND id = ANY($2::bigint[])`,
-    [runId, rows.map((row) => row.id)],
-  );
-
+  rows.sort((a, b) => Number(a.id) - Number(b.id));
   return rows.map((row) => ({
     id: row.id,
     input: Buffer.isBuffer(row.input) ? row.input : Buffer.from(row.input),

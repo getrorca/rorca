@@ -200,6 +200,43 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         continue;
       }
 
+      // AGE graph names are PostgreSQL schemas. The legacy graph was named
+      // `rorca`, which now intentionally belongs to application tables. If AGE
+      // is installed but that graph was never created, executing migration 050
+      // would LOAD AGE, fail at create_graph('rorca'), and poison the backend
+      // session after rollback. Skip it before LOAD; the supported rorca_v2
+      // bootstrap uses its own non-conflicting graph schema.
+      if (file.startsWith('050_knowledge_graph')) {
+        // Keep the useful, non-conflicting part of the legacy migration: install
+        // AGE when this PostgreSQL distribution and role support it. Failure is
+        // intentionally non-fatal so managed/lite databases continue migrating.
+        try {
+          await client.query('CREATE EXTENSION IF NOT EXISTS age');
+        } catch (err) {
+          console.warn(`[pg-migrate] AGE extension unavailable; continuing in graph-lite mode: ${(err as Error).message || err}`);
+        }
+
+        const catalog = await client.query<{ graph_catalog: string | null }>(
+          `SELECT to_regclass('ag_catalog.ag_graph')::text AS graph_catalog`,
+        );
+        let legacyGraphExists = false;
+        if (catalog.rows[0]?.graph_catalog) {
+          const graph = await client.query<{ exists: boolean }>(
+            `SELECT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'rorca') AS exists`,
+          );
+          legacyGraphExists = Boolean(graph.rows[0]?.exists);
+        }
+        if (!legacyGraphExists) {
+          await client.query(
+            'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
+            [version, `${file} [skipped: application schema collision]`],
+          );
+          skippedCount++;
+          console.warn('[pg-migrate] Skipping legacy rorca AGE graph: application schema owns that name; use rorca_v2 bootstrap');
+          continue;
+        }
+      }
+
       const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
 
       // Wrap each migration in a transaction

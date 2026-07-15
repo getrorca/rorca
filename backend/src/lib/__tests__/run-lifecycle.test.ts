@@ -1,5 +1,13 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { execute, queryOne } from '../../db/index';
 import {
+  attachRunPtyLifecycle,
   isTerminalRunLifecycle,
   lifecycleFromLegacyStatus,
   transitionRunLifecycle,
@@ -33,6 +41,26 @@ describe('backend-owned run lifecycle compatibility', () => {
     expect(isTerminalRunLifecycle('finished')).toBe(true);
     expect(isTerminalRunLifecycle('failed')).toBe(true);
     expect(isTerminalRunLifecycle('cancelled')).toBe(true);
+  });
+
+  it('keeps run lifecycle running across sequential PTY story attachments', async () => {
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (workspace_id, spec_path, status)
+       VALUES ($1, 'forge/specs/approved/sequential-pty.json', 'queued') RETURNING id`,
+      [WORKSPACE_ID],
+    );
+    const id = run!.id;
+
+    await expect(transitionRunLifecycle(id, 'starting')).resolves.toBe(true);
+    await expect(attachRunPtyLifecycle(id, { storyId: 'US-001' })).resolves.toBe(true);
+    await expect(transitionRunLifecycle(id, 'running')).resolves.toBe(true);
+    await expect(attachRunPtyLifecycle(id, { storyId: 'US-002' })).resolves.toBe(true);
+
+    const row = await queryOne<{ lifecycle_status: string; lifecycle_diagnostics: Record<string, unknown> }>(
+      'SELECT lifecycle_status, lifecycle_diagnostics FROM pipeline_runs WHERE id = $1', [id],
+    );
+    expect(row?.lifecycle_status).toBe('running');
+    expect(row?.lifecycle_diagnostics).toEqual(expect.objectContaining({ storyId: 'US-002' }));
   });
 
   it('accepts the ordered PTY path and rejects backward/terminal resurrection', async () => {

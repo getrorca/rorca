@@ -1861,20 +1861,77 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
     }
 
     const runId = parsed.data.runId;
-    const child = activeProcesses.get(runId);
-    if (child) {
-      // Mark as intentionally cancelled so the exit handler sets status='cancelled'.
-      // Lifecycle is terminal immediately; cleanup still waits for the process group.
-      cancellingRuns.add(runId);
-      await transitionRunLifecycle(runId, 'cancelled', { owner: 'worker_cancel', process: 'termination_requested' });
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        // Only SIGKILL if the process is still in the active map (not yet exited)
-        if (activeProcesses.has(runId)) child.kill('SIGKILL');
-      }, 10_000);
-    } else {
-      logger.warn({ jobId: job.id, runId }, '[worker] pipeline:cancel — no active process found for runId');
+    const run = await queryOne<{
+      status: string;
+      pid: number | null;
+      workspace_id: string;
+      pty_child_pid: number | null;
+      pty_status: string | null;
+    }>(
+      `SELECT pr.status, pr.pid, pr.workspace_id,
+              rps.child_pid AS pty_child_pid, rps.status AS pty_status
+       FROM pipeline_runs pr
+       LEFT JOIN run_pty_sessions rps ON rps.run_id = pr.id
+       WHERE pr.id = $1`,
+      [runId],
+    );
+    if (!run || !['running', 'paused'].includes(run.status)) {
+      logger.info({ jobId: job.id, runId, status: run?.status }, '[worker] pipeline:cancel — run already terminal or missing');
+      continue;
     }
+
+    const child = activeProcesses.get(runId);
+    const ptyPid = run.pty_status === 'active' ? run.pty_child_pid : null;
+    cancellingRuns.add(runId);
+    await transitionRunLifecycle(runId, 'cancelled', { owner: 'worker_cancel', process: 'termination_requested' });
+
+    if (child) {
+      // Signal both the engine and independently tracked forkpty process. The
+      // latter prevents a provider CLI from surviving if engine cleanup races
+      // the worker's force-kill deadline.
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      signalPtyProcessGroup(ptyPid, 'SIGTERM');
+      const forceKill = setTimeout(() => {
+        if (activeProcesses.has(runId)) {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        }
+        signalPtyProcessGroup(ptyPid, 'SIGKILL');
+      }, 10_000);
+      forceKill.unref?.();
+      continue;
+    }
+
+    // Crash/restart recovery: the new worker has no ChildProcess handle, so use
+    // durable engine/PTY PIDs, terminate both trees, and finalize authority here.
+    logger.warn({ jobId: job.id, runId, enginePid: run.pid, ptyPid }, '[worker] pipeline:cancel — recovering untracked process tree');
+    if (isProcessAlive(run.pid)) {
+      try { process.kill(run.pid!, 'SIGTERM'); } catch { /* already gone */ }
+    }
+    signalPtyProcessGroup(ptyPid, 'SIGTERM');
+    await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+    if (isProcessAlive(run.pid)) {
+      try { process.kill(run.pid!, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    if (isProcessAlive(ptyPid)) signalPtyProcessGroup(ptyPid, 'SIGKILL');
+
+    cancellingRuns.delete(runId);
+    await execute(
+      `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW()
+       WHERE id = $1 AND status IN ('running', 'paused')`,
+      [runId],
+    );
+    await execute(
+      `UPDATE run_pty_sessions
+       SET status = 'killed', exit_signal = COALESCE(exit_signal, 'SIGTERM'),
+           exited_at = COALESCE(exited_at, NOW()), updated_at = NOW()
+       WHERE run_id = $1 AND status = 'active'`,
+      [runId],
+    );
+    await emitWalEvent('run_cancelled', run.workspace_id, {
+      run_id: runId,
+      cancelledAt: new Date().toISOString(),
+      source: 'worker_crash_recovery',
+    });
   }
 }
 
@@ -2082,6 +2139,14 @@ function signalPtyProcessGroup(pid: number | null | undefined, signal: NodeJS.Si
     try { process.kill(-pid, signal); } catch { /* fall through to direct PID signal */ }
   }
   try { process.kill(pid, signal); } catch { /* already gone */ }
+}
+
+async function signalDurableRunPty(runId: number, signal: NodeJS.Signals): Promise<void> {
+  const session = await queryOne<{ child_pid: number | null; status: string }>(
+    'SELECT child_pid, status FROM run_pty_sessions WHERE run_id = $1',
+    [runId],
+  );
+  if (session?.status === 'active') signalPtyProcessGroup(session.child_pid, signal);
 }
 
 export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
@@ -2508,8 +2573,9 @@ async function shutdown(signal: string): Promise<void> {
   const activeRunIds = Array.from(activeProcesses.keys());
   if (activeRunIds.length > 0) {
     logger.info({ count: activeRunIds.length, runIds: activeRunIds }, '[worker] shutdown — sending SIGTERM to active child processes');
-    for (const [, child] of activeProcesses) {
+    for (const [runId, child] of activeProcesses) {
       try { child.kill('SIGTERM'); } catch { /* best-effort */ }
+      try { await signalDurableRunPty(runId, 'SIGTERM'); } catch { /* best-effort */ }
     }
   }
 
@@ -2526,8 +2592,9 @@ async function shutdown(signal: string): Promise<void> {
   if (activeProcesses.size > 0) {
     const remaining = Array.from(activeProcesses.keys());
     logger.warn({ remaining }, '[worker] shutdown — children did not exit in 15s, sending SIGKILL');
-    for (const [, child] of activeProcesses) {
+    for (const [runId, child] of activeProcesses) {
       try { child.kill('SIGKILL'); } catch { /* best-effort */ }
+      try { await signalDurableRunPty(runId, 'SIGKILL'); } catch { /* best-effort */ }
     }
     // Give SIGKILL a moment to land before we proceed
     await new Promise<void>((resolve) => setTimeout(resolve, 200));

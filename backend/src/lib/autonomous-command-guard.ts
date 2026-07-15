@@ -11,6 +11,13 @@ import * as path from 'path';
 
 const GUARD_DIR_PREFIX = 'rorca-autonomous-guard-';
 const LOCAL_DB_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+const AUTONOMOUS_SECRET_ENV_KEYS = new Set([
+  'DATABASE_URL', 'DATABASE_URL_TEST', 'TEST_DATABASE_URL',
+  'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE',
+  'JWT_SECRET', 'VAULT_KEY', 'SUPABASE_SERVICE_ROLE_KEY',
+  'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET',
+  'GITHUB_TOKEN', 'GH_TOKEN', 'RORCA_MCP_TOKEN', 'RORCA_MCP_ADMIN_TOKEN',
+]);
 
 export interface AutonomousCommandGuardOptions {
   cwd: string;
@@ -169,6 +176,12 @@ exec ${execTarget} "$@"
 `;
 }
 
+export function sanitizeAutonomousAgentEnv(env: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => !AUTONOMOUS_SECRET_ENV_KEYS.has(key)),
+  );
+}
+
 export function createAutonomousCommandGuard(options: AutonomousCommandGuardOptions): AutonomousCommandGuardResult {
   const guardBinDir = fs.mkdtempSync(path.join(os.tmpdir(), GUARD_DIR_PREFIX));
   const commands = ['npm', 'npx', 'jest', 'yarn', 'pnpm'];
@@ -178,16 +191,21 @@ export function createAutonomousCommandGuard(options: AutonomousCommandGuardOpti
   }
 
   const autonomousBackendJestEnv = deriveAutonomousBackendJestEnv(options.env);
+  const sanitizedEnv = sanitizeAutonomousAgentEnv(options.env);
 
   return {
     guardBinDir,
     env: {
-      ...options.env,
-      PATH: `${guardBinDir}${path.delimiter}${options.env.PATH ?? process.env.PATH ?? ''}`,
+      ...sanitizedEnv,
+      PATH: `${guardBinDir}${path.delimiter}${sanitizedEnv.PATH ?? process.env.PATH ?? ''}`,
       RORCA_AUTONOMOUS_COMMAND_GUARD: '1',
       RORCA_AUTONOMOUS_WORKSPACE_ROOT: fs.realpathSync(options.cwd),
       ...(autonomousBackendJestEnv
         ? {
+          // The only database credential exposed to an autonomous CLI is a
+          // guard-validated database whose name ends in _test.
+          DATABASE_URL: autonomousBackendJestEnv.databaseUrl,
+          DATABASE_URL_TEST: autonomousBackendJestEnv.databaseUrl,
           RORCA_AUTONOMOUS_BACKEND_JEST_DATABASE_URL: autonomousBackendJestEnv.databaseUrl,
           RORCA_AUTONOMOUS_BACKEND_JEST_PGHOST: autonomousBackendJestEnv.pgHost,
           RORCA_AUTONOMOUS_BACKEND_JEST_PGPORT: autonomousBackendJestEnv.pgPort,

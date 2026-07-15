@@ -36,7 +36,7 @@
  *   --attach <addr>         OpenCode server socket address (passed by pipeline.ts)
  */
 
-import { spawn, execSync, type ChildProcess } from 'child_process';
+import { spawn, execFileSync, execSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -80,7 +80,7 @@ import {
   recordRunPtyPromptReadiness,
   startRunPtySession,
 } from './run-pty-store';
-import { transitionRunLifecycle } from './run-lifecycle';
+import { attachRunPtyLifecycle, transitionRunLifecycle } from './run-lifecycle';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
@@ -2085,7 +2085,7 @@ export function buildPtyCommand(
       if (mcpServers && Object.keys(mcpServers).length > 0) {
         for (const [name, url] of Object.entries(mcpServers)) {
           try {
-            execSync(`${compatibility.binaryPath} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
+            execFileSync(compatibility.binaryPath!, ['mcp', 'add', name, '--url', url], { stdio: 'pipe' });
             codexMcpRegisteredNames.push(name);
           } catch { /* ignore registration failures in PTY mode */ }
         }
@@ -2103,7 +2103,7 @@ export function buildPtyCommand(
         prompt,
         cleanup: () => {
           for (const name of codexMcpRegisteredNames) {
-            try { execSync(`${compatibility.binaryPath} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
+            try { execFileSync(compatibility.binaryPath!, ['mcp', 'remove', name], { stdio: 'pipe' }); } catch { /* ignore */ }
           }
         },
       };
@@ -2377,10 +2377,11 @@ async function spawnAgentViaPty(
         childPid: pty.pid ?? null,
         completionMarker,
       });
-      const ptyAttached = await transitionRunLifecycle(ptyOptions.runId, 'pty_attached', {
+      const ptyAttached = await attachRunPtyLifecycle(ptyOptions.runId, {
         transport: 'pty_attached',
         process: 'spawned',
         agentType: ptyOptions.agentType,
+        storyId: storyIdForMarker,
       });
       if (!ptyAttached) {
         throw new Error('PTY_LIFECYCLE_ATTACH_REJECTED: refusing to inject a prompt without an authoritative PTY-attached phase');

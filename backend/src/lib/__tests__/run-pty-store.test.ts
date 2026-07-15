@@ -1,16 +1,26 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Regression coverage for PTY capture persistence/replay semantics.
  */
 
 import { execute, queryOne } from '../../db/index';
 import {
   appendRunPtyOutput,
+  claimPendingRunPtyInput,
   createRunPtyOutputBatcher,
   getRunPtySessionHealth,
   initializeRunPtySequence,
   listRunPtyChunks,
   markRunPtyCompletionMarkerSeen,
   recordRunPtyHeartbeat,
+  requestRunPtyInput,
+  requestRunPtyResize,
   startRunPtySession,
 } from '../run-pty-store';
 
@@ -95,6 +105,45 @@ describe('run-pty-store', () => {
     expect(Number(health?.total_output_bytes)).toBe(8);
     expect(Number(health?.dropped_output_bytes)).toBe(4);
     expect(health?.output_truncated_at).toBeTruthy();
+  });
+
+  it('bounds pending input, consumes it in order, and removes raw input after claim', async () => {
+    await startRunPtySession({
+      runId, workspaceId, cwd: process.cwd(), agentType: 'pi', cols: 120, rows: 36, childPid: null,
+    });
+    const chunk = Buffer.alloc(65_536, 'a');
+    await expect(requestRunPtyInput(runId, chunk)).resolves.toBe(true);
+    await expect(requestRunPtyInput(runId, chunk)).resolves.toBe(true);
+    await expect(requestRunPtyInput(runId, chunk)).resolves.toBe(true);
+    await expect(requestRunPtyInput(runId, chunk)).resolves.toBe(true);
+    await expect(requestRunPtyInput(runId, Buffer.from('overflow'))).resolves.toBe(false);
+
+    const claimed = await claimPendingRunPtyInput(runId, 100);
+    expect(claimed).toHaveLength(4);
+    const remaining = await queryOne<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM run_pty_input_requests WHERE run_id = $1', [runId],
+    );
+    expect(remaining?.count).toBe('0');
+  });
+
+  it('purges stale controls before a new sequential story attachment', async () => {
+    await startRunPtySession({
+      runId, workspaceId, cwd: process.cwd(), agentType: 'pi', cols: 120, rows: 36, childPid: null,
+    });
+    await requestRunPtyInput(runId, Buffer.from('old-story-input'));
+    await requestRunPtyResize(runId, 140, 40);
+
+    await startRunPtySession({
+      runId, workspaceId, cwd: process.cwd(), agentType: 'pi', cols: 100, rows: 30, childPid: null,
+    });
+
+    const controls = await queryOne<{ inputs: string; resizes: string }>(
+      `SELECT
+         (SELECT COUNT(*)::text FROM run_pty_input_requests WHERE run_id = $1) AS inputs,
+         (SELECT COUNT(*)::text FROM run_pty_resize_requests WHERE run_id = $1) AS resizes`,
+      [runId],
+    );
+    expect(controls).toEqual({ inputs: '0', resizes: '0' });
   });
 
   it('records completion markers as metadata, not pass state or terminal output chunks', async () => {

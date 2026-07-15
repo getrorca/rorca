@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Backend-owned pipeline run lifecycle.
  *
  * `pipeline_runs.status` remains a compatibility/result field. This module is
@@ -87,4 +94,28 @@ export async function transitionRunLifecycle(
     [runId, next, JSON.stringify(diagnostics), current],
   );
   return result.rowCount === 1;
+}
+
+/**
+ * Attach one sequential PTY story without moving a run-level lifecycle
+ * backwards between stories. The first story advances starting → pty_attached;
+ * later stories keep the already-authoritative running phase and only merge
+ * fresh diagnostics.
+ */
+export async function attachRunPtyLifecycle(
+  runId: number,
+  diagnostics: Record<string, unknown> = {},
+): Promise<boolean> {
+  const row = await queryOne<LifecycleRow>(
+    'SELECT lifecycle_status FROM pipeline_runs WHERE id = $1',
+    [runId],
+  );
+  if (!row) return false;
+  if (row.lifecycle_status === 'starting') {
+    return transitionRunLifecycle(runId, 'pty_attached', diagnostics);
+  }
+  if (row.lifecycle_status === 'pty_attached' || row.lifecycle_status === 'running') {
+    return transitionRunLifecycle(runId, row.lifecycle_status, diagnostics);
+  }
+  return false;
 }

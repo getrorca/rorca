@@ -52,12 +52,6 @@ interface CountRow {
   count: string;
 }
 
-interface ResizeAppliedRow {
-  cols: number;
-  rows: number;
-  applied_at: Date | null;
-}
-
 let app: Express;
 let authToken: string;
 let tmpDir = '';
@@ -535,15 +529,40 @@ describe('PTY resize forwarding and SSE attach/disconnect', () => {
     expect(res.body).toEqual({ ok: true, runId, cols: 132, rows: 43 });
 
     const claimed = await claimLatestRunPtyResize(runId);
-    const resizeRow = await db.queryOne<ResizeAppliedRow>(
-      'SELECT cols, rows, applied_at FROM run_pty_resize_requests WHERE run_id = $1 ORDER BY id DESC LIMIT 1',
+    expect(claimed).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
+    const remaining = await db.queryOne<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM run_pty_resize_requests WHERE run_id = $1',
       [runId],
     );
-    expect(resizeRow).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
-    if (claimed) {
-      expect(claimed).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
-    }
-    expect(claimed || resizeRow?.applied_at).toBeTruthy();
+    expect(remaining?.count).toBe('0');
+  });
+
+  test('rejects oversized dimensions and invalid UTF-8 input before mutation', async () => {
+    const runId = await seedRun('running', 'pty');
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
+       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
+      [runId, wsDir],
+    );
+
+    const resize = await request(app)
+      .post(`/api/pipeline/runs/${runId}/pty/resize`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ cols: 501, rows: 24 });
+    const input = await request(app)
+      .post(`/api/pipeline/runs/${runId}/input`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ dataBase64: Buffer.from([0xc3, 0x28]).toString('base64') });
+
+    expect(resize.status).toBe(400);
+    expect(input.status).toBe(400);
+    const controls = await db.queryOne<{ inputs: string; resizes: string }>(
+      `SELECT
+         (SELECT COUNT(*)::text FROM run_pty_input_requests WHERE run_id = $1) AS inputs,
+         (SELECT COUNT(*)::text FROM run_pty_resize_requests WHERE run_id = $1) AS resizes`,
+      [runId],
+    );
+    expect(controls).toEqual({ inputs: '0', resizes: '0' });
   });
 
   test('closing the SSE output attachment clears polling and stops further DB reads', async () => {

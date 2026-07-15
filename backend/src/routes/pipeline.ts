@@ -6,6 +6,7 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { isUtf8 } from 'buffer';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -46,7 +47,7 @@ import { logger } from '../lib/logger';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
-import { authRequired } from '../lib/auth-utils';
+import { authRequired, isSuperUser } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
@@ -191,8 +192,40 @@ function emitSemanticSteps(text: string, agent: string, res: Response): void {
   }
 }
 
-function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): void {
-  res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
+const RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS = 10_000;
+
+/**
+ * Respect Node's writable high-water mark. Durable cursors make it safe to end
+ * a stalled attachment and let EventSource replay, rather than buffering an
+ * unbounded transcript in the server process for a slow consumer.
+ */
+async function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): Promise<boolean> {
+  if (res.destroyed || res.writableEnded) return false;
+  const accepted = res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
+  if (accepted) return true;
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onClose);
+      resolve(result);
+    };
+    const onDrain = () => finish(true);
+    const onClose = () => finish(false);
+    const timer = setTimeout(() => {
+      finish(false);
+      if (!res.destroyed) res.destroy();
+    }, RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS);
+    timer.unref?.();
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onClose);
+  });
 }
 
 function readBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
@@ -215,6 +248,20 @@ const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
 const RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS = Math.max(1_000, RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 5);
 const RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS = readBoundedIntegerEnv('RORCA_OUTPUT_REPLAY_MAX_CHUNKS', 2_048, 100, 25_000);
 const RUN_OUTPUT_REPLAY_BATCH_CHUNKS = getRunPtyOutputLimits().replayBatchChunks;
+const MAX_PTY_COLS = 500;
+const MAX_PTY_ROWS = 200;
+const MAX_PTY_INPUT_CHUNK_BYTES = 65_536;
+
+async function assertPipelineWorkspaceAccess(req: Request, workspaceId: string): Promise<void> {
+  const user = req.user;
+  if (!user) throw new ForbiddenError('Authentication required');
+  if (isSuperUser(user)) return;
+  const membership = await queryOne<{ role: string }>(
+    'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_auth_id = $2',
+    [workspaceId, user.supabaseId],
+  );
+  if (!membership) throw new ForbiddenError('Run does not belong to an accessible workspace');
+}
 
 function parseOutputResumeCursor(value: string, source: 'afterSequence' | 'Last-Event-ID'): number {
   if (!/^(0|[1-9]\d*)$/.test(value)) {
@@ -4303,6 +4350,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     const { status } = run;
 
     // Already done — conflict
@@ -4362,11 +4410,14 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     // Deliver cancel job to the worker for SIGTERM/SIGKILL sequencing.
     await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
 
-    // Best-effort: if the PID is already dead (worker crashed, process exited),
-    // mark the run cancelled immediately rather than waiting for the worker.
+    // If both the engine and its independently tracked PTY process are gone,
+    // finalize inline. A dead wrapper PID alone is not enough: the forkpty child
+    // may still be alive and must remain visible to the worker cancellation job.
+    const ptyHealth = await getRunPtySessionHealth(runId);
     const pidAlive = run.pid ? isPidAlive(run.pid) : false;
+    const ptyPidAlive = ptyHealth?.status === 'active' && isPtyPidAlive(ptyHealth.child_pid);
 
-    if (!pidAlive) {
+    if (!pidAlive && !ptyPidAlive) {
       // Process is already gone — handle cancellation inline
       await execute(
         `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,
@@ -4382,15 +4433,8 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
-    // PID is alive — send SIGTERM directly as a best-effort fallback alongside the worker job
-    if (run.pid) {
-      try {
-        process.kill(run.pid, 'SIGTERM');
-      } catch {
-        // ESRCH (already dead) or EPERM (no permission) — ignore, worker will handle it
-      }
-    }
-
+    // The worker owns process-tree termination. Do not race it with a direct
+    // PID signal here: a stale/recycled PID must not be targeted by the API.
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
     // AppError subclasses are caught and serialized by the centralized error handler
@@ -4436,6 +4480,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     if (run.status !== 'queued') {
       throw new ConflictError(`Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE`);
       return;
@@ -4489,8 +4534,8 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *             type: object
  *             required: [cols, rows]
  *             properties:
- *               cols: { type: integer, minimum: 1 }
- *               rows: { type: integer, minimum: 1 }
+ *               cols: { type: integer, minimum: 1, maximum: 500 }
+ *               rows: { type: integer, minimum: 1, maximum: 200 }
  *     responses:
  *       200: { description: PTY resize request recorded }
  */
@@ -4501,18 +4546,20 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     const rows = parseInt(String(req.body?.rows), 10);
 
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
-    if (!Number.isInteger(cols) || cols <= 0 || !Number.isInteger(rows) || rows <= 0) {
-      throw new ValidationError('cols and rows must be positive integers');
+    if (!Number.isInteger(cols) || cols <= 0 || cols > MAX_PTY_COLS
+      || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
+      throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
     }
     if (!PTY_AVAILABLE) {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
 
-    const run = await queryOne<{ terminal_mode: string | null; status: string }>(
-      'SELECT terminal_mode, status FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ terminal_mode: string | null; status: string; workspace_id: string }>(
+      'SELECT terminal_mode, status, workspace_id FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!run) throw new NotFoundError('Run not found');
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
@@ -4592,15 +4639,19 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
     if (input.length === 0) {
       throw new ValidationError('PTY input chunk cannot be empty');
     }
-    if (input.length > 65_536) {
+    if (input.length > MAX_PTY_INPUT_CHUNK_BYTES) {
       throw new ValidationError('PTY input chunk is too large');
     }
+    if (!isUtf8(input)) {
+      throw new ValidationError('dataBase64 must decode to valid UTF-8 terminal input');
+    }
 
-    const run = await queryOne<{ terminal_mode: string | null; status: string }>(
-      'SELECT terminal_mode, status FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ terminal_mode: string | null; status: string; workspace_id: string }>(
+      'SELECT terminal_mode, status, workspace_id FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!run) throw new NotFoundError('Run not found');
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
@@ -4613,7 +4664,10 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ConflictError('Run PTY session is not active');
     }
 
-    await requestRunPtyInput(runId, input);
+    const accepted = await requestRunPtyInput(runId, input);
+    if (!accepted) {
+      throw new ConflictError('PTY input queue is full or the session is no longer active');
+    }
     res.json({ ok: true, runId, bytes: input.length });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] PTY input');
@@ -4673,6 +4727,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   ) as { workspace_id: string; agent_type: string; agent: string; agent_model: string | null; status: string; lifecycle_status: string | null; terminal_mode: string | null } | undefined;
   if (!runRow) throw new NotFoundError('Run not found');
 
+  await assertPipelineWorkspaceAccess(req, runRow.workspace_id);
   const wsId = req.query.workspaceId as string | undefined;
   if (wsId && String(runRow.workspace_id) !== wsId) {
     throw new ForbiddenError('Run does not belong to this workspace');
@@ -4708,7 +4763,9 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   res.write('retry: 1000\n\n');
   res.write(': connected\n\n');
 
-  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
+  const hb = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write(': hb\n\n');
+  }, 15_000);
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
   let unsubscribeOutputWakeup: (() => void) | null = null;
@@ -4825,7 +4882,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      writeOutputChunkEvent(res, row.sequence, chunkBuf);
+      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+        cleanupOutputStream();
+        return;
+      }
       lastSequence = row.sequence;
     }
   } else {
@@ -4849,7 +4909,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      writeOutputChunkEvent(res, row.sequence, chunkBuf);
+      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+        cleanupOutputStream();
+        return;
+      }
       emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
       lastSequence = row.sequence;
     }
@@ -4884,7 +4947,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          writeOutputChunkEvent(res, row.sequence, chunkBuf);
+          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+            cleanupOutputStream();
+            return;
+          }
           lastSequence = row.sequence;
         }
       } else {
@@ -4896,7 +4962,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          writeOutputChunkEvent(res, row.sequence, chunkBuf);
+          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+            cleanupOutputStream();
+            return;
+          }
           emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
           lastSequence = row.sequence;
         }
@@ -4966,7 +5035,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         }
         for (const row of fallbackChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          writeOutputChunkEvent(res, row.sequence, chunkBuf);
+          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+            cleanupOutputStream();
+            return;
+          }
           emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
         }
       }
