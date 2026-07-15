@@ -545,3 +545,930 @@ export function redactObject(value, options = {}) {
     const redactedValue = walk(value);
     return { value: redactedValue, findings, redactionCount: findings.length };
 }
+// ════════════════════════════════════════════════════════════════════════════
+// 6. TASK-MANIFEST CONTEXT SAFETY (bounded manifest/prompt response helpers)
+// ════════════════════════════════════════════════════════════════════════════
+export const CONTEXT_SAFETY_LIMITS = {
+    maxStringChars: 4_000,
+    maxArrayItems: 100,
+    maxSerializedBytes: 64 * 1024,
+    maxRawTextChars: 8_000,
+    maxRawLineCount: 120,
+};
+const HIGH_ENTROPY_TOKEN_PATTERN = /[A-Za-z0-9._~+=-]{20,}/g;
+const UUID_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function shannonEntropy(value) {
+    const counts = new Map();
+    for (const char of value) {
+        counts.set(char, (counts.get(char) ?? 0) + 1);
+    }
+    return [...counts.values()].reduce((entropy, count) => {
+        const probability = count / value.length;
+        return entropy - probability * Math.log2(probability);
+    }, 0);
+}
+function characterClassCount(value) {
+    return [
+        /[a-z]/.test(value),
+        /[A-Z]/.test(value),
+        /\d/.test(value),
+        /[^A-Za-z0-9]/.test(value),
+    ].filter(Boolean).length;
+}
+function isHighEntropySecretToken(candidate) {
+    if (candidate.length < 20)
+        return false;
+    if (UUID_TOKEN_PATTERN.test(candidate))
+        return false;
+    if (/^[a-f0-9]{32,}$/i.test(candidate))
+        return false;
+    if (!/[A-Z]/.test(candidate) || !/[a-z]/.test(candidate) || !/\d/.test(candidate))
+        return false;
+    if (characterClassCount(candidate) < 3)
+        return false;
+    return shannonEntropy(candidate) >= 4;
+}
+function findHighEntropySecretToken(value) {
+    HIGH_ENTROPY_TOKEN_PATTERN.lastIndex = 0;
+    let match;
+    while ((match = HIGH_ENTROPY_TOKEN_PATTERN.exec(value)) !== null) {
+        if (isHighEntropySecretToken(match[0])) {
+            return match[0];
+        }
+    }
+    return null;
+}
+function withDefaultContextSafetyOptions(options = {}) {
+    return {
+        maxStringChars: options.maxStringChars ?? CONTEXT_SAFETY_LIMITS.maxStringChars,
+        maxArrayItems: options.maxArrayItems ?? CONTEXT_SAFETY_LIMITS.maxArrayItems,
+        maxSerializedBytes: options.maxSerializedBytes ?? CONTEXT_SAFETY_LIMITS.maxSerializedBytes,
+        maxRawTextChars: options.maxRawTextChars ?? CONTEXT_SAFETY_LIMITS.maxRawTextChars,
+        maxRawLineCount: options.maxRawLineCount ?? CONTEXT_SAFETY_LIMITS.maxRawLineCount,
+    };
+}
+function serializedBytes(value) {
+    try {
+        return Buffer.byteLength(JSON.stringify(value), 'utf8');
+    }
+    catch {
+        return Number.POSITIVE_INFINITY;
+    }
+}
+export function detectSecretLikeString(value) {
+    const redacted = redactSecrets(value);
+    if (redacted.redactionCount > 0) {
+        return Object.keys(redacted.byType)[0] ?? 'secret';
+    }
+    if (findHighEntropySecretToken(value)) {
+        return 'high entropy token';
+    }
+    return null;
+}
+export function redactSecretLikeStrings(value) {
+    const redacted = redactSecrets(value).redacted;
+    HIGH_ENTROPY_TOKEN_PATTERN.lastIndex = 0;
+    return redacted.replace(HIGH_ENTROPY_TOKEN_PATTERN, (candidate) => (isHighEntropySecretToken(candidate) ? '[REDACTED:high entropy token]' : candidate));
+}
+export function looksLikeRawPromptBundle(value) {
+    const markers = [
+        /^\s*system prompt\s*:/im,
+        /^\s*developer prompt\s*:/im,
+        /^\s*user prompt\s*:/im,
+        /^\s*assistant prompt\s*:/im,
+        /<{1,2}\s*system\s*>/i,
+        /<{1,2}\s*developer\s*>/i,
+        /BEGIN (?:RAW )?PROMPT/i,
+        /RORCA DIRECTION STACK/i,
+    ];
+    const markerCount = markers.reduce((count, marker) => count + (marker.test(value) ? 1 : 0), 0);
+    return markerCount >= 2 || (markerCount === 1 && value.length > 1_500);
+}
+export function looksLikeRawLogBundle(value, options = withDefaultContextSafetyOptions()) {
+    const lines = value.split(/\r?\n/);
+    if (lines.length <= 8 && value.length <= options.maxRawTextChars) {
+        return false;
+    }
+    const logishLines = lines.filter((line) => (/^\d{4}-\d{2}-\d{2}[T\s]/.test(line)
+        || /\b(?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\b/.test(line)
+        || /^\s+at\s+\S+/.test(line)
+        || /^npm ERR!/i.test(line)
+        || /^Traceback \(most recent call last\):/.test(line))).length;
+    return lines.length > options.maxRawLineCount
+        || (value.length > options.maxRawTextChars && logishLines >= 3)
+        || (lines.length > 40 && logishLines >= 10);
+}
+export function getUnsafePathReason(candidate) {
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+        return 'path cannot be empty';
+    }
+    if (trimmed.includes('\0')) {
+        return 'path contains a NUL byte';
+    }
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(trimmed)) {
+        return 'path must be workspace-relative, not a URL';
+    }
+    if (trimmed.startsWith('~')) {
+        return 'path must not use home-directory expansion';
+    }
+    if (path.isAbsolute(trimmed) || path.posix.isAbsolute(trimmed) || path.win32.isAbsolute(trimmed)) {
+        return 'path must be workspace-relative, not absolute';
+    }
+    if (/^[A-Za-z]:/.test(trimmed)) {
+        return 'path must not use a Windows drive prefix';
+    }
+    const normalized = trimmed.replace(/\\/g, '/');
+    const segments = normalized.split('/').filter(Boolean);
+    if (segments.some((segment) => segment === '..')) {
+        return 'path must not traverse outside the workspace';
+    }
+    return null;
+}
+export function isSafeRelativePath(candidate) {
+    return getUnsafePathReason(candidate) === null;
+}
+export function checkStringSafety(value, issuePath = [], options = {}) {
+    const opts = withDefaultContextSafetyOptions(options);
+    const issues = [];
+    if (value.length > opts.maxStringChars) {
+        issues.push({
+            code: 'oversized-string',
+            path: issuePath,
+            message: `String exceeds ${opts.maxStringChars} characters`,
+        });
+    }
+    const secretLabel = detectSecretLikeString(value);
+    if (secretLabel) {
+        issues.push({
+            code: 'secret-like-string',
+            path: issuePath,
+            message: `Secret-like value detected (${secretLabel}); pass a reference instead of raw credentials`,
+        });
+    }
+    if (looksLikeRawPromptBundle(value)) {
+        issues.push({
+            code: 'raw-prompt-bundle',
+            path: issuePath,
+            message: 'Raw prompt bundles are not accepted in task manifests; pass a bounded artifact reference instead',
+        });
+    }
+    if (looksLikeRawLogBundle(value, opts)) {
+        issues.push({
+            code: 'raw-log-bundle',
+            path: issuePath,
+            message: 'Raw oversized logs are not accepted in task manifests; pass a bounded artifact reference instead',
+        });
+    }
+    return issues;
+}
+function collectIssues(value, issuePath, options, issues) {
+    if (typeof value === 'string') {
+        issues.push(...checkStringSafety(value, issuePath, options));
+        return;
+    }
+    if (Array.isArray(value)) {
+        if (value.length > options.maxArrayItems) {
+            issues.push({
+                code: 'oversized-array',
+                path: issuePath,
+                message: `Array exceeds ${options.maxArrayItems} items`,
+            });
+        }
+        value.forEach((item, index) => collectIssues(item, [...issuePath, index], options, issues));
+        return;
+    }
+    if (value && typeof value === 'object') {
+        Object.entries(value).forEach(([key, nested]) => {
+            collectIssues(nested, [...issuePath, key], options, issues);
+        });
+    }
+}
+export function collectContextSafetyIssues(value, options = {}) {
+    const opts = withDefaultContextSafetyOptions(options);
+    const issues = [];
+    const byteLength = serializedBytes(value);
+    if (byteLength > opts.maxSerializedBytes) {
+        issues.push({
+            code: 'oversized-payload',
+            path: [],
+            message: `Payload exceeds ${opts.maxSerializedBytes} serialized bytes`,
+        });
+    }
+    collectIssues(value, [], opts, issues);
+    return issues;
+}
+export const CONTEXT_RESPONSE_LIMITS = {
+    maxStringChars: 1_000,
+    maxPathChars: 512,
+    maxArrayItems: 25,
+    maxObjectKeys: 40,
+    maxDepth: 6,
+};
+function contextResponseOptions(options = {}) {
+    const base = withDefaultContextSafetyOptions({
+        ...options,
+        maxStringChars: options.maxStringChars ?? CONTEXT_RESPONSE_LIMITS.maxStringChars,
+        maxArrayItems: options.maxArrayItems ?? CONTEXT_RESPONSE_LIMITS.maxArrayItems,
+    });
+    return {
+        ...base,
+        maxPathChars: options.maxPathChars ?? CONTEXT_RESPONSE_LIMITS.maxPathChars,
+        maxObjectKeys: options.maxObjectKeys ?? CONTEXT_RESPONSE_LIMITS.maxObjectKeys,
+        maxDepth: options.maxDepth ?? CONTEXT_RESPONSE_LIMITS.maxDepth,
+    };
+}
+export function contextSafeString(value, options = {}) {
+    const opts = contextResponseOptions(options);
+    const input = String(value ?? '');
+    const redactedValue = redactSecretLikeStrings(input).replace(/\r\n/g, '\n');
+    const truncated = redactedValue.length > opts.maxStringChars;
+    const valueOut = truncated
+        ? `${redactedValue.slice(0, opts.maxStringChars)}… [truncated ${redactedValue.length - opts.maxStringChars} chars]`
+        : redactedValue;
+    return {
+        value: valueOut,
+        truncated,
+        redacted: redactedValue !== input,
+    };
+}
+export function contextSafeRelativePath(value, options = {}) {
+    if (typeof value !== 'string')
+        return null;
+    const opts = contextResponseOptions(options);
+    const safe = contextSafeString(value, { ...opts, maxStringChars: opts.maxPathChars });
+    return isSafeRelativePath(safe.value) ? safe : null;
+}
+export function contextSafeRelativePathList(values, options = {}) {
+    const opts = contextResponseOptions(options);
+    const input = Array.isArray(values) ? values : [];
+    const items = [];
+    let omittedUnsafe = 0;
+    let redacted = false;
+    let truncated = input.length > opts.maxArrayItems;
+    for (const candidate of input.slice(0, opts.maxArrayItems)) {
+        const safe = contextSafeRelativePath(candidate, opts);
+        if (!safe) {
+            omittedUnsafe += 1;
+            continue;
+        }
+        items.push(safe.value);
+        redacted = redacted || safe.redacted;
+        truncated = truncated || safe.truncated;
+    }
+    return {
+        items,
+        omittedUnsafe,
+        omittedOverflow: Math.max(0, input.length - opts.maxArrayItems),
+        truncated,
+        redacted,
+    };
+}
+export function sanitizeContextResponseValue(value, options = {}, depth = 0) {
+    const opts = contextResponseOptions(options);
+    if (value === null || value === undefined)
+        return value ?? null;
+    if (typeof value === 'string')
+        return contextSafeString(value, opts).value;
+    if (typeof value === 'number' || typeof value === 'boolean')
+        return value;
+    if (typeof value === 'bigint')
+        return value.toString();
+    if (typeof value !== 'object')
+        return contextSafeString(String(value), opts).value;
+    if (depth >= opts.maxDepth) {
+        return `[TRUNCATED:max depth ${opts.maxDepth}]`;
+    }
+    if (Array.isArray(value)) {
+        const items = value.slice(0, opts.maxArrayItems).map((item) => sanitizeContextResponseValue(item, opts, depth + 1));
+        if (value.length > opts.maxArrayItems) {
+            items.push(`[TRUNCATED:${value.length - opts.maxArrayItems} additional items]`);
+        }
+        return items;
+    }
+    const entries = Object.entries(value);
+    const output = {};
+    for (const [key, nested] of entries.slice(0, opts.maxObjectKeys)) {
+        output[key] = sanitizeContextResponseValue(nested, opts, depth + 1);
+    }
+    if (entries.length > opts.maxObjectKeys) {
+        output._truncatedKeys = entries.length - opts.maxObjectKeys;
+    }
+    return output;
+}
+// ─── Compatibility exports for context-capture sidecar APIs ─────────────────
+export const CONTEXT_SAFETY_CONTRACT_VERSION = 'rorca-context-safety/v1';
+export const DEFAULT_CONTEXT_MAX_FILE_BYTES = 256 * 1024;
+export const DEFAULT_CONTEXT_MAX_EVENT_BYTES = 1024 * 1024;
+export const DEFAULT_CONTEXT_IGNORE_FILE_NAME = '.rorca-captureignore';
+export const DEFAULT_CONTEXT_IGNORE_PATHS = [
+    '.git/**',
+    '.hg/**',
+    '.svn/**',
+    'node_modules/**',
+    'dist/**',
+    'build/**',
+    'coverage/**',
+    '.next/**',
+    '.nuxt/**',
+    '.turbo/**',
+    '.cache/**',
+    '.rorca/capture-queue.ndjson',
+    '.rorca/capture-queue/**',
+    '.rorca-capture-queue.jsonl',
+    '.rorca-capture-queue.jsonl.tmp',
+    '*.pem',
+    '*.key',
+    '*.p12',
+    '*.pfx',
+    '.env',
+    '.env.*',
+];
+export const DEFAULT_CONTEXT_REDACTION_PATTERNS = [
+    {
+        name: 'bearer-token',
+        pattern: '\\bBearer\\s+[A-Za-z0-9._~+\\/-]+=*',
+        replacement: 'Bearer [REDACTED]',
+    },
+    {
+        name: 'api-key-assignment',
+        pattern: "\\b[A-Z0-9_]*(?:API|TOKEN|SECRET|PASSWORD|KEY)[A-Z0-9_]*\\s*=\\s*[\"\\']?[^\"\\'\\s]+",
+        replacement: '[REDACTED_SECRET_ASSIGNMENT]',
+    },
+    {
+        name: 'cli-secret-argument',
+        pattern: "--?(?:api[-_]?key|token|secret|password|key)\\s+(?:=\\s*)?[\"\\']?[^\"\\'\\s]+",
+        replacement: '[REDACTED_SECRET_ARGUMENT]',
+    },
+    {
+        name: 'github-token',
+        pattern: '\\bgh[pousr]_[A-Za-z0-9_]{20,}\\b',
+        replacement: '[REDACTED_GITHUB_TOKEN]',
+    },
+    {
+        name: 'openai-secret-key',
+        pattern: '\\bsk-[A-Za-z0-9_-]{20,}\\b',
+        replacement: 'sk-[REDACTED]',
+    },
+    {
+        name: 'database-url',
+        pattern: "\\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis)://[^\\s'\"<>]+",
+        replacement: '[REDACTED_DATABASE_URL]',
+    },
+    {
+        name: 'aws-access-key-id',
+        pattern: '\\bAKIA[0-9A-Z]{16}\\b',
+        replacement: '[REDACTED_AWS_ACCESS_KEY]',
+    },
+    {
+        name: 'jwt-token',
+        pattern: '\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b',
+        replacement: '[REDACTED_JWT]',
+    },
+    {
+        name: 'private-key-block',
+        pattern: '-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----',
+        replacement: '[REDACTED_PRIVATE_KEY]',
+    },
+];
+export const DEFAULT_CONTEXT_REGULATED_DOMAIN_PATTERNS = [
+    {
+        name: 'hipaa-phi',
+        pattern: '\\b(?:HIPAA|PHI|patient(?:\\s+(?:data|record|records|health))?|diagnosis|medical\\s+record|healthcare)\\b',
+    },
+    {
+        name: 'pci-cardholder-data',
+        pattern: '\\b(?:PCI(?:[-\\s]?DSS)?|cardholder\\s+data|credit\\s+card|payment\\s+card|primary\\s+account\\s+number|PAN)\\b',
+    },
+    {
+        name: 'privacy-pii',
+        pattern: '\\b(?:GDPR|PII|personally\\s+identifiable|SSN|social\\s+security\\s+number|data\\s+subject)\\b',
+    },
+    {
+        name: 'financial-regulatory',
+        pattern: '\\b(?:SOX|FINRA|GLBA|FedRAMP|ITAR|EAR|export\\s+controlled)\\b',
+    },
+];
+export function normalizeContextPath(input) {
+    return input.split(path.sep).join('/').replace(/^\.\//, '');
+}
+export function safeNormalizeWorkspaceRelativePath(workspacePath, inputPath) {
+    const rawWorkspaceRoot = path.resolve(workspacePath);
+    const workspaceRoot = resolveContextPathForComparison(rawWorkspaceRoot);
+    const rawAbsolutePath = path.isAbsolute(inputPath)
+        ? path.resolve(inputPath)
+        : path.resolve(rawWorkspaceRoot, inputPath);
+    const absolutePath = resolveWorkspaceComparablePath(rawWorkspaceRoot, workspaceRoot, rawAbsolutePath);
+    const relativePath = path.relative(workspaceRoot, absolutePath);
+    if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
+        throw new Error(`Path escapes workspace: ${inputPath}`);
+    }
+    return normalizeContextPath(relativePath);
+}
+export function normalizeContextIgnoreSettings(settings = {}) {
+    return {
+        paths: [...DEFAULT_CONTEXT_IGNORE_PATHS, ...contextUserIgnorePaths(settings)],
+        maxFileBytes: positiveNumberOrDefault(settings.maxFileBytes, DEFAULT_CONTEXT_MAX_FILE_BYTES),
+        maxEventBytes: positiveNumberOrDefault(settings.maxEventBytes, DEFAULT_CONTEXT_MAX_EVENT_BYTES),
+    };
+}
+export function normalizeContextRedactionSettings(settings = {}) {
+    const customPatterns = contextUserRedactionPatterns(settings).map((item, index) => {
+        if (typeof item === 'string') {
+            return { name: `custom-${index + 1}`, pattern: item, replacement: settings.replacement };
+        }
+        return item;
+    });
+    return {
+        enabled: settings.enabled ?? true,
+        patterns: [...DEFAULT_CONTEXT_REDACTION_PATTERNS, ...customPatterns],
+        replacement: settings.replacement ?? '[REDACTED]',
+    };
+}
+export function shouldCapturePath(relativePath, settings = {}) {
+    return !isContextPathIgnored(relativePath, settings);
+}
+export function isContextPathIgnored(relativePath, settings = {}) {
+    const normalized = normalizeContextPath(relativePath);
+    for (const rawPattern of DEFAULT_CONTEXT_IGNORE_PATHS) {
+        const prepared = prepareIgnorePattern(rawPattern);
+        if (prepared && globMatches(normalized, prepared.pattern)) {
+            return true;
+        }
+    }
+    let ignored = false;
+    for (const rawPattern of contextUserIgnorePaths(settings)) {
+        const prepared = prepareIgnorePattern(rawPattern);
+        if (!prepared)
+            continue;
+        if (globMatches(normalized, prepared.pattern)) {
+            ignored = !prepared.negated;
+        }
+    }
+    return ignored;
+}
+export function enforceContextSizeLimit(byteLength, settings = {}, limit = 'file') {
+    const ignore = normalizeContextIgnoreSettings(settings);
+    const maxBytes = limit === 'file' ? ignore.maxFileBytes : ignore.maxEventBytes;
+    return byteLength <= maxBytes;
+}
+export function hashContextContent(input) {
+    return createHash('sha256').update(input).digest('hex');
+}
+export function redactContextText(text, settings = {}) {
+    const redaction = normalizeContextRedactionSettings(settings);
+    if (!redaction.enabled)
+        return text;
+    return redaction.patterns.reduce((current, pattern) => {
+        try {
+            return current.replace(new RegExp(pattern.pattern, 'gi'), pattern.replacement ?? redaction.replacement);
+        }
+        catch {
+            return current;
+        }
+    }, text);
+}
+export function redactContextPayload(value, settings = {}, options = {}) {
+    if (typeof value === 'string') {
+        return redactContextText(redactAbsoluteContextPaths(value, options), settings);
+    }
+    if (Array.isArray(value)) {
+        return value.map((item) => redactContextPayload(item, settings, options));
+    }
+    if (value && typeof value === 'object') {
+        const record = value;
+        return Object.fromEntries(Object.keys(record).sort().map((key) => [key, redactContextPayload(record[key], settings, options)]));
+    }
+    return value;
+}
+export function redactAbsoluteContextPaths(text, options = {}) {
+    const pathReplacement = options.pathReplacement ?? '[REDACTED_PATH]';
+    const workspacePathReplacement = options.workspacePathReplacement ?? '[WORKSPACE]';
+    const repoPath = options.repoPath ? path.resolve(options.repoPath) : undefined;
+    let redacted = text;
+    if (repoPath) {
+        const repoVariants = [...new Set([repoPath, normalizeContextPath(repoPath)])];
+        for (const variant of repoVariants) {
+            redacted = redacted.replace(new RegExp(escapeRegex(variant), 'g'), workspacePathReplacement);
+        }
+    }
+    return redacted
+        .replace(/(^|[\s"'([{,:])((?:\/(?:Users|home|tmp|var|private|Volumes|opt|srv|etc|mnt|workspace|workspaces)[^\s"'<>()[\]{},;]*)|(?:[A-Za-z]:\\[^\s"'<>()[\]{},;]+))/g, `$1${pathReplacement}`);
+}
+export function parseContextIgnoreFile(text) {
+    return text
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith('#'));
+}
+export function loadContextCaptureIgnoreFile(repoPath, fileName = DEFAULT_CONTEXT_IGNORE_FILE_NAME) {
+    const filePath = path.join(path.resolve(repoPath), fileName);
+    if (!fs.existsSync(filePath))
+        return null;
+    return {
+        path: filePath,
+        patterns: parseContextIgnoreFile(fs.readFileSync(filePath, 'utf8')),
+    };
+}
+export function analyzeContextSafety(value, redactionSettings = {}) {
+    const text = collectContextText(value);
+    const findings = [];
+    for (const pattern of normalizeContextRedactionSettings(redactionSettings).patterns) {
+        if (patternMatches(text, pattern.pattern)) {
+            findings.push({ category: 'secret', name: pattern.name });
+        }
+    }
+    for (const pattern of DEFAULT_CONTEXT_REGULATED_DOMAIN_PATTERNS) {
+        if (patternMatches(text, pattern.pattern)) {
+            findings.push({ category: 'regulated-domain', name: pattern.name });
+        }
+    }
+    const uniqueFindings = uniqueSafetyFindings(findings);
+    const securitySensitive = uniqueFindings.some((finding) => finding.category === 'secret');
+    const regulatedDomain = uniqueFindings.some((finding) => finding.category === 'regulated-domain');
+    return {
+        securitySensitive,
+        regulatedDomain,
+        requiresReview: regulatedDomain,
+        findings: uniqueFindings,
+    };
+}
+function contextUserIgnorePaths(settings) {
+    let paths = [...(settings.paths ?? [])];
+    while (startsWithDefaultIgnorePaths(paths)) {
+        paths = paths.slice(DEFAULT_CONTEXT_IGNORE_PATHS.length);
+    }
+    return paths;
+}
+function contextUserRedactionPatterns(settings) {
+    let patterns = [...(settings.patterns ?? [])];
+    while (startsWithDefaultRedactionPatterns(patterns)) {
+        patterns = patterns.slice(DEFAULT_CONTEXT_REDACTION_PATTERNS.length);
+    }
+    return patterns;
+}
+function startsWithDefaultIgnorePaths(paths) {
+    if (paths.length < DEFAULT_CONTEXT_IGNORE_PATHS.length)
+        return false;
+    return DEFAULT_CONTEXT_IGNORE_PATHS.every((pattern, index) => paths[index] === pattern);
+}
+function startsWithDefaultRedactionPatterns(patterns) {
+    if (patterns.length < DEFAULT_CONTEXT_REDACTION_PATTERNS.length)
+        return false;
+    return DEFAULT_CONTEXT_REDACTION_PATTERNS.every((pattern, index) => {
+        const current = patterns[index];
+        return typeof current !== 'string' && current.name === pattern.name && current.pattern === pattern.pattern;
+    });
+}
+function patternMatches(text, pattern) {
+    if (!text)
+        return false;
+    try {
+        return new RegExp(pattern, 'i').test(text);
+    }
+    catch {
+        return false;
+    }
+}
+function uniqueSafetyFindings(findings) {
+    const seen = new Set();
+    return findings.filter((finding) => {
+        const key = `${finding.category}:${finding.name}`;
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
+}
+function collectContextText(value, seen = new WeakSet()) {
+    if (value == null)
+        return '';
+    if (typeof value === 'string')
+        return value;
+    if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint')
+        return String(value);
+    if (Array.isArray(value))
+        return value.map((item) => collectContextText(item, seen)).join('\n');
+    if (typeof value === 'object') {
+        if (seen.has(value))
+            return '';
+        seen.add(value);
+        const record = value;
+        return Object.keys(record).sort().map((key) => `${key}\n${collectContextText(record[key], seen)}`).join('\n');
+    }
+    return '';
+}
+function positiveNumberOrDefault(value, fallback) {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+function resolveContextPathForComparison(inputPath) {
+    const resolved = path.resolve(inputPath);
+    try {
+        return fs.realpathSync.native(resolved);
+    }
+    catch {
+        return resolved;
+    }
+}
+function resolveWorkspaceComparablePath(rawWorkspaceRoot, workspaceRoot, rawAbsolutePath) {
+    const relativeToRawRoot = path.relative(rawWorkspaceRoot, rawAbsolutePath);
+    if (relativeToRawRoot === '')
+        return workspaceRoot;
+    if (!relativeToRawRoot.startsWith(`..${path.sep}`) && relativeToRawRoot !== '..' && !path.isAbsolute(relativeToRawRoot)) {
+        return path.resolve(workspaceRoot, relativeToRawRoot);
+    }
+    return resolveContextPathForComparison(rawAbsolutePath);
+}
+function escapeRegex(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function prepareIgnorePattern(rawPattern) {
+    let pattern = normalizeContextPath(rawPattern.trim());
+    if (!pattern || pattern.startsWith('#'))
+        return null;
+    const negated = pattern.startsWith('!');
+    if (negated)
+        pattern = pattern.slice(1);
+    pattern = pattern.replace(/^\//, '');
+    if (!pattern || pattern.startsWith('#'))
+        return null;
+    if (pattern.endsWith('/'))
+        pattern = `${pattern}**`;
+    return { pattern, negated };
+}
+function globMatches(value, pattern) {
+    if (pattern === value)
+        return true;
+    if (!pattern.includes('/')) {
+        return value.split('/').some((segment) => globMatchesAnchored(segment, pattern));
+    }
+    if (globMatchesAnchored(value, pattern))
+        return true;
+    return !pattern.startsWith('**/') && globMatchesAnchored(value, `**/${pattern}`);
+}
+function globMatchesAnchored(value, pattern) {
+    if (pattern === value)
+        return true;
+    if (pattern.endsWith('/**')) {
+        const prefix = pattern.slice(0, -3);
+        if (!prefix.includes('*')) {
+            return value === prefix.slice(0, -1) || value.startsWith(prefix);
+        }
+    }
+    const regex = new RegExp(`^${globToRegexSource(pattern)}$`);
+    return regex.test(value);
+}
+function globToRegexSource(pattern) {
+    let source = '';
+    for (let index = 0; index < pattern.length; index += 1) {
+        const char = pattern[index];
+        const next = pattern[index + 1];
+        const afterNext = pattern[index + 2];
+        if (char === '*' && next === '*' && afterNext === '/') {
+            source += '(?:.*/)?';
+            index += 2;
+        }
+        else if (char === '*' && next === '*') {
+            source += '.*';
+            index += 1;
+        }
+        else if (char === '*') {
+            source += '[^/]*';
+        }
+        else {
+            source += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+        }
+    }
+    return source;
+}
+export const CANONICAL_CAPTURE_POLICY_MODES = [
+    'off',
+    'metadata-only',
+    'repo-and-command',
+    'ide-assisted',
+    'full',
+];
+export function normalizeCapturePolicyMode(value, fallback = 'metadata-only') {
+    if (CANONICAL_CAPTURE_POLICY_MODES.includes(value)) {
+        return value;
+    }
+    if (value === 'command-summary')
+        return 'repo-and-command';
+    if (value === 'explicit-transcript-import')
+        return 'full';
+    return fallback;
+}
+export function capturePolicyRawContent(mode) {
+    const normalized = normalizeCapturePolicyMode(mode);
+    if (normalized === 'off')
+        return 'off';
+    if (normalized === 'metadata-only')
+        return 'metadata';
+    if (normalized === 'full')
+        return 'explicit';
+    return 'summary';
+}
+export const DEFAULT_CAPTURE_POLICY = {
+    version: '2026-07-ucc-007',
+    maxStringBytes: 16_384,
+    maxPayloadBytes: 128_000,
+    rawContentDefault: 'metadata+hash',
+    hashAlgorithm: 'sha256',
+};
+export const BUILTIN_AGENT_BINARIES = ['claude', 'codex', 'opencode', 'pi', 'aider', 'cursor'];
+const CAPTURE_REGULATED_SIGNALS = [
+    { name: 'possible_ssn', pattern: /\b\d{3}-\d{2}-\d{4}\b/ },
+    { name: 'possible_credit_card', pattern: /\b(?:\d[ -]*?){13,19}\b/ },
+    { name: 'regulated_domain_keyword', pattern: /\b(hipaa|phi|pci|cardholder|ssn|medical\s+record|patient)\b/i },
+];
+export function hashCaptureContent(value) {
+    return createHash('sha256').update(stableCaptureStringify(value)).digest('hex');
+}
+export function sanitizeCapturePayload(input, policy = DEFAULT_CAPTURE_POLICY) {
+    const diagnostics = analyzeContextSafety(input, {});
+    const redacted = redactContextPayload(input, {}, {});
+    let payload = redactCaptureRawFields(redacted, policy);
+    let truncated = false;
+    const encoded = stableCaptureStringify(payload);
+    if (Buffer.byteLength(encoded) > policy.maxPayloadBytes) {
+        payload = {
+            truncated: true,
+            hash: hashCaptureContent(payload),
+            byteLength: Buffer.byteLength(encoded),
+            preview: encoded.slice(0, policy.maxStringBytes),
+        };
+        truncated = true;
+    }
+    const regulatedSignals = diagnostics.findings
+        .filter((finding) => finding.category === 'regulated-domain')
+        .map((finding) => finding.name)
+        .sort();
+    const redactionTypes = diagnostics.findings
+        .filter((finding) => finding.category === 'secret')
+        .map((finding) => finding.name)
+        .sort();
+    return {
+        payload,
+        safety: {
+            contextSafetyModule: 'backend/src/lib/context-safety.ts',
+            policyVersion: policy.version,
+            redactionCount: redactionTypes.length,
+            ignoredPathCount: 0,
+            truncated,
+            hashAlgorithm: 'sha256',
+            contentHash: hashCaptureContent(payload),
+            redactionTypes: [...new Set(redactionTypes)],
+            regulatedSignals: [...new Set(regulatedSignals)],
+        },
+    };
+}
+function redactCaptureRawFields(value, policy) {
+    if (Array.isArray(value))
+        return value.slice(0, 200).map((item) => redactCaptureRawFields(item, policy));
+    if (!value || typeof value !== 'object') {
+        if (typeof value === 'string' && Buffer.byteLength(value) > policy.maxStringBytes) {
+            return `${Buffer.from(value).subarray(0, policy.maxStringBytes).toString('utf8')}…[TRUNCATED]`;
+        }
+        return value;
+    }
+    const output = {};
+    for (const [key, child] of Object.entries(value)) {
+        if (/^(raw|content|text|stdout|stderr|transcript)$/i.test(key) && policy.rawContentDefault !== 'explicit') {
+            output[key] = typeof child === 'string'
+                ? { hash: hashCaptureContent(child), byteLength: Buffer.byteLength(child), redacted: true }
+                : '[REDACTED_RAW_CONTENT]';
+        }
+        else {
+            output[key] = redactCaptureRawFields(child, policy);
+        }
+    }
+    return output;
+}
+export function detectAgentBinary(commandText, customPatterns = []) {
+    const token = commandText.trim().match(/^(?:env\s+)?(?:[A-Z0-9_]+=[^\s]+\s+)*(?:command\s+)?(?:npx\s+)?(?:["']?)([^\s"']+)/i)?.[1] ?? '';
+    const basename = token.split(/[\\/]/).pop()?.replace(/\.(cmd|exe|ps1)$/i, '').toLowerCase() ?? '';
+    if (BUILTIN_AGENT_BINARIES.includes(basename)) {
+        return { recognized: true, binary: basename, matchedPattern: basename };
+    }
+    for (const pattern of customPatterns) {
+        try {
+            if (new RegExp(pattern, 'i').test(commandText))
+                return { recognized: true, binary: 'custom', matchedPattern: pattern };
+        }
+        catch {
+            if (commandText.toLowerCase().includes(pattern.toLowerCase()))
+                return { recognized: true, binary: 'custom', matchedPattern: pattern };
+        }
+    }
+    return { recognized: false, binary: 'unknown' };
+}
+export function isCaptureIgnoredPath(candidatePath, workspacePath, patterns = []) {
+    if (!candidatePath || patterns.length === 0)
+        return false;
+    const root = path.resolve(workspacePath || process.cwd());
+    const absolute = path.isAbsolute(candidatePath) ? path.resolve(candidatePath) : path.resolve(root, candidatePath);
+    const relative = normalizeContextPath(path.relative(root, absolute));
+    return isContextPathIgnored(relative, { paths: patterns });
+}
+export function redactCommandText(commandText, input = {}) {
+    const diagnostics = analyzeContextSafety(commandText, {});
+    let text = redactContextText(commandText, {});
+    let ignoredPathCount = 0;
+    for (const match of text.matchAll(/(?:^|\s)(['"]?)([^\s'"<>|;&]+(?:[\\/][^\s'"<>|;&]*)+)\1/g)) {
+        const token = match[2];
+        if (isCaptureIgnoredPath(token, input.workspacePath, input.captureIgnorePatterns)) {
+            text = text.split(token).join('[REDACTED_PATH]');
+            ignoredPathCount += 1;
+        }
+    }
+    const maxBytes = input.policy?.maxStringBytes ?? DEFAULT_CAPTURE_POLICY.maxStringBytes;
+    const truncated = Buffer.byteLength(text) > maxBytes;
+    if (truncated)
+        text = `${Buffer.from(text).subarray(0, maxBytes).toString('utf8')}…[TRUNCATED]`;
+    const regulatedSignals = CAPTURE_REGULATED_SIGNALS.filter((rule) => rule.pattern.test(commandText)).map((rule) => rule.name);
+    return {
+        text,
+        redactionCount: diagnostics.findings.filter((finding) => finding.category === 'secret').length + ignoredPathCount,
+        ignoredPathCount,
+        truncated,
+        regulatedSignals,
+        redactionTypes: [...new Set([
+                ...diagnostics.findings.filter((finding) => finding.category === 'secret').map((finding) => finding.name),
+                ...(ignoredPathCount > 0 ? ['ignored_path'] : []),
+            ])].sort(),
+    };
+}
+export function sanitizeCliCommandEvent(input, policy = DEFAULT_CAPTURE_POLICY) {
+    const policyMode = normalizeCapturePolicyMode(input.policyMode);
+    if (policyMode === 'off')
+        return { payload: null, safety: sanitizeCapturePayload({ skipped: 'policy_off' }, policy).safety };
+    if (input.transcript !== undefined && policyMode !== 'full') {
+        throw new ValidationError('Transcript capture requires full explicit-session summary policy');
+    }
+    if (input.cwd && isCaptureIgnoredPath(input.cwd, input.workspacePath, input.captureIgnorePatterns)) {
+        const safety = sanitizeCapturePayload({ skipped: 'capture_ignore' }, policy).safety;
+        return { payload: null, safety: { ...safety, ignoredPathCount: safety.ignoredPathCount + 1 } };
+    }
+    const command = input.command ?? '';
+    const redacted = redactCommandText(command, {
+        workspacePath: input.workspacePath,
+        captureIgnorePatterns: input.captureIgnorePatterns,
+        policy,
+    });
+    const agent = detectAgentBinary(command, input.customAgentPatterns);
+    const event = {
+        eventType: input.eventType === 'cli_command' ? 'shell_command' : input.eventType ?? (agent.recognized ? 'agent_cli_session' : 'shell_command'),
+        source_system: input.source_system?.trim() || 'shell',
+        tool_name: input.tool_name?.trim() || (agent.recognized ? agent.binary : 'shell'),
+        session_id: input.session_id?.trim() || 'shell',
+        phase: input.phase ?? 'end',
+        policyMode,
+        command_summary: policyMode === 'metadata-only' ? null : redacted.text,
+        command_hash: hashCaptureContent(command),
+        cwd: input.cwd ? redactCommandText(input.cwd, { workspacePath: input.workspacePath, captureIgnorePatterns: input.captureIgnorePatterns, policy }).text : null,
+        exit_code: typeof input.exitCode === 'number' && Number.isFinite(input.exitCode) ? input.exitCode : null,
+        duration_ms: typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) ? input.durationMs : null,
+        git_branch: input.gitBranch ?? null,
+        git_sha: input.gitSha ?? null,
+        agent,
+        regulated_signals: redacted.regulatedSignals,
+        ...(policyMode === 'full' && input.transcript !== undefined ? { transcript: input.transcript } : {}),
+    };
+    const sanitized = sanitizeCapturePayload(event, {
+        ...policy,
+        rawContentDefault: policyMode === 'full' ? 'explicit' : policy.rawContentDefault,
+    });
+    return {
+        payload: sanitized.payload,
+        safety: {
+            ...sanitized.safety,
+            redactionCount: sanitized.safety.redactionCount + redacted.redactionCount,
+            ignoredPathCount: sanitized.safety.ignoredPathCount + redacted.ignoredPathCount,
+            truncated: sanitized.safety.truncated || redacted.truncated,
+            redactionTypes: [...new Set([...sanitized.safety.redactionTypes, ...redacted.redactionTypes])].sort(),
+            regulatedSignals: [...new Set([...sanitized.safety.regulatedSignals, ...redacted.regulatedSignals])].sort(),
+        },
+    };
+}
+export function formatRedactionDiagnostics(input = {}) {
+    const regulatedSignals = [...new Set(input.regulatedSignals ?? [])].sort();
+    return {
+        redactionCount: Number(input.redactionCount ?? 0),
+        ignoredPathCount: Number(input.ignoredPathCount ?? 0),
+        redactionTypes: [...new Set(input.redactionTypes ?? [])].sort(),
+        regulatedSignals,
+        regulatedDomainFlags: regulatedSignals,
+        truncated: Boolean(input.truncated),
+    };
+}
+function stableCaptureStringify(value) {
+    if (Array.isArray(value))
+        return `[${value.map(stableCaptureStringify).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.entries(value)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([key, child]) => `${JSON.stringify(key)}:${stableCaptureStringify(child)}`)
+            .join(',')}}`;
+    }
+    return JSON.stringify(value);
+}

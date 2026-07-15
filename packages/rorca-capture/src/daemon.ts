@@ -6,7 +6,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import path from "node:path";
 import {
@@ -24,6 +25,7 @@ import type { CaptureConfig } from "./config.js";
 import { readCaptureQueue, enqueueCaptureQueueEntry, sanitizeCaptureErrorMessage } from "./queue.js";
 import { buildGitCommitContextEvent, readGitCommit, type BuiltGitCommitEvent, type GitCommitContextEventPayload } from "./git-ingest.js";
 import type { CaptureApiReachabilityStatus, CaptureOperationalStatus } from "./status.js";
+import { atomicWriteFileSecure, readSecureFile } from "./secure-fs.js";
 
 export const DEFAULT_DAEMON_INTERVAL_MS = 30_000;
 export const DEFAULT_DAEMON_MAX_COMMITS_PER_SCAN = 50;
@@ -132,6 +134,7 @@ export type CaptureDaemonStatusFile = {
   hookState: ReturnType<typeof inspectHookState>;
   consecutiveErrorCount: number;
   backoff: CaptureDaemonBackoffState;
+  processIdentity?: CaptureProcessIdentity;
   lastScan?: CaptureDaemonScanSummary;
   lastFlush?: CaptureDaemonFlushSummary;
 };
@@ -153,11 +156,22 @@ export type CaptureDaemonScanResult = {
   lastError?: string;
 };
 
+export type CaptureProcessIdentity = {
+  nonce: string;
+  startMarker: string;
+  commandHash: string;
+};
+
 export type StopCaptureDaemonResult = {
   stopped: boolean;
   pid: number | null;
   statusPath: string;
   message: string;
+};
+
+type StopDaemonRuntime = {
+  inspectProcess?: (pid: number) => Omit<CaptureProcessIdentity, "nonce"> | null;
+  signal?: (pid: number) => void;
 };
 
 export async function runCaptureDaemon(options: CaptureDaemonLoopOptions): Promise<CaptureDaemonScanResult | null> {
@@ -183,11 +197,13 @@ export async function runCaptureDaemon(options: CaptureDaemonLoopOptions): Promi
   if (last) {
     const status = readCaptureDaemonStatus(last.workspaceId, options.homeDir);
     if (status) {
-      writeCaptureDaemonStatus(last.workspaceId, {
+      const stoppedStatus = {
         ...status,
         running: false,
         last_seen: new Date().toISOString(),
-      }, options.homeDir);
+      };
+      writeCaptureDaemonStatus(last.workspaceId, stoppedStatus, options.homeDir);
+      writeWorkspaceCaptureStatus(options.config.repoPath, stoppedStatus);
     }
   }
   return last;
@@ -221,6 +237,10 @@ export async function runDaemonScanOnce(options: CaptureDaemonOptions): Promise<
   const cursorBefore = cursor?.lastReconciledSha ?? null;
   const hookState = inspectHookState(options.config.repoPath);
   const initialQueueDepth = safeQueueDepth(options.config.queuePath);
+  const observedIdentity = inspectProcessIdentity(process.pid);
+  const processIdentity = observedIdentity
+    ? { ...observedIdentity, nonce: previousStatus?.pid === process.pid && previousStatus.processIdentity?.nonce ? previousStatus.processIdentity.nonce : randomBytes(24).toString("hex") }
+    : undefined;
   const baseStatus: CaptureDaemonStatusFile = {
     version: DAEMON_STATUS_VERSION,
     worker_id: daemonWorkerId(workspaceId),
@@ -245,6 +265,7 @@ export async function runDaemonScanOnce(options: CaptureDaemonOptions): Promise<
     hookState,
     consecutiveErrorCount: backoffBefore.consecutiveErrorCount,
     backoff: backoffBefore,
+    ...(processIdentity ? { processIdentity } : {}),
     ...(previousStatus?.lastScan ? { lastScan: previousStatus.lastScan } : {}),
     ...(previousStatus?.lastFlush ? { lastFlush: previousStatus.lastFlush } : {}),
     ...(previousStatus?.last_error ? { last_error: previousStatus.last_error } : {}),
@@ -252,6 +273,7 @@ export async function runDaemonScanOnce(options: CaptureDaemonOptions): Promise<
   if (!dryRun) {
     writeCaptureDaemonPid(workspaceId, process.pid, options.homeDir);
     writeCaptureDaemonStatus(workspaceId, baseStatus, options.homeDir);
+    writeWorkspaceCaptureStatus(options.config.repoPath, baseStatus);
   }
 
   let lastError: string | undefined;
@@ -349,6 +371,7 @@ export async function runDaemonScanOnce(options: CaptureDaemonOptions): Promise<
   };
   if (!dryRun) {
     writeCaptureDaemonStatus(workspaceId, finalStatus, options.homeDir);
+    writeWorkspaceCaptureStatus(options.config.repoPath, finalStatus);
   }
 
   return {
@@ -454,7 +477,7 @@ export function readCaptureCursor(workspaceId: string, homeDir?: string): Captur
   const filePath = getCaptureCursorPath(workspaceId, homeDir);
   if (!existsSync(filePath)) return null;
   try {
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Partial<CaptureCursorFile>;
+    const parsed = JSON.parse(readSecureFile(filePath, { expectedMode: 0o600, privateParent: true })) as Partial<CaptureCursorFile>;
     if (parsed.version !== CURSOR_VERSION || parsed.workspaceId !== workspaceId) return null;
     return {
       version: CURSOR_VERSION,
@@ -476,7 +499,7 @@ export function readCaptureDaemonStatus(workspaceId: string, homeDir?: string): 
   const filePath = getCaptureDaemonStatusPath(workspaceId, homeDir);
   if (!existsSync(filePath)) return null;
   try {
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as CaptureDaemonStatusFile;
+    const parsed = JSON.parse(readSecureFile(filePath, { expectedMode: 0o600, privateParent: true })) as CaptureDaemonStatusFile;
     if (parsed.version !== DAEMON_STATUS_VERSION || parsed.workspaceId !== workspaceId) return null;
     return parsed;
   } catch {
@@ -488,7 +511,43 @@ export function writeCaptureDaemonStatus(workspaceId: string, status: CaptureDae
   writeJsonAtomic(getCaptureDaemonStatusPath(workspaceId, homeDir), status);
 }
 
-export function stopCaptureDaemon(workspaceId: string, homeDir?: string): StopCaptureDaemonResult {
+export function getWorkspaceCaptureStatusPath(repoPath: string): string {
+  return path.join(path.resolve(repoPath), ".rorca", "capture", "status.json");
+}
+
+function writeWorkspaceCaptureStatus(repoPath: string, status: CaptureDaemonStatusFile): void {
+  let capturePolicy: { mode: string; policyMode: string; paused: boolean } = { mode: "metadata-only", policyMode: "metadata-only", paused: false };
+  try {
+    const local = JSON.parse(readFileSync(path.join(repoPath, ".rorca", "capture", "policy.json"), "utf8")) as { policyMode?: string; paused?: boolean };
+    const policyMode = typeof local.policyMode === "string" ? local.policyMode : "metadata-only";
+    capturePolicy = { mode: policyMode, policyMode, paused: local.paused === true };
+  } catch {
+    // Setup is optional; retain the safe metadata-only status default.
+  }
+  writeJsonAtomic(getWorkspaceCaptureStatusPath(repoPath), {
+    ...status,
+    capturePolicy,
+    sourceCapabilities: {
+      repoDaemon: { status: "active" },
+      gitHook: { status: status.hookState.managed ? "active" : "degraded", reason: status.hookState.managed ? undefined : "managed_hook_not_installed" },
+      shellIntegration: { status: "degraded", reason: "shell_host_status_not_observable" },
+      vscodeExtension: { status: "degraded", reason: "extension_host_optional", fallbackSources: ["repoDaemon", "gitHook", "shellIntegration"] },
+    },
+    processHealth: { manager: "local", running: status.running, pid: status.pid },
+    lastFlush: status.lastFlush?.finishedAt ?? null,
+    lastScan: status.lastScan?.finishedAt ?? null,
+    backoffMs: status.backoff.delayMs ?? 0,
+    resourceBounds: {
+      scanIntervalMs: status.intervalMs,
+      maxCommitsPerScan: status.maxCommitsPerScan,
+      maxConcurrency: DEFAULT_DAEMON_MAX_CONCURRENT_SUBMISSIONS,
+      queueWarnSize: null,
+      queueMaxSize: null,
+    },
+  });
+}
+
+export function stopCaptureDaemon(workspaceId: string, homeDir?: string, runtime: StopDaemonRuntime = {}): StopCaptureDaemonResult {
   const statusPath = getCaptureDaemonStatusPath(workspaceId, homeDir);
   const status = readCaptureDaemonStatus(workspaceId, homeDir);
   const pid = status?.pid ?? readCaptureDaemonPid(workspaceId, homeDir);
@@ -496,24 +555,34 @@ export function stopCaptureDaemon(workspaceId: string, homeDir?: string): StopCa
     return { stopped: false, pid: null, statusPath, message: "No daemon PID recorded." };
   }
 
-  const running = isProcessRunning(pid);
-  if (running && pid !== process.pid) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      // The status file is still marked stopped below so a stale PID does not keep reporting as live.
-    }
+  const inspect = runtime.inspectProcess ?? inspectProcessIdentity;
+  const observed = inspect(pid);
+  if (!observed) {
+    markDaemonStopped(workspaceId, status, homeDir);
+    return { stopped: false, pid, statusPath, message: `Daemon pid ${pid} was not running.` };
+  }
+  if (!status?.processIdentity || observed.startMarker !== status.processIdentity.startMarker || observed.commandHash !== status.processIdentity.commandHash) {
+    return { stopped: false, pid, statusPath, message: `Refusing to signal pid ${pid}: daemon process identity could not be verified.` };
+  }
+  if (pid === process.pid) {
+    markDaemonStopped(workspaceId, status, homeDir);
+    return { stopped: true, pid, statusPath, message: `Stopped daemon pid ${pid} without signaling the current process.` };
   }
 
+  try {
+    (runtime.signal ?? ((targetPid: number) => process.kill(targetPid, "SIGTERM")))(pid);
+  } catch {
+    return { stopped: false, pid, statusPath, message: `Verified daemon pid ${pid}, but signaling failed.` };
+  }
+  markDaemonStopped(workspaceId, status, homeDir);
+  return { stopped: true, pid, statusPath, message: `Stopped verified daemon pid ${pid}.` };
+}
+
+function markDaemonStopped(workspaceId: string, status: CaptureDaemonStatusFile | null, homeDir?: string): void {
   if (status) {
-    writeCaptureDaemonStatus(workspaceId, {
-      ...status,
-      running: false,
-      last_seen: new Date().toISOString(),
-    }, homeDir);
+    writeCaptureDaemonStatus(workspaceId, { ...status, running: false, last_seen: new Date().toISOString() }, homeDir);
   }
   rmSync(getCaptureDaemonPidPath(workspaceId, homeDir), { force: true });
-  return { stopped: running, pid, statusPath, message: running ? `Stopped daemon pid ${pid}.` : `Daemon pid ${pid} was not running.` };
 }
 
 export function getCaptureCursorPath(workspaceId: string, homeDir = homedir()): string {
@@ -529,18 +598,19 @@ export function getCaptureDaemonPidPath(workspaceId: string, homeDir = homedir()
 }
 
 function writeCaptureDaemonPid(workspaceId: string, pid: number, homeDir?: string): void {
-  const pidPath = getCaptureDaemonPidPath(workspaceId, homeDir);
-  mkdirSync(path.dirname(pidPath), { recursive: true });
-  writeFileSync(`${pidPath}.tmp`, `${pid}\n`, { encoding: "utf8", mode: 0o600 });
-  chmodBestEffort(`${pidPath}.tmp`, 0o600);
-  renameSync(`${pidPath}.tmp`, pidPath);
+  atomicWriteFileSecure(getCaptureDaemonPidPath(workspaceId, homeDir), `${JSON.stringify({ pid })}\n`, { mode: 0o600, privateParent: true });
 }
 
 function readCaptureDaemonPid(workspaceId: string, homeDir?: string): number | null {
   const pidPath = getCaptureDaemonPidPath(workspaceId, homeDir);
   if (!existsSync(pidPath)) return null;
-  const parsed = Number.parseInt(readFileSync(pidPath, "utf8"), 10);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  try {
+    const text = readSecureFile(pidPath, { expectedMode: 0o600, privateParent: true });
+    const parsed = text.trim().startsWith("{") ? Number((JSON.parse(text) as { pid?: unknown }).pid) : Number.parseInt(text, 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function resolveDaemonWorkspace(options: CaptureDaemonOptions, apiReachability: CaptureApiReachabilityStatus): Promise<ResolvedWorkspace> {
@@ -708,7 +778,12 @@ function safeQueueDepth(queuePath: string): number {
 function inspectHookState(repoPath: string): { path: string; installed: boolean; managed: boolean; mode?: "best-effort" | "strict" | "unmanaged" } {
   const hookPath = path.join(repoPath, ".git", "hooks", "post-commit");
   if (!existsSync(hookPath)) return { path: hookPath, installed: false, managed: false };
-  const contents = readFileSync(hookPath, "utf8");
+  let contents: string;
+  try {
+    contents = readSecureFile(hookPath);
+  } catch {
+    return { path: hookPath, installed: true, managed: false, mode: "unmanaged" };
+  }
   const managed = contents.includes(RORCA_HOOK_SENTINEL);
   if (!managed) return { path: hookPath, installed: true, managed: false, mode: "unmanaged" };
   const mode = contents.includes("# RORCA_HOOK_MODE: strict") ? "strict" : "best-effort";
@@ -748,30 +823,34 @@ function safeWorkspaceId(workspaceId: string): string {
 }
 
 function writeJsonAtomic(filePath: string, value: unknown): void {
-  mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  chmodBestEffort(tmpPath, 0o600);
-  renameSync(tmpPath, filePath);
-  chmodBestEffort(filePath, 0o600);
-}
-
-function chmodBestEffort(filePath: string, mode: number): void {
-  if (process.platform === "win32") return;
-  try {
-    chmodSync(filePath, mode);
-  } catch {
-    // Best effort on platforms without POSIX chmod support.
-  }
+  const privateParent = path.basename(path.dirname(filePath)) === ".rorca";
+  atomicWriteFileSecure(filePath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, privateParent });
 }
 
 function isProcessRunning(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+  return inspectProcessIdentity(pid) !== null;
+}
+
+function inspectProcessIdentity(pid: number): Omit<CaptureProcessIdentity, "nonce"> | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return typeof error === "object" && error !== null && (error as { code?: string }).code === "EPERM";
+    let startMarker: string;
+    let command: string;
+    const procStatPath = `/proc/${pid}/stat`;
+    if (existsSync(procStatPath)) {
+      const stat = readFileSync(procStatPath, "utf8");
+      const closeParen = stat.lastIndexOf(")");
+      const fields = stat.slice(closeParen + 2).split(" ");
+      startMarker = fields[19] ?? "";
+      command = readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
+    } else {
+      startMarker = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      command = execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    }
+    if (!startMarker || !command) return null;
+    return { startMarker, commandHash: createHash("sha256").update(command).digest("hex") };
+  } catch {
+    return null;
   }
 }
 

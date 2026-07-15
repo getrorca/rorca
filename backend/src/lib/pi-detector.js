@@ -7,10 +7,12 @@
 // ─── Pi CLI Binary Detection ────────────────────────────────────────────────
 // Detect whether the Pi CLI binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
-import { execSync, spawnSync } from 'child_process';
+import { execFile, execSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { promisify } from 'util';
 import { logger } from './logger';
+const execFileAsync = promisify(execFile);
 export const PI_INSTALL_METHODS = {
     npm: 'npm install -g @mariozechner/pi-coding-agent',
     pnpm: 'pnpm add -g @mariozechner/pi-coding-agent',
@@ -18,6 +20,9 @@ export const PI_INSTALL_METHODS = {
     curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
 };
 export const MIN_PI_VERSION = '0.67.0';
+// Explicit version probes must not load extensions that could call back into a
+// backend currently waiting for the diagnostic. Keep request-path availability
+// checks process-free instead (see detectPiAvailability).
 const PI_VERSION_ARGS = ['--no-extensions', '--offline', '--version'];
 const PI_PROBE_TIMEOUT_MS = 2_000;
 /**
@@ -46,26 +51,9 @@ function parseBoolean(value) {
     const normalized = value.trim().toLowerCase();
     return normalized === '✓' || normalized === 'true' || normalized === 'yes';
 }
-function parseTokenCount(value) {
-    const normalized = value.trim().toUpperCase();
-    const match = normalized.match(/^(\d+(?:\.\d+)?)([KM])?$/);
-    if (!match) {
-        const fallback = Number(normalized);
-        return Number.isFinite(fallback) ? fallback : 0;
-    }
-    const amount = Number(match[1]);
-    if (!Number.isFinite(amount))
-        return 0;
-    switch (match[2]) {
-        case 'M': return Math.round(amount * 1_000_000);
-        case 'K': return Math.round(amount * 1_000);
-        default: return Math.round(amount);
-    }
-}
 /**
- * Fast, process-free Pi availability check for request paths such as health.
- * Version probing is intentionally excluded so a Pi extension can never call
- * back into a backend that is synchronously waiting for another Pi process.
+ * Process-free Pi availability check for request paths. It intentionally does
+ * not run Pi or load extensions; explicit detailed diagnostics use detectPi.
  */
 export function detectPiAvailability() {
     const configuredPath = process.env.PI_BIN?.trim();
@@ -86,6 +74,22 @@ export function detectPiAvailability() {
     }
     return { piInstalled: false, piVersion: null, piBinPath: null };
 }
+function parseTokenCount(value) {
+    const normalized = value.trim().toUpperCase();
+    const match = normalized.match(/^(\d+(?:\.\d+)?)([KM])?$/);
+    if (!match) {
+        const fallback = Number(normalized);
+        return Number.isFinite(fallback) ? fallback : 0;
+    }
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount))
+        return 0;
+    switch (match[2]) {
+        case 'M': return Math.round(amount * 1_000_000);
+        case 'K': return Math.round(amount * 1_000);
+        default: return Math.round(amount);
+    }
+}
 /**
  * Detect pi binary: resolve path, run --version, parse output.
  * Never throws — returns a status object.
@@ -96,8 +100,6 @@ export function detectPi() {
         return { piInstalled: false, piVersion: null, piBinPath: null };
     }
     try {
-        // Explicit diagnostics must never load the Rorca extension and call back
-        // into a backend that is synchronously waiting for this probe.
         const result = spawnSync(binPath, PI_VERSION_ARGS, {
             encoding: 'utf8',
             timeout: PI_PROBE_TIMEOUT_MS,
@@ -114,6 +116,32 @@ export function detectPi() {
             piVersion: version,
             piBinPath: binPath,
         };
+    }
+    catch {
+        return { piInstalled: false, piVersion: null, piBinPath: null };
+    }
+}
+/** Non-blocking detector for request/diagnostic paths. */
+export async function detectPiAsync(timeoutMs = 1_000) {
+    let binPath = process.env.PI_BIN?.trim() || null;
+    if (!binPath) {
+        try {
+            const result = await execFileAsync('which', ['pi'], { encoding: 'utf8', timeout: timeoutMs });
+            binPath = result.stdout.trim() || null;
+        }
+        catch {
+            return { piInstalled: false, piVersion: null, piBinPath: null };
+        }
+    }
+    if (!binPath)
+        return { piInstalled: false, piVersion: null, piBinPath: null };
+    try {
+        const result = await execFileAsync(binPath, PI_VERSION_ARGS, {
+            encoding: 'utf8',
+            timeout: Math.min(timeoutMs, PI_PROBE_TIMEOUT_MS),
+        });
+        const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+        return { piInstalled: true, piVersion: parseVersion(raw), piBinPath: binPath };
     }
     catch {
         return { piInstalled: false, piVersion: null, piBinPath: null };

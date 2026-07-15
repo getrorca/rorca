@@ -47,8 +47,8 @@ interface RunMetadataPanelProps {
     worktree_path: string | null;
     started_at: string;
     finished_at: string | null;
-    agent_type?: string;
-    agent_model?: string | null;
+    agentType: string | null;
+    agentModel: string | null;
   };
   tokenSummary: { inputTokens: number; outputTokens: number };
   specModel: string | null;
@@ -273,9 +273,9 @@ export default function RunMetadataPanel({
       {/* Engine (agent type) */}
       <MetaRow icon={Zap} label="Engine">
         <div className="flex items-center gap-1.5">
-          <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} showModelName={false} />
-          {run.agent_model && (
-            <span className="text-[10px] text-muted font-mono">{run.agent_model}</span>
+          <AgentBadge agentType={run.agentType} agentModel={run.agentModel} showModelName={false} />
+          {run.agentModel && (
+            <span className="text-[10px] text-muted font-mono">{run.agentModel}</span>
           )}
         </div>
       </MetaRow>
@@ -318,7 +318,7 @@ export default function RunMetadataPanel({
       {/* Cost */}
       <MetaRow icon={DollarSign} label="Cost">
         {(() => {
-          const agent = normalizeAgentType(run.agent_type);
+          const agent = normalizeAgentType(run.agentType);
           const label = agent === 'claude'
             ? '$0.00 (your Claude sub)'
             : agent === 'codex'

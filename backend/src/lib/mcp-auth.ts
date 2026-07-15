@@ -71,58 +71,108 @@ function setSecureMode(filePath: string, mode: number): void {
 }
 
 function verifyPosixMode(filePath: string, expectedMode: number): void {
-  if (process.platform === 'win32') {
-    return;
-  }
-
-  const stat = fs.statSync(filePath);
+  if (process.platform === 'win32') return;
+  const stat = fs.lstatSync(filePath);
+  if (stat.isSymbolicLink()) throw new Error(`Refusing symlink at secure MCP path: ${filePath}`);
   const actualMode = stat.mode & 0o777;
   if (actualMode !== expectedMode) {
     throw new Error(`Invalid mode for ${filePath}: expected ${expectedMode.toString(8)}, got ${actualMode.toString(8)}`);
   }
 }
 
+function assertCurrentUserOwner(uid: number, filePath: string): void {
+  if (process.platform !== 'win32' && typeof process.getuid === 'function' && uid !== process.getuid()) {
+    throw new Error(`Secure MCP path must be owned by the current user: ${filePath}`);
+  }
+}
+
 function ensureMcpDir(): void {
   const dirPath = getMcpDirPath();
   fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(dirPath);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`MCP token parent must be a real directory: ${dirPath}`);
+  assertCurrentUserOwner(stat.uid, dirPath);
   setSecureMode(dirPath, 0o700);
   verifyPosixMode(dirPath, 0o700);
 }
 
-function readTokenFile(tokenPath: string): string {
-  return fs.readFileSync(tokenPath, 'utf8').trim();
+function readTokenFile(tokenPath: string, repairMode = false): string {
+  const fd = fs.openSync(tokenPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`MCP token must be a regular file: ${tokenPath}`);
+    assertCurrentUserOwner(stat.uid, tokenPath);
+    if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600) {
+      if (!repairMode) throw new Error(`MCP token must have mode 0600: ${tokenPath}`);
+      fs.fchmodSync(fd, 0o600);
+    }
+    return fs.readFileSync(fd, 'utf8').trim();
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
-function writeTokenFile(tokenPath: string, token: string): void {
-  fs.writeFileSync(tokenPath, token, { mode: 0o600 });
-  setSecureMode(tokenPath, 0o600);
-  verifyPosixMode(tokenPath, 0o600);
+function writeTokenFileExclusive(tokenPath: string, token: string): void {
+  const fd = fs.openSync(tokenPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+  try {
+    if (process.platform !== 'win32') fs.fchmodSync(fd, 0o600);
+    fs.writeFileSync(fd, token, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function ensureTokenFile(tokenPath: string): { token: string; created: boolean } {
   ensureMcpDir();
-
-  if (fs.existsSync(tokenPath)) {
-    setSecureMode(tokenPath, 0o600);
-    verifyPosixMode(tokenPath, 0o600);
-    return { token: readTokenFile(tokenPath), created: false };
+  try {
+    return { token: readTokenFile(tokenPath, true), created: false };
+  } catch (error) {
+    if (!isFsError(error, 'ENOENT')) throw error;
   }
 
   const token = generateMcpToken();
-  writeTokenFile(tokenPath, token);
-  return { token, created: true };
+  try {
+    writeTokenFileExclusive(tokenPath, token);
+    fsyncMcpDir();
+    return { token, created: true };
+  } catch (error) {
+    if (!isFsError(error, 'EEXIST')) throw error;
+    return { token: readTokenFile(tokenPath, true), created: false };
+  }
 }
 
 function rotateTokenFile(tokenPath: string): string {
   ensureMcpDir();
+  try {
+    const target = fs.lstatSync(tokenPath);
+    if (!target.isFile() || target.isSymbolicLink()) throw new Error(`Refusing non-regular MCP token target: ${tokenPath}`);
+    assertCurrentUserOwner(target.uid, tokenPath);
+  } catch (error) {
+    if (!isFsError(error, 'ENOENT')) throw error;
+  }
 
-  const tmpPath = `${tokenPath}.tmp-${process.pid}-${Date.now()}`;
+  const tmpPath = path.join(path.dirname(tokenPath), `.${path.basename(tokenPath)}.${process.pid}.${crypto.randomBytes(12).toString('hex')}.tmp`);
   const token = generateMcpToken();
-  writeTokenFile(tmpPath, token);
-  fs.renameSync(tmpPath, tokenPath);
-  setSecureMode(tokenPath, 0o600);
-  verifyPosixMode(tokenPath, 0o600);
+  writeTokenFileExclusive(tmpPath, token);
+  try {
+    fs.renameSync(tmpPath, tokenPath);
+    fsyncMcpDir();
+  } catch (error) {
+    fs.rmSync(tmpPath, { force: true });
+    throw error;
+  }
   return token;
+}
+
+function fsyncMcpDir(): void {
+  if (process.platform === 'win32') return;
+  const fd = fs.openSync(getMcpDirPath(), fs.constants.O_RDONLY);
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
+function isFsError(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === code;
 }
 
 function safeCompareToken(providedToken: string, expectedToken: string): boolean {
@@ -260,13 +310,14 @@ export function getMcpPublicToken(): string | null {
   }
 
   const tokenPath = getMcpPublicTokenPath();
-  if (!fs.existsSync(tokenPath)) {
-    return null;
+  try {
+    const token = readTokenFile(tokenPath);
+    cachedPublicToken = token;
+    return token;
+  } catch (error) {
+    if (isFsError(error, 'ENOENT')) return null;
+    throw error;
   }
-
-  const token = readTokenFile(tokenPath);
-  cachedPublicToken = token;
-  return token;
 }
 
 export function getMcpAdminToken(): string | null {
@@ -275,13 +326,14 @@ export function getMcpAdminToken(): string | null {
   }
 
   const tokenPath = getMcpAdminTokenPath();
-  if (!fs.existsSync(tokenPath)) {
-    return null;
+  try {
+    const token = readTokenFile(tokenPath);
+    cachedAdminToken = token;
+    return token;
+  } catch (error) {
+    if (isFsError(error, 'ENOENT')) return null;
+    throw error;
   }
-
-  const token = readTokenFile(tokenPath);
-  cachedAdminToken = token;
-  return token;
 }
 
 export function getMcpToken(): string | null {

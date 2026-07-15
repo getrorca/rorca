@@ -57,6 +57,7 @@ import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
 import { registerHydrationWorker } from './lib/hydration-worker';
+import { registerContextCaptureHandlers } from './lib/context-distillation';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { advanceQueue } from './lib/run-queue';
@@ -66,6 +67,7 @@ import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
+import { replayFallbackResults } from './lib/fallback-replay';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -1122,6 +1124,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     child.on('close', async () => {
       try {
         await flushPending();
+        // The engine flushes its bounded telemetry queue before process close.
+        // Replay its durable journal before deriving completion from DB state.
+        await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         const signal = capturedSignal;
@@ -1679,6 +1684,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       child.on('close', async () => {
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
         await flushPending();
+        await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -2922,6 +2928,7 @@ async function start(): Promise<void> {
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
   await registerSpecJobHandlers(boss);
   await registerHydrationWorker(boss);
+  await registerContextCaptureHandlers(boss);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
   // If concurrency settings changed, hot-reload the pipeline:run and pipeline:retry subscriptions.

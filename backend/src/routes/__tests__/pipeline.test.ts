@@ -1133,6 +1133,36 @@ describe('POST /api/pipeline/story-result', () => {
     expect(usage.output_tokens).toBe(300);
     expect(usage.cost_usd).toBe(0.01875);
   });
+
+  test('deduplicates story result and token accounting retries by ingest key', async () => {
+    const runId = await seedRun({ status: 'running' });
+    const body = {
+      runId,
+      storyId: 'US-IDEMPOTENT-001',
+      status: 'pass',
+      inputTokens: 100,
+      outputTokens: 25,
+      modelUsed: 'pi/test/model',
+      idempotencyKey: `story-result-${runId}-US-IDEMPOTENT-001`,
+    };
+
+    const first = await request(app).post('/api/pipeline/story-result').send(body);
+    const retry = await request(app).post('/api/pipeline/story-result').send(body);
+    const storyCount = await queryOne<{ count: number }>(
+      'SELECT COUNT(*)::int AS count FROM story_results WHERE ingest_key = $1',
+      [body.idempotencyKey],
+    );
+    const usageCount = await queryOne<{ count: number }>(
+      'SELECT COUNT(*)::int AS count FROM token_usage WHERE run_id = $1 AND story_id = $2',
+      [runId, body.storyId],
+    );
+
+    expect(first.status).toBe(201);
+    expect(retry.status).toBe(200);
+    expect(retry.body.duplicate).toBe(true);
+    expect(storyCount?.count).toBe(1);
+    expect(usageCount?.count).toBe(1);
+  });
 });
 
 // ─── GET /api/pipeline/runs/compare ─────────────────────────────────────────

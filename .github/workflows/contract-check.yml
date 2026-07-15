@@ -10,7 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # Canonical migrations use pgvector; AGE remains optional/lite-mode in
+        # this contract environment and is safely skipped by the migration runner.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: rorca
           POSTGRES_PASSWORD: rorca

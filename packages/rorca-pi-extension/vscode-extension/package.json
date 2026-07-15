@@ -1,0 +1,87 @@
+{
+  "name": "rorca-capture-vscode",
+  "displayName": "Rorca Capture",
+  "description": "Always-on Rorca context capture for VS Code-compatible editors using stable extension APIs.",
+  "version": "0.1.0",
+  "publisher": "rorca",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:rorca.captureSessionSummary",
+    "onCommand:rorca.rememberSelection",
+    "onCommand:rorca.pauseCapture",
+    "onCommand:rorca.showCaptureStatus",
+    "onCommand:rorca.reviewCandidates"
+  ],
+  "main": "./out/packages/rorca-pi-extension/vscode-extension/src/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Rorca Capture activates UI/status commands in untrusted workspaces, but event capture and submissions remain disabled until Workspace Trust is granted."
+    }
+  },
+  "contributes": {
+    "commands": [
+      { "command": "rorca.captureSessionSummary", "title": "Rorca: Capture Session Summary" },
+      { "command": "rorca.rememberSelection", "title": "Rorca: Remember Selection" },
+      { "command": "rorca.pauseCapture", "title": "Rorca: Pause Capture" },
+      { "command": "rorca.showCaptureStatus", "title": "Rorca: Show Capture Status" },
+      { "command": "rorca.reviewCandidates", "title": "Rorca: Review Candidates" }
+    ],
+    "configuration": {
+      "title": "Rorca Capture",
+      "properties": {
+        "rorcaCapture.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Rorca editor/workspace context capture when the workspace is trusted."
+        },
+        "rorcaCapture.apiBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3030",
+          "description": "Local Rorca API base URL."
+        },
+        "rorcaCapture.workspaceId": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Rorca workspace id. Defaults to the first workspace folder name."
+        },
+        "rorcaCapture.policyMode": {
+          "type": "string",
+          "default": "metadata-only",
+          "enum": ["off", "metadata-only", "command-summary", "explicit-transcript-import"],
+          "description": "Capture policy mode. Raw content is never captured unless explicitly imported or remembered."
+        },
+        "rorcaCapture.queueMaxSize": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 1,
+          "description": "Maximum queued events retained while the local Rorca API is unavailable."
+        },
+        "rorcaCapture.memoryCandidateMaxCount": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 32,
+          "description": "Default-on governance cap for explicit memory candidates sent from the extension."
+        },
+        "rorcaCapture.memoryCandidateTokenCap": {
+          "type": "number",
+          "default": 1200,
+          "minimum": 100,
+          "maximum": 8000,
+          "description": "Default-on approximate token cap for explicit memory candidates sent from the extension."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "setup:hosts": "node ./out/packages/rorca-pi-extension/vscode-extension/src/install.js"
+  }
+}

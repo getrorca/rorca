@@ -60,6 +60,18 @@ rorca capture status --api-url http://localhost:3030 --workspace rorca
 
 `rorca capture ...` is only a thin shell-out alias to `packages/rorca-capture`; it must not reimplement behavior or write to the DB.
 
+## Optional always-on layer
+
+The reconciled always-on layer is explicit and reversible. It reuses the same `packages/rorca-capture` binary, stable CCS APIs, canonical offline queue, and candidate governance:
+
+```sh
+rorca-capture setup --always-on --policy metadata-only --workspace rorca
+rorca-capture service install --workspace rorca
+rorca-capture status --workspace rorca
+```
+
+Use `pause`/`resume` as privacy controls and `teardown --all` only after inspecting `.rorca-capture-queue.jsonl`. See [`universal-context-capture.md`](./universal-context-capture.md) and [`always-on-context-production-readiness.md`](./always-on-context-production-readiness.md). `repo-and-command` is opt-in; raw transcripts are never an automatic default.
+
 ## Local workstation mode
 
 Use local mode when the repository, Rorca API, and operator are on the same workstation.

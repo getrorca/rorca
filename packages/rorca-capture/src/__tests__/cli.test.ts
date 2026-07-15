@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { HELP_TEXT, runCli } from "../cli.js";
-import { buildCaptureStatus, formatStatusText } from "../status.js";
+import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "../status.js";
 import { resolveCaptureConfig } from "../config.js";
 
 function tempRepo(): string {
@@ -163,7 +163,7 @@ describe("rorca-capture CLI", () => {
     expect(output.stdout).toContain("Queue path:");
     expect(output.stdout).toContain("Capture ignore:");
     expect(output.stdout).toContain("API-only: yes");
-    expect(output.stdout).toContain("Commands: remember, import-duckbrain, ingest-pr, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
+    expect(output.stdout).toContain(`Commands: ${MVP_COMMANDS.join(", ")}`);
   });
 
   it("runs daemon scan/status/stop through the CLI with configurable bounds", async () => {
@@ -259,7 +259,7 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(output.stdout) as { ok: boolean; workspaceId: string; apiOnly: boolean; commands: string[] };
     expect(parsed).toMatchObject({ ok: true, workspaceId: "ws-2", apiOnly: true });
-    expect(parsed.commands).toEqual(["remember", "import-duckbrain", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]);
+    expect(parsed.commands).toEqual(MVP_COMMANDS);
   });
 
   it("formats status text without invoking the API", () => {
@@ -789,6 +789,33 @@ describe("rorca-capture CLI", () => {
     expect(queued.key).toMatch(/^capture:/);
     expect(queued.payload.workspaceId).toBe("ws-offline");
     expect(queued.payload.idempotencyKey).toMatch(/^memory-candidate:ws-offline:content:/);
+  });
+
+  it("queues policy-redacted shell events when the API is offline", async () => {
+    const repo = tempRepo();
+    const tokenPath = tokenFile(repo);
+    const output = captureIO();
+    const queuePath = path.join(repo, ".rorca", "shell-offline.ndjson");
+
+    const code = await runCli([
+      "emit", "shell", "--workspace", "ws-shell-offline", "--queue-path", queuePath,
+      "--policy", "metadata-only", "--phase", "end", "--command", "deploy --token super-secret-value",
+      "--json",
+    ], {
+      cwd: repo,
+      gitRoot: repo,
+      tokenPath,
+      env: {},
+      io: output.io,
+      fetchImpl: async () => { throw new TypeError("fetch failed"); },
+    });
+
+    expect(code).toBe(0);
+    const queued = JSON.parse(readFileSync(queuePath, "utf8").trim()) as { endpoint: string; payload: any };
+    expect(queued.endpoint).toBe("/api/context-capture/events");
+    expect(queued.payload.workspaceId).toBe("ws-shell-offline");
+    expect(queued.payload.payload.command_summary).toBeNull();
+    expect(JSON.stringify(queued)).not.toContain("super-secret-value");
   });
 
   it("uses deterministic source and content idempotency keys", async () => {

@@ -127,8 +127,8 @@ export class TooManyRequestsError extends AppError {
 /** 409 — conflict (duplicate, already exists, active run) */
 export class ConflictError extends AppError {
     statusCode = 409;
-    constructor(message) {
-        super(message, 'CONFLICT');
+    constructor(message, details) {
+        super(message, 'CONFLICT', details);
     }
 }
 /** 422 — unprocessable entity (valid syntax but semantic error) */

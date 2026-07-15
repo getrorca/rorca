@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiFetch } from '../lib/apiFetch';
+import { normalizePipelineRunListResponse } from '../api/run-dto';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -19,8 +20,10 @@ export interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   retried_from_run_id: number | null;
-  agent_type?: string;
+  agent_type?: string | null;
   agent_model?: string | null;
+  agentType: string | null;
+  agentModel: string | null;
   parallelism?: number;
   branch_name?: string | null;
   worktree_path?: string | null;
@@ -30,8 +33,13 @@ export interface PipelineRun {
   auto_worktree?: boolean;
 }
 
+type PipelineRunWire = Omit<PipelineRun, 'agentType' | 'agentModel'> & {
+  agentType?: string | null;
+  agentModel?: string | null;
+};
+
 interface RunsResponse {
-  items: PipelineRun[];
+  items: PipelineRunWire[];
   total: number;
   hasMore?: boolean;
 }
@@ -75,7 +83,8 @@ function fetchRuns(workspaceId: string): Promise<PipelineRun[]> {
   if (entry.inflight) return entry.inflight;
 
   const promise = apiFetch<RunsResponse>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
-    .then((resp) => {
+    .then((response) => {
+      const resp = normalizePipelineRunListResponse(response);
       entry.data = resp.items;
       entry.timestamp = Date.now();
       entry.inflight = null;

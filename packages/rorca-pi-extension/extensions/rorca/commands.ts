@@ -7,7 +7,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RorcaApiClient } from "./api.js";
 import { generateCaptureIdempotencyKey, parseApproveCommand, parseCaptureCommand, parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
 import { buildWatchSnapshot, formatRunList, formatRunNotify } from "./format.js";

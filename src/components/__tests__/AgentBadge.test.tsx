@@ -29,11 +29,25 @@ describe('AgentBadge', () => {
     render(
       <>
         <AgentBadge agentType="codex" />
-        <AgentBadge agentType="pi" />
+        <AgentBadge agentType="pi" agentModel="openai-codex/gpt-5.6-sol" />
       </>,
     );
 
     expect(screen.getByText('Codex')).toBeInTheDocument();
     expect(screen.getByText('Pi')).toBeInTheDocument();
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
+  });
+
+  it('renders Unknown instead of inferring Claude when engine provenance is absent or unsupported', () => {
+    render(
+      <>
+        <AgentBadge agentType={null} />
+        <AgentBadge agentType="future-engine" agentModel="vendor/model" />
+      </>,
+    );
+
+    expect(screen.getAllByText('Unknown')).toHaveLength(2);
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
+    expect(screen.queryByText('model')).not.toBeInTheDocument();
   });
 });

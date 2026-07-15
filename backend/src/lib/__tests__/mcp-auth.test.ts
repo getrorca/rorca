@@ -42,6 +42,24 @@ describe('mcp-auth', () => {
     expect(fs.statSync(mod.getMcpAdminTokenPath()).mode & 0o777).toBe(0o600);
   });
 
+  it('rejects symlink token and token-directory attacks without reading targets', () => {
+    if (process.platform === 'win32') return;
+    const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
+    const tokenDir = path.dirname(mod.getMcpPublicTokenPath());
+    fs.mkdirSync(tokenDir, { mode: 0o700 });
+    const victim = path.join(tmpHome, 'victim-token');
+    fs.writeFileSync(victim, 'attacker-controlled', { mode: 0o600 });
+    fs.symlinkSync(victim, mod.getMcpPublicTokenPath());
+
+    expect(() => mod.ensureMcpToken()).toThrow(/ELOOP|symlink|regular/i);
+    expect(fs.readFileSync(victim, 'utf8')).toBe('attacker-controlled');
+
+    fs.rmSync(mod.getMcpPublicTokenPath(), { force: true });
+    fs.rmSync(tokenDir, { recursive: true, force: true });
+    fs.symlinkSync(path.dirname(victim), tokenDir);
+    expect(() => mod.ensureMcpToken()).toThrow(/real directory|symlink/i);
+  });
+
   it('rotates public, admin, and all tokens atomically', () => {
     const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
     const original = mod.ensureMcpToken();

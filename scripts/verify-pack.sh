@@ -73,7 +73,7 @@ if [[ -d "$ROOT_DIR/supabase/migrations" ]]; then
   }
 fi
 
-if grep -E '^package/packages/' "$TMPDIR/contents.txt" | grep -Ev '^package/packages/rorca-pi-extension/' >/dev/null; then
+if grep -E '^package/packages/' "$TMPDIR/contents.txt" | grep -Ev '^package/packages/(rorca-pi-extension|rorca-capture)/' >/dev/null; then
   echo "✗ Unexpected workspace package content leaked into tarball"
   exit 1
 fi

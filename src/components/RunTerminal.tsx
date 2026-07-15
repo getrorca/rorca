@@ -496,7 +496,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const seenChunkIdsRef = useRef(new Set<string>());
 
   // Agent type detected from backend run_meta SSE event
-  const [agentType, setAgentType] = useState<string>('claude');
+  const [agentType, setAgentType] = useState<string>('unknown');
   const [terminalMode, setTerminalMode] = useState<TerminalMode>(rendererMode);
   const terminalModeRef = useRef<TerminalMode>(rendererMode);
   const [terminalMeta, setTerminalMeta] = useState<RunTerminalMetaState>(() => ({
@@ -778,7 +778,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     terminalModeRef.current = rendererMode;
     pendingPtyChunksRef.current = [];
     seenChunkIdsRef.current = new Set();
-    setAgentType('claude');
+    setAgentType('unknown');
     setSteps([]);
     setExpandedSet(new Set());
     setStreamDone(false);
