@@ -1669,7 +1669,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           ...(triggerOptions ?? {}),
         });
         const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, queuedTaskManifestArtifacts, queuedTriggerOptions]);
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, queuedTaskManifestArtifacts, queuedTriggerOptions]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
