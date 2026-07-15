@@ -29,11 +29,24 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
+jest.mock('../../lib/claude-auth', () => ({
+  getClaudeAuthState: jest.fn().mockReturnValue({ connected: true, email: 'test@example.com', tier: 'max', cliInstalled: true }),
+  triggerClaudeLogin: jest.fn().mockReturnValue({ started: true }),
+  triggerClaudeLogout: jest.fn().mockResolvedValue({ ok: true }),
+}));
+
+jest.mock('../../lib/codex-auth', () => ({
+  getCodexAuthState: jest.fn().mockReturnValue({ connected: true, username: 'test@example.com', plan: 'pro', cliInstalled: true }),
+  triggerCodexLogin: jest.fn().mockReturnValue({ started: true }),
+  triggerCodexLogout: jest.fn().mockResolvedValue({ ok: true }),
+}));
+
 // Mock pg-boss so pipeline trigger doesn't fail with "getBoss() called before initBoss()"
 // In test mode server.ts never calls initBoss(), so we stub the whole module.
 jest.mock('../../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
   getBoss: jest.fn().mockReturnValue({
+    createQueue: jest.fn().mockResolvedValue(undefined),
     send: jest.fn().mockResolvedValue('mock-job-id'),
     work: jest.fn(),
     stop: jest.fn().mockResolvedValue(undefined),
@@ -201,6 +214,34 @@ async function seedRun(overrides: Partial<{ status: string; workspace_id: string
     overrides.status ?? 'running',
     overrides.pid ?? null,]);
   return result!.id;
+}
+
+function cloneTaskManifestFixture(): Record<string, any> {
+  const fixturePath = path.join(__dirname, '..', '..', 'lib', '__tests__', 'fixtures', 'hermes-task-manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Record<string, any>;
+  manifest.workspaceId = 'ws-pipe';
+  manifest.source.rorca.specPath = 'forge/specs/approved/source-spec.json';
+  manifest.execution.agentOverride = 'pi';
+  manifest.execution.modelOverride = 'claude-sonnet-4-5-20250929';
+  manifest.execution.terminalMode = 'ansi-html';
+  return manifest;
+}
+
+function taskManifestTriggerBody(overrides: Record<string, any> = {}): Record<string, any> {
+  const manifest = cloneTaskManifestFixture();
+  return {
+    workspaceId: 'ws-pipe',
+    idempotencyKey: manifest.idempotencyKey,
+    manifest,
+    ...overrides,
+  };
+}
+
+function hasExecutionEnvironmentSupportInTest(): boolean {
+  return [
+    path.join(__dirname, '..', '..', 'lib', 'execution-environment.ts'),
+    path.join(__dirname, '..', '..', 'lib', 'execution-environment.js'),
+  ].some((candidate) => fs.existsSync(candidate));
 }
 
 // ─── POST /api/pipeline/trigger ──────────────────────────────────────────────
@@ -1095,6 +1136,36 @@ describe('POST /api/pipeline/story-result', () => {
     expect(usage.output_tokens).toBe(300);
     expect(usage.cost_usd).toBe(0.01875);
   });
+
+  test('deduplicates story result and token accounting retries by ingest key', async () => {
+    const runId = await seedRun({ status: 'running' });
+    const body = {
+      runId,
+      storyId: 'US-IDEMPOTENT-001',
+      status: 'pass',
+      inputTokens: 100,
+      outputTokens: 25,
+      modelUsed: 'pi/test/model',
+      idempotencyKey: `story-result-${runId}-US-IDEMPOTENT-001`,
+    };
+
+    const first = await request(app).post('/api/pipeline/story-result').send(body);
+    const retry = await request(app).post('/api/pipeline/story-result').send(body);
+    const storyCount = await queryOne<{ count: number }>(
+      'SELECT COUNT(*)::int AS count FROM story_results WHERE ingest_key = $1',
+      [body.idempotencyKey],
+    );
+    const usageCount = await queryOne<{ count: number }>(
+      'SELECT COUNT(*)::int AS count FROM token_usage WHERE run_id = $1 AND story_id = $2',
+      [runId, body.storyId],
+    );
+
+    expect(first.status).toBe(201);
+    expect(retry.status).toBe(200);
+    expect(retry.body.duplicate).toBe(true);
+    expect(storyCount?.count).toBe(1);
+    expect(usageCount?.count).toBe(1);
+  });
 });
 
 // ─── GET /api/pipeline/runs/compare ─────────────────────────────────────────
@@ -1172,6 +1243,17 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.status).toBe(201);
     expect(res.body.agentType).toBe('claude');
     expect(res.body.agentModel).toBeNull();
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({ runId: res.body.runId }),
+      expect.any(Object),
+    );
+    const queuedPayload = mockSend.mock.calls.find(([queueName]) => queueName === 'pipeline:run')?.[1];
+    expect(typeof queuedPayload?.runId).toBe('number');
+    expect(Number.isSafeInteger(queuedPayload?.runId)).toBe(true);
 
     const run = await queryOne(`SELECT agent, agent_type, agent_model FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
     expect(run.agent).toBe('claude');
@@ -1626,6 +1708,88 @@ describe('POST /api/pipeline/runs/:runId/retry', () => {
         runId: Number(res.body.runId),
         originalRunId: Number(originalRun!.id),
         storyIds: ['US-001'],
+      }),
+      expect.any(Object),
+    );
+  });
+
+  test('preserves original agent, model, terminal, graph, merge, and reasoning options when retrying', async () => {
+    seedSpec('approved', 'retry-preserve-options');
+
+    const originalRun = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs
+         (spec_path, workspace_id, status, parallelism, agent, agent_type, agent_model,
+          auto_worktree, auto_merge, include_graph, merge_strategy, terminal_mode, trigger_options)
+       VALUES ('forge/specs/approved/retry-preserve-options.json', 'ws-pipe', 'failed', 4,
+          'pi', 'pi', 'openai-codex/gpt-5.5', true, false, true, 'branch-only', 'pty',
+          $1::jsonb)
+       RETURNING id`,
+      [JSON.stringify({ thinkingEnabled: true, thinkingBudget: 4096, effortLevel: 'xhigh', reasoningEffort: 'xhigh' })],
+    );
+    expect(originalRun?.id).toBeDefined();
+
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, retries)
+       VALUES ($1, 'US-001', 'fail', 0)`,
+      [originalRun!.id],
+    );
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${originalRun!.id}/retry`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ forceSequential: true });
+
+    expect(res.status).toBe(201);
+
+    const retryRun = await queryOne<{
+      parallelism: number;
+      agent: string;
+      agent_type: string;
+      agent_model: string | null;
+      auto_worktree: boolean;
+      auto_merge: boolean;
+      include_graph: boolean;
+      merge_strategy: string | null;
+      terminal_mode: string | null;
+      retried_from_run_id: number | null;
+    }>(
+      `SELECT parallelism, agent, agent_type, agent_model, auto_worktree, auto_merge,
+              include_graph, merge_strategy, terminal_mode, retried_from_run_id
+       FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+
+    expect(retryRun).toMatchObject({
+      parallelism: 1,
+      agent: 'pi',
+      agent_type: 'pi',
+      agent_model: 'openai-codex/gpt-5.5',
+      auto_worktree: true,
+      auto_merge: false,
+      include_graph: true,
+      merge_strategy: 'branch-only',
+      terminal_mode: 'pty',
+      retried_from_run_id: originalRun!.id,
+    });
+
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:retry',
+      expect.objectContaining({
+        runId: Number(res.body.runId),
+        originalRunId: Number(originalRun!.id),
+        storyIds: ['US-001'],
+        agent: 'pi',
+        model: 'openai-codex/gpt-5.5',
+        includeGraph: true,
+        terminalMode: 'pty',
+        thinkingEnabled: true,
+        thinkingBudget: 4096,
+        effortLevel: 'xhigh',
+        reasoningEffort: 'xhigh',
       }),
       expect.any(Object),
     );
@@ -2719,5 +2883,577 @@ describe('GET /api/pipeline/runs/:runId/context-inspector-events — retrievalTe
     for (const event of res.body.events) {
       expect(event.retrievalTelemetryId).toBeUndefined();
     }
+  });
+});
+
+// ─── POST /api/pipeline/task-manifests/trigger ───────────────────────────────
+
+describe('POST /api/pipeline/task-manifests/trigger', () => {
+  test('dry-run validates, writes artifacts, returns estimated plan, and does not enqueue', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      dryRun: true,
+      agentOverride: 'pi',
+      modelOverride: 'claude-sonnet-4-5-20250929',
+      effortLevel: 'high',
+      mergeStrategy: 'draft-pr',
+      terminalMode: 'ansi-html',
+    });
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      dryRun: true,
+      queued: false,
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+    });
+    expect(res.body.artifacts).toEqual(expect.objectContaining({
+      manifestPath: expect.stringContaining('manifest.json'),
+      tasksMdPath: expect.stringContaining('tasks.md'),
+      specPath: expect.stringContaining(`hermes-task-manifest-${body.manifest.manifestId}.json`),
+      manifestHash: expect.stringMatching(/^sha256:/),
+    }));
+    expect(res.body.artifactRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'manifest-json', path: res.body.artifacts.manifestPath }),
+      expect.objectContaining({ role: 'synthetic-spec', path: res.body.artifacts.specPath }),
+    ]));
+    expect(res.body.estimatedExecutionPlan).toMatchObject({
+      willQueue: false,
+      willSpawnSubprocess: false,
+      autoMerge: false,
+      mergeStrategy: 'draft-pr',
+      agentOverride: 'pi',
+      modelOverride: 'claude-sonnet-4-5-20250929',
+      terminalMode: 'ansi-html',
+      resolvedAgentType: 'pi',
+      agentSource: 'request.agentOverride',
+      modelSource: 'request.modelOverride',
+      executionOptionPrecedence: {
+        agent: expect.stringContaining('request.agentOverride > manifest.execution.agentOverride'),
+        model: expect.stringContaining('request.modelOverride > manifest.execution.modelOverride'),
+      },
+    });
+    expect(fs.existsSync(path.join(wsDir, res.body.artifacts.manifestPath))).toBe(true);
+    expect(fs.existsSync(path.join(wsDir, res.body.artifacts.tasksMdPath))).toBe(true);
+    expect(fs.existsSync(path.join(wsDir, res.body.artifacts.specPath))).toBe(true);
+
+    const runCount = await queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM pipeline_runs`);
+    expect(Number(runCount?.count ?? '0')).toBe(0);
+    expect(getBoss().send).not.toHaveBeenCalled();
+  });
+
+  test('queues through pipeline broker with manifest correlation metadata and option pass-through', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      mergeStrategy: 'branch-only',
+      agentOverride: 'pi',
+      modelOverride: 'claude-sonnet-4-5-20250929',
+      effortLevel: 'high',
+      terminal_mode: 'ansi-html',
+      executionEnvironment: 'local-worktree',
+      executionEnvironmentId: 'tm-test-env',
+    });
+
+    const executionEnvironmentSupported = hasExecutionEnvironmentSupportInTest();
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      ok: true,
+      queued: true,
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      artifacts: expect.objectContaining({ specPath: expect.stringContaining('hermes-task-manifest') }),
+    }));
+    if (executionEnvironmentSupported) {
+      expect(res.body).toEqual(expect.objectContaining({
+        executionEnvironment: 'local-worktree',
+        executionEnvironmentId: 'tm-test-env',
+      }));
+    } else {
+      expect(res.body.executionEnvironment).toBeUndefined();
+      expect(res.body.executionEnvironmentId).toBeUndefined();
+    }
+
+    const run = await queryOne<{
+      idempotency_key: string | null;
+      task_manifest_id: string | null;
+      task_manifest_artifacts: any;
+      trigger_options: any;
+      merge_strategy: string | null;
+      auto_merge: boolean;
+      auto_worktree: boolean;
+      terminal_mode: string | null;
+      agent_type: string | null;
+    }>(`SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options, merge_strategy, auto_merge, auto_worktree, terminal_mode, agent_type FROM pipeline_runs WHERE id = $1`, [res.body.runId]);
+
+    expect(run).toMatchObject({
+      idempotency_key: body.idempotencyKey,
+      task_manifest_id: body.manifest.manifestId,
+      merge_strategy: 'branch-only',
+      auto_merge: false,
+      auto_worktree: false,
+      terminal_mode: 'ansi-html',
+      agent_type: 'pi',
+    });
+    expect(run?.task_manifest_artifacts).toEqual(expect.objectContaining({
+      manifestPath: res.body.artifacts.manifestPath,
+      specPath: res.body.artifacts.specPath,
+      manifestHash: res.body.artifacts.manifestHash,
+    }));
+    expect(run?.trigger_options).toEqual(expect.objectContaining({
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      manifestHash: res.body.artifacts.manifestHash,
+      sourceRefs: expect.objectContaining({
+        rorca: expect.objectContaining({ specPath: 'forge/specs/approved/source-spec.json' }),
+      }),
+      artifactPaths: expect.objectContaining({ specPath: res.body.artifacts.specPath }),
+      routeDecision: expect.objectContaining({ route: body.manifest.routeDecision.route }),
+      routeDecisionSummary: expect.stringContaining(body.manifest.routeDecision.route),
+    }));
+
+    expect(getBoss().createQueue).toHaveBeenCalledWith('pipeline:run');
+    expect(getBoss().send).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({
+        runId: res.body.runId,
+        manifestId: body.manifest.manifestId,
+        idempotencyKey: body.idempotencyKey,
+        taskManifestArtifacts: expect.objectContaining({ specPath: res.body.artifacts.specPath }),
+        agent: 'pi',
+        effortLevel: 'high',
+        terminalMode: 'ansi-html',
+        autoWorktree: false,
+        autoMerge: false,
+        mergeStrategy: 'branch-only',
+      }),
+      expect.objectContaining({ retryLimit: 0 }),
+    );
+    const [, jobPayload] = (getBoss().send as jest.Mock).mock.calls.at(-1) as [string, Record<string, unknown>];
+    if (executionEnvironmentSupported) {
+      expect(jobPayload).toEqual(expect.objectContaining({
+        executionEnvironment: 'local-worktree',
+        executionEnvironmentId: 'tm-test-env',
+      }));
+    } else {
+      expect(jobPayload.executionEnvironment).toBeUndefined();
+      expect(jobPayload.executionEnvironmentId).toBeUndefined();
+    }
+  });
+
+  test('request agentOverride=codex beats manifest agentOverride=pi for queued execution', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      agentOverride: 'codex',
+      terminal_mode: 'ansi-html',
+    });
+    body.manifest.execution.agentOverride = 'pi';
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body.agentType).toBe('codex');
+
+    const run = await queryOne<{ agent_type: string | null }>(
+      `SELECT agent_type FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run?.agent_type).toBe('codex');
+
+    const [, jobPayload] = (getBoss().send as jest.Mock).mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect(jobPayload).toEqual(expect.objectContaining({
+      runId: res.body.runId,
+      agent: 'codex',
+      agentOverride: 'codex',
+    }));
+  });
+
+  test('request agentOverride=opencode with openrouter model passes model through unchanged', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      agentOverride: 'opencode',
+      modelOverride: 'openrouter/z-ai/glm-5',
+      terminal_mode: 'ansi-html',
+    });
+    body.manifest.execution.agentOverride = 'pi';
+    body.manifest.execution.modelOverride = 'claude-sonnet-4-5-20250929';
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      agentType: 'opencode',
+      agentModel: 'openrouter/z-ai/glm-5',
+    }));
+
+    const run = await queryOne<{ agent_type: string | null; agent_model: string | null }>(
+      `SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      agent_type: 'opencode',
+      agent_model: 'openrouter/z-ai/glm-5',
+    }));
+
+    const [, jobPayload] = (getBoss().send as jest.Mock).mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect(jobPayload).toEqual(expect.objectContaining({
+      agent: 'opencode',
+      model: 'openrouter/z-ai/glm-5',
+    }));
+  });
+
+  test('manifest opencode with Claude model uses shared Claude-to-OpenRouter translation', async () => {
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      terminal_mode: 'ansi-html',
+    });
+    body.manifest.execution.agentOverride = 'opencode';
+    body.manifest.execution.modelOverride = 'claude-sonnet-4-6';
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      agentType: 'opencode',
+      agentModel: 'openrouter/anthropic/claude-sonnet-4.6',
+    }));
+
+    const run = await queryOne<{ agent_type: string | null; agent_model: string | null }>(
+      `SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      agent_type: 'opencode',
+      agent_model: 'openrouter/anthropic/claude-sonnet-4.6',
+    }));
+  });
+
+  test('task manifest without request or manifest overrides uses the default pipeline agent behavior', async () => {
+    const { setActiveAgentConfig } = require('../../lib/config') as typeof import('../../lib/config');
+    setActiveAgentConfig({ agent: 'claude', model: null });
+    delete process.env.RORCA_AGENT;
+    delete process.env.RORCA_MODEL;
+
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      terminal_mode: 'ansi-html',
+    });
+    delete body.agentOverride;
+    delete body.modelOverride;
+    delete body.manifest.execution.agentOverride;
+    delete body.manifest.execution.modelOverride;
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(expect.objectContaining({
+      agentType: 'claude',
+      agentModel: null,
+    }));
+
+    const run = await queryOne<{ agent_type: string | null; agent_model: string | null }>(
+      `SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      agent_type: 'claude',
+      agent_model: null,
+    }));
+  });
+
+  test('active run conflict returns structured activeRunId before artifact write or enqueue', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({ autoWorktree: false });
+    const activeRun = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/existing.json', 'ws-pipe', 'running')
+       RETURNING id`,
+    );
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({
+      ok: false,
+      conflict: true,
+      activeRunId: Number(activeRun!.id),
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      manifestHash: expect.stringMatching(/^sha256:/),
+    }));
+    expect(getBoss().send).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(wsDir, 'forge', 'task-manifests', body.manifest.manifestId, 'manifest.json'))).toBe(false);
+  });
+
+  test('duplicate identical request returns the existing manifest run without a second enqueue', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      mergeStrategy: 'branch-only',
+      terminal_mode: 'ansi-html',
+    });
+
+    const first = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(first.status).toBe(201);
+    const sendCallsAfterFirst = (getBoss().send as jest.Mock).mock.calls.length;
+
+    const second = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual(expect.objectContaining({
+      ok: true,
+      idempotent: true,
+      reused: true,
+      runId: first.body.runId,
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      manifestHash: first.body.artifacts.manifestHash,
+      artifacts: expect.objectContaining({ specPath: first.body.artifacts.specPath }),
+    }));
+    expect((getBoss().send as jest.Mock).mock.calls.length).toBe(sendCallsAfterFirst);
+
+    const runCount = await queryOne<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM pipeline_runs WHERE idempotency_key = $1`,
+      [body.idempotencyKey],
+    );
+    expect(Number(runCount?.count ?? '0')).toBe(1);
+  });
+
+  test('duplicate same idempotencyKey with different manifest hash returns ConflictError without artifacts or enqueue', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      autoWorktree: false,
+      mergeStrategy: 'branch-only',
+      terminal_mode: 'ansi-html',
+    });
+
+    const first = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(first.status).toBe(201);
+    const sendCallsAfterFirst = (getBoss().send as jest.Mock).mock.calls.length;
+    const manifestPath = path.join(wsDir, first.body.artifacts.manifestPath);
+    const manifestBefore = fs.readFileSync(manifestPath, 'utf8');
+
+    const conflictingBody = JSON.parse(JSON.stringify(body));
+    conflictingBody.manifest.objective = `${conflictingBody.manifest.objective} Conflicting duplicate.`;
+
+    const conflict = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(conflictingBody);
+
+    expect(conflict.status).toBe(409);
+    expect(conflict.body).toEqual(expect.objectContaining({
+      code: 'CONFLICT',
+      details: expect.objectContaining({
+        runId: first.body.runId,
+        idempotencyKey: body.idempotencyKey,
+        existingManifestHash: first.body.artifacts.manifestHash,
+        requestedManifestHash: expect.stringMatching(/^sha256:/),
+      }),
+    }));
+    expect(conflict.body.details.requestedManifestHash).not.toBe(first.body.artifacts.manifestHash);
+    expect((getBoss().send as jest.Mock).mock.calls.length).toBe(sendCallsAfterFirst);
+    expect(fs.readFileSync(manifestPath, 'utf8')).toBe(manifestBefore);
+
+    const runCount = await queryOne<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM pipeline_runs WHERE idempotency_key = $1`,
+      [body.idempotencyKey],
+    );
+    expect(Number(runCount?.count ?? '0')).toBe(1);
+  });
+
+  test('queue=true persists manifest metadata without enqueuing pg-boss immediately', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      queue: true,
+      autoWorktree: false,
+      mergeStrategy: 'branch-only',
+      terminal_mode: 'ansi-html',
+    });
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual(expect.objectContaining({
+      ok: true,
+      queued: true,
+      runId: expect.any(Number),
+      queuePosition: 1,
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      manifestHash: expect.stringMatching(/^sha256:/),
+      manifestSource: expect.objectContaining({
+        manifestId: body.manifest.manifestId,
+        idempotencyKey: body.idempotencyKey,
+      }),
+    }));
+    expect(getBoss().send).not.toHaveBeenCalled();
+
+    const run = await queryOne<{
+      status: string;
+      triggered_via: string | null;
+      idempotency_key: string | null;
+      task_manifest_id: string | null;
+      task_manifest_artifacts: any;
+      trigger_options: any;
+    }>(`SELECT status, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options FROM pipeline_runs WHERE id = $1`, [res.body.runId]);
+
+    expect(run).toEqual(expect.objectContaining({
+      status: 'queued',
+      triggered_via: 'queue',
+      idempotency_key: body.idempotencyKey,
+      task_manifest_id: body.manifest.manifestId,
+    }));
+    expect(run?.task_manifest_artifacts).toEqual(expect.objectContaining({
+      manifestHash: res.body.manifestHash,
+      manifestPath: res.body.artifacts.manifestPath,
+      specPath: res.body.artifacts.specPath,
+    }));
+    expect(run?.trigger_options).toEqual(expect.objectContaining({
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      manifestHash: res.body.manifestHash,
+      sourceRefs: expect.objectContaining({
+        rorca: expect.objectContaining({ specPath: 'forge/specs/approved/source-spec.json' }),
+      }),
+      artifactPaths: expect.objectContaining({ specPath: res.body.artifacts.specPath }),
+      routeDecision: expect.objectContaining({ route: body.manifest.routeDecision.route }),
+    }));
+  });
+
+  test('run detail retrieval exposes persisted manifest source metadata after queue restart', async () => {
+    const body = taskManifestTriggerBody({
+      queue: true,
+      autoWorktree: false,
+      mergeStrategy: 'branch-only',
+      terminal_mode: 'ansi-html',
+    });
+
+    const queued = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(queued.status).toBe(202);
+
+    const detail = await request(app)
+      .get(`/api/pipeline/runs/${queued.body.runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(detail.status).toBe(200);
+    expect(detail.body.manifestSource).toEqual(expect.objectContaining({
+      manifestId: body.manifest.manifestId,
+      idempotencyKey: body.idempotencyKey,
+      manifestHash: queued.body.manifestHash,
+      sourceRefs: expect.objectContaining({
+        rorca: expect.objectContaining({
+          specPath: 'forge/specs/approved/source-spec.json',
+        }),
+      }),
+      artifactPaths: expect.objectContaining({
+        manifestPath: queued.body.artifacts.manifestPath,
+        specPath: queued.body.artifacts.specPath,
+      }),
+      routeDecision: expect.objectContaining({ route: body.manifest.routeDecision.route }),
+    }));
+    expect(detail.body.run.trigger_options).toEqual(expect.objectContaining({
+      manifestHash: queued.body.manifestHash,
+    }));
+  });
+
+  test.each([
+    ['missing workspaceId', (body: Record<string, any>) => { delete body.workspaceId; }, 400],
+    ['missing idempotencyKey', (body: Record<string, any>) => { delete body.idempotencyKey; }, 400],
+    ['autoMerge=true', (body: Record<string, any>) => { body.autoMerge = true; }, 422],
+    ['mergeStrategy=direct', (body: Record<string, any>) => { body.mergeStrategy = 'direct'; }, 422],
+    ['invalid source authority', (body: Record<string, any>) => { body.workspaceId = 'other-workspace'; }, 400],
+    ['direct-repair-ineligible route decision', (body: Record<string, any>) => { body.manifest.routeDecision = { route: 'rorca.spec.run', reason: 'Route through normal spec run.' }; }, 400],
+  ])('rejects %s', async (_caseName, mutate, expectedStatus) => {
+    const body = taskManifestTriggerBody();
+    mutate(body);
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+
+    expect(res.status).toBe(expectedStatus);
+  });
+
+  test('openapi and MCP catalog expose the stable public task-manifest trigger schema', async () => {
+    const docsRes = await request(app)
+      .get('/api/docs/openapi.json')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(docsRes.status).toBe(200);
+    const operation = docsRes.body.paths?.['/api/pipeline/task-manifests/trigger']?.post;
+    expect(operation).toEqual(expect.objectContaining({
+      operationId: 'triggerTaskManifestPipelineRun',
+      'x-rorca-tier': 'public',
+      'x-rorca-public-api': true,
+    }));
+    expect(operation['x-rorca-rationale']).toContain('rejects autoMerge=true');
+    expect(operation.requestBody.content['application/json'].schema.required).toEqual(expect.arrayContaining(['workspaceId', 'manifest', 'idempotencyKey']));
+
+    const toolsRes = await request(app)
+      .get('/api/mcp/tools')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(toolsRes.status).toBe(200);
+    const names = toolsRes.body.tools.map((tool: { name: string }) => tool.name);
+    expect(names).toContain('rorca_pipeline_task_manifests_trigger');
+    expect(names).toContain('rorca_trigger_task_manifest');
+    const tool = toolsRes.body.tools.find((item: { name: string }) => item.name === 'rorca_pipeline_task_manifests_trigger');
+    expect(tool.requiredParams).toEqual(expect.arrayContaining(['workspaceId', 'manifest', 'idempotencyKey']));
+    expect(tool.inputSchema).toEqual(expect.objectContaining({
+      workspaceId: expect.any(Object),
+      manifest: expect.any(Object),
+      idempotencyKey: expect.any(Object),
+      mergeStrategy: expect.any(Object),
+      terminal_mode: expect.any(Object),
+    }));
   });
 });

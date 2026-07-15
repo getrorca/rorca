@@ -78,7 +78,7 @@ rorca-capture service restart --workspace-id <workspace-id>
 
 # Or immediately stop submissions; uninstall is available if capture must be removed.
 rorca-capture pause --workspace-id <workspace-id>
-rorca-capture uninstall --all --workspace-id <workspace-id>
+rorca-capture teardown --all --workspace-id <workspace-id>
 ```
 
 Before enabling `repo-and-command`, add workspace-specific sensitive paths to

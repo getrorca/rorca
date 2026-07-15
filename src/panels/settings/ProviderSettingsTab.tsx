@@ -997,7 +997,7 @@ function ConnectionsHubSection() {
         apiFetch<AgentConfig>('/api/config', { silent: true }).catch(() => null),
         apiFetch<ClaudeAuthState>('/api/config/claude-auth', { silent: true }).catch(() => null),
         apiFetch<OllamaStatus>('/api/config/ollama', { silent: true }).catch(() => null),
-        apiFetch<HealthResponse>('/api/health', { silent: true }).catch(() => null),
+        apiFetch<HealthResponse>('/api/health/detailed', { silent: true }).catch(() => null),
       ]);
       setKeys(keyData.keys);
       setAgentConfig(config);

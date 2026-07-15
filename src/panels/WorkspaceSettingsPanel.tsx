@@ -176,13 +176,13 @@ export interface WsSectionProps {
 
 type ContextSubTab = 'library' | 'capture' | 'files' | 'routing' | 'skills';
 
-type CaptureControlStatus = {
+type CaptureStatus = {
   policyMode: string;
   paused: boolean;
   activeIntegrations: Record<string, unknown>;
   ignoredPaths: string[];
   queueDepth: number;
-  redactionPolicy: { version: string; mode: string; availableModes: string[] };
+  redactionPolicy: { version: string; availableModes: string[] };
   lastCapturedEvent: {
     occurredAt: string | null;
     eventType: string | null;
@@ -195,100 +195,140 @@ type CaptureControlStatus = {
       truncated: boolean;
     };
   };
-  auditLog: Array<{ id: string; eventType: string; integrationId: string; occurredAt: string; redactionDiagnostics: { redactionCount: number; redactionTypes: string[]; regulatedDomainFlags: string[] } }>;
+  auditLog: Array<{
+    id: string;
+    eventType: string;
+    integrationId: string;
+    occurredAt: string;
+    redactionDiagnostics: { redactionCount: number; regulatedDomainFlags: string[] };
+  }>;
+};
+
+type CaptureMonitoring = {
+  status: 'healthy' | 'degraded';
+  reasons: string[];
+  advisories: string[];
+  queues: { capture: { depth: number; failed: number }; distillation: { depth: number; failed: number } };
+  worker: { status: string; ageSeconds: number | null };
 };
 
 function ContextCaptureStatusCard({ workspaceId, showToast }: WsSectionProps) {
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState<CaptureControlStatus | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<CaptureStatus | null>(null);
+  const [monitoring, setMonitoring] = useState<CaptureMonitoring | null>(null);
 
-  const loadStatus = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiFetch<{ status: CaptureControlStatus }>(`/api/context-capture/${encodeURIComponent(workspaceId)}/status`);
-      setStatus(data.status);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load capture status', 'error');
+      const [statusData, monitoringData] = await Promise.all([
+        apiFetch<{ status: CaptureStatus }>(`/api/context-capture/${encodeURIComponent(workspaceId)}/status`),
+        apiFetch<CaptureMonitoring>(`/api/context-capture/${encodeURIComponent(workspaceId)}/monitoring`),
+      ]);
+      setStatus(statusData.status);
+      setMonitoring(monitoringData);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to load capture status', 'error');
     } finally {
       setLoading(false);
     }
   }, [workspaceId, showToast]);
 
-  useEffect(() => { void loadStatus(); }, [loadStatus]);
+  useEffect(() => { void load(); }, [load]);
 
-  const setPause = async (paused: boolean) => {
+  const postControl = async (action: 'pause' | 'resume') => {
+    setSaving(true);
     try {
-      await apiFetch(`/api/context-capture/${encodeURIComponent(workspaceId)}/${paused ? 'pause' : 'resume'}`, { method: 'POST' });
-      showToast(paused ? 'Context capture paused' : 'Context capture resumed', 'success');
-      await loadStatus();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update capture pause state', 'error');
+      await apiFetch(`/api/context-capture/${encodeURIComponent(workspaceId)}/${action}`, { method: 'POST' });
+      showToast(action === 'pause' ? 'Context capture paused' : 'Context capture resumed', 'success');
+      await load();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : `Failed to ${action} capture`, 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
-  if (loading && !status) {
-    return <div className="flex items-center gap-2 text-sm text-muted"><Loader2 size={16} className="animate-spin" /> Loading capture controls...</div>;
-  }
+  const updatePolicy = async (policyMode: string) => {
+    setSaving(true);
+    try {
+      await apiFetch(`/api/context-capture/${encodeURIComponent(workspaceId)}/policy`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ policyMode }),
+      });
+      showToast(`Capture policy changed to ${policyMode}`, 'success');
+      await load();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to change capture policy', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
 
-  if (!status) return null;
+  if (loading && !status) return <div className="flex items-center gap-2 text-sm text-muted"><Loader2 size={16} className="animate-spin" /> Loading capture controls…</div>;
+  if (!status) return <div className="rounded-xl border border-border bg-panel p-4 text-sm text-muted">Capture status is unavailable.</div>;
 
   const diagnostics = status.lastCapturedEvent.redactionDiagnostics;
   const integrations = Object.keys(status.activeIntegrations).filter((key) => status.activeIntegrations[key]);
+  const degraded = monitoring?.status === 'degraded';
 
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-border bg-panel p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-[var(--text)]">Always-on capture privacy controls</h3>
-            <p className="mt-1 text-xs leading-5 text-muted">
-              Shows the single operator policy, pause state, queue depth, ignored paths, integrations, and redaction diagnostics. Secret values and raw payloads are never displayed.
-            </p>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-[var(--text)]">Always-on capture</h3>
+              <span className={`rounded-full px-2 py-0.5 text-[11px] ${degraded ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>{degraded ? 'Degraded' : 'Healthy'}</span>
+            </div>
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-muted">Metadata-only is the production default. Raw payloads, secret values, command output, and transcripts are never shown here.</p>
           </div>
           <div className="flex gap-2">
-            <button type="button" onClick={() => void loadStatus()} className="rounded border border-border px-3 py-1.5 text-xs text-muted hover:bg-surface-100">Refresh</button>
-            <button type="button" onClick={() => void setPause(!status.paused)} className="rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90">
-              {status.paused ? 'Resume' : 'Pause'}
-            </button>
+            <button type="button" disabled={saving} onClick={() => void load()} className="rounded border border-border px-3 py-1.5 text-xs text-muted hover:bg-surface-100">Refresh</button>
+            <button type="button" disabled={saving} onClick={() => void postControl(status.paused ? 'resume' : 'pause')} className="rounded bg-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{status.paused ? 'Resume' : 'Pause'}</button>
           </div>
         </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Policy</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{status.policyMode}</div></div>
-          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Pause state</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{status.paused ? 'Paused' : 'Active'}</div></div>
-          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Queue depth</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{status.queueDepth}</div></div>
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
+          <label className="rounded-lg border border-border bg-surface-50 p-3 text-xs text-muted">Policy
+            <select aria-label="Capture policy" disabled={saving} value={status.policyMode} onChange={(event) => void updatePolicy(event.target.value)} className="mt-1 w-full rounded border border-border bg-panel px-2 py-1.5 text-sm text-[var(--text)]">
+              {status.redactionPolicy.availableModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select>
+          </label>
+          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Privacy switch</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{status.paused ? 'Paused' : 'Active'}</div></div>
+          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Capture queue</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{monitoring?.queues.capture.depth ?? status.queueDepth}</div></div>
+          <div className="rounded-lg border border-border bg-surface-50 p-3"><div className="text-[11px] uppercase text-muted">Distillation queue</div><div className="mt-1 text-sm font-medium text-[var(--text)]">{monitoring?.queues.distillation.depth ?? 0}</div></div>
         </div>
+        {degraded && <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-300">{monitoring?.reasons.join(', ') || 'Capture monitoring is degraded.'}</div>}
+        {monitoring && monitoring.advisories.length > 0 && <div className="mt-2 text-xs text-muted">Advisories: {monitoring.advisories.join(', ')}</div>}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-panel p-4">
-          <h4 className="text-sm font-semibold text-[var(--text)]">Integrations and ignored paths</h4>
-          <div className="mt-3 text-xs text-muted">Active integrations: {integrations.length ? integrations.join(', ') : 'none'}</div>
-          <div className="mt-2 text-xs text-muted">Ignored paths: {status.ignoredPaths.length ? status.ignoredPaths.join(', ') : 'none configured'}</div>
-          <div className="mt-2 text-xs text-muted">Redaction policy: {status.redactionPolicy.version}</div>
+        <div className="rounded-xl border border-border bg-panel p-4 text-xs text-muted">
+          <h4 className="text-sm font-semibold text-[var(--text)]">Integrations and ignore policy</h4>
+          <div className="mt-3">Active integrations: {integrations.join(', ') || 'none'}</div>
+          <div className="mt-2 break-words">Ignored paths: {status.ignoredPaths.join(', ') || 'none configured'}</div>
+          <div className="mt-2">Redaction policy: {status.redactionPolicy.version}</div>
+          <div className="mt-2">Worker: {monitoring?.worker.status ?? 'unknown'}{monitoring?.worker.ageSeconds != null ? ` (${monitoring.worker.ageSeconds}s)` : ''}</div>
         </div>
-        <div className="rounded-xl border border-border bg-panel p-4">
+        <div className="rounded-xl border border-border bg-panel p-4 text-xs text-muted">
           <h4 className="text-sm font-semibold text-[var(--text)]">Last captured event</h4>
-          <div className="mt-3 space-y-1 text-xs text-muted">
+          <div className="mt-3 space-y-1">
             <div>Time: {status.lastCapturedEvent.occurredAt ?? 'none'}</div>
             <div>Integration: {status.lastCapturedEvent.integrationId ?? 'none'}</div>
             <div>Event type: {status.lastCapturedEvent.eventType ?? 'none'}</div>
             <div>Redactions: {diagnostics.redactionCount} ({diagnostics.redactionTypes.join(', ') || 'none'})</div>
             <div>Regulated flags: {diagnostics.regulatedDomainFlags.join(', ') || 'none'}</div>
-            <div>Ignored path hits: {diagnostics.ignoredPathCount}</div>
+            <div>Ignored paths: {diagnostics.ignoredPathCount}{diagnostics.truncated ? ' · truncated' : ''}</div>
           </div>
         </div>
       </div>
 
       <div className="rounded-xl border border-border bg-panel p-4">
-        <h4 className="text-sm font-semibold text-[var(--text)]">Local audit log</h4>
+        <h4 className="text-sm font-semibold text-[var(--text)]">Count-only audit history</h4>
         <div className="mt-3 divide-y divide-border text-xs">
           {status.auditLog.length === 0 && <div className="py-2 text-muted">No audit events yet.</div>}
-          {status.auditLog.slice(0, 8).map((item) => (
-            <div key={item.id} className="flex flex-col gap-1 py-2 sm:flex-row sm:items-center sm:justify-between">
-              <span className="text-[var(--text)]">{item.eventType} · {item.integrationId}</span>
-              <span className="text-muted">{item.occurredAt} · redactions={item.redactionDiagnostics.redactionCount} · flags={item.redactionDiagnostics.regulatedDomainFlags.join(', ') || 'none'}</span>
-            </div>
-          ))}
+          {status.auditLog.slice(0, 8).map((item) => <div key={item.id} className="flex flex-col gap-1 py-2 sm:flex-row sm:justify-between"><span className="text-[var(--text)]">{item.eventType} · {item.integrationId}</span><span className="text-muted">{item.occurredAt} · redactions={item.redactionDiagnostics.redactionCount} · flags={item.redactionDiagnostics.regulatedDomainFlags.join(', ') || 'none'}</span></div>)}
         </div>
       </div>
     </div>

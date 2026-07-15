@@ -26,10 +26,22 @@ const smtpTransport = SMTP_HOST && SMTP_USER && SMTP_PASS
         user: SMTP_USER,
         pass: SMTP_PASS,
       },
+      disableFileAccess: true,
+      disableUrlAccess: true,
     })
   : null;
 
 const FROM = SMTP_FROM || process.env.RORCA_EMAIL_FROM || 'Rorca <no-reply@rorca.ai>';
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character]!);
+}
 
 async function sendEmail(to: string, subject: string, html: string): Promise<void> {
   if (smtpTransport) {
@@ -38,6 +50,8 @@ async function sendEmail(to: string, subject: string, html: string): Promise<voi
       to,
       subject,
       html,
+      disableFileAccess: true,
+      disableUrlAccess: true,
     });
     return;
   }
@@ -65,7 +79,7 @@ export async function sendVerificationEmail(email: string, confirmationUrl: stri
         <p style="color:#475569;margin-bottom:24px">
           Click the button below to verify your email address and activate your Rorca account.
         </p>
-        <a href="${confirmationUrl}"
+        <a href="${escapeHtml(confirmationUrl)}"
            style="display:inline-block;background:#0ea5e9;color:#fff;font-weight:600;font-size:14px;padding:12px 24px;border-radius:6px;text-decoration:none">
           Verify email
         </a>
@@ -87,7 +101,7 @@ export async function sendPasswordResetEmail(email: string, resetUrl: string): P
         <p style="color:#475569;margin-bottom:24px">
           Click the button below to reset your Rorca password. This link expires in 1 hour.
         </p>
-        <a href="${resetUrl}"
+        <a href="${escapeHtml(resetUrl)}"
            style="display:inline-block;background:#0ea5e9;color:#fff;font-weight:600;font-size:14px;padding:12px 24px;border-radius:6px;text-decoration:none">
           Reset password
         </a>
@@ -112,9 +126,9 @@ export async function sendTeamInviteEmail(
       <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 24px">
         <h1 style="font-size:24px;font-weight:700;color:#0f172a;margin-bottom:8px">You're invited</h1>
         <p style="color:#475569;margin-bottom:24px">
-          <strong>${inviterName}</strong> has invited you to join the <strong>${teamName}</strong> team on Rorca.
+          <strong>${escapeHtml(inviterName)}</strong> has invited you to join the <strong>${escapeHtml(teamName)}</strong> team on Rorca.
         </p>
-        <a href="${inviteUrl}"
+        <a href="${escapeHtml(inviteUrl)}"
            style="display:inline-block;background:#0ea5e9;color:#fff;font-weight:600;font-size:14px;padding:12px 24px;border-radius:6px;text-decoration:none">
           Accept invitation
         </a>
@@ -144,13 +158,13 @@ export async function sendRunCompleteEmail(
       <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 24px">
         <h1 style="font-size:24px;font-weight:700;color:#0f172a;margin-bottom:8px">Pipeline run finished</h1>
         <p style="color:#475569;margin-bottom:8px">
-          <strong>${specTitle}</strong>
+          <strong>${escapeHtml(specTitle)}</strong>
         </p>
         <p style="margin-bottom:24px">
           <span style="color:${statusColor};font-weight:600">${statusText}</span>
           &nbsp;—&nbsp;${passed}/${total} stories passed
         </p>
-        <a href="${runUrl}"
+        <a href="${escapeHtml(runUrl)}"
            style="display:inline-block;background:#0ea5e9;color:#fff;font-weight:600;font-size:14px;padding:12px 24px;border-radius:6px;text-decoration:none">
           View run
         </a>

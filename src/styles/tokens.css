@@ -13,6 +13,9 @@
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
   --status-healthy: var(--success);
   --status-healthy-bg: rgba(16, 185, 129, 0.12);
   --status-degraded: var(--warning);
@@ -49,6 +52,9 @@
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
   --status-healthy: var(--success);
   --status-healthy-bg: rgba(16, 185, 129, 0.12);
   --status-degraded: var(--warning);

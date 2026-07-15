@@ -10,7 +10,7 @@
  * touch credentials, or change a CLI's configuration.
  */
 
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentType } from './config';
@@ -94,7 +94,8 @@ const CAPABILITY_FLAG: Record<AgentType, Partial<Record<PtyCliCapability, string
     effort: '--effort',
     mcpConfig: '--mcp-config',
   },
-  opencode: { attach: '--attach', model: '--model' },
+  // OpenCode 1.x exposes `attach <url>` as a subcommand, not `--attach`.
+  opencode: { attach: 'attach', model: '--model' },
   codex: {
     askForApproval: '--ask-for-approval',
     noAltScreen: '--no-alt-screen',
@@ -193,8 +194,10 @@ function parseVersion(output: string): string | null {
 }
 
 function outputAdvertisesFlag(helpOutput: string, flag: string): boolean {
-  // `--model=<id>` and `--model <id>` are both legitimate help renderings.
-  return new RegExp(`(^|[\\s,])${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s=,])`, 'm').test(helpOutput);
+  // Flags may render as `--model=<id>` or `--model <id>`. OpenCode's attach
+  // capability is an official subcommand (`opencode attach <url>`), so the same
+  // token-boundary check intentionally supports that help rendering too.
+  return new RegExp(`(^|[\\s,])${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s=,<])`, 'm').test(helpOutput);
 }
 
 /** Probe one CLI synchronously, with short bounded non-interactive commands. */
@@ -256,6 +259,107 @@ export function probePtyCliCompatibility(agentType: AgentType, opts: PtyCliProbe
   return result;
 }
 
+async function runProbeAsync(binaryPath: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<InternalPtyCliProbeResult> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (exitCode: number | null, error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      const rawOutput = String(`${stdout}\n${stderr}${error ? `\n${error.message}` : ''}`).replace(/\0/g, '').slice(0, 64 * 1024);
+      resolve({
+        args,
+        ok: exitCode === 0 && !error && !timedOut,
+        timedOut,
+        exitCode,
+        output: trimOutput(rawOutput),
+        rawOutput,
+      });
+    };
+    let child;
+    try {
+      child = spawn(binaryPath, args, {
+        cwd: osSafeCwd(),
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish(null, error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => { if (stdout.length < 64 * 1024) stdout += chunk; });
+    child.stderr?.on('data', (chunk: string) => { if (stderr.length < 64 * 1024) stderr += chunk; });
+    child.once('error', (error) => finish(null, error));
+    child.once('close', (code) => finish(code));
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      // Resolve even if a broken wrapper never reports close after SIGTERM.
+      setTimeout(() => finish(null), 100).unref?.();
+    }, timeoutMs);
+    timer.unref?.();
+  });
+}
+
+/** Async health-safe variant; provider probes run concurrently without blocking the event loop. */
+export async function probePtyCliCompatibilityAsync(agentType: AgentType, opts: PtyCliProbeOptions = {}): Promise<PtyCliCompatibility> {
+  const env = opts.env ?? process.env;
+  const timeoutMs = opts.timeoutMs ?? PTY_CLI_PROBE_TIMEOUT_MS;
+  const checkedAt = new Date().toISOString();
+  const binaryPath = resolveBinary(agentType, env);
+  const capabilities = emptyCapabilities();
+  const diagnostics: PtyCliDiagnostic[] = [];
+  if (!binaryPath) {
+    return {
+      agentType, checkedAt, binaryPath: null, version: null, ready: false, interactive: false, capabilities,
+      probes: { version: null, help: null },
+      diagnostics: [{
+        code: 'binary_not_found',
+        message: `Could not find the ${agentType} CLI on PATH or via ${ENV_KEY[agentType]}.`,
+        action: `Install/configure ${agentType}, or set ${ENV_KEY[agentType]} to its executable path.`,
+      }],
+    };
+  }
+
+  const [version, help] = await Promise.all([
+    runProbeAsync(binaryPath, ['--version'], env, timeoutMs),
+    runProbeAsync(binaryPath, ['--help'], env, timeoutMs),
+  ]);
+  if (!version.ok) diagnostics.push({
+    code: 'version_probe_failed',
+    message: `${agentType} at ${binaryPath} did not complete --version${version.timedOut ? ` within ${timeoutMs}ms` : ''}.`,
+    action: 'Verify this is the real CLI executable and that its wrapper/runtime is available.',
+  });
+  if (!help.ok) diagnostics.push({
+    code: 'help_probe_failed',
+    message: `${agentType} at ${binaryPath} did not complete --help${help.timedOut ? ` within ${timeoutMs}ms` : ''}.`,
+    action: 'Repair or update the CLI, then retry; Rorca will not launch an unverified interactive session.',
+  });
+  if (help.ok) {
+    for (const [capability, flag] of Object.entries(CAPABILITY_FLAG[agentType]) as Array<[PtyCliCapability, string]>) {
+      capabilities[capability] = outputAdvertisesFlag(help.rawOutput, flag);
+    }
+  }
+  return {
+    agentType,
+    checkedAt,
+    binaryPath,
+    version: version.ok ? parseVersion(version.output) : null,
+    ready: version.ok && help.ok,
+    interactive: version.ok && help.ok,
+    capabilities,
+    probes: { version: toPublicProbe(version), help: toPublicProbe(help) },
+    diagnostics,
+  };
+}
+
 export function getPtyCliCompatibility(): Record<AgentType, PtyCliCompatibility> {
   return {
     claude: probePtyCliCompatibility('claude'),
@@ -263,6 +367,16 @@ export function getPtyCliCompatibility(): Record<AgentType, PtyCliCompatibility>
     codex: probePtyCliCompatibility('codex'),
     pi: probePtyCliCompatibility('pi'),
   };
+}
+
+export async function getPtyCliCompatibilityAsync(): Promise<Record<AgentType, PtyCliCompatibility>> {
+  const [claude, opencode, codex, pi] = await Promise.all([
+    probePtyCliCompatibilityAsync('claude'),
+    probePtyCliCompatibilityAsync('opencode'),
+    probePtyCliCompatibilityAsync('codex'),
+    probePtyCliCompatibilityAsync('pi'),
+  ]);
+  return { claude, opencode, codex, pi };
 }
 
 export class PtyCliCompatibilityError extends Error {

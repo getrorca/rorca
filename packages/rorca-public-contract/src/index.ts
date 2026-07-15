@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
@@ -9,6 +9,35 @@ import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { execFileSync } from 'child_process';
+
+export {
+  DEFAULT_TASK_MANIFEST_COMMAND_DENYLIST,
+  DEFAULT_TASK_MANIFEST_REQUIRED_VALIDATION,
+  TASK_MANIFEST_LIMITS,
+  TASK_MANIFEST_VERSION,
+  TaskManifestBoundedScopeSchema,
+  TaskManifestContextRefSchema,
+  TaskManifestContextSchema,
+  TaskManifestEvidenceSchema,
+  TaskManifestExecutionSchema,
+  TaskManifestPolicySchema,
+  TaskManifestRouteDecisionSchema,
+  TaskManifestSchema,
+  TaskManifestSourceSchema,
+  TaskManifestTaskSchema,
+  TaskManifestTasksMdProjectionSchema,
+  TaskManifestValidationSchema,
+  parseTaskManifest,
+  safeParseTaskManifest,
+} from '../../../backend/src/lib/task-manifest';
+
+export type {
+  TaskManifest,
+  TaskManifestExecution,
+  TaskManifestPolicy,
+  TaskManifestSource,
+  TaskManifestTask,
+} from '../../../backend/src/lib/task-manifest';
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
 

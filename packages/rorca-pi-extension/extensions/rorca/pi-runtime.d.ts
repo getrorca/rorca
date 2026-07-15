@@ -1,20 +1,23 @@
-declare module "@mariozechner/pi-coding-agent" {
-  export class Theme {
-    fg(kind: string, value: string): string;
-    strikethrough(value: string): string;
-  }
-
+declare module "@earendil-works/pi-coding-agent" {
   export interface ExtensionUi {
     notify(message: string, level?: "info" | "success" | "warning" | "error"): void;
     setStatus(key: string, value?: string): void;
     setWidget(key: string, value?: string[]): void;
-    custom<T>(factory: (tui: import("@mariozechner/pi-tui").TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => import("@mariozechner/pi-tui").Component | Promise<import("@mariozechner/pi-tui").Component>, options?: Record<string, unknown>): Promise<T>;
     select(title: string, options: string[], config?: Record<string, unknown>): Promise<string | undefined>;
     confirm(title: string, message: string): Promise<boolean>;
+    custom<T>(
+      factory: (tui: any, theme: Theme, keybindings: any, done: (value: T) => void) => any,
+      options?: Record<string, unknown>,
+    ): Promise<T>;
     theme: {
       fg(kind: string, value: string): string;
       strikethrough(value: string): string;
     };
+  }
+
+  export interface Theme {
+    fg(kind: string, value: string): string;
+    strikethrough(value: string): string;
   }
 
   export interface ExtensionContext {

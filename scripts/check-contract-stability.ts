@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
@@ -6,11 +6,11 @@
  */
 
 import path from 'path';
-import { execFileSync } from 'child_process';
 import {
   buildSnapshotFromOpenApi,
   compareSnapshots,
   determineBumpType,
+  fetchOpenApiFromServer,
   formatDiff,
   getReferenceDate,
   isMajorVersionBump,
@@ -24,28 +24,14 @@ import {
   resolveMarkersForChanges,
   snapshotRoutesEqual,
 } from '../packages/rorca-public-contract/src/index';
-import { loadOpenApiDocument } from './openapi-source';
 
 const cwd = process.cwd();
 const snapshotFile = 'docs/openapi-public-snapshot.json';
 const breakingChangesFile = 'docs/contract-breaking-changes.md';
 const snapshotPath = path.join(cwd, snapshotFile);
 const breakMarkdownPath = path.join(cwd, breakingChangesFile);
-function resolveBaseRef(): string | null {
-  if (process.env.GITHUB_BASE_REF) {
-    return `origin/${process.env.GITHUB_BASE_REF}`;
-  }
-
-  try {
-    const branch = execFileSync('git', ['branch', '--show-current'], { cwd, encoding: 'utf8' }).trim();
-    if (!branch || branch === 'main') return null;
-    return execFileSync('git', ['merge-base', 'HEAD', 'main'], { cwd, encoding: 'utf8' }).trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-const baseRef = resolveBaseRef();
+const baseUrl = process.env.RORCA_CONTRACT_BASE_URL || 'http://127.0.0.1:3030';
+const baseRef = process.env.GITHUB_BASE_REF ? `origin/${process.env.GITHUB_BASE_REF}` : null;
 
 async function main(): Promise<void> {
   const committedSnapshot = await readSnapshot(snapshotPath);
@@ -53,7 +39,7 @@ async function main(): Promise<void> {
     throw new Error(`Missing committed baseline at ${snapshotFile}. Run npm run build:contract and commit the result.`);
   }
 
-  const openApi = await loadOpenApiDocument();
+  const openApi = await fetchOpenApiFromServer(baseUrl);
   const freshSnapshot = buildSnapshotFromOpenApi(openApi, committedSnapshot.contractVersion);
 
   if (!snapshotRoutesEqual(committedSnapshot, freshSnapshot)) {
@@ -91,6 +77,8 @@ async function main(): Promise<void> {
     if (bumpType === 'major' && !isMajorVersionBump(baseVersion, headVersion)) {
       throw new Error(`Breaking public API changes require a contract major bump: ${baseVersion} -> ${headVersion} was not sufficient.`);
     }
+  } else if (headVersion !== '1.0.0') {
+    throw new Error(`Bootstrap baseline must start at contractVersion 1.0.0, found ${headVersion}.`);
   }
 
   const markerResolution = resolveMarkersForChanges(changes, currentMarkers, referenceDate);

@@ -573,47 +573,64 @@ export async function stageExternalMemoryImportCandidates(candidates: ExternalMe
   for (const candidate of candidates) {
     const sourceContentHash = hashCaptureContent({ content: candidate.content, provenanceHash: candidate.provenanceHash });
     const candidateHash = prefixedHash({ category: 'Pattern', content: candidate.content, relatedFiles: candidate.relatedFiles });
+    const trustTier = candidate.trustTier === 'privileged'
+      ? 'approved_policy'
+      : candidate.trustTier === 'verified'
+        ? 'verified_fact'
+        : candidate.trustTier === 'local'
+          ? 'working_note'
+          : 'agent_observation';
+    const title = `Imported ${candidate.vendor} memory: ${candidate.content}`.slice(0, 240).trim() || 'Imported memory candidate';
+    const provenance = candidate.payload.provenance ?? candidate.payload;
+    const metadata = {
+      externalImport: candidate.payload,
+      redactionDiagnostics: candidate.redactionDiagnostics,
+      importedAt: candidate.importedAt,
+    };
     const row = await queryOne<{ id: number }>(
       `INSERT INTO memory_candidates (
-         workspace_id, event_type, payload_schema_version, source_system, tool_name,
-         host_application, session_id, related_files, capture_policy, trust_tier,
-         idempotency_key, provenance, payload, title, rule, status, category, content, confidence,
-         candidate_hash, source_content_hash, source_event_id, source_session_id,
-         evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible,
-         dedupe_key, external_import_id, source_vendor, source_original_id, import_adapter
+         workspace_id, event_type, source_system, source_ref, occurred_at,
+         suggested_category, title, rule, context, related_files, confidence,
+         trust_tier, review_status, idempotency_key, provenance, metadata,
+         security_sensitive, regulated_domain, requires_review,
+         payload_schema_version, tool_name, host_application, session_id,
+         capture_policy, candidate_hash, source_content_hash, source_event_id,
+         source_session_id, evidence_snippets, review_reason,
+         default_retrieval_eligible, dedupe_key, external_import_id,
+         source_vendor, source_original_id, import_adapter
        ) VALUES (
-         $1, 'explicit_memory', '2026-07-ucc-007.v1', 'external_import', $2,
-         $3, $4, $5::jsonb, $6::jsonb, $7,
-         $8, $9::jsonb, $10::jsonb, $11, $12, $13, 'Pattern', $14, $15,
-         $16, $17, $18, $19,
-         $20::jsonb, $21, $22, false,
-         $23, $24, $25, $26, $27
+         $1, 'manual_note', 'external_import', $2, $3, 'Pattern', $4, $5,
+         'Imported external memory; review provenance before promotion.', $6::jsonb,
+         $7, $8, 'pending', $9, $10::jsonb, $11::jsonb, $12, $13, TRUE,
+         '2026-07-ucc-007.v1', $14, $15, $16, $17::jsonb, $18, $19, $20,
+         $21, $22::jsonb, $23, FALSE, $24, $25, $26, $27, $28
        )
        ON CONFLICT (workspace_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
        RETURNING id`,
       [
         candidate.workspaceId,
+        candidate.originalId,
+        candidate.occurredAt ?? candidate.importedAt,
+        title,
+        candidate.content,
+        JSON.stringify(candidate.relatedFiles),
+        candidate.confidence,
+        trustTier,
+        candidate.idempotencyKey,
+        JSON.stringify(provenance),
+        JSON.stringify(metadata),
+        candidate.securitySensitive,
+        candidate.redactionDiagnostics.regulatedDomainFlags.length > 0,
         candidate.vendor,
         candidate.adapter,
         candidate.externalId,
-        JSON.stringify(candidate.relatedFiles.map((file) => ({ path: file, role: 'mentioned', hash: null }))),
-        JSON.stringify({ imported_by: 'external-memory-import-adapters', version: '2026-07-ucc-011.v1' }),
-        candidate.trustTier,
-        candidate.idempotencyKey,
-        JSON.stringify(candidate.payload.provenance ?? candidate.payload),
-        JSON.stringify(candidate.payload),
-        `Imported ${candidate.vendor} memory: ${candidate.content}`.slice(0, 240).trim() || 'Imported memory candidate',
-        candidate.content,
-        candidate.status,
-        candidate.content,
-        candidate.confidence,
+        JSON.stringify({ importedBy: 'external-memory-import-adapters', version: '2026-07-ucc-011.v1' }),
         candidateHash,
         sourceContentHash,
         candidate.originalId,
         candidate.externalId,
         JSON.stringify([{ text: candidate.content.slice(0, 500), sourceField: 'external_import', redacted: candidate.redactionDiagnostics.redactionCount > 0 }]),
         candidate.reviewReason,
-        candidate.securitySensitive,
         candidate.dedupeKey,
         candidate.externalId,
         candidate.vendor,

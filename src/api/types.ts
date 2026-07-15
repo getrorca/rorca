@@ -105,13 +105,8 @@ export interface StoryComment {
 
 // ─── Pipeline types ───────────────────────────────────────────────────────────
 
-export type RunStatus = 'queued' | 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
-/** Backend-owned phase contract; `status` remains compatibility/result state. */
-export type RunLifecycleStatus = 'queued' | 'starting' | 'pty_attached' | 'running' | 'validating' | 'finished' | 'failed' | 'cancelled' | 'unknown';
-export type RunAgentType = 'claude' | 'opencode' | 'codex' | 'pi' | 'unknown';
-export type RunTerminalMode = 'ansi-html' | 'pty';
+export type RunStatus = 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
 
-/** Canonical API DTO fields are camelCase; snake_case remains a legacy wire alias. */
 export interface PipelineRun {
   id: number;
   spec_path: string;
@@ -121,32 +116,15 @@ export interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   retried_from_run_id: number | null;
-  terminal_mode?: RunTerminalMode;
-  /** Canonical normalized execution metadata. */
-  agentType?: RunAgentType;
-  agentModel?: string | null;
-  terminalMode?: RunTerminalMode;
-  /** Authoritative lifecycle phase. Never infer this from browser SSE/WAL. */
-  lifecycleStatus?: RunLifecycleStatus;
-  lifecyclePhase?: RunLifecycleStatus;
-  /** Legacy backend aliases retained while clients migrate. */
   agent_type?: string | null;
   agent_model?: string | null;
-  lifecycle_status?: RunLifecycleStatus | null;
-  lifecycle_phase?: RunLifecycleStatus | null;
-  parallelism?: number;
-  branch_name?: string | null;
-  worktree_path?: string | null;
-  queue_position?: number | null;
-  queued_at?: string | null;
-  triggered_via?: 'queue' | 'run_now';
-  auto_worktree?: boolean;
-}
-
-export interface RunTokenTelemetry {
-  inputTokens: number | null;
-  outputTokens: number | null;
-  totalCostUsd: number | null;
+  agentType: string | null;
+  agentModel: string | null;
+  terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
+  lifecycleStatus?: string | null;
+  lifecycle_status?: string | null;
+  lifecyclePhase?: string | null;
+  lifecycle_phase?: string | null;
 }
 
 export interface StoryResult {

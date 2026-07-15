@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, Brain, DollarSign, SquareTerminal } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, DollarSign, Server } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
@@ -44,6 +44,29 @@ interface AgentConfigSummary {
   agentModel: string | null;
   modelDisplayName: string | null;
   hasApiKey: boolean;
+}
+
+
+interface ExecutionEnvironmentAgentReadiness {
+  agent: string;
+  installed: boolean;
+  credentialsReady: boolean;
+  ready: boolean;
+  version?: string;
+}
+
+interface ExecutionEnvironmentReadiness {
+  id: string;
+  label: string;
+  kind: 'remote-rorca' | 'local-runner' | 'ci-runner';
+  enabled: boolean;
+  ready: boolean;
+  reason?: string;
+  networkMode: string;
+  lastHeartbeatAt: string | null;
+  agents: Record<string, ExecutionEnvironmentAgentReadiness>;
+  supportedAgents: string[];
+  secretProfileId: string | null;
 }
 
 interface OrchestrationPreview {
@@ -172,12 +195,13 @@ export interface TriggerOptions {
   autoMerge?: boolean;
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   includeGraph?: boolean;
-  terminalMode?: 'ansi-html' | 'pty';
+  terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
   effortLevel?: EffortLevel;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
   /** Override reasoning config for this run without mutating spec JSON */
   reasoningOverride?: ReasoningConfig;
+  executionEnvironment?: string;
 }
 
 interface TriggerPopoverProps {
@@ -238,7 +262,7 @@ export default function TriggerPopover({
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const [forceSequential, setForceSequential] = useState(false);
   const [includeGraph, setIncludeGraph] = useState(false);
-  const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty'>('ansi-html');
+  const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty' | 'native-pty'>('pty');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
   const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
@@ -249,6 +273,8 @@ export default function TriggerPopover({
   const [reasoningSectionExpanded, setReasoningSectionExpanded] = useState(false);
   const [dryRunEstimate, setDryRunEstimate] = useState<DryRunCostEstimate | null>(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [executionEnvironments, setExecutionEnvironments] = useState<ExecutionEnvironmentReadiness[]>([]);
+  const [executionEnvironment, setExecutionEnvironment] = useState('remote-rorca');
   const ref = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -289,6 +315,19 @@ export default function TriggerPopover({
       .then(setHealthBadge)
       .catch(() => {});
   }, [workspaceId]);
+
+  // Fetch execution environments on mount
+  useEffect(() => {
+    apiFetch<{ environments: ExecutionEnvironmentReadiness[] }>('/api/execution-environments')
+      .then((data) => {
+        const environments = data.environments ?? [];
+        setExecutionEnvironments(environments);
+        if (!environments.some((env) => env.id === executionEnvironment)) {
+          setExecutionEnvironment(environments.find((env) => env.ready)?.id ?? environments[0]?.id ?? 'remote-rorca');
+        }
+      })
+      .catch(() => {});
+  }, [executionEnvironment]);
 
   // Fetch agent config on mount
   useEffect(() => {
@@ -387,18 +426,18 @@ export default function TriggerPopover({
   const isOpenCode = agentConfig?.agentType === 'opencode';
   const noModelConfigured = isOpenCode && !agentConfig?.agentModel;
   const noApiKey = isOpenCode && !noModelConfigured && !agentConfig?.hasApiKey;
-  const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey;
+  const selectedExecutionEnvironment = executionEnvironments.find((env) => env.id === executionEnvironment) ?? null;
+  const selectedAgentReadiness = agentConfig?.agentType && selectedExecutionEnvironment?.agents ? selectedExecutionEnvironment.agents[agentConfig.agentType] : null;
+  const executionEnvironmentBlocked = selectedExecutionEnvironment ? (!selectedExecutionEnvironment.ready || (selectedAgentReadiness ? !selectedAgentReadiness.ready : false)) : false;
+  const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey || executionEnvironmentBlocked;
 
   const isCodex = agentConfig?.agentType === 'codex';
-  const isPi = agentConfig?.agentType === 'pi';
   const isOpenRouterModel = isOpenCode && agentConfig?.agentModel?.startsWith('openrouter/');
 
   const engineLabel = agentConfig
     ? isCodex
       ? 'Codex CLI (ChatGPT)'
-      : isPi
-        ? `Pi${agentConfig.modelDisplayName ? ` — ${agentConfig.modelDisplayName}` : ''}`
-        : isOpenCode
+      : isOpenCode
         ? isOpenRouterModel && agentConfig.modelDisplayName
           ? `OpenRouter — ${agentConfig.modelDisplayName}`
           : agentConfig.modelDisplayName
@@ -434,6 +473,7 @@ export default function TriggerPopover({
             dryRun: true,
             thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
             reasoningEffort: thinkingApplies ? effortLevel : undefined,
+            executionEnvironment,
           }),
         }
       );
@@ -554,6 +594,37 @@ export default function TriggerPopover({
           )}
         </div>
       )}
+
+
+      {/* Execution environment selector */}
+      <div>
+        <label htmlFor="trigger-execution-environment" className="block text-xs text-muted mb-1.5">Execution environment</label>
+        <div className="flex items-center gap-2">
+          <Server size={13} className="text-muted shrink-0" />
+          <select
+            id="trigger-execution-environment"
+            value={executionEnvironment}
+            onChange={(event) => { setExecutionEnvironment(event.target.value); setDryRunEstimate(null); }}
+            className="min-w-0 flex-1 px-2.5 py-1.5 text-xs bg-[var(--bg-secondary,var(--bg))] border border-border rounded-md focus:border-accent outline-none text-[var(--text)]"
+          >
+            {executionEnvironments.length === 0 && <option value="remote-rorca">Remote Rorca worker</option>}
+            {executionEnvironments.map((env) => (
+              <option key={env.id} value={env.id}>
+                {env.label} {env.ready ? '✓' : '— not ready'}
+              </option>
+            ))}
+          </select>
+        </div>
+        {selectedExecutionEnvironment && (
+          <p className={`mt-1 text-[10px] leading-tight ${executionEnvironmentBlocked ? 'text-amber-500' : 'text-muted'}`}>
+            {selectedExecutionEnvironment.ready
+              ? selectedAgentReadiness && !selectedAgentReadiness.ready
+                ? `${agentConfig?.agentType} is not ready on ${selectedExecutionEnvironment.label}`
+                : `${selectedExecutionEnvironment.kind} · ${selectedExecutionEnvironment.networkMode}`
+              : selectedExecutionEnvironment.reason ?? 'execution environment is not ready'}
+          </p>
+        )}
+      </div>
 
       {/* OC-031: Capability warnings */}
       {capWarnings.length > 0 && (
@@ -820,34 +891,6 @@ export default function TriggerPopover({
         {/* Divider */}
         <div className="border-t border-border/50" />
 
-        {/* Terminal transport */}
-        <label className="flex items-center gap-3 cursor-pointer group py-1">
-          <div className="relative flex items-center justify-center">
-            <input
-              type="checkbox"
-              checked={terminalMode === 'pty'}
-              onChange={(event) => {
-                const enabled = event.target.checked;
-                setTerminalMode(enabled ? 'pty' : 'ansi-html');
-                if (enabled) setForceSequential(true);
-              }}
-              className="peer sr-only"
-            />
-            <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-accent transition-colors" />
-            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <SquareTerminal size={12} className="text-muted shrink-0" />
-              <span className="text-xs font-medium text-[var(--text)]">Interactive PTY terminal</span>
-            </div>
-            <p className="text-[10px] text-muted mt-0.5">Durable raw terminal replay, live input, and resize. PTY runs execute sequentially.</p>
-          </div>
-        </label>
-
-        {/* Divider */}
-        <div className="border-t border-border/50" />
-
         {/* Worktrees */}
         <label className="flex items-center gap-3 cursor-pointer group py-1">
           <div className="relative flex items-center justify-center">
@@ -947,6 +990,40 @@ export default function TriggerPopover({
           </div>
         </label>
 
+        {/* Native/live terminal mode */}
+        <div className="space-y-2 rounded-lg border border-border/60 bg-[var(--bg)] p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-[var(--text)]">Terminal Stream</span>
+                <span className="relative group/tip">
+                  <Info size={11} className="text-muted/60 cursor-help" />
+                  <span className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-2 rounded-md bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-72 opacity-0 pointer-events-none group-hover/tip:opacity-100 group-hover/tip:pointer-events-auto transition-opacity z-[200] shadow-xl">
+                    PTY Print keeps the reliable autonomous print/exec contract. Native PTY runs the real interactive CLI in xterm and uses a marker file to detect story completion.
+                  </span>
+                </span>
+              </div>
+              <p className="text-[10px] text-muted leading-tight mt-0.5">
+                Choose reliability-first output or the native interactive CLI experience.
+              </p>
+            </div>
+            <select
+              value={terminalMode}
+              onChange={(event) => setTerminalMode(event.target.value as 'ansi-html' | 'pty' | 'native-pty')}
+              className="shrink-0 rounded-md border border-border bg-[var(--bg-elevated)] px-2 py-1 text-[11px] text-[var(--text)]"
+            >
+              <option value="pty">PTY Print</option>
+              <option value="native-pty">Native PTY</option>
+              <option value="ansi-html">ANSI Replay</option>
+            </select>
+          </div>
+          {terminalMode === 'native-pty' && (
+            <p className="text-[10px] leading-snug text-amber-400/90">
+              Native PTY is best for supervised/debug runs. If the interactive CLI never creates the completion marker, Rorca falls back to the story timeout.
+            </p>
+          )}
+        </div>
+
         {/* Divider */}
         <div className="border-t border-border/50" />
 
@@ -976,17 +1053,17 @@ export default function TriggerPopover({
             const isClaude = agentConfig?.agentType === 'claude';
             const m = agentConfig?.agentModel?.toLowerCase() ?? '';
             const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
-            const effortApplies = thinkingApplies || agentConfig?.agentType === 'pi' || agentConfig?.agentType === 'codex' || modelCapability?.supportsReasoning;
             onTrigger(effectiveWorktree, {
               forceSequential: forceSequential || undefined,
               autoMerge: effectiveWorktree ? autoMerge : undefined,
               mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
-              terminalMode,
-              effortLevel: effortApplies ? effortLevel : undefined,
+              terminal_mode: terminalMode,
+              effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
               reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+              executionEnvironment,
             });
           }}
           disabled={triggerDisabled}
@@ -1007,17 +1084,17 @@ export default function TriggerPopover({
               const isClaude = agentConfig?.agentType === 'claude';
               const m = agentConfig?.agentModel?.toLowerCase() ?? '';
               const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
-              const effortApplies = thinkingApplies || agentConfig?.agentType === 'pi' || agentConfig?.agentType === 'codex' || modelCapability?.supportsReasoning;
               onAddToQueue(effectiveWorktree, {
                 forceSequential: forceSequential || undefined,
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
                 mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,
-                terminalMode,
-                effortLevel: effortApplies ? effortLevel : undefined,
+                terminal_mode: terminalMode,
+                effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
                 reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+                executionEnvironment,
               });
             }}
             disabled={triggerDisabled}

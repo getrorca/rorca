@@ -9,10 +9,12 @@
 // OC-002: Detect whether the opencode binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
+import { promisify } from 'util';
 import { logger } from './logger';
 
 export const MIN_OPENCODE_VERSION = '0.1.0';
+const execFileAsync = promisify(execFile);
 
 export interface OpenCodeStatus {
   opencodeInstalled: boolean;
@@ -77,6 +79,26 @@ export function detectOpenCode(): OpenCodeStatus {
     };
   } catch {
     // Binary exists but --version failed — installed but possibly broken
+    return { opencodeInstalled: true, opencodeVersion: null, opencodeBinPath: binPath };
+  }
+}
+
+/** Non-blocking detector for request/diagnostic paths. */
+export async function detectOpenCodeAsync(timeoutMs = 1_000): Promise<OpenCodeStatus> {
+  let binPath = process.env.OPENCODE_BIN?.trim() || null;
+  if (!binPath) {
+    try {
+      const result = await execFileAsync('which', ['opencode'], { encoding: 'utf8', timeout: timeoutMs });
+      binPath = result.stdout.trim() || null;
+    } catch {
+      return { opencodeInstalled: false, opencodeVersion: null, opencodeBinPath: null };
+    }
+  }
+  if (!binPath) return { opencodeInstalled: false, opencodeVersion: null, opencodeBinPath: null };
+  try {
+    const result = await execFileAsync(binPath, ['--version'], { encoding: 'utf8', timeout: timeoutMs });
+    return { opencodeInstalled: true, opencodeVersion: parseVersion(result.stdout), opencodeBinPath: binPath };
+  } catch {
     return { opencodeInstalled: true, opencodeVersion: null, opencodeBinPath: binPath };
   }
 }

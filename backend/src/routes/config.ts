@@ -24,6 +24,7 @@ import * as os from 'os';
 import { AuthError, DependencyNotFoundError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 import { detectCapability, OpenRouterModelMetadata } from '../lib/reasoning-detector';
 import { isModelMarkedNonReasoning } from '../lib/llm-client';
+import { handleRouteError } from '../lib/async-handler';
 
 /**
  * Context window overrides for OpenRouter models where the API reports the wrong value
@@ -1091,7 +1092,8 @@ function getOpenRouterMetadataFromCache(modelId: string): OpenRouterModelMetadat
 router.get('/model-capability', async (req: Request, res: Response) => {
   const modelId = req.query.modelId as string | undefined;
   if (!modelId || typeof modelId !== 'string' || modelId.trim() === '') {
-    throw new ValidationError('modelId query parameter is required');
+    handleRouteError(res, new ValidationError('modelId query parameter is required'));
+    return;
   }
 
   const trimmedId = modelId.trim();

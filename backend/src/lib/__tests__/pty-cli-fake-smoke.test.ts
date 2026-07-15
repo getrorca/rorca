@@ -42,7 +42,7 @@ function writeFakeCli(directory: string): string {
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const flags = '--dangerously-skip-permissions --model --thinking-budget --effort --mcp-config --attach --ask-for-approval --no-alt-screen --mode --no-extensions --tools --append-system-prompt --extension --provider --thinking --skill';
+const flags = '--dangerously-skip-permissions --model --thinking-budget --effort --mcp-config opencode attach <url> --ask-for-approval --no-alt-screen --mode --no-extensions --tools --append-system-prompt --extension --provider --thinking --skill';
 if (process.argv.includes('--version')) { console.log('fake-pty-cli 9.9.9'); process.exit(0); }
 if (process.argv.includes('--help')) { console.log(flags); process.exit(0); }
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
@@ -89,6 +89,19 @@ describe('deterministic fake-CLI PTY adapter smoke harness', () => {
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('uses the official OpenCode attach subcommand instead of the rejected --attach flag', () => {
+    const compatibility = probePtyCliCompatibility('opencode', {
+      force: true,
+      env: { ...process.env, OPENCODE_BIN: fakeCli },
+    });
+    const command = buildPtyCommand(
+      'opencode', 'prompt', tempDir, null, 'http://127.0.0.1:4096',
+      undefined, undefined, undefined, undefined, [], compatibility,
+    );
+    expect(command.args).toEqual(['attach', 'http://127.0.0.1:4096']);
+    expect(command.args).not.toContain('--attach');
   });
 
   for (const agentType of ['claude', 'opencode', 'codex', 'pi'] as AgentType[]) {

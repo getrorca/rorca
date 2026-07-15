@@ -54,6 +54,11 @@ import { checkAge } from './age-guard';
 import { resolveGraphScoringRollout } from './graph-scoring-rollout';
 import { loadRorcaConfig, defaultRorcaConfig, type RetrievalGuardrailsConfig } from './rorca-config';
 import { lookupMemoryOntologyAdjustments, type MemoryOntologyLookupResult } from './memory-ontology';
+import {
+  clampRetrievalLimits,
+  getContextLimits,
+  type ClampedRetrievalLimits,
+} from './context-limits';
 import { query as dbQuery } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -141,6 +146,14 @@ export interface RetrievedContext {
 
 export interface RetrieveContextOptions {
   maxTokens?: number;
+  /** Optional per-call cap; clamped to RORCA_RETRIEVAL_MAX_CANDIDATES. */
+  maxCandidates?: number;
+  /** Optional per-call distinct file cap; clamped to RORCA_RETRIEVAL_MAX_FILES. */
+  maxFiles?: number;
+  /** Optional graph traversal depth; clamped to RORCA_RETRIEVAL_MAX_DEPTH. */
+  maxDepth?: number;
+  /** Optional selected context/excerpt cap; clamped to RORCA_RETRIEVAL_MAX_EXCERPTS. */
+  maxExcerpts?: number;
   includeGraph?: boolean;
   graphScoreWeight?: number;
   workspacePath?: string;
@@ -434,6 +447,51 @@ function calculateBudgets(
   return { memory: memoryBudget, skills: skillsBudget, graph: graphBudget };
 }
 
+function resolveActiveRetrievalLimits(options?: RetrieveContextOptions): ClampedRetrievalLimits {
+  return clampRetrievalLimits(
+    {
+      maxTokens: options?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      maxCandidates: options?.maxCandidates,
+      maxFiles: options?.maxFiles,
+      maxDepth: options?.maxDepth,
+      maxExcerpts: options?.maxExcerpts,
+    },
+    getContextLimits(),
+  );
+}
+
+function limitCandidateFiles(
+  candidate: RetrievalCandidateInput,
+  workspaceId: string,
+  seenFiles: Set<string>,
+  maxFiles: number,
+): RetrievalCandidateInput | null {
+  const relatedFiles = candidate.relatedFiles ?? [];
+  if (relatedFiles.length === 0) return candidate;
+
+  const keptFiles: string[] = [];
+  for (const filePath of relatedFiles) {
+    if (seenFiles.has(filePath) || seenFiles.size < maxFiles) {
+      seenFiles.add(filePath);
+      keptFiles.push(filePath);
+    }
+  }
+
+  if (keptFiles.length === 0 && seenFiles.size >= maxFiles) {
+    // The candidate is only about files outside the bounded retrieval surface.
+    return null;
+  }
+
+  const keptFileKeys = keptFiles.map(filePath => buildFileNodeKey(workspaceId, filePath)).filter(Boolean).sort();
+  const keptFileKeySet = new Set(keptFileKeys);
+  return {
+    ...candidate,
+    relatedFiles: keptFiles,
+    relatedFileKeys: keptFileKeys,
+    graphSignals: candidate.graphSignals?.filter(signal => !signal.toCanonicalKey.startsWith(`file:${workspaceId}::`) || keptFileKeySet.has(signal.toCanonicalKey)),
+  };
+}
+
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 
 /**
@@ -448,9 +506,16 @@ export async function retrieveContext(
   options?: RetrieveContextOptions,
 ): Promise<RetrievedContext> {
   const start = Date.now();
-  const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const activeLimits = resolveActiveRetrievalLimits(options);
+  const maxTokens = activeLimits.maxTokens;
   const includeGraph = options?.includeGraph ?? false;
   const wsId = String(workspaceId);
+  if (activeLimits.clamped.length > 0) {
+    logger.info(
+      { workspaceId: wsId, clamped: activeLimits.clamped, activeLimits },
+      '[memory-router] retrieval request limits clamped to configured ceilings',
+    );
+  }
   const retrievalSettings = await resolveRetrievalSettings(wsId, options);
   const graphScoreWeight = retrievalSettings.graphScoreWeight;
   const ageAvailable = includeGraph ? await checkAge() : false;
@@ -493,7 +558,8 @@ export async function retrieveContext(
   const remainingTokens = maxTokens - directionTokens;
   const budgets = calculateBudgets(remainingTokens, includeGraph && ageAvailable);
 
-  const predictedPaths = options?.predictedPaths ?? extractFilePaths(storyText);
+  const predictedPaths = (options?.predictedPaths ?? extractFilePaths(storyText))
+    .slice(0, activeLimits.maxFiles);
 
   // ── Hydrate memory metadata once so the pipeline can use stable IDs/provenance ──
 
@@ -517,8 +583,8 @@ export async function retrieveContext(
        FROM memories
        WHERE workspace_id = $1 AND deleted_at IS NULL
        ORDER BY pinned DESC, COALESCE(updated_at, created_at) DESC
-       LIMIT 250`,
-      [wsId],
+       LIMIT $2`,
+      [wsId, Math.min(250, activeLimits.maxCandidates)],
     );
   } catch {
     memoryRows = [];
@@ -528,13 +594,17 @@ export async function retrieveContext(
   const rowsByContent = new Map(memoryRows.map(row => [row.content, row]));
   const retrievalCandidates: RetrievalCandidateInput[] = [];
   const seenCandidateIds = new Set<string>();
+  const seenCandidateFiles = new Set<string>();
   const pinnedTexts = new Set<string>();
 
   const addCandidate = (candidate: RetrievalCandidateInput): void => {
+    if (retrievalCandidates.length >= activeLimits.maxCandidates) return;
     const key = `${candidate.origin}:${candidate.id}`;
     if (seenCandidateIds.has(key)) return;
+    const boundedCandidate = limitCandidateFiles(candidate, wsId, seenCandidateFiles, activeLimits.maxFiles);
+    if (!boundedCandidate) return;
     seenCandidateIds.add(key);
-    retrievalCandidates.push(candidate);
+    retrievalCandidates.push(boundedCandidate);
   };
 
   const rowToCandidate = (
@@ -664,7 +734,7 @@ export async function retrieveContext(
     const ragResults: SearchResult[] = await hybridSearch(storyText, {
       sourceTypes: ['memory'],
       workspaceId: wsId,
-      limit: 15,
+      limit: Math.min(15, activeLimits.maxCandidates),
     });
 
     ragHits = ragResults.length;
@@ -732,10 +802,14 @@ export async function retrieveContext(
             if (!signal.matchedPath) {
               continue;
             }
+            if (!seenCandidateFiles.has(signal.matchedPath) && seenCandidateFiles.size >= activeLimits.maxFiles) {
+              continue;
+            }
             const matchedFileKey = buildFileNodeKey(wsId, signal.matchedPath);
             if (!matchedFileKey) {
               continue;
             }
+            seenCandidateFiles.add(signal.matchedPath);
 
             appendGraphSignal(candidate, {
               fromCanonicalKey: candidate.canonicalKey,
@@ -759,10 +833,11 @@ export async function retrieveContext(
       };
 
       if (predictedPaths.length > 0 && currentStoryId) {
-        const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId, 2, currentSpecId);
+        const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId, activeLimits.maxDepth, currentSpecId);
         graphProximityAvailable = !fullCtx.proximityUnavailable;
 
-        const relatedStories: GraphContext['relatedStories'] = fullCtx.fileHistory.flatMap(fh =>
+        const boundedFileHistory = fullCtx.fileHistory.slice(0, activeLimits.maxFiles);
+        const relatedStories: GraphContext['relatedStories'] = boundedFileHistory.flatMap(fh =>
           fh.touchedByStories.map(sid => ({ id: sid, title: sid, relevance: 0.7 })),
         );
         const seenIds = new Set<string>();
@@ -772,7 +847,7 @@ export async function retrieveContext(
           return true;
         });
 
-        const fileTouches: GraphContext['fileTouches'] = fullCtx.fileHistory.map(fh => ({
+        const fileTouches: GraphContext['fileTouches'] = boundedFileHistory.map(fh => ({
           path: fh.path,
           storyIds: fh.touchedByStories,
         }));
@@ -783,7 +858,7 @@ export async function retrieveContext(
           type: 'APPLIES_TO',
         }));
 
-        graphHits = fullCtx.relatedMemories.length + fullCtx.relatedConventions.length + fullCtx.fileHistory.length;
+        graphHits = fullCtx.relatedMemories.length + fullCtx.relatedConventions.length + boundedFileHistory.length;
         graphContext = { relatedStories: dedupedStories, fileTouches, conventionLinks };
         for (const memory of fullCtx.relatedMemories) {
           if (memory.relationship === 'conflict') continue;
@@ -794,20 +869,33 @@ export async function retrieveContext(
           });
         }
         applyCandidateGraphSignals();
-        const budgeted = trimGraphContextForBudget(fullCtx, budgets.graph);
+        const graphMemoryExcerpts = fullCtx.relatedMemories.slice(0, activeLimits.maxExcerpts);
+        const graphConventionExcerpts = fullCtx.relatedConventions.slice(
+          0,
+          Math.max(0, activeLimits.maxExcerpts - graphMemoryExcerpts.length),
+        );
+        const graphFileHistoryExcerpts = boundedFileHistory.slice(
+          0,
+          Math.max(0, activeLimits.maxExcerpts - graphMemoryExcerpts.length - graphConventionExcerpts.length),
+        );
+        const budgeted = trimGraphContextForBudget({
+          relatedMemories: graphMemoryExcerpts,
+          relatedConventions: graphConventionExcerpts,
+          fileHistory: graphFileHistoryExcerpts,
+        }, budgets.graph);
         graphSection = budgeted.graphSection;
         graphTokensUsed = budgeted.graphTokens;
       } else if (ageAvailable) {
         const stats = await graphStats();
         if (stats.available && stats.vertexCount > 0) {
-          const filePaths = extractFilePaths(storyText);
+          const filePaths = extractFilePaths(storyText).slice(0, activeLimits.maxFiles);
           const storyIds = extractStoryIds(storyText);
 
           const relatedStories: GraphContext['relatedStories'] = [];
           const fileTouches: GraphContext['fileTouches'] = [];
           const conventionLinks: GraphContext['conventionLinks'] = [];
 
-          for (const fp of filePaths.slice(0, 5)) {
+          for (const fp of filePaths.slice(0, Math.min(5, activeLimits.maxFiles))) {
             const impact = await queryImpact(fp, wsId);
             for (const s of impact.stories) {
               if (!relatedStories.some(rs => rs.id === s.id)) {
@@ -823,7 +911,7 @@ export async function retrieveContext(
           }
 
           for (const sid of storyIds.slice(0, 5)) {
-            const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES'], {
+            const related = await queryRelated('Story', sid, activeLimits.maxDepth, ['DEPENDS_ON', 'TOUCHES'], {
               workspaceId: wsId,
               specId: currentSpecId,
             });
@@ -837,10 +925,15 @@ export async function retrieveContext(
 
           graphHits = relatedStories.length + fileTouches.length + conventionLinks.length;
           graphContext = { relatedStories, fileTouches, conventionLinks };
+          const graphConventionExcerpts = conventionLinks.slice(0, activeLimits.maxExcerpts);
+          const graphFileTouchExcerpts = fileTouches.slice(
+            0,
+            Math.max(0, activeLimits.maxExcerpts - graphConventionExcerpts.length),
+          );
           const budgeted = trimGraphContextForBudget({
             relatedMemories: [],
-            relatedConventions: conventionLinks.map(c => ({ name: c.from, content: c.from, appliesTo: c.to })),
-            fileHistory: fileTouches.map(f => ({ path: f.path, touchedByStories: f.storyIds, lastModifiedSpec: '' })),
+            relatedConventions: graphConventionExcerpts.map(c => ({ name: c.from, content: c.from, appliesTo: c.to })),
+            fileHistory: graphFileTouchExcerpts.map(f => ({ path: f.path, touchedByStories: f.storyIds, lastModifiedSpec: '' })),
           }, budgets.graph);
           graphSection = budgeted.graphSection;
           graphTokensUsed = budgeted.graphTokens;
@@ -918,7 +1011,20 @@ export async function retrieveContext(
     guardrails: retrievalSettings.guardrails,
   });
 
-  memoryEntries = ranked.selected.map(candidate => ({
+  const selectedForContext = ranked.selected.slice(0, activeLimits.maxExcerpts);
+  if (ranked.selected.length > selectedForContext.length) {
+    logger.warn(
+      {
+        workspaceId: wsId,
+        selected: ranked.selected.length,
+        kept: selectedForContext.length,
+        maxExcerpts: activeLimits.maxExcerpts,
+      },
+      '[memory-router] selected context exceeded max excerpts — truncated',
+    );
+  }
+
+  memoryEntries = selectedForContext.map(candidate => ({
     text: candidate.text,
     score: candidate.finalScore,
     source: candidate.origin === 'search' ? 'search' : 'cache',
@@ -930,7 +1036,7 @@ export async function retrieveContext(
     scoring: options?.explain ? candidate.scoring : undefined,
     explainability: options?.explain ? buildGraphRagExplainability(candidate) : undefined,
   }));
-  memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
+  memoryTokensUsed = selectedForContext.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
   const ontologyExplainability = summarizeGraphRagOntologySurface(
     ranked.candidates.map(candidate => buildGraphRagExplainability(candidate)),
   );
@@ -968,15 +1074,18 @@ export async function retrieveContext(
     tier = 'cache';
   }
 
+  const selectedContextKeySet = new Set(selectedForContext.map(candidate => candidate.key));
   const telemetry = recordRetrievalTelemetry({
     workspaceId: wsId,
     queryPreview: storyText.slice(0, 240),
     matchedSkills: ranked.matchedSkills.map(skill => skill.name),
-    selectedCandidateKeys: ranked.selected.map(candidate => candidate.key),
-    droppedCandidateKeys: ranked.candidates.filter(candidate => !ranked.selected.some(selected => selected.key === candidate.key)).map(candidate => candidate.key),
+    selectedCandidateKeys: selectedForContext.map(candidate => candidate.key),
+    droppedCandidateKeys: ranked.candidates
+      .filter(candidate => !selectedContextKeySet.has(candidate.key))
+      .map(candidate => candidate.key),
     needsMoreEvidence: ranked.needsMoreEvidence,
     candidateCount: ranked.candidates.length,
-    selectedCount: ranked.selected.length,
+    selectedCount: selectedForContext.length,
     tokenBudget: budgets.memory,
     contradictions: ranked.contradictions,
     candidates: ranked.candidates.map(candidate => ({
@@ -1006,7 +1115,7 @@ export async function retrieveContext(
 
   await recordRetrievalSelection(
     wsId,
-    ranked.selected.map(candidate => ({
+    selectedForContext.map(candidate => ({
       candidateKey: candidate.key,
       candidateKind: 'memory',
       skillName: ranked.matchedSkills[0]?.name,
@@ -1044,8 +1153,8 @@ export async function retrieveContext(
       tier,
       needsMoreEvidence: ranked.needsMoreEvidence,
       matchedSkills: ranked.matchedSkills.map(skill => skill.name),
-      selectedCandidateIds: ranked.selected.map(candidate => candidate.id),
-      selectedCandidateKeys: ranked.selected.map(candidate => candidate.key),
+      selectedCandidateIds: selectedForContext.map(candidate => candidate.id),
+      selectedCandidateKeys: selectedForContext.map(candidate => candidate.key),
       graphScoreWeight: ranked.graphScoreWeight,
       graphRerankAppliedWeight: ranked.graphRerankAppliedWeight,
       graphRerankChanged: ranked.graphRerankChanged,

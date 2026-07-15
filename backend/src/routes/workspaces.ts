@@ -81,8 +81,6 @@ function parseWorkspace(row: WorkspaceRow) {
  *     tags: [Workspaces]
  *     summary: Register a new workspace
  *     operationId: createWorkspace
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workspace creation mutates user-owned project configuration and should require authenticated access."
  *     description: >
  *       Registers a new workspace by path. Validates the filesystem path exists,
  *       optionally persists a database mode selection (including hosted BYOP
@@ -118,6 +116,9 @@ function parseWorkspace(row: WorkspaceRow) {
  *     tags: [Workspaces]
  *     summary: List all registered workspaces
  *     operationId: listWorkspaces
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only workspace discovery is required by the standalone capture sidecar to resolve a local repo to a Rorca workspace via the stable API-only contract."
+ *     x-rorca-public-api: true
  *     description: Returns a paginated list of all registered workspaces ordered by creation date descending.
  *     responses:
  *       200:
@@ -292,8 +293,9 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
  *     tags: [Workspaces]
  *     summary: List all workspaces
  *     operationId: listWorkspaces
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workspace inventory is user-owned project metadata and should only be exposed to authenticated callers."
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only workspace discovery is required by the standalone capture sidecar to resolve a local repo to a Rorca workspace via the stable API-only contract."
+ *     x-rorca-public-api: true
  *     description: >
  *       Returns all registered workspace entries ordered by creation date descending.
  *       Supports cursor-based pagination via query parameters.

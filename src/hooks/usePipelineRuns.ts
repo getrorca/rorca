@@ -7,13 +7,43 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiFetch } from '../lib/apiFetch';
-import type { PipelineRun } from '../api/types';
-import { normalizePipelineRun } from '../lib/run-metadata';
+import { normalizePipelineRunListResponse } from '../api/run-dto';
 
-export type { PipelineRun } from '../api/types';
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export interface PipelineRun {
+  id: number;
+  spec_path: string;
+  workspace_id: string;
+  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled' | 'queued';
+  pid: number | null;
+  started_at: string;
+  finished_at: string | null;
+  retried_from_run_id: number | null;
+  agent_type?: string | null;
+  agent_model?: string | null;
+  agentType: string | null;
+  agentModel: string | null;
+  parallelism?: number;
+  branch_name?: string | null;
+  worktree_path?: string | null;
+  queue_position?: number | null;
+  queued_at?: string | null;
+  triggered_via?: 'queue' | 'run_now';
+  auto_worktree?: boolean;
+  lifecycleStatus?: string | null;
+  lifecycle_status?: string | null;
+  lifecyclePhase?: string | null;
+  lifecycle_phase?: string | null;
+}
+
+type PipelineRunWire = Omit<PipelineRun, 'agentType' | 'agentModel'> & {
+  agentType?: string | null;
+  agentModel?: string | null;
+};
 
 interface RunsResponse {
-  items: PipelineRun[];
+  items: PipelineRunWire[];
   total: number;
   hasMore?: boolean;
 }
@@ -57,8 +87,9 @@ function fetchRuns(workspaceId: string): Promise<PipelineRun[]> {
   if (entry.inflight) return entry.inflight;
 
   const promise = apiFetch<RunsResponse>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
-    .then((resp) => {
-      entry.data = resp.items.map(normalizePipelineRun);
+    .then((response) => {
+      const resp = normalizePipelineRunListResponse(response);
+      entry.data = resp.items;
       entry.timestamp = Date.now();
       entry.inflight = null;
       notifyListeners();

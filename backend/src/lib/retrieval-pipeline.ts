@@ -13,6 +13,7 @@ import {
   normalizeGraphFilePath,
 } from './knowledge-graph';
 import { logger } from './logger';
+import { getContextLimits, capCandidates } from './context-limits';
 import type { MemoryOntologyRelation, MemoryOntologyRelationType } from './memory-ontology';
 import type { RetrievalGuardrailsConfig } from './rorca-config';
 
@@ -49,6 +50,7 @@ export interface RetrievalCandidateInput {
   updatedAt?: string | null;
   relatedFiles?: string[];
   relatedFileKeys?: string[];
+  fileSize?: number | null;
   sourceStoryId?: string | null;
   sourceStoryCanonicalKey?: string;
   sourceSpecId?: string | null;
@@ -122,6 +124,16 @@ export interface GraphRagPenaltyComponent extends GraphRagScoreComponent {
   similarity: number;
 }
 
+export interface GraphRagFileRoleBoostComponent extends GraphRagScoreComponent {
+  roles: string[];
+  capped: boolean;
+}
+
+export interface GraphRagFileSizeGeneratedComponent extends GraphRagScoreComponent {
+  sizeScore: number;
+  generatedScore: number;
+}
+
 export interface GraphRagScoreBreakdown {
   directGraphProximity: GraphRagProximityComponent;
   scopeStrength: GraphRagScopeStrengthComponent;
@@ -131,6 +143,8 @@ export interface GraphRagScoreBreakdown {
   retrievalSignal: GraphRagRetrievalSignalComponent;
   skillAlignment: GraphRagSkillAlignmentComponent;
   historicalUsefulness: GraphRagHistoricalComponent;
+  fileRoleBoost: GraphRagFileRoleBoostComponent;
+  fileSizeGenerated: GraphRagFileSizeGeneratedComponent;
   diversityPenalty: GraphRagPenaltyComponent;
   echoChamberPenalty: GraphRagPenaltyComponent;
   repetitionPenalty: GraphRagPenaltyComponent;
@@ -206,6 +220,8 @@ export interface GraphRagExplainabilityScoreBreakdown {
   pinned: number;
   skills: number;
   historical: number;
+  fileRoleBoost: number;
+  fileSizeGeneratedPenalty: number;
   diversityPenalty: number;
   echoChamberPenalty: number;
   repetitionPenalty: number;
@@ -277,6 +293,8 @@ export interface RankedRetrievalCandidate extends RetrievalCandidateInput {
   fileOverlapScore: number;
   validatorScore: number;
   historicalScore: number;
+  fileRoleScore: number;
+  fileSizeGeneratedScore: number;
   semanticRankScore: number;
   finalScore: number;
   preRerankPosition: number | null;
@@ -397,6 +415,8 @@ const RETRIEVAL_SCORE_WEIGHTS = {
   retrievalSignal: 0.17,
   skillAlignment: 0.08,
   historicalUsefulness: 0.07,
+  fileRoleBoost: 1.0,
+  fileSizeGenerated: 1.0,
 } as const;
 
 function weightedContribution(score: number, weight: number, multiplier = 1): number {
@@ -686,6 +706,8 @@ export function buildGraphRagExplainability(
       RETRIEVAL_SCORE_WEIGHTS.historicalUsefulness,
       semanticMultiplier,
     ),
+    fileRoleBoost: scoring.breakdown.fileRoleBoost.score * semanticMultiplier,
+    fileSizeGeneratedPenalty: scoring.breakdown.fileSizeGenerated.score * semanticMultiplier,
     diversityPenalty: roundScore(-1 * scoring.breakdown.diversityPenalty.score * semanticMultiplier),
     echoChamberPenalty: roundScore(-1 * scoring.breakdown.echoChamberPenalty.score * semanticMultiplier),
     repetitionPenalty: roundScore(-1 * scoring.breakdown.repetitionPenalty.score * semanticMultiplier),
@@ -862,6 +884,149 @@ function confidenceScore(confidence?: string | null): number {
     case 'low': return 0.45;
     default: return 0.6;
   }
+}
+
+type FileRole = 'test' | 'entrypoint' | 'doc' | 'config' | 'source' | 'generated' | 'unknown';
+
+const FILE_ROLE_PATTERNS: Array<{ role: FileRole; patterns: RegExp[] }> = [
+  {
+    role: 'generated',
+    patterns: [
+      /(^|\/)node_modules\//,
+      /(^|\/)dist\//,
+      /(^|\/)build\//,
+      /(^|\/)\.next\//,
+      /(^|\/)coverage\//,
+      /\.generated\./i,
+      /\.min\.(js|css)$/i,
+      /\.d\.ts$/i,
+    ],
+  },
+  {
+    role: 'test',
+    patterns: [
+      /\.(test|spec)\.(ts|tsx|js|jsx)$/i,
+      /(^|\/)__tests__\//,
+      /(^|\/)test(s)?\//,
+      /(^|\/)spec(s)?\//,
+      /(^|\/)e2e\//,
+      /(^|\/)fixtures\//,
+      /(^|\/)mocks\//,
+      /(^|\/)__mocks__\//,
+    ],
+  },
+  {
+    role: 'entrypoint',
+    patterns: [
+      /(^|\/)(index|main|server|app|cli|worker)\.(ts|tsx|js|jsx)$/i,
+      /(^|\/)entry\.(ts|tsx|js|jsx)$/i,
+    ],
+  },
+  {
+    role: 'doc',
+    patterns: [
+      /\.md$/i,
+      /(^|\/)docs\//,
+      /(^|\/)documentation\//,
+      /(^|\/)README/i,
+      /(^|\/)CONTRIBUTING/i,
+      /(^|\/)CHANGELOG/i,
+      /(^|\/)LICENSE/i,
+    ],
+  },
+  {
+    role: 'config',
+    patterns: [
+      /\.config\.(ts|js|json|yaml|yml)$/i,
+      /\.rc(\.(json|yaml|yml|js|ts))?$/i,
+      /(^|\/)\.env/i,
+      /(^|\/)tsconfig/i,
+      /(^|\/)package\.json$/i,
+      /(^|\/)dockerfile$/i,
+      /(^|\/)makefile$/i,
+    ],
+  },
+  {
+    role: 'source',
+    patterns: [
+      /\.(ts|tsx|js|jsx|py|go|rs|rb|java|kt|cpp|c|h|hpp)$/i,
+    ],
+  },
+];
+
+function detectFileRole(filePath: string): FileRole {
+  const normalized = filePath.replace(/\\/g, '/');
+  for (const { role, patterns } of FILE_ROLE_PATTERNS) {
+    for (const pattern of patterns) {
+      if (pattern.test(normalized)) {
+        return role;
+      }
+    }
+  }
+  return 'unknown';
+}
+
+function detectFileRoles(filePaths: string[]): FileRole[] {
+  const roles = new Set<FileRole>();
+  for (const path of filePaths) {
+    roles.add(detectFileRole(path));
+  }
+  return [...roles].sort();
+}
+
+const FILE_ROLE_BOOST_WEIGHTS: Record<FileRole, number> = {
+  test: 0.05,
+  entrypoint: 0.06,
+  doc: 0.04,
+  config: 0.02,
+  source: 0.01,
+  generated: -0.06,
+  unknown: 0,
+};
+
+const MAX_FILE_ROLE_BOOST = 0.07;
+
+function fileRoleBoostScore(relatedFiles: string[]): GraphRagFileRoleBoostComponent {
+  if (relatedFiles.length === 0) {
+    return { score: 0, roles: [], capped: false };
+  }
+
+  const roles = detectFileRoles(relatedFiles);
+  let rawBoost = roles.reduce((sum, role) => sum + (FILE_ROLE_BOOST_WEIGHTS[role] ?? 0), 0);
+
+  const boostCapped = rawBoost > MAX_FILE_ROLE_BOOST;
+  const positivePart = Math.max(0, Math.min(rawBoost, MAX_FILE_ROLE_BOOST));
+  const negativePart = rawBoost < 0 ? rawBoost : 0;
+  const score = positivePart + negativePart;
+
+  return { score, roles, capped: boostCapped };
+}
+
+const LARGE_FILE_THRESHOLD_BYTES = 100_000;
+const VERY_LARGE_FILE_THRESHOLD_BYTES = 500_000;
+
+function fileSizeGeneratedScore(
+  relatedFiles: string[],
+  fileSize?: number | null,
+): GraphRagFileSizeGeneratedComponent {
+  let sizeScore = 0;
+  let generatedScore = 0;
+
+  if (fileSize != null && fileSize > LARGE_FILE_THRESHOLD_BYTES) {
+    const ratio = (fileSize - LARGE_FILE_THRESHOLD_BYTES) / (VERY_LARGE_FILE_THRESHOLD_BYTES - LARGE_FILE_THRESHOLD_BYTES);
+    sizeScore = -1 * clamp(ratio, 0, 1) * 0.12;
+  }
+
+  const roles = detectFileRoles(relatedFiles);
+  if (roles.includes('generated')) {
+    generatedScore = -0.2;
+  }
+
+  return {
+    score: sizeScore + generatedScore,
+    sizeScore,
+    generatedScore,
+  };
 }
 
 function provenanceSourceScore(candidate: RetrievalCandidateInput): number {
@@ -1653,6 +1818,8 @@ function scorePositiveSignals(
     + (breakdown.retrievalSignal.score * RETRIEVAL_SCORE_WEIGHTS.retrievalSignal)
     + (breakdown.skillAlignment.score * RETRIEVAL_SCORE_WEIGHTS.skillAlignment)
     + (breakdown.historicalUsefulness.score * RETRIEVAL_SCORE_WEIGHTS.historicalUsefulness)
+    + (breakdown.fileRoleBoost.score * RETRIEVAL_SCORE_WEIGHTS.fileRoleBoost)
+    + (breakdown.fileSizeGenerated.score * RETRIEVAL_SCORE_WEIGHTS.fileSizeGenerated)
   );
 }
 
@@ -1671,6 +1838,23 @@ export function rankRetrievalCandidates(input: {
   evaluationTimestamp?: string;
   guardrails?: Partial<RetrievalGuardrailsConfig>;
 }): RankRetrievalCandidatesResult {
+  const limits = getContextLimits();
+  // Hard-cap the candidate set before any O(n²) ranking work (US-039). A large
+  // external repo can produce tens of thousands of candidates; the MMR/diversity
+  // pass is quadratic, so an unbounded set would blow latency and memory. Excess
+  // candidates are dropped (lowest-priority tail) and the truncation is logged.
+  const capped = capCandidates(input.candidates, limits);
+  if (capped.droppedCount > 0) {
+    logger.warn(
+      { workspaceId: input.workspaceId, kept: capped.kept.length, dropped: capped.droppedCount, cap: limits.maxCandidates },
+      '[retrieval-pipeline] candidate set exceeded cap — truncated before ranking',
+    );
+  }
+  const candidatePool = capped.kept;
+  // Clamp the token budget to the absolute retrieval ceiling so a caller cannot
+  // request an unbounded selection on a huge repo.
+  const tokenBudget = Math.min(input.tokenBudget, limits.maxRetrievalTokens);
+
   const predictedPaths = input.predictedPaths ?? [];
   const predictedFileKeys = canonicalFileKeys(input.workspaceId, predictedPaths);
   const historicalUsefulness = input.historicalUsefulness ?? new Map<string, number>();
@@ -1680,9 +1864,9 @@ export function rankRetrievalCandidates(input: {
   const matchedSkills = matchSkillsToQuery(input.queryText, input.skills, predictedPaths);
   const contradictions: Array<[string, string]> = [];
   const guardrails = resolveGuardrailsConfig(input.guardrails);
-  const referenceTimestamp = inferReferenceTimestamp(input.evaluationTimestamp, input.candidates);
+  const referenceTimestamp = inferReferenceTimestamp(input.evaluationTimestamp, candidatePool);
 
-  const enriched: RankedRetrievalCandidate[] = input.candidates.map((candidate) => {
+  const enriched: RankedRetrievalCandidate[] = candidatePool.map((candidate) => {
     const invalidCanonicalKey = `invalid:memory:${input.workspaceId}::${candidate.id || 'missing-id'}`;
     const canonicalKey = resolveCanonicalKey(candidate, input.workspaceId) ?? invalidCanonicalKey;
     const relatedFileKeys = resolveRelatedFileKeys(candidate, input.workspaceId);
@@ -1725,6 +1909,8 @@ export function rankRetrievalCandidates(input: {
       ?? historicalUsefulness.get(`memory:${candidate.id}`)
       ?? 0.5,
     );
+    const fileRoleBoost = fileRoleBoostScore(candidate.relatedFiles ?? []);
+    const fileSizeGenerated = fileSizeGeneratedScore(candidate.relatedFiles ?? [], candidate.fileSize);
     const positiveBreakdown = {
       directGraphProximity: graph,
       scopeStrength: scope,
@@ -1734,6 +1920,8 @@ export function rankRetrievalCandidates(input: {
       retrievalSignal,
       skillAlignment,
       historicalUsefulness: { score: historical, feedbackKey },
+      fileRoleBoost,
+      fileSizeGenerated,
     };
     const semanticEligibilityBreakdown = {
       ...positiveBreakdown,
@@ -1758,6 +1946,8 @@ export function rankRetrievalCandidates(input: {
       fileOverlapScore: scope.file,
       validatorScore: validator.score,
       historicalScore: historical,
+      fileRoleScore: fileRoleBoost.score,
+      fileSizeGeneratedScore: fileSizeGenerated.score,
       semanticRankScore: provisionalScore,
       finalScore: provisionalScore,
       preRerankPosition: null,
@@ -1985,7 +2175,7 @@ export function rankRetrievalCandidates(input: {
       continue;
     }
 
-    if (tokensUsed + candidate.tokenCount > input.tokenBudget) {
+    if (tokensUsed + candidate.tokenCount > tokenBudget) {
       candidate.decision = 'drop';
       candidate.reasons.push('Dropped for token budget');
       continue;

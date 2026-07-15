@@ -1,0 +1,104 @@
+Wave 3 PostgreSQL 16 certification evidence (redacted)
+Run date: 2026-07-15
+Source commit: 9f0f624d0a7f20c850baf653141231d59a7e8565
+Branch: wave3/postgres-cert
+
+IDENTITY
+server_version=16.13 (Homebrew)
+server_port=5433
+maintenance_database=postgres
+protected_database=rorca
+protected_database_oid=16887327 (read-only identity only; never a mutable/test target)
+data_directory=<redacted>
+data_directory_sha256=860978022d2de55e3a10c067879c49451d9cfd94d99a7ca6e1197904e8dbb901
+system_identifier=<redacted>
+system_identifier_sha256=a5b111aa13d0f91373890c7bd7763d0f877b91ac800cf6758d97e2491fd01720
+local_role=<redacted-peer-role>
+
+disposable_databases:
+- rorca_wave3_cert_fresh_8bbf4421efbc009d
+- rorca_wave3_cert_brownfield_8bbf4421efbc009d
+- rorca_wave3_cert_restore_8bbf4421efbc009d
+- rorca_wave3_cert_focus_8bbf4421efbc009d_test
+
+COMPATIBILITY
+PATH client observed before certification: PostgreSQL 14.15 (not used for certification)
+Pinned clients: PostgreSQL 16.13 psql/createdb/dropdb/pg_dump/pg_restore
+Required available extensions:
+- AGE 1.5.0
+- pgcrypto 1.3
+- pgvector 0.8.0
+
+FRESH INSTALL
+canonical migrations=150
+skipped migrations=0
+050_knowledge_graph.sql=applied
+20260715130000_always_on_context_mainline_reconciliation.sql=applied
+AGE graph=rorca
+AGE labels=18
+installed extension schemas:
+- age 1.5.0 @ ag_catalog
+- pgcrypto 1.3 @ public
+- vector 0.8.0 @ public
+pgcrypto digest/UUID behavior=pass
+pgvector 1536-dimension behavior=pass
+canonical migration pgboss schema creation=absent
+Always-On constraints/indexes/reconciliation tables=pass
+
+BROWNFIELD
+reconciliation migrations applied=1
+prior migrations skipped as already applied=149
+candidate rows preserved=2
+canonical review statuses preserved=approved,conflict
+accepted historical errors=1
+immutable event checksum before/after=ac86cfcf9dd88edd… (identical)
+candidate checksum before/after=85d14043691969e2… (identical)
+pgboss schema before/after=absent (no hand management)
+
+CAPTURE -> DISTILL
+execution mode=in-process harness; no Rorca server/worker/service
+explicitly created queues=context:capture,context:distill
+persisted events=2
+metadata-only events=1
+metadata-only leaked command summaries=0
+distillation skipped=1
+distillation candidates=1
+candidate review_status=pending
+default_retrieval_eligible=false
+
+BACKUP / RESTORE
+format=PostgreSQL custom
+archive_bytes=445124
+archive_sha256=0ba9b29aa3b7141e12645a14d8ffd9b5aac5fd8dec3342ba342876e1cf66bb59
+pg_restore_list_entries=1058
+listing contained context_events=true
+listing contained memory_candidates=true
+listing contained pgboss=true
+critical fresh/restore schema checksums=identical
+critical fresh/restore constraint checksums=identical
+critical fresh/restore row checksums=identical
+critical fresh/restore graph/extension/queue invariants=identical
+
+CONTROLLED FAILURE
+expected psql failure rc=3
+partial table published=false
+partial schema_migrations record published=false
+
+BACKEND CHECKS
+backend TypeScript typecheck=pass
+focused suites=2 passed
+focused tests=12 passed
+- Always-On Context mainline reconciliation
+- PostgreSQL 16 AGE fresh-install migration
+Focused Jest database=rorca_wave3_cert_focus_8bbf4421efbc009d_test
+
+CLEANUP
+disposable_databases_remaining=0
+archive_removed=true
+cleanup_result=0
+
+FINAL TECHNICAL RESULT
+PASS fresh_install=true brownfield=true capture_distill=true backup_restore=true atomic_failure=true
+
+SAFETY DISCLOSURE
+An earlier exploratory focused-test invocation set DATABASE_URL but omitted DATABASE_URL_TEST. The repository Jest selector ignored the local DATABASE_URL and recreated shared non-production database rorca_test. No connection or mutation targeted production database rorca. The reusable harness was corrected to set both variables to a unique rorca_wave3_cert_*_test database, and the complete certification above was rerun successfully with cleanup proof. The shared rorca_test database was not modified again or automatically dropped/restored after discovery.

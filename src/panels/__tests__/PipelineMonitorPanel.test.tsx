@@ -193,19 +193,21 @@ describe('PipelineMonitorPanel', () => {
     }, { timeout: 3000 });
   });
 
-  it('uses canonical Pi/Terra metadata in run cards without a Claude fallback', async () => {
-    const piRun = {
+  it('normalizes camelCase list provenance instead of showing a false Claude badge', async () => {
+    const camelRun = {
       ...RUNNING_RUN,
-      agentType: 'pi',
-      agentModel: 'openai-codex/gpt-5.6-terra',
+      id: 12,
       agent_type: undefined,
       agent_model: undefined,
+      agentType: 'pi',
+      agentModel: 'openai-codex/gpt-5.6-sol',
     };
+
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
       if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
       if (path.includes('/api/pipeline/runs') && !path.includes('/api/pipeline/runs/')) {
-        return { items: [piRun], total: 1, hasMore: false };
+        return { items: [camelRun], total: 1, hasMore: false };
       }
       if (path.includes('/api/run-queue')) return { items: [] };
       return { items: [], total: 0, hasMore: false };
@@ -213,7 +215,7 @@ describe('PipelineMonitorPanel', () => {
 
     renderWithProviders(<PipelineMonitorPanel />);
 
-    expect(await screen.findByText('Pi/Terra')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText('Pi').length).toBeGreaterThan(0));
     expect(screen.queryByText('Claude')).not.toBeInTheDocument();
   });
 

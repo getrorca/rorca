@@ -15,13 +15,15 @@
     "mcp": "npx tsx src/mcp/server.ts",
     "lint": "npx eslint src/",
     "worker": "npx tsx src/worker-supervisor.ts",
+    "reconcile": "npx tsx src/reconcile-daemon-cli.ts",
+    "runner:local": "npx tsx src/runner/local-runner.ts",
     "verify:node-pty": "node scripts/verify-node-pty-install.js",
     "postinstall": "npm run verify:node-pty"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
-    "@modelcontextprotocol/sdk": "^1.26.0",
-    "@playwright/mcp": "^0.0.78",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@playwright/mcp": "0.0.78",
     "@types/helmet": "^0.0.48",
     "@types/multer": "^2.0.0",
     "@types/ws": "^8.18.1",
@@ -31,17 +33,17 @@
     "cors": "^2.8.5",
     "cron-parser": "^5.5.0",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2",
+    "express": "4.22.2",
     "helmet": "^8.1.0",
     "ink": "^3.2.0",
     "ink-text-input": "^4.0.3",
     "js-yaml": "^4.1.1",
     "jsonwebtoken": "^9.0.3",
-    "mammoth": "^1.11.0",
+    "mammoth": "1.12.0",
     "micromatch": "^4.0.8",
-    "multer": "^2.0.2",
+    "multer": "2.2.0",
     "node-pty": "^1.1.0",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "9.0.3",
     "openai": "^6.24.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
@@ -51,11 +53,19 @@
     "playwright": "^1.52.0",
     "react": "^17.0.2",
     "resend": "^6.12.2",
-    "simple-git": "^3.27.0",
+    "simple-git": "3.36.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
-    "ws": "^8.20.0",
+    "ws": "8.21.1",
     "zod": "^4.3.6"
+  },
+  "overrides": {
+    "ink": {
+      "ws": "7.5.11"
+    },
+    "react-devtools-core": {
+      "ws": "7.5.11"
+    }
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

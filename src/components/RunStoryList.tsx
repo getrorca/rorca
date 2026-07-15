@@ -32,6 +32,7 @@ interface StoryResult {
   started_at: string | null;
   finished_at: string | null;
   elapsed_seconds: number | null;
+  reason?: string | null;
   blocked_by: string | null; // JSON array of upstream story IDs
   log_path: string | null;
 }
@@ -41,6 +42,7 @@ interface SpecStory {
   title: string;
   dependsOn?: string[];
   passes?: boolean;
+  excluded?: boolean;
 }
 
 /** CTM-004: Per-story context usage surfaced in the Stories accordion. */
@@ -137,7 +139,7 @@ interface CompiledWave {
 
 function compileWavesFromStories(stories: SpecStory[]): CompiledWave[] {
   const passedIds = new Set(stories.filter(s => s.passes).map(s => s.id));
-  const pending = stories.filter(s => !s.passes);
+  const pending = stories.filter(s => !s.passes && !s.excluded);
   if (pending.length === 0) return [];
 
   const pendingIds = new Set(pending.map(s => s.id));
@@ -179,6 +181,75 @@ function compileWavesFromStories(stories: SpecStory[]): CompiledWave[] {
   return waves;
 }
 
+interface RuntimeWavePlan {
+  mode: 'sequential' | 'wave-parallel' | string;
+  parallelism?: number;
+  waveCount?: number;
+  waves: CompiledWave[];
+  source?: 'trigger-options' | 'wal' | 'fallback';
+}
+
+type WavePlanSource = 'trigger-options' | 'wal' | 'fallback';
+
+interface ActiveWavePlan {
+  source: WavePlanSource;
+  waves: CompiledWave[];
+}
+
+function parseObject(value: unknown): Record<string, unknown> | null {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function normalizeRuntimeWavePlan(value: unknown, source: RuntimeWavePlan['source'] = 'trigger-options'): RuntimeWavePlan | null {
+  const obj = parseObject(value);
+  if (!obj || !Array.isArray(obj.waves)) return null;
+
+  const waves = obj.waves
+    .map((wave): CompiledWave | null => {
+      const waveObj = parseObject(wave);
+      if (!waveObj || typeof waveObj.index !== 'number' || !Number.isFinite(waveObj.index) || !Array.isArray(waveObj.storyIds)) return null;
+      const storyIds = waveObj.storyIds.filter((storyId): storyId is string => typeof storyId === 'string' && storyId.length > 0);
+      if (storyIds.length === 0) return null;
+      return { index: waveObj.index, storyIds };
+    })
+    .filter((wave): wave is CompiledWave => wave !== null)
+    .sort((a, b) => a.index - b.index);
+
+  if (waves.length === 0) return null;
+
+  return {
+    mode: typeof obj.mode === 'string' ? obj.mode : 'wave-parallel',
+    parallelism: typeof obj.parallelism === 'number' ? obj.parallelism : undefined,
+    waveCount: typeof obj.waveCount === 'number' ? obj.waveCount : waves.length,
+    waves,
+    source,
+  };
+}
+
+function extractRuntimeWavePlanFromRun(run: unknown): RuntimeWavePlan | null {
+  const runObj = parseObject(run);
+  if (!runObj) return null;
+  const triggerOptions = parseObject(runObj.trigger_options ?? runObj.triggerOptions);
+  if (!triggerOptions) return null;
+  return normalizeRuntimeWavePlan(
+    triggerOptions.orchestration ?? triggerOptions.runtimeWavePlan ?? triggerOptions.wavePlan,
+    'trigger-options',
+  );
+}
+
 // ─── Wave status types ───────────────────────────────────────────────────────
 
 type WaveStatus = 'waiting' | 'running' | 'merging' | 'done' | 'partial-fail';
@@ -204,6 +275,7 @@ interface MergedStory {
   storyId: string;
   title: string;
   status: DerivedStatus;
+  recentlyPassed: boolean;
   elapsed: number | null;
   retries: number | null;
   startedAt: number | null; // epoch ms for live timer
@@ -252,7 +324,7 @@ const MAX_RETRIES = 3;
 
 // ─── Story row component ─────────────────────────────────────────────────────
 
-function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused, includeGraph, context, passEventId }: {
+function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused, includeGraph, context }: {
   story: MergedStory;
   onStoryClick?: (storyId: string) => void;
   indented?: boolean;
@@ -261,7 +333,6 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   isFocused?: boolean;
   includeGraph?: boolean;
   context?: StoryContextInfo;
-  passEventId?: number | null;
 }) {
   const cfg = STATUS_CONFIG[story.status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
@@ -298,24 +369,17 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
 
   // Track status transitions — animate only when status *changes* to pass
   const prevStatusRef = useRef<DerivedStatus>(story.status);
-  const lastPassEventRef = useRef<number | null>(null);
   const [justPassed, setJustPassed] = useState(false);
+  const showPassAnimation = justPassed || story.recentlyPassed;
 
   useEffect(() => {
-    const statusTransitioned = story.status === 'pass' && prevStatusRef.current !== 'pass';
-    const passEventArrived = story.status === 'pass'
-      && passEventId != null
-      && lastPassEventRef.current !== passEventId;
-    if (statusTransitioned || passEventArrived) {
+    if (story.status === 'pass' && prevStatusRef.current !== 'pass') {
       setJustPassed(true);
-      const timer = setTimeout(() => setJustPassed(false), 600);
-      if (passEventId != null) lastPassEventRef.current = passEventId;
-      prevStatusRef.current = story.status;
+      const timer = setTimeout(() => setJustPassed(false), 1500);
       return () => clearTimeout(timer);
     }
-    if (passEventId != null) lastPassEventRef.current = passEventId;
     prevStatusRef.current = story.status;
-  }, [story.status, passEventId]);
+  }, [story.status]);
 
   // Fetch output when expanding a failed story (50 lines for story log)
   useEffect(() => {
@@ -347,7 +411,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   const canRetry = retriesUsed < MAX_RETRIES;
 
   return (
-    <div className={`${cfg.rowClass || ''} ${justPassed ? 'animate-story-pass' : ''}`}>
+    <div className={`${cfg.rowClass || ''} ${showPassAnimation ? 'animate-story-pass' : ''}`}>
       {/* Main row — fixed 48px height */}
       <div
         onClick={isExpandable ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
@@ -368,7 +432,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         ) : null}
         <Icon
           size={14}
-          className={`shrink-0 ${cfg.color} ${isRunning ? 'animate-pulse' : isRetrying ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
+          className={`shrink-0 ${cfg.color} ${isRunning ? 'animate-pulse' : isRetrying ? 'animate-spin' : ''} ${showPassAnimation ? 'animate-checkmark-pop' : ''}`}
         />
         <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
           story.status === 'running' ? 'bg-emerald-500/10 text-emerald-500' :
@@ -736,7 +800,8 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
 type VirtualItem =
   | { type: 'story'; story: MergedStory; indented?: boolean }
   | { type: 'wave-header'; waveIndex: number; storyCount: number; waveStatus: WaveStatus; counts: { passed: number; failed: number } }
-  | { type: 'excluded-header'; count: number };
+  | { type: 'excluded-header'; count: number }
+  | { type: 'pending-header'; count: number; source: WavePlanSource };
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
@@ -753,6 +818,7 @@ export default function RunStoryList({
 }: RunStoryListProps) {
   const [storyResults, setStoryResults] = useState<StoryResult[]>([]);
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
+  const [triggerWavePlan, setTriggerWavePlan] = useState<RuntimeWavePlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [collapsedWaves, setCollapsedWaves] = useState<Set<number>>(new Set());
   const [retryingStories, setRetryingStories] = useState<Set<string>>(new Set());
@@ -821,6 +887,7 @@ export default function RunStoryList({
         specStories?: SpecStory[];
       }>(`/api/pipeline/runs/${runId}`);
       setStoryResults(data.stories);
+      setTriggerWavePlan(extractRuntimeWavePlanFromRun(data.run));
       if (data.specStories && data.specStories.length > 0) {
         setSpecStories(data.specStories);
       }
@@ -854,20 +921,12 @@ export default function RunStoryList({
   // Build SSE-derived running stories (all concurrently running in wave mode)
   // Only consider events from the current run — old story_started events from
   // previous runs for the same story_id would otherwise show stale timers.
-  const passedEventIds = useMemo(() => {
-    const passed = new Map<string, number>();
-    for (const evt of effectiveWalEvents) {
-      if (evt.event_type === 'story_passed' && evt.story_id) passed.set(evt.story_id, evt.id);
-    }
-    return passed;
-  }, [effectiveWalEvents]);
-
   const runningStoryIds = useMemo(() => {
     const running = new Set<string>();
     for (const evt of effectiveWalEvents) {
       if (!evt.story_id) continue;
       const p = parsePayload(evt.payload);
-      if (p?.run_id !== undefined && p.run_id !== runId) continue;
+      if (p?.run_id !== undefined && String(p.run_id) !== String(runId)) continue;
       if (evt.event_type === 'story_started') {
         running.add(evt.story_id);
       } else if (
@@ -889,7 +948,7 @@ export default function RunStoryList({
     for (const evt of effectiveWalEvents) {
       if (evt.event_type === 'story_started' && evt.story_id) {
         const p = parsePayload(evt.payload);
-        if (p?.run_id !== undefined && p.run_id !== runId) continue;
+        if (p?.run_id !== undefined && String(p.run_id) !== String(runId)) continue;
         map.set(evt.story_id, new Date(evt.ts).getTime());
       }
     }
@@ -937,14 +996,65 @@ export default function RunStoryList({
     const set = new Set<number>();
     for (const evt of effectiveWalEvents) {
       if (evt.event_type === 'wave_merged' && evt.payload) {
-        try {
-          const payload = JSON.parse(evt.payload);
-          if (typeof payload.wave === 'number') set.add(payload.wave);
-        } catch { /* ignore */ }
+        const payload = parsePayload(evt.payload);
+        if (payload?.run_id !== undefined && String(payload.run_id) !== String(runId)) continue;
+        if (typeof payload?.wave === 'number') set.add(payload.wave);
       }
     }
     return set;
-  }, [effectiveWalEvents]);
+  }, [effectiveWalEvents, runId]);
+
+  // Stories inserted before engine execution (previously passed/excluded) should
+  // stay outside runtime waves. This is especially important for continuation
+  // runs where recomputing waves from the mutated spec can shift labels.
+  const preRunStoryIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const result of storyResults) {
+      if (result.status === 'excluded') set.add(result.story_id);
+      if (result.status === 'skip' && result.reason === 'previously_passed') set.add(result.story_id);
+    }
+    for (const evt of effectiveWalEvents) {
+      if (!evt.story_id) continue;
+      const payload = parsePayload(evt.payload);
+      if (payload?.run_id !== undefined && String(payload.run_id) !== String(runId)) continue;
+      if (evt.event_type === 'story_excluded_from_run') set.add(evt.story_id);
+      if (evt.event_type === 'story_skipped' && payload?.reason === 'previously_passed') set.add(evt.story_id);
+    }
+    return set;
+  }, [storyResults, effectiveWalEvents, runId]);
+
+  // Canonical runtime wave evidence. The execution engine emits wave_index on
+  // story_started, which is the trustworthy source for runs that already exist
+  // before trigger-time wave plans were persisted.
+  const walWavePlan = useMemo(() => {
+    const byStory = new Map<string, number>();
+    const groups = new Map<number, string[]>();
+
+    for (const evt of effectiveWalEvents) {
+      if (evt.event_type !== 'story_started' || !evt.story_id) continue;
+      const payload = parsePayload(evt.payload);
+      if (payload?.run_id !== undefined && String(payload.run_id) !== String(runId)) continue;
+      if (typeof payload?.wave_index !== 'number' || !Number.isFinite(payload.wave_index)) continue;
+
+      const previousWave = byStory.get(evt.story_id);
+      if (previousWave !== undefined && previousWave !== payload.wave_index) {
+        const previousStories = groups.get(previousWave);
+        if (previousStories) groups.set(previousWave, previousStories.filter(id => id !== evt.story_id));
+      }
+
+      byStory.set(evt.story_id, payload.wave_index);
+      const group = groups.get(payload.wave_index) ?? [];
+      if (!group.includes(evt.story_id)) group.push(evt.story_id);
+      groups.set(payload.wave_index, group);
+    }
+
+    const waves = Array.from(groups.entries())
+      .filter(([, storyIds]) => storyIds.length > 0)
+      .sort(([a], [b]) => a - b)
+      .map(([index, storyIds]) => ({ index, storyIds }));
+
+    return { byStory, waves };
+  }, [effectiveWalEvents, runId]);
 
   // US-007: Extract graph_hits per story from WAL event payloads
   const graphHitsMap = useMemo(() => {
@@ -1056,6 +1166,17 @@ export default function RunStoryList({
     return map;
   }, [storyContext, eventContextFilesMap]);
 
+  const recentlyPassedStoryIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const evt of effectiveWalEvents) {
+      if (evt.event_type !== 'story_passed' || !evt.story_id) continue;
+      const p = parsePayload(evt.payload);
+      if (p?.run_id !== undefined && String(p.run_id) !== String(runId)) continue;
+      set.add(evt.story_id);
+    }
+    return set;
+  }, [effectiveWalEvents, runId]);
+
   // Merge spec stories with results to derive status
   const mergedStories = useMemo(() => {
     const source: SpecStory[] = specStories.length > 0
@@ -1148,6 +1269,7 @@ export default function RunStoryList({
         storyId: spec.id,
         title: spec.title,
         status,
+        recentlyPassed: recentlyPassedStoryIds.has(spec.id),
         elapsed: result?.elapsed_seconds ?? (carriedPass?.elapsedMs != null ? Math.round(carriedPass.elapsedMs / 1000) : carriedFail?.elapsedMs != null ? Math.round(carriedFail.elapsedMs / 1000) : carriedSkip?.elapsedMs != null ? Math.round(carriedSkip.elapsedMs / 1000) : null),
         retries: result?.retries ?? carriedFail?.retries ?? carriedSkip?.retries ?? null,
         startedAt: storyStartTimes.get(spec.id) ?? (runState?.currentStory === spec.id ? Date.parse(runState.lastUpdatedAt) : null),
@@ -1161,7 +1283,7 @@ export default function RunStoryList({
         retrieval: retrievalMap.get(spec.id) ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, effectiveWalEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, effectiveWalEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState, recentlyPassedStoryIds]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -1170,11 +1292,32 @@ export default function RunStoryList({
     return map;
   }, [mergedStories]);
 
-  // Compile waves from spec stories
-  const waves = useMemo(() => {
-    if (!isWaveMode || specStories.length === 0) return null;
-    return compileWavesFromStories(specStories);
-  }, [isWaveMode, specStories]);
+  // Build the active visual wave plan. Prefer the trigger-time plan persisted
+  // with the run, then actual WAL wave indices for historical runs, and only
+  // then fall back to local graph compilation for older sequential-ish data.
+  const activeWavePlan = useMemo((): ActiveWavePlan | null => {
+    if (!isWaveMode) return null;
+
+    if (triggerWavePlan?.waves.length) {
+      return { source: 'trigger-options', waves: triggerWavePlan.waves };
+    }
+
+    if (walWavePlan.waves.length > 0) {
+      return { source: 'wal', waves: walWavePlan.waves };
+    }
+
+    if (specStories.length === 0) return null;
+    const fallbackStories = specStories.map(story => ({
+      ...story,
+      // Do not let pass flags written during this run collapse/re-index the
+      // visual waves. Only pre-run carry-forward/excluded stories are removed.
+      passes: preRunStoryIds.has(story.id),
+    }));
+    const fallbackWaves = compileWavesFromStories(fallbackStories);
+    return fallbackWaves.length > 0 ? { source: 'fallback', waves: fallbackWaves } : null;
+  }, [isWaveMode, triggerWavePlan, walWavePlan, specStories, preRunStoryIds]);
+
+  const waves = activeWavePlan?.waves ?? null;
 
   // Derive wave status for each wave
   const waveStatuses = useMemo(() => {
@@ -1267,13 +1410,21 @@ export default function RunStoryList({
     if (isWaveMode && waves && waves.length > 0) {
       const items: VirtualItem[] = [];
 
-      // Excluded stories (pre-passed)
       const waveCoveredIds = new Set(waves.flatMap(w => w.storyIds));
-      const excludedStories = mergedStories.filter(s => !waveCoveredIds.has(s.storyId));
+      const uncoveredStories = mergedStories.filter(s => !waveCoveredIds.has(s.storyId));
+      const carriedForwardStories = uncoveredStories.filter(s => preRunStoryIds.has(s.storyId) || s.status === 'excluded');
+      const unassignedStories = uncoveredStories.filter(s => !preRunStoryIds.has(s.storyId) && s.status !== 'excluded');
 
-      if (excludedStories.length > 0) {
-        items.push({ type: 'excluded-header', count: excludedStories.length });
-        for (const story of excludedStories) {
+      if (carriedForwardStories.length > 0) {
+        items.push({ type: 'excluded-header', count: carriedForwardStories.length });
+        for (const story of carriedForwardStories) {
+          items.push({ type: 'story', story, indented: true });
+        }
+      }
+
+      if (unassignedStories.length > 0) {
+        items.push({ type: 'pending-header', count: unassignedStories.length, source: activeWavePlan?.source ?? 'fallback' });
+        for (const story of unassignedStories) {
           items.push({ type: 'story', story, indented: true });
         }
       }
@@ -1304,7 +1455,7 @@ export default function RunStoryList({
 
     // Sequential mode: flat story list
     return mergedStories.map(story => ({ type: 'story' as const, story }));
-  }, [isWaveMode, waves, waveStatuses, collapsedWaves, mergedMap, mergedStories]);
+  }, [isWaveMode, waves, waveStatuses, collapsedWaves, mergedMap, mergedStories, preRunStoryIds, activeWavePlan]);
 
   // ─── Virtual scroll setup ──────────────────────────────────────────────────
 
@@ -1317,6 +1468,7 @@ export default function RunStoryList({
       if (!item) return index;
       if (item.type === 'story') return `story:${item.story.storyId}:${index}`;
       if (item.type === 'wave-header') return `wave:${item.waveIndex}:${index}`;
+      if (item.type === 'pending-header') return `pending:${item.count}:${index}`;
       return `excluded:${item.count}:${index}`;
     },
     overscan: 10,
@@ -1521,7 +1673,6 @@ export default function RunStoryList({
                     isFocused={isFocused}
                     includeGraph={includeGraph}
                     context={effectiveStoryContext.get(item.story.storyId)}
-                    passEventId={passedEventIds.get(item.story.storyId) ?? null}
                   />
                 ) : item.type === 'wave-header' ? (
                   <WaveHeader
@@ -1540,6 +1691,18 @@ export default function RunStoryList({
                     <SkipForward size={10} className="text-gray-400" />
                     <span className="text-[10px] font-medium text-muted">
                       {item.count} pre-passed
+                    </span>
+                  </div>
+                ) : item.type === 'pending-header' ? (
+                  <div
+                    className="flex items-center gap-2 px-3 border-b border-border bg-panel/50"
+                    style={{ height: ROW_HEIGHT }}
+                  >
+                    <Clock size={10} className="text-gray-400" />
+                    <span className="text-[10px] font-medium text-muted">
+                      {item.source === 'wal'
+                        ? `${item.count} pending · no runtime wave yet`
+                        : `${item.count} unassigned`}
                     </span>
                   </div>
                 ) : null}

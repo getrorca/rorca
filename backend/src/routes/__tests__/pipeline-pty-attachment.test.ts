@@ -120,7 +120,7 @@ function extractChunkPayloads(body: string): string[] {
   return payloads;
 }
 
-async function seedRun(status: string, terminalMode: 'ansi-html' | 'pty'): Promise<number> {
+async function seedRun(status: string, terminalMode: 'ansi-html' | 'pty' | 'native-pty'): Promise<number> {
   const row = await db.queryOne<{ id: number }>(
     `INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode, agent, agent_type)
      VALUES ('forge/specs/approved/pty-attach.json', 'ws-pty-attach', $1, $2, 'claude', 'claude')
@@ -470,6 +470,26 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(response.status).toBe(200);
     expect(response.text).toContain('"cursorReset":true');
     expect(response.text).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
+  });
+
+  test('native PTY-backed replay preserves requested native mode and reads PTY chunks', async () => {
+    const runId = await seedRun('done', 'native-pty');
+    const ptyChunk = Buffer.from('\u001b[36mnative cli bytes\u001b[0m\r\n', 'utf8');
+
+    await db.execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes, total_stored_bytes)
+       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited', $3, $3)`,
+      [runId, wsDir, ptyChunk.length],
+    );
+    await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ptyChunk]);
+
+    const body = await streamOutput(runId);
+
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminalMode":"native-pty"');
+    expect(body).toContain('"requestedTerminalMode":"native-pty"');
+    expect(body).toContain('"isPty":true');
+    expect(body).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
   });
 
   test('requested PTY without a PTY session demotes explicitly to ANSI fallback metadata', async () => {

@@ -1,12 +1,11 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
- * Licensed under the Apache License, Version 2.0.
- * See LICENSE file in the project root for full license text.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import crypto from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import { isCaptureIgnoredPath, sanitizeCapturePayload, type SanitizedCapturePayload } from "../../../../backend/src/lib/context-safety.js";
 import type { CapturePolicyMode, RorcaCaptureConfig } from "./config.js";
@@ -67,6 +66,8 @@ export type RorcaCaptureClientOptions = {
   queueMaxSize: number;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  token?: string;
+  tokenPath?: string;
 };
 
 export const MEMORY_CANDIDATE_GOVERNANCE_DEFAULTS = {
@@ -80,6 +81,7 @@ export class RorcaCaptureClient {
   private readonly queueMaxSize: number;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly token: string | null;
 
   constructor(options: RorcaCaptureClientOptions) {
     this.apiBaseUrl = options.apiBaseUrl.replace(/\/+$/, "");
@@ -87,6 +89,7 @@ export class RorcaCaptureClient {
     this.queueMaxSize = options.queueMaxSize;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 2_000;
+    this.token = options.token?.trim() || readMcpToken(options.tokenPath ?? path.join(os.homedir(), ".rorca", "mcp-token"));
   }
 
   buildEvent(input: CaptureEventInput): RorcaCaptureEvent {
@@ -155,10 +158,11 @@ export class RorcaCaptureClient {
   }
 
   private async postEvent(event: RorcaCaptureEvent): Promise<boolean> {
+    if (!this.token) return false;
     try {
       const response = await this.fetchImpl(`${this.apiBaseUrl}/api/context-capture/events`, {
         method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
         body: JSON.stringify({
           id: event.id,
           workspaceId: event.workspaceId,
@@ -175,6 +179,13 @@ export class RorcaCaptureClient {
       return false;
     }
   }
+}
+
+function readMcpToken(tokenPath: string): string | null {
+  if (!existsSync(tokenPath)) return null;
+  if (process.platform !== "win32" && (statSync(tokenPath).mode & 0o777) !== 0o600) return null;
+  const token = readFileSync(tokenPath, "utf8").trim();
+  return token || null;
 }
 
 export function queuePathForWorkspace(workspacePath: string): string {

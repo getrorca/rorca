@@ -37,6 +37,7 @@
  */
 
 import { spawn, execFileSync, execSync, type ChildProcess } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -45,7 +46,7 @@ import { StringDecoder } from 'string_decoder';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
-import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
+import { isPtyTerminalMode, normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import {
   buildPtyCompletionMarker,
   buildPtyMarkerFilePath,
@@ -108,9 +109,14 @@ import {
   loadOrchestrationConfig,
 } from './complexity-scorer';
 import { parseClaudeLogTokens } from './claude-token-parser';
-import { parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
+import { parseOpenCodeEvent, parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
 import { calculateCost } from './model-pricing';
-import { retryPost, writeFallbackResult, type FallbackResultEntry } from './resilient-post';
+import {
+  CoalescingPostQueue,
+  retryPost,
+  writeFallbackResult,
+  type FallbackResultEntry,
+} from './resilient-post';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -162,6 +168,9 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { runGitReinsJudge } from './gitreins-runner';
+import { appendGitReinsEvidence } from './gitreins-evidence-store';
+import { decideGitReinsGateAction } from './gitreins-gate';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -422,13 +431,13 @@ function resolveNoopRecoveryEngine(
   currentEngine: AgentType,
   packet: StoryExecutionPacket,
 ): AgentType | null {
+  const fallbackEnabled = ['1', 'true', 'yes'].includes(String(process.env.RORCA_ENABLE_NOOP_ENGINE_FALLBACK ?? '').toLowerCase());
+  if (!fallbackEnabled) return null;
+
   const orchConfig = loadOrchestrationConfig(cwd);
   const candidates = [
     packet.readiness.recommendedFallbackEngine,
     orchConfig.fallbackEngine,
-    currentEngine === 'pi' ? 'codex' as AgentType : null,
-    currentEngine === 'pi' ? 'claude' as AgentType : null,
-    currentEngine === 'pi' ? 'opencode' as AgentType : null,
   ].filter((value, index, all): value is AgentType => Boolean(value) && all.indexOf(value) === index);
 
   for (const candidate of candidates) {
@@ -994,14 +1003,67 @@ function getNextStory(stories: UserStory[]): UserStory | null {
   return null;
 }
 
-/** Effective CWD for fallback file writes — set by executeStory / main before use. */
+/** Stable run root for fallback writes; never point this at ephemeral story worktrees. */
 let _fallbackCwd: string | null = null;
-/** Current run ID for fallback entries. */
-let _fallbackRunId: number = 0;
+let _fallbackRunId = 0;
+let _walTelemetryQueue: CoalescingPostQueue | null = null;
+const _tokenAccumulators = new Map<string, {
+  baseInput: number;
+  baseOutput: number;
+  baseCost: number;
+  lastInput: number;
+  lastOutput: number;
+  lastCost: number;
+  lastTurn: number;
+  sequence: number;
+}>();
 
 function setFallbackContext(cwd: string, runId: number): void {
   _fallbackCwd = cwd;
   _fallbackRunId = runId;
+  if (!_walTelemetryQueue) {
+    _walTelemetryQueue = new CoalescingPostQueue({
+      maxPending: 64,
+      concurrency: 2,
+      timeoutMs: 750,
+      maxRetries: 1,
+      failureCooldownMs: 2_000,
+      persistFallback: entry => writeFallbackResult(cwd, entry),
+    });
+  }
+}
+
+function tokenTelemetryKey(runId: number, storyId: string): string {
+  return `${runId}:story_token_update:${storyId}`;
+}
+
+async function flushStoryTokenTelemetry(runId: number, storyId: string): Promise<void> {
+  await _walTelemetryQueue?.flushKey(tokenTelemetryKey(runId, storyId), 1_250);
+}
+
+async function shutdownWalTelemetry(): Promise<void> {
+  const queue = _walTelemetryQueue;
+  _walTelemetryQueue = null;
+  await queue?.shutdown(2_000);
+  _tokenAccumulators.clear();
+}
+
+
+function engineApiEndpoint(port: number, apiPath: string): string {
+  const rawBase = process.env.RORCA_ENGINE_API_BASE_URL?.trim();
+  const base = (rawBase && rawBase.length > 0 ? rawBase : `http://localhost:${port}`).replace(/\/+$/, '');
+  const path = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+  if (base.endsWith('/api') && path.startsWith('/api/')) {
+    return `${base}${path.slice('/api'.length)}`;
+  }
+  return `${base}${path}`;
+}
+
+function engineMcpEndpoint(port: number): string {
+  const rawBase = process.env.RORCA_ENGINE_API_BASE_URL?.trim();
+  const base = (rawBase && rawBase.length > 0 ? rawBase : `http://127.0.0.1:${port}`).replace(/\/+$/, '');
+  const root = base.endsWith('/api') ? base.slice(0, -'/api'.length) : base;
+  return `${root}/mcp`;
 }
 
 async function emitWalEvent(
@@ -1012,16 +1074,20 @@ async function emitWalEvent(
   storyId?: string,
   specId?: string,
 ): Promise<void> {
+  const occurredAt = new Date().toISOString();
+  const idempotencyKey = `wal:${_fallbackRunId}:${randomUUID()}`;
   const body = {
     event_type: eventType,
     workspace_id: workspaceId,
     story_id: storyId ?? null,
     spec_id: specId ?? null,
     payload,
+    idempotency_key: idempotencyKey,
+    occurred_at: occurredAt,
   };
 
   const ok = await retryPost(
-    `http://localhost:${port}/api/wal`,
+    engineApiEndpoint(port, '/api/wal'),
     body,
     `WAL:${eventType}`,
   );
@@ -1033,10 +1099,13 @@ async function emitWalEvent(
       status: eventType,
       runId: _fallbackRunId,
       retries: 3,
-      ts: new Date().toISOString(),
+      ts: occurredAt,
+      idempotencyKey,
       payload: body,
     };
-    writeFallbackResult(_fallbackCwd, entry);
+    if (!await writeFallbackResult(_fallbackCwd, entry)) {
+      throw new Error(`WAL fallback persistence failed for ${eventType}`);
+    }
   }
 }
 
@@ -1092,9 +1161,11 @@ async function postStoryResult(
   port: number,
   body: Record<string, unknown>,
 ): Promise<void> {
+  const idempotencyKey = `story-result:${_fallbackRunId}:${randomUUID()}`;
+  const deliveryBody = { ...body, idempotencyKey };
   const ok = await retryPost(
-    `http://localhost:${port}/api/pipeline/story-result`,
-    body,
+    engineApiEndpoint(port, '/api/pipeline/story-result'),
+    deliveryBody,
     `story-result:${body.storyId ?? 'unknown'}`,
   );
 
@@ -1106,9 +1177,12 @@ async function postStoryResult(
       runId: _fallbackRunId,
       retries: 3,
       ts: new Date().toISOString(),
-      payload: body,
+      idempotencyKey,
+      payload: deliveryBody,
     };
-    writeFallbackResult(_fallbackCwd, entry);
+    if (!await writeFallbackResult(_fallbackCwd, entry)) {
+      throw new Error(`Story-result fallback persistence failed for ${String(body.storyId ?? 'unknown')}`);
+    }
   }
 }
 
@@ -1907,6 +1981,7 @@ type TokenUpdateCallback = (update: TokenUpdate) => void;
 
 interface PtyRunOptions {
   enabled: boolean;
+  terminalMode: TerminalMode;
   runId: number;
   workspaceId: string;
   agentType: AgentType;
@@ -1944,7 +2019,6 @@ type PtyCommand = PtyLaunchCommand;
 
 const DEFAULT_PTY_COLS = 120;
 const DEFAULT_PTY_ROWS = 36;
-
 function loadNodePty(): NodePtyLike {
   if (!PTY_AVAILABLE) {
     throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
@@ -2056,10 +2130,11 @@ export function buildPtyCommand(
       }
       return {
         command: compatibility.binaryPath!,
-        args: [
-          ...(attachAddr ? ['--attach', attachAddr] : []),
-          ...(agentModel ? ['--model', normalizeOpenCodeModel(agentModel)] : []),
-        ],
+        // OpenCode 1.x uses `attach <url>` as a subcommand. A fresh session
+        // remains the default interactive command and accepts the global model flag.
+        args: attachAddr
+          ? ['attach', attachAddr]
+          : [...(agentModel ? ['--model', normalizeOpenCodeModel(agentModel)] : [])],
         env,
         prompt,
         cleanup: () => {
@@ -2397,7 +2472,7 @@ async function spawnAgentViaPty(
             run_id: ptyOptions.runId,
             story_id: ptyOptions.storyId,
             agent_type: ptyOptions.agentType,
-            terminal_mode: 'pty',
+            terminal_mode: ptyOptions.terminalMode,
             elapsed_seconds: elapsedSeconds,
             heartbeat_only: true,
             message: 'Agent process is still running; heartbeat is connection/process liveness metadata, not terminal output.',
@@ -2459,7 +2534,7 @@ async function spawnAgentViaPty(
               run_id: ptyOptions.runId,
               story_id: ptyOptions.storyId,
               agent_type: ptyOptions.agentType,
-              terminal_mode: 'pty',
+              terminal_mode: ptyOptions.terminalMode,
               marker_file: markerFilePath,
               terminal_marker_seen: terminalMarkerSeen,
               message: 'Agent completion file observed; process exit plus merge and validation gates still determine story pass.',
@@ -2567,7 +2642,7 @@ async function spawnAgentViaPty(
           run_id: ptyOptions.runId,
           story_id: ptyOptions.storyId,
           agent_type: ptyOptions.agentType,
-          terminal_mode: 'pty',
+          terminal_mode: ptyOptions.terminalMode,
           lifecycle_status: 'running',
           prompt_readiness: readiness.reason,
           prompt_readiness_fallback: readiness.timedOut,
@@ -2738,10 +2813,10 @@ function runAgent(
     case 'claude':
       return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
     case 'opencode':
-      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
+      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
-      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
+      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, mcpServers);
     case 'pi':
       return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers, effortLevel);
   }
@@ -3021,6 +3096,7 @@ function spawnOpenCode(
   logFile: string,
   agentModel: string | null,
   attachAddr: string | null,
+  onTokenUpdate?: TokenUpdateCallback,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
@@ -3093,11 +3169,31 @@ function spawnOpenCode(
     // tool_result (full file contents as escaped JSON) produce giant JSON blobs
     // in the terminal — skip them.
     let ocLineBuf = '';
+    let cumulativeInput = 0;
+    let cumulativeOutput = 0;
+    let turnCount = 0;
     const forwardOpenCodeStdoutLine = (line: string): void => {
       const trimmed = line.trim();
       if (!trimmed) return;
       try {
         const ev = JSON.parse(trimmed);
+        const parsedUsage = parseOpenCodeEvent(ev).tokenUsage;
+        const stepTokens = ev.type === 'step_finish' ? ev.part?.tokens : undefined;
+        const usage = parsedUsage ?? (stepTokens
+          ? { inputTokens: Number(stepTokens.input ?? 0), outputTokens: Number(stepTokens.output ?? 0) }
+          : null);
+        if (usage && onTokenUpdate && (usage.inputTokens > 0 || usage.outputTokens > 0)) {
+          cumulativeInput += usage.inputTokens;
+          cumulativeOutput += usage.outputTokens;
+          turnCount++;
+          onTokenUpdate({
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            turn: turnCount,
+            cumulativeInput,
+            cumulativeOutput,
+          });
+        }
         if (ev.type === 'step_finish' || ev.type === 'step_start' || ev.type === 'tool_result') return;
         process.stdout.write(trimmed + '\n');
       } catch {
@@ -3208,6 +3304,7 @@ function spawnCodex(
   timeoutMs: number,
   logFile: string,
   model?: string | null,
+  _onTokenUpdate?: TokenUpdateCallback,
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
@@ -4953,7 +5050,7 @@ async function postReviewComment(
   };
 
   await retryPost(
-    `http://localhost:${port}/api/review/comment`,
+    engineApiEndpoint(port, '/api/review/comment'),
     body,
     `review:${review.reviewerName}:${storyId}`,
   );
@@ -5116,9 +5213,6 @@ async function executeStory(
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
   const storyStartHead = getGitHead(effectiveCwd);
-
-  // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
-  setFallbackContext(effectiveCwd, config.runId);
 
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
   // stable workspace/run artifact root, not ephemeral story worktrees, so the
@@ -5470,7 +5564,7 @@ async function executeStory(
     }, story.id);
   };
 
-  if (effectiveAgent !== 'pi' || config.terminalMode === 'pty') {
+  if (effectiveAgent !== 'pi' || isPtyTerminalMode(config.terminalMode)) {
     await emitStoryStarted();
   }
 
@@ -5493,28 +5587,86 @@ async function executeStory(
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
+  let gitReinsRetryContext = '';
   if (effectiveAgent === 'pi') {
     logger.info(`[pi] Session options ready for ${story.id}`);
   }
 
-  // Real-time token update callback — emits WAL events as tokens stream in
-  const tokenUpdateCallback: TokenUpdateCallback | undefined =
-    workspaceId && (effectiveAgent === 'claude' || effectiveAgent === 'pi')
-      ? (update) => {
-          // Fire-and-forget WAL event for live token streaming
-          emitWalEvent(config.port, 'story_token_update', workspaceId, {
+  // Every agent path receives the same callback contract. Claude, Pi, and
+  // usage-bearing OpenCode JSON feed a latest-value queue; Codex retains final
+  // story-result accounting because its stdout contract has no live usage.
+  const tokenUpdateCallback: TokenUpdateCallback | undefined = workspaceId
+    ? (update) => {
+        const key = tokenTelemetryKey(config.runId, story.id);
+        const accumulator = _tokenAccumulators.get(key) ?? {
+          baseInput: 0, baseOutput: 0, baseCost: 0,
+          lastInput: 0, lastOutput: 0, lastCost: 0,
+          lastTurn: 0, sequence: 0,
+        };
+        // Agent subprocess retries/reroutes restart their local cumulative
+        // counters. Carry the completed attempt forward so coalescing never
+        // replaces a larger run total with a smaller per-attempt total.
+        const restarted = update.turn <= accumulator.lastTurn
+          || update.cumulativeInput < accumulator.lastInput
+          || update.cumulativeOutput < accumulator.lastOutput;
+        if (restarted) {
+          accumulator.baseInput += accumulator.lastInput;
+          accumulator.baseOutput += accumulator.lastOutput;
+          accumulator.baseCost += accumulator.lastCost;
+        }
+        accumulator.lastInput = update.cumulativeInput;
+        accumulator.lastOutput = update.cumulativeOutput;
+        accumulator.lastCost = update.cumulativeCostUsd ?? accumulator.lastCost;
+        accumulator.lastTurn = update.turn;
+        accumulator.sequence++;
+        _tokenAccumulators.set(key, accumulator);
+
+        const cumulativeInput = accumulator.baseInput + update.cumulativeInput;
+        const cumulativeOutput = accumulator.baseOutput + update.cumulativeOutput;
+        const cumulativeCostUsd = accumulator.baseCost + (update.cumulativeCostUsd ?? 0);
+        const occurredAt = new Date().toISOString();
+        const idempotencyKey = `wal-token:${config.runId}:${story.id}:${randomUUID()}`;
+        const body = {
+          event_type: 'story_token_update',
+          workspace_id: workspaceId,
+          story_id: story.id,
+          spec_id: null,
+          payload: {
             run_id: config.runId,
             story_id: story.id,
             input_tokens: update.inputTokens,
             output_tokens: update.outputTokens,
-            cumulative_input: update.cumulativeInput,
-            cumulative_output: update.cumulativeOutput,
+            cumulative_input: cumulativeInput,
+            cumulative_output: cumulativeOutput,
             ...(update.costUsd != null ? { cost_usd: update.costUsd } : {}),
-            ...(update.cumulativeCostUsd != null ? { cumulative_cost_usd: update.cumulativeCostUsd } : {}),
+            ...(update.cumulativeCostUsd != null ? { cumulative_cost_usd: cumulativeCostUsd } : {}),
             turn: update.turn,
-          }, story.id).catch(() => { /* best-effort — don't block execution */ });
-        }
-      : undefined;
+            telemetry_sequence: accumulator.sequence,
+          },
+          idempotency_key: idempotencyKey,
+          occurred_at: occurredAt,
+        };
+        const fallback: FallbackResultEntry = {
+          type: 'wal',
+          storyId: story.id,
+          status: 'story_token_update',
+          runId: config.runId,
+          retries: 1,
+          ts: occurredAt,
+          idempotencyKey,
+          coalesceKey: key,
+          sequence: accumulator.sequence,
+          payload: body,
+        };
+        _walTelemetryQueue?.enqueue({
+          key,
+          url: engineApiEndpoint(config.port, '/api/wal'),
+          body,
+          label: 'WAL:story_token_update',
+          fallback,
+        });
+      }
+    : undefined;
 
   const persistRetrievalOutcome = async (success: boolean): Promise<void> => {
     await recordRetrievalSelectionsOutcome(workspaceId, retrievalSelections, success);
@@ -5526,7 +5678,7 @@ async function executeStory(
       // Build the MCP servers map.
       // Rorca MCP is the preferred direct memory/control-plane path for agents that support remote MCP.
       const mcpServers: Record<string, string> = {
-        rorca: `http://127.0.0.1:${config.port}/mcp`,
+        rorca: engineMcpEndpoint(config.port),
       };
       if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
       if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
@@ -5535,9 +5687,12 @@ async function executeStory(
       const piRetryContext: PiRetryContext | undefined = effectiveAgent === 'pi'
         ? { isRetry: retryAttempt > 0, attempt: retryAttempt }
         : undefined;
-      const prompt = effectiveAgent === 'pi' && piSessionOptions
+      const baseAttemptPrompt = effectiveAgent === 'pi' && piSessionOptions
         ? `${buildPiStoryPromptContext({ ...piSessionOptions, attempt: retryAttempt + 1, maxAttempts: MAX_RETRIES })}\n\n${promptBody}`
         : promptBody;
+      const prompt = gitReinsRetryContext
+        ? `${baseAttemptPrompt}\n\n${gitReinsRetryContext}`
+        : baseAttemptPrompt;
       const attemptPrompt = effectiveAgent === 'pi' && retryAttempt > 0
         ? [
             prompt,
@@ -5549,9 +5704,10 @@ async function executeStory(
 
       logger.info(`[agent] Launching ${effectiveAgent} for ${story.id}`);
       const agentAttemptStartedAt = Date.now();
-      const ptyOptions = config.terminalMode === 'pty' && workspaceId
+      const ptyOptions = isPtyTerminalMode(config.terminalMode) && workspaceId
         ? {
             enabled: true,
+            terminalMode: config.terminalMode,
             runId: config.runId,
             workspaceId,
             agentType: effectiveAgent,
@@ -5589,6 +5745,10 @@ async function executeStory(
         exitCode: result.exitCode,
         stageDurationMs: Math.max(0, Date.now() - agentAttemptStartedAt),
       }, '[engine] telemetry');
+
+    // Preserve token-update ordering relative to terminal story events without
+    // ever waiting through the critical-event 3×10s retry policy.
+    await flushStoryTokenTelemetry(config.runId, story.id);
 
     // Extract token usage from log file after agent exits
     const tokenUsage = extractTokenUsage(
@@ -5888,7 +6048,7 @@ async function executeStory(
               if (entry && typeof entry === 'object') {
                 const e = entry as Record<string, unknown>;
                 try {
-                  await fetch(`http://localhost:${config.port}/api/memory`, {
+                  await fetch(engineApiEndpoint(config.port, '/api/memory'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -6076,6 +6236,136 @@ async function executeStory(
         } catch (err: any) {
           logger.warn(`  [review] Adversarial review failed: ${err.message} — proceeding with pass`);
         }
+      }
+
+      // GitReins blocking gate: runs for every agent symmetrically after optional
+      // adversarial review and before any local/canonical pass finalization.
+      const gitReinsConfig = loadRorcaConfig(config.cwd).execution.gitreins;
+      const gitReinsAttempt = (retryCounts.get(story.id) ?? 0) + 1;
+      let gitReinsResult = await runGitReinsJudge({
+        cwd: effectiveCwd,
+        mode: gitReinsConfig.mode,
+        timeoutMs: gitReinsConfig.timeoutMs,
+        maxEvidenceBytes: gitReinsConfig.maxEvidenceBytes,
+        runId: config.runId,
+        storyId: story.id,
+        title: story.title,
+        criteria: [story.description, ...(story.acceptanceCriteria ?? [])].filter(Boolean),
+        attempt: gitReinsAttempt,
+      });
+
+      let gitReinsEvidenceId: number | null = null;
+      if (gitReinsResult.mode !== 'disabled') {
+        try {
+          if (!workspaceId) throw new Error('workspace id unavailable');
+          const saved = await appendGitReinsEvidence({ workspaceId, runId: config.runId, storyId: story.id, result: gitReinsResult });
+          gitReinsEvidenceId = saved.id;
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(`  [gitreins] Evidence persistence failed for ${story.id}: ${message}`);
+          gitReinsResult = {
+            ...gitReinsResult,
+            status: 'error',
+            reasonCode: 'evidence_store_failed',
+            passed: false,
+            shouldBlock: gitReinsResult.mode === 'enforce',
+            diagnostics: '',
+          };
+        }
+
+        logger.info(`  [gitreins] ${story.id}: ${gitReinsResult.status} (${gitReinsResult.reasonCode}, mode=${gitReinsResult.mode}, attempt=${gitReinsAttempt})`);
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_gitreins_evaluated', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            mode: gitReinsResult.mode,
+            status: gitReinsResult.status,
+            reason_code: gitReinsResult.reasonCode,
+            should_block: gitReinsResult.shouldBlock,
+            attempt: gitReinsAttempt,
+            duration_ms: gitReinsResult.durationMs,
+            worktree: gitReinsResult.worktree,
+            evidence_id: gitReinsEvidenceId,
+            schema_version: gitReinsResult.evidence?.schemaVersion ?? '1.0',
+          }, story.id);
+        }
+      }
+
+      if (gitReinsResult.shouldBlock) {
+        retryCounts.set(story.id, gitReinsAttempt);
+        const action = decideGitReinsGateAction(gitReinsResult, gitReinsAttempt, MAX_RETRIES);
+        recordPiProgress({
+          knownIssues: [`GitReins enforce gate blocked: ${gitReinsResult.reasonCode}.`],
+          validationResults: [`GitReins attempt ${gitReinsAttempt}/${MAX_RETRIES}: ${gitReinsResult.status}.`],
+          remainingWork: action === 'retry'
+            ? ['Address GitReins findings and rerun the story validation.']
+            : ['Inspect persisted GitReins evidence before a scoped manual retry.'],
+        });
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: `gitreins_${gitReinsResult.reasonCode}`,
+            attempt: gitReinsAttempt,
+            max_attempts: MAX_RETRIES,
+            evidence_id: gitReinsEvidenceId,
+            worktree: gitReinsResult.worktree,
+            log_file: storyLogFile,
+          }, story.id);
+          await postStoryResult(config.port, {
+            runId: config.runId,
+            storyId: story.id,
+            status: 'fail',
+            reason: `gitreins_${gitReinsResult.reasonCode}`,
+            logPath: storyLogFile,
+            gitReinsEvidenceId,
+            ...storyResultExtra,
+            ...activeSkillsExtra,
+            ...tokenPayload,
+          });
+        }
+
+        if (action === 'retry') {
+          const findingSummaries = gitReinsResult.evidence?.checks
+            .filter(check => check.passed !== true)
+            .slice(0, 8)
+            .map(check => `- ${check.id}: ${check.summary}`) ?? [];
+          gitReinsRetryContext = [
+            '## GitReins retry evidence',
+            `The enforce gate blocked the prior attempt (${gitReinsResult.reasonCode}).`,
+            gitReinsResult.evidence?.summary ?? 'No valid judge summary was available.',
+            ...findingSummaries,
+            'Address this evidence, rerun relevant validation, and do not bypass or disable the gate.',
+          ].join('\n');
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_retry', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              story_title: story.title,
+              attempt: gitReinsAttempt + 1,
+              max_attempts: MAX_RETRIES,
+              reason: `gitreins_${gitReinsResult.reasonCode}`,
+            }, story.id);
+            if (effectiveAgent !== 'pi') await emitStoryStarted();
+          }
+          continue;
+        }
+
+        markStorySkipped(config.jsonPath, story.id);
+        rsMarkStoryFailed(effectiveCwd, {
+          storyId: story.id,
+          title: story.title,
+          status: 'failed',
+          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+          finishedAt: new Date().toISOString(),
+          agentType: effectiveAgent,
+          failReason: `gitreins_${gitReinsResult.reasonCode}`,
+          retries: gitReinsAttempt,
+        });
+        writeProgressTxt(effectiveCwd);
+        await persistRetrievalOutcome(false);
+        return 'failed';
       }
 
       retryCounts.delete(story.id);
@@ -6445,10 +6735,10 @@ async function main(): Promise<void> {
 
   logger.info(`[engine] Agent: ${config.agentType}${config.agentModel ? ` (model: ${config.agentModel})` : ''}`);
   logger.info(`[engine] Terminal mode: ${config.terminalMode}`);
-  if (config.terminalMode === 'pty' && !PTY_AVAILABLE) {
+  if (isPtyTerminalMode(config.terminalMode) && !PTY_AVAILABLE) {
     throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
   }
-  if (config.terminalMode === 'pty' && config.parallelism > 1) {
+  if (isPtyTerminalMode(config.terminalMode) && config.parallelism > 1) {
     logger.warn('[engine] PTY mode uses one run-scoped interactive terminal; forcing sequential story execution.');
     config.parallelism = 1;
   }
@@ -6480,7 +6770,7 @@ async function main(): Promise<void> {
   // A PTY has no safe ANSI/RPC fallback: verify every adapter which could be
   // selected before any session or prompt is created. The probe is bounded and
   // only invokes --version/--help, so it never changes CLI state or credentials.
-  if (config.terminalMode === 'pty') {
+  if (isPtyTerminalMode(config.terminalMode)) {
     for (const requiredAgent of requiredEngines) {
       const compatibility = assertPtyCliCompatible(requiredAgent);
       logger.info(`[engine] PTY ${requiredAgent}: ${compatibility.version ?? 'unknown version'} at ${compatibility.binaryPath}`);
@@ -6511,7 +6801,7 @@ async function main(): Promise<void> {
   logger.info('');
 
   const workspaceId = config.workspaceId ?? await resolveWorkspaceId(config.port, config.cwd);
-  if (config.terminalMode === 'pty' && !workspaceId) {
+  if (isPtyTerminalMode(config.terminalMode) && !workspaceId) {
     throw new Error('PTY_WORKSPACE_ID_REQUIRED: PTY runs require a canonical workspace ID from the worker; refusing silent ANSI/RPC fallback.');
   }
   const retryCounts = new Map<string, number>();
@@ -6578,6 +6868,7 @@ async function main(): Promise<void> {
       logger.info('');
       logger.info('[engine] Received SIGINT — stopping run');
       await runRegisteredPtyCleanupTasks();
+      await shutdownWalTelemetry();
       await cleanupBrowserServers();
       process.exit(130);
     })();
@@ -6587,6 +6878,7 @@ async function main(): Promise<void> {
     void (async () => {
       logger.error('[engine] Received SIGTERM — terminating run before completion');
       await runRegisteredPtyCleanupTasks();
+      await shutdownWalTelemetry();
       await cleanupBrowserServers();
       process.exit(143);
     })();
@@ -6728,6 +7020,7 @@ async function main(): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
   } finally {
+    await shutdownWalTelemetry();
     await cleanupBrowserServers();
   }
 }
@@ -7024,7 +7317,7 @@ async function runParallel(
 
 async function resolveWorkspaceId(port: number, cwd: string): Promise<string | null> {
   try {
-    const res = await fetch(`http://localhost:${port}/api/workspaces`);
+    const res = await fetch(engineApiEndpoint(port, '/api/workspaces'));
     if (!res.ok) return null;
     const data = await res.json() as { items?: Array<{ id: string; path: string }>; workspaces?: Array<{ id: string; path: string }> };
     // API returns `items` (paginated format), fallback to `workspaces` for compat
@@ -7146,7 +7439,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--workspace-id <id>] [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--workspace-id <id>] [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty|native-pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
     process.exit(1);
   }
 

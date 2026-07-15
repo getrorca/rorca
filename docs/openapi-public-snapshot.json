@@ -1,6 +1,6 @@
 {
-  "contractVersion": "2.0.0",
-  "generatedAt": "2026-07-15T05:25:20.677Z",
+  "contractVersion": "4.0.0",
+  "generatedAt": "2026-07-15T08:56:51.252Z",
   "routes": [
     {
       "method": "GET",
@@ -21,6 +21,1355 @@
         "404": {}
       },
       "hash": "sha256:368d07d862002971e3e30fa3158c24fa37d7859ef9c561663564a13aa93b1a3e"
+    },
+    {
+      "method": "GET",
+      "path": "/api/candidates",
+      "parameters": [
+        {
+          "name": "category",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "confidence",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "date_from",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        {
+          "name": "date_to",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 50,
+            "maximum": 250,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "page",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "search",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "source_system",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "status",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "duplicate",
+              "superseded",
+              "revisit"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "trust_tier",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "authoritative",
+              "trusted",
+              "community",
+              "unverified"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "workspace_id",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cursor": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "hasMore": {
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "total": {
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:2f7d17864b92fe8e42f82427be71dc914fd01d106ed0824aed5ddb83a19ef879"
+    },
+    {
+      "method": "POST",
+      "path": "/api/candidates",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "category": {
+                    "description": "Knowledge category (Architecture, Bug Fix, Convention, Decision, Gotcha, Pattern)",
+                    "type": "string"
+                  },
+                  "confidence": {
+                    "default": "medium",
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low"
+                    ],
+                    "type": "string"
+                  },
+                  "context": {
+                    "description": "Why it matters (redacted for secrets before persistence)",
+                    "type": "string"
+                  },
+                  "context_event_id": {
+                    "description": "FK to the originating context_event (if any)",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "description": "Stable key so offline-queue flushes and retries are safe",
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "type": "object"
+                  },
+                  "related_files": {
+                    "description": "Workspace-relative file paths this candidate touches",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rule": {
+                    "description": "The actionable lesson (redacted for secrets before persistence)",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "type": "integer"
+                  },
+                  "source_ref": {
+                    "description": "Pointer into the source system (commit SHA, file path, note ID)",
+                    "type": "string"
+                  },
+                  "source_system": {
+                    "description": "Provenance system (e.g. 'rorca-capture', 'git', 'manual')",
+                    "type": "string"
+                  },
+                  "title": {
+                    "description": "Short summary of the distilled knowledge",
+                    "type": "string"
+                  },
+                  "trust_tier": {
+                    "default": "unverified",
+                    "enum": [
+                      "authoritative",
+                      "trusted",
+                      "community",
+                      "unverified"
+                    ],
+                    "type": "string"
+                  },
+                  "workspace_id": {
+                    "description": "Workspace ID (must exist in Rorca)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace_id",
+                  "source_system",
+                  "category",
+                  "title",
+                  "rule",
+                  "idempotency_key"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryCandidate"
+              }
+            }
+          }
+        },
+        "201": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryCandidate"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:efd8a598b9e6e15b5e04ec1a3af2d4e77a296b0a6ee35c9f39aff7e548641f74"
+    },
+    {
+      "method": "GET",
+      "path": "/api/candidates/{id}",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "candidate": {
+                    "type": "object"
+                  },
+                  "eventProvenance": {
+                    "description": "The originating context event (null if no event linked)",
+                    "nullable": true,
+                    "type": "object"
+                  },
+                  "promotedMemory": {
+                    "description": "The durable memory this candidate was promoted into",
+                    "nullable": true,
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:5328df7d607357ebd87512994278d7fff28ef56d49d6c4655772b10e482fe87e"
+    },
+    {
+      "method": "POST",
+      "path": "/api/candidates/{id}/approve",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "category": {
+                    "description": "Override category",
+                    "type": "string"
+                  },
+                  "confidence": {
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low"
+                    ],
+                    "type": "string"
+                  },
+                  "context": {
+                    "description": "Override context",
+                    "type": "string"
+                  },
+                  "related_files": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "review_note": {
+                    "description": "Optional review note",
+                    "type": "string"
+                  },
+                  "reviewer": {
+                    "description": "Who took the review decision",
+                    "type": "string"
+                  },
+                  "rule": {
+                    "description": "Override rule",
+                    "type": "string"
+                  },
+                  "title": {
+                    "description": "Override title",
+                    "type": "string"
+                  },
+                  "trust_tier": {
+                    "enum": [
+                      "authoritative",
+                      "trusted",
+                      "community",
+                      "unverified"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "candidate": {
+                    "type": "object"
+                  },
+                  "promotedMemoryId": {
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "409": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:a8092eb4ec338c50d1ce116f960015d2419d0f80ee71a9f9c487d2190bb6b79f"
+    },
+    {
+      "method": "POST",
+      "path": "/api/candidates/{id}/mark-duplicate",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "duplicate_of_candidate_id": {
+                    "description": "ID of the candidate this one duplicates",
+                    "type": "integer"
+                  },
+                  "review_note": {
+                    "type": "string"
+                  },
+                  "reviewer": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "409": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:e653514411af5a7b4863502e40af658cbc45aeb3c779b3ac23016ea982e21b3c"
+    },
+    {
+      "method": "POST",
+      "path": "/api/candidates/{id}/mark-superseded",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "review_note": {
+                    "type": "string"
+                  },
+                  "reviewer": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "409": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:9055017b9b3b57bb00ad1b27d8272b0c6126e9daf84f2647011fa0a16f7fa1c0"
+    },
+    {
+      "method": "POST",
+      "path": "/api/candidates/{id}/reject",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "review_note": {
+                    "type": "string"
+                  },
+                  "reviewer": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "409": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:17b974dccde32840ccf7991c6080c20479f68fa48d5914779012cc4bc1912c18"
+    },
+    {
+      "method": "POST",
+      "path": "/api/candidates/{id}/revisit",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "review_note": {
+                    "type": "string"
+                  },
+                  "reviewer": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "409": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:f32e5449aeec2b05e064254ca013d450294b2b17a0405c8c85c4de71149d82a1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-candidates",
+      "parameters": [
+        {
+          "name": "category",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "confidence",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "eventType",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "sourceSystem",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "status",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "description": "pending by default; use all or a comma-separated status list to include reviewed candidates",
+            "type": "string"
+          }
+        },
+        {
+          "name": "trustTier",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "agent_observation",
+              "working_note",
+              "engineering_decision",
+              "approved_policy",
+              "verified_fact"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:9df7b23d1f3585b8e4338d8cd7947908a245b10471d314f72ad87b0b43105c02"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-candidates",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confidence": {
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low"
+                    ],
+                    "type": "string"
+                  },
+                  "context": {
+                    "type": "string"
+                  },
+                  "contextEventId": {
+                    "type": "integer"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "relatedFiles": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rule": {
+                    "type": "string"
+                  },
+                  "suggestedCategory": {
+                    "enum": [
+                      "Architecture",
+                      "Convention",
+                      "Bug Fix",
+                      "Decision",
+                      "Pattern",
+                      "Gotcha"
+                    ],
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "trustTier": {
+                    "enum": [
+                      "agent_observation",
+                      "working_note",
+                      "engineering_decision",
+                      "approved_policy",
+                      "verified_fact"
+                    ],
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "suggestedCategory",
+                  "title",
+                  "rule"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:fbcbf193684997084d8612ae7b16bdad4b65e17ce014ae9b71fc70dee7f2f1b0"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-candidates/{id}",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:94d30ad8606aa55e7e769e16fb605588a07ee823c2d8b1026d920850ff6137cc"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-candidates/{id}/approve",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {},
+        "409": {}
+      },
+      "hash": "sha256:b770e85170ce7f322e2d2180b80f78c09c92d9ee26c813cd6916737e3467ce23"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-candidates/retrieval",
+      "parameters": [
+        {
+          "name": "includeUnsafe",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "description": "Opt in to include pending, rejected, low-confidence, or regulated-unapproved candidates.",
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "minConfidence",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": "medium",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:63bf93ea1ca780b2c71246588eb2c3f9b509991015ecd586901f53c3a28f9028"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-events",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "actor": {
+                    "type": "string"
+                  },
+                  "contentHash": {
+                    "type": "string"
+                  },
+                  "eventType": {
+                    "enum": [
+                      "manual_cli_note",
+                      "manual_note",
+                      "git_commit",
+                      "git_range",
+                      "daemon_scan",
+                      "pr_merge",
+                      "incident",
+                      "duckbrain_import",
+                      "duckbrain_memory",
+                      "hermes_event",
+                      "hermes_session"
+                    ],
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "type": "object"
+                  },
+                  "occurredAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "payload": {
+                    "type": "object"
+                  },
+                  "provenance": {
+                    "type": "object"
+                  },
+                  "relatedFiles": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "sourceRef": {
+                    "type": "string"
+                  },
+                  "sourceSystem": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "trustTier": {
+                    "enum": [
+                      "agent_observation",
+                      "working_note",
+                      "engineering_decision",
+                      "approved_policy",
+                      "verified_fact"
+                    ],
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "eventType",
+                  "sourceSystem",
+                  "sourceRef"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:f494521cac421fae33f5ad571d333754b5250ce64ad8d10f43064df80bc3461e"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-events/candidates",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "candidate": {
+                    "$ref": "#/components/schemas/MemoryCandidate"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {}
+      },
+      "hash": "sha256:f0406a89d9d763902e5f5bca047f2dbbd5152889dc4429452b3b96361de91e48"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-events/events",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "event": {
+                    "$ref": "#/components/schemas/ContextEvent"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "created": {
+                    "description": "Whether this was a new insert (false = idempotent deduplication)",
+                    "type": "boolean"
+                  },
+                  "id": {
+                    "type": "number"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "404": {}
+      },
+      "hash": "sha256:ac22a1e32618037f318b75a367f39d408068a19b409ba1f95c273b6b042c6322"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context-events/flush",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "entries": {
+                    "items": {
+                      "oneOf": [
+                        {
+                          "properties": {
+                            "payload": {
+                              "$ref": "#/components/schemas/ContextEvent"
+                            },
+                            "type": {
+                              "enum": [
+                                "event"
+                              ]
+                            }
+                          },
+                          "type": "object"
+                        },
+                        {
+                          "properties": {
+                            "payload": {
+                              "$ref": "#/components/schemas/MemoryCandidate"
+                            },
+                            "type": {
+                              "enum": [
+                                "candidate"
+                              ]
+                            }
+                          },
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "failed": {
+                    "items": {
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "idempotencyKey": {
+                          "type": "string"
+                        },
+                        "index": {
+                          "type": "number"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "succeeded": {
+                    "type": "number"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:ba7997cb404438539260fe2fc8fbef3ad3908554f5fdbe337486c97e7a1b15ae"
+    },
+    {
+      "method": "GET",
+      "path": "/api/context-events/health",
+      "parameters": [],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "db": {
+                    "example": "connected",
+                    "type": "string"
+                  },
+                  "status": {
+                    "example": "ok",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:028a100fe20de3b3c20219962b3784570a328c13fcbf85ac5b258712553624a0"
     },
     {
       "method": "POST",
@@ -190,6 +1539,302 @@
         "404": {}
       },
       "hash": "sha256:5b138e731e9b8a8537bc42fe2c7272ba47366f0282f15dffff729df31e0c53e8"
+    },
+    {
+      "method": "POST",
+      "path": "/api/context/retrieve",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "brief": {
+                    "description": "The story brief or task description to retrieve context for",
+                    "type": "string"
+                  },
+                  "budget": {
+                    "description": "Token budget for context retrieval (default 32000)",
+                    "type": "integer"
+                  },
+                  "freshness": {
+                    "properties": {
+                      "allowStale": {
+                        "description": "Whether to proceed with stale hydration data",
+                        "type": "boolean"
+                      },
+                      "maxAgeMs": {
+                        "description": "Max age in ms for freshness; stale hydration beyond this degrades",
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "includeGraph": {
+                    "description": "Include knowledge graph context (default true)",
+                    "type": "boolean"
+                  },
+                  "maxCandidates": {
+                    "description": "Requested candidate cap; clamped to RORCA_RETRIEVAL_MAX_CANDIDATES",
+                    "type": "integer"
+                  },
+                  "maxDepth": {
+                    "description": "Requested graph traversal depth; clamped to RORCA_RETRIEVAL_MAX_DEPTH",
+                    "type": "integer"
+                  },
+                  "maxExcerpts": {
+                    "description": "Requested excerpt/context item cap; clamped to RORCA_RETRIEVAL_MAX_EXCERPTS",
+                    "type": "integer"
+                  },
+                  "maxFiles": {
+                    "description": "Requested distinct file cap; clamped to RORCA_RETRIEVAL_MAX_FILES",
+                    "type": "integer"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "brief"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "degradationFlags": {
+                    "properties": {
+                      "cacheDegraded": {
+                        "type": "boolean"
+                      },
+                      "graphDegraded": {
+                        "type": "boolean"
+                      },
+                      "graphLite": {
+                        "type": "boolean"
+                      },
+                      "noSeeds": {
+                        "type": "boolean"
+                      },
+                      "searchDegraded": {
+                        "type": "boolean"
+                      },
+                      "staleHydration": {
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "hydrationFreshness": {
+                    "properties": {
+                      "checks": {
+                        "type": "object"
+                      },
+                      "currentHead": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "humanSummary": {
+                        "type": "string"
+                      },
+                      "hydratedSha": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "status": {
+                        "enum": [
+                          "clean",
+                          "stale",
+                          "dirty",
+                          "unknown",
+                          "missing"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "meta": {
+                    "properties": {
+                      "cagHits": {
+                        "type": "integer"
+                      },
+                      "graphHits": {
+                        "type": "integer"
+                      },
+                      "latencyMs": {
+                        "type": "integer"
+                      },
+                      "matchedSkills": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "needsMoreEvidence": {
+                        "type": "boolean"
+                      },
+                      "ragHits": {
+                        "type": "integer"
+                      },
+                      "tier": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "sections": {
+                    "properties": {
+                      "direction": {
+                        "type": "object"
+                      },
+                      "graphContext": {
+                        "type": "object"
+                      },
+                      "memory": {
+                        "items": {
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "skills": {
+                        "items": {
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "tokenEstimates": {
+                    "properties": {
+                      "direction": {
+                        "type": "integer"
+                      },
+                      "graph": {
+                        "type": "integer"
+                      },
+                      "memory": {
+                        "type": "integer"
+                      },
+                      "seeds": {
+                        "type": "integer"
+                      },
+                      "skills": {
+                        "type": "integer"
+                      },
+                      "total": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "traceId": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:ee2757154698ec469af8492249fab4cd62f50320bbc3f4d8e718b40e67dc0e25"
+    },
+    {
+      "method": "POST",
+      "path": "/api/diagnostics/capture-status",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "apiReachable": {
+                    "type": "boolean"
+                  },
+                  "daemonPid": {
+                    "type": "integer"
+                  },
+                  "daemonRunning": {
+                    "type": "boolean"
+                  },
+                  "gitHead": {
+                    "type": "string"
+                  },
+                  "hookInstalled": {
+                    "type": "boolean"
+                  },
+                  "lastError": {
+                    "type": "string"
+                  },
+                  "lastErrorAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "lastFlushAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "lastFlushFailed": {
+                    "type": "integer"
+                  },
+                  "lastFlushSucceeded": {
+                    "type": "integer"
+                  },
+                  "localQueueDepth": {
+                    "type": "integer"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "accepted": {
+                    "type": "boolean"
+                  },
+                  "timestamp": {
+                    "format": "date-time",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:9538213cfbfd8c04d5f2d5a55e00130c6386fc666b8295d150e39a168e964b86"
     },
     {
       "method": "GET",
@@ -393,6 +2038,219 @@
         }
       },
       "hash": "sha256:ab4353f2a3ac535ce7500a755268a556bc29030597e7ae77933e8e20fac9966b"
+    },
+    {
+      "method": "POST",
+      "path": "/api/events",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "actor": {
+                    "description": "Who or what produced the event",
+                    "type": "string"
+                  },
+                  "event_type": {
+                    "description": "Event category (e.g. 'commit', 'manual_note', 'file_change')",
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "description": "Stable key so offline-queue flushes and retries are safe",
+                    "type": "string"
+                  },
+                  "occurred_at": {
+                    "description": "When the event happened in the source system (ISO 8601)",
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "payload": {
+                    "description": "Structured event body (redacted for secrets before persistence)",
+                    "type": "object"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "description": "Context Intelligence contract version",
+                    "type": "integer"
+                  },
+                  "source_ref": {
+                    "description": "Pointer into the source system (commit SHA, file path, note ID)",
+                    "type": "string"
+                  },
+                  "source_system": {
+                    "description": "Provenance system (e.g. 'rorca-capture', 'git', 'manual')",
+                    "type": "string"
+                  },
+                  "summary": {
+                    "description": "Short human-readable description",
+                    "type": "string"
+                  },
+                  "workspace_id": {
+                    "description": "Workspace ID (must exist in Rorca)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace_id",
+                  "source_system",
+                  "event_type",
+                  "occurred_at",
+                  "idempotency_key"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextEvent"
+              }
+            }
+          }
+        },
+        "201": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextEvent"
+              }
+            }
+          }
+        },
+        "400": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:75873284be7dc38fb4be4e31bb0046daed356c3b0e11e20538ea6c744b2c81b4"
+    },
+    {
+      "method": "GET",
+      "path": "/api/gitreins/evidence",
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 20,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 0,
+            "maximum": 100000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "runId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "storyId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "maxLength": 256,
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "maxItems": 100,
+                    "type": "array"
+                  },
+                  "limit": {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "total": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "items",
+                  "total",
+                  "limit",
+                  "offset"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {}
+      },
+      "hash": "sha256:85b8020bcc61a740e19e1ab49c9e1620e021eec8f2044c7ed5f2668a2f6109b8"
     },
     {
       "method": "GET",
@@ -630,6 +2488,128 @@
         "503": {}
       },
       "hash": "sha256:7e6377c00dcc39b43b5ee72a3748d8238299b9497e892bc649d5f43ee4e15f6c"
+    },
+    {
+      "method": "GET",
+      "path": "/api/health/detailed",
+      "parameters": [
+        {
+          "name": "refresh",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": false,
+            "type": "boolean"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "active_runs": {
+                    "type": "integer"
+                  },
+                  "databaseCapability": {
+                    "description": "Canonical redacted database capability contract for DB mode, connection metadata, graph mode, and extension availability.",
+                    "type": "object"
+                  },
+                  "db_connected": {
+                    "type": "boolean"
+                  },
+                  "dbMode": {
+                    "enum": [
+                      "native",
+                      "docker",
+                      "byop"
+                    ],
+                    "type": "string"
+                  },
+                  "graphMode": {
+                    "enum": [
+                      "full",
+                      "lite",
+                      "disabled"
+                    ],
+                    "type": "string"
+                  },
+                  "graphWarnings": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "last_backup_at": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "memory_usage": {
+                    "properties": {
+                      "external": {
+                        "type": "integer"
+                      },
+                      "heapTotal": {
+                        "type": "integer"
+                      },
+                      "heapUsed": {
+                        "type": "integer"
+                      },
+                      "rss": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "pending_specs_count": {
+                    "type": "integer"
+                  },
+                  "pgvectorReady": {
+                    "description": "Whether the pgvector extension is installed for the active database mode",
+                    "type": "boolean"
+                  },
+                  "status": {
+                    "enum": [
+                      "healthy",
+                      "degraded"
+                    ],
+                    "type": "string"
+                  },
+                  "uptime": {
+                    "type": "integer"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "503": {}
+      },
+      "hash": "sha256:61ec3715fb302acd12d25880281c7cc988fc4a5600361d080570aae8cffcf049"
+    },
+    {
+      "method": "GET",
+      "path": "/api/health/live",
+      "parameters": [],
+      "responseSchema": {
+        "200": {}
+      },
+      "hash": "sha256:772e7e716666897606c64ab853f56c3b255328398a8cd9691260ff2c1bc246d9"
+    },
+    {
+      "method": "GET",
+      "path": "/api/health/ready",
+      "parameters": [],
+      "responseSchema": {
+        "200": {},
+        "503": {}
+      },
+      "hash": "sha256:dc8d9411e04c8501fbb1d607b826ea500f0e53963d2e4a7e0e63117829896281"
     },
     {
       "method": "GET",
@@ -901,6 +2881,113 @@
         "404": {}
       },
       "hash": "sha256:e4569960c6f8e24d96030581c4327dabcb8568f934383f011f398bd49a98f896"
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/candidates",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confidence": {
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low"
+                    ],
+                    "type": "string"
+                  },
+                  "context": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "relatedFiles": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rule": {
+                    "type": "string"
+                  },
+                  "sourceRef": {
+                    "type": "string"
+                  },
+                  "suggestedCategory": {
+                    "enum": [
+                      "Architecture",
+                      "Convention",
+                      "Bug Fix",
+                      "Decision",
+                      "Pattern",
+                      "Gotcha"
+                    ],
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "trustTier": {
+                    "enum": [
+                      "agent_observation",
+                      "working_note",
+                      "engineering_decision",
+                      "approved_policy",
+                      "verified_fact"
+                    ],
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "suggestedCategory",
+                  "title",
+                  "rule"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "400": {},
+        "404": {}
+      },
+      "hash": "sha256:13e4c8b1cc3fac35fb08b998cd911cc16dcecc43769b44b01442623e60ecb304"
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/candidates/{id}/approve",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {},
+        "409": {}
+      },
+      "hash": "sha256:763e8f3806888cc5c0831128242941e801422b3b70cb4cf77ab93a9c4d5b1950"
     },
     {
       "method": "GET",
@@ -1458,6 +3545,70 @@
       "hash": "sha256:05178c17f8f5f366c095540d5670dbe112e2d4405f37de5e4009ee4e048154b7"
     },
     {
+      "method": "POST",
+      "path": "/api/operator-chat/query",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "input": {
+                    "description": "User/operator question",
+                    "type": "string"
+                  },
+                  "maxTokens": {
+                    "maximum": 2000,
+                    "minimum": 256,
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "enum": [
+                      "general",
+                      "coding",
+                      "research",
+                      "genesis"
+                    ],
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "Optional model override for model synthesis",
+                    "type": "string"
+                  },
+                  "operatorContext": {
+                    "description": "Redacted caller context used for grounding",
+                    "type": "object"
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "useModel": {
+                    "description": "Request model synthesis when safe and configured",
+                    "type": "boolean"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {}
+      },
+      "hash": "sha256:a84a3bbfd814b78c662cb45d2a1bb8a7d123ae4fd8869c2e45158bdeabf1a756"
+    },
+    {
       "method": "GET",
       "path": "/api/pipeline/runs",
       "parameters": [
@@ -1528,7 +3679,8 @@
                     "description": "Normalized run terminal renderer mode. Missing/null historical values resolve to ansi-html.",
                     "enum": [
                       "ansi-html",
-                      "pty"
+                      "pty",
+                      "native-pty"
                     ],
                     "type": "string"
                   },
@@ -1545,7 +3697,7 @@
         },
         "404": {}
       },
-      "hash": "sha256:1d9fd9ce8c77d46480d9d99e428081fadc9728d30081b11cb3d8840cdb1a42fc"
+      "hash": "sha256:30043f8edd511560ee7725204fe083b92c03e29d0f3395c13f6e025e3550dc5e"
     },
     {
       "method": "POST",
@@ -1642,6 +3794,45 @@
       "hash": "sha256:d69339acbddc4e82ede5e2cde4ba9a002cf60e7335f2f4a67485786df96014f3"
     },
     {
+      "method": "POST",
+      "path": "/api/pipeline/runs/{runId}/input",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "dataBase64": {
+                    "description": "Base64-encoded UTF-8 terminal input bytes from xterm.onData.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "dataBase64"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "runId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {}
+      },
+      "hash": "sha256:f8a3f6aa2d5ae57add5776d2dcf8aa1d4d1e26f9f92443083c1cb7a5b5ff2754"
+    },
+    {
       "method": "GET",
       "path": "/api/pipeline/runs/{runId}/log",
       "parameters": [
@@ -1667,6 +3858,76 @@
         "404": {}
       },
       "hash": "sha256:46e8b2c0eace7e3cda5b3bf722724d4997719e6477091a3f280c98fe42142764"
+    },
+    {
+      "method": "GET",
+      "path": "/api/pipeline/runs/{runId}/output",
+      "parameters": [
+        {
+          "name": "runId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "text/event-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:2da61f1f03565ec86f76999cd45aca33a66eb88828fca3abd5c3ca349d842df5"
+    },
+    {
+      "method": "POST",
+      "path": "/api/pipeline/runs/{runId}/pty/resize",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cols": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "rows": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "cols",
+                  "rows"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "runId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {}
+      },
+      "hash": "sha256:0c7d890b1de79d09694defcaab084608cfa1b893efffbde021812ed113bd1993"
     },
     {
       "method": "GET",
@@ -1826,6 +4087,121 @@
     },
     {
       "method": "POST",
+      "path": "/api/pipeline/task-manifests/trigger",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "agentOverride": {
+                    "enum": [
+                      "claude",
+                      "opencode",
+                      "codex",
+                      "pi"
+                    ],
+                    "type": "string"
+                  },
+                  "autoMerge": {
+                    "default": false,
+                    "description": "Must be false; task manifests never auto-merge",
+                    "type": "boolean"
+                  },
+                  "autoWorktree": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "dryRun": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "effortLevel": {
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "max",
+                      "xhigh"
+                    ],
+                    "type": "string"
+                  },
+                  "executionEnvironment": {
+                    "description": "Optional; carried to the broker only when local execution-environment support is installed, otherwise defaults to remote-rorca.",
+                    "type": "string"
+                  },
+                  "executionEnvironmentId": {
+                    "description": "Optional execution-environment identifier when supported.",
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "description": "Hermes-issued idempotency key; must match manifest.idempotencyKey",
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "manifest": {
+                    "description": "Hermes TaskManifest v1 payload",
+                    "type": "object"
+                  },
+                  "mergeStrategy": {
+                    "default": "draft-pr",
+                    "enum": [
+                      "pr",
+                      "draft-pr",
+                      "branch-only"
+                    ],
+                    "type": "string"
+                  },
+                  "modelOverride": {
+                    "type": "string"
+                  },
+                  "terminal_mode": {
+                    "enum": [
+                      "ansi-html",
+                      "pty"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "terminalMode": {
+                    "enum": [
+                      "ansi-html",
+                      "pty"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "description": "Rorca workspace authority anchor",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "manifest",
+                  "idempotencyKey"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "201": {},
+        "202": {},
+        "400": {},
+        "409": {},
+        "422": {}
+      },
+      "hash": "sha256:8c6ce52dc89a84c164046c455b816671bfceb1d548329d675efc3e9bd7d7f528"
+    },
+    {
+      "method": "POST",
       "path": "/api/pipeline/trigger",
       "parameters": [
         {
@@ -1871,6 +4247,15 @@
                     ],
                     "type": "string"
                   },
+                  "executionEnvironment": {
+                    "default": "remote-rorca",
+                    "description": "Where the implementation engine executes. local-user requires a configured local execution bridge and fails closed otherwise.",
+                    "enum": [
+                      "remote-rorca",
+                      "local-user"
+                    ],
+                    "type": "string"
+                  },
                   "forceRerun": {
                     "description": "Force rerun even if an identical idempotent request already exists; does not reset passed story state.",
                     "type": "boolean"
@@ -1913,10 +4298,11 @@
                   },
                   "terminal_mode": {
                     "default": "ansi-html",
-                    "description": "Run-level terminal renderer mode. null/missing resolves to ansi-html for backward compatibility.",
+                    "description": "Run-level terminal renderer mode. native-pty runs the real interactive CLI in xterm with marker-based completion. null/missing resolves to ansi-html for backward compatibility.",
                     "enum": [
                       "ansi-html",
-                      "pty"
+                      "pty",
+                      "native-pty"
                     ],
                     "nullable": true,
                     "type": "string"
@@ -1993,7 +4379,207 @@
         "400": {},
         "404": {}
       },
-      "hash": "sha256:6a1d07a2c549282eafd4840997bbfa68d8ed41815cf0e13d654d89d2f02361b9"
+      "hash": "sha256:bd48a5ff3dcd07743ba1b2aec432d807e3fc4fd4a361b71eab434f230d642a24"
+    },
+    {
+      "method": "GET",
+      "path": "/api/pipeline/worker/health",
+      "parameters": [],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "activeChildProcesses": {
+                    "description": "Number of active execution-engine child processes (from latest heartbeat)",
+                    "type": "integer"
+                  },
+                  "activeJobs": {
+                    "items": {
+                      "properties": {
+                        "elapsedMs": {
+                          "type": "integer"
+                        },
+                        "runId": {
+                          "type": "integer"
+                        },
+                        "specId": {
+                          "type": "string"
+                        },
+                        "startedAt": {
+                          "format": "date-time",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "dlqDepth": {
+                    "type": "integer"
+                  },
+                  "lastReconciliationErrors": {
+                    "description": "Number of state mismatches fixed in last reconcile cycle (last 90s)",
+                    "type": "integer"
+                  },
+                  "pgBossVersion": {
+                    "type": "string"
+                  },
+                  "queueDepth": {
+                    "type": "integer"
+                  },
+                  "queueHealth": {
+                    "description": "Health classification based on queue stats",
+                    "enum": [
+                      "healthy",
+                      "degraded",
+                      "critical"
+                    ],
+                    "type": "string"
+                  },
+                  "queueMaxConcurrent": {
+                    "description": "Max concurrent queued (non-worktree) pipeline:run jobs",
+                    "type": "integer"
+                  },
+                  "queueStats": {
+                    "properties": {
+                      "active": {
+                        "description": "Number of jobs currently being processed",
+                        "type": "integer"
+                      },
+                      "archiveSize": {
+                        "description": "Total number of archived jobs",
+                        "type": "integer"
+                      },
+                      "completed24h": {
+                        "description": "Number of jobs completed in the last 24 hours",
+                        "type": "integer"
+                      },
+                      "failed": {
+                        "description": "Number of jobs in failed state (not yet archived)",
+                        "type": "integer"
+                      },
+                      "failedInLast24h": {
+                        "description": "Number of jobs failed in the last 24 hours",
+                        "type": "integer"
+                      },
+                      "failedInLast7d": {
+                        "description": "Number of jobs failed in the last 7 days",
+                        "type": "integer"
+                      },
+                      "oldestPendingAgeSeconds": {
+                        "description": "Age in seconds of the oldest pending job (null if no pending jobs)",
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "pending": {
+                        "description": "Number of jobs waiting to be picked up",
+                        "type": "integer"
+                      },
+                      "pickupLatency": {
+                        "description": "Job pickup latency metrics over a 24-hour rolling window (pipeline:run + pipeline:retry only)",
+                        "nullable": true,
+                        "properties": {
+                          "avgSeconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "maxSeconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "p50Seconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "p95Seconds": {
+                            "nullable": true,
+                            "type": "number"
+                          },
+                          "sampleCount": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "enum": [
+                              "healthy",
+                              "degraded",
+                              "critical"
+                            ],
+                            "type": "string"
+                          },
+                          "windowHours": {
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "queues": {
+                        "items": {
+                          "properties": {
+                            "active": {
+                              "type": "integer"
+                            },
+                            "failed": {
+                              "type": "integer"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "pending": {
+                              "type": "integer"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "runNowMaxConcurrent": {
+                    "description": "Max concurrent immediate worktree-isolated runs",
+                    "type": "integer"
+                  },
+                  "scheduledJobs": {
+                    "items": {
+                      "properties": {
+                        "cronExpr": {
+                          "type": "string"
+                        },
+                        "nextFireAt": {
+                          "format": "date-time",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "scheduleId": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "workerActive": {
+                    "type": "boolean"
+                  },
+                  "workerPid": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "workerStartedAt": {
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:f295ae7b4c1388e4533b9b6cddd516951b92cf987e36b62c8c2c2e510a19607c"
     },
     {
       "method": "GET",
@@ -2073,6 +4659,181 @@
         "404": {}
       },
       "hash": "sha256:9c5672c3fdf5e0ded65c40f03760271c48722f77158c6b46a87c99621e8d5a9a"
+    },
+    {
+      "method": "GET",
+      "path": "/api/retrieval-traces",
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 20,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "total": {
+                    "type": "integer"
+                  },
+                  "traces": {
+                    "items": {
+                      "$ref": "#/components/schemas/RetrievalTrace"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {}
+      },
+      "hash": "sha256:999514247daea42c051fc08f42229d29b8dc35bcc7236e9dcaff7ecea3aab027"
+    },
+    {
+      "method": "POST",
+      "path": "/api/retrieval-traces",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "briefHash": {
+                    "type": "string"
+                  },
+                  "candidates": {
+                    "items": {
+                      "$ref": "#/components/schemas/RetrievalCandidate"
+                    },
+                    "type": "array"
+                  },
+                  "degraded": {
+                    "type": "boolean"
+                  },
+                  "gitSha": {
+                    "type": "string"
+                  },
+                  "graphMode": {
+                    "enum": [
+                      "full",
+                      "lite",
+                      "disabled"
+                    ],
+                    "type": "string"
+                  },
+                  "policy": {
+                    "type": "string"
+                  },
+                  "specLogId": {
+                    "type": "integer"
+                  },
+                  "tokenEstimate": {
+                    "type": "integer"
+                  },
+                  "traceId": {
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "traceId",
+                  "workspaceId",
+                  "briefHash",
+                  "candidates"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "201": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "candidateCount": {
+                    "type": "integer"
+                  },
+                  "redacted": {
+                    "description": "Always true — traces are redacted before storage",
+                    "type": "boolean"
+                  },
+                  "traceId": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {}
+      },
+      "hash": "sha256:04dd8e240a5f5c769ad45f5d1b0b59f7999aa4df67b5ba95898c2a4c2e1a8611"
+    },
+    {
+      "method": "GET",
+      "path": "/api/retrieval-traces/{traceId}",
+      "parameters": [
+        {
+          "name": "traceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetrievalTrace"
+              }
+            }
+          }
+        },
+        "404": {}
+      },
+      "hash": "sha256:d2715d49a75e5d6e1fd5bc7d0d861ecc354b7d46588240b6c471533b2fb40d81"
     },
     {
       "method": "GET",
@@ -4234,6 +6995,46 @@
     },
     {
       "method": "POST",
+      "path": "/api/specs/context-preview",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "brief": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "templateId": {
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "brief"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {}
+      },
+      "hash": "sha256:669e0c076cddc7e05d9677829e9d422b0d79ba70c13a77c2752182d83b824685"
+    },
+    {
+      "method": "POST",
       "path": "/api/specs/forge",
       "parameters": [
         {
@@ -5459,6 +8260,359 @@
         }
       },
       "hash": "sha256:580155644cbfddc9b3efa50861d1c011a29c2930c73dabbf45fdb8265de30f95"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workspaces",
+      "parameters": [
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": 50,
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cursor": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "hasMore": {
+                    "example": false,
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "items": {
+                      "$ref": "#/components/schemas/Workspace"
+                    },
+                    "type": "array"
+                  },
+                  "total": {
+                    "example": 3,
+                    "type": "integer"
+                  },
+                  "workspaces": {
+                    "items": {
+                      "$ref": "#/components/schemas/Workspace"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "500": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        }
+      },
+      "hash": "sha256:17b8dea2ff89bb1d8c7acb63659fe62b73747dbc118c3047bf30ce80e029ef69"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workspaces/{workspaceId}/capture/last-rorca-run",
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {},
+        "404": {},
+        "422": {}
+      },
+      "hash": "sha256:5a8bd7d5e1ea819b1c6ff9ed656465427dead6c6a5d2e98a5505d61c201b7b41"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workspaces/{workspaceId}/hydration",
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "actionHint": {
+                    "enum": [
+                      "hydrate",
+                      "rehydrate",
+                      "wait",
+                      "configure_hilo",
+                      "none"
+                    ],
+                    "type": "string"
+                  },
+                  "actionMessage": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "counts": {
+                    "type": "object"
+                  },
+                  "currentStatus": {
+                    "enum": [
+                      "pending",
+                      "running",
+                      "succeeded",
+                      "failed",
+                      "stale",
+                      "cancelled"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "errors": {
+                    "properties": {
+                      "hasErrors": {
+                        "type": "boolean"
+                      },
+                      "latestError": {
+                        "nullable": true,
+                        "type": "object"
+                      },
+                      "latestErrorStatus": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "freshness": {
+                    "enum": [
+                      "clean",
+                      "stale",
+                      "dirty",
+                      "unknown",
+                      "missing"
+                    ],
+                    "type": "string"
+                  },
+                  "freshnessDetails": {
+                    "properties": {
+                      "currentHead": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "dirtyTree": {
+                        "type": "boolean"
+                      },
+                      "gitRepo": {
+                        "type": "boolean"
+                      },
+                      "hasHydration": {
+                        "type": "boolean"
+                      },
+                      "headMatches": {
+                        "type": "boolean"
+                      },
+                      "humanSummary": {
+                        "type": "string"
+                      },
+                      "hydratedSha": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "latest": {
+                    "nullable": true,
+                    "properties": {
+                      "counts": {
+                        "type": "object"
+                      },
+                      "createdAt": {
+                        "format": "date-time",
+                        "type": "string"
+                      },
+                      "durationMs": {
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "errorJson": {
+                        "nullable": true,
+                        "type": "object"
+                      },
+                      "finishedAt": {
+                        "format": "date-time",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "gitSha": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "graphPath": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "id": {
+                        "type": "integer"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "staleReason": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "startedAt": {
+                        "format": "date-time",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "status": {
+                        "enum": [
+                          "pending",
+                          "running",
+                          "succeeded",
+                          "failed",
+                          "stale",
+                          "cancelled"
+                        ],
+                        "type": "string"
+                      },
+                      "updatedAt": {
+                        "format": "date-time",
+                        "type": "string"
+                      },
+                      "workspaceId": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "provider": {
+                    "enum": [
+                      "hilo"
+                    ],
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "404": {}
+      },
+      "hash": "sha256:025169be7f2ec0379ff62f09b96e2f682a8b2e4f9efdddc10c298a90709357ed"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workspaces/{workspaceId}/hydration",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "types": {
+                    "default": [
+                      "hilo"
+                    ],
+                    "items": {
+                      "enum": [
+                        "hilo"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "202": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "hydrationId": {
+                    "type": "integer"
+                  },
+                  "idempotent": {
+                    "type": "boolean"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "pending",
+                      "running"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "404": {},
+        "409": {},
+        "422": {},
+        "429": {}
+      },
+      "hash": "sha256:d1c47bbb1246fe417b72ee908c9f266f2c40360bc7808dc4ff8cce8391bd994d"
     }
   ]
 }

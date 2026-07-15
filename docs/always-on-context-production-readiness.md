@@ -45,22 +45,117 @@ command text, raw provider errors, tokens, or redacted secret values.
 | Audit/redaction | Unexpected zero audit events during known activity | Redaction/regulated counts spike unexpectedly or raw-content policy changes | Pause capture, inspect aggregate audit plus local policy, correct source/policy |
 | Managed services | Loaded but stopped during an intentional handoff | Backend/worker/capture not running outside a documented maintenance gate | `scripts/verify-always-on-login-readiness.mjs` and monitor both pass |
 
-Suggested cron (every five minutes):
+### Managed schedule (supported local production scope)
 
-```cron
-*/5 * * * * cd /path/to/workspace && /absolute/path/to/node scripts/monitor-always-on-context.mjs --workspace-id <id> --root "$PWD" --json >> .rorca/services/always-on-monitor.ndjson 2>&1
+macOS launchd is the supported scheduler. Review the deterministic artifact in
+a disposable directory first; `render` never loads or signals a job:
+
+```bash
+review_dir="$(mktemp -d)"
+node scripts/manage-always-on-monitor.mjs render \
+  --workspace-id <id> --root "$PWD" --plist-dir "$review_dir"
+plutil -lint "$review_dir"/*.plist
 ```
 
-Keep the file workspace-local, rotate it, and do not ship it externally without
-an explicit telemetry decision. For macOS login/reboot validation, also follow
+Operator installation and reversal are explicit:
+
+```bash
+node scripts/manage-always-on-monitor.mjs install --workspace-id <id> --root "$PWD"
+node scripts/manage-always-on-monitor.mjs status --workspace-id <id> --root "$PWD"
+node scripts/manage-always-on-monitor.mjs uninstall --workspace-id <id> --root "$PWD"
+```
+
+Installation is idempotent: it atomically replaces and reloads only
+`com.rorca.monitor.<checkout>.<workspace>`. Uninstall refuses an unowned plist,
+unloads only that exact label, and retains status, alert, and historical log
+files as operator evidence. The schedule runs at login and every 300 seconds.
+It does not restart or signal backend, worker, capture, or execution processes.
+The API URL is restricted to loopback HTTP.
+
+Each run atomically writes mode-0600
+`.rorca/services/always-on-monitor-status.json`, appends one count/status-only
+record to `always-on-monitor.ndjson`, and runs managed log retention. A missing,
+invalid, timed-out, or unreachable dependency is degraded/unknown rather than
+implicitly healthy. There is no managed `--allow-degraded` override.
+
+### Alert sink contract
+
+The built-in sink is `local-file` only. It writes mode-0600 transition/reminder
+events to `.rorca/services/always-on-alerts.ndjson`; `none` is available for an
+operator's diagnostic invocation. External email/chat/webhook delivery is not
+implemented and must be a separate reviewed adapter consuming this v1 record:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "rorca.always_on.health",
+  "observedAt": "ISO-8601",
+  "state": "healthy|degraded",
+  "previousState": "healthy|degraded|unknown",
+  "severity": "critical|recovery",
+  "reasonCodes": ["classified_code_only"],
+  "counts": {
+    "localQueueDepth": 0,
+    "captureQueueDepth": 0,
+    "captureFailed": 0,
+    "distillationQueueDepth": 0,
+    "distillationFailed": 0,
+    "activeDistillationErrors": 0,
+    "logRotationBlocked": 0
+  }
+}
+```
+
+No monitor output or alert may contain captured payloads, prompts, command text,
+file content, secrets/tokens, connection strings, raw provider/database errors,
+URLs, paths, process arguments, or arbitrary upstream reason strings. Unknown
+upstream data is collapsed to a classified reason code. Do not ship local files
+externally without an explicit telemetry/security decision.
+
+For macOS login/reboot validation, also follow
 [Always-On Login Readiness](./always-on-login-readiness.md). For backend/worker
 ownership and graceful takeover, follow
 [Local managed backend and worker](./local-managed-services.md).
 
+## Explicit local-production SLOs
+
+| Surface | Objective | Alert / fail-closed rule |
+| --- | --- | --- |
+| Process liveness | `GET /api/health/live` returns 200 without dependency, filesystem, or executable probes | Any failed local supervisor probe is critical. |
+| Readiness and restart gate | `GET /api/health` and `/api/health/ready` make a decision within the coded 750 ms deadline and confirm `db_connected` plus an integer `active_runs` | Timeout/error returns 503, `readiness.confirmed=false`, and `active_runs=null`; unknown is never treated as zero. |
+| Monitor schedule | One status observation every 300 s; status age no more than 600 s (one missed interval) | Missing/stale/invalid local status is critical and fail-closed. |
+| Capture/queue | Local and pg-boss queue depths return to zero within two scan intervals; failed count remains zero; oldest pending remains below 300 s | Any failed job is critical. Non-zero depth after two intervals is warning; oldest pending >=300 s or local depth >= `queueWarnSize` is critical. |
+| Freshness | `last_seen` within three configured scans (minimum 180 s); worker heartbeat within 90 s; `lastFlush` advances within the same threshold whenever local queue depth is non-zero | Stale service plus manager not running is critical; stale flush with pending work is critical. |
+| Distillation/audit privacy | Active distillation errors remain zero; accepted historical errors are advisory; emitted records remain count/status-only | Any active error is critical. Any forbidden field/value in monitor/alert output is a privacy incident: pause capture and preserve classified evidence. |
+| Logs | At each 300 s maintenance boundary each managed active log is <=10 MiB plus writes since the boundary; <=7 archives per log; archives <=14 days | Rotation journal/block/symlink refusal is critical. Capacity planning assumes at most 80 MiB per stream (active burst plus seven 10 MiB archives). |
+
+SLOs apply to the supported single-user local production scope; they do not
+claim internet-scale availability. Alert reminders are at most once per 15
+minutes while degraded, plus state transitions and recovery.
+
+## Bounded log rotation and retention
+
+The managed monitor applies retention only to the known backend, worker,
+capture, and monitor stdout/stderr paths. It snapshots one oldest chunk of at
+most 10 MiB, fsyncs and atomically publishes the archive, then compacts the same
+inode so launchd-held descriptors remain valid. A first pass repeats bounded
+chunks until a historical active file is within the limit. Writes observed after the snapshot are
+preserved as the new active tail. A mode-0600 per-log journal records
+`copying`/`archived`; after a crash, an incomplete copy is discarded without
+truncation, while a published archive is completed before another rotation.
+Symlinks/non-regular files and invalid journals fail closed and are never
+truncated. Retention pruning runs even when the active file is below threshold.
+
+Do not manually rename/delete managed live logs. Review status and stop the
+read-only monitor schedule before forensic copying. The Wave 1 validation used
+only disposable temporary logs; it did not rotate current live files.
+
 ## Failure triage
 
-1. **Protect active work.** Confirm `/api/health` reports `active_runs: 0`
-   before any backend/worker restart. Never force-kill an execution engine.
+1. **Protect active work.** Confirm `/api/health` returns
+   `readiness.confirmed: true` and integer `active_runs: 0` before any
+   backend/worker restart. `null`, missing, timeout, 503, or malformed data is a
+   hard refusal. Never force-kill an execution engine.
 2. **Capture daemon:** inspect `rorca-capture service status`,
    `.rorca/capture/service.log`, and the already-redacted offline queue. Restart
    only through `rorca-capture service restart`.
@@ -69,8 +164,16 @@ ownership and graceful takeover, follow
 4. **Distillation errors:** preserve the immutable `context_events` row. Fix the
    processor/schema first. Replay only through a reviewed canonical queue path;
    do not set `distillation_status` to success by hand.
-5. **Privacy anomaly:** pause capture first, preserve count-only evidence, then
-   inspect policy/source configuration. Never paste queue payloads into tickets.
+5. **Log retention:** if `log_retention_blocked`, stop automatic remediation,
+   inspect only file type/mode/size and the classified rotation journal stage,
+   then preserve archives. Never delete the active file or bypass a symlink/
+   invalid-journal refusal.
+6. **Monitor schedule:** inspect `manage-always-on-monitor.mjs status`, local
+   status age, and classified reason codes. Render/review before reinstalling;
+   uninstall does not erase evidence.
+7. **Privacy anomaly:** pause capture first, preserve count-only evidence, then
+   inspect policy/source configuration locally. Never paste queue payloads,
+   command text, raw errors, paths, or secrets into tickets/alerts.
 
 ## Optional adapter validation and behavior
 
@@ -86,71 +189,29 @@ installed. Report both artifact status and host status. Never install an editor
 extension or invoke a real provider session in unattended production validation
 without operator approval.
 
-## Brownfield candidate compatibility
+## Mainline/brownfield candidate compatibility
 
-Canonical Rorca installations may already have the richer
-`memory_candidates` ledger before UCC migrations run. Migration
-`20260714143000_context_capture_candidate_compatibility.sql` adds only missing
-compatibility columns and does not alter existing rows. UCC distillation/import
-writes now populate the canonical required `title` and `rule` fields and keep
-UCC `status` plus canonical `review_status` aligned for new review actions.
-External-import dedupe keys exclude the import timestamp, so identical exports
-remain idempotent across runs while changed content can stage a new candidate.
+Migration `20260715130000_always_on_context_mainline_reconciliation.sql` extends
+the canonical CCS `context_events` and `memory_candidates` ledgers additively.
+It does **not** add a second `status`, `category`, `content`, or candidate
+`payload` model. Distillation/import writes populate canonical
+`suggested_category`, `title`, `rule`, `context`, and `review_status` fields;
+approval continues through the existing candidate promotion path.
 
-If monitoring reports historical schema errors, preserve them as evidence. Once
-the migration and processor fix are loaded, validate a new harmless event first.
-Historical error rows must be replayed only through an explicit reviewed repair;
-they must not be mass-updated or silently marked successful.
+The migration adds only operational envelope, distillation, provenance,
+dedupe/import, policy, and count-only audit fields/tables. It never touches
+`pgboss.*`; the worker creates `context:capture` and `context:distill` through
+`boss.createQueue()` before send/work registration. It leaves historic events,
+candidates, and distillation errors unchanged.
 
-The monitor has one narrow, code-reviewed accepted baseline for the original
-brownfield mismatch. An error is `accepted_historical` only when all of these
-conditions hold:
+External-import dedupe excludes import time: repeated identical exports remain
+idempotent, while changed content under the same vendor/original id may stage a
+new pending candidate. Pending/imported/distilled candidates are not durable
+memory and do not enter default retrieval until canonical approval/promotion.
 
-1. the stored error exactly identifies the missing `payload` column on
-   `memory_candidates`;
-2. its attempt timestamp is no later than the recorded application time of
-   migration `20260714143000`;
-3. that migration is present in `public.schema_migrations`; and
-4. `rorca.memory_candidates.payload` currently exists.
-
-The API keeps those rows in `errors`, reports them separately in
-`acceptedHistoricalErrors`, marks each recent item with its disposition, and
-emits advisory `distillation_historical_errors_accepted`. It does **not** delete,
-rewrite, replay, or mark the rows successful. Any different error, any same
-error after migration, a missing migration record, or a missing repaired column
-remains active and degrades both the endpoint and operator script. This is a
-fixed compatibility disposition, not a count-based blanket waiver.
-
-## UCC-012 stale tracking disposition
-
-Authoritative implementation evidence exists in:
-
-- commit `981a28b58` (`feat(UCC-012): Compatibility lab, E2E validation, and rollout documentation`);
-- `.rorca/memory/runs/20260316000484.json` in the feature worktree, where
-  `UCC-012` is `passed` with start/finish timestamps;
-- `.rorca/progress/run-20260316000484/UCC-012.md`, whose acceptance criteria and
-  focused validation are complete.
-
-The current PostgreSQL database has no run `20260316000484`, no `UCC-012`
-`story_results` row, and no current Always-On approved spec file. Therefore
-there is no canonical record to repair and no safe reason to synthesize one.
-A direct `passes:false -> true` file edit or ad-hoc SQL insert would falsify
-provenance and is forbidden.
-
-If a stale presentation/spec artifact reappears, use this non-destructive path:
-
-1. Copy the artifact plus the two authoritative evidence files to a dated
-   `.rorca/tracking-backups/UCC-012-<timestamp>/` directory and record SHA-256
-   hashes.
-2. Resolve the owning workspace/spec through the API and confirm whether a
-   canonical run/story row exists. Do not infer ownership from the title alone.
-3. If a canonical completed run exists, rebuild the presentation from that run
-   through the supported spec/run read path. Do not edit the result flag.
-4. If the approved spec exists but no run exists, an operator may trigger only
-   `UCC-012` through the normal pipeline and let the engine create the result;
-   do not do this merely to clean UI state without approval/cost review.
-5. If neither exists, move the orphaned artifact (never delete it) into the
-   dated tracking backup and document it as non-authoritative. Keep commit/run
-   memory evidence intact.
-
-This disposition addresses stale tracking without rewriting historical truth.
+Monitoring retains one narrow advisory classification for the pre-reconciliation
+missing-`payload` error produced by the divergent UCC branch. It is advisory
+only when the exact error predates recorded migration `20260714150000` and the
+reconciled `memory_candidates.dedupe_key` column exists. Every different or
+post-migration error remains active. Never mass-update, delete, or mark historic
+errors successful; replay only through a separately reviewed repair path.

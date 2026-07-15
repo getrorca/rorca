@@ -24,7 +24,6 @@ import {
 import type { WalEvent } from '../hooks/usePipelineSSE';
 import AgentBadge from './AgentBadge';
 import { normalizeAgentType } from '../lib/agent-display';
-import { formatRunCostTelemetry, formatRunTokenTelemetry, normalizeRunTokenTelemetry, type RunTokenTelemetry } from '../lib/run-metadata';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -50,10 +49,8 @@ interface RunMetadataPanelProps {
     finished_at: string | null;
     agentType?: string | null;
     agentModel?: string | null;
-    agent_type?: string | null;
-    agent_model?: string | null;
   };
-  tokenSummary: RunTokenTelemetry;
+  tokenSummary: { inputTokens: number | null; outputTokens: number | null };
   specModel: string | null;
   totalStories: number;
   walEvents: WalEvent[];
@@ -64,7 +61,8 @@ interface RunMetadataPanelProps {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function formatTokens(n: number): string {
+function formatTokens(value: number | null): string {
+  const n = value ?? 0;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
@@ -156,9 +154,6 @@ export default function RunMetadataPanel({
 }: RunMetadataPanelProps) {
   const [now, setNow] = useState(Date.now());
 
-  const telemetry = normalizeRunTokenTelemetry(tokenSummary);
-  const agentType = normalizeAgentType(run.agentType ?? run.agent_type);
-
   // Tick every second for live elapsed / ETA
   const isActive = run.status === 'running' || run.status === 'paused' || run.status === 'blocked';
   useEffect(() => {
@@ -229,7 +224,7 @@ export default function RunMetadataPanel({
       {/* Tokens */}
       <MetaRow icon={Cpu} label="Tokens">
         <span className="font-mono">
-          {formatRunTokenTelemetry(telemetry, agentType)}
+          {formatTokens(tokenSummary.inputTokens)} in / {formatTokens(tokenSummary.outputTokens)} out
         </span>
       </MetaRow>
 
@@ -279,9 +274,9 @@ export default function RunMetadataPanel({
       {/* Engine (agent type) */}
       <MetaRow icon={Zap} label="Engine">
         <div className="flex items-center gap-1.5">
-          <AgentBadge agentType={run.agentType ?? run.agent_type} agentModel={run.agentModel ?? run.agent_model} showModelName={false} />
-          {(run.agentModel ?? run.agent_model) && (
-            <span className="text-[10px] text-muted font-mono">{run.agentModel ?? run.agent_model}</span>
+          <AgentBadge agentType={run.agentType} agentModel={run.agentModel} showModelName={false} />
+          {run.agentModel && (
+            <span className="text-[10px] text-muted font-mono">{run.agentModel}</span>
           )}
         </div>
       </MetaRow>
@@ -323,7 +318,17 @@ export default function RunMetadataPanel({
 
       {/* Cost */}
       <MetaRow icon={DollarSign} label="Cost">
-        <span className="text-[10px] text-muted">{formatRunCostTelemetry(telemetry, agentType)}</span>
+        {(() => {
+          const agent = normalizeAgentType(run.agentType);
+          const label = agent === 'claude'
+            ? '$0.00 (your Claude sub)'
+            : agent === 'codex'
+              ? 'ChatGPT subscription'
+              : agent === 'pi'
+                ? 'Pi-managed billing'
+                : 'API key billing';
+          return <span className="text-[10px] text-muted">{label}</span>;
+        })()}
       </MetaRow>
     </div>
   );

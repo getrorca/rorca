@@ -9,8 +9,11 @@
 // OC-024: Detect whether the Codex CLI binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
+import { promisify } from 'util';
 import { logger } from './logger';
+
+const execFileAsync = promisify(execFile);
 
 export interface CodexStatus {
   codexInstalled: boolean;
@@ -62,6 +65,26 @@ export function detectCodex(): CodexStatus {
     };
   } catch {
     // Binary exists but --version failed — installed but possibly broken
+    return { codexInstalled: true, codexVersion: null, codexBinPath: binPath };
+  }
+}
+
+/** Non-blocking detector for request/diagnostic paths. */
+export async function detectCodexAsync(timeoutMs = 1_000): Promise<CodexStatus> {
+  let binPath = process.env.CODEX_BIN?.trim() || null;
+  if (!binPath) {
+    try {
+      const result = await execFileAsync('which', ['codex'], { encoding: 'utf8', timeout: timeoutMs });
+      binPath = result.stdout.trim() || null;
+    } catch {
+      return { codexInstalled: false, codexVersion: null, codexBinPath: null };
+    }
+  }
+  if (!binPath) return { codexInstalled: false, codexVersion: null, codexBinPath: null };
+  try {
+    const result = await execFileAsync(binPath, ['--version'], { encoding: 'utf8', timeout: timeoutMs });
+    return { codexInstalled: true, codexVersion: parseVersion(result.stdout), codexBinPath: binPath };
+  } catch {
     return { codexInstalled: true, codexVersion: null, codexBinPath: binPath };
   }
 }

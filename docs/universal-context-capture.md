@@ -7,7 +7,7 @@ See LICENSE file in the project root for full license text.
 
 # Always-On Universal Context Capture Strategy
 
-Story: UCC-001 — Universal capture strategy, ecosystem benchmark, and compatibility contract.
+This is the mainline contract after reconciling the production-ready UCC review with the CCS sidecar already on `main`. `packages/rorca-capture` is the single standalone sidecar implementation; `rorca capture` remains a thin alias. UCC policy, multi-source envelopes, queue/distillation, monitoring, adapters, and operator controls extend—not replace—the stable CCS APIs and candidate governance model.
 
 This document defines the product and engineering contract for Rorca's always-on
 universal context capture. The goal is to preserve useful engineering context
@@ -343,12 +343,12 @@ provenance hash from the sanitized source metadata/content hash; duplicate
 
 The admin endpoint `POST /api/context-capture/imports/{workspaceId}` exposes the
 same contract for local operators. It defaults to `dryRun: true`; setting
-`dryRun: false` stages rows as `memory_candidates` only, with
-`default_retrieval_eligible=false` and `status='pending'`. Imports never write to
-`memories`, the graph, or retrieval-visible context. Candidate approval remains
-through the existing context-distillation governance endpoints.
+`dryRun: false` stages rows as canonical `memory_candidates` only, with
+`default_retrieval_eligible=false` and `review_status='pending'`. Imports never
+write to `memories`, the graph, or retrieval-visible context. Candidate approval
+remains on the existing `/api/context-candidates` governance routes.
 
-## UCC-012 compatibility lab, rollout, and validation runbook
+## Mainline compatibility lab, rollout, and validation runbook
 
 The compatibility lab is intentionally split into automated local checks plus manual smoke scripts for surfaces that are not available in headless CI. The automated entry point is:
 
@@ -357,7 +357,7 @@ The compatibility lab is intentionally split into automated local checks plus ma
 npm run test:capture
 ```
 
-That script runs the Pi extension capture E2E harness and focused backend Jest coverage. The E2E harness creates a fresh git workspace, runs `rorca capture setup --always-on --policy repo-and-command`, starts the managed daemon in one-shot mode, captures a git commit, injects shell/agent and VS Code extension-style events, distills memory candidates, approves one candidate into durable memory, renders `MEMORY.md`, verifies pending/rejected candidates stay out of default retrieval, and runs uninstall cleanup with `--all`. It does not spawn a long-running `tsx src/server.ts`, `tsx src/worker.ts`, pg-boss worker, daemon, or extension host; teardown asserts capture queue and `service.pid` state are removed.
+That script runs the standalone `packages/rorca-capture` Vitest suite, including dry-run setup, canonical queue/daemon behavior, policy redaction, service rendering, and API-only CLI flows. The VS Code-compatible adapter has its own Vitest config. Backend distillation/route coverage must use a deliberately isolated test database or a no-global-setup unit harness; the repository Jest global setup may recreate its configured `_test` database even when runtime migration flags are set.
 
 ### Copy-paste local setup
 
@@ -396,7 +396,7 @@ rorca-capture service uninstall --workspace-id <workspace-id>
 rorca-capture teardown --all
 ```
 
-Uninstall is a privacy control. `teardown --all` may delete pending redacted offline queue entries; inspect `.rorca/capture/queue/offline.ndjson` first if you need to replay them.
+Uninstall is a privacy control. `teardown --all` may delete pending redacted offline queue entries; inspect the canonical `.rorca-capture-queue.jsonl` first if you need to replay them.
 
 ### Adapter installation smoke matrix
 
@@ -432,8 +432,9 @@ Before release, run or record why each item is unavailable:
 ```bash
 npm run typecheck
 npm run test:capture
-cd backend && JEST_SKIP_RUNTIME_MIGRATIONS=true npx jest src/lib/__tests__/context-distillation.test.ts src/routes/__tests__/context-capture-validation.test.ts --runInBand
-npx vitest run --config packages/rorca-pi-extension/vitest.config.ts
+# Backend: use a no-global-setup unit harness, or explicitly provision an isolated disposable _test database.
+npx vitest run --config packages/rorca-capture/vitest.config.ts
+npx vitest run --config packages/rorca-pi-extension/vscode-extension/vitest.config.ts
 npm run lint:tier
 npm run lint:swagger
 npm run check:contract
@@ -442,10 +443,10 @@ npm run build
 
 Caveats:
 
-- Do not run broad backend Jest or `npm test` against a live database. Use focused Jest with `JEST_SKIP_RUNTIME_MIGRATIONS=true` or an isolated `_test` database.
+- Do not run backend Jest or `npm test` against a live database. `JEST_SKIP_RUNTIME_MIGRATIONS=true` does not bypass this repository's global test-database recreation; use a no-global-setup unit harness or an explicitly disposable isolated `_test` database.
 - Backend `tsc` excludes `__tests__`; for compile-only test validation, run focused Jest or an explicit test-file TypeScript command before declaring test code green.
 - `npm run lint:swagger` and `npm run lint:tier` currently fail in some `tsx` ESM contexts because `__dirname` resolves to an empty spec. If that occurs, run the compiled/node equivalent or document the blocked attempt; do not hide the failure inside the E2E suite.
-- Public contract checks are required only when endpoint contracts change. This story adds tests/docs and a pure memory projection helper; no public endpoint contract changes are expected.
+- Public contract checks remain required to prove the existing CCS public surface did not drift. The new `/api/context-capture` operations are operator `admin`/`auth` routes and intentionally are not marked `x-rorca-public-api`.
 - After any E2E/manual validation, confirm no long-running processes remain: `pgrep -fl 'tsx src/(server|worker)\.ts|rorca-capture|extensionHost'` and stop leftovers before handing off.
 
 ### Troubleshooting

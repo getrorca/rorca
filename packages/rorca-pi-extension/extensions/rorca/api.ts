@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
@@ -19,9 +19,21 @@ import type {
   TriggerPipelineResponse,
   Workspace,
   WorkspaceContextRoutingResponse,
-  CaptureBootstrapVerifyRequest,
-  CaptureBootstrapVerifyResponse,
 } from "./types.js";
+
+export type MemoryCandidateInput = {
+  workspace_id: string;
+  source_system: string;
+  category: string;
+  title: string;
+  rule: string;
+  context?: string;
+  related_files: string[];
+  confidence: 'high' | 'medium' | 'low';
+  trust_tier: 'authoritative' | 'trusted' | 'community' | 'unverified';
+  source_ref?: string;
+  idempotency_key: string;
+};
 
 export class RorcaApiClient {
   readonly baseUrl: string;
@@ -32,7 +44,7 @@ export class RorcaApiClient {
     options: { headers?: Record<string, string> } = {},
   ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.defaultHeaders = options.headers ?? {};
+    this.defaultHeaders = { ...(options.headers ?? {}) };
   }
 
   async getHealth(): Promise<HealthResponse> {
@@ -198,8 +210,40 @@ export class RorcaApiClient {
     }, 60_000);
   }
 
-  async verifyCaptureBootstrap(input: CaptureBootstrapVerifyRequest): Promise<CaptureBootstrapVerifyResponse> {
-    return this.fetchJson<CaptureBootstrapVerifyResponse>("/api/context-capture/bootstrap/verify", {
+  /**
+   * Submit a memory candidate to the review queue (pending status).
+   * Uses the candidates ingestion API with idempotency.
+   */
+  async submitCandidate(input: MemoryCandidateInput): Promise<{ id: string; created: boolean }> {
+    const response = await this.fetchJson<{
+      id: string;
+      created_at: string;
+      updated_at: string;
+    }>("/api/candidates", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    const created = Math.abs(
+      new Date(response.updated_at).getTime() - new Date(response.created_at).getTime(),
+    ) < 1000;
+    return { id: response.id, created };
+  }
+
+  /**
+   * Save a memory entry directly (approved/permanent).
+   * Uses the memory API (skip review gate).
+   */
+  async saveMemory(input: {
+    workspaceId: string;
+    category: string;
+    title: string;
+    rule: string;
+    context?: string;
+    source?: string;
+    sourceType?: string;
+    relatedFiles?: string[];
+  }): Promise<{ total: number }> {
+    return this.fetchJson<{ total: number }>("/api/memory", {
       method: "POST",
       body: JSON.stringify(input),
     });
@@ -212,26 +256,14 @@ export class RorcaApiClient {
     });
   }
 
-  async getCaptureStatus(workspaceId: string): Promise<unknown> {
-    return this.fetchJson(`/api/context-capture/${encodeURIComponent(workspaceId)}/status`);
-  }
-
-  async setCapturePaused(workspaceId: string, paused: boolean): Promise<unknown> {
-    return this.fetchJson(`/api/context-capture/${encodeURIComponent(workspaceId)}/${paused ? "pause" : "resume"}`, { method: "POST" });
-  }
-
-  async uninstallCapture(workspaceId: string): Promise<unknown> {
-    return this.fetchJson(`/api/context-capture/${encodeURIComponent(workspaceId)}/uninstall`, { method: "POST" });
-  }
-
   async fetchJson<T>(pathname: string, init?: RequestInit, timeoutMs: number = 30_000): Promise<T> {
     const response = await fetch(`${this.baseUrl}${pathname}`, {
       ...init,
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
         Accept: "application/json",
-        ...this.defaultHeaders,
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...this.defaultHeaders,
         ...(init?.headers || {}),
       },
     });

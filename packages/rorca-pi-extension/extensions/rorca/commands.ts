@@ -1,13 +1,15 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RorcaApiClient } from "./api.js";
-import { parseApproveCommand, parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
+import { generateCaptureIdempotencyKey, parseApproveCommand, parseCaptureCommand, parseEnrichCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
 import { buildWatchSnapshot, formatRunList, formatRunNotify } from "./format.js";
 import { type RorcaSkillWorkflowRequest } from "./skill-launcher.js";
 import type { ExtensionState, PiModel, SpecDetail, Workspace } from "./types.js";
@@ -195,6 +197,7 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
       "/rorca-status [runId|workspaceId] [--workspace <id>]",
       "/rorca-watch [runId]",
       "/rorca-retry <runId> [storyId...] [--sequential] [--no-watch]",
+      "/rorca-capture <text> --title <title> --category <category> [--files <path...>] [--source <ref>] [--confidence high|medium|low] [--trust tier] [--workspace <id>] [--approve]",
       "/rorca-mcp-status",
     ].join("\n"), "info");
   });
@@ -371,6 +374,72 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
       forceSequential: parsed.forceSequential,
     });
     await handleTriggeredRun(result.runId, result.queued, parsed.autoWatch, ctx, deps, `Retried run ${parsed.runId}`);
+  });
+
+  registerCommand("rorca-capture", "Capture a memory (lessons, decisions, conventions, bug fixes, patterns, gotchas) to the workspace ledger", async (args, ctx) => {
+    const parsed = parseCaptureCommand(args);
+    const workspace = await resolveWorkspace(ctx, deps, parsed.workspaceId);
+    deps.updateState({ workspaceId: workspace.id });
+
+    // Validate related files exist in the workspace
+    const missingFiles: string[] = [];
+    for (const file of parsed.files) {
+      const absPath = path.join(workspace.path, file);
+      if (!fs.existsSync(absPath)) {
+        missingFiles.push(file);
+      }
+    }
+    if (missingFiles.length > 0) {
+      throw new Error(
+        `Related file(s) not found in workspace: ${missingFiles.join(', ')}`,
+      );
+    }
+
+    const idempotencyKey = generateCaptureIdempotencyKey(
+      workspace.id,
+      parsed.source,
+      parsed.title,
+      parsed.text,
+    );
+
+    if (parsed.approve) {
+      // Submit directly as an approved memory entry
+      const result = await deps.api.saveMemory({
+        workspaceId: workspace.id,
+        category: parsed.category,
+        title: parsed.title,
+        rule: parsed.text,
+        context: `Source: ${parsed.source || 'manual'} | Confidence: ${parsed.confidence} | Trust: ${parsed.trust}`,
+        source: parsed.source ?? '',
+        sourceType: 'manual',
+        relatedFiles: parsed.files,
+      });
+      ctx.ui.notify(
+        `Captured "${parsed.title}" as ${parsed.category} memory (approved, #${result.total} entries)`,
+        "success",
+      );
+    } else {
+      // Submit as a pending candidate for review
+      const result = await deps.api.submitCandidate({
+        workspace_id: workspace.id,
+        source_system: 'rorca-capture',
+        category: parsed.category,
+        title: parsed.title,
+        rule: parsed.text,
+        context: `Submitted via Pi CLI. Source: ${parsed.source || 'manual'}. Confidence: ${parsed.confidence}. Trust: ${parsed.trust}.`,
+        related_files: parsed.files,
+        confidence: parsed.confidence,
+        trust_tier: parsed.trust,
+        source_ref: parsed.source,
+        idempotency_key: idempotencyKey,
+      });
+
+      const statusLabel = result.created ? 'pending' : 'already exists';
+      ctx.ui.notify(
+        `Captured "${parsed.title}" as ${parsed.category} candidate (${statusLabel}, idempotent key: ${idempotencyKey.slice(0, 8)}…)`,
+        result.created ? "info" : "warning",
+      );
+    }
   });
 }
 

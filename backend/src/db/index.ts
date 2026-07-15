@@ -25,7 +25,7 @@
  */
 
 import * as fs from 'fs';
-import { Pool, PoolClient, PoolConfig } from 'pg';
+import { Pool, PoolClient, PoolConfig, type QueryConfig, type QueryResultRow } from 'pg';
 import { logger } from '../lib/logger';
 import { runPgMigrations } from './pg-index';
 
@@ -134,10 +134,18 @@ function assertTestDatabaseSafety(databaseUrl?: string): void {
   }
 }
 
-function buildPoolConfig(): PoolConfig {
+function configuredPoolSizes(): { application: number; operational: number; total: number } {
+  const parsed = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
+  const total = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_POOL_SIZE;
+  const operational = total >= 3 ? Math.min(2, total - 1) : 0;
+  return { application: Math.max(1, total - operational), operational, total };
+}
+
+function buildPoolConfig(role: 'application' | 'operational' = 'application'): PoolConfig {
   const databaseUrl = process.env.DATABASE_URL;
   assertTestDatabaseSafety(databaseUrl);
-  const configuredPoolSize = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
+  const sizes = configuredPoolSizes();
+  const configuredPoolSize = role === 'operational' ? sizes.operational : sizes.application;
   const ssl = buildSslConfig(databaseUrl);
 
   // Explicitly pin search_path so all queries and migrations consistently hit the
@@ -176,27 +184,38 @@ function buildPoolConfig(): PoolConfig {
 // ── Lazy Pool ────────────────────────────────────────────────────────────
 
 let _pool: Pool | null = null;
+let _operationalPool: Pool | null = null;
 let _migrationsDone = false;
 let _migrationsRunning: Promise<void> | null = null;
 
+function configurePoolEvents(target: Pool, label: string): void {
+  // PoolConfig.options pins search_path before a connection is exposed. Do not
+  // issue fire-and-forget client.query() calls from the `connect` event: pg does
+  // not await that listener, so the first borrower can overlap RESET/SET queries
+  // on one client (pg@9 rejects this and pg@8 warns about it).
+  target.on('error', (err) => logger.error({ err }, `[db] Unexpected ${label} pool error`));
+}
+
 function getPool(): Pool {
   if (!_pool) {
-    _pool = new Pool(buildPoolConfig());
-
-    // Guarantee search_path on every new connection — guards against AGE graph
-    // queries that SET search_path to ag_catalog and poison the pool connection.
-    _pool.on('connect', (client) => {
-      client.query('RESET ROLE').catch(() => {});
-      client.query('RESET request.jwt.claim.sub').catch(() => {});
-      client.query('RESET request.jwt.claims').catch(() => {});
-      client.query('SET search_path TO rorca, public').catch(() => {});
-    });
-
-    _pool.on('error', (err) => {
-      logger.error({ err }, '[db] Unexpected pool error');
-    });
+    _pool = new Pool(buildPoolConfig('application'));
+    configurePoolEvents(_pool, 'application');
   }
   return _pool;
+}
+
+/** Reserved for WAL ingestion and readiness so application pool pressure cannot starve them. */
+function getOperationalPool(): Pool {
+  if (configuredPoolSizes().operational === 0) return getPool();
+  if (!_operationalPool) {
+    _operationalPool = new Pool({
+      ...buildPoolConfig('operational'),
+      connectionTimeoutMillis: 500,
+      statement_timeout: 650,
+    });
+    configurePoolEvents(_operationalPool, 'operational');
+  }
+  return _operationalPool;
 }
 
 /** Ensure migrations have run exactly once. Awaited before first query. */
@@ -262,12 +281,32 @@ let _serverMaxConnections: number | null = null;
 /** The pg Pool instance. Prefer using query/queryOne/execute/transaction helpers. */
 export const pool: Pool = new Proxy({} as Pool, {
   get(_target, prop, receiver) {
-    // Intercept to ensure pool exists lazily
     const real = getPool();
     const val = Reflect.get(real, prop, receiver);
     return typeof val === 'function' ? val.bind(real) : val;
   },
 });
+
+export const operationalPool: Pool = new Proxy({} as Pool, {
+  get(_target, prop, receiver) {
+    const real = getOperationalPool();
+    const val = Reflect.get(real, prop, receiver);
+    return typeof val === 'function' ? val.bind(real) : val;
+  },
+});
+
+export function combinedPoolStats(): { total: number; idle: number; waiting: number } {
+  const application = getPool();
+  if (configuredPoolSizes().operational === 0) {
+    return { total: application.totalCount, idle: application.idleCount, waiting: application.waitingCount };
+  }
+  const operational = getOperationalPool();
+  return {
+    total: application.totalCount + operational.totalCount,
+    idle: application.idleCount + operational.idleCount,
+    waiting: application.waitingCount + operational.waitingCount,
+  };
+}
 
 // ── Placeholder Rewriter ─────────────────────────────────────────────────
 
@@ -350,8 +389,24 @@ export async function queryOne<T = Record<string, unknown>>(
 }
 
 /**
- * Execute a statement (INSERT/UPDATE/DELETE) and return affected row count.
+ * Run a short operational query on the reserved pool. Callers must provide a
+ * query_timeout no greater than the operational statement timeout.
  */
+export async function operationalQuery<T extends QueryResultRow = QueryResultRow>(
+  config: QueryConfig,
+): Promise<T[]> {
+  await ensureMigrations();
+  const result = await getOperationalPool().query<T>(config);
+  return result.rows;
+}
+
+export async function operationalQueryOne<T extends QueryResultRow = QueryResultRow>(
+  config: QueryConfig,
+): Promise<T | undefined> {
+  return (await operationalQuery<T>(config))[0];
+}
+
+/** Execute a statement (INSERT/UPDATE/DELETE) and return affected row count. */
 export async function execute(
   sql: string,
   params?: unknown[],
@@ -539,12 +594,19 @@ async function seedDefaultAdmin(): Promise<void> {
 // ── Graceful Shutdown ────────────────────────────────────────────────────
 
 async function shutdown(): Promise<void> {
+  const closing: Promise<void>[] = [];
   if (_pool) {
-    logger.info('[db] Closing pool...');
-    await _pool.end();
+    logger.info('[db] Closing application pool...');
+    closing.push(_pool.end());
     _pool = null;
-    logger.info('[db] Pool closed');
   }
+  if (_operationalPool) {
+    logger.info('[db] Closing operational pool...');
+    closing.push(_operationalPool.end());
+    _operationalPool = null;
+  }
+  await Promise.allSettled(closing);
+  if (closing.length > 0) logger.info('[db] Pools closed');
 }
 
 // Exported for tests that need to close the pool to release connections

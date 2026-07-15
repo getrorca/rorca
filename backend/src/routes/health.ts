@@ -6,26 +6,33 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import type { QueryConfig } from 'pg';
 import { CronExpressionParser } from 'cron-parser';
-import { execSync } from 'child_process';
-import { query, queryOne, dbHealthCheck } from '../db/index';
-import { listBackups } from '../lib/backup';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { combinedPoolStats, operationalQueryOne, query, queryOne, dbHealthCheck } from '../db/index';
+import { getBackupDir } from '../lib/backup';
 import { activeAgent, activeModel, agentType } from '../lib/config';
-import { detectOpenCode } from '../lib/opencode-detector';
-import { detectCodex } from '../lib/codex-detector';
-import { detectPi } from '../lib/pi-detector';
-import { getPtyCliCompatibility } from '../lib/pty-cli-compat';
+import { detectOpenCodeAsync, type OpenCodeStatus } from '../lib/opencode-detector';
+import { detectCodexAsync, type CodexStatus } from '../lib/codex-detector';
+import { detectPiAsync, type PiStatus } from '../lib/pi-detector';
+import { getPtyCliCompatibilityAsync } from '../lib/pty-cli-compat';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
 import { getMcpTransportCount } from '../lib/mcp-http';
 import { buildDatabaseCapability, buildDatabaseSetupGuidance, type DatabaseProvider } from '../lib/db-strategy';
+import { HealthProbeTimeoutError, withHealthProbeDeadline } from '../lib/bounded-health-probe';
 import * as fs from 'fs';
 import * as path from 'path';
 
 const router = Router();
 
 const startTime = Date.now();
+
+/** Public readiness probes must finish before launchd/client two-second checks. */
+export const BASIC_HEALTH_DEADLINE_MS = 750;
+const BASIC_HEALTH_QUERY_TIMEOUT_MS = 650;
 
 // ── Engine detection cache (30s TTL) ─────────────────────────────────────────
 
@@ -36,73 +43,63 @@ interface EnginesStatus {
   pi: { installed: boolean; version?: string };
 }
 
-let enginesCache: EnginesStatus | null = null;
-let enginesCacheAt = 0;
+interface EngineDetectionSnapshot {
+  engines: EnginesStatus;
+  opencode: OpenCodeStatus;
+  codex: CodexStatus;
+  pi: PiStatus;
+}
+
+const execFileAsync = promisify(execFile);
+let engineSnapshotCache: EngineDetectionSnapshot | null = null;
+let engineSnapshotCacheAt = 0;
+let engineSnapshotInFlight: Promise<EngineDetectionSnapshot> | null = null;
 const ENGINES_CACHE_TTL_MS = 30_000;
 
-function detectClaudeBinary(): boolean {
-  // Check CLAUDE_BIN env var first, then PATH
+async function detectClaudeBinaryAsync(): Promise<boolean> {
   const claudeBin = process.env.CLAUDE_BIN?.trim();
   if (claudeBin) {
-    return fs.existsSync(claudeBin);
+    return fs.promises.access(claudeBin, fs.constants.X_OK).then(() => true).catch(() => false);
   }
   try {
-    execSync('which claude', { encoding: 'utf-8', timeout: 5000 });
+    await execFileAsync('which', ['claude'], { encoding: 'utf8', timeout: 1_000 });
     return true;
   } catch {
     return false;
   }
 }
 
-function detectEngines(): EnginesStatus {
+async function detectEngineSnapshot(): Promise<EngineDetectionSnapshot> {
   const now = Date.now();
-  if (enginesCache && now - enginesCacheAt < ENGINES_CACHE_TTL_MS) {
-    return enginesCache;
+  if (engineSnapshotCache && now - engineSnapshotCacheAt < ENGINES_CACHE_TTL_MS) {
+    return engineSnapshotCache;
   }
+  if (engineSnapshotInFlight) return engineSnapshotInFlight;
 
-  const claudeInstalled = agentType === 'claude' || detectClaudeBinary();
+  engineSnapshotInFlight = (async () => {
+    const [claudeInstalled, opencode, codex, pi] = await Promise.all([
+      agentType === 'claude' ? Promise.resolve(true) : detectClaudeBinaryAsync(),
+      detectOpenCodeAsync(1_000).catch(() => ({ opencodeInstalled: false, opencodeVersion: null, opencodeBinPath: null })),
+      detectCodexAsync(1_000).catch(() => ({ codexInstalled: false, codexVersion: null, codexBinPath: null })),
+      detectPiAsync(1_000).catch(() => ({ piInstalled: false, piVersion: null, piBinPath: null })),
+    ]);
+    const snapshot: EngineDetectionSnapshot = {
+      opencode,
+      codex,
+      pi,
+      engines: {
+        claude: { installed: claudeInstalled },
+        opencode: { installed: opencode.opencodeInstalled, ...(opencode.opencodeVersion ? { version: opencode.opencodeVersion } : {}) },
+        codex: { installed: codex.codexInstalled, ...(codex.codexVersion ? { version: codex.codexVersion } : {}) },
+        pi: { installed: pi.piInstalled, ...(pi.piVersion ? { version: pi.piVersion } : {}) },
+      },
+    };
+    engineSnapshotCache = snapshot;
+    engineSnapshotCacheAt = Date.now();
+    return snapshot;
+  })().finally(() => { engineSnapshotInFlight = null; });
 
-  const opencode = (() => {
-    try {
-      return detectOpenCode();
-    } catch {
-      return { opencodeInstalled: false, opencodeVersion: undefined };
-    }
-  })();
-  const codex = (() => {
-    try {
-      return detectCodex();
-    } catch {
-      return { codexInstalled: false, codexVersion: undefined };
-    }
-  })();
-  const pi = (() => {
-    try {
-      return detectPi();
-    } catch {
-      return { piInstalled: false, piVersion: undefined };
-    }
-  })();
-
-  const result: EnginesStatus = {
-    claude: { installed: claudeInstalled },
-    opencode: {
-      installed: opencode.opencodeInstalled,
-      ...(opencode.opencodeVersion ? { version: opencode.opencodeVersion } : {}),
-    },
-    codex: {
-      installed: codex.codexInstalled,
-      ...(codex.codexVersion ? { version: codex.codexVersion } : {}),
-    },
-    pi: {
-      installed: pi.piInstalled,
-      ...(pi.piVersion ? { version: pi.piVersion } : {}),
-    },
-  };
-
-  enginesCache = result;
-  enginesCacheAt = now;
-  return result;
+  return engineSnapshotInFlight;
 }
 
 // Cache package.json version at module load — avoids fs.readFileSync on every request
@@ -140,12 +137,12 @@ function getMcpBridgeHealth(): {
  * /api/health:
  *   get:
  *     tags: [Health]
- *     summary: Basic health check
+ *     summary: Bounded readiness and active-run safety check
  *     operationId: getHealth
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Health checks are safe read-only diagnostics that external CLI clients depend on before invoking higher-level workflows."
  *     x-rorca-public-api: true
- *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status. Also returns unconditional Pi CLI detection status and component-level health for database, worker, github, postgres, and migrations.
+ *     description: Uses one database query with a 750ms deadline to confirm connectivity, database capabilities, and the active pipeline run count. Expensive component, filesystem, and executable diagnostics are available from /api/health/detailed.
  *     responses:
  *       200:
  *         description: Server is healthy
@@ -220,161 +217,146 @@ function getMcpBridgeHealth(): {
  *       503:
  *         description: Server is down (database unreachable)
  */
-router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
+interface BasicReadinessResult {
+  activeRuns: number;
+  pgVersion?: string;
+  extensions: string[];
+  poolStats: { total: number; idle: number; waiting: number };
+}
+
+async function checkBasicReadiness(): Promise<BasicReadinessResult> {
+  type ReadinessRow = {
+    active_runs: number | string;
+    pg_version: string | null;
+    extensions: string[] | null;
+  };
+  // pg supports per-query query_timeout at runtime although the QueryConfig
+  // shape in older @types/pg releases omits it. Keep it below the HTTP
+  // deadline so timed-out probes do not accumulate in the pool.
+  const readinessQuery = {
+    text: `SELECT
+             COUNT(*) FILTER (WHERE status = 'running')::int AS active_runs,
+             current_setting('server_version', true) AS pg_version,
+             COALESCE(
+               (SELECT array_agg(extname ORDER BY extname)
+                  FROM pg_catalog.pg_extension
+                 WHERE extname IN ('vector', 'age', 'pgcrypto')),
+               ARRAY[]::text[]
+             ) AS extensions
+           FROM pipeline_runs`,
+    query_timeout: BASIC_HEALTH_QUERY_TIMEOUT_MS,
+  } as QueryConfig & { query_timeout: number };
+  const row = await operationalQueryOne<ReadinessRow>(readinessQuery as QueryConfig);
+  const activeRuns = Number(row?.active_runs);
+  if (!Number.isSafeInteger(activeRuns) || activeRuns < 0) {
+    throw new Error('active run count was not confirmed');
+  }
+  return {
+    activeRuns,
+    ...(row?.pg_version ? { pgVersion: row.pg_version } : {}),
+    extensions: Array.isArray(row?.extensions) ? row.extensions : [],
+    poolStats: combinedPoolStats(),
+  };
+}
+
+function unavailableBasicHealth(reason: 'timeout' | 'database_unavailable') {
+  const databaseCapability = buildDatabaseCapability({ connected: false });
+  return {
+    status: 'down',
+    version: VERSION,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    db_connected: false,
+    active_runs: null,
+    readiness: { confirmed: false, reason, deadlineMs: BASIC_HEALTH_DEADLINE_MS },
+    dbMode: databaseCapability.dbMode,
+    graphMode: databaseCapability.graphMode,
+    pgvectorReady: false,
+    graphWarnings: databaseCapability.warnings,
+    databaseCapability,
+  };
+}
+
+async function basicHealthHandler(_req: Request, res: Response): Promise<void> {
+  res.set(NO_CACHE_HEADERS);
   try {
-    res.set(NO_CACHE_HEADERS);
-
-    // Run all component checks in parallel for <500ms SLA
-    const [
-      dbResult,
-      workerResult,
-      githubResult,
-      migrationsResult,
-      activeJobsResult,
-      scheduledJobsResult,
-    ] = await Promise.allSettled([
-      checkDatabaseComponent(),
-      checkWorkerComponent(),
-      checkGithubComponent(),
-      checkMigrationsComponent(),
-      getActiveJobs(),
-      getScheduledJobs(),
-    ]);
-
-    const dbHealth = dbResult.status === 'fulfilled' ? dbResult.value : { status: 'down' as const, error: 'check failed' };
-    const workerHealth = workerResult.status === 'fulfilled' ? workerResult.value : { status: 'unknown' as const };
-    const githubHealth = githubResult.status === 'fulfilled' ? githubResult.value : { status: 'unknown' as const };
-    const migrationsHealth = migrationsResult.status === 'fulfilled' ? migrationsResult.value : { status: 'unknown' as const };
-
-    const dbConnected = dbHealth.status !== 'down';
-    const workerDown = workerHealth.status === 'down' || workerHealth.status === 'not_running';
-    const rawDbHealth = dbHealth as ComponentDatabaseHealth;
-    const databaseCapability = buildDatabaseCapability({
-      connected: dbConnected,
-      provider: rawDbHealth.provider,
-      extensionStatus: rawDbHealth.extensionStatus,
-    });
-
-    // Overall status: 'down' if DB or worker is down, 'degraded' if any component is amber, 'ok' if all green
-    let overallStatus: 'ok' | 'degraded' | 'down';
-    if (!dbConnected) {
-      overallStatus = 'down';
-    } else if (workerDown || githubHealth.status === 'degraded' || migrationsHealth.status === 'degraded') {
-      overallStatus = 'degraded';
-    } else {
-      overallStatus = 'ok';
-    }
-
-    if (!dbConnected) {
-      return res.status(503).json({
-        status: 'down',
-        error: 'Database unreachable',
-        version: VERSION,
-        uptime: Math.floor((Date.now() - startTime) / 1000),
-        dbMode: databaseCapability.dbMode,
-        graphMode: databaseCapability.graphMode,
-        pgvectorReady: databaseCapability.extensions.vector,
-        graphWarnings: databaseCapability.warnings,
-        databaseCapability,
-        databaseSetup: buildDatabaseSetupGuidance(databaseCapability.dbMode),
-      });
-    }
-
-    let activeRuns = 0;
-    try {
-      const row = await queryOne<{ cnt: string }>(
-        `SELECT COUNT(*)::int AS cnt FROM pipeline_runs WHERE status = 'running'`
-      );
-      activeRuns = parseInt(row?.cnt ?? '0', 10);
-    } catch {
-      // DB query failed — already captured by dbConnected
-    }
-
-    // OC-002: Include opencode status when agentType=opencode
-    const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
-    // OC-024: Include codex status when agentType=codex
-    const codex = agentType === 'codex' ? detectCodex() : undefined;
-    const pi = (() => {
-      try {
-        return detectPi();
-      } catch {
-        return {
-          piInstalled: false,
-          piVersion: null,
-          piBinPath: null,
-        };
-      }
-    })();
-
-    // MP-009: Detect all engines (cached 30s) for EngineSelector availability dots
-    const engines = detectEngines();
+    const readiness = await withHealthProbeDeadline(checkBasicReadiness(), BASIC_HEALTH_DEADLINE_MS);
+    const extensionStatus = {
+      vector: readiness.extensions.includes('vector'),
+      age: readiness.extensions.includes('age'),
+      pgcrypto: readiness.extensions.includes('pgcrypto'),
+    };
+    const databaseCapability = buildDatabaseCapability({ connected: true, extensionStatus });
     const mcp = getMcpBridgeHealth();
-    const databaseSetup = buildDatabaseSetupGuidance(databaseCapability.dbMode);
 
     res.status(200).json({
-      status: overallStatus,
+      status: 'healthy',
       version: VERSION,
       uptime: Math.floor((Date.now() - startTime) / 1000),
       database: 'postgresql',
-      db_connected: dbConnected,
-      active_runs: activeRuns,
+      db_connected: true,
+      active_runs: readiness.activeRuns,
+      readiness: { confirmed: true, deadlineMs: BASIC_HEALTH_DEADLINE_MS },
       dbMode: databaseCapability.dbMode,
       graphMode: databaseCapability.graphMode,
-      // LHM-009: Explicit pgvector readiness so clients see (and can surface the
-      // fix path in graphWarnings) when the active DB mode lacks pgvector.
       pgvectorReady: databaseCapability.extensions.vector,
       graphWarnings: databaseCapability.warnings,
+      databaseCapability,
+      databaseSetup: buildDatabaseSetupGuidance(databaseCapability.dbMode),
+      poolStats: readiness.poolStats,
+      ...(readiness.pgVersion ? { pgVersion: readiness.pgVersion } : {}),
+      extensions: readiness.extensions,
       agentType: activeAgent,
       agentModel: activeModel,
-      db: rawDbHealth.poolStats,
-      ...(rawDbHealth.pgVersion ? { pgVersion: rawDbHealth.pgVersion } : {}),
-      ...(rawDbHealth.extensions ? { extensions: rawDbHealth.extensions } : {}),
-      poolStats: rawDbHealth.poolStats,
-      cloud: rawDbHealth.cloud,
-      provider: rawDbHealth.provider,
-      ...(rawDbHealth.extensionStatus ? { extensionStatus: rawDbHealth.extensionStatus } : {}),
-      ...(rawDbHealth.connectionLimit ? { connectionLimit: rawDbHealth.connectionLimit } : {}),
-      databaseCapability,
-      databaseSetup,
-      // CA-021: Report MCP transport mode + bridge health
       mcpTransport: mcp.enabled ? 'http' : 'disabled',
       mcp,
-      // PR-005: Report telemetry status
       telemetryEnabled: isTelemetryEnabled(),
-      // PR-009: Report auth enforcement status
       authRequired: process.env.AUTH_REQUIRED === 'true',
-      ...(agentType === 'opencode' && opencode ? {
-        opencodeInstalled: opencode.opencodeInstalled,
-        opencodeVersion: opencode.opencodeVersion,
-      } : {}),
-      ...(agentType === 'codex' && codex ? {
-        codexInstalled: codex.codexInstalled,
-        codexVersion: codex.codexVersion,
-      } : {}),
-      piInstalled: pi.piInstalled,
-      piVersion: pi.piVersion,
-      piBinPath: pi.piBinPath,
-      // MP-009: Engine availability for EngineSelector (all three engines, cached 30s)
-      engines,
-      // PTY readiness is a separate, verified contract: each result includes
-      // resolved binary, version/help probe outcomes, supported flags, and
-      // actionable diagnostics without exposing credentials or prompt data.
-      ptyCliCompatibility: getPtyCliCompatibility(),
-      embeddings: getQueueStats(),
-      cache: cacheStats(),
-      activeJobs: activeJobsResult.status === 'fulfilled' ? activeJobsResult.value : [],
-      scheduledJobs: scheduledJobsResult.status === 'fulfilled' ? scheduledJobsResult.value : [],
-      // US-047: Component-level health status
-      components: {
-        database: dbHealth,
-        worker: workerHealth,
-        github: githubHealth,
-        postgres: buildPostgresComponent(rawDbHealth),
-        migrations: migrationsHealth,
-      },
     });
-  } catch (err) { next(err); }
+  } catch (error) {
+    const reason = error instanceof HealthProbeTimeoutError ? 'timeout' : 'database_unavailable';
+    res.status(503).json(unavailableBasicHealth(reason));
+  }
+}
+
+/**
+ * @swagger
+ * /api/health/live:
+ *   get:
+ *     tags: [Health]
+ *     summary: Process-only liveness check
+ *     operationId: getHealthLive
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Process liveness is a read-only local supervisor probe with no environment or payload exposure."
+ *     x-rorca-public-api: true
+ *     responses:
+ *       200: { description: Process event loop is serving requests }
+ */
+router.get('/live', (_req: Request, res: Response) => {
+  res.set(NO_CACHE_HEADERS).status(200).json({
+    status: 'alive',
+    version: VERSION,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+  });
 });
+
+/**
+ * @swagger
+ * /api/health/ready:
+ *   get:
+ *     tags: [Health]
+ *     summary: Bounded database and active-run readiness check
+ *     operationId: getHealthReady
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Readiness safely confirms the local database and active-run restart gate without exposing work payloads."
+ *     x-rorca-public-api: true
+ *     responses:
+ *       200: { description: Readiness facts were confirmed before the deadline }
+ *       503: { description: Readiness could not be confirmed; active run state is unknown }
+ */
+router.get('/ready', basicHealthHandler);
+
+// @swagger contract is declared above the bounded handler implementation.
+router.get('/', basicHealthHandler);
 
 // ── Component health check types ─────────────────────────────────────────
 
@@ -529,9 +511,7 @@ async function checkMigrationsComponent(): Promise<ComponentMigrationsHealth> {
     let totalOnDisk = 0;
     try {
       const migrationsDir = path.join(__dirname, '..', 'db', 'pg-migrations');
-      if (fs.existsSync(migrationsDir)) {
-        totalOnDisk = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).length;
-      }
+      totalOnDisk = (await fs.promises.readdir(migrationsDir)).filter(f => f.endsWith('.sql')).length;
     } catch {
       // File system read failed — report what we know
     }
@@ -597,6 +577,13 @@ interface ScheduledJobInfo {
 let scheduledJobsCache: ScheduledJobInfo[] | null = null;
 let scheduledJobsCacheAt = 0;
 const SCHEDULED_JOBS_CACHE_TTL_MS = 30_000;
+const DETAILED_HEALTH_CACHE_TTL_MS = 10_000;
+let detailedHealthInFlight = false;
+let detailedHealthCache: { statusCode: number; body: Record<string, unknown>; capturedAt: number } | null = null;
+
+async function settleHealthCheck<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
+  try { return await operation(); } catch { return fallback; }
+}
 
 function computeNextFireAt(cron: string): string | null {
   try {
@@ -647,7 +634,13 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
  *     operationId: getHealthDetailed
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Detailed health diagnostics remain read-only and are safe for local tooling that needs richer readiness and environment context before invoking workflows."
- *     description: Returns extended health metrics including pending spec count, memory usage, last backup timestamp, database mode, graph mode, and execution engine status.
+ *     x-rorca-public-api: true
+ *     description: Returns extended health metrics including pending spec count, memory usage, last backup timestamp, database mode, graph mode, and execution engine status. Results are single-flight and cached briefly to protect the request/DB pools.
+ *     parameters:
+ *       - in: query
+ *         name: refresh
+ *         schema: { type: boolean, default: false }
+ *         description: Request a fresh snapshot when no refresh is already in progress.
  *     responses:
  *       200:
  *         description: Detailed health metrics
@@ -682,16 +675,47 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
  *       503:
  *         description: Server is degraded
  */
-router.get('/detailed', async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    res.set(NO_CACHE_HEADERS);
+router.get('/detailed', async (req: Request, res: Response, next: NextFunction) => {
+  res.set(NO_CACHE_HEADERS);
+  const now = Date.now();
+  const forceRefresh = req.query.refresh === 'true';
+  if (!forceRefresh && detailedHealthCache && now - detailedHealthCache.capturedAt < DETAILED_HEALTH_CACHE_TTL_MS) {
+    res.status(detailedHealthCache.statusCode).json({
+      ...detailedHealthCache.body,
+      diagnostics: { cached: true, ageMs: now - detailedHealthCache.capturedAt },
+    });
+    return;
+  }
+  if (detailedHealthInFlight) {
+    const stale = detailedHealthCache?.body ?? {
+      status: 'degraded', version: VERSION,
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      db_connected: false, active_runs: null,
+      pending_specs_count: null, memory_usage: process.memoryUsage(), last_backup_at: null,
+    };
+    res.status(detailedHealthCache?.statusCode ?? 503).json({
+      ...stale,
+      diagnostics: { cached: Boolean(detailedHealthCache), refreshInProgress: true },
+    });
+    return;
+  }
 
-    const healthResult = await dbHealthCheck();
-    const dbConnected = healthResult.ok;
+  detailedHealthInFlight = true;
+  try {
+    // Serialize DB diagnostics. Repeated detailed-health requests share the
+    // short-lived snapshot above instead of fanning out across the pool.
+    const dbHealth = await settleHealthCheck(checkDatabaseComponent, { status: 'down' as const, error: 'check failed' });
+    const workerHealth = await settleHealthCheck(checkWorkerComponent, { status: 'unknown' as const });
+    const githubHealth = await settleHealthCheck(checkGithubComponent, { status: 'unknown' as const });
+    const migrationsHealth = await settleHealthCheck(checkMigrationsComponent, { status: 'unknown' as const });
+    const activeJobs = await settleHealthCheck(getActiveJobs, []);
+    const scheduledJobs = await settleHealthCheck(getScheduledJobs, []);
+    const dbConnected = dbHealth.status !== 'down';
+    const rawDbHealth = dbHealth as ComponentDatabaseHealth;
     const databaseCapability = buildDatabaseCapability({
-      connected: healthResult.ok,
-      provider: healthResult.provider,
-      extensionStatus: healthResult.extensionStatus,
+      connected: dbConnected,
+      provider: rawDbHealth.provider,
+      extensionStatus: rawDbHealth.extensionStatus,
     });
     const databaseSetup = buildDatabaseSetupGuidance(databaseCapability.dbMode);
 
@@ -701,10 +725,10 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       const workspaces = await query<{ path: string }>('SELECT path FROM workspaces');
       for (const ws of workspaces) {
         const pendingDir = path.join(ws.path, 'forge', 'specs', 'pending');
-        if (fs.existsSync(pendingDir)) {
-          const files = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json'));
-          pendingSpecsCount += files.length;
-        }
+        try {
+          const files = await fs.promises.readdir(pendingDir);
+          pendingSpecsCount += files.filter(f => f.endsWith('.json')).length;
+        } catch { /* missing/unreadable workspace directory */ }
       }
     } catch {
       // Workspace/spec read failed
@@ -722,10 +746,12 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
     // Last backup timestamp
     let lastBackupAt: string | null = null;
     try {
-      const backups = listBackups();
-      if (backups.length > 0) {
-        lastBackupAt = backups[0].createdAt;
-      }
+      const backupDir = getBackupDir();
+      const names = (await fs.promises.readdir(backupDir))
+        .filter(name => name.startsWith('rorca-backup-') && name.endsWith('.sql'));
+      const stats = await Promise.all(names.map(async name => fs.promises.stat(path.join(backupDir, name))));
+      const newest = stats.reduce((latest, stat) => Math.max(latest, stat.birthtimeMs), 0);
+      lastBackupAt = newest > 0 ? new Date(newest).toISOString() : null;
     } catch {
       // Backup dir not found or unreadable
     }
@@ -741,15 +767,21 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       // DB query failed
     }
 
-    const status = dbConnected ? 'healthy' : 'degraded';
+    const workerUnavailable = ['down', 'not_running', 'stale'].includes(workerHealth.status);
+    const diagnosticsDegraded = workerUnavailable || githubHealth.status === 'degraded' || migrationsHealth.status === 'degraded';
+    const status = dbConnected && !diagnosticsDegraded ? 'healthy' : 'degraded';
     const statusCode = dbConnected ? 200 : 503;
 
-    // OC-002: Include opencode status when agentType=opencode
-    const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
-    // OC-024: Include codex status when agentType=codex
-    const codex = agentType === 'codex' ? detectCodex() : undefined;
+    // Child-process probes are asynchronous and cached, so a broken executable
+    // cannot freeze the event loop or liveness endpoint.
+    const [engineSnapshot, ptyCliCompatibility] = await Promise.all([
+      detectEngineSnapshot(),
+      getPtyCliCompatibilityAsync(),
+    ]);
+    const { opencode, codex, pi, engines } = engineSnapshot;
+    const mcp = getMcpBridgeHealth();
 
-    res.status(statusCode).json({
+    const responseBody = {
       status,
       version: VERSION,
       uptime: Math.floor((Date.now() - startTime) / 1000),
@@ -764,16 +796,46 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
       last_backup_at: lastBackupAt,
       databaseCapability,
       databaseSetup,
+      agentType: activeAgent,
+      agentModel: activeModel,
+      mcpTransport: mcp.enabled ? 'http' : 'disabled',
+      mcp,
+      telemetryEnabled: isTelemetryEnabled(),
+      authRequired: process.env.AUTH_REQUIRED === 'true',
+      piInstalled: pi.piInstalled,
+      piVersion: pi.piVersion,
+      piBinPath: pi.piBinPath,
+      engines,
+      // Expensive executable help/version probes live only on detailed health
+      // and run asynchronously so a broken provider CLI cannot block liveness.
+      ptyCliCompatibility,
+      embeddings: getQueueStats(),
+      cache: cacheStats(),
+      activeJobs,
+      scheduledJobs,
+      components: {
+        database: dbHealth,
+        worker: workerHealth,
+        github: githubHealth,
+        postgres: buildPostgresComponent(rawDbHealth),
+        migrations: migrationsHealth,
+      },
       ...(agentType === 'opencode' && opencode ? {
         opencodeInstalled: opencode.opencodeInstalled,
         opencodeVersion: opencode.opencodeVersion,
       } : {}),
-      ...(agentType === 'codex' && codex ? {
+      ...(agentType === 'codex' ? {
         codexInstalled: codex.codexInstalled,
         codexVersion: codex.codexVersion,
       } : {}),
-    });
-  } catch (err) { next(err); }
+    };
+    detailedHealthCache = { statusCode, body: responseBody, capturedAt: Date.now() };
+    res.status(statusCode).json({ ...responseBody, diagnostics: { cached: false, serializedDbChecks: true } });
+  } catch (err) {
+    next(err);
+  } finally {
+    detailedHealthInFlight = false;
+  }
 });
 
 export default router;

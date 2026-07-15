@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
@@ -418,5 +418,196 @@ describe("rorca pi extension commands", () => {
     expect(api.getRun).toHaveBeenCalledWith(91);
     expect(notifications[0].message).toContain("Run #91");
     expect(widgets.at(-1)?.value?.join("\n")).toContain("US-002: running");
+  });
+
+  it("captures a memory as a pending candidate (default)", async () => {
+    const { commands, register } = createRegistry();
+    const submitCandidate = vi.fn(async () => ({
+      id: "cand-1",
+      created: true,
+    }));
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      submitCandidate,
+      saveMemory: vi.fn(),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-capture")!(
+      "Always use async/await for DB calls --title 'pg async rule' --category Pattern --source US-027 --workspace cashflow",
+      ctx,
+    );
+
+    expect(submitCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspace_id: "cashflow",
+        source_system: "rorca-capture",
+        category: "Pattern",
+        title: "pg async rule",
+        rule: "Always use async/await for DB calls",
+        confidence: "medium",
+        trust_tier: "unverified",
+        source_ref: "US-027",
+      }),
+    );
+    expect(submitCandidate).toHaveBeenCalled();
+    const firstArg = (submitCandidate as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { idempotency_key?: string } | undefined;
+    expect(firstArg?.idempotency_key).toBeTruthy();
+    expect(notifications.at(-1)?.message).toContain("Captured");
+    expect(notifications.at(-1)?.message).toContain("pending");
+  });
+
+  it("captures a memory as approved when --approve is used", async () => {
+    const { commands, register } = createRegistry();
+    const saveMemory = vi.fn(async () => ({ total: 5 }));
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      submitCandidate: vi.fn(),
+      saveMemory,
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-capture")!(
+      "Always use async/await --title 'pg async rule' --category Pattern --approve --workspace cashflow",
+      ctx,
+    );
+
+    expect(saveMemory).toHaveBeenCalledWith({
+      workspaceId: "cashflow",
+      category: "Pattern",
+      title: "pg async rule",
+      rule: "Always use async/await",
+      context: expect.stringContaining("Source: manual"),
+      source: "",
+      sourceType: "manual",
+      relatedFiles: [],
+    });
+    expect(notifications.at(-1)?.message).toContain("approved");
+  });
+
+  it("validates related files exist in workspace", async () => {
+    const { commands, register } = createRegistry();
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/nonexistent-repo" })),
+      submitCandidate: vi.fn(),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx } = createContext();
+    const handler = commands.get("rorca-capture")!;
+    await expect(handler(
+      "Some text --title Test --category Pattern --files src/missing.ts --workspace cashflow",
+      ctx,
+    )).rejects.toThrow(/not found in workspace/);
+  });
+
+  it("reports idempotency when submitting a duplicate candidate", async () => {
+    const { commands, register } = createRegistry();
+    const submitCandidate = vi.fn(async () => ({
+      id: "cand-1",
+      created: false, // duplicate
+    }));
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      submitCandidate,
+      saveMemory: vi.fn(),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-capture")!(
+      "Some rule --title 'dup test' --category Pattern --source DUP-001 --workspace cashflow",
+      ctx,
+    );
+
+    expect(notifications.at(-1)?.message).toContain("already exists");
+    expect(notifications.at(-1)?.level).toBe("warning");
+  });
+
+  it("generates the same idempotency key for identical captures with source ref", async () => {
+    const { commands, register } = createRegistry();
+    const submitCandidate = vi.fn(async () => ({
+      id: "cand-1",
+      created: true,
+    }));
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      submitCandidate,
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx } = createContext();
+
+    // First call
+    await commands.get("rorca-capture")!(
+      "Always use async/await --title 'pg async' --category Pattern --source US-027 --workspace cashflow",
+      ctx,
+    );
+    const call0Arg = (submitCandidate as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { idempotency_key?: string } | undefined;
+    const key1 = call0Arg?.idempotency_key;
+
+    // Second call with same params
+    await commands.get("rorca-capture")!(
+      "Always use async/await --title 'pg async' --category Pattern --source US-027 --workspace cashflow",
+      ctx,
+    );
+    const call1Arg = (submitCandidate as ReturnType<typeof vi.fn>).mock.calls[1]?.[0] as { idempotency_key?: string } | undefined;
+    const key2 = call1Arg?.idempotency_key;
+
+    expect(key1).toBe(key2);
+    expect(typeof key1).toBe("string");
+    expect(key1!.length).toBe(32);
   });
 });

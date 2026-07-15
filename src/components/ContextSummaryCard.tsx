@@ -95,7 +95,7 @@ export default function ContextSummaryCard({ summary, isGenerating, skillDetails
   const [expanded, setExpanded] = useState(!!isGenerating);
   const [filesExpanded, setFilesExpanded] = useState(false);
 
-  const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, retrieval } = summary;
+  const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, retrieval, composerDegraded, composerDegradationReasons, composerSections, composedAt } = summary;
   // Prefer nested retrieval object (SW-010); fall back to legacy flat fields for older logs
   const cagHits = retrieval?.cagHits ?? 0;
   const vectorHits = retrieval?.ragHits ?? summary.vectorHits;
@@ -259,6 +259,42 @@ export default function ContextSummaryCard({ summary, isGenerating, skillDetails
               </div>
             )}
           </div>
+
+          {/* US-022: Composer degradation warnings */}
+          {composerDegraded && composerDegradationReasons && composerDegradationReasons.length > 0 && (
+            <div className="space-y-1 text-xs">
+              <span className="inline-flex items-center gap-1 text-warning font-medium">
+                <AlertTriangle className="w-3 h-3" />
+                Composer Warnings
+              </span>
+              <ul className="space-y-0.5 pl-4">
+                {composerDegradationReasons.map((reason, i) => (
+                  <li key={i} className="text-muted flex items-start gap-1">
+                    <span className="text-warning shrink-0 mt-0.5">•</span>
+                    <span className="text-[11px]">{reason}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* US-022: Composer section summary */}
+          {composerSections && composerSections.length > 0 && (
+            <div className="text-xs">
+              <span className="inline-flex items-center gap-1 text-muted font-medium">
+                <Layers className="w-3 h-3" />
+                Composed Sections ({composerSections.length})
+              </span>
+              <div className="mt-1 grid grid-cols-2 gap-1">
+                {composerSections.filter(s => s.itemCount > 0).map(s => (
+                  <div key={s.section} className="flex items-center gap-1.5 px-1.5 py-0.5 rounded bg-muted/10">
+                    <span className="text-[10px] font-mono text-text truncate">{s.section}</span>
+                    <span className="text-[10px] text-muted ml-auto">{s.itemCount} items</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Skills */}
           <div className="flex items-start gap-1.5 text-xs">

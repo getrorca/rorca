@@ -154,8 +154,8 @@ export class TooManyRequestsError extends AppError {
 export class ConflictError extends AppError {
   readonly statusCode = 409 as const;
 
-  constructor(message: string) {
-    super(message, 'CONFLICT');
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 'CONFLICT', details);
   }
 }
 

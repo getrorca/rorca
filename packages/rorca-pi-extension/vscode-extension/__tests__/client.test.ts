@@ -1,8 +1,6 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
- * Licensed under the Apache License, Version 2.0.
- * See LICENSE file in the project root for full license text.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -42,6 +40,34 @@ describe("Rorca VS Code capture client", () => {
     expect(result.event.payload).toMatchObject({ eventType: "explicit_memory", source_event_id: result.event.id });
     expect(result.event.safety.contextSafetyModule).toBe("backend/src/lib/context-safety.ts");
     expect(readQueuedCaptureEvents(queuePathForWorkspace(workspacePath))).toHaveLength(1);
+  });
+
+  test("uses the MCP bearer token for successful API-only submission", async () => {
+    const workspacePath = mkdtempSync(path.join(os.tmpdir(), "rorca-vscode-auth-"));
+    tmpDirs.push(workspacePath);
+    let authorization: string | null = null;
+    const client = new RorcaCaptureClient({
+      apiBaseUrl: "http://127.0.0.1:3030",
+      queuePath: queuePathForWorkspace(workspacePath),
+      queueMaxSize: 10,
+      token: "local-mcp-token",
+      fetchImpl: async (_url, init) => {
+        authorization = new Headers(init?.headers).get("authorization");
+        return { ok: true } as Response;
+      },
+    });
+
+    const result = await client.submit({
+      workspaceId: "ws",
+      workspacePath,
+      eventType: "editor_activity",
+      policyMode: "metadata-only",
+      occurredAt: "2026-07-05T00:00:00.000Z",
+      payload: { activity_type: "save", related_files: [] },
+    });
+
+    expect(result.queued).toBe(false);
+    expect(authorization).toBe("Bearer local-mcp-token");
   });
 
   test("applies .rorca-captureignore path redaction before queueing", async () => {

@@ -15,6 +15,7 @@ import * as path from 'path';
 import {
   assertPtyCliCompatible,
   probePtyCliCompatibility,
+  probePtyCliCompatibilityAsync,
   resetPtyCliCompatibilityCacheForTests,
 } from '../pty-cli-compat';
 
@@ -63,6 +64,17 @@ describe('PTY CLI compatibility probes', () => {
     expect(status.probes.help).toMatchObject({ ok: true, timedOut: false });
   });
 
+  it('detects the official OpenCode attach subcommand without accepting a legacy --attach flag', () => {
+    const fake = writeFakeCli(tempDir, 'opencode', 'opencode attach <url>\n--model MODEL');
+    const status = probePtyCliCompatibility('opencode', {
+      force: true,
+      env: { ...process.env, OPENCODE_BIN: fake },
+    });
+
+    expect(status.capabilities.attach).toBe(true);
+    expect(status.capabilities.model).toBe(true);
+  });
+
   it('does not infer unsupported flags and gives an actionable fail-closed error', () => {
     const fake = writeFakeCli(tempDir, 'codex', '--model MODEL');
     const status = probePtyCliCompatibility('codex', {
@@ -101,6 +113,20 @@ describe('PTY CLI compatibility probes', () => {
     });
 
     expect(Date.now() - started).toBeLessThan(500);
+    expect(status.ready).toBe(false);
+    expect(status.probes.version).toMatchObject({ timedOut: true });
+    expect(status.probes.help).toMatchObject({ timedOut: true });
+  });
+
+  it('runs health probes asynchronously and retains fail-closed timeout diagnostics', async () => {
+    const fake = path.join(tempDir, 'hung-opencode');
+    fs.writeFileSync(fake, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000);\n', { mode: 0o755 });
+
+    const status = await probePtyCliCompatibilityAsync('opencode', {
+      timeoutMs: 25,
+      env: { ...process.env, OPENCODE_BIN: fake },
+    });
+
     expect(status.ready).toBe(false);
     expect(status.probes.version).toMatchObject({ timedOut: true });
     expect(status.probes.help).toMatchObject({ timedOut: true });

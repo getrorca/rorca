@@ -115,10 +115,17 @@ function assertTestDatabaseSafety(databaseUrl) {
         throw new Error(`[db] Refusing to use non-test database "${dbName || '(unknown)'}" while NODE_ENV=test`);
     }
 }
-function buildPoolConfig() {
+function configuredPoolSizes() {
+    const parsed = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
+    const total = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_POOL_SIZE;
+    const operational = total >= 3 ? Math.min(2, total - 1) : 0;
+    return { application: Math.max(1, total - operational), operational, total };
+}
+function buildPoolConfig(role = 'application') {
     const databaseUrl = process.env.DATABASE_URL;
     assertTestDatabaseSafety(databaseUrl);
-    const configuredPoolSize = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
+    const sizes = configuredPoolSizes();
+    const configuredPoolSize = role === 'operational' ? sizes.operational : sizes.application;
     const ssl = buildSslConfig(databaseUrl);
     // Explicitly pin search_path so all queries and migrations consistently hit the
     // rorca schema (where pg-boss and app tables live) before falling back to public.
@@ -152,24 +159,36 @@ function buildPoolConfig() {
 }
 // ── Lazy Pool ────────────────────────────────────────────────────────────
 let _pool = null;
+let _operationalPool = null;
 let _migrationsDone = false;
 let _migrationsRunning = null;
+function configurePoolEvents(target, label) {
+    // PoolConfig.options pins search_path before a connection is exposed. Do not
+    // issue fire-and-forget client.query() calls from the `connect` event: pg does
+    // not await that listener, so the first borrower can overlap RESET/SET queries
+    // on one client (pg@9 rejects this and pg@8 warns about it).
+    target.on('error', (err) => logger.error({ err }, `[db] Unexpected ${label} pool error`));
+}
 function getPool() {
     if (!_pool) {
-        _pool = new Pool(buildPoolConfig());
-        // Guarantee search_path on every new connection — guards against AGE graph
-        // queries that SET search_path to ag_catalog and poison the pool connection.
-        _pool.on('connect', (client) => {
-            client.query('RESET ROLE').catch(() => { });
-            client.query('RESET request.jwt.claim.sub').catch(() => { });
-            client.query('RESET request.jwt.claims').catch(() => { });
-            client.query('SET search_path TO rorca, public').catch(() => { });
-        });
-        _pool.on('error', (err) => {
-            logger.error({ err }, '[db] Unexpected pool error');
-        });
+        _pool = new Pool(buildPoolConfig('application'));
+        configurePoolEvents(_pool, 'application');
     }
     return _pool;
+}
+/** Reserved for WAL ingestion and readiness so application pool pressure cannot starve them. */
+function getOperationalPool() {
+    if (configuredPoolSizes().operational === 0)
+        return getPool();
+    if (!_operationalPool) {
+        _operationalPool = new Pool({
+            ...buildPoolConfig('operational'),
+            connectionTimeoutMillis: 500,
+            statement_timeout: 650,
+        });
+        configurePoolEvents(_operationalPool, 'operational');
+    }
+    return _operationalPool;
 }
 /** Ensure migrations have run exactly once. Awaited before first query. */
 async function ensureMigrations() {
@@ -227,12 +246,30 @@ let _serverMaxConnections = null;
 /** The pg Pool instance. Prefer using query/queryOne/execute/transaction helpers. */
 export const pool = new Proxy({}, {
     get(_target, prop, receiver) {
-        // Intercept to ensure pool exists lazily
         const real = getPool();
         const val = Reflect.get(real, prop, receiver);
         return typeof val === 'function' ? val.bind(real) : val;
     },
 });
+export const operationalPool = new Proxy({}, {
+    get(_target, prop, receiver) {
+        const real = getOperationalPool();
+        const val = Reflect.get(real, prop, receiver);
+        return typeof val === 'function' ? val.bind(real) : val;
+    },
+});
+export function combinedPoolStats() {
+    const application = getPool();
+    if (configuredPoolSizes().operational === 0) {
+        return { total: application.totalCount, idle: application.idleCount, waiting: application.waitingCount };
+    }
+    const operational = getOperationalPool();
+    return {
+        total: application.totalCount + operational.totalCount,
+        idle: application.idleCount + operational.idleCount,
+        waiting: application.waitingCount + operational.waitingCount,
+    };
+}
 // ── Placeholder Rewriter ─────────────────────────────────────────────────
 /**
  * Converts ? placeholders to $1, $2, ... numbered placeholders.
@@ -302,8 +339,18 @@ export async function queryOne(sql, params) {
     }
 }
 /**
- * Execute a statement (INSERT/UPDATE/DELETE) and return affected row count.
+ * Run a short operational query on the reserved pool. Callers must provide a
+ * query_timeout no greater than the operational statement timeout.
  */
+export async function operationalQuery(config) {
+    await ensureMigrations();
+    const result = await getOperationalPool().query(config);
+    return result.rows;
+}
+export async function operationalQueryOne(config) {
+    return (await operationalQuery(config))[0];
+}
+/** Execute a statement (INSERT/UPDATE/DELETE) and return affected row count. */
 export async function execute(sql, params) {
     await ensureMigrations();
     const p = getPool();
@@ -449,12 +496,20 @@ async function seedDefaultAdmin() {
 }
 // ── Graceful Shutdown ────────────────────────────────────────────────────
 async function shutdown() {
+    const closing = [];
     if (_pool) {
-        logger.info('[db] Closing pool...');
-        await _pool.end();
+        logger.info('[db] Closing application pool...');
+        closing.push(_pool.end());
         _pool = null;
-        logger.info('[db] Pool closed');
     }
+    if (_operationalPool) {
+        logger.info('[db] Closing operational pool...');
+        closing.push(_operationalPool.end());
+        _operationalPool = null;
+    }
+    await Promise.allSettled(closing);
+    if (closing.length > 0)
+        logger.info('[db] Pools closed');
 }
 // Exported for tests that need to close the pool to release connections
 export const closePool = shutdown;

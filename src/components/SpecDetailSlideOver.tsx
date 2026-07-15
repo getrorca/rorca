@@ -609,7 +609,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; terminalMode?: 'ansi-html' | 'pty'; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean; rerunFromScratch?: boolean; readinessOverride?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; terminal_mode?: 'ansi-html' | 'pty' | 'native-pty'; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; executionEnvironment?: string; forceRerun?: boolean; rerunFromScratch?: boolean; readinessOverride?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -624,11 +624,12 @@ function SpecDetailContent({
           ...(autoWorktree && options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
           ...(autoWorktree && options?.mergeStrategy ? { mergeStrategy: options.mergeStrategy } : {}),
           ...(options?.includeGraph ? { includeGraph: true } : {}),
-          ...(options?.terminalMode ? { terminal_mode: options.terminalMode } : {}),
+          ...(options?.terminal_mode ? { terminal_mode: options.terminal_mode } : {}),
           ...(options?.effortLevel ? { effortLevel: options.effortLevel } : {}),
           ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
           ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
           ...(options?.reasoningOverride !== undefined ? { reasoning: options.reasoningOverride } : {}),
+          ...(options?.executionEnvironment ? { executionEnvironment: options.executionEnvironment } : {}),
           ...(options?.forceRerun ? { forceRerun: true } : {}),
           ...(options?.rerunFromScratch ? { rerunFromScratch: true } : {}),
           ...(options?.readinessOverride ? { readinessOverride: true } : {}),

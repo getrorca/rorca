@@ -1,0 +1,140 @@
+{
+  "manifestVersion": 1,
+  "manifestId": "11111111-1111-4111-8111-111111111111",
+  "idempotencyKey": "22222222-2222-4222-8222-222222222222",
+  "workspaceId": "rorca",
+  "source": {
+    "rorca": {
+      "specId": "rorca-task-manifest-execution-bridge-for-hermes",
+      "storyId": "TMB-001",
+      "runId": "20260316000440",
+      "specPath": "forge/specs/approved/rorca-task-manifest-execution-bridge-for-hermes.json"
+    },
+    "github": {
+      "owner": "rorca",
+      "repo": "rorca",
+      "pullRequestNumber": 42,
+      "pullRequestUrl": "https://github.example/rorca/rorca/pull/42"
+    },
+    "linear": {
+      "issueId": "ROR-123",
+      "issueKey": "ROR-123",
+      "issueUrl": "https://linear.example/rorca/issue/ROR-123"
+    },
+    "slack": {
+      "channelId": "C123RORCA",
+      "threadTs": "1710547480.000100",
+      "messageTs": "1710547480.000100",
+      "threadUrl": "https://slack.example/archives/C123RORCA/p1710547480000100"
+    },
+    "operator": {
+      "intentId": "hermes-intent-001",
+      "actor": "pi-autonomous-runner",
+      "summary": "Define the canonical bounded manifest contract before route or execution code is added."
+    },
+    "cli": {
+      "invocationId": "pi-run-20260316000440",
+      "command": "pi",
+      "args": ["run", "TMB-001"]
+    }
+  },
+  "routeDecision": {
+    "route": "rorca.pipeline.story",
+    "reason": "Hermes delegated a bounded execution envelope that Rorca should validate before using the existing provider harness.",
+    "confidence": 0.98,
+    "decidedAt": "2026-03-16T00:04:40.000Z"
+  },
+  "objective": "Create the canonical Rorca task-manifest execution contract and authority boundary for bounded Hermes task manifests.",
+  "boundedScope": {
+    "summary": "Contract-only implementation for manifest validation, safety defaults, fixture coverage, and secondary public contract export.",
+    "allowedPaths": [
+      "backend/src/lib/task-manifest.ts",
+      "backend/src/lib/context-safety.ts",
+      "backend/src/lib/__tests__/task-manifest.test.ts",
+      "packages/rorca-public-contract/src/index.ts"
+    ],
+    "forbiddenPaths": [
+      "backend/src/lib/spec-types.ts"
+    ],
+    "inScope": [
+      "Define schema and TypeScript type",
+      "Reject unsafe manifest inputs",
+      "Document tasks.md projection boundary"
+    ],
+    "outOfScope": [
+      "Persist manifests in the database",
+      "Trigger execution routes"
+    ]
+  },
+  "tasks": [
+    {
+      "taskId": "TMB-001-contract",
+      "title": "Define task manifest schema",
+      "description": "Implement the versioned Zod schema, exported type, safety defaults, and route-boundary parse helper.",
+      "acceptanceCriteria": [
+        "Valid Hermes fixture parses successfully",
+        "Unsafe paths, prompt bundles, logs, secrets, and forbidden policy values are rejected"
+      ],
+      "targetPaths": [
+        "backend/src/lib/task-manifest.ts",
+        "backend/src/lib/context-safety.ts"
+      ],
+      "commands": [
+        "cd backend && npx tsc --noEmit",
+        "cd backend && npx jest --testPathPattern=task-manifest"
+      ],
+      "dependsOn": []
+    }
+  ],
+  "context": {
+    "summary": "Hermes can propose bounded tasks, but Rorca owns workspace authority, policy enforcement, and provider/model execution.",
+    "contextRefs": [
+      {
+        "kind": "spec",
+        "ref": "forge/specs/approved/rorca-task-manifest-execution-bridge-for-hermes.json",
+        "path": "forge/specs/approved/rorca-task-manifest-execution-bridge-for-hermes.json",
+        "title": "Rorca Task Manifest Execution Bridge for Hermes",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "excerpt": "TMB-001 defines the canonical manifest contract and rejects unsafe raw inputs before routes are implemented."
+      }
+    ],
+    "tasksMdProjection": {
+      "path": "tasks.md",
+      "generatedFrom": "manifest",
+      "durableSourceOfTruth": false,
+      "note": "tasks.md may be generated for agent readability only; the manifest remains the durable contract."
+    }
+  },
+  "policy": {
+    "dryRun": false
+  },
+  "execution": {
+    "agentOverride": "pi",
+    "modelOverride": "claude-sonnet-4",
+    "effortLevel": "high",
+    "terminalMode": "pty",
+    "mergeStrategy": "draft-pr",
+    "executionEnvironment": "local-worktree",
+    "executionEnvironmentId": "rorca-hermes-bridge"
+  },
+  "validation": {
+    "requiredCommands": [
+      "cd backend && npx tsc --noEmit",
+      "cd backend && npx jest --testPathPattern=task-manifest"
+    ],
+    "successCriteria": [
+      "Schema accepts the valid Hermes fixture",
+      "Schema rejects unsafe and authority-violating manifests"
+    ],
+    "artifactRefs": []
+  },
+  "evidence": [
+    {
+      "kind": "test",
+      "ref": "backend/src/lib/__tests__/task-manifest.test.ts",
+      "path": "backend/src/lib/__tests__/task-manifest.test.ts",
+      "summary": "Unit coverage for task manifest validation."
+    }
+  ],
+  "createdAt": "2026-03-16T00:04:40.000Z"
+}

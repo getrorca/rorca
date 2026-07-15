@@ -42,7 +42,7 @@ export interface MockRun {
   finished_at: string | null;
   agent_type?: string;
   agent_model?: string | null;
-  terminal_mode?: 'ansi-html' | 'pty';
+  terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
 }
 
 // ─── Providers wrapper ────────────────────────────────────────────────────────

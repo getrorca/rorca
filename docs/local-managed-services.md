@@ -25,10 +25,15 @@ node scripts/rorca-managed-services.mjs start --service worker
 node scripts/rorca-managed-services.mjs uninstall
 ```
 
-The helper renders and validates these user LaunchAgents. The cross-service,
-read-only login gate and operator-approved reboot smoke procedure are in
-[`always-on-login-readiness.md`](./always-on-login-readiness.md).
-
+The helper renders and validates these user LaunchAgents. The separate,
+read-only five-minute health monitor and bounded log retention schedule are in
+[`always-on-context-production-readiness.md`](./always-on-context-production-readiness.md).
+The cross-service login gate and operator-approved reboot smoke procedure are in
+[`always-on-login-readiness.md`](./always-on-login-readiness.md). **Warning:**
+the smoke's `reboot-now` step is destructive and invokes privileged shutdown;
+arming is not reboot consent. Use only the generated arm-ID-bound command after
+a separate interactive review. Never delegate it to an agent or unattended
+shell.
 
 - `~/Library/LaunchAgents/com.rorca.backend.rorca.plist`
 - `~/Library/LaunchAgents/com.rorca.worker.rorca.plist`
@@ -48,8 +53,10 @@ appended to:
 - `<checkout>/.rorca/services/worker.stdout.log`
 - `<checkout>/.rorca/services/worker.stderr.log`
 
-`restart` first requires a healthy API with zero active pipeline runs. It uses
-`launchctl bootout` to remove persistent demand while sending graceful
+`restart` first requires bounded readiness to confirm `db_connected: true` and
+an integer `active_runs: 0`. A 503, timeout, `null`, missing, or malformed count
+fails closed and forbids the restart. It uses `launchctl bootout` to remove
+persistent demand while sending graceful
 termination, waits for the checkout process to exit, then bootstraps the
 current plist and kickstarts it. This prevents launchd from racing the worker's
 deliberate pg-boss/child-process drain. Launchd restarts unexpected exits and
@@ -71,8 +78,9 @@ requires both the expected command and the kernel-reported
 `<checkout>/backend` cwd; a sibling worktree borrowing this checkout's `tsx`
 binary is never eligible for takeover. A matching manual Rorca backend/worker
 is replaced only with `--take-over`; the helper
-requires a responsive local health endpoint with `active_runs: 0`, sends only
-`SIGTERM`, waits up to 30 seconds, and never force-kills a process. If a
+requires a responsive local health endpoint with `readiness.confirmed: true`
+and integer `active_runs: 0`, sends only `SIGTERM`, waits up to 30 seconds, and
+never force-kills a process. If a
 shutdown stalls, resolve it manually after reviewing its logs and pipeline
 state.
 

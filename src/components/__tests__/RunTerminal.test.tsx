@@ -132,7 +132,7 @@ class TestResizeObserver {
   }
 }
 
-function renderTerminal(terminalMode: 'ansi-html' | 'pty' = 'pty', runStatus: string | null = null) {
+function renderTerminal(terminalMode: 'ansi-html' | 'pty' | 'native-pty' = 'pty', runStatus: string | null = null) {
   return render(
     <ThemeProvider>
       <RunTerminal runId={77} workspaceId="ws-test" terminalMode={terminalMode} runStatus={runStatus} />
@@ -220,12 +220,12 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(screen.getByText('Waiting for semantic events…')).toBeInTheDocument();
   });
 
-  it('uses neutral copy while resolving PTY support and hides ANSI toggles in real PTY mode', async () => {
+  it('uses neutral copy while resolving PTY support and shows PTY terminal/semantic controls after resolution', async () => {
     renderTerminal('pty');
 
     expect(screen.getByText('Checking PTY support')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Semantic/i })).toBeInTheDocument();
 
     await waitFor(() => expect(lastEventSource).not.toBeNull());
 
@@ -257,7 +257,8 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(screen.getByText('Connection diagnostics')).toBeInTheDocument();
     expect(screen.getByText('Live')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Semantic/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Terminal/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Semantic/i })).toBeInTheDocument();
   });
 
   it('focuses the xterm pane and sends keyboard input only while in authoritative PTY mode', async () => {

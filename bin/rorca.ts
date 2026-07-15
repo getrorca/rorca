@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
+
 
 import { Command } from 'commander';
 import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync, statSync, readdirSync } from 'node:fs';
@@ -29,7 +30,9 @@ import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar';
 import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
 import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
 import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
-import { formatCaptureBootstrapHumanReport, runCaptureBootstrap, runCaptureTeardown } from '../packages/rorca-pi-extension/extensions/rorca/capture-bootstrap.js';
+import { ingestCommit, ingestGitRange, isNoiseCommit } from '../backend/src/lib/ingest-commit';
+import { CaptureClient, CaptureQueue } from '../backend/src/lib/capture-client';
+import { installHook, uninstallHook, isHookInstalled, readHookContent } from '../backend/src/lib/git-hook-installer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -397,6 +400,34 @@ function runCommand(
     child.on('close', (code: number | null) => {
       resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
     });
+  });
+}
+
+async function runCaptureAlias(args: string[]): Promise<number> {
+  const distEntry = path.join(ROOT_DIR, 'packages', 'rorca-capture', 'dist', 'cli.js');
+  const sourceEntry = path.join(ROOT_DIR, 'packages', 'rorca-capture', 'src', 'cli.ts');
+
+  if (existsSync(distEntry)) {
+    return spawnPassthrough(process.execPath, [distEntry, ...args]);
+  }
+
+  if (existsSync(sourceEntry)) {
+    return spawnPassthrough('npx', ['tsx', sourceEntry, ...args]);
+  }
+
+  console.error('rorca-capture entrypoint not found. Run `npm run build` first.');
+  return 1;
+}
+
+function spawnPassthrough(command: string, args: string[]): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: ROOT_DIR,
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
+    child.on('error', reject);
+    child.on('close', (code: number | null) => resolve(code ?? 1));
   });
 }
 
@@ -2755,7 +2786,8 @@ function printPiInstallMethods(): void {
 }
 
 async function fetchPiHealth(): Promise<HealthResponse> {
-  return fetchBackendHealth();
+  // Executable diagnostics deliberately live off the bounded readiness route.
+  return fetchJson<HealthResponse>('/api/health/detailed');
 }
 
 async function fetchPiModels(): Promise<PiModelsResponse> {
@@ -2999,32 +3031,6 @@ async function runTui(): Promise<number> {
   return result.code;
 }
 
-async function runCaptureSetupCommand(options: { alwaysOn?: boolean; dryRun?: boolean; json?: boolean; workspaceId?: string; uninstall?: boolean; teardown?: boolean }): Promise<number> {
-  if (options.uninstall || options.teardown) {
-    const teardown = runCaptureTeardown({ dryRun: Boolean(options.dryRun), cwd: process.cwd(), env: process.env });
-    console.log(JSON.stringify(teardown, null, 2));
-    return teardown.ok ? 0 : 1;
-  }
-
-  const report = await runCaptureBootstrap({
-    alwaysOn: Boolean(options.alwaysOn),
-    dryRun: Boolean(options.dryRun),
-    workspaceId: options.workspaceId,
-    apiBaseUrl: API_BASE,
-  });
-
-  if (options.json) {
-    console.log(JSON.stringify(report, null, 2));
-  } else {
-    console.log(formatCaptureBootstrapHumanReport(report));
-    console.log('');
-    console.log('JSON report:');
-    console.log(JSON.stringify(report, null, 2));
-  }
-
-  return report.ok ? 0 : 1;
-}
-
 const program = new Command();
 
 program
@@ -3063,6 +3069,18 @@ program
   .option('--workspace-id <id>', 'Workspace to inject context from')
   .action(async (options: { model?: string; workspaceId?: string }) => {
     process.exitCode = await runChat(options);
+  });
+
+program
+  .command('capture')
+  .description('Thin alias for the standalone rorca-capture sidecar')
+  .helpOption(false)
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(async () => {
+    const captureIndex = process.argv.indexOf('capture');
+    const passthrough = captureIndex === -1 ? [] : process.argv.slice(captureIndex + 1);
+    process.exitCode = await runCaptureAlias(passthrough);
   });
 
 program
@@ -3172,41 +3190,6 @@ program
     process.exitCode = await runTui();
   });
 
-program
-  .command('setup')
-  .description('Explicit setup command for the rorca-capture binary')
-  .option('--always-on', 'Install reversible always-on context capture components')
-  .option('--uninstall', 'Remove only sentinel-managed capture components using uninstall metadata')
-  .option('--teardown', 'Alias for --uninstall')
-  .option('--dry-run', 'Report what would be installed without writing files')
-  .option('--json', 'Emit only JSON output')
-  .option('--workspace-id <id>', 'Workspace id or label to bootstrap')
-  .action(async (options: { alwaysOn?: boolean; uninstall?: boolean; teardown?: boolean; dryRun?: boolean; json?: boolean; workspaceId?: string }) => {
-    process.exitCode = await runCaptureSetupCommand(options);
-  });
-
-const capture = program.command('capture').description('Manage always-on universal context capture');
-
-capture
-  .command('setup')
-  .option('--always-on', 'Install reversible always-on context capture components')
-  .option('--uninstall', 'Remove only sentinel-managed capture components using uninstall metadata')
-  .option('--teardown', 'Alias for --uninstall')
-  .option('--dry-run', 'Report what would be installed without writing files')
-  .option('--json', 'Emit only JSON output')
-  .option('--workspace-id <id>', 'Workspace id or label to bootstrap')
-  .action(async (options: { alwaysOn?: boolean; uninstall?: boolean; teardown?: boolean; dryRun?: boolean; json?: boolean; workspaceId?: string }) => {
-    process.exitCode = await runCaptureSetupCommand(options);
-  });
-
-capture
-  .command('teardown')
-  .option('--dry-run', 'Report what would be removed without writing files')
-  .option('--json', 'Emit only JSON output')
-  .action(async (options: { dryRun?: boolean; json?: boolean }) => {
-    process.exitCode = await runCaptureSetupCommand({ ...options, teardown: true });
-  });
-
 const mcp = program.command('mcp').description('Manage MCP HTTP authentication');
 
 mcp
@@ -3243,6 +3226,235 @@ mcp
   .description('Scan known MCP client configs for broken Rorca OAuth-era entries')
   .action(async () => {
     process.exitCode = await runMcpDiagnoseClients();
+  });
+
+const capture = program.command('capture').description('Capture sidecar — submit context events and memory candidates');
+
+capture
+  .command('ingest-commit [sha]')
+  .description('Ingest a single git commit as a context event + memory candidates')
+  .option('--workspace-id <id>', 'Rorca workspace ID (required)')
+  .option('--workspace-path <path>', 'Absolute path to the git repository root (default: cwd)', process.cwd())
+  .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
+  .option('--api-key <key>', 'API key for auth-gated deployments')
+  .option('--dry-run', 'Extract and print metadata without submitting')
+  .option('--json', 'Emit JSON output')
+  .action(async (sha: string | undefined, options: { workspaceId?: string; workspacePath: string; backendUrl: string; apiKey?: string; dryRun?: boolean; json?: boolean }) => {
+    try {
+      if (!options.workspaceId) {
+        console.error('Error: --workspace-id is required');
+        process.exitCode = 1;
+        return;
+      }
+
+      const result = await ingestCommit({
+        workspaceId: options.workspaceId,
+        workspacePath: options.workspacePath,
+        backendUrl: options.backendUrl,
+        apiKey: options.apiKey,
+        dryRun: Boolean(options.dryRun),
+        sha: sha || undefined,
+      });
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        const mode = options.dryRun ? 'DRY RUN' : 'INGEST';
+        console.log(`${mode} commit ${result.commitSha.slice(0, 8)}`);
+        console.log(`  Subject: ${result.subject.slice(0, 80)}`);
+        console.log(`  Event:   ${result.event.queued ? 'queued' : result.event.created ? (result.event.created ? 'created' : 'exists') : 'dry-run'}`);
+        console.log(`  Candidates: ${result.candidates.length} (${result.noise ? 'noise' : 'submitted'})`);
+        if (!result.noise) {
+          for (const c of result.candidates) {
+            console.log(`    - ${c.queued ? 'queued' : c.created ? 'created' : 'exists'}`);
+          }
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Error: ${message}`);
+      process.exitCode = 1;
+    }
+  });
+
+capture
+  .command('ingest-git')
+  .description('Ingest a range of git commits (since..HEAD)')
+  .requiredOption('--since <ref>', 'Starting ref (branch, tag, or SHA)')
+  .option('--workspace-id <id>', 'Rorca workspace ID (required)')
+  .option('--workspace-path <path>', 'Absolute path to the git repository root (default: cwd)', process.cwd())
+  .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
+  .option('--api-key <key>', 'API key for auth-gated deployments')
+  .option('--dry-run', 'List commits without submitting')
+  .option('--json', 'Emit JSON output')
+  .action(async (options: { since: string; workspaceId?: string; workspacePath: string; backendUrl: string; apiKey?: string; dryRun?: boolean; json?: boolean }) => {
+    try {
+      if (!options.workspaceId) {
+        console.error('Error: --workspace-id is required');
+        process.exitCode = 1;
+        return;
+      }
+
+      const result = await ingestGitRange({
+        workspaceId: options.workspaceId,
+        workspacePath: options.workspacePath,
+        backendUrl: options.backendUrl,
+        apiKey: options.apiKey,
+        dryRun: Boolean(options.dryRun),
+        since: options.since,
+      });
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        const mode = options.dryRun ? 'DRY RUN' : 'INGEST';
+        console.log(`${mode} range ${result.range}: ${result.commits} commits`);
+        console.log(`  Ingested: ${result.ingested}  Noise: ${result.noise}`);
+        for (const r of result.results) {
+          const status = r.noise ? dim('(noise)') : green('✓');
+          console.log(`  ${r.commitSha.slice(0, 8)} ${status} ${r.subject.slice(0, 60)}`);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Error: ${message}`);
+      process.exitCode = 1;
+    }
+  });
+
+capture
+  .command('flush')
+  .description('Flush the local offline queue to the Rorca backend')
+  .option('--workspace-path <path>', 'Path to the workspace root containing .rorca-capture-queue.jsonl', process.cwd())
+  .option('--backend-url <url>', 'Rorca backend base URL', 'http://localhost:3030')
+  .option('--api-key <key>', 'API key for auth-gated deployments')
+  .action(async (options: { workspacePath: string; backendUrl: string; apiKey?: string }) => {
+    try {
+      const queue = new CaptureQueue(options.workspacePath);
+      const client = new CaptureClient({ baseUrl: options.backendUrl, apiKey: options.apiKey });
+
+      if (queue.isEmpty) {
+        console.log('Queue is empty — nothing to flush.');
+        return;
+      }
+
+      console.log(`Flushing ${queue.length} queued entries...`);
+      const result = await client.flushQueue(queue);
+      console.log(`Succeeded: ${result.succeeded}  Failed: ${result.failed}`);
+      if (result.failed > 0) {
+        for (const entry of result.entries.filter((e) => !e.success)) {
+          console.log(`  Failed: ${entry.idempotencyKey} — ${entry.error ?? 'unknown'}`);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Error: ${message}`);
+      process.exitCode = 1;
+    }
+  });
+
+const gitHook = capture
+  .command('git-hook')
+  .description('Safe git post-commit hook installer/uninstaller for best-effort local capture');
+
+gitHook
+  .command('install')
+  .description('Install or update a Rorca-managed post-commit hook')
+  .option('--repo-path <path>', 'Path to the git repository root', process.cwd())
+  .option('--workspace-id <id>', 'Rorca workspace ID (passed to the capture command)')
+  .option('--backend-url <url>', 'Rorca backend URL for the capture command', 'http://localhost:3030')
+  .option('--api-key <key>', 'API key for auth-gated deployments')
+  .option('--strict', 'Hook failures block commits (non-zero exit)')
+  .option('--json', 'Emit JSON output')
+  .action(async (options: { repoPath: string; workspaceId?: string; backendUrl: string; apiKey?: string; strict?: boolean; json?: boolean }) => {
+    try {
+      let extraArgs = `--workspace-path ${options.repoPath} --backend-url ${options.backendUrl}`;
+      if (options.workspaceId) {
+        extraArgs += ` --workspace-id ${options.workspaceId}`;
+      }
+      if (options.apiKey) {
+        extraArgs += ` --api-key ${options.apiKey}`;
+      }
+
+      const result = installHook({
+        repoPath: options.repoPath,
+        extraArgs,
+        strict: Boolean(options.strict),
+      });
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        const verb = result.action === 'updated' ? 'Updated' : 'Installed';
+        console.log(`${green('✓')} ${verb} post-commit hook at ${result.hookPath}`);
+        if (result.hadExistingHook) {
+          console.log(`${dim('  Existing hook preserved and chained.')}`);
+        }
+        if (options.strict) {
+          console.log(`${yellow('  Strict mode enabled — capture failures will block commits.')}`);
+        } else {
+          console.log(`${dim('  Best-effort mode — capture failures will not block commits.')}`);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Error: ${message}`);
+      process.exitCode = 1;
+    }
+  });
+
+gitHook
+  .command('uninstall')
+  .description('Remove the Rorca-managed post-commit hook and restore previous state')
+  .option('--repo-path <path>', 'Path to the git repository root', process.cwd())
+  .option('--json', 'Emit JSON output')
+  .action(async (options: { repoPath: string; json?: boolean }) => {
+    try {
+      const result = uninstallHook({ repoPath: options.repoPath });
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        if (result.action === 'not-installed') {
+          console.log(`${yellow('⚠')} No Rorca hook found at ${result.hookPath}`);
+        } else {
+          console.log(`${green('✓')} Uninstalled Rorca post-commit hook from ${result.hookPath}`);
+          if (result.hadExistingHook) {
+            console.log(`${dim('  Previous hook content restored.')}`);
+          }
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Error: ${message}`);
+      process.exitCode = 1;
+    }
+  });
+
+gitHook
+  .command('status')
+  .description('Check if a Rorca post-commit hook is installed')
+  .option('--repo-path <path>', 'Path to the git repository root', process.cwd())
+  .option('--json', 'Emit JSON output')
+  .action(async (options: { repoPath: string; json?: boolean }) => {
+    try {
+      const installed = isHookInstalled(options.repoPath);
+      const content = installed ? readHookContent(options.repoPath) : null;
+
+      if (options.json) {
+        console.log(JSON.stringify({ installed, hookPath: `${options.repoPath}/.git/hooks/post-commit`, content }, null, 2));
+      } else {
+        if (installed) {
+          console.log(`${green('✓')} Rorca post-commit hook is installed`);
+        } else {
+          console.log(`Rorca post-commit hook is not installed`);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Error: ${message}`);
+      process.exitCode = 1;
+    }
   });
 
 const db = program.command('db').description('Manage the Docker Postgres sidecar');

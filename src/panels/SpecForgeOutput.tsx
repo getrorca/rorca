@@ -70,6 +70,18 @@ export interface ContextSummary {
   };
   /** CU-004: Predicted injected file paths from context-router (up to 30 paths) */
   predictedFiles?: string[];
+  /** US-022: Composer-specific metadata */
+  composedAt?: string;
+  briefHash?: string;
+  composerDegraded?: boolean;
+  composerDegradationReasons?: string[];
+  composerTraceIds?: string[];
+  composerSections?: Array<{
+    section: string;
+    itemCount: number;
+    tokenBudget: number;
+    tokensUsed: number;
+  }>;
 }
 
 export interface GeneratedSpec {

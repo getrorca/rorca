@@ -47,7 +47,7 @@ export function EngineSelector({ value, onChange, engineStatus }: EngineSelector
     // Only fetch if no engineStatus prop is provided
     if (engineStatus !== undefined) return;
 
-    apiFetch<HealthResponse>('/api/health', { silent: true })
+    apiFetch<HealthResponse>('/api/health/detailed', { silent: true })
       .then((data) => {
         if (data.engines) {
           setFetchedStatus({

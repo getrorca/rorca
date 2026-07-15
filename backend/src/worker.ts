@@ -56,15 +56,17 @@ import { initDb, query, queryOne, execute, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
+import { registerHydrationWorker } from './lib/hydration-worker';
 import { registerContextCaptureHandlers } from './lib/context-distillation';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { advanceQueue } from './lib/run-queue';
 import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
-import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
+import { replayFallbackResults } from './lib/fallback-replay';
+import { isPtyTerminalMode } from './lib/terminal-mode';
 import { prepareRunSpecSnapshot } from './lib/run-spec-snapshot';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 
@@ -828,31 +830,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
-    // External Pi orchestration is only for local-user runner jobs. Remote Rorca
-    // jobs must be executed by this worker; otherwise the worker consumes the
-    // pg-boss job and leaves pipeline_runs stuck in status='queued'.
-    const payloadExecutionEnvironment = (payload as PipelineRunJobPayloadType & { executionEnvironment?: string }).executionEnvironment;
-    if (
-      payload.agent === 'pi'
-      && payloadExecutionEnvironment === 'local-user'
-      && isPiExternalOrchestrationEnabled()
-    ) {
-      const runRow = await queryOne<{ workspace_id: string }>(
-        'SELECT workspace_id FROM pipeline_runs WHERE id = $1',
-        [payload.runId],
+    // Local-user jobs belong to the signed local runner, never this remote worker.
+    if (executionEnvironment !== 'remote-rorca') {
+      logger.error({ jobId, runId, executionEnvironment }, '[worker] unsupported execution environment reached remote worker');
+      await execute(
+        `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = $2 WHERE id = $1`,
+        [runId, `unsupported_execution_environment:${executionEnvironment}`],
       );
-      const workspaceId = runRow?.workspace_id;
-      if (workspaceId !== undefined) {
-        await emitWalEvent('pi_native_run_pending', workspaceId, {
-          run_id: payload.runId,
-          spec_path: payload.specPath,
-          model: payload.model ?? null,
-          execution_environment: payloadExecutionEnvironment,
-        });
-      }
-      await getBoss().complete('pipeline:run', job.id);
       return;
     }
 
@@ -936,7 +922,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     // queue/result consumers and must not be used by UI to infer phase.
     await transitionRunLifecycle(runId, 'starting', {
       owner: 'worker',
-      transport: terminalMode === 'pty' ? 'pty_pending' : 'pipe',
+      transport: isPtyTerminalMode(terminalMode) ? 'pty_pending' : 'pipe',
       process: 'launching',
     });
     // 2. Mark run as running — set worker_id so orphan sweep knows this run belongs to us
@@ -1055,7 +1041,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       env,
     });
 
-    if (terminalMode !== 'pty') {
+    if (!isPtyTerminalMode(terminalMode)) {
       await transitionRunLifecycle(runId, 'running', {
         owner: 'worker', transport: 'pipe', process: 'spawned', semantic: 'engine_started',
       });
@@ -1132,6 +1118,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     child.on('close', async () => {
       try {
         await flushPending();
+        // The engine flushes its bounded telemetry queue before process close.
+        // Replay its durable journal before deriving completion from DB state.
+        await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         const signal = capturedSignal;
@@ -1465,6 +1454,50 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
 // ── Job handler: pipeline:retry ───────────────────────────────────────────
 
+function collectStoriesFromSpec(specJson: any): any[] {
+  if (Array.isArray(specJson?.userStories)) return specJson.userStories;
+  if (Array.isArray(specJson?.phases)) {
+    return specJson.phases.flatMap((phase: { stories?: unknown[] }) => Array.isArray(phase.stories) ? phase.stories : []);
+  }
+  return [];
+}
+
+function syncRetrySpecPassesToOriginalSpec(params: {
+  retrySpecPath: string;
+  originalSpecPath: string;
+  storyIds: string[];
+}): { syncedStoryIds: string[]; remainingStoryIds: string[] } {
+  const retrySpecJson = JSON.parse(fs.readFileSync(params.retrySpecPath, 'utf8'));
+  const originalSpecJson = JSON.parse(fs.readFileSync(params.originalSpecPath, 'utf8'));
+  const retriedIds = new Set(params.storyIds);
+  const passedInRetry = new Set(
+    collectStoriesFromSpec(retrySpecJson)
+      .filter((story: any) => retriedIds.has(String(story.id)) && story.passes === true)
+      .map((story: any) => String(story.id)),
+  );
+
+  const syncedStoryIds: string[] = [];
+  let changed = false;
+  for (const story of collectStoriesFromSpec(originalSpecJson)) {
+    const storyId = String(story.id);
+    if (passedInRetry.has(storyId) && story.passes !== true) {
+      story.passes = true;
+      syncedStoryIds.push(storyId);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(params.originalSpecPath, JSON.stringify(originalSpecJson, null, 2), 'utf8');
+  }
+
+  const remainingStoryIds = collectStoriesFromSpec(originalSpecJson)
+    .filter((story: any) => story.excluded !== true && story.passes !== true)
+    .map((story: any) => String(story.id));
+
+  return { syncedStoryIds, remainingStoryIds };
+}
+
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
@@ -1481,7 +1514,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     const {
       runId,
       originalRunId,
+      storyIds,
       workspacePath,
+      specPath,
       retrySpecPath,
       agent,
       model,
@@ -1544,7 +1579,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     // 3. Retry runs use the same authoritative lifecycle as fresh runs.
     await transitionRunLifecycle(runId, 'starting', {
       owner: 'worker_retry',
-      transport: effectiveTerminalMode === 'pty' ? 'pty_pending' : 'pipe',
+      transport: isPtyTerminalMode(effectiveTerminalMode) ? 'pty_pending' : 'pipe',
       process: 'launching',
     });
     await execute(
@@ -1630,7 +1665,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       env,
     });
 
-    if (effectiveTerminalMode !== 'pty') {
+    if (!isPtyTerminalMode(effectiveTerminalMode)) {
       await transitionRunLifecycle(runId, 'running', {
         owner: 'worker_retry', transport: 'pipe', process: 'spawned', semantic: 'engine_started',
       });
@@ -1686,6 +1721,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       child.on('close', async () => {
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
         await flushPending();
+        await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -1696,6 +1732,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         // Derive the retry run's terminal status from durable story results.
         // The temporary retry spec is run-owned; never mutate the approved source spec.
         let finalStatus: string;
+        let syncedStoryIds: string[] = [];
+        let remainingStoryIds: string[] = [];
+        let retrySpecSyncSucceeded = false;
         if (wasCancelled) {
           finalStatus = 'cancelled';
         } else {
@@ -1711,9 +1750,30 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           } catch {
             finalStatus = code === 0 ? 'done' : 'failed';
           }
+
+          if (finalStatus === 'done') {
+            try {
+              const syncResult = syncRetrySpecPassesToOriginalSpec({
+                retrySpecPath,
+                originalSpecPath: path.join(workspacePath, specPath),
+                storyIds,
+              });
+              syncedStoryIds = syncResult.syncedStoryIds;
+              remainingStoryIds = syncResult.remainingStoryIds;
+              retrySpecSyncSucceeded = true;
+            } catch (syncErr: any) {
+              logger.warn({ err: syncErr, runId, retrySpecPath, specPath }, '[worker] Failed to sync retry spec pass flags back to original spec');
+            }
+          }
         }
 
-        logger.info({ runId, code, finalStatus, wasCancelled }, '[worker] retry execution-engine exited');
+        const retryScopeComplete = !wasCancelled && finalStatus === 'done';
+        const fullSpecComplete = retryScopeComplete && retrySpecSyncSucceeded && remainingStoryIds.length === 0;
+        const retrySummary = retryScopeComplete && !fullSpecComplete
+          ? `retry_scope_passed_remaining_stories:${remainingStoryIds.join(',')}`
+          : null;
+
+        logger.info({ runId, code, finalStatus, wasCancelled, retryScopeComplete, fullSpecComplete, remainingStoryIds }, '[worker] retry execution-engine exited');
         await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : 'validating', {
           owner: 'worker_retry', process: 'exited', exitCode: code, semantic: 'engine_exit_observed',
         });
@@ -1729,8 +1789,8 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         try {
           await execute(
-            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
-            [finalStatus, runId],
+            `UPDATE pipeline_runs SET status = $1, finished_at = NOW(), summary = COALESCE($3, summary) WHERE id = $2`,
+            [finalStatus, runId, retrySummary],
           );
 
           await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (finalStatus === 'done' ? 'finished' : 'failed'), {
@@ -1749,6 +1809,11 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
               status: finalStatus,
               exit_code: code,
               source: 'worker_retry',
+              retry_scope_complete: retryScopeComplete,
+              full_spec_complete: fullSpecComplete,
+              synced_story_ids: syncedStoryIds,
+              remaining_story_ids: remainingStoryIds,
+              ...(retrySummary ? { summary: retrySummary } : {}),
             });
           }
         } catch (err) {
@@ -2986,8 +3051,9 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
-  await registerContextCaptureHandlers(boss);
   await registerSpecJobHandlers(boss);
+  await registerHydrationWorker(boss);
+  await registerContextCaptureHandlers(boss);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
   // If concurrency settings changed, hot-reload the pipeline:run and pipeline:retry subscriptions.
