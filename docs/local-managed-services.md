@@ -27,8 +27,11 @@ node scripts/rorca-managed-services.mjs uninstall
 
 The helper renders and validates these user LaunchAgents. The cross-service,
 read-only login gate and operator-approved reboot smoke procedure are in
-[`always-on-login-readiness.md`](./always-on-login-readiness.md).
-
+[`always-on-login-readiness.md`](./always-on-login-readiness.md). **Warning:**
+the smoke's `reboot-now` step is destructive and invokes privileged shutdown;
+arming is not reboot consent. Use only the generated arm-ID-bound command after
+a separate interactive review. Never delegate it to an agent or unattended
+shell.
 
 - `~/Library/LaunchAgents/com.rorca.backend.rorca.plist`
 - `~/Library/LaunchAgents/com.rorca.worker.rorca.plist`
