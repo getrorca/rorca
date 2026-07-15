@@ -13,7 +13,7 @@ const artifacts = path.join(tempRoot, 'artifacts');
 mkdirSync(artifacts, { recursive: true });
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: 'utf8', ...options });
+  const result = spawnSync(command, args, { encoding: 'utf8', shell: process.platform === 'win32' && command.endsWith('.cmd'), ...options });
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed (${result.status})\n${result.stdout || ''}\n${result.stderr || ''}`);
   return result;
 }
@@ -62,6 +62,7 @@ const server = http.createServer((request, response) => {
 });
 
 try {
+  run(npm, ['run', 'build:capture'], { cwd: repoRoot });
   const dryPack = npmJson(['pack', '--dry-run', '--ignore-scripts', '--json'])[0];
   const files = new Map(dryPack.files.map((file) => [file.path, file]));
   const required = [
@@ -81,7 +82,7 @@ try {
     'LICENSE',
   ];
   for (const file of required) assert(files.has(file), `packed artifact is missing ${file}`);
-  assert(![...files.keys()].some((file) => file.includes('packages/rorca-capture/src/__tests__')), 'capture source tests must not ship');
+  assert(![...files.keys()].some((file) => file.includes('packages/rorca-capture/src/__tests__') || file.includes('packages/rorca-capture/dist/__tests__')), 'capture tests must not ship');
   if (process.platform !== 'win32') assert.equal(files.get('packages/rorca-capture/dist/cli.js').mode & 0o111, 0o111, 'capture CLI must be executable');
   assert.equal(files.get('scripts/install.sh').mode & 0o111, 0o111, 'POSIX installer must be executable');
 

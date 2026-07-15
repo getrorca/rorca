@@ -45,7 +45,7 @@
     "start": "node cli.js start",
     "reconcile": "npm --prefix backend run reconcile --",
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
-    "prepack": "npm run build:package",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build",
     "test:e2e:first-run": "npx tsx test/e2e/first-run.test.ts",
     "auth:test": "npx playwright test tests/auth.spec.ts"

@@ -9,9 +9,9 @@ login, logout, reboot, or an OS update.
 
 `npm pack` must include:
 
-- executable `bin/rorca-capture.js` and the `rorca-capture` npm bin mapping;
-- capture bootstrap, shell, service, API, and type JavaScript plus their
-  TypeScript sources under `packages/rorca-pi-extension/`;
+- executable `packages/rorca-capture/dist/cli.js` and the `rorca-capture` npm bin mapping;
+- canonical compiled capture bootstrap, shell, service, API, queue, and secure
+  filesystem runtime under `packages/rorca-capture/dist/` (without test files);
 - canonical runtime safety code at `backend/src/lib/context-safety.js`;
 - backend compiled output and all PostgreSQL migrations, including context
   capture controls/event/candidate migrations;
@@ -57,6 +57,8 @@ code from the checkout after packing.
 
 The CI jobs are non-mutating by design. The final column remains a manual release
 blocker until evidence from the target host is attached to a release checklist.
+This is a **required real-host gate**: render checks do not prove login or reboot
+survival, and parser success is not Task Scheduler execution evidence.
 
 ## Install
 
@@ -131,7 +133,7 @@ npm run test:capture-platform
 npm run test:pi-extension
 npm run typecheck
 npm run build
-node --check bin/rorca-capture.js
+node --check packages/rorca-capture/dist/cli.js
 node --check scripts/test-packed-capture-lifecycle.mjs
 node --check scripts/capture-platform-smoke.mjs
 sh -n scripts/install.sh

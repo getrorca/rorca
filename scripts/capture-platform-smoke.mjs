@@ -12,7 +12,7 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'rorca platform contract '));
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: 'utf8', ...options });
+  const result = spawnSync(command, args, { encoding: 'utf8', shell: process.platform === 'win32' && command.endsWith('.cmd'), ...options });
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed\n${result.stdout || ''}\n${result.stderr || ''}`);
   return result;
 }
@@ -20,6 +20,7 @@ function run(command, args, options = {}) {
 async function cleanPackageRoot() {
   const packageRootIndex = process.argv.indexOf('--package-root');
   if (packageRootIndex >= 0) return path.resolve(process.argv[packageRootIndex + 1]);
+  run(npm, ['run', 'build:capture'], { cwd: repoRoot });
   const output = JSON.parse(run(npm, ['pack', '--ignore-scripts', '--json', '--pack-destination', tempRoot], { cwd: repoRoot }).stdout)[0];
   run('tar', ['-xzf', path.join(tempRoot, output.filename), '-C', tempRoot]);
   return path.join(tempRoot, 'package');
