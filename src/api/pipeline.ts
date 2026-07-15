@@ -140,15 +140,37 @@ export function resumeRun(
   });
 }
 
-export function retryRun(
-  runId: number,
-  body?: { storyIds?: string[]; workspaceId?: string },
-  opts?: ApiOptions,
-): Promise<{ ok: true; runId: number; originalRunId: number; retriedStories: string[]; copiedStories: string[] }> {
+export interface RetryPreviewResponse {
+  ok: true;
+  preview: {
+    previewHash: string;
+    requiresApproval: boolean;
+    forceSequential: boolean;
+    scope: Record<'requested' | 'requiredDependency' | 'copiedPassed' | 'skipped' | 'executable' | 'remaining' | 'excluded', Array<{ storyId: string; reasonCode: string }>>;
+  };
+  worktreePreflight: { classification: string; ok: boolean; detail?: string } | null;
+}
+
+export function previewRetry(runId: number, body?: { storyIds?: string[]; forceSequential?: boolean }, opts?: ApiOptions): Promise<RetryPreviewResponse> {
   return apiFetch(`/api/pipeline/runs/${runId}/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+    body: JSON.stringify({ ...(body ?? {}), safeMode: true }),
+    signal: opts?.signal,
+  });
+}
+
+export async function retryRun(
+  runId: number,
+  body?: { storyIds?: string[]; workspaceId?: string; forceSequential?: boolean },
+  opts?: ApiOptions,
+): Promise<{ ok: true; runId: number; originalRunId: number; retriedStories: Array<{ storyId: string; attempt: number }>; copiedStories: string[] }> {
+  const preview = await previewRetry(runId, body, opts);
+  if (preview.preview.requiresApproval) throw new Error('Retry requires explicit operator approval');
+  return apiFetch(`/api/pipeline/runs/${runId}/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...(body ?? {}), safeMode: true, forceSequential: preview.preview.forceSequential, previewHash: preview.preview.previewHash }),
     signal: opts?.signal,
   });
 }

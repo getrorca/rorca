@@ -68,6 +68,7 @@ import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import { replayFallbackResults } from './lib/fallback-replay';
+import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -413,7 +414,7 @@ async function emitWalEvent(
       });
     }
   } catch (err) {
-    logger.warn({ err, eventType }, '[worker] Failed to emit WAL event');
+    logger.warn({ err, eventType }, '[worker] Failed to emit WAL event through /api/wal');
   }
 }
 
@@ -1503,30 +1504,19 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
     const payload: PipelineRetryJobPayloadType = parsed.data;
     const {
-      runId,
-      originalRunId,
-      workspacePath,
-      retrySpecPath,
-      agent,
-      model,
-      worktreePath,
-      sequenceOffset,
-      executionManifestPath,
-      envOverrides,
-      includeGraph,
-      terminalMode: payloadTerminalMode,
-      thinkingEnabled,
-      thinkingBudget,
-      effortLevel,
-      reasoningEffort,
+      runId, originalRunId, workspacePath, retrySpecPath, agent, model, worktreePath,
+      sequenceOffset, executionManifestPath, envOverrides, includeGraph,
+      terminalMode: payloadTerminalMode, thinkingEnabled, thinkingBudget, effortLevel,
+      reasoningEffort, previewHash, approvedPreview: approvedPreviewRaw, generatedPlanHash,
     } = payload;
+    const approvedPreview = approvedPreviewRaw as unknown as RetryPreviewPacket;
 
     // Effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
 
     // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null }>(
-      'SELECT workspace_id, parallelism, terminal_mode, branch_name FROM pipeline_runs WHERE id = $1',
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string }>(
+      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
@@ -1535,12 +1525,26 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
     const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
+    if (runRow.status === 'cancelled') {
+      logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
+      return;
+    }
+    const previewRow = await queryOne<{ status: string }>(
+      `SELECT status FROM pipeline_retry_previews WHERE preview_hash = $1 AND retry_run_id = $2`,
+      [previewHash, runId],
+    );
+    if (previewRow?.status !== 'dispatched' || !verifyRetryPreview(approvedPreview)) {
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_preview_not_authorized' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'preview_not_authorized' });
+      return;
+    }
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
         workspacePath,
         worktreePath,
         expectedBranchName: branchName,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
       });
       if (!worktreeValidation.ok) {
         logger.error(
@@ -1561,6 +1565,30 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         });
         return;
       }
+    }
+
+    // Re-read the generated retry spec after queue handoff and compare its
+    // executable plan before marking the run started. A prompt/model cannot
+    // authorize work absent from this frozen preview.
+    if (!fs.existsSync(retrySpecPath)) {
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_spec_missing' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'retry_spec_missing' });
+      return;
+    }
+    const actualRetrySpec = JSON.parse(fs.readFileSync(retrySpecPath, 'utf8')) as Record<string, unknown>;
+    const planComparison = compareRetryPlanToPreview(actualRetrySpec, approvedPreview);
+    if (!planComparison.matches || planComparison.scopeHash !== generatedPlanHash || retryHash(approvedPreview.scope.executable.map((entry) => entry.storyId)) !== payload.scopeHash) {
+      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'worker_scope_mismatch' WHERE preview_hash = $1`, [previewHash]);
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_scope_mismatch' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, {
+        run_id: runId,
+        original_run_id: originalRunId,
+        preview_hash: previewHash,
+        approved_scope: planComparison.approved,
+        actual_scope: planComparison.actual,
+        reason: 'worker_scope_mismatch',
+      });
+      return;
     }
 
     // 3. Mark the new run as running — set worker_id so orphan sweep knows this run belongs to us
