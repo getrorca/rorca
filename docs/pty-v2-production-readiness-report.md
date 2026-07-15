@@ -82,8 +82,9 @@ Command: `cd backend && npm run soak:pty`, with both database URLs verified as `
 
 | Command | Result |
 | --- | --- |
-| `npm run typecheck` | PASS — frontend, backend, Pi extension, public contract |
-| `npm run build` | PASS — frontend production bundle, backend TypeScript, bin TypeScript |
+| Fresh detached checkout: `npm ci` | PASS — backend checkout dependencies retained; node-pty verification ran during install |
+| Fresh detached checkout: `npm run typecheck` | PASS — frontend, backend, Pi extension, public contract |
+| Fresh detached checkout: `npm run build` | PASS — frontend production bundle, backend TypeScript, bin TypeScript |
 | `npm run lint` | PASS — 0 errors, 68 warnings |
 | `cd backend && npm run lint` | PASS — 0 errors, 41 warnings |
 | `npm run check:contract` | PASS against merge base; contract 2.0.0 |
@@ -93,7 +94,7 @@ Command: `cd backend && npm run soak:pty`, with both database URLs verified as `
 | `npm run split:check -- --allow-review` | PASS — 54 shareable, 3 review, 0 blocked, 0 unknown |
 | `npm audit --omit=dev --audit-level=high` | PASS — 0 vulnerabilities |
 | `cd backend && npm audit --omit=dev --audit-level=high` | PASS — 0 vulnerabilities |
-| `npm pack --pack-destination /tmp/ptyv2-pack --json` | PASS — 911 entries, 3,153,965-byte tarball |
+| `npm pack --pack-destination /tmp/ptyv2-pack-final --json` | PASS — 912 entries, 3,154,522-byte tarball |
 | Package content checks | PASS — verifier, migration, CLI, and frontend bundle included |
 | `git diff --check` | PASS |
 
