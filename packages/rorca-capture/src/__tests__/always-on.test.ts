@@ -50,7 +50,8 @@ describe('always-on capture sidecar integration', () => {
 
       expect(payload.command_hash).toMatch(/^sha256:/);
       expect(JSON.stringify(envelope)).not.toContain('super-secret-value');
-      expect(payload.command_summary).toBe(policyMode === 'metadata-only' ? null : expect.any(String));
+      if (policyMode === 'metadata-only') expect(payload.command_summary).toBeNull();
+      else expect(payload.command_summary).toEqual(expect.any(String));
       expect(JSON.stringify(envelope)).not.toContain('stdout');
     },
   );

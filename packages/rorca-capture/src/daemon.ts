@@ -497,8 +497,23 @@ export function getWorkspaceCaptureStatusPath(repoPath: string): string {
 }
 
 function writeWorkspaceCaptureStatus(repoPath: string, status: CaptureDaemonStatusFile): void {
+  let capturePolicy: { mode: string; policyMode: string; paused: boolean } = { mode: "metadata-only", policyMode: "metadata-only", paused: false };
+  try {
+    const local = JSON.parse(readFileSync(path.join(repoPath, ".rorca", "capture", "policy.json"), "utf8")) as { policyMode?: string; paused?: boolean };
+    const policyMode = typeof local.policyMode === "string" ? local.policyMode : "metadata-only";
+    capturePolicy = { mode: policyMode, policyMode, paused: local.paused === true };
+  } catch {
+    // Setup is optional; retain the safe metadata-only status default.
+  }
   writeJsonAtomic(getWorkspaceCaptureStatusPath(repoPath), {
     ...status,
+    capturePolicy,
+    sourceCapabilities: {
+      repoDaemon: { status: "active" },
+      gitHook: { status: status.hookState.managed ? "active" : "degraded", reason: status.hookState.managed ? undefined : "managed_hook_not_installed" },
+      shellIntegration: { status: "degraded", reason: "shell_host_status_not_observable" },
+      vscodeExtension: { status: "degraded", reason: "extension_host_optional", fallbackSources: ["repoDaemon", "gitHook", "shellIntegration"] },
+    },
     processHealth: { manager: "local", running: status.running, pid: status.pid },
     lastFlush: status.lastFlush?.finishedAt ?? null,
     lastScan: status.lastScan?.finishedAt ?? null,

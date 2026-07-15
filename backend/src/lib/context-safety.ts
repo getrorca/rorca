@@ -1167,7 +1167,7 @@ export const DEFAULT_CONTEXT_REDACTION_PATTERNS: ContextRedactionPattern[] = [
   },
   {
     name: 'cli-secret-argument',
-    pattern: "(?:--?(?:api[-_]?key|token|secret|password|key)|(?:api[-_]?key|token|secret|password|key))\\s+(?:=\\s*)?[\"\\']?[^\"\\'\\s]+",
+    pattern: "--?(?:api[-_]?key|token|secret|password|key)\\s+(?:=\\s*)?[\"\\']?[^\"\\'\\s]+",
     replacement: '[REDACTED_SECRET_ARGUMENT]',
   },
   {
@@ -1664,6 +1664,11 @@ export type CaptureSafetyReport = {
   regulatedSignals: string[];
 };
 
+export type SanitizedCapturePayload = {
+  payload: unknown;
+  safety: CaptureSafetyReport;
+};
+
 export type RedactionDiagnostics = {
   redactionCount: number;
   ignoredPathCount: number;
@@ -1721,7 +1726,7 @@ export function hashCaptureContent(value: unknown): string {
 export function sanitizeCapturePayload(
   input: unknown,
   policy: CapturePolicy = DEFAULT_CAPTURE_POLICY,
-): { payload: unknown; safety: CaptureSafetyReport } {
+): SanitizedCapturePayload {
   const diagnostics = analyzeContextSafety(input, {});
   const redacted = redactContextPayload(input, {}, {});
   let payload = redactCaptureRawFields(redacted, policy);

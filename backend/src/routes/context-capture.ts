@@ -285,7 +285,7 @@ router.post('/bootstrap/verify', async (req, res) => {
   if (workspacePath !== path.resolve(workspace.path)) throw new ValidationError('workspacePath does not match registered workspace path');
   if (!fs.existsSync(workspacePath)) throw new ValidationError('Registered workspace path does not exist');
   const expected = {
-    queuePath: path.join(workspacePath, '.rorca', 'capture', 'queue'),
+    queuePath: path.join(workspacePath, '.rorca-capture-queue.jsonl'),
     redactionConfigPath: path.join(workspacePath, '.rorca', 'capture', 'redaction.json'),
     captureIgnorePath: path.join(workspacePath, '.rorca-captureignore'),
   };
@@ -559,6 +559,14 @@ router.post('/imports/:workspaceId', async (req, res) => {
  *     x-rorca-rationale: "Distillation and auto-approval settings are operator-only automation controls."
  *     responses:
  *       200: { description: Distillation settings }
+ */
+router.get('/distillation/:workspaceId/config', async (req, res) => {
+  const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
+  res.json({ ok: true, workspaceId: workspace.id, settings: await getMemoryDistillationSettings(workspace.id), candidateCounts: await getMemoryCandidateCounts(workspace.id) });
+});
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/config:
  *   patch:
  *     tags: [Context Capture]
  *     summary: Update distillation settings
@@ -567,10 +575,6 @@ router.post('/imports/:workspaceId', async (req, res) => {
  *     responses:
  *       200: { description: Updated distillation settings }
  */
-router.get('/distillation/:workspaceId/config', async (req, res) => {
-  const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
-  res.json({ ok: true, workspaceId: workspace.id, settings: await getMemoryDistillationSettings(workspace.id), candidateCounts: await getMemoryCandidateCounts(workspace.id) });
-});
 router.patch('/distillation/:workspaceId/config', async (req, res) => {
   const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
   const mode = req.body.mode as MemoryDistillationMode | undefined;

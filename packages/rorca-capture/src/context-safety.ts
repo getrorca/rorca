@@ -71,7 +71,7 @@ export const DEFAULT_CONTEXT_REDACTION_PATTERNS: ContextRedactionPattern[] = [
   },
   {
     name: 'cli-secret-argument',
-    pattern: "(?:--?(?:api[-_]?key|token|secret|password|key)|(?:api[-_]?key|token|secret|password|key))\\s+(?:=\\s*)?[\"\\']?[^\"\\'\\s]+",
+    pattern: "--?(?:api[-_]?key|token|secret|password|key)\\s+(?:=\\s*)?[\"\\']?[^\"\\'\\s]+",
     replacement: '[REDACTED_SECRET_ARGUMENT]',
   },
   {

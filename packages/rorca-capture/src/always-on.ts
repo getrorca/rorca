@@ -101,11 +101,11 @@ export function setupAlwaysOnCapture(input: {
   const { workspace, apiUrl, policyMode } = input;
   const dryRun = input.dryRun === true;
   const captureDir = path.join(workspace.path, '.rorca', 'capture');
-  const queueDir = path.join(captureDir, 'queue');
+  const queuePath = path.join(workspace.path, '.rorca-capture-queue.jsonl');
   const installed: string[] = [];
   const skipped: string[] = [];
   const degraded: Array<{ path: string; reason: string }> = [];
-  if (!dryRun) mkdirSync(queueDir, { recursive: true });
+  if (!dryRun) mkdirSync(captureDir, { recursive: true });
 
   const files: Array<{ path: string; content: string; executable?: boolean }> = [
     {
@@ -114,7 +114,7 @@ export function setupAlwaysOnCapture(input: {
     },
     {
       path: path.join(captureDir, 'sidecar.json'),
-      content: managedJson({ workspaceId: workspace.id, workspacePath: workspace.path, apiUrl, endpoint: '/api/context-capture/events', apiOnly: true, policyMode, queuePath: queueDir, sources: ['repoDaemon', 'gitHook', 'shellIntegration', 'vscodeExtension', 'agentAdapter', 'mcpSlashCommand', 'ciPrIngestion', 'externalImport'] }),
+      content: managedJson({ workspaceId: workspace.id, workspacePath: workspace.path, apiUrl, endpoint: '/api/context-capture/events', apiOnly: true, policyMode, queuePath, sources: ['repoDaemon', 'gitHook', 'shellIntegration', 'vscodeExtension', 'agentAdapter', 'mcpSlashCommand', 'ciPrIngestion', 'externalImport'] }),
     },
     {
       path: path.join(captureDir, 'redaction.json'),
@@ -140,9 +140,9 @@ export function setupAlwaysOnCapture(input: {
   ];
 
   const ignorePath = path.join(workspace.path, '.rorca-captureignore');
-  files.push({ path: ignorePath, content: managedText('node_modules/\ndist/\nbuild/\n.env\n.env.*\n*.pem\n*.key\n.rorca/capture/queue/\n') });
+  files.push({ path: ignorePath, content: managedText('node_modules/\ndist/\nbuild/\n.env\n.env.*\n*.pem\n*.key\n.rorca-capture-queue.jsonl\n') });
   const manifestPath = path.join(captureDir, 'uninstall.json');
-  files.push({ path: manifestPath, content: managedJson({ workspaceId: workspace.id, removes: files.map((file) => file.path), queuePath: queueDir }) });
+  files.push({ path: manifestPath, content: managedJson({ workspaceId: workspace.id, removes: files.map((file) => file.path), queuePath }) });
 
   for (const file of files) {
     const outcome = writeManaged(file.path, file.content, dryRun, file.executable);

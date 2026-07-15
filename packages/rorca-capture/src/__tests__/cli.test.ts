@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { HELP_TEXT, runCli } from "../cli.js";
-import { buildCaptureStatus, formatStatusText } from "../status.js";
+import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "../status.js";
 import { resolveCaptureConfig } from "../config.js";
 
 function tempRepo(): string {
@@ -163,7 +163,7 @@ describe("rorca-capture CLI", () => {
     expect(output.stdout).toContain("Queue path:");
     expect(output.stdout).toContain("Capture ignore:");
     expect(output.stdout).toContain("API-only: yes");
-    expect(output.stdout).toContain("Commands: remember, import-duckbrain, ingest-pr, ingest-commit, ingest-git, install-hooks, daemon, status, flush");
+    expect(output.stdout).toContain(`Commands: ${MVP_COMMANDS.join(", ")}`);
   });
 
   it("runs daemon scan/status/stop through the CLI with configurable bounds", async () => {
@@ -259,7 +259,7 @@ describe("rorca-capture CLI", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(output.stdout) as { ok: boolean; workspaceId: string; apiOnly: boolean; commands: string[] };
     expect(parsed).toMatchObject({ ok: true, workspaceId: "ws-2", apiOnly: true });
-    expect(parsed.commands).toEqual(["remember", "import-duckbrain", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"]);
+    expect(parsed.commands).toEqual(MVP_COMMANDS);
   });
 
   it("formats status text without invoking the API", () => {

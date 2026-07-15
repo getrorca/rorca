@@ -586,7 +586,7 @@ async function runAlwaysOnSetup(parsed: ParsedArgs, deps: CliDeps, io: CliIO): P
   const policyMode = parseCapturePolicyMode(policyValue);
   const runtime = await resolveRuntime(parsed, deps);
   const captureDir = path.join(runtime.workspace.path, ".rorca", "capture");
-  const queuePath = path.join(captureDir, "queue");
+  const queuePath = path.join(runtime.workspace.path, ".rorca-capture-queue.jsonl");
 
   await runtime.client.post("/api/context-capture/bootstrap/verify", {
     workspaceId: runtime.workspace.id,
