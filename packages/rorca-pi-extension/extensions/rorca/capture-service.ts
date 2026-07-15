@@ -102,12 +102,23 @@ export function resolveCaptureServicePaths(workspace: Workspace, platform: Captu
   };
 }
 
-export function renderLaunchdPlist(input: { workspace: Workspace; command: string; nodePath?: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
+export function renderLaunchdPlist(input: { workspace: Workspace; command: string; nodePath?: string; homeDir?: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
   const config = defaultCaptureServiceConfig(input.config);
   const paths = input.paths ?? resolveCaptureServicePaths(input.workspace, "darwin");
   const label = `com.rorca.capture.${input.workspace.id}`;
   const [program, ...commandPrefix] = captureCommandArgs(input.command, input.nodePath);
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${escapeXml(label)}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${escapeXml(program)}</string>\n${commandPrefix.map((argument) => `    <string>${escapeXml(argument)}</string>\n`).join('')}    <string>daemon</string>\n    <string>--workspace-id</string>\n    <string>${escapeXml(input.workspace.id)}</string>\n    <string>--cwd</string>\n    <string>${escapeXml(input.workspace.path)}</string>\n    <string>--scan-interval-ms</string>\n    <string>${config.scanIntervalMs}</string>\n    <string>--max-commits-per-scan</string>\n    <string>${config.maxCommitsPerScan}</string>\n    <string>--max-concurrency</string>\n    <string>${config.maxConcurrency}</string>\n    <string>--queue-warn-size</string>\n    <string>${config.queueWarnSize}</string>\n    <string>--queue-max-size</string>\n    <string>${config.queueMaxSize}</string>\n  </array>\n  <key>WorkingDirectory</key>\n  <string>${escapeXml(input.workspace.path)}</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict><key>Crashed</key><true/></dict>\n  <key>StandardOutPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n  <key>StandardErrorPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n</dict>\n</plist>\n`;
+  const homeDir = input.homeDir ?? os.homedir();
+  const servicePath = Array.from(new Set([
+    path.dirname(program),
+    path.join(homeDir, ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ])).join(":");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${escapeXml(label)}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${escapeXml(program)}</string>\n${commandPrefix.map((argument) => `    <string>${escapeXml(argument)}</string>\n`).join('')}    <string>daemon</string>\n    <string>--workspace-id</string>\n    <string>${escapeXml(input.workspace.id)}</string>\n    <string>--cwd</string>\n    <string>${escapeXml(input.workspace.path)}</string>\n    <string>--scan-interval-ms</string>\n    <string>${config.scanIntervalMs}</string>\n    <string>--max-commits-per-scan</string>\n    <string>${config.maxCommitsPerScan}</string>\n    <string>--max-concurrency</string>\n    <string>${config.maxConcurrency}</string>\n    <string>--queue-warn-size</string>\n    <string>${config.queueWarnSize}</string>\n    <string>--queue-max-size</string>\n    <string>${config.queueMaxSize}</string>\n  </array>\n  <key>WorkingDirectory</key>\n  <string>${escapeXml(input.workspace.path)}</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>HOME</key>\n    <string>${escapeXml(homeDir)}</string>\n    <key>PATH</key>\n    <string>${escapeXml(servicePath)}</string>\n    <key>RORCA_CAPTURE_API_URL</key>\n    <string>${escapeXml(config.apiBaseUrl)}</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>PathState</key>\n    <dict>\n      <key>${escapeXml(input.command)}</key>\n      <true/>\n    </dict>\n  </dict>\n  <key>ThrottleInterval</key>\n  <integer>10</integer>\n  <key>ProcessType</key>\n  <string>Background</string>\n  <key>StandardOutPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n  <key>StandardErrorPath</key>\n  <string>${escapeXml(paths.logFile)}</string>\n</dict>\n</plist>\n`;
 }
 
 export function renderSystemdUserService(input: { workspace: Workspace; command: string; nodePath?: string; paths?: CaptureServicePaths; config?: Partial<CaptureServiceConfig> }): string {
@@ -148,12 +159,14 @@ export function runCaptureServiceLifecycle(input: { action: CaptureServiceAction
   const commands: string[] = [];
   if (!input.dryRun && input.action !== "status") mkdirSync(paths.captureDir, { recursive: true });
 
-  const run = (cmd: string, args: string[]) => {
+  const run = (cmd: string, args: string[], options: { allowFailure?: boolean } = {}) => {
     commands.push([cmd, ...args].join(" "));
     if (!input.dryRun) {
       const result = runner(cmd, args, { cwd: input.workspace.path, stdio: "pipe" });
-      if (result.error || result.status !== 0) throw new Error(`${cmd} ${args.join(" ")} failed`);
+      if (!options.allowFailure && (result.error || result.status !== 0)) throw new Error(`${cmd} ${args.join(" ")} failed`);
+      return result;
     }
+    return undefined;
   };
 
   if (input.action === "status") {
@@ -165,34 +178,52 @@ export function runCaptureServiceLifecycle(input: { action: CaptureServiceAction
       mkdirSync(paths.serviceDir, { recursive: true });
       writeFileSync(paths.serviceFile, renderServiceFile(platform, { workspace: input.workspace, command, nodePath: process.execPath, paths, config: input.config }), "utf8");
     }
-    if (platform === "darwin") run("launchctl", ["bootstrap", `gui/${process.getuid?.() ?? 501}`, paths.serviceFile]);
-    else if (platform === "linux") { run("systemctl", ["--user", "daemon-reload"]); run("systemctl", ["--user", "enable", serviceName]); }
+    if (platform === "darwin") {
+      const domain = `gui/${process.getuid?.() ?? 501}`;
+      const target = `${domain}/${serviceName}`;
+      // Installation is also the deterministic update path: unload an older
+      // in-memory definition if present, load the validated file, then demand
+      // an immediate start instead of waiting for the next login event.
+      run("launchctl", ["bootout", target], { allowFailure: true });
+      run("launchctl", ["bootstrap", domain, paths.serviceFile]);
+      run("launchctl", ["kickstart", "-k", target]);
+    } else if (platform === "linux") { run("systemctl", ["--user", "daemon-reload"]); run("systemctl", ["--user", "enable", serviceName]); }
     return { ok: true, action: input.action, platform, serviceFile: paths.serviceFile, commands, message: input.dryRun ? "Managed capture service would be installed." : platform === "win32" ? "Windows fallback script installed; register it with Task Scheduler or Startup." : "Managed capture service installed." };
   }
 
   if (input.action === "start") {
-    if (platform === "darwin") run("launchctl", ["kickstart", "-k", `gui/${process.getuid?.() ?? 501}/${serviceName}`]);
+    if (platform === "darwin") {
+      const domain = `gui/${process.getuid?.() ?? 501}`;
+      const target = `${domain}/${serviceName}`;
+      run("launchctl", ["bootstrap", domain, paths.serviceFile], { allowFailure: true });
+      run("launchctl", ["kickstart", "-k", target]);
+    }
     else if (platform === "linux") run("systemctl", ["--user", "start", serviceName]);
     else if (!input.dryRun) startFallbackProcess(input.workspace, command, input.config);
     return { ok: true, action: input.action, platform, serviceFile: paths.serviceFile, commands, message: "Managed capture service started." };
   }
 
   if (input.action === "stop") {
-    if (platform === "darwin") run("launchctl", ["kill", "TERM", `gui/${process.getuid?.() ?? 501}/${serviceName}`]);
+    if (platform === "darwin") run("launchctl", ["bootout", `gui/${process.getuid?.() ?? 501}/${serviceName}`], { allowFailure: true });
     else if (platform === "linux") run("systemctl", ["--user", "stop", serviceName]);
     else if (!input.dryRun) stopFallbackProcess(paths.pidFile);
     return { ok: true, action: input.action, platform, serviceFile: paths.serviceFile, commands, message: "Managed capture service stopped." };
   }
 
   if (input.action === "restart") {
-    if (platform === "darwin") run("launchctl", ["kickstart", "-k", `gui/${process.getuid?.() ?? 501}/${serviceName}`]);
+    if (platform === "darwin") {
+      const domain = `gui/${process.getuid?.() ?? 501}`;
+      const target = `${domain}/${serviceName}`;
+      run("launchctl", ["bootstrap", domain, paths.serviceFile], { allowFailure: true });
+      run("launchctl", ["kickstart", "-k", target]);
+    }
     else if (platform === "linux") run("systemctl", ["--user", "restart", serviceName]);
     else if (!input.dryRun) { stopFallbackProcess(paths.pidFile); startFallbackProcess(input.workspace, command, input.config); }
     return { ok: true, action: input.action, platform, serviceFile: paths.serviceFile, commands, message: "Managed capture service restarted. Restart after Rorca updates so stale daemon schemas are replaced." };
   }
 
   if (input.action === "uninstall") {
-    if (platform === "darwin") run("launchctl", ["bootout", `gui/${process.getuid?.() ?? 501}`, paths.serviceFile]);
+    if (platform === "darwin") run("launchctl", ["bootout", `gui/${process.getuid?.() ?? 501}/${serviceName}`], { allowFailure: true });
     else if (platform === "linux") { run("systemctl", ["--user", "stop", serviceName]); run("systemctl", ["--user", "disable", serviceName]); run("systemctl", ["--user", "daemon-reload"]); }
     else if (!input.dryRun) stopFallbackProcess(paths.pidFile);
     if (!input.dryRun && existsSync(paths.serviceFile)) rmSync(paths.serviceFile, { force: true });
@@ -253,6 +284,7 @@ export async function runManagedCaptureDaemon(input: { workspace: Workspace; con
     const localPolicy = readLocalCapturePolicy(paths.captureDir);
     if (!localPolicy.paused && localPolicy.policyMode !== 'off') {
       await scanRepository(input.workspace, paths, config, state, spawnSyncImpl, now, localPolicy.policyMode);
+      ingestGitHookSignals(input.workspace, paths, config, now, localPolicy.policyMode);
       await flushQueue(input.workspace, paths, config, state, fetchImpl, now);
     }
     writeState(paths.stateFile, state);
@@ -297,6 +329,34 @@ async function scanRepository(workspace: Workspace, paths: CaptureServicePaths, 
   state.lastScan = now().toISOString();
 }
 
+function ingestGitHookSignals(workspace: Workspace, paths: CaptureServicePaths, config: CaptureServiceConfig, now: () => Date, policyMode?: string): void {
+  const signalFile = path.join(paths.queuePath, "git-hook.ndjson");
+  const processingFile = path.join(paths.queuePath, "git-hook.processing.ndjson");
+
+  // Recover a batch left behind by a crash before moving newly appended signals.
+  // renameSync keeps hook appends in a fresh file while this bounded batch is read.
+  if (!existsSync(processingFile) && existsSync(signalFile)) renameSync(signalFile, processingFile);
+  if (!existsSync(processingFile)) return;
+
+  const lines = readFileSync(processingFile, "utf8").split("\n").filter(Boolean);
+  const hookEvents: QueuedEvent[] = [];
+  for (const line of lines) {
+    let signal: Record<string, unknown>;
+    try { signal = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    const gitSha = typeof signal.gitSha === "string" && /^[0-9a-f]{7,64}$/i.test(signal.gitSha) ? signal.gitSha : null;
+    const hook = typeof signal.hook === "string" && signal.hook.trim() ? signal.hook : "unknown";
+    const occurredAt = typeof signal.occurredAt === "string" && !Number.isNaN(Date.parse(signal.occurredAt)) ? new Date(signal.occurredAt).toISOString() : now().toISOString();
+    if (signal.workspaceId !== workspace.id || signal.source !== "gitHook" || !gitSha) continue;
+    hookEvents.push(redactedEvent(workspace.id, workspace.path, `git-hook:${hook}:${gitSha}`, occurredAt, {
+      commit: gitSha,
+      committedAt: occurredAt,
+      workspacePath: workspace.path,
+    }, policyMode, "gitHook"));
+  }
+  enqueueMany(paths.queuePath, hookEvents, config);
+  rmSync(processingFile, { force: true });
+}
+
 async function flushQueue(workspace: Workspace, paths: CaptureServicePaths, config: CaptureServiceConfig, state: CaptureState, fetchImpl: typeof fetch, now: () => Date): Promise<void> {
   let healthy = false;
   try {
@@ -331,10 +391,18 @@ async function flushQueue(workspace: Workspace, paths: CaptureServicePaths, conf
 }
 
 function enqueue(queuePath: string, event: QueuedEvent, config: CaptureServiceConfig): void {
-  const events = readQueue(queuePath);
-  if (events.some((item) => item.id === event.id)) return;
-  const next = [...events, event];
-  if (next.length >= config.queueWarnSize) event.payload = { ...(event.payload as Record<string, unknown>), queueWarning: true };
+  enqueueMany(queuePath, [event], config);
+}
+
+function enqueueMany(queuePath: string, incoming: QueuedEvent[], config: CaptureServiceConfig): void {
+  const next = readQueue(queuePath);
+  const existing = new Set(next.map((event) => event.id));
+  for (const event of incoming) {
+    if (existing.has(event.id)) continue;
+    if (next.length + 1 >= config.queueWarnSize) event.payload = { ...(event.payload as Record<string, unknown>), queueWarning: true };
+    next.push(event);
+    existing.add(event.id);
+  }
   rewriteQueue(queuePath, next.slice(Math.max(0, next.length - config.queueMaxSize)));
 }
 
@@ -355,7 +423,12 @@ function rewriteQueue(queuePath: string, events: QueuedEvent[]): void {
 }
 
 function countQueue(queuePath: string): number {
-  return readQueue(queuePath).length;
+  const hookSignals = ["git-hook.ndjson", "git-hook.processing.ndjson"].reduce((count, fileName) => {
+    const file = path.join(queuePath, fileName);
+    if (!existsSync(file)) return count;
+    return count + readFileSync(file, "utf8").split("\n").filter(Boolean).length;
+  }, 0);
+  return readQueue(queuePath).length + hookSignals;
 }
 
 function readState(filePath: string): CaptureState {
@@ -379,8 +452,10 @@ function writeState(filePath: string, state: CaptureState): void {
   writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
-function redactedEvent(workspaceId: string, workspacePath: string, id: string, occurredAt: string, payload: Record<string, unknown>, policyMode?: string): QueuedEvent {
+function redactedEvent(workspaceId: string, workspacePath: string, id: string, occurredAt: string, payload: Record<string, unknown>, policyMode?: string, source: "repoDaemon" | "gitHook" = "repoDaemon"): QueuedEvent {
   const normalizedPolicyMode = normalizeCapturePolicyMode(policyMode, "metadata-only");
+  const sourceSystem = source === "gitHook" ? "git_hook" : "repo_daemon";
+  const toolName = source === "gitHook" ? "git-hook" : "rorca-capture-daemon";
   const redacted = sanitizeCapturePayload(payload, { ...DEFAULT_CAPTURE_POLICY, rawContentDefault: "explicit" });
   const safePayload = redacted.payload as Record<string, unknown>;
   // A Git object ID is public repository metadata, not a credential. Generic
@@ -391,19 +466,19 @@ function redactedEvent(workspaceId: string, workspacePath: string, id: string, o
   const subject = typeof safePayload.subject === "string" ? safePayload.subject : null;
   const committedAt = typeof safePayload.committedAt === "string" ? safePayload.committedAt : null;
   const repoPathHash = `sha256:${sha256(path.resolve(workspacePath))}`;
-  const idempotencyKey = `sha256:${sha256(JSON.stringify(["git_commit", "repo_daemon", workspaceId, commit]))}`;
+  const idempotencyKey = `sha256:${sha256(JSON.stringify(["git_commit", sourceSystem, workspaceId, commit]))}`;
   const eventPayload = {
     eventType: "git_commit",
       payload_schema_version: "2026-07-ucc-007.v1",
-      source_system: "repo_daemon",
-      tool_name: "rorca-capture-daemon",
+      source_system: sourceSystem,
+      tool_name: toolName,
       host_application: null,
       session_id: null,
       workspace_id: workspaceId,
       repo_path_hash: repoPathHash,
       source_identity: {
-        source_system: "repo_daemon",
-        tool_name: "rorca-capture-daemon",
+        source_system: sourceSystem,
+        tool_name: toolName,
         host_application: null,
         session_id: null,
         workspace_id: workspaceId,
@@ -415,7 +490,7 @@ function redactedEvent(workspaceId: string, workspacePath: string, id: string, o
       capture_policy: { policy_version: "2026-07-ucc-007", mode: normalizedPolicyMode, raw_content: capturePolicyRawContent(normalizedPolicyMode) },
       trust_tier: "local",
       idempotency_key: idempotencyKey,
-      provenance: { capture_source: "repoDaemon", source_event_id: id, adapter_version: null, emitted_at: occurredAt, received_at: null, local_only: true },
+      provenance: { capture_source: source, source_event_id: id, adapter_version: null, emitted_at: occurredAt, received_at: null, local_only: true },
       // Commit subjects are human text and can expose issue/customer details. The
       // metadata-only baseline stores the commit identity and timestamp, not text.
       commit_subject: normalizedPolicyMode === "metadata-only" ? null : subject,
@@ -426,7 +501,7 @@ function redactedEvent(workspaceId: string, workspacePath: string, id: string, o
   return {
     id,
     workspaceId,
-    source: "repoDaemon",
+    source,
     occurredAt,
     payload: eventPayload,
     safety: {

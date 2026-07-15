@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderAgentAdapterConfig, renderAgentWrapperScript, runCaptureBootstrap, runCaptureTeardown, type CaptureBootstrapApiClient } from "../capture-bootstrap.js";
+import { readCaptureServiceStatus } from "../capture-service.js";
 import type { Workspace } from "../types.js";
 
 const temps: string[] = [];
@@ -119,7 +120,25 @@ describe("runCaptureBootstrap", () => {
     expect(metadata.rorcaManaged).toBe("v1");
     expect(metadata.command).toBe("rorca capture teardown");
     expect(metadata.removes).toContain(path.join(root, ".rorca-captureignore"));
-    expect(readFileSync(path.join(root, ".git", "hooks", "post-commit"), "utf8")).toContain("rorca-managed: v1");
+    const postCommitHook = readFileSync(path.join(root, ".git", "hooks", "post-commit"), "utf8");
+    expect(postCommitHook).toContain("rorca-managed: v1");
+    expect(postCommitHook).toContain('git rev-parse --verify HEAD');
+    expect(postCommitHook).toContain('"gitSha":"%s"');
+    expect(postCommitHook).toContain('tail -n 1000');
+  });
+
+  it("propagates an explicit policy change to local status and generated agent wrappers", async () => {
+    const { root, home, workspace } = makeRepo();
+    const options = { alwaysOn: true, cwd: root, homeDir: home, apiClient: api(workspace), env: { SHELL: "/bin/zsh", PATH: "" } };
+    const wrapperPath = path.join(root, ".rorca", "capture", "adapters", "codex", "rorca-codex-wrapper.sh");
+
+    await runCaptureBootstrap({ ...options, policyMode: "metadata-only" });
+    expect(readCaptureServiceStatus(workspace).capturePolicy.mode).toBe("metadata-only");
+    expect(readFileSync(wrapperPath, "utf8")).toContain("--policy 'metadata-only'");
+
+    await runCaptureBootstrap({ ...options, policyMode: "repo-and-command" });
+    expect(readCaptureServiceStatus(workspace).capturePolicy.mode).toBe("repo-and-command");
+    expect(readFileSync(wrapperPath, "utf8")).toContain("--policy 'repo-and-command'");
   });
 
   it("uses backend-assisted verification with the planned workspace-scoped paths", async () => {

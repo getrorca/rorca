@@ -57,10 +57,20 @@ Always-on setup is opt-in and must include an explicit policy choice:
 `off`, `metadata-only`, `repo-and-command`, `ide-assisted`, or `full` explicit-session summaries.
 No setup command may silently enable transcript capture by default.
 
+The accepted production baseline, mode-by-mode risk assessment, escalation
+criteria, and reversible `repo-and-command` operator procedure are recorded in
+[Always-On Capture Policy Baseline](./always-on-capture-policy-decision.md).
+`metadata-only` is the default; `repo-and-command` is an explicit workspace
+opt-in and does not permit raw terminal or provider transcript capture.
+
 The single operator status surface is `rorca-capture status --workspace-id <id>`
-and the Settings → Workspace Context → Capture Status UI. Both display active
-integrations, last captured event metadata, queue depth, redaction policy,
-ignored paths, pause state, and redaction diagnostics. Diagnostics are limited
+and the Settings → Workspace Context → Capture Status UI. Production alerting,
+aggregate failed-job/distillation/audit signals, managed-service checks, and
+recovery thresholds are documented in
+[Always-On Context production readiness](./always-on-context-production-readiness.md).
+Both status surfaces display active integrations, last captured event metadata,
+queue depth, redaction policy, ignored paths, pause state, and redaction
+diagnostics. Diagnostics are limited
 to counts, redaction type names, and regulated-domain flag names; they must not
 echo matched secret values or raw payloads.
 
@@ -279,7 +289,7 @@ Review UX must show:
 
 ## Managed local service lifecycle (UCC-003)
 
-`rorca-capture service <install|start|stop|restart|status|uninstall>` manages the always-on capture daemon for a selected workspace. macOS renders and registers a launchd LaunchAgent, Linux renders and registers a systemd user service, and Windows writes a PowerShell fallback suitable for Task Scheduler or a Startup shortcut. The service wraps `rorca-capture daemon`, starts at login/boot where the platform supports it, and should be restarted after Rorca updates so stale in-memory schemas are replaced.
+`rorca-capture service <install|start|stop|restart|status|uninstall>` manages the always-on capture daemon for a selected workspace. macOS renders and registers a launchd LaunchAgent, Linux renders and registers a systemd user service, and Windows writes a PowerShell fallback suitable for Task Scheduler or a Startup shortcut. The service wraps `rorca-capture daemon`, starts at login/boot where the platform supports it, and should be restarted after Rorca updates so stale in-memory schemas are replaced. On macOS, install is an idempotent definition reload followed by an immediate kickstart, with explicit `HOME`, bounded `PATH`, loopback capture API URL, entrypoint-backed `KeepAlive` demand, and throttling. Use [`always-on-login-readiness.md`](./always-on-login-readiness.md) for the read-only cross-service gate and human-approved reboot smoke checklist.
 
 The daemon uses durable workspace-local files under `.rorca/capture/`: `state.json` stores the WAL cursor, `queue/offline.ndjson` stores already-redacted offline payloads, and `status.json` exposes process health, `last_seen`, last scan, last flush, queue depth, backoff, source capabilities, current policy, and resource bounds. Flushes are attempted only after `GET /api/health` succeeds; failed health checks use bounded exponential backoff. Runtime bounds are configurable with `--scan-interval-ms`, `--max-commits-per-scan`, `--max-concurrency`, `--queue-warn-size`, and `--queue-max-size`. The repo daemon uses bounded polling (no recursive root watcher) and preserves cursor/idempotency across launchd/systemd restarts.
 
@@ -368,7 +378,7 @@ rorca-capture service start --workspace-id <workspace-id>
 rorca-capture status --workspace-id <workspace-id>
 ```
 
-Use `--policy repo-and-command` only after reviewing the privacy model below. Raw transcripts are still not enabled by default; richer content requires explicit policy and source support.
+Use `--policy repo-and-command` only after reviewing the [accepted policy decision](./always-on-capture-policy-decision.md). Raw transcripts are still not enabled by default; richer content requires explicit policy and source support.
 
 ### Pause, resume, and uninstall
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -56,7 +56,7 @@ describe("capture service rendering", () => {
     const paths = fixedPaths("/tmp/Rorca Demo");
     const config = { scanIntervalMs: 5000, maxCommitsPerScan: 7, maxConcurrency: 2, queueWarnSize: 3, queueMaxSize: 9, apiBaseUrl: "http://127.0.0.1:3030" };
 
-    expect(renderLaunchdPlist({ workspace: ws, command: "/usr/local/bin/rorca-capture", paths, config })).toMatchInlineSnapshot(`
+    expect(renderLaunchdPlist({ workspace: ws, command: "/usr/local/bin/rorca-capture", homeDir: "/Users/demo", paths, config })).toMatchInlineSnapshot(`
       "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
       <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
       <plist version=\"1.0\">
@@ -84,10 +84,29 @@ describe("capture service rendering", () => {
         </array>
         <key>WorkingDirectory</key>
         <string>/tmp/Rorca Demo</string>
+        <key>EnvironmentVariables</key>
+        <dict>
+          <key>HOME</key>
+          <string>/Users/demo</string>
+          <key>PATH</key>
+          <string>/usr/local/bin:/Users/demo/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+          <key>RORCA_CAPTURE_API_URL</key>
+          <string>http://127.0.0.1:3030</string>
+        </dict>
         <key>RunAtLoad</key>
         <true/>
         <key>KeepAlive</key>
-        <dict><key>Crashed</key><true/></dict>
+        <dict>
+          <key>PathState</key>
+          <dict>
+            <key>/usr/local/bin/rorca-capture</key>
+            <true/>
+          </dict>
+        </dict>
+        <key>ThrottleInterval</key>
+        <integer>10</integer>
+        <key>ProcessType</key>
+        <string>Background</string>
         <key>StandardOutPath</key>
         <string>/tmp/Rorca Demo/.rorca/capture/service.log</string>
         <key>StandardErrorPath</key>
@@ -124,6 +143,25 @@ describe("capture service rendering", () => {
 });
 
 describe("capture service lifecycle", () => {
+  it("uses deterministic launchd reload and kickstart commands for install", () => {
+    const ws = workspace();
+    const result = runCaptureServiceLifecycle({ action: "install", workspace: ws, platform: "darwin", dryRun: true, command: "/bin/rorca-capture" });
+    const domain = `gui/${process.getuid?.() ?? 501}`;
+
+    const plist = path.join(os.homedir(), "Library", "LaunchAgents", "com.rorca.capture.demo.plist");
+    expect(result.commands).toEqual([
+      `launchctl bootout ${domain}/com.rorca.capture.demo`,
+      `launchctl bootstrap ${domain} ${plist}`,
+      `launchctl kickstart -k ${domain}/com.rorca.capture.demo`,
+    ]);
+    expect(runCaptureServiceLifecycle({ action: "stop", workspace: ws, platform: "darwin", dryRun: true }).commands)
+      .toEqual([`launchctl bootout ${domain}/com.rorca.capture.demo`]);
+    expect(runCaptureServiceLifecycle({ action: "start", workspace: ws, platform: "darwin", dryRun: true }).commands)
+      .toEqual([`launchctl bootstrap ${domain} ${plist}`, `launchctl kickstart -k ${domain}/com.rorca.capture.demo`]);
+    expect(runCaptureServiceLifecycle({ action: "restart", workspace: ws, platform: "darwin", dryRun: true }).commands)
+      .toEqual([`launchctl bootstrap ${domain} ${plist}`, `launchctl kickstart -k ${domain}/com.rorca.capture.demo`]);
+  });
+
   it("does not spawn the Windows fallback daemon during dry-run start", () => {
     const ws = workspace();
     const result = runCaptureServiceLifecycle({ action: "start", workspace: ws, platform: "win32", dryRun: true, command: "/bin/rorca-capture" });
@@ -175,9 +213,33 @@ describe("managed capture daemon", () => {
     expect((posted[0] as { payload: { git_sha: string; idempotency_key: string } }).payload.git_sha).toBe("aaa111");
     expect((posted[0] as { payload: { idempotency_key: string } }).payload.idempotency_key).toMatch(/^sha256:/);
     expect((posted[0] as { payload: { idempotency_key: string } }).payload.idempotency_key).not.toBe((posted[1] as { payload: { idempotency_key: string } }).payload.idempotency_key);
+    expect((posted[0] as { payload: { capture_policy: { mode: string; raw_content: string }; commit_subject: string | null } }).payload).toMatchObject({
+      capture_policy: { mode: "metadata-only", raw_content: "metadata" },
+      commit_subject: null,
+    });
     const state = JSON.parse(readFileSync(path.join(ws.path, ".rorca", "capture", "state.json"), "utf8"));
     expect(state.cursor.lastCommit).toBe("bbb222");
     expect(state.cursor.pendingEventIds).toEqual([]);
+  });
+
+  it("uses the explicit repo-and-command policy for redacted commit text", async () => {
+    const ws = workspace();
+    mkdirSync(path.join(ws.path, ".rorca", "capture"), { recursive: true });
+    writeFileSync(path.join(ws.path, ".rorca", "capture", "policy.json"), JSON.stringify({ policyMode: "repo-and-command", paused: false }), "utf8");
+    const posted: Array<{ payload: { capture_policy: { mode: string; raw_content: string }; commit_subject: string | null } }> = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/health")) return new Response("{}", { status: 200 });
+      posted.push(JSON.parse(String(init?.body)) as (typeof posted)[number]);
+      return new Response("{}", { status: 200 });
+    };
+
+    await runManagedCaptureDaemon({ workspace: ws, once: true, fetchImpl, spawnSyncImpl: gitLog(["aaa111\t1700000000\tAdd customer billing flow"]) });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0].payload).toMatchObject({
+      capture_policy: { mode: "repo-and-command", raw_content: "summary" },
+      commit_subject: "Add customer billing flow",
+    });
   });
 
   it("queues redacted payloads while offline and flushes only after health succeeds", async () => {
@@ -206,6 +268,49 @@ describe("managed capture daemon", () => {
     await runManagedCaptureDaemon({ workspace: ws, once: true, fetchImpl, spawnSyncImpl: gitLog(commits) });
     expect(posted).toHaveLength(1);
     expect(JSON.stringify(posted[0].payload)).not.toContain("super-secret");
+  });
+
+  it("atomically transfers git hook signals into the durable queue and retries them after an outage", async () => {
+    const ws = workspace();
+    const queuePath = path.join(ws.path, ".rorca", "capture", "queue");
+    mkdirSync(queuePath, { recursive: true });
+    const gitSha = "a".repeat(40);
+    writeFileSync(path.join(queuePath, "git-hook.ndjson"), `${JSON.stringify({
+      source: "gitHook",
+      workspaceId: ws.id,
+      hook: "post-commit",
+      policyMode: "metadata-only",
+      gitSha,
+      occurredAt: "2026-07-05T00:00:00.000Z",
+    })}\n`, "utf8");
+    const posted: Array<{ source: string; payload: { source_system: string; git_sha: string; commit_subject: string | null; provenance: { capture_source: string } } }> = [];
+    let online = false;
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/health")) return new Response("{}", { status: online ? 200 : 503 });
+      posted.push(JSON.parse(String(init?.body)) as (typeof posted)[number]);
+      return new Response("{}", { status: 200 });
+    };
+
+    await runManagedCaptureDaemon({ workspace: ws, once: true, fetchImpl, spawnSyncImpl: gitLog([]) });
+    expect(posted).toHaveLength(0);
+    expect(existsSync(path.join(queuePath, "git-hook.ndjson"))).toBe(false);
+    expect(existsSync(path.join(queuePath, "git-hook.processing.ndjson"))).toBe(false);
+    const queued = readFileSync(path.join(queuePath, "offline.ndjson"), "utf8");
+    expect(queued).toContain('"source":"gitHook"');
+    expect(queued).toContain('"source_system":"git_hook"');
+    expect(queued).toContain(`"git_sha":"${gitSha}"`);
+    expect(queued).toContain('"commit_subject":null');
+    expect(readCaptureServiceStatus(ws).queueDepth).toBe(1);
+
+    online = true;
+    await runManagedCaptureDaemon({ workspace: ws, once: true, fetchImpl, spawnSyncImpl: gitLog([]) });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      source: "gitHook",
+      payload: { source_system: "git_hook", git_sha: gitSha, commit_subject: null, provenance: { capture_source: "gitHook" } },
+    });
+    expect(readFileSync(path.join(queuePath, "offline.ndjson"), "utf8")).toBe("");
+    expect(readCaptureServiceStatus(ws).queueDepth).toBe(0);
   });
 
   it("reports status with health, scan, flush, queue, backoff, capabilities, policy, and bounds", async () => {

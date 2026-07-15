@@ -408,7 +408,7 @@ function sidecarConfigContent(workspace: Workspace, queuePath: string, policyMod
 }
 
 function gitHookContent(hookName: string, workspace: Workspace, queuePath: string, policyMode: string): string {
-  return `#!/bin/sh\n# ${SENTINEL}\n# Best-effort API-only context capture hook. Does not block git operations.\nRORCA_WORKSPACE_ID=${JSON.stringify(workspace.id)}\nRORCA_QUEUE_PATH=${JSON.stringify(queuePath)}\nRORCA_CAPTURE_POLICY=${JSON.stringify(policyMode)}\nRORCA_HOOK=${JSON.stringify(hookName)}\nmkdir -p "$RORCA_QUEUE_PATH" 2>/dev/null || true\nif [ "$RORCA_CAPTURE_POLICY" = "off" ]; then exit 0; fi\nprintf '{"source":"gitHook","workspaceId":"%s","hook":"%s","policyMode":"%s","occurredAt":"%s"}\\n' "$RORCA_WORKSPACE_ID" "$RORCA_HOOK" "$RORCA_CAPTURE_POLICY" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RORCA_QUEUE_PATH/git-hook.ndjson" 2>/dev/null || true\nexit 0\n`;
+  return `#!/bin/sh\n# ${SENTINEL}\n# Best-effort API-only context capture hook. Does not block git operations.\nRORCA_WORKSPACE_ID=${JSON.stringify(workspace.id)}\nRORCA_QUEUE_PATH=${JSON.stringify(queuePath)}\nRORCA_CAPTURE_POLICY=${JSON.stringify(policyMode)}\nRORCA_HOOK=${JSON.stringify(hookName)}\nRORCA_SIGNAL_FILE="$RORCA_QUEUE_PATH/git-hook.ndjson"\nmkdir -p "$RORCA_QUEUE_PATH" 2>/dev/null || true\nif [ "$RORCA_CAPTURE_POLICY" = "off" ]; then exit 0; fi\nRORCA_GIT_SHA="$(git rev-parse --verify HEAD 2>/dev/null || true)"\nif [ -z "$RORCA_GIT_SHA" ]; then exit 0; fi\nprintf '{"source":"gitHook","workspaceId":"%s","hook":"%s","policyMode":"%s","gitSha":"%s","occurredAt":"%s"}\\n' "$RORCA_WORKSPACE_ID" "$RORCA_HOOK" "$RORCA_CAPTURE_POLICY" "$RORCA_GIT_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RORCA_SIGNAL_FILE" 2>/dev/null || true\n# Bound hook signals while the daemon is unavailable. The daemon atomically moves\n# this file before ingestion, so a concurrent append lands in the next batch.\nif [ -f "$RORCA_SIGNAL_FILE" ] && command -v tail >/dev/null 2>&1; then\n  RORCA_SIGNAL_TMP="$RORCA_SIGNAL_FILE.trim.$$"\n  tail -n 1000 "$RORCA_SIGNAL_FILE" > "$RORCA_SIGNAL_TMP" 2>/dev/null && mv "$RORCA_SIGNAL_TMP" "$RORCA_SIGNAL_FILE" 2>/dev/null || rm -f "$RORCA_SIGNAL_TMP"\nfi\nexit 0\n`;
 }
 
 function daemonServiceContent(workspace: Workspace): string {
@@ -502,27 +502,28 @@ export function renderAgentAdapterConfig(tool: AgentAdapterTool, workspace: Work
   });
 }
 
-export function renderAgentWrapperScript(tool: Extract<AgentAdapterTool, "codex" | "opencode">, workspace: Workspace, captureCommand = "rorca-capture"): string {
+export function renderAgentWrapperScript(tool: Extract<AgentAdapterTool, "codex" | "opencode">, workspace: Workspace, captureCommand = "rorca-capture", policyMode: CapturePolicyMode = "metadata-only"): string {
+  const policy = normalizeCapturePolicyMode(policyMode, "metadata-only");
   const binary = tool;
   const envName = tool === "codex" ? "RORCA_CODEX_BIN" : "RORCA_OPENCODE_BIN";
   const sourceSystem = adapterSourceSystem(tool);
   const commandPreview = tool === "codex" ? "codex exec --dangerously-bypass-approvals-and-sandbox -m <model>" : "opencode run";
-  return `#!/bin/sh\n# ${SENTINEL}\n# Thin Rorca ${tool} adapter. It does not read provider credentials or mutate provider config.\nset +e\nTOOL_BIN=\"${`$`}{${envName}:-}\"\nif [ -z \"$TOOL_BIN\" ]; then\n  TOOL_BIN=\"$(command -v ${binary} 2>/dev/null)\"\nfi\nif [ -z \"$TOOL_BIN\" ] || [ ! -x \"$TOOL_BIN\" ]; then\n  echo \"Rorca ${tool} adapter: ${binary} binary not found; fallback to shell capture and explicit remember: ${rememberCommand(tool, workspace)}\" >&2\n  exit 127\nfi\nSESSION_ID=\"${`$`}{${tool === "codex" ? "CODEX_SESSION_ID" : "OPENCODE_SESSION_ID"}:-manual}\"\n${captureCommand} emit shell --phase start --workspace-id ${shQuote(workspace.id)} --cwd \"$PWD\" --command ${shQuote(`${commandPreview} $*`)} --policy command-summary >/dev/null 2>&1 || true\n\"$TOOL_BIN\" \"$@\"\nCODE=$?\n${captureCommand} emit shell --phase end --workspace-id ${shQuote(workspace.id)} --cwd \"$PWD\" --command ${shQuote(`${commandPreview} $*`)} --exit-code \"$CODE\" --duration-ms 0 --policy command-summary >/dev/null 2>&1 || true\n${captureCommand} remember --workspace-id ${shQuote(workspace.id)} --source-system ${shQuote(sourceSystem)} --tool-name ${shQuote(tool)} --session-id \"$SESSION_ID\" --message \"${tool} session ended with exit code $CODE\" >/dev/null 2>&1 || true\nexit \"$CODE\"\n`;
+  return `#!/bin/sh\n# ${SENTINEL}\n# Thin Rorca ${tool} adapter. It does not read provider credentials or mutate provider config.\nset +e\nTOOL_BIN=\"${`$`}{${envName}:-}\"\nif [ -z \"$TOOL_BIN\" ]; then\n  TOOL_BIN=\"$(command -v ${binary} 2>/dev/null)\"\nfi\nif [ -z \"$TOOL_BIN\" ] || [ ! -x \"$TOOL_BIN\" ]; then\n  echo \"Rorca ${tool} adapter: ${binary} binary not found; fallback to shell capture and explicit remember: ${rememberCommand(tool, workspace)}\" >&2\n  exit 127\nfi\nSESSION_ID=\"${`$`}{${tool === "codex" ? "CODEX_SESSION_ID" : "OPENCODE_SESSION_ID"}:-manual}\"\n${captureCommand} emit shell --phase start --workspace-id ${shQuote(workspace.id)} --cwd \"$PWD\" --command ${shQuote(`${commandPreview} $*`)} --policy ${shQuote(policy)} >/dev/null 2>&1 || true\n\"$TOOL_BIN\" \"$@\"\nCODE=$?\n${captureCommand} emit shell --phase end --workspace-id ${shQuote(workspace.id)} --cwd \"$PWD\" --command ${shQuote(`${commandPreview} $*`)} --exit-code \"$CODE\" --duration-ms 0 --policy ${shQuote(policy)} >/dev/null 2>&1 || true\n${captureCommand} remember --workspace-id ${shQuote(workspace.id)} --source-system ${shQuote(sourceSystem)} --tool-name ${shQuote(tool)} --session-id \"$SESSION_ID\" --message \"${tool} session ended with exit code $CODE\" >/dev/null 2>&1 || true\nexit \"$CODE\"\n`;
 }
 
-function agentAdapterFiles(workspace: Workspace, captureDir: string, apiBaseUrl: string): ManagedFile[] {
+function agentAdapterFiles(workspace: Workspace, captureDir: string, apiBaseUrl: string, policyMode: CapturePolicyMode): ManagedFile[] {
   return [
     { id: "agent-adapter:pi", label: "Pi capture command alias", path: path.join(workspace.path, ".pi", "extensions", "rorca", "capture-command.json"), content: renderAgentAdapterConfig("pi", workspace, apiBaseUrl) },
     { id: "agent-adapter:claude-code", label: "Claude Code slash/MCP adapter", path: path.join(captureDir, "adapters", "claude-code", "slash-commands.json"), content: renderAgentAdapterConfig("claude-code", workspace, apiBaseUrl) },
     { id: "agent-adapter:codex-config", label: "Codex capture adapter config", path: path.join(captureDir, "adapters", "codex", "adapter.json"), content: renderAgentAdapterConfig("codex", workspace, apiBaseUrl) },
-    { id: "agent-adapter:codex-wrapper", label: "Codex pass-through wrapper", path: path.join(captureDir, "adapters", "codex", "rorca-codex-wrapper.sh"), content: renderAgentWrapperScript("codex", workspace), executable: true },
+    { id: "agent-adapter:codex-wrapper", label: "Codex pass-through wrapper", path: path.join(captureDir, "adapters", "codex", "rorca-codex-wrapper.sh"), content: renderAgentWrapperScript("codex", workspace, "rorca-capture", policyMode), executable: true },
     { id: "agent-adapter:opencode-config", label: "OpenCode capture adapter config", path: path.join(captureDir, "adapters", "opencode", "adapter.json"), content: renderAgentAdapterConfig("opencode", workspace, apiBaseUrl) },
-    { id: "agent-adapter:opencode-wrapper", label: "OpenCode pass-through wrapper", path: path.join(captureDir, "adapters", "opencode", "rorca-opencode-wrapper.sh"), content: renderAgentWrapperScript("opencode", workspace), executable: true },
+    { id: "agent-adapter:opencode-wrapper", label: "OpenCode pass-through wrapper", path: path.join(captureDir, "adapters", "opencode", "rorca-opencode-wrapper.sh"), content: renderAgentWrapperScript("opencode", workspace, "rorca-capture", policyMode), executable: true },
   ];
 }
 
-function installAgentAdapters(workspace: Workspace, captureDir: string, apiBaseUrl: string, env: NodeJS.ProcessEnv, dryRun: boolean): CaptureBootstrapStep[] {
-  const steps = agentAdapterFiles(workspace, captureDir, apiBaseUrl).map((file) => installManagedFile(file, dryRun));
+function installAgentAdapters(workspace: Workspace, captureDir: string, apiBaseUrl: string, env: NodeJS.ProcessEnv, dryRun: boolean, policyMode: CapturePolicyMode): CaptureBootstrapStep[] {
+  const steps = agentAdapterFiles(workspace, captureDir, apiBaseUrl, policyMode).map((file) => installManagedFile(file, dryRun));
   for (const tool of ["codex", "opencode"] as const) {
     const envName = tool === "codex" ? "RORCA_CODEX_BIN" : "RORCA_OPENCODE_BIN";
     const configured = env[envName];
@@ -771,7 +772,7 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
   steps.push(...installShellSnippets(workspace, captureDir, homeDir, env, dryRun, client.baseUrl, policyMode));
   steps.push(installIdeAdapter(workspace, dryRun));
   steps.push(installManagedFile({ id: "mcp-slash-config", label: "MCP/slash-command config", path: mcpSlashPath, content: mcpSlashConfigContent(workspace) }, dryRun));
-  steps.push(...installAgentAdapters(workspace, captureDir, client.baseUrl, env, dryRun));
+  steps.push(...installAgentAdapters(workspace, captureDir, client.baseUrl, env, dryRun, policyMode));
 
   const artifactPaths = [
     queuePath,
@@ -787,7 +788,7 @@ export async function runCaptureBootstrap(options: CaptureBootstrapOptions): Pro
     ...SUPPORTED_CAPTURE_SHELLS.map((shell) => shellSnippetFile(captureDir, shell)),
     path.join(workspace.path, ".vscode", "rorca-capture-adapter.json"),
     mcpSlashPath,
-    ...agentAdapterFiles(workspace, captureDir, client.baseUrl).map((file) => file.path),
+    ...agentAdapterFiles(workspace, captureDir, client.baseUrl, policyMode).map((file) => file.path),
     uninstallPath,
   ];
   steps.push(installManagedFile({ id: "uninstall-metadata", label: "Uninstall metadata", path: uninstallPath, content: uninstallMetadataContent(workspace, artifactPaths) }, dryRun));
