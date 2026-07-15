@@ -36,9 +36,24 @@ import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
 import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
-import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
+import {
+  check as checkStoryCapability,
+  checkSpec,
+  detectRequiredTools,
+  findCapableEngine,
+  type CapabilityStory,
+  type StoryCapabilityReport,
+} from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
-import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
+import {
+  buildStoryExecutionPacket,
+  createStoryExecutionManifest,
+  deriveStoryContractRevision,
+  detectExecutionModeFromSpec,
+  type ImmutableStoryExecutionManifest,
+  type StoryChangePolicy,
+} from '../lib/story-execution-packet';
+import { persistStoryExecutionManifest } from '../lib/story-closeout';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
@@ -240,6 +255,146 @@ async function resolveLogPath(runId: number): Promise<string | null> {
 /** True if the given PID is still alive */
 function isPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+interface DispatchManifestProfile {
+  profileId?: string;
+  changePolicy?: StoryChangePolicy;
+  noCodeReason?: string;
+  baselineFailurePolicy?: 'block' | 'allow_with_host_evidence';
+}
+
+interface DispatchManifestStory extends CapabilityStory {
+  acceptance?: string;
+  excluded?: boolean;
+  passes?: boolean;
+  model?: string;
+  effort?: string;
+  agent?: AgentType;
+  executionManifest?: DispatchManifestProfile;
+}
+
+function acceptanceCriteriaForManifest(story: DispatchManifestStory): string[] {
+  if (Array.isArray(story.acceptanceCriteria) && story.acceptanceCriteria.length > 0) return story.acceptanceCriteria;
+  return typeof story.acceptance === 'string'
+    ? story.acceptance.split('\n').map((line) => line.replace(/^[-*]\s*/, '').trim()).filter(Boolean)
+    : [];
+}
+
+async function resolveAndPersistDispatchManifests(input: {
+  workspaceId: string;
+  specId: string;
+  runId: number;
+  specJson: Record<string, unknown>;
+  cwd: string;
+  agent: AgentType;
+  model: string | null;
+  effort: string | null;
+  terminalMode: TerminalMode;
+  worktreePath: string | null;
+  branchName: string | null;
+  autoMerge: boolean;
+  mergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
+  parallelism: number;
+}): Promise<{ path: string; manifests: ImmutableStoryExecutionManifest[] }> {
+  const phaseStories = Array.isArray(input.specJson.phases)
+    ? (input.specJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap((phase) => phase.stories ?? [])
+    : [];
+  const stories = (Array.isArray(input.specJson.userStories) ? input.specJson.userStories : phaseStories) as DispatchManifestStory[];
+  const mode = detectExecutionModeFromSpec(input.specJson as { mode?: string; phases?: unknown });
+  const specProfile = (input.specJson.executionManifest as DispatchManifestProfile | undefined) ?? {};
+  const baseRevision = execSync('git rev-parse HEAD', { cwd: input.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const specRevision = deriveStoryContractRevision(input.specJson);
+  const manifests: ImmutableStoryExecutionManifest[] = [];
+
+  for (const story of stories.filter((item) => !item.excluded)) {
+    const packet = buildStoryExecutionPacket(input.cwd, story, mode);
+    const profile = { ...specProfile, ...(story.executionManifest ?? {}) };
+    const criteria = acceptanceCriteriaForManifest(story);
+    let resolvedStoryAgent = resolveStoryAgent(story as EngineUserStory, input.agent);
+    const orchestrationPolicy = loadOrchestrationConfig(input.cwd);
+    if (orchestrationPolicy.capabilityMismatch === 'reroute') {
+      const capability = checkStoryCapability(story, resolvedStoryAgent);
+      if (!capability.compatible) {
+        resolvedStoryAgent = findCapableEngine(detectRequiredTools(story), resolvedStoryAgent) ?? resolvedStoryAgent;
+      }
+    }
+    const storyIsolated = input.parallelism > 1;
+    const storyWorktreePath = storyIsolated
+      ? path.resolve(input.cwd, '..', `${path.basename(input.cwd)}-${story.id}-run-${input.runId}`)
+      : input.cwd;
+    const storyBranch = storyIsolated
+      ? `feat/${input.specId}-${story.id}-run-${input.runId}`
+      : input.branchName;
+    const manifest = createStoryExecutionManifest({
+      identity: {
+        workspaceId: input.workspaceId,
+        specId: input.specId,
+        storyId: story.id,
+        runId: input.runId,
+        attempt: 1,
+      },
+      revisions: {
+        specRevision,
+        storyRevision: deriveStoryContractRevision(story),
+      },
+      executionMode: mode,
+      execution: {
+        agent: resolvedStoryAgent,
+        model: story.model ?? input.model,
+        effort: story.effort ?? input.effort,
+        terminal: input.terminalMode,
+        worktree: {
+          enabled: storyIsolated || Boolean(input.worktreePath),
+          path: storyWorktreePath,
+          branch: storyBranch,
+          baseRevision,
+        },
+        merge: {
+          enabled: input.autoMerge,
+          strategy: input.mergeStrategy,
+          targetBranch: input.mergeStrategy === 'direct' ? 'main' : null,
+        },
+      },
+      validationPlan: packet.validationCommands.map((command, index) => ({
+        id: `validation-${index + 1}`,
+        command: '/bin/sh',
+        args: ['-lc', command],
+        required: true,
+        revisionSensitive: true,
+        timeoutMs: 300_000,
+      })),
+      evidenceExpectations: criteria.map((criterion, index) => ({
+        criterionId: `${story.id}:ac:${deriveStoryContractRevision(criterion)}`,
+        description: criterion,
+        requiredEvidenceKinds: ['validation', 'revision'],
+      })),
+      repositoryProfile: {
+        profileId: profile.profileId ?? 'rorca-code-change-v1',
+        changePolicy: profile.changePolicy ?? 'code_required',
+        noCodeReason: profile.noCodeReason ?? null,
+        runtimeMetadataPaths: ['.rorca/**', '.claude/**', '.opencode/**', '.playwright-mcp/**', 'forge/logs/**', 'forge/specs/**', 'MEMORY.md', 'progress.txt'],
+      },
+      commandSafety: {
+        profileId: 'autonomous-command-guard-v1',
+        guardVersion: '1',
+        guardedWorkingDirectory: storyWorktreePath,
+        allowedWorkingDirectories: [storyWorktreePath],
+        blockedCommandPatterns: ['backend/Jest-style tests without an isolated *_test database'],
+        redactedEnvironmentKeys: ['ANTHROPIC_API_KEY', 'DATABASE_URL', 'DATABASE_URL_TEST', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'],
+        allowBackendJest: false,
+        baselineFailurePolicy: profile.baselineFailurePolicy ?? 'block',
+      },
+    });
+    await persistStoryExecutionManifest(manifest);
+    manifests.push(manifest);
+  }
+
+  const runtimeDir = path.join(input.cwd, '.rorca', 'runtime');
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  const manifestPath = path.join(runtimeDir, `run-${input.runId}-story-execution-manifests.json`);
+  fs.writeFileSync(manifestPath, JSON.stringify(manifests, null, 2), { encoding: 'utf8', mode: 0o600 });
+  return { path: manifestPath, manifests };
 }
 
 function buildExecutionReadinessSummary(
@@ -1781,6 +1936,23 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         );
         runId = normalizePipelineRunId(runResult?.id);
       }
+      const piNativeSpec = JSON.parse(fs.readFileSync(path.join(workspace.path, specPath), 'utf8')) as Record<string, unknown>;
+      const piNativeManifests = await resolveAndPersistDispatchManifests({
+        workspaceId: workspace.id,
+        specId,
+        runId,
+        specJson: piNativeSpec,
+        cwd: workspace.path,
+        agent: resolvedAgentType,
+        model: finalAgentModel ?? null,
+        effort: resolvedReasoningEffort ?? effortLevel ?? null,
+        terminalMode: resolvedTerminalMode,
+        worktreePath: null,
+        branchName: null,
+        autoMerge: false,
+        mergeStrategy: mergeStrategy ?? 'branch-only',
+        parallelism: 1,
+      });
 
       const walEvent = await queryOne<WalEvent>(
         `INSERT INTO wal_events (event_type, workspace_id, spec_id, payload)
@@ -1814,6 +1986,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           task_manifest_artifacts: taskManifestArtifacts ?? null,
           trigger_options: triggerOptions,
         }) } : {}),
+        executionManifestPath: piNativeManifests.path,
+        executionManifestHashes: piNativeManifests.manifests.map((manifest) => manifest.manifestHash),
         specReadiness: (req as any)._specReadiness,
       });
       return;
@@ -2146,9 +2320,29 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       startFromStoryId = startFromStory?.id ?? undefined;
     } catch { /* spec read error — non-fatal, worker will handle */ }
 
-    // 10. Enqueue the pipeline run via pg-boss.
+    // 10. Resolve immutable per-story manifests before queue dispatch. The
+    // engine receives the resulting execution-only contract and does not
+    // recompute lifecycle evidence or command-safety policy from story prose.
+    const dispatchSpec = JSON.parse(fs.readFileSync(absSpecPath, 'utf8')) as Record<string, unknown>;
+    const manifestBundle = await resolveAndPersistDispatchManifests({
+      workspaceId: workspace.id,
+      specId: path.basename(specPath, '.json'),
+      runId,
+      specJson: dispatchSpec,
+      cwd,
+      agent: resolvedAgentType,
+      model: finalAgentModel ?? null,
+      effort: resolvedReasoningEffort ?? effortLevel ?? null,
+      terminalMode: resolvedTerminalMode,
+      worktreePath,
+      branchName,
+      autoMerge: computedAutoMerge,
+      mergeStrategy: resolvedMergeStrategy,
+      parallelism,
+    });
+
+    // 11. Enqueue the pipeline run via pg-boss.
     //     The worker process picks it up and does the actual spawn / execution.
-    //     Job ID = String(runId) for direct lookup by runId.
     const jobPayload = {
       runId,
       specPath,
@@ -2162,6 +2356,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
+      executionManifestPath: manifestBundle.path,
       envOverrides,
       ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
       ...(storyId ? { specificStory: storyId } : {}),
@@ -5361,7 +5556,28 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       envOverrides[k] = v;
     }
 
-    // 12. Validate job payload with Zod before sending to pg-boss.
+    // 12. Resolve retry manifests from the same immutable policy/profile inputs
+    // before dispatch. Retry gets a new run identity; prior failed attempts stay
+    // attached to the original run for audit.
+    const retryCwd = originalRun.worktree_path ?? workspace.path;
+    const retryManifests = await resolveAndPersistDispatchManifests({
+      workspaceId: workspace.id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      runId: Number(newRunId),
+      specJson,
+      cwd: retryCwd,
+      agent: activeAgent,
+      model: activeModel ?? null,
+      effort: null,
+      terminalMode: normalizeTerminalMode(originalRun.terminal_mode),
+      worktreePath: originalRun.worktree_path ?? null,
+      branchName: originalRun.branch_name ?? null,
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      parallelism: forceSequential ? 1 : (originalRun.parallelism ?? 1),
+    });
+
+    // 13. Validate job payload with Zod before sending to pg-boss.
     //     Invalid payloads must throw here — pg-boss failure handling is not a substitute.
     const PipelineRetryJobPayloadSchema = z.object({
       runId: z.number().int().positive(),
@@ -5374,6 +5590,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       model: z.string().nullable(),
       worktreePath: z.string().nullable(),
       sequenceOffset: z.number().int().min(0),
+      executionManifestPath: z.string().min(1),
       envOverrides: z.record(z.string(), z.string()),
       includeGraph: z.boolean().optional().default(false),
       terminalMode: z.enum(['ansi-html', 'pty', 'native-pty']).optional().default('ansi-html'),
@@ -5394,6 +5611,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       model: retryModel,
       worktreePath: originalRun.worktree_path ?? null,
       sequenceOffset,
+      executionManifestPath: retryManifests.path,
       envOverrides,
       includeGraph: retryIncludeGraph,
       terminalMode: retryTerminalMode,
@@ -5403,7 +5621,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
     });
 
-    // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
+    // 14. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
     await getBoss().send('pipeline:retry', jobPayload, {
       retryLimit: 0,
       expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
@@ -6382,6 +6600,8 @@ async function recordTokenUsage(
  *               status: { type: string, enum: [pass, fail, skip, excluded] }
  *               worktreePath: { type: string, nullable: true }
  *               worktreeBranch: { type: string, nullable: true }
+ *               commitSha: { type: string, nullable: true, description: "Host-observed story/worktree branch commit" }
+ *               commitMessage: { type: string, nullable: true }
  *               inputTokens: { type: integer, nullable: true }
  *               outputTokens: { type: integer, nullable: true }
  *               modelUsed: { type: string, nullable: true }
@@ -6397,12 +6617,12 @@ async function recordTokenUsage(
 router.post('/story-result', async (req: Request, res: Response) => {
   try {
     const {
-      runId, storyId, status, worktreePath, worktreeBranch,
+      runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
       logPath, blockedBy, activeSkills, idempotencyKey,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
-      worktreePath?: string; worktreeBranch?: string;
+      worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
       inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
       idempotencyKey?: string;
@@ -6418,6 +6638,10 @@ router.post('/story-result', async (req: Request, res: Response) => {
       return;
     }
 
+    if (commitSha && !/^[0-9a-f]{40}$/i.test(commitSha)) {
+      throw new ValidationError('commitSha must be a full git SHA');
+    }
+
     const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills, ingest_key)
        VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
@@ -6429,6 +6653,28 @@ router.post('/story-result', async (req: Request, res: Response) => {
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
       activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
       idempotencyKey ?? null,]);
+
+    if (inserted && status === 'pass' && commitSha) {
+      const run = await queryOne<{ workspace_id: string; spec_path: string; branch_name: string | null }>(
+        'SELECT workspace_id, spec_path, branch_name FROM pipeline_runs WHERE id = $1',
+        [runId],
+      );
+      if (!run) throw new NotFoundError('Pipeline run not found');
+      await execute(`
+        INSERT INTO story_commits (
+          story_id, spec_id, workspace_id, run_id, commit_sha, commit_message, author, pushed_at, branch_name, observed_source
+        ) VALUES ($1,$2,$3,$4,$5,$6,'rorca-execution-engine',NOW(),$7,'worktree_branch')
+        ON CONFLICT DO NOTHING
+      `, [
+        storyId,
+        path.basename(run.spec_path, '.json'),
+        run.workspace_id,
+        runId,
+        commitSha,
+        commitMessage?.trim() || `story(${storyId}): host-observed output`,
+        worktreeBranch ?? run.branch_name,
+      ]);
+    }
 
     // Only the first ingest records analytics. A retry after a response timeout
     // returns the original logical result without double-accounting.
@@ -8004,6 +8250,25 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
     if (!newRunRow) throw new UnprocessableError('Failed to create new run row');
     const newRunId = normalizePipelineRunId(newRunRow.id);
 
+    const dlqCwd = originalRun.worktree_path ?? workspace.path;
+    const dlqSpec = JSON.parse(fs.readFileSync(path.join(workspace.path, originalRun.spec_path), 'utf8')) as Record<string, unknown>;
+    const dlqManifests = await resolveAndPersistDispatchManifests({
+      workspaceId: originalRun.workspace_id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      runId: newRunId,
+      specJson: dlqSpec,
+      cwd: dlqCwd,
+      agent: (originalRun.agent_type ?? originalRun.agent ?? 'claude') as AgentType,
+      model: originalRun.agent_model ?? null,
+      effort: null,
+      terminalMode: normalizeTerminalMode(originalRun.terminal_mode),
+      worktreePath: originalRun.worktree_path ?? null,
+      branchName: originalRun.branch_name ?? null,
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      parallelism: 1,
+    });
+
     // Build the job payload (mirrors pipeline:trigger payload shape)
     const jobPayload = {
       runId: newRunId,
@@ -8016,6 +8281,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       terminalMode: normalizeTerminalMode(originalRun.terminal_mode),
       autoWorktree: false,
       autoMerge: false,
+      executionManifestPath: dlqManifests.path,
       envOverrides: {},
     };
 

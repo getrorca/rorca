@@ -50,6 +50,8 @@ export const PipelineRunJobPayload = z.object({
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
+  /** Host-resolved immutable story manifests. Optional only for audited legacy jobs. */
+  executionManifestPath: z.string().min(1).optional(),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   startFromStoryId: z.string().optional(),
   specificStory: z.string().optional(),
@@ -86,6 +88,8 @@ export const PipelineRetryJobPayload = z.object({
   model: z.string().nullable(),
   worktreePath: z.string().nullable(),
   sequenceOffset: z.number().int().min(0),
+  /** Host-resolved immutable retry manifests. Optional only for audited legacy jobs. */
+  executionManifestPath: z.string().min(1).optional(),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   includeGraph: z.boolean().optional().default(false),
   terminalMode: TerminalModeSchema.optional().default('ansi-html'),

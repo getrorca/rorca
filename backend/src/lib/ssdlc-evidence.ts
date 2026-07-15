@@ -1160,9 +1160,9 @@ export async function normalizeExistingRunEvidence(
       const rows = await db.query<StoryCommitEvidenceRow>(`
         SELECT id, story_id, commit_sha, commit_message, author, pushed_at
         FROM story_commits
-        WHERE workspace_id = $1 AND spec_id = $2
+        WHERE workspace_id = $1 AND spec_id = $2 AND run_id = $3
         ORDER BY pushed_at, id
-      `, [context.scope.workspaceId, context.scope.specSlug]);
+      `, [context.scope.workspaceId, context.scope.specSlug, runId]);
       return rows.map((row) => normalizeStoryCommitEvidence(row, context, true));
     }, db),
     runAdapter('wal_validation', context, async () => {

@@ -73,8 +73,12 @@ import {
 import {
   buildExecutionPacketPromptSection,
   buildNoopRecoveryPromptSection,
+  buildStoryExecutionManifestPromptSection,
   buildStoryExecutionPacket,
+  verifyStoryExecutionManifest,
+  type StoryExecutionManifest,
   type StoryExecutionPacket,
+  type StoryManifestWorktreeOptions,
 } from './story-execution-packet';
 import { isPiExternalOrchestrationEnabled } from './pi-execution-mode';
 import { detectCapability } from './reasoning-detector';
@@ -144,6 +148,8 @@ import { createAutonomousCommandGuard } from './autonomous-command-guard';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
+import { runHostValidationRequirement } from './story-host-validation';
+import type { HostValidationObservation } from './story-closeout';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -254,6 +260,8 @@ interface EngineConfig {
   thinkingBudget?: number;
   /** Effort level hint for models that support it (e.g. 'low'|'medium'|'high'|'xhigh'). */
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+  /** Immutable host-resolved manifests keyed by story ID; absent only for audited legacy invocations. */
+  executionManifests: ReadonlyMap<string, StoryExecutionManifest>;
 }
 
 // ─── Browser MCP Auto-Detection ─────────────────────────────────────────────
@@ -4063,6 +4071,51 @@ function getStoryWorkingTreeChanges(cwd: string): StoryWorkingTreeChanges {
   return classifyStoryWorkingTreeChanges(files);
 }
 
+function getGitHead(cwd: string): string | null {
+  try {
+    const head = execSync('git rev-parse HEAD', {
+      cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return /^[0-9a-f]{40}$/i.test(head) ? head : null;
+  } catch {
+    return null;
+  }
+}
+
+function getGitBranch(cwd: string): string | null {
+  try {
+    return execSync('git branch --show-current', {
+      cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function getCommittedStoryChangesSince(cwd: string, baseHead: string | null): StoryWorkingTreeChanges {
+  if (!baseHead || !/^[0-9a-f]{40}$/i.test(baseHead)) {
+    return { meaningfulFiles: [], metadataFiles: [] };
+  }
+
+  const currentHead = getGitHead(cwd);
+  if (!currentHead || currentHead === baseHead) {
+    return { meaningfulFiles: [], metadataFiles: [] };
+  }
+
+  try {
+    const files = readGitLines(cwd, `git diff --name-only ${baseHead}..HEAD --`);
+    return classifyStoryWorkingTreeChanges(files);
+  } catch {
+    return { meaningfulFiles: [], metadataFiles: [] };
+  }
+}
+
 function gitPathArgs(files: string[]): string {
   return files.map(file => JSON.stringify(file)).join(' ');
 }
@@ -4175,11 +4228,26 @@ const GATE_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface GateResult {
   passed: boolean;
-  reason?: 'typecheck';
+  reason?: 'typecheck' | 'manifest_validation';
   output?: string;
+  observations?: HostValidationObservation[];
 }
 
-function runGate(cwd: string): GateResult {
+function runGate(
+  cwd: string,
+  manifest?: StoryExecutionManifest,
+): GateResult {
+  if (manifest) {
+    const observations = manifest.validationPlan
+      .filter((requirement) => requirement.required)
+      .map((requirement) => runHostValidationRequirement(manifest, requirement));
+    const failed = observations.find((observation) => observation.classification !== 'passed');
+    return {
+      passed: !failed,
+      ...(failed ? { reason: 'manifest_validation' as const, output: failed.output.redactedExcerpt ?? failed.remediation ?? undefined } : {}),
+      observations,
+    };
+  }
   const env = buildCleanEnv();
   const rorcaConfig = loadRorcaConfig(cwd);
   const gates = rorcaConfig.execution.gates;
@@ -4225,19 +4293,207 @@ interface StoryWorktree {
   branchName: string;
 }
 
+interface PendingIntegratedPass {
+  story: UserStory;
+  agentType: AgentType;
+  logPath: string;
+  storyResultExtra: Record<string, unknown>;
+  activeSkillsExtra: Record<string, unknown>;
+  tokenPayload: {
+    inputTokens: number;
+    outputTokens: number;
+    modelUsed: string;
+    costUsd: number;
+  };
+  graphHits?: number;
+  commitSha: string | null;
+  commitBranch: string | null;
+}
+
+interface IntegrationValidationResult {
+  ok: boolean;
+  reason?: 'unmerged_files' | 'conflict_markers' | 'diff_check';
+  files: string[];
+  details?: string;
+}
+
+function readGitLines(cwd: string, command: string): string[] {
+  const output = execSync(command, {
+    cwd,
+    env: buildCleanEnv(),
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).trim();
+  return output.length > 0 ? output.split('\n').map(line => line.trim()).filter(Boolean) : [];
+}
+
+function getIntegrationCandidateFiles(cwd: string): string[] {
+  try {
+    return readGitLines(cwd, 'git diff --name-only HEAD');
+  } catch {
+    return [];
+  }
+}
+
+function findConflictMarkerFiles(cwd: string, files: string[]): string[] {
+  const markerFiles: string[] = [];
+  const markerPattern = /^(<<<<<<< .+|=======$|>>>>>>> .+)$/m;
+
+  for (const file of files) {
+    const absPath = path.join(cwd, file);
+    try {
+      if (!fs.existsSync(absPath)) continue;
+      const stat = fs.statSync(absPath);
+      if (!stat.isFile() || stat.size > 5 * 1024 * 1024) continue;
+      const content = fs.readFileSync(absPath, 'utf8');
+      if (content.includes('\u0000')) continue;
+      if (markerPattern.test(content)) markerFiles.push(file);
+    } catch {
+      // Binary/unreadable files are not conflict-marker candidates.
+    }
+  }
+
+  return markerFiles;
+}
+
+function runDiffCheck(cwd: string): string | null {
+  const env = buildCleanEnv();
+  for (const command of ['git diff --check', 'git diff --cached --check']) {
+    try {
+      execSync(command, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (err: unknown) {
+      const e = err as Error & { stdout?: Buffer; stderr?: Buffer };
+      return (e.stdout?.toString() || e.stderr?.toString() || e.message || command).trim();
+    }
+  }
+  return null;
+}
+
+function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegrationCandidateFiles(cwd)): IntegrationValidationResult {
+  let unmerged: string[] = [];
+  try {
+    unmerged = readGitLines(cwd, 'git diff --name-only --diff-filter=U');
+  } catch {
+    unmerged = [];
+  }
+  if (unmerged.length > 0) {
+    return { ok: false, reason: 'unmerged_files', files: unmerged };
+  }
+
+  const markerFiles = findConflictMarkerFiles(cwd, candidateFiles);
+  if (markerFiles.length > 0) {
+    return { ok: false, reason: 'conflict_markers', files: markerFiles };
+  }
+
+  const diffCheck = runDiffCheck(cwd);
+  if (diffCheck) {
+    return { ok: false, reason: 'diff_check', files: candidateFiles, details: diffCheck };
+  }
+
+  return { ok: true, files: [] };
+}
+
+async function finalizeIntegratedStoryPass(
+  config: EngineConfig,
+  workspaceId: string | null,
+  pending: PendingIntegratedPass,
+): Promise<void> {
+  await markStoryPassed(config.jsonPath, pending.story.id);
+
+  if (!workspaceId) return;
+
+  await emitWalEvent(config.port, 'story_passed', workspaceId, {
+    run_id: config.runId,
+    story_id: pending.story.id,
+    story_title: pending.story.title,
+    agent_type: pending.agentType,
+    input_tokens: pending.tokenPayload.inputTokens,
+    output_tokens: pending.tokenPayload.outputTokens,
+    cost_usd: pending.tokenPayload.costUsd,
+    integrated: true,
+    ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
+  }, pending.story.id);
+  await postStoryResult(config.port, {
+    runId: config.runId,
+    storyId: pending.story.id,
+    status: 'pass',
+    logPath: pending.logPath,
+    commitSha: pending.commitSha,
+    commitMessage: `story(${pending.story.id}): ${pending.story.title}`,
+    worktreeBranch: pending.commitBranch,
+    ...pending.storyResultExtra,
+    ...pending.activeSkillsExtra,
+    ...pending.tokenPayload,
+  });
+
+  await autoSynthesizeMemory(
+    pending.story.id,
+    workspaceId,
+    buildStoryText(pending.story),
+    readLogTail(pending.logPath),
+    'passed',
+    config.runId,
+    config.port,
+  );
+}
+
+async function recordStoryMergeConflict(
+  config: EngineConfig,
+  workspaceId: string | null,
+  wt: StoryWorktree,
+  conflictingFiles: string[],
+  pending?: PendingIntegratedPass,
+  wave?: number,
+): Promise<void> {
+  await markStoryMergeFailed(config.jsonPath, wt.storyId);
+
+  if (!workspaceId) return;
+
+  await emitWalEvent(config.port, 'story_failed', workspaceId, {
+    run_id: config.runId,
+    story_id: wt.storyId,
+    reason: 'merge_conflict',
+    conflictingFiles,
+    worktree_branch: wt.branchName,
+    ...(wave != null ? { wave } : {}),
+  }, wt.storyId);
+  await postStoryResult(config.port, {
+    runId: config.runId,
+    storyId: wt.storyId,
+    status: 'fail',
+    reason: 'merge_conflict',
+    blockedBy: [],
+    logPath: pending?.logPath,
+    worktreePath: wt.worktreePath,
+    worktreeBranch: wt.branchName,
+    ...(pending?.activeSkillsExtra ?? {}),
+    ...(pending?.tokenPayload ?? {}),
+  });
+}
+
 function createStoryWorktree(
   workspaceCwd: string,
   specSlug: string,
   storyId: string,
+  resolved?: StoryManifestWorktreeOptions,
 ): StoryWorktree | null {
   const ts = Date.now();
-  const branchName = `feat/${specSlug}-${storyId}-${ts}`;
+  const branchName = resolved?.branch ?? `feat/${specSlug}-${storyId}-${ts}`;
   const repoName = path.basename(workspaceCwd);
-  const worktreePath = path.resolve(workspaceCwd, '..', `${repoName}-${storyId}-${ts}`);
+  const worktreePath = resolved?.path ?? path.resolve(workspaceCwd, '..', `${repoName}-${storyId}-${ts}`);
 
   try {
+    if (fs.existsSync(worktreePath)) {
+      const existingBranch = execSync('git branch --show-current', {
+        cwd: worktreePath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      if (existingBranch !== branchName) throw new Error(`existing worktree branch ${existingBranch} does not match ${branchName}`);
+      return { storyId, worktreePath, branchName };
+    }
     execSync(
-      `git worktree add -b "${branchName}" "${worktreePath}" HEAD`,
+      `git worktree add -b "${branchName}" "${worktreePath}" "${resolved?.baseRevision ?? 'HEAD'}"`,
       { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
     );
 
@@ -4910,6 +5166,20 @@ async function executeStory(
   spec?: SpecJson,
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
+  const executionManifest = config.executionManifests.get(story.id);
+  if (config.executionManifests.size > 0 && !executionManifest) {
+    throw new Error(`Missing pre-dispatch execution manifest for ${story.id}`);
+  }
+  if (executionManifest) {
+    if (!verifyStoryExecutionManifest(executionManifest)) throw new Error(`Invalid execution manifest hash for ${story.id}`);
+    if (executionManifest.identity.runId !== config.runId || executionManifest.identity.storyId !== story.id) {
+      throw new Error(`Execution manifest identity mismatch for ${story.id}`);
+    }
+    if (executionManifest.executionMode !== mode) throw new Error(`Execution manifest mode mismatch for ${story.id}`);
+    if (executionManifest.commandSafety.guardedWorkingDirectory !== effectiveCwd) {
+      throw new Error(`Execution manifest working directory mismatch for ${story.id}`);
+    }
+  }
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
@@ -4922,11 +5192,15 @@ async function executeStory(
   const traceWriter = createContextTraceWriter(traceArtifactCwd, config.runId);
 
   // Per-story agent resolution: explicit override > story.agent field > run-level config
-  let effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
+  let effectiveAgent: AgentType = executionManifest?.execution.agent
+    ?? storyAgentOverride
+    ?? resolveStoryAgent(story, config.agentType);
 
   // ── OC-031: Tool capability reroute ────────────────────────────────
+  // New runs resolve this before dispatch. Legacy runs without a manifest keep
+  // the historical engine-side behavior for bounded compatibility.
   const orchConfigForCap = loadOrchestrationConfig(config.cwd);
-  if (orchConfigForCap.capabilityMismatch === 'reroute') {
+  if (!executionManifest && orchConfigForCap.capabilityMismatch === 'reroute') {
     const capStory: CapabilityStory = {
       id: story.id,
       title: story.title,
@@ -4973,8 +5247,9 @@ async function executeStory(
 
   const effectiveAttach = effectiveAgent === 'opencode' ? (storyAttachAddr ?? config.attachAddr) : null;
 
-  // Per-story model override takes precedence over run-level model.
-  let currentModel = story.model ?? config.agentModel;
+  // Host-resolved manifests are authoritative; story overrides are legacy fallback only.
+  let currentModel = executionManifest?.execution.model ?? story.model ?? config.agentModel;
+  const currentEffort = (executionManifest?.execution.effort ?? config.effortLevel) as EngineConfig['effortLevel'];
 
   logger.info(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
   if (worktreeInfo) logger.info(`  Worktree: ${worktreeInfo.worktreePath}`);
@@ -5047,7 +5322,15 @@ async function executeStory(
   }
   const activeSkillNames = resolvedSkills.map(s => s.name);
 
-  const executionPacket = buildStoryExecutionPacket(effectiveCwd, story, mode);
+  const inferredExecutionPacket = buildStoryExecutionPacket(effectiveCwd, story, mode);
+  const executionPacket: StoryExecutionPacket = executionManifest
+    ? {
+      ...inferredExecutionPacket,
+      validationCommands: executionManifest.validationPlan.map((requirement) => (
+        [requirement.command, ...requirement.args].join(' ')
+      )),
+    }
+    : inferredExecutionPacket;
 
   // PG-023: Unified retrieval for execution-time memory context + graph context + feedback binding
   const predictedPaths = executionPacket.candidateFiles;
@@ -5171,6 +5454,9 @@ async function executeStory(
     graphSection,
   );
   promptBody += `\n\n${buildExecutionPacketPromptSection(executionPacket)}`;
+  if (executionManifest) {
+    promptBody += `\n\n${buildStoryExecutionManifestPromptSection(executionManifest)}`;
+  }
 
   if (wantsBrowser && browserMcpUrl) {
     promptBody += [
@@ -5426,7 +5712,7 @@ async function executeStory(
         tokenUpdateCallback,
         config.thinkingEnabled,
         config.thinkingBudget,
-        config.effortLevel,
+        currentEffort,
         Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
         piRetryContext,
         effectiveAgent === 'pi' ? emitStoryStarted : undefined,
@@ -5575,7 +5861,21 @@ async function executeStory(
       logger.info(`${story.id} completed (exit 0)`);
 
       const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
-      const gate = skipGate ? { passed: true } as GateResult : runGate(effectiveCwd);
+      // Manifest validations bind to the committed story revision below. Legacy
+      // runs retain the historical pre-commit typecheck gate.
+      const gate = skipGate || executionManifest
+        ? { passed: true } as GateResult
+        : runGate(effectiveCwd);
+      if (workspaceId && gate.observations) {
+        for (const observation of gate.observations) {
+          await emitWalEvent(config.port, 'validation_result', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            manifest_hash: executionManifest?.manifestHash,
+            ...observation,
+          }, story.id);
+        }
+      }
 
       if (!gate.passed) {
         logger.info(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
@@ -5853,6 +6153,67 @@ async function executeStory(
         writeProgressTxt(effectiveCwd);
         await persistRetrievalOutcome(false);
         return 'failed';
+      }
+
+      // Manifest-backed host validation runs after commit so revision-sensitive
+      // evidence binds to the actual story branch commit, never the superseded
+      // pre-commit HEAD. Any commit made by a validation command is recorded in
+      // before/after revisions and will be blocked by closeout until rerun.
+      if (executionManifest && !skipGate) {
+        const manifestGate = runGate(effectiveCwd, executionManifest);
+        if (workspaceId && manifestGate.observations) {
+          for (const observation of manifestGate.observations) {
+            await emitWalEvent(config.port, 'validation_result', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              manifest_hash: executionManifest.manifestHash,
+              ...observation,
+            }, story.id);
+          }
+        }
+        if (!manifestGate.passed) {
+          const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, currentRetries);
+          recordPiProgress({
+            knownIssues: [`Host manifest validation failed: ${manifestGate.reason}.`],
+            validationResults: [`Host validation failure: ${manifestGate.output ?? manifestGate.reason}`],
+            remainingWork: ['Remediate the typed host validation blocker and rerun against the active revision.'],
+          });
+          if (currentRetries >= MAX_RETRIES) {
+            markStorySkipped(config.jsonPath, story.id);
+            rsMarkStoryFailed(effectiveCwd, {
+              storyId: story.id,
+              title: story.title,
+              status: 'failed',
+              startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+              finishedAt: new Date().toISOString(),
+              agentType: effectiveAgent,
+              failReason: 'gate_manifest_validation',
+              retries: currentRetries,
+            });
+            writeProgressTxt(effectiveCwd);
+          }
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              reason: 'manifest_validation',
+              summary: manifestGate.output,
+              log_file: storyLogFile,
+            }, story.id);
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+            });
+          }
+          await persistRetrievalOutcome(false);
+          return 'failed';
+        }
       }
 
       // CIE-006: Post-commit violation detection
@@ -6786,7 +7147,12 @@ async function runParallel(
     const worktreeMap = new Map<string, StoryWorktree>();
 
     for (const story of executableStories) {
-      const wt = createStoryWorktree(config.cwd, specSlug, story.id);
+      const wt = createStoryWorktree(
+        config.cwd,
+        specSlug,
+        story.id,
+        config.executionManifests.get(story.id)?.execution.worktree,
+      );
       if (wt) {
         worktreeMap.set(story.id, wt);
       } else {
@@ -6981,6 +7347,21 @@ async function resolveWorkspaceId(port: number, cwd: string): Promise<string | n
 
 // ─── Argument Parser ────────────────────────────────────────────────────────
 
+function loadExecutionManifestMap(manifestPath: string | null, runId: number): ReadonlyMap<string, StoryExecutionManifest> {
+  if (!manifestPath) return new Map(); // Named legacy compatibility path only.
+  const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as unknown;
+  if (!Array.isArray(parsed)) throw new Error('Execution manifest bundle must be an array');
+  const manifests = new Map<string, StoryExecutionManifest>();
+  for (const candidate of parsed) {
+    const manifest = candidate as StoryExecutionManifest;
+    if (!verifyStoryExecutionManifest(manifest)) throw new Error('Execution manifest bundle contains a stale or invalid hash');
+    if (manifest.identity.runId !== runId) throw new Error('Execution manifest bundle contains the wrong run identity');
+    if (manifests.has(manifest.identity.storyId)) throw new Error(`Duplicate execution manifest for ${manifest.identity.storyId}`);
+    manifests.set(manifest.identity.storyId, manifest);
+  }
+  return manifests;
+}
+
 function parseArgs(): EngineConfig {
   const args = process.argv.slice(2);
   let jsonPath = '';
@@ -7002,6 +7383,7 @@ function parseArgs(): EngineConfig {
   let thinkingEnabled: boolean | undefined;
   let thinkingBudget: number | undefined;
   let effortLevel: 'low' | 'medium' | 'high' | 'max' | 'xhigh' | undefined;
+  let executionManifestPath: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -7071,6 +7453,9 @@ function parseArgs(): EngineConfig {
       case '--reasoning-effort':
         effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max' | 'xhigh';
         break;
+      case '--execution-manifests':
+        executionManifestPath = args[++i];
+        break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
@@ -7087,7 +7472,8 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
+  const executionManifests = loadExecutionManifestMap(executionManifestPath, runId);
+  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, executionManifests };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

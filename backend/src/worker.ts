@@ -834,7 +834,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     if (executionEnvironment !== 'remote-rorca') {
       logger.error({ jobId, runId, executionEnvironment }, '[worker] unsupported execution environment reached remote worker');
@@ -1018,6 +1018,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     if (includeGraph) {
       engineArgs.push('--include-graph');
+    }
+    if (executionManifestPath) {
+      engineArgs.push('--execution-manifests', executionManifestPath);
     }
     // agentOverride is already incorporated into the `agent` field via pipeline.ts resolution;
     // the --agent flag above uses payload.agent which already reflects the override.
@@ -1503,6 +1506,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       model,
       worktreePath,
       sequenceOffset,
+      executionManifestPath,
       envOverrides,
       includeGraph,
       terminalMode: payloadTerminalMode,
@@ -1612,6 +1616,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     if (reasoningEffort) {
       engineArgs.push('--reasoning-effort', reasoningEffort);
+    if (executionManifestPath) {
+      engineArgs.push('--execution-manifests', executionManifestPath);
+    }
     }
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
