@@ -1,6 +1,6 @@
 # Rorca Capture Sidecar Architecture Contract
 
-This contract implements the product requirements in [`docs/prds/rorca-context-capture-sidecar/PRD.md`](./prds/rorca-context-capture-sidecar/PRD.md). For copy-pasteable rollout steps, see the [operator guide](./rorca-capture-sidecar-operator-guide.md).
+This contract implements the product requirements in [`docs/prds/rorca-context-capture-sidecar/PRD.md`](./prds/rorca-context-capture-sidecar/PRD.md). For copy-pasteable rollout steps, see the [operator guide](./rorca-capture-sidecar-operator-guide.md). The reconciled opt-in always-on policy, multi-source adapters, distillation, and monitoring layers are defined in [Universal Context Capture](./universal-context-capture.md) and [production readiness](./always-on-context-production-readiness.md); they extend this CCS contract rather than replacing its stable public APIs.
 
 ## Package and entrypoint
 
