@@ -27,7 +27,7 @@ async function cleanPackageRoot() {
 
 try {
   const packageRoot = await cleanPackageRoot();
-  const runtimePath = path.join(packageRoot, 'packages', 'rorca-pi-extension', 'extensions', 'rorca', 'capture-service.js');
+  const runtimePath = path.join(packageRoot, 'packages', 'rorca-capture', 'dist', 'always-on.js');
   assert(existsSync(runtimePath), 'packed capture service runtime is missing');
   const {
     renderLaunchdPlist,
@@ -35,16 +35,16 @@ try {
     renderWindowsFallbackScript,
     renderWindowsTaskSchedulerRegistration,
     resolveCaptureServicePaths,
-    runCaptureServiceLifecycle,
+    runCaptureServiceAction,
   } = await import(`${pathToFileURL(runtimePath).href}?smoke=${Date.now()}`);
 
   const home = path.join(tempRoot, 'Home With Spaces');
   const workspacePath = path.join(tempRoot, "Workspace's 100% Ready");
-  const command = path.join(packageRoot, 'bin', 'rorca-capture.js');
+  const command = path.join(packageRoot, 'packages', 'rorca-capture', 'dist', 'cli.js');
   const workspace = { id: 'platform-demo', label: 'Platform Demo', path: workspacePath };
   mkdirSync(home, { recursive: true });
   mkdirSync(workspacePath, { recursive: true });
-  const config = { apiBaseUrl: 'http://127.0.0.1:3030', scanIntervalMs: 60000, maxCommitsPerScan: 20, maxConcurrency: 4, queueWarnSize: 100, queueMaxSize: 1000 };
+  const config = { apiUrl: 'http://127.0.0.1:3030' };
 
   const darwinPaths = resolveCaptureServicePaths(workspace, 'darwin', home);
   const linuxPaths = resolveCaptureServicePaths(workspace, 'linux', home);
@@ -56,9 +56,9 @@ try {
 
   const nodeV1 = path.join(tempRoot, 'Node Runtime v1', process.platform === 'win32' ? 'node.exe' : 'node');
   const nodeV2 = path.join(tempRoot, 'Node Runtime v2', process.platform === 'win32' ? 'node.exe' : 'node');
-  const launchd = renderLaunchdPlist({ workspace, command, nodePath: nodeV1, homeDir: home, paths: darwinPaths, config });
-  const systemd = renderSystemdUserService({ workspace, command, nodePath: nodeV1, paths: linuxPaths, config });
-  const windows = renderWindowsFallbackScript({ workspace, command, nodePath: nodeV1, config });
+  const launchd = renderLaunchdPlist({ workspace, command, nodePath: nodeV1, homeDir: home, paths: darwinPaths, ...config });
+  const systemd = renderSystemdUserService({ workspace, command, nodePath: nodeV1, paths: linuxPaths, ...config });
+  const windows = renderWindowsFallbackScript({ workspace, command, nodePath: nodeV1, ...config });
   const taskScheduler = renderWindowsTaskSchedulerRegistration({ workspace, serviceFile: windowsPaths.serviceFile, powershellPath: 'pwsh.exe' });
 
   assert(launchd.includes(nodeV1.replace(/&/g, '&amp;')));
@@ -73,7 +73,7 @@ try {
 
   // A service reinstall is the supported Node-path upgrade operation. Rendering
   // must replace the old absolute runtime without touching queue/state files.
-  const upgradedSystemd = renderSystemdUserService({ workspace, command, nodePath: nodeV2, paths: linuxPaths, config });
+  const upgradedSystemd = renderSystemdUserService({ workspace, command, nodePath: nodeV2, paths: linuxPaths, ...config });
   assert(systemd.includes(nodeV1));
   assert(!upgradedSystemd.includes(nodeV1));
   assert(upgradedSystemd.includes(nodeV2));
@@ -82,7 +82,7 @@ try {
   const runner = () => { runnerCalls += 1; throw new Error('dry-run attempted a live service-manager command'); };
   for (const platform of ['darwin', 'linux', 'win32']) {
     for (const action of ['install', 'start', 'stop', 'restart', 'uninstall']) {
-      const result = runCaptureServiceLifecycle({ action, platform, workspace, command, nodePath: nodeV1, homeDir: home, config, dryRun: true, runner });
+      const result = runCaptureServiceAction({ action, platform, workspace, command, nodePath: nodeV1, homeDir: home, ...config, dryRun: true, runner });
       assert.equal(result.ok, true);
     }
   }
@@ -97,7 +97,7 @@ try {
   writeFileSync(plistFile, launchd, 'utf8');
   // Use the real host Node executable for systemd-analyze's executable check;
   // synthetic old/new paths above remain render-only upgrade assertions.
-  writeFileSync(unitFile, renderSystemdUserService({ workspace, command, nodePath: process.execPath, paths: linuxPaths, config }), 'utf8');
+  writeFileSync(unitFile, renderSystemdUserService({ workspace, command, nodePath: process.execPath, paths: linuxPaths, ...config }), 'utf8');
   writeFileSync(psFile, windows, 'utf8');
   writeFileSync(taskFile, taskScheduler, 'utf8');
 
