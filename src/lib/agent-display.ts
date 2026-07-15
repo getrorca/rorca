@@ -21,6 +21,22 @@ function shortModelName(agentModel?: string | null): string | null {
   return trimmed.split('/').pop() || trimmed;
 }
 
+/**
+ * Present an explicitly persisted model without changing its provenance.
+ * Known GPT identifiers get a human-readable label; unknown values remain
+ * verbatim so the UI never invents a model name.
+ */
+export function getAgentModelDisplayName(agentModel?: string | null): string | null {
+  const model = shortModelName(agentModel);
+  if (!model) return null;
+  const gpt = /^gpt-(\d+(?:\.\d+)*)(?:-([a-z0-9]+))?$/i.exec(model);
+  if (!gpt) return model;
+  const variant = gpt[2]
+    ? ` ${gpt[2].replace(/(^|[-_])([a-z0-9])/gi, (_match, _separator, character) => character.toUpperCase())}`
+    : '';
+  return `GPT ${gpt[1]}${variant}`;
+}
+
 export function getAgentBadgeLabel(
   agentType?: string | null,
   agentModel?: string | null,

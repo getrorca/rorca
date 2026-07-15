@@ -228,6 +228,8 @@ describe('RunViewPanel', () => {
 
     await waitFor(() => {
       expect(screen.getAllByText('Pi')).toHaveLength(2);
+      expect(screen.getByTestId('run-engine-model')).toHaveTextContent('GPT 5.6 Sol');
+      expect(screen.getByTestId('run-engine-model')).toHaveAttribute('title', 'openai-codex/gpt-5.6-sol');
       expect(screen.getByText('openai-codex/gpt-5.6-sol')).toBeInTheDocument();
     });
     expect(screen.queryByText('Claude')).not.toBeInTheDocument();
