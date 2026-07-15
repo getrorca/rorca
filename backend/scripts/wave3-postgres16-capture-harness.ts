@@ -1,5 +1,12 @@
 #!/usr/bin/env npx tsx
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Disposable Wave 3 PostgreSQL certification harness.
  *
  * This process never starts a Rorca server or worker. It lets pg-boss create its
