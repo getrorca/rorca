@@ -426,7 +426,7 @@ export async function runContextDistillationJob(input: { workspaceId: string; ev
   const limit = Math.min(Math.max(input.limit ?? settings.maxEventsPerJob, 1), MAX_EVENTS_PER_JOB);
   const rows = input.eventId
     ? await query<ContextEventRow>('SELECT id, occurred_at, workspace_id, event_type, idempotency_key, payload, distillation_status FROM context_events WHERE id = $1 AND workspace_id = $2 LIMIT 1', [input.eventId, input.workspaceId])
-    : await query<ContextEventRow>('SELECT id, occurred_at, workspace_id, event_type, idempotency_key, payload, distillation_status FROM context_events WHERE workspace_id = $1 AND distillation_status IS NULL ORDER BY id ASC LIMIT $2', [input.workspaceId, limit]);
+    : await query<ContextEventRow>("SELECT id, occurred_at, workspace_id, event_type, idempotency_key, payload, distillation_status FROM context_events WHERE workspace_id = $1 AND distillation_status IS NULL AND payload->>'payload_schema_version' = '2026-07-ucc-007.v1' ORDER BY id ASC LIMIT $2", [input.workspaceId, limit]);
   let candidates = 0;
   let skipped = 0;
   let autoApproved = 0;
