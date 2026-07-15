@@ -85,9 +85,11 @@ try {
   // A service reinstall is the supported Node-path upgrade operation. Rendering
   // must replace the old absolute runtime without touching queue/state files.
   const upgradedSystemd = renderSystemdUserService({ workspace, command, nodePath: nodeV2, paths: linuxPaths, ...config });
-  assert(systemd.includes(nodeV1));
-  assert(!upgradedSystemd.includes(nodeV1));
-  assert(upgradedSystemd.includes(nodeV2));
+  const renderedNodeV1 = nodeV1.replace(/\\/g, '\\\\');
+  const renderedNodeV2 = nodeV2.replace(/\\/g, '\\\\');
+  assert(systemd.includes(renderedNodeV1));
+  assert(!upgradedSystemd.includes(renderedNodeV1));
+  assert(upgradedSystemd.includes(renderedNodeV2));
 
   let runnerCalls = 0;
   const runner = () => { runnerCalls += 1; throw new Error('dry-run attempted a live service-manager command'); };
