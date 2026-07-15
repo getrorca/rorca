@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, type RefObject } from 'react';
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -22,9 +22,14 @@ const FOCUSABLE_SELECTOR = [
  * On unmount (or when active becomes false), restores focus to the element
  * that was focused before the trap activated.
  */
-export function useFocusTrap<T extends HTMLElement = HTMLElement>(active = true) {
+export function useFocusTrap<T extends HTMLElement = HTMLElement>(
+  active = true,
+  restoreFocusRef?: RefObject<HTMLElement | null>,
+) {
   const containerRef = useRef<T>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const requestedRestoreRef = useRef(restoreFocusRef);
+  requestedRestoreRef.current = restoreFocusRef;
 
   // Capture the previously focused element when the trap activates
   useEffect(() => {
@@ -36,12 +41,13 @@ export function useFocusTrap<T extends HTMLElement = HTMLElement>(active = true)
   // Restore focus when trap deactivates or unmounts
   useEffect(() => {
     if (!active) return;
-    const prev = previousFocusRef.current;
     return () => {
-      if (prev && typeof prev.focus === 'function') {
-        // Use requestAnimationFrame to ensure DOM has settled
+      // Read the requested target during cleanup so a drawer that switches
+      // matrix cells restores to the latest selected cell, not the opener.
+      const target = requestedRestoreRef.current?.current ?? previousFocusRef.current;
+      if (target && typeof target.focus === 'function') {
         requestAnimationFrame(() => {
-          prev.focus();
+          if (target.isConnected) target.focus();
         });
       }
     };
@@ -52,7 +58,10 @@ export function useFocusTrap<T extends HTMLElement = HTMLElement>(active = true)
 
     const focusable = Array.from(
       containerRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
-    ).filter((el) => el.offsetParent !== null); // exclude hidden elements
+    ).filter((el) => {
+      const style = window.getComputedStyle(el);
+      return !el.hidden && style.display !== 'none' && style.visibility !== 'hidden';
+    });
 
     if (focusable.length === 0) {
       e.preventDefault();
@@ -61,6 +70,12 @@ export function useFocusTrap<T extends HTMLElement = HTMLElement>(active = true)
 
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
+
+    if (!containerRef.current.contains(document.activeElement)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+      return;
+    }
 
     if (e.shiftKey) {
       if (document.activeElement === first) {

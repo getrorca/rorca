@@ -24,6 +24,8 @@
   --switch-knob: #ffffff;
   --kbd-bg: rgba(255, 255, 255, 0.15);
   --backdrop-opacity: 0.75;
+  --motion-duration-drawer: 150ms;
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --inline-code-bg: rgba(58, 153, 150, 0.1);
   --code-block-bg: rgba(0, 0, 0, 0.4);
   --code-block-text: #e0e0e0;

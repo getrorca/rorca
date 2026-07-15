@@ -380,6 +380,10 @@
   }
 }
 
+.animate-slideInRight {
+  animation: slideInRight var(--motion-duration-drawer) var(--motion-ease-out);
+}
+
 @keyframes slideInLeft {
   from {
     transform: translateX(-100%);
@@ -671,7 +675,7 @@
 }
 
 .animate-slide-up-full {
-  animation: slideUpFull 0.25s ease-out;
+  animation: slideUpFull var(--motion-duration-drawer) var(--motion-ease-out);
 }
 
 /* ─── ULT-012: Tablet sidebar rail ─────────────────────────────────── */

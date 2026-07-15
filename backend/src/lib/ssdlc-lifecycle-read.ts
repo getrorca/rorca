@@ -1005,6 +1005,24 @@ function permittedActions(phase: PhaseEvaluation, stalePlan: boolean): string[] 
   return ['inspect_evidence', 'reopen_disposition'];
 }
 
+function phaseActionGuidance(phase: PhaseEvaluation, stalePlan: boolean) {
+  const action = stalePlan
+    ? 'Recompile the lifecycle plan before acting on phase state.'
+    : phase.nextSafeAction ?? phase.nextUnmetGate?.nextSafeAction ?? 'No action is required for this phase.';
+  const rationale = stalePlan
+    ? 'The compiled lifecycle plan does not match the current spec revision, so downstream phase evidence cannot be acted on safely.'
+    : phase.blockerReason
+      ?? (phase.nextUnmetGate
+        ? `Gate ${phase.nextUnmetGate.gateId} is ${phase.nextUnmetGate.status.replace(/_/g, ' ')} in the current bounded evaluation snapshot.`
+        : `The current bounded evaluation classified this phase as ${phase.status.replace(/_/g, ' ')} with ${phase.counts.passed} of ${phase.counts.total} required gates passed.`);
+  return {
+    action,
+    rationale,
+    confidence: phase.snapshotChanged || phase.refetchRequired ? 0.5 : 0.95,
+    classifier: 'phase_evaluator' as const,
+  };
+}
+
 export async function getLifecyclePhase(input: LifecyclePhaseInput) {
   const loaded = await loadOne(input);
   if (!loaded.bundle) {
@@ -1023,6 +1041,12 @@ export async function getLifecyclePhase(input: LifecyclePhaseInput) {
       evidence: paginateArray([], input.evidencePagination),
       blocker: null,
       nextSafeAction: 'Compile the lifecycle plan.',
+      nextSafeActionGuidance: {
+        action: 'Compile the lifecycle plan.',
+        rationale: 'No current compiled lifecycle plan exists for this spec revision.',
+        confidence: 1,
+        classifier: 'plan_state' as const,
+      },
       permittedActions: ['recompile_plan'],
       recompileHint: missingPlanItem(loaded.candidate).recompileHint,
       evaluationSnapshot: {
@@ -1086,6 +1110,7 @@ export async function getLifecyclePhase(input: LifecyclePhaseInput) {
     nextSafeAction: bundle.planState !== 'current'
       ? 'Recompile the lifecycle plan before acting on phase state.'
       : phase.nextSafeAction ?? phase.nextUnmetGate?.nextSafeAction ?? null,
+    nextSafeActionGuidance: phaseActionGuidance(phase, bundle.planState !== 'current'),
     permittedActions: permittedActions(phase, bundle.planState !== 'current'),
     evaluationSnapshot: bundle.evaluation.snapshot,
     snapshotId: bundle.evaluation.snapshot.snapshotId,

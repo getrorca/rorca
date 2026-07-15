@@ -342,6 +342,8 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   selectedSpecRef.current = selectedSpec;
   phaseRef.current = phase;
   const generations = useRef({ portfolio: 0, detail: 0, phase: 0, evidence: 0 });
+  const phaseSelectionKeyRef = useRef<string | null>(null);
+  const evidenceSelectionKeyRef = useRef<string | null>(null);
   const recoveryKeyRef = useRef<string | null>(null);
 
   const updateUrlState = useCallback((patch: Partial<LifecycleUrlState>, replace = false) => {
@@ -409,6 +411,8 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       evidence: generations.current.evidence + 1,
     };
     recoveryKeyRef.current = null;
+    phaseSelectionKeyRef.current = null;
+    evidenceSelectionKeyRef.current = null;
     setPortfolio(emptyQuery());
     setSelectedSpec(emptyQuery());
     setPhase(emptyQuery());
@@ -464,12 +468,23 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   }, [workspaceId, urlState.selectedSpecId, portfolioReady, selectedPortfolioSnapshot, revisions.detail, coordinatedRefetch]);
 
   useEffect(() => {
-    if (!workspaceId || !urlState.selectedSpecId || !urlState.selectedPhaseId) { setPhase(emptyQuery()); return; }
+    if (!workspaceId || !urlState.selectedSpecId || !urlState.selectedPhaseId) {
+      phaseSelectionKeyRef.current = null;
+      setPhase(emptyQuery());
+      return;
+    }
+    const selectionKey = `${workspaceId}:${urlState.selectedSpecId}:${urlState.selectedPhaseId}`;
+    const selectionChanged = phaseSelectionKeyRef.current !== selectionKey;
+    phaseSelectionKeyRef.current = selectionKey;
+    if (selectionChanged) {
+      setSelectedEvidenceId(null);
+      setEvidence(emptyQuery());
+    }
+    setPhase((state) => selectionChanged ? { ...emptyQuery<LifecyclePhaseResponse>(), loading: true } : beginQuery(state));
     const expected = selectedPortfolioSnapshot ?? selectedSpec.data?.snapshotId;
     if (!expected) return;
     const generation = ++generations.current.phase;
     const controller = new AbortController();
-    setPhase(beginQuery);
     getLifecyclePhase(
       workspaceId,
       urlState.selectedSpecId,
@@ -494,10 +509,17 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   }, [workspaceId, urlState.selectedSpecId, urlState.selectedPhaseId, urlState.limit, selectedSpec.data?.snapshotId, selectedPortfolioSnapshot, revisions.phase, coordinatedRefetch]);
 
   useEffect(() => {
-    if (!workspaceId || !selectedEvidenceId) { setEvidence(emptyQuery()); return; }
+    if (!workspaceId || !selectedEvidenceId) {
+      evidenceSelectionKeyRef.current = null;
+      setEvidence(emptyQuery());
+      return;
+    }
+    const selectionKey = `${workspaceId}:${selectedEvidenceId}`;
+    const selectionChanged = evidenceSelectionKeyRef.current !== selectionKey;
+    evidenceSelectionKeyRef.current = selectionKey;
     const generation = ++generations.current.evidence;
     const controller = new AbortController();
-    setEvidence(beginQuery);
+    setEvidence((state) => selectionChanged ? { ...emptyQuery<LifecycleEvidenceDetail>(), loading: true } : beginQuery(state));
     getLifecycleEvidence(workspaceId, selectedEvidenceId, undefined, { signal: controller.signal, silent: true })
       .then((data) => {
         if (generation !== generations.current.evidence || controller.signal.aborted) return;

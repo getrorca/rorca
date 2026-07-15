@@ -408,6 +408,14 @@ export interface LifecyclePhaseResponse extends LifecycleSnapshotRef {
   requiredGates: LifecycleBounded<LifecycleGate>;
   evidence: LifecyclePaginated<LifecycleEvidenceSummary>;
   blocker: { gateId: string | null; reason: string } | null;
+  /** Backend-classified guidance. Clients must not derive this from status presentation. */
+  nextSafeActionGuidance: {
+    action: string;
+    rationale: string;
+    confidence: number;
+    classifier: 'phase_evaluator' | 'plan_state';
+  };
+  /** Backward-compatible evaluator action text. Prefer nextSafeActionGuidance in new UI. */
   nextSafeAction: string | null;
   permittedActions: LifecyclePermittedAction[];
   evaluationSnapshot: LifecycleEvaluationSnapshot | LifecycleSnapshotRef;

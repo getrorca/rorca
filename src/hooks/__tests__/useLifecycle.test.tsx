@@ -100,7 +100,9 @@ function phase(snapshot = SNAPSHOT): LifecyclePhaseResponse {
     disposition: 'required', whyRequired: 'QA is required', mappedRequirements: { items: [], total: 0, truncated: false },
     mappedDecisions: { items: [], total: 0, truncated: false }, mappedStories: { items: [], total: 0, truncated: false },
     governedDecisions: { items: [], total: 0, truncated: false }, requiredGates: { items: [], total: 0, truncated: false },
-    evidence: { items: [], total: 0, hasMore: false }, blocker: null, nextSafeAction: 'Run QA', permittedActions: ['run_phase'],
+    evidence: { items: [], total: 0, hasMore: false }, blocker: null,
+    nextSafeActionGuidance: { action: 'Run QA', rationale: 'QA has not completed.', confidence: 0.95, classifier: 'phase_evaluator' },
+    nextSafeAction: 'Run QA', permittedActions: ['run_phase'],
     evaluationSnapshot: { snapshotId: snapshot, ...MARKS }, snapshotId: snapshot, ...MARKS,
   };
 }

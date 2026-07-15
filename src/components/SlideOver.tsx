@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useEffect, useRef, useCallback, useState, useId } from 'react';
+import { useEffect, useRef, useCallback, useState, useId, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
@@ -15,21 +15,41 @@ interface SlideOverProps {
     isOpen: boolean;
     onClose: () => void;
     title?: React.ReactNode;
+    ariaLabel?: string;
     hideHeader?: boolean;
     desktopMaxWidth?: number;
+    /** Opt-in sheet behavior for surfaces whose tablet layout cannot retain useful background context. */
+    fullScreenBelowDesktop?: boolean;
+    /** Keeps the desktop board pointer-accessible while the non-modal detail panel is open. */
+    allowBackgroundInteraction?: boolean;
+    contentClassName?: string;
+    restoreFocusRef?: RefObject<HTMLElement | null>;
     children: React.ReactNode;
 }
 
 const SWIPE_THRESHOLD = 100; // px to swipe down before triggering close
 
-export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopMaxWidth, children }: SlideOverProps) {
+export default function SlideOver({
+    isOpen,
+    onClose,
+    title,
+    ariaLabel,
+    hideHeader,
+    desktopMaxWidth,
+    fullScreenBelowDesktop = false,
+    allowBackgroundInteraction = false,
+    contentClassName = '',
+    restoreFocusRef,
+    children,
+}: SlideOverProps) {
     const panelRef = useRef<HTMLDivElement>(null);
     const breakpoint = useBreakpoint();
     const isMobile = breakpoint === 'mobile';
+    const isFullScreen = isMobile || (fullScreenBelowDesktop && breakpoint === 'tablet');
     const titleId = useId();
 
     // Focus trap — captures focus inside the dialog, restores on close
-    const focusTrapRef = useFocusTrap<HTMLDivElement>(isOpen);
+    const focusTrapRef = useFocusTrap<HTMLDivElement>(isOpen, restoreFocusRef);
 
     // Swipe-to-close state
     const [swipeY, setSwipeY] = useState(0);
@@ -47,10 +67,10 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopM
 
     // Prevent body scroll while open
     useEffect(() => {
-        if (!isOpen) return;
+        if (!isOpen || (allowBackgroundInteraction && !isFullScreen)) return;
         document.body.style.overflow = 'hidden';
         return () => { document.body.style.overflow = ''; };
-    }, [isOpen]);
+    }, [allowBackgroundInteraction, isFullScreen, isOpen]);
 
     // Handle click outside panel (desktop only)
     const handleBackdropClick = (e: React.MouseEvent) => {
@@ -98,7 +118,7 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopM
     const dialogTitle = title || 'Details';
 
     // Mobile: full-screen slide-up with swipe-down-to-close
-    if (isMobile) {
+    if (isFullScreen) {
         const opacity = swipeY > 0 ? Math.max(0.2, 1 - swipeY / 300) : 1;
 
         return createPortal(
@@ -108,7 +128,7 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopM
                 aria-modal="true"
                 role="dialog"
                 aria-labelledby={!hideHeader ? titleId : undefined}
-                aria-label={hideHeader ? 'Detail panel' : undefined}
+                aria-label={hideHeader ? (ariaLabel ?? 'Detail panel') : undefined}
             >
                 {/* Backdrop */}
                 <div
@@ -124,7 +144,7 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopM
                     className="relative flex flex-col w-full h-full bg-bg animate-slide-up-full"
                     style={{
                         transform: swipeY > 0 ? `translateY(${swipeY}px)` : undefined,
-                        transition: swipeY > 0 ? 'none' : 'transform 0.25s ease-out',
+                        transition: swipeY > 0 ? 'none' : 'transform var(--motion-duration-drawer) var(--motion-ease-out)',
                     }}
                     onTouchStart={onTouchStart}
                     onTouchMove={onTouchMove}
@@ -151,7 +171,7 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopM
                     </div>
 
                     {/* Content */}
-                    <div data-slide-content className="flex-1 overflow-y-auto contain-layout">
+                    <div data-slide-content className={`flex-1 min-h-0 overflow-y-auto contain-layout ${contentClassName}`}>
                         {children}
                     </div>
                 </div>
@@ -166,20 +186,20 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopM
     return createPortal(
         <aside
             ref={focusTrapRef}
-            className="fixed inset-0 z-[100] flex justify-end"
-            onClick={handleBackdropClick}
-            aria-modal="true"
+            className={`fixed inset-0 z-[100] flex justify-end ${allowBackgroundInteraction ? 'pointer-events-none' : ''}`}
+            onClick={allowBackgroundInteraction ? undefined : handleBackdropClick}
+            aria-modal={allowBackgroundInteraction ? undefined : 'true'}
             role="dialog"
             aria-labelledby={!hideHeader ? titleId : undefined}
-            aria-label={hideHeader ? 'Detail panel' : undefined}
+            aria-label={hideHeader ? (ariaLabel ?? 'Detail panel') : undefined}
         >
             {/* Heavy overlay shadow */}
-            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity" aria-hidden="true" />
+            {!allowBackgroundInteraction && <div className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity" aria-hidden="true" />}
 
             {/* Slide panel */}
             <div
                 ref={panelRef}
-                className="relative flex flex-col w-full h-full bg-bg border-l border-border animate-slideInRight shadow-[0_0_64px_rgba(0,0,0,0.8)]"
+                className="pointer-events-auto relative flex h-full w-full flex-col border-l border-border bg-bg animate-slideInRight shadow-[0_0_64px_rgba(0,0,0,0.8)]"
                 style={{ maxWidth }}
             >
                 {/* Header */}
@@ -199,7 +219,7 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopM
                 )}
 
                 {/* Content */}
-                <div className="flex-1 overflow-y-auto contain-layout">
+                <div data-slide-content className={`flex-1 min-h-0 overflow-y-auto contain-layout ${contentClassName}`}>
                     {children}
                 </div>
             </div>

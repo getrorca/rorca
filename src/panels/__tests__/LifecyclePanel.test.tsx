@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/apiFetch';
@@ -15,8 +15,13 @@ const mocks = vi.hoisted(() => ({
   workspaceId: 'ws-1' as string | null,
   selectedWorkspace: { id: 'ws-1', name: 'Hermes', git_path: '/tmp/hermes' } as { id: string; name: string; git_path: string } | null,
   lifecycle: {} as Record<string, any>,
+  navigate: vi.fn(),
 }));
 
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('react-router-dom')>()),
+  useNavigate: () => mocks.navigate,
+}));
 vi.mock('../../contexts/WorkspaceContext', () => ({
   useWorkspace: () => ({ workspaceId: mocks.workspaceId, selectedWorkspace: mocks.selectedWorkspace }),
 }));
@@ -33,7 +38,7 @@ function lifecycleState() {
   const item = {
     specId: 'spec-a', title: 'Spec A', specStatus: 'approved', state: 'current', overallStatus: 'in_progress', risk: 'high', owner: null,
     storySummary: { total: 2, passed: 1, failed: 0 }, currentPhaseId: 'qa', blocked: false, blockers: [], liveness: null,
-    currentRevision: null, phases: [{ phaseId: 'qa', displayName: 'QA', status: 'in_progress', disposition: 'required', blocker: null, nextSafeAction: 'Run QA' }],
+    currentRevision: { specVersion: '2', inputHash: 'sha256:spec-a', planVersion: 1 }, phases: [{ phaseId: 'qa', displayName: 'QA', status: 'in_progress', disposition: 'required', blocker: null, nextSafeAction: 'Run QA' }],
     updatedAt: null,
   };
   return {
@@ -47,13 +52,16 @@ function lifecycleState() {
       },
       loading: false, refreshing: false, stale: false, partial: false, error: null,
     },
-    selectedSpec: { data: { title: 'Spec A', ...marks }, loading: false, refreshing: false, stale: false, partial: false, error: null },
+    selectedSpec: { data: { specId: 'spec-a', title: 'Spec A', currentRun: null, plan: null, ...marks }, loading: false, refreshing: false, stale: false, partial: false, error: null },
     phase: {
       data: {
-        phaseId: 'qa', status: 'in_progress', whyRequired: 'QA is required', blocker: null, nextSafeAction: 'Run QA',
+        workspaceId: 'ws-1', specId: 'spec-a', phaseId: 'qa', state: 'current', status: 'in_progress', disposition: 'required',
+        whyRequired: 'QA is required', blocker: null, nextSafeAction: 'Run QA',
+        nextSafeActionGuidance: { action: 'Run QA', rationale: 'QA remains incomplete.', confidence: 0.95, classifier: 'phase_evaluator' },
+        permittedActions: ['run_phase'], governedDecisions: { items: [], total: 0, truncated: false },
         mappedRequirements: { items: [], total: 0, truncated: false }, mappedDecisions: { items: [], total: 0, truncated: false },
         mappedStories: { items: [], total: 0, truncated: false }, requiredGates: { items: [], total: 0, truncated: false },
-        evidence: { items: [], total: 0, hasMore: false }, ...marks,
+        evidence: { items: [], total: 0, hasMore: false }, evaluationSnapshot: marks, ...marks,
       },
       loading: false, refreshing: false, stale: false, partial: false, error: null,
     },
@@ -72,6 +80,7 @@ beforeEach(() => {
   mocks.workspaceId = 'ws-1';
   mocks.selectedWorkspace = { id: 'ws-1', name: 'Hermes', git_path: '/tmp/hermes' };
   mocks.lifecycle = lifecycleState();
+  mocks.navigate.mockReset();
 });
 
 describe('LifecyclePanel', () => {
@@ -80,7 +89,7 @@ describe('LifecyclePanel', () => {
     expect(screen.getByRole('heading', { name: 'Lifecycle Control' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Spec A, QA: In progress.*0 of 0 required gates passed/i })).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Spec A — QA' })).toHaveTextContent('QA is required');
-    expect(screen.getByText('No evidence has been recorded.')).toBeInTheDocument();
+    expect(screen.getByText(/No evidence has been recorded; source, time, and revision match are unknown/)).toBeInTheDocument();
   });
 
   it('uses a matrix-shaped loading skeleton with the stable product label', () => {
@@ -217,5 +226,44 @@ describe('LifecyclePanel', () => {
     expect(mocks.lifecycle.mutations.recompile).not.toHaveBeenCalled();
     expect(mocks.lifecycle.mutations.recordDecision).not.toHaveBeenCalled();
     expect(mocks.lifecycle.mutations.revokeDecision).not.toHaveBeenCalled();
+  });
+
+  it('replaces URL selection on close and when switching an already open drawer', async () => {
+    const user = userEvent.setup();
+    render(<LifecyclePanel />);
+    await user.click(screen.getByRole('button', { name: /Spec A, Intake:/i }));
+    expect(mocks.lifecycle.closeEvidence).toHaveBeenCalled();
+    expect(mocks.lifecycle.updateUrlState).toHaveBeenLastCalledWith({ selectedSpecId: 'spec-a', selectedPhaseId: 'intake' }, true);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Loading phase evidence…');
+
+    await user.click(screen.getByRole('button', { name: 'Close phase details' }));
+    expect(mocks.lifecycle.updateUrlState).toHaveBeenLastCalledWith({ selectedSpecId: null, selectedPhaseId: null }, true);
+  });
+
+  it('routes the server-permitted Open run action without inferring it from status', async () => {
+    const user = userEvent.setup();
+    mocks.lifecycle.selectedSpec.data.currentRun = { id: 913 };
+    render(<LifecyclePanel />);
+    await user.click(screen.getByRole('button', { name: /Open run/ }));
+    expect(mocks.navigate).toHaveBeenCalledWith('/runs/913');
+  });
+
+  it('never flashes a prior phase response while a different selected cell is loading', () => {
+    mocks.lifecycle.phase.data = { ...mocks.lifecycle.phase.data, specId: 'other-spec', whyRequired: 'Stale response content' };
+    mocks.lifecycle.phase.loading = true;
+    render(<LifecyclePanel />);
+    expect(screen.getByText('Loading phase evidence…')).toBeInTheDocument();
+    expect(screen.queryByText('Stale response content')).not.toBeInTheDocument();
+  });
+
+  it('keeps a phase request error recoverable without showing stale content', async () => {
+    const user = userEvent.setup();
+    mocks.lifecycle.phase.data = null;
+    mocks.lifecycle.phase.loading = false;
+    mocks.lifecycle.phase.error = new ApiError(503, 'UNAVAILABLE', 'Evidence service unavailable');
+    render(<LifecyclePanel />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Evidence service unavailable');
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry' }));
+    expect(mocks.lifecycle.refresh).toHaveBeenCalled();
   });
 });
