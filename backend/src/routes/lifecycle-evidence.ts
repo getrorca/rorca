@@ -6,7 +6,8 @@
  */
 
 import { Router, type Request } from 'express';
-import { AuthError, ValidationError } from '../lib/errors';
+import { AuthError, ForbiddenError, ValidationError } from '../lib/errors';
+import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
 import {
   normalizeHermesEvidence,
   paginateNormalizedEvidence,
@@ -31,7 +32,7 @@ function requestPrincipal(req: Request): EvidencePrincipal {
 
 /**
  * @swagger
- * /api/lifecycle/evidence/hermes:
+ * /api/lifecycle/evidence:
  *   post:
  *     tags: [Lifecycle Evidence]
  *     summary: Ingest one bounded normalized Hermes evidence envelope
@@ -62,16 +63,57 @@ function requestPrincipal(req: Request): EvidencePrincipal {
  *       400: { description: Invalid or unbounded envelope }
  *       409: { description: Source event ID conflicts with an existing immutable payload }
  */
-router.post('/evidence/hermes', async (req, res, next) => {
+async function ingestEvidence(req: Request, res: import('express').Response, next: import('express').NextFunction): Promise<void> {
   try {
     const envelope = parseHermesEvidenceEnvelope(req.body);
-    const evidence = normalizeHermesEvidence(envelope, requestPrincipal(req));
+    const principal = requestPrincipal(req);
+    if (envelope.kind !== 'manual_qa' && !principal.adapterVerified) {
+      throw new ForbiddenError('Automated lifecycle evidence requires an authenticated internal/Hermes adapter identity', {
+        classification: 'blocked',
+        source: envelope.kind,
+      });
+    }
+    const evidence = normalizeHermesEvidence(envelope, principal);
     const result = await persistCanonicalEvidence(evidence);
-    res.status(result.replayed ? 200 : 201).json(result);
+    // Emit after persistence on both create and source replay. If the process
+    // died after the evidence commit but before WAL publication, replay repairs
+    // the invalidation without duplicating immutable evidence.
+    await emitLifecycleInvalidation({
+      workspaceId: evidence.scope.workspaceId,
+      specId: evidence.scope.specSlug,
+      phaseId: evidence.scope.phaseId,
+      runId: evidence.scope.runId,
+      changeKind: 'evidence_persisted',
+    });
+    res.status(result.replayed ? 200 : 201).json({
+      classification: result.replayed ? 'duplicate' : 'persisted',
+      ...result,
+    });
   } catch (error) {
     next(error);
   }
-});
+}
+
+router.post('/evidence', ingestEvidence);
+
+/**
+ * @swagger
+ * /api/lifecycle/evidence/hermes:
+ *   post:
+ *     tags: [Lifecycle Evidence]
+ *     summary: Deprecated alias for canonical lifecycle evidence ingress
+ *     deprecated: true
+ *     operationId: ingestHermesLifecycleEvidenceCompatibility
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Compatibility ingress has the identical authenticated, bounded, redacted contract as canonical lifecycle evidence ingress."
+ *     responses:
+ *       201: { description: Immutable evidence created }
+ *       200: { description: Exact source replay returned idempotently }
+ *       400: { description: Invalid or unbounded envelope }
+ *       403: { description: Source identity blocked }
+ *       409: { description: Source event conflicts with immutable evidence }
+ */
+router.post('/evidence/hermes', ingestEvidence);
 
 /**
  * @swagger

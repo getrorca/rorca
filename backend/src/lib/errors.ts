@@ -57,8 +57,8 @@ export class AuthError extends AppError {
 export class ForbiddenError extends AppError {
   readonly statusCode = 403 as const;
 
-  constructor(message = 'Insufficient permissions') {
-    super(message, 'FORBIDDEN');
+  constructor(message = 'Insufficient permissions', details?: Record<string, unknown>) {
+    super(message, 'FORBIDDEN', details);
   }
 }
 

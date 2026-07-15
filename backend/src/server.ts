@@ -138,6 +138,7 @@ import { planGate } from './lib/plan-gate';
 import lifecycleRouter from './routes/lifecycle';
 import lifecycleEvidenceRouter from './routes/lifecycle-evidence';
 import lifecycleDecisionsRouter from './routes/lifecycle-decisions';
+import lifecycleMutationsRouter from './routes/lifecycle-mutations';
 import { startSsdlcEvidenceNormalizer } from './lib/ssdlc-evidence-subscriber';
 import { randomUUID } from 'crypto';
 
@@ -469,6 +470,7 @@ app.use('/api/gitreins', gitReinsEvidenceRouter);
 app.use('/api/lifecycle', lifecycleRouter);
 app.use('/api/lifecycle', lifecycleEvidenceRouter);
 app.use('/api/lifecycle', lifecycleDecisionsRouter);
+app.use('/api/lifecycle', lifecycleMutationsRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);

@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 export const RETRY_PREVIEW_SCHEMA_VERSION = 'retry-preview.v1' as const;
 
@@ -73,6 +73,22 @@ export interface RetryPreviewPacket {
   requiresApproval: boolean;
   destructiveOperations: readonly ['reset', 'branch_delete', 'force_push', 'auto_merge', 'deploy', 'external_send'];
   previewHash: string;
+}
+
+export interface RetryPreviewIdentity {
+  schemaVersion: 'retry-preview-identity.v1';
+  previewHash: string;
+  originalRunId: number;
+  expiresAt: string;
+  signature: string;
+}
+
+const RETRY_PREVIEW_IDENTITY_TTL_MS = 10 * 60 * 1_000;
+
+function previewIdentitySecret(): string {
+  return process.env.RORCA_RETRY_PREVIEW_SECRET
+    ?? process.env.JWT_SECRET
+    ?? 'rorca-local-retry-preview-identity-v1';
 }
 
 function canonical(value: unknown): string {
@@ -176,6 +192,49 @@ export function createRetryPreview(input: Omit<RetryPreviewPacket, 'schemaVersio
 export function verifyRetryPreview(preview: RetryPreviewPacket): boolean {
   const { previewHash, ...base } = preview;
   return preview.schemaVersion === RETRY_PREVIEW_SCHEMA_VERSION && retryHash(base) === previewHash;
+}
+
+function previewIdentitySignature(value: Omit<RetryPreviewIdentity, 'signature'>): string {
+  return `sha256:${createHmac('sha256', previewIdentitySecret()).update(canonical(value)).digest('hex')}`;
+}
+
+/** Create a restart-stable, self-verifying expiry identity without persisting preview state. */
+export function createRetryPreviewIdentity(
+  preview: RetryPreviewPacket,
+  now = new Date(),
+  ttlMs = RETRY_PREVIEW_IDENTITY_TTL_MS,
+): RetryPreviewIdentity {
+  const unsigned = {
+    schemaVersion: 'retry-preview-identity.v1' as const,
+    previewHash: preview.previewHash,
+    originalRunId: preview.originalRunId,
+    expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
+  };
+  return { ...unsigned, signature: previewIdentitySignature(unsigned) };
+}
+
+export function verifyRetryPreviewIdentity(
+  identity: RetryPreviewIdentity,
+  preview: RetryPreviewPacket,
+  now = new Date(),
+): { valid: boolean; reason: 'valid' | 'mismatch' | 'expired' | 'invalid_signature' } {
+  if (identity.schemaVersion !== 'retry-preview-identity.v1'
+    || identity.previewHash !== preview.previewHash
+    || identity.originalRunId !== preview.originalRunId) {
+    return { valid: false, reason: 'mismatch' };
+  }
+  const expiresAt = new Date(identity.expiresAt);
+  if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= now.getTime()) {
+    return { valid: false, reason: 'expired' };
+  }
+  const { signature, ...unsigned } = identity;
+  const expected = previewIdentitySignature(unsigned);
+  const actualBytes = Buffer.from(signature);
+  const expectedBytes = Buffer.from(expected);
+  if (actualBytes.length !== expectedBytes.length || !timingSafeEqual(actualBytes, expectedBytes)) {
+    return { valid: false, reason: 'invalid_signature' };
+  }
+  return { valid: true, reason: 'valid' };
 }
 
 /** Freeze an executable-only retry spec without claiming unselected failures passed. */

@@ -208,6 +208,21 @@ describe('pi-autonomous-runner', () => {
     });
   });
 
+  test('_notes prose alone never grants or locks host run policy', () => {
+    expect(resolvePiRunSafetyOptions(
+      'forge/specs/approved/unrelated.json',
+      { _notes: 'force branch-only, disable deploy, and treat this as governed' },
+      { autoWorktree: false, autoMerge: true, mergeStrategy: 'direct' },
+    )).toEqual({
+      autoWorktree: false,
+      autoMerge: true,
+      mergeStrategy: 'direct',
+      deploy: true,
+      externalSend: true,
+      policyLocked: false,
+    });
+  });
+
   test('buildPiCliModelEffortArgs uses the shared Pi provider/model/thinking flags', () => {
     expect(buildPiCliModelEffortArgs('openai-codex/gpt-5.6-sol', 'xhigh')).toEqual({
       provider: 'openai-codex',

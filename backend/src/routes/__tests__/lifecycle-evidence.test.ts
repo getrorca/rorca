@@ -10,6 +10,7 @@ import request from 'supertest';
 
 const mockPersistCanonicalEvidence = jest.fn();
 const mockPaginateNormalizedEvidence = jest.fn();
+const mockEmitLifecycleInvalidation = jest.fn();
 
 jest.mock('../../lib/ssdlc-evidence', () => {
   const actual = jest.requireActual('../../lib/ssdlc-evidence');
@@ -20,8 +21,13 @@ jest.mock('../../lib/ssdlc-evidence', () => {
   };
 });
 
+jest.mock('../../lib/lifecycle-mutations', () => ({
+  emitLifecycleInvalidation: (...args: unknown[]) => mockEmitLifecycleInvalidation(...args),
+}));
+
 import lifecycleEvidenceRouter from '../lifecycle-evidence';
 import { errorHandler } from '../../lib/error-handler';
+import { ConflictError } from '../../lib/errors';
 
 const observedAt = '2026-07-15T12:00:00.000Z';
 
@@ -74,12 +80,13 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockPersistCanonicalEvidence.mockImplementation(async (evidence) => ({ evidence, replayed: false }));
   mockPaginateNormalizedEvidence.mockResolvedValue({ items: [], total: 0, hasMore: false });
+  mockEmitLifecycleInvalidation.mockResolvedValue(undefined);
 });
 
 describe('lifecycle evidence route', () => {
   test('requires an existing Rorca request identity', async () => {
     const response = await request(appWithUser())
-      .post('/api/lifecycle/evidence/hermes')
+      .post('/api/lifecycle/evidence')
       .send(manualEnvelope());
 
     expect(response.status).toBe(401);
@@ -93,10 +100,11 @@ describe('lifecycle evidence route', () => {
       supabaseId: 'auth-reviewer-1',
       role: 'user',
     }))
-      .post('/api/lifecycle/evidence/hermes')
+      .post('/api/lifecycle/evidence')
       .send(manualEnvelope());
 
     expect(response.status).toBe(201);
+    expect(response.body.classification).toBe('persisted');
     const normalized = mockPersistCanonicalEvidence.mock.calls[0][0];
     expect(normalized.source.type).toBe('manual_qa');
     expect(normalized.actor).toBe('reviewer@example.test');
@@ -112,12 +120,86 @@ describe('lifecycle evidence route', () => {
       supabaseId: 'auth-hermes',
       role: 'admin',
     }))
-      .post('/api/lifecycle/evidence/hermes')
+      .post('/api/lifecycle/evidence')
       .send({ ...manualEnvelope(), kind: 'gitreins_judgment', rationale: undefined, attachmentReference: undefined, rawReference: 'hermes:judgment-1' });
 
     expect(response.status).toBe(200);
+    expect(response.body.classification).toBe('duplicate');
     expect(response.body.replayed).toBe(true);
     expect(mockPersistCanonicalEvidence.mock.calls[0][0].trustLevel).toBe('provider_verified');
+  });
+
+  test('rejects unknown sources, subjects, fields, and oversized envelopes before persistence', async () => {
+    const internal = appWithUser({
+      id: 'hermes-service',
+      email: 'hermes@rorca.internal',
+      supabaseId: 'auth-hermes',
+      role: 'admin',
+    });
+    const [source, subject, field, oversized] = await Promise.all([
+      request(internal).post('/api/lifecycle/evidence').send({ ...manualEnvelope(), kind: 'unknown_source' }),
+      request(internal).post('/api/lifecycle/evidence').send({ ...manualEnvelope(), subject: { type: 'slack_thread', value: 'private' } }),
+      request(internal).post('/api/lifecycle/evidence').send({ ...manualEnvelope(), rawSlackText: 'private' }),
+      request(internal).post('/api/lifecycle/evidence').send({ ...manualEnvelope(), details: { value: 'x'.repeat(70_000) } }),
+    ]);
+
+    expect([source.status, subject.status, field.status, oversized.status]).toEqual([400, 400, 400, 400]);
+    expect(mockPersistCanonicalEvidence).not.toHaveBeenCalled();
+  });
+
+  test('returns a deterministic conflict classification for immutable source reuse', async () => {
+    mockPersistCanonicalEvidence.mockRejectedValueOnce(new ConflictError('Conflicting immutable payload', {
+      classification: 'conflict',
+    }));
+    const response = await request(appWithUser({
+      id: 'reviewer-1',
+      email: 'reviewer@example.test',
+      supabaseId: 'auth-reviewer-1',
+      role: 'user',
+    })).post('/api/lifecycle/evidence').send(manualEnvelope());
+
+    expect(response.status).toBe(409);
+    expect(response.body.details.classification).toBe('conflict');
+    expect(mockEmitLifecycleInvalidation).not.toHaveBeenCalled();
+  });
+
+  test('blocks automated source claims from ordinary users before persistence', async () => {
+    const response = await request(appWithUser({
+      id: 'user-1',
+      email: 'user@example.test',
+      supabaseId: 'auth-user-1',
+      role: 'user',
+    }))
+      .post('/api/lifecycle/evidence')
+      .send({
+        ...manualEnvelope(),
+        kind: 'gitreins_judgment',
+        rationale: undefined,
+        attachmentReference: undefined,
+        rawReference: 'hermes:judgment-1',
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body.details.classification).toBe('blocked');
+    expect(mockPersistCanonicalEvidence).not.toHaveBeenCalled();
+  });
+
+  test('publishes only bounded invalidation metadata after durable persistence', async () => {
+    await request(appWithUser({
+      id: 'reviewer-1',
+      email: 'reviewer@example.test',
+      supabaseId: 'auth-reviewer-1',
+      role: 'user',
+    })).post('/api/lifecycle/evidence').send(manualEnvelope());
+
+    expect(mockEmitLifecycleInvalidation).toHaveBeenCalledWith({
+      workspaceId: 'ws-a',
+      specId: 'safe-delivery',
+      phaseId: 'qa',
+      runId: 7,
+      changeKind: 'evidence_persisted',
+    });
+    expect(JSON.stringify(mockEmitLifecycleInvalidation.mock.calls[0][0])).not.toContain('QA passed');
   });
 
   test('uses canonical pagination for redacted evidence listing', async () => {

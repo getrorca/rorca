@@ -5,9 +5,9 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import crypto from 'node:crypto';
 import { Router, type Request } from 'express';
 import { AuthError, ValidationError } from '../lib/errors';
+import { requireLifecycleIdempotencyKey } from '../lib/lifecycle-mutations';
 import {
   deriveDecisionPrincipal,
   getSsdlcDecisionState,
@@ -65,9 +65,7 @@ function requestPrincipal(req: Request, body: Record<string, unknown> = {}) {
 }
 
 function sourceRequestId(req: Request): string {
-  const idempotencyKey = req.get('Idempotency-Key')?.trim();
-  const requestId = req.get('X-Request-Id')?.trim();
-  return idempotencyKey || requestId || crypto.randomUUID();
+  return requireLifecycleIdempotencyKey(req.get('Idempotency-Key'));
 }
 
 function optionalString(value: unknown): string | null | undefined {
@@ -96,6 +94,11 @@ function decisionSubject(value: unknown): DecisionSubject | null | undefined {
  *     operationId: recordLifecycleDecision
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Governed decisions mutate a workspace-owned audit ledger and bind authority to the authenticated request principal."
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema: { type: string, minLength: 8, maxLength: 200 }
  *     requestBody:
  *       required: true
  *       content:
@@ -162,6 +165,10 @@ router.post('/decisions', async (req, res, next) => {
  *         name: decisionId
  *         required: true
  *         schema: { type: string }
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema: { type: string, minLength: 8, maxLength: 200 }
  *     responses:
  *       200: { description: Decision revoked or exact revocation replay returned }
  *       403: { description: Authenticated principal cannot revoke governed decisions }

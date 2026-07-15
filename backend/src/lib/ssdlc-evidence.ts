@@ -248,6 +248,14 @@ const HERMES_KINDS: readonly HermesEvidenceKind[] = [
   'deployment_proof',
   'memory_closeout',
 ];
+const HERMES_ENVELOPE_FIELDS = new Set([
+  'schemaVersion', 'kind', 'sourceSystem', 'sourceEventId', 'observedAt',
+  'scope', 'subject', 'phaseSubject', 'releaseIdentity', 'status', 'confidence',
+  'payloadHash', 'excerpt', 'rawReference', 'attachmentReference',
+  'provenanceChain', 'rationale', 'details',
+  // Compatibility claims remain bounded but never grant actor/trust authority.
+  'actor', 'trustLevel', 'sourceLabel', 'automated',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -500,6 +508,8 @@ export function parseHermesEvidenceEnvelope(value: unknown): HermesEvidenceEnvel
     throw new ValidationError(`Hermes evidence envelope exceeds ${MAX_HERMES_ENVELOPE_BYTES} bytes`);
   }
   if (!isRecord(value)) throw new ValidationError('Hermes evidence envelope must be an object');
+  const unknownField = Object.keys(value).find((field) => !HERMES_ENVELOPE_FIELDS.has(field));
+  if (unknownField) throw new ValidationError(`Unknown Hermes evidence field '${unknownField}'`, { field: unknownField });
   if (value.schemaVersion !== HERMES_EVIDENCE_SCHEMA_VERSION) {
     throw new ValidationError(`schemaVersion must be ${HERMES_EVIDENCE_SCHEMA_VERSION}`, { field: 'schemaVersion' });
   }
@@ -767,7 +777,11 @@ export async function persistCanonicalEvidence(
       return { evidence: sanitizeEvidenceForRendering(rowToEvidence(existing)), replayed: true };
     }
     await auditEvidenceConflict(existing, evidence, db);
-    throw new ConflictError('Evidence source event ID has a conflicting immutable payload; conflict was audit-recorded');
+    throw new ConflictError('Evidence source event ID has a conflicting immutable payload; conflict was audit-recorded', {
+      classification: 'conflict',
+      sourceSystem: evidence.source.system,
+      sourceEventId: evidence.source.eventId,
+    });
   }
 
   const workspace = await db.queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [evidence.scope.workspaceId]);

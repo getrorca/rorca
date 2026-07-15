@@ -54,7 +54,7 @@ import {
   type StoryChangePolicy,
 } from '../lib/story-execution-packet';
 import { persistStoryExecutionManifest } from '../lib/story-closeout';
-import { reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
+import { inspectApprovedSpecPasses, reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
 import { classifyRunLiveness } from '../lib/ssdlc-liveness';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
 import { advanceQueue } from '../lib/run-queue';
@@ -68,6 +68,7 @@ import {
   resolvePiRunSafetyOptions,
 } from '../lib/pi-autonomous-runner';
 import { logger } from '../lib/logger';
+import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
@@ -88,12 +89,15 @@ import {
   buildGovernedRetrySpec,
   compareRetryPlanToPreview,
   createRetryPreview,
+  createRetryPreviewIdentity,
   resolveRetryScope,
   retryHash,
   verifyRetryPreview,
+  verifyRetryPreviewIdentity,
   type RetryExecutionOptions,
   type RetryPlanStatus,
   type RetryPlanStory,
+  type RetryPreviewIdentity,
   type RetryPreviewPacket,
 } from '../lib/retry-governance';
 import {
@@ -5582,6 +5586,23 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
 // Accepts optional 'storyIds' array; when omitted, retries all failed stories.
 // Preserves original failed story_result rows for audit trail.
 
+const PipelineRetrySchema = z.object({
+  storyIds: z.array(z.string().trim().min(1).max(256)).max(100).optional(),
+  forceSequential: z.boolean().optional(),
+  previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+  approvalToken: z.string().trim().min(8).max(512).optional(),
+  cancelPreview: z.boolean().optional(),
+  safeMode: z.boolean().optional(),
+  approvedPreview: z.record(z.string(), z.unknown()).optional(),
+  previewIdentity: z.object({
+    schemaVersion: z.literal('retry-preview-identity.v1'),
+    previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    originalRunId: z.number().int().positive(),
+    expiresAt: z.string().datetime(),
+    signature: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  }).strict().optional(),
+}).strict();
+
 /**
  * @swagger
  * /api/pipeline/runs/{runId}/retry:
@@ -5589,10 +5610,9 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
  *     tags: [Pipeline]
  *     summary: Retry failed stories in a pipeline run via pg-boss job queue
  *     operationId: retryPipelineRun
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Retrying failed local stories is part of the stable open-source execution workflow and has no billing or admin side effects."
- *     x-rorca-public-api: true
- *     description: Two-phase governed retry. First call without previewHash returns and audits a reconciled preview; a second call with that hash recomputes scope and dispatches only when it still matches.
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Retry preview and dispatch expose workspace-owned execution scope and can create a retry run, so an authenticated caller and governed packet are required."
+ *     description: Two-phase governed retry. First call without previewHash returns a read-only exact packet plus expiring identity; dispatch recomputes scope and submits to the existing queue only when packet, identity, hash, policy, and replay key still match.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -5617,6 +5637,12 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
  *               previewHash:
  *                 type: string
  *                 description: Hash returned by the preview call and approved for dispatch
+ *               approvedPreview:
+ *                 type: object
+ *                 description: Exact packet returned by the read-only preview call
+ *               previewIdentity:
+ *                 type: object
+ *                 description: Unexpired self-verifying identity returned with the packet
  *               approvalToken:
  *                 type: string
  *                 description: Existing explicit operator approval token required when the preview marks requiresApproval
@@ -5629,7 +5655,9 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
  *       404: { description: "Run not found" }
  *       409: { description: "Retry job already queued for this run" }
  */
-router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
+router.post('/runs/:runId/retry', validateBody(PipelineRetrySchema), retryPipelineRunHandler);
+
+export async function retryPipelineRunHandler(req: Request, res: Response): Promise<void> {
   try {
     const originalRunId = parseInt(String(req.params.runId), 10);
     if (isNaN(originalRunId)) {
@@ -5637,13 +5665,14 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       return;
     }
 
-    const { storyIds, forceSequential, previewHash, approvalToken, cancelPreview, override, safeMode } = req.body as {
+    const { storyIds, forceSequential, previewHash, approvalToken, cancelPreview, safeMode, approvedPreview: approvedPreviewRaw, previewIdentity } = req.body as {
       storyIds?: string[];
       forceSequential?: boolean;
       previewHash?: string;
       approvalToken?: string;
       cancelPreview?: boolean;
-      override?: { rationale: string };
+      approvedPreview?: RetryPreviewPacket;
+      previewIdentity?: RetryPreviewIdentity;
       /** Explicitly preview branch-only/no-send safety changes instead of replaying destructive options. */
       safeMode?: boolean;
     };
@@ -5672,7 +5701,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       throw new NotFoundError('Workspace not found');
       return;
     }
-    const passReconciliation = await reconcileApprovedSpecPasses({
+    const passReconciliation = await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)({
       workspaceId: originalRun.workspace_id,
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
@@ -5835,20 +5864,31 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       });
     }
 
+    // Initial trigger and retry dispatch resolve the same host-enforced policy.
+    // Structured policy wins; spec prose (including `_notes`) is never authority.
+    const retrySafety = resolvePiRunSafetyOptions(originalRun.spec_path, sourceSpecJson, {
+      autoWorktree: originalEffectiveOptions.worktree.enabled,
+      autoMerge: originalEffectiveOptions.merge.autoMerge,
+      mergeStrategy: originalEffectiveOptions.merge.strategy,
+    });
+    const enforceSafeRetry = safeMode === true || retrySafety.policyLocked;
     const replayedOptions: RetryExecutionOptions = {
       agent: retryAgent,
       model: retryModel,
       effort: retryEffort,
       terminalMode: originalRun.terminal_mode,
       includeGraph: originalRun.include_graph ?? originalEffectiveOptions.graph.enabled,
-      worktree: { ...originalEffectiveOptions.worktree },
-      merge: safeMode
+      worktree: {
+        ...originalEffectiveOptions.worktree,
+        enabled: retrySafety.autoWorktree,
+      },
+      merge: enforceSafeRetry
         ? { strategy: 'branch-only', autoMerge: false }
-        : { ...originalEffectiveOptions.merge },
+        : { strategy: retrySafety.mergeStrategy, autoMerge: retrySafety.autoMerge },
       safety: {
-        deploy: safeMode ? false : originalEffectiveOptions.safety.deploy,
-        externalSend: safeMode ? false : originalEffectiveOptions.safety.externalSend,
-        policyLocked: originalEffectiveOptions.safety.policyLocked,
+        deploy: enforceSafeRetry ? false : retrySafety.deploy,
+        externalSend: enforceSafeRetry ? false : retrySafety.externalSend,
+        policyLocked: retrySafety.policyLocked,
         allowBackendJest: false,
       },
     };
@@ -5869,75 +5909,108 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const scopeHash = retryHash(retryPreview.scope.executable.map((entry) => entry.storyId));
 
     if (!previewHash) {
-      await execute(
-        `INSERT INTO pipeline_retry_previews (preview_hash, original_run_id, workspace_id, scope_hash, status, packet)
-         VALUES ($1, $2, $3, $4, 'previewed', $5::jsonb)
-         ON CONFLICT (preview_hash) DO UPDATE SET packet = EXCLUDED.packet, status = CASE WHEN pipeline_retry_previews.status = 'cancelled' THEN pipeline_retry_previews.status ELSE 'previewed' END`,
-        [retryPreview.previewHash, originalRunId, originalRun.workspace_id, scopeHash, JSON.stringify(retryPreview)],
+      // Preview is deliberately read-only: no approval row, WAL record, run, or
+      // queue job exists until the caller dispatches this exact expiring packet.
+      const identity = createRetryPreviewIdentity(retryPreview);
+      res.status(200).json({ ok: true, preview: retryPreview, previewIdentity: identity, worktreePreflight, passReconciliation });
+      return;
+    }
+
+    if (!approvedPreviewRaw || !previewIdentity || !verifyRetryPreview(approvedPreviewRaw)) {
+      throw new ConflictError('Dispatch requires the exact self-verifying retry preview packet');
+    }
+    if (approvedPreviewRaw.previewHash !== previewHash || approvedPreviewRaw.originalRunId !== originalRunId) {
+      throw new ConflictError('Retry preview identity does not match the requested run/hash');
+    }
+    const identityCheck = verifyRetryPreviewIdentity(previewIdentity, approvedPreviewRaw);
+    if (!identityCheck.valid) {
+      throw new ConflictError(
+        identityCheck.reason === 'expired' ? 'Retry preview has expired; generate a new preview' : 'Retry preview identity is invalid or mismatched',
+        { reason: identityCheck.reason },
       );
-      await postRetryWalEvent('retry_preview_generated', originalRun.workspace_id, {
-        original_run_id: originalRunId,
-        preview_hash: retryPreview.previewHash,
-        scope_hash: scopeHash,
-        executable_story_ids: retryScope.executable.map((entry) => entry.storyId),
-        requires_approval: retryPreview.requiresApproval,
-      });
-      res.status(200).json({ ok: true, preview: retryPreview, worktreePreflight, passReconciliation });
+    }
+    if (cancelPreview) {
+      res.json({ ok: true, cancelled: true, previewHash });
       return;
     }
 
     const storedPreviewRow = await queryOne<{ packet: RetryPreviewPacket; status: string; retry_run_id: number | null; approval_token: string | null }>(
-      `SELECT packet, status, retry_run_id, approval_token FROM pipeline_retry_previews WHERE preview_hash = $1 AND original_run_id = $2`,
+      `SELECT packet, status, retry_run_id, approval_token
+       FROM pipeline_retry_previews WHERE preview_hash = $1 AND original_run_id = $2`,
       [previewHash, originalRunId],
     );
-    if (!storedPreviewRow) throw new NotFoundError('Retry preview not found');
-    const storedPreview = storedPreviewRow.packet;
-    if (!verifyRetryPreview(storedPreview)) throw new ConflictError('Retry preview integrity check failed');
-    if (cancelPreview) {
-      if (storedPreviewRow.status === 'dispatched') throw new ConflictError('Retry was already dispatched and cannot be cancelled as a preview');
-      await execute(`UPDATE pipeline_retry_previews SET status = 'cancelled', cancelled_at = NOW() WHERE preview_hash = $1`, [previewHash]);
-      res.json({ ok: true, cancelled: true, previewHash });
+    if (storedPreviewRow?.status === 'dispatched' && storedPreviewRow.retry_run_id) {
+      await emitLifecycleInvalidation({
+        workspaceId: originalRun.workspace_id,
+        specId: path.basename(originalRun.spec_path, '.json'),
+        runId: storedPreviewRow.retry_run_id,
+        changeKind: 'retry_dispatched',
+      });
+      res.status(200).json({ ok: true, queued: true, duplicate: true, runId: storedPreviewRow.retry_run_id, originalRunId, previewHash });
       return;
     }
-    if (storedPreviewRow.status === 'cancelled') throw new ConflictError('Retry preview was cancelled before dispatch');
-    if (storedPreviewRow.status === 'dispatched' && storedPreviewRow.retry_run_id) {
-      res.status(200).json({ ok: true, queued: true, duplicate: true, runId: storedPreviewRow.retry_run_id, originalRunId });
-      return;
+    if (storedPreviewRow && (storedPreviewRow.status === 'cancelled' || storedPreviewRow.status === 'refused')) {
+      throw new ConflictError('Retry preview is no longer dispatchable');
     }
-
-    let approvedPreview = storedPreview;
     if (retryPreview.previewHash !== previewHash) {
       await postRetryWalEvent('retry_scope_mismatch', originalRun.workspace_id, {
         original_run_id: originalRunId,
         approved_preview_hash: previewHash,
         actual_preview_hash: retryPreview.previewHash,
-        approved_scope: storedPreview.scope.executable,
+        approved_scope: approvedPreviewRaw.scope.executable,
         actual_scope: retryPreview.scope.executable,
       });
-      if (!override?.rationale || override.rationale.trim().length < 10 || !approvalToken) {
-        await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'retry_scope_mismatch' WHERE preview_hash = $1`, [previewHash]);
-        throw new ConflictError('Retry scope differs from the approved preview; generate a new preview or record an explicit audited override');
-      }
-      approvedPreview = retryPreview;
-      await execute(
-        `UPDATE pipeline_retry_previews SET override_record = COALESCE(override_record, '{}'::jsonb) || $2::jsonb WHERE preview_hash = $1`,
-        [previewHash, JSON.stringify({ mismatchOverride: { rationale: override.rationale, approvalTokenHash: retryHash({ approvalToken }), approvedAt: new Date().toISOString(), replacementPreviewHash: retryPreview.previewHash } })],
-      );
+      throw new ConflictError('Retry scope differs from the approved preview; generate a new preview');
     }
+    const approvedPreview = approvedPreviewRaw;
     if (approvedPreview.requiresApproval && !approvalToken) {
       throw new ForbiddenError('Retry preview requires the existing explicit operator approval path before destructive options may be replayed');
     }
     if (unsafeWorktree) throw new ConflictError(`Worktree preflight requires operator action (${worktreePreflight?.classification})`);
 
+    const dispatchIdempotencyKey = req.get('Idempotency-Key')?.trim() || `retry:${previewHash}`;
     const approvalClaim = await queryOne<{ preview_hash: string }>(
-      `UPDATE pipeline_retry_previews
-       SET status = 'approved', approved_at = NOW(), approval_token = COALESCE($2, approval_token)
-       WHERE preview_hash = $1 AND status = 'previewed'
+      `INSERT INTO pipeline_retry_previews (
+         preview_hash, original_run_id, workspace_id, scope_hash, status, packet,
+         approval_token, preview_identity_hash, expires_at, idempotency_key, approved_at
+       ) VALUES ($1, $2, $3, $4, 'approved', $5::jsonb, $6, $7, $8, $9, NOW())
+       ON CONFLICT DO NOTHING
        RETURNING preview_hash`,
-      [previewHash, approvalToken ? retryHash({ approvalToken }) : null],
+      [
+        previewHash,
+        originalRunId,
+        originalRun.workspace_id,
+        scopeHash,
+        JSON.stringify(approvedPreview),
+        approvalToken ? retryHash({ approvalToken }) : null,
+        retryHash(previewIdentity),
+        previewIdentity.expiresAt,
+        dispatchIdempotencyKey,
+      ],
     );
-    if (!approvalClaim && storedPreviewRow.status !== 'approved') {
-      throw new ConflictError('Retry preview is no longer dispatchable');
+    if (!approvalClaim) {
+      const replay = await queryOne<{ preview_hash: string; retry_run_id: number | null; status: string }>(
+        `SELECT preview_hash, retry_run_id, status FROM pipeline_retry_previews
+         WHERE workspace_id = $1 AND idempotency_key = $2`,
+        [originalRun.workspace_id, dispatchIdempotencyKey],
+      );
+      if (replay?.status === 'dispatched' && replay.retry_run_id) {
+        await emitLifecycleInvalidation({
+          workspaceId: originalRun.workspace_id,
+          specId: path.basename(originalRun.spec_path, '.json'),
+          runId: replay.retry_run_id,
+          changeKind: 'retry_dispatched',
+        });
+        res.status(200).json({ ok: true, queued: true, duplicate: true, runId: replay.retry_run_id, originalRunId, previewHash });
+        return;
+      }
+      if (!replay || replay.preview_hash !== previewHash) {
+        throw new ConflictError('Retry dispatch Idempotency-Key was reused with a different preview');
+      }
+      // The unique preview/idempotency claim is the single dispatch owner. A
+      // concurrent/restart replay must never create a second run while that
+      // owner is still approved but not durably marked dispatched.
+      throw new ConflictError('Retry preview dispatch is already in progress; replay after its durable queue outcome');
     }
 
     // 5. Duplicate-job guard — check for an active pipeline:retry job for this run and scope.
@@ -5998,6 +6071,10 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       JSON.stringify(retryEffectiveOptions),
     ]);
     const newRunId = newRunResult!.id;
+    await execute(
+      `UPDATE pipeline_retry_previews SET retry_run_id = $2 WHERE preview_hash = $1 AND status = 'approved'`,
+      [previewHash, newRunId],
+    );
 
     // 8. Copy successful story results from the original run to the new run
     for (const passed of passedStories) {
@@ -6168,6 +6245,12 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     );
 
     logger.info(`[Pipeline] Enqueued pipeline:retry job for newRunId=${newRunId} (originalRunId=${originalRunId})`);
+    await emitLifecycleInvalidation({
+      workspaceId: originalRun.workspace_id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      runId: newRunId,
+      changeKind: 'retry_dispatched',
+    });
 
     res.status(201).json({
       ok: true,
@@ -6185,7 +6268,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Retry');
   }
-});
+}
 
 // ─── POST /api/pipeline/runs/:runId/retry-merge — Retry a failed worktree merge ─
 // Re-enqueues the merge job for a run whose merge_status is 'failed'.

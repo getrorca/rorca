@@ -65,6 +65,18 @@ describe('lifecycle decision route authority boundary', () => {
     expect(mockRecord).not.toHaveBeenCalled();
   });
 
+  test('requires a client idempotency key before calling the decision service', async () => {
+    const response = await request(appWithUser({
+      id: 'local-admin',
+      email: 'admin@rorca.local',
+      supabaseId: 'local-auth',
+      role: 'admin',
+    })).post('/api/lifecycle/decisions').send(body());
+
+    expect(response.status).toBe(400);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
   test.each(['actor', 'principalId', 'principalType', 'authority', 'role'])(
     'rejects request-body authority field %s',
     async (field) => {
@@ -109,9 +121,11 @@ describe('lifecycle decision route authority boundary', () => {
       email: 'hermes@rorca.internal',
       supabaseId: 'auth-hermes',
       role: 'admin',
-    })).post('/api/lifecycle/decisions').send(body({
-      delegatedOnBehalfOf: { principalId: 'human-9', displayLabel: 'Release Approver' },
-    }));
+    })).post('/api/lifecycle/decisions')
+      .set('Idempotency-Key', 'decision-hermes-1')
+      .send(body({
+        delegatedOnBehalfOf: { principalId: 'human-9', displayLabel: 'Release Approver' },
+      }));
 
     expect(mockRecord.mock.calls[0][1]).toMatchObject({
       principalType: 'hermes',
@@ -125,9 +139,11 @@ describe('lifecycle decision route authority boundary', () => {
       email: 'user@example.test',
       supabaseId: 'auth-user-1',
       role: 'admin',
-    })).post('/api/lifecycle/decisions').send(body({
-      delegatedOnBehalfOf: { principalId: 'claimed-human', displayLabel: 'Claimed Human' },
-    }));
+    })).post('/api/lifecycle/decisions')
+      .set('Idempotency-Key', 'decision-user-1')
+      .send(body({
+        delegatedOnBehalfOf: { principalId: 'claimed-human', displayLabel: 'Claimed Human' },
+      }));
     expect(rejected.status).toBe(400);
   });
 });

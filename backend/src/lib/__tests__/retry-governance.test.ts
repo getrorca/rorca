@@ -9,8 +9,10 @@ import {
   buildGovernedRetrySpec,
   compareRetryPlanToPreview,
   createRetryPreview,
+  createRetryPreviewIdentity,
   resolveRetryScope,
   verifyRetryPreview,
+  verifyRetryPreviewIdentity,
   type RetryExecutionOptions,
 } from '../retry-governance';
 
@@ -85,5 +87,18 @@ describe('retry governance', () => {
     const tampered = structuredClone(preview);
     tampered.scope.executable.push({ storyId: 'US-004', reasonCode: 'EXECUTABLE_RETRY_WORK' });
     expect(verifyRetryPreview(tampered)).toBe(false);
+  });
+
+  test('self-verifying preview identity survives restart secrets and expires closed', () => {
+    const now = new Date('2026-07-15T12:00:00.000Z');
+    const scope = resolveRetryScope({ stories, statuses, requestedStoryIds: ['US-002'] });
+    const preview = createRetryPreview({ originalRunId: 7, scope, options, forceSequential: false, requiresApproval: false });
+    const identity = createRetryPreviewIdentity(preview, now, 60_000);
+
+    expect(verifyRetryPreviewIdentity(identity, preview, new Date('2026-07-15T12:00:30.000Z'))).toEqual({ valid: true, reason: 'valid' });
+    expect(verifyRetryPreviewIdentity(identity, preview, new Date('2026-07-15T12:01:00.000Z'))).toEqual({ valid: false, reason: 'expired' });
+
+    const mismatch = { ...identity, previewHash: `sha256:${'f'.repeat(64)}` };
+    expect(verifyRetryPreviewIdentity(mismatch, preview, now)).toEqual({ valid: false, reason: 'mismatch' });
   });
 });
