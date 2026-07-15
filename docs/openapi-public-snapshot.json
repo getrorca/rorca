@@ -1,6 +1,6 @@
 {
-  "contractVersion": "3.4.0",
-  "generatedAt": "2026-07-15T05:47:52.539Z",
+  "contractVersion": "4.0.0",
+  "generatedAt": "2026-07-15T08:56:51.252Z",
   "routes": [
     {
       "method": "GET",
@@ -2492,7 +2492,17 @@
     {
       "method": "GET",
       "path": "/api/health/detailed",
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "refresh",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "default": false,
+            "type": "boolean"
+          }
+        }
+      ],
       "responseSchema": {
         "200": {
           "content": {
@@ -2580,7 +2590,7 @@
         },
         "503": {}
       },
-      "hash": "sha256:6987aae3d184fc6c71d49977f02db8b9d1320ceb1d79fda382d96a857216d22b"
+      "hash": "sha256:61ec3715fb302acd12d25880281c7cc988fc4a5600361d080570aae8cffcf049"
     },
     {
       "method": "GET",
