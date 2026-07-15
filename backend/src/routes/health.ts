@@ -364,20 +364,7 @@ router.get('/live', (_req: Request, res: Response) => {
  */
 router.get('/ready', basicHealthHandler);
 
-/**
- * @swagger
- * /api/health:
- *   get:
- *     tags: [Health]
- *     summary: Bounded readiness and active-run safety check
- *     operationId: getHealth
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Health checks safely confirm local readiness and the active-run restart gate."
- *     x-rorca-public-api: true
- *     responses:
- *       200: { description: Readiness facts confirmed before the deadline }
- *       503: { description: Readiness unknown; restart gate remains closed }
- */
+// @swagger contract is declared above the bounded handler implementation.
 router.get('/', basicHealthHandler);
 
 // ── Component health check types ─────────────────────────────────────────
