@@ -65,6 +65,7 @@ export const PipelineRunJobPayload = z.object({
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
   taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  triggerOptions: z.record(z.string(), z.unknown()).optional(),
   executionEnvironmentId: z.string().optional(),
 }).strict();
 

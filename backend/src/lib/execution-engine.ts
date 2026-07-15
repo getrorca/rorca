@@ -36,8 +36,9 @@
  *   --attach <addr>         OpenCode server socket address (passed by pipeline.ts)
  */
 
-import { spawn, execFileSync, execSync, type ChildProcess } from 'child_process';
+import { spawn, execSync, type ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
+import { createRequire } from 'module';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -50,7 +51,7 @@ import { isPtyTerminalMode, normalizeTerminalMode, type TerminalMode } from './t
 import {
   buildPtyCompletionMarker,
   buildPtyMarkerFilePath,
-  DEFAULT_PTY_READINESS_TIMEOUT_MS,
+  getPtyReadinessTimeoutMs,
   createBaseInteractivePtyAdapter,
   createPtyCompletionState,
   createPtyReadinessState,
@@ -171,6 +172,13 @@ import { createAutonomousCommandGuard } from './autonomous-command-guard';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
+
+// tsx 4.23 executes direct TypeScript entrypoints as ESM. Keep the few
+// runtime-only CommonJS dependencies available without relying on a global
+// `require`, which is undefined in that mode.
+const runtimeRequire = createRequire(
+  typeof __filename === 'string' ? __filename : path.resolve(process.argv[1] ?? process.cwd()),
+);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -806,12 +814,12 @@ async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
 
   try {
     // Lazy-load MCP SDK to avoid importing at module level (keeps startup fast when not needed).
-    const { Client } = require('@modelcontextprotocol/sdk/client/index.js') as typeof import('@modelcontextprotocol/sdk/client/index.js');
-    const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js') as typeof import('@modelcontextprotocol/sdk/client/stdio.js');
-    const { Server } = require('@modelcontextprotocol/sdk/server/index.js') as typeof import('@modelcontextprotocol/sdk/server/index.js');
-    const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js') as typeof import('@modelcontextprotocol/sdk/server/streamableHttp.js');
-    const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js') as typeof import('@modelcontextprotocol/sdk/types.js');
-    const expressLib = require('express') as typeof import('express');
+    const { Client } = runtimeRequire('@modelcontextprotocol/sdk/client/index.js') as typeof import('@modelcontextprotocol/sdk/client/index.js');
+    const { StdioClientTransport } = runtimeRequire('@modelcontextprotocol/sdk/client/stdio.js') as typeof import('@modelcontextprotocol/sdk/client/stdio.js');
+    const { Server } = runtimeRequire('@modelcontextprotocol/sdk/server/index.js') as typeof import('@modelcontextprotocol/sdk/server/index.js');
+    const { StreamableHTTPServerTransport } = runtimeRequire('@modelcontextprotocol/sdk/server/streamableHttp.js') as typeof import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+    const { CallToolRequestSchema, ListToolsRequestSchema } = runtimeRequire('@modelcontextprotocol/sdk/types.js') as typeof import('@modelcontextprotocol/sdk/types.js');
+    const expressLib = runtimeRequire('express') as typeof import('express');
 
     // 1. Connect to chrome-devtools-mcp via stdio
     const stdioTransport = new StdioClientTransport({
@@ -2023,7 +2031,7 @@ function loadNodePty(): NodePtyLike {
   if (!PTY_AVAILABLE) {
     throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
   }
-  return require('node-pty') as NodePtyLike;
+  return runtimeRequire('node-pty') as NodePtyLike;
 }
 
 function toBuffer(chunk: string | Uint8Array): Buffer {
@@ -2061,6 +2069,7 @@ export function buildPtyCommand(
     case 'claude': {
       const claudeCliModel = resolveClaudeCliModelId(agentModel);
       const compatibility = requireCapabilities([
+        'permissionMode',
         ...(claudeCliModel ? ['model' as const] : []),
         ...(thinkingBudget && thinkingBudget > 0 ? ['thinkingBudget' as const] : []),
         ...(effortLevel ? ['effort' as const] : []),
@@ -2089,7 +2098,7 @@ export function buildPtyCommand(
       return {
         command: compatibility.binaryPath!,
         args: [
-          ...(compatibility.capabilities.permissionBypass ? ['--dangerously-skip-permissions'] : []),
+          '--permission-mode', 'acceptEdits',
           ...(claudeCliModel ? ['--model', claudeCliModel] : []),
           ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
           ...(effortLevel ? ['--effort', effortLevel] : []),
@@ -2156,15 +2165,11 @@ export function buildPtyCommand(
     case 'codex': {
       const compatibility = requireCapabilities(agentModel ? ['model'] : []);
       const env = buildGuardedAgentEnv(cwd);
-      const codexMcpRegisteredNames: string[] = [];
-      if (mcpServers && Object.keys(mcpServers).length > 0) {
-        for (const [name, url] of Object.entries(mcpServers)) {
-          try {
-            execFileSync(compatibility.binaryPath!, ['mcp', 'add', name, '--url', url], { stdio: 'pipe' });
-            codexMcpRegisteredNames.push(name);
-          } catch { /* ignore registration failures in PTY mode */ }
-        }
-      }
+      // Do not mutate the user's global Codex MCP registry for a run-scoped
+      // PTY. The generated Rorca HTTP endpoint requires bearer auth, while
+      // `codex mcp add --url` without token metadata stalls startup and can
+      // discard the injected prompt. Story context is already in the prompt.
+      void mcpServers;
       return {
         command: compatibility.binaryPath!,
         // Codex 0.132+ rejects the old --approval-mode auto-edit spelling.
@@ -2176,11 +2181,6 @@ export function buildPtyCommand(
         ],
         env,
         prompt,
-        cleanup: () => {
-          for (const name of codexMcpRegisteredNames) {
-            try { execFileSync(compatibility.binaryPath!, ['mcp', 'remove', name], { stdio: 'pipe' }); } catch { /* ignore */ }
-          }
-        },
       };
     }
     case 'pi': {
@@ -2564,7 +2564,10 @@ async function spawnAgentViaPty(
         logStream.write(buf);
         recordStderr(buf);
         const text = buf.toString('utf8');
-        const ready = adapter?.detectReadiness?.(text, readinessState!) ?? null;
+        const handledStartupPrompt = adapter?.handleStartupPrompt?.(pty!, text, readinessState!) ?? false;
+        const ready = handledStartupPrompt
+          ? null
+          : adapter?.detectReadiness?.(text, readinessState!) ?? null;
         if (ready?.type === 'ready') {
           observedReadiness = { reason: ready.reason, timedOut: false };
           resolveReadiness?.(observedReadiness);
@@ -2603,7 +2606,7 @@ async function spawnAgentViaPty(
         readinessTimeoutTimer = setTimeout(() => {
           resolveReadiness?.({ reason: 'readiness_timeout_fallback', timedOut: true });
           resolveReadiness = null;
-        }, DEFAULT_PTY_READINESS_TIMEOUT_MS);
+        }, getPtyReadinessTimeoutMs(ptyOptions.agentType));
         readinessTimeoutTimer.unref?.();
       });
       if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
@@ -7454,7 +7457,7 @@ function parseArgs(): EngineConfig {
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 // Guard: only run main() when executed directly (not when imported by tests)
-const _isDirectRun = require.main === module || process.argv[1]?.endsWith('execution-engine.ts');
+const _isDirectRun = /(?:^|[/\\])execution-engine\.(?:ts|js)$/.test(process.argv[1] ?? '');
 if (_isDirectRun) {
   main().catch((err) => {
     const message = err instanceof Error ? (err.stack || err.message) : String(err);

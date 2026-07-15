@@ -18,6 +18,9 @@ export async function loadOpenApiDocument(): Promise<unknown> {
     return fetchOpenApiFromServer(baseUrl);
   }
 
-  const { swaggerSpec } = await import('../backend/src/lib/swagger');
+  // Explicit extension avoids Node/tsx resolving a tracked stale swagger.js
+  // sibling ahead of the current TypeScript source.
+  const sourceModule = '../backend/src/lib/swagger.ts';
+  const { swaggerSpec } = await import(sourceModule);
   return swaggerSpec;
 }

@@ -20,6 +20,7 @@ const PTY_CLI_CACHE_TTL_MS = 30_000;
 
 export type PtyCliCapability =
   | 'permissionBypass'
+  | 'permissionMode'
   | 'model'
   | 'thinkingBudget'
   | 'effort'
@@ -89,6 +90,7 @@ const COMMAND: Record<AgentType, string> = {
 const CAPABILITY_FLAG: Record<AgentType, Partial<Record<PtyCliCapability, string>>> = {
   claude: {
     permissionBypass: '--dangerously-skip-permissions',
+    permissionMode: '--permission-mode',
     model: '--model',
     thinkingBudget: '--thinking-budget',
     effort: '--effort',
@@ -115,7 +117,7 @@ const CAPABILITY_FLAG: Record<AgentType, Partial<Record<PtyCliCapability, string
 };
 
 const ALL_CAPABILITIES: PtyCliCapability[] = [
-  'permissionBypass', 'model', 'thinkingBudget', 'effort', 'mcpConfig',
+  'permissionBypass', 'permissionMode', 'model', 'thinkingBudget', 'effort', 'mcpConfig',
   'attach', 'askForApproval', 'noAltScreen', 'textMode', 'noExtensions',
   'tools', 'appendSystemPrompt', 'extension', 'provider', 'thinking', 'skill',
 ];

@@ -115,3 +115,30 @@ Justification: spec metadata updates now include agent/reasoning controls used b
 Migration path:
 - Existing metadata updates may omit the new execution-control fields.
 - Clients should validate supported agent/reasoning values before sending them.
+
+<!-- contract-break: 2026-07-15 GET /api/pipeline/runs/{runId}/output -->
+## 2026-07-15 `GET /api/pipeline/runs/{runId}/output`
+
+Justification: PTY v2 adds explicit durable replay cursors and output-source identity so reconnects cannot duplicate or suppress bytes across PTY and ANSI stores.
+
+Migration path:
+- Existing callers may omit `afterSequence` and `outputSource`; they receive the bounded initial replay.
+- Reconnecting clients should persist both the last sequence and returned output source, then send them together.
+
+<!-- contract-break: 2026-07-15 POST /api/pipeline/runs/{runId}/pty/resize -->
+## 2026-07-15 `POST /api/pipeline/runs/{runId}/pty/resize`
+
+Justification: PTY v2 bounds terminal dimensions to 500 columns by 200 rows to prevent unbounded native-terminal allocation.
+
+Migration path:
+- Existing values within the documented bounds are unchanged.
+- Clients must clamp larger requested dimensions before submitting resize controls.
+
+<!-- contract-break: 2026-07-15 POST /api/pipeline/task-manifests/trigger -->
+## 2026-07-15 `POST /api/pipeline/task-manifests/trigger`
+
+Justification: the merged mainline terminal contract retains `native-pty` as a compatibility alias for the hardened PTY v2 transport.
+
+Migration path:
+- Existing `ansi-html` and `pty` requests remain valid.
+- New callers should prefer canonical `pty`; `native-pty` remains accepted for mainline compatibility.

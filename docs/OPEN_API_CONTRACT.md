@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `4.0.0`
+Contract version: `5.0.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -62,11 +62,11 @@ Contract version: `4.0.0`
 | GET | `/api/pipeline/runs/{runId}/context-trace/{rawRef}` | path:rawRef (required), path:runId (required) | `sha256:d69339acbddc4e82ede5e2cde4ba9a002cf60e7335f2f4a67485786df96014f3` |
 | POST | `/api/pipeline/runs/{runId}/input` | body:dataBase64 (required), path:runId (required) | `sha256:f8a3f6aa2d5ae57add5776d2dcf8aa1d4d1e26f9f92443083c1cb7a5b5ff2754` |
 | GET | `/api/pipeline/runs/{runId}/log` | path:runId (required) | `sha256:46e8b2c0eace7e3cda5b3bf722724d4997719e6477091a3f280c98fe42142764` |
-| GET | `/api/pipeline/runs/{runId}/output` | path:runId (required) | `sha256:2da61f1f03565ec86f76999cd45aca33a66eb88828fca3abd5c3ca349d842df5` |
-| POST | `/api/pipeline/runs/{runId}/pty/resize` | body:cols (required), body:rows (required), path:runId (required) | `sha256:0c7d890b1de79d09694defcaab084608cfa1b893efffbde021812ed113bd1993` |
+| GET | `/api/pipeline/runs/{runId}/output` | path:runId (required), query:afterSequence (optional), query:outputSource (optional) | `sha256:e68df8483ab6eb4f2fd764b8c6968219d140b7f9601c0486f18026f51cc6b6d0` |
+| POST | `/api/pipeline/runs/{runId}/pty/resize` | body:cols (required), body:rows (required), path:runId (required) | `sha256:e1b74808682335a01b0239173fae564c200d94feab43f6276447d0a3ba2d4231` |
 | GET | `/api/pipeline/runs/{runId}/retrieval-telemetry/{telemetryId}` | path:runId (required), path:telemetryId (required) | `sha256:79a73a02d19c6bedd4af114f4e25cd55bd631d570264d276f3a0b952472e6d1d` |
 | POST | `/api/pipeline/runs/{runId}/retry` | body:forceSequential (optional), body:storyIds (optional), path:runId (required) | `sha256:719233bff39bb836289f4d0b4477bf43690765ca36cb48de49dd9173e75abed9` |
-| POST | `/api/pipeline/task-manifests/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:executionEnvironmentId (optional), body:idempotencyKey (required), body:manifest (required), body:mergeStrategy (optional), body:modelOverride (optional), body:terminalMode (optional), body:terminal_mode (optional), body:workspaceId (required) | `sha256:8c6ce52dc89a84c164046c455b816671bfceb1d548329d675efc3e9bd7d7f528` |
+| POST | `/api/pipeline/task-manifests/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:executionEnvironmentId (optional), body:idempotencyKey (required), body:manifest (required), body:mergeStrategy (optional), body:modelOverride (optional), body:terminalMode (optional), body:terminal_mode (optional), body:workspaceId (required) | `sha256:8beff74c282556146184c8baf891822626022fecfb02d921d3caa877f56c1bab` |
 | POST | `/api/pipeline/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:forceRerun (optional), body:includeGraph (optional), body:mergeStrategy (optional), body:modelOverride (optional), body:readinessOverride (optional), body:rerunFromScratch (optional), body:specPath (required), body:storyId (optional), body:terminal_mode (optional), body:thinkingBudget (optional), body:thinkingEnabled (optional), body:triggerType (optional), body:workspaceId (required) | `sha256:bd48a5ff3dcd07743ba1b2aec432d807e3fc4fd4a361b71eab434f230d642a24` |
 | GET | `/api/pipeline/worker/health` | - | `sha256:f295ae7b4c1388e4533b9b6cddd516951b92cf987e36b62c8c2c2e510a19607c` |
 | GET | `/api/recall` | query:category (optional), query:includeHealth (optional), query:includeRuns (optional), query:query (optional), query:storyText (optional), query:titlesOnly (optional), query:workspaceId (required) | `sha256:9c5672c3fdf5e0ded65c40f03760271c48722f77158c6b46a87c99621e8d5a9a` |

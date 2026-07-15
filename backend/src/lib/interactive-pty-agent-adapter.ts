@@ -53,6 +53,7 @@ export interface PtyReadinessState {
   tail: string;
   ready: boolean;
   readyReason: string | null;
+  handledStartupPrompts: Set<string>;
 }
 
 export interface PtyReadinessSignal {
@@ -71,6 +72,7 @@ export interface InteractivePtyAgentAdapter {
   resolveCommand(input: PtyLaunchInput): PtyLaunchCommand;
   preparePrompt(input: PtyPromptInput): string;
   injectPrompt(pty: InteractivePtyProcess, prompt: string): Promise<void>;
+  handleStartupPrompt?(pty: InteractivePtyProcess, chunk: string, state: PtyReadinessState): boolean;
   detectReadiness?(chunk: string, state: PtyReadinessState): PtyReadinessSignal | null;
   detectCompletion?(chunk: string, state: PtyCompletionState): PtyCompletionSignal | null;
   cleanup?(state: PtyRunState): Promise<void>;
@@ -81,6 +83,14 @@ export const BRACKETED_PASTE_END = '\x1b[201~';
 export const DEFAULT_PTY_TYPE_CHUNK_SIZE = 4096;
 export const DEFAULT_PTY_TYPE_DELAY_MS = 5;
 export const DEFAULT_PTY_READINESS_TIMEOUT_MS = 12_000;
+export function getPtyReadinessTimeoutMs(agentType: AgentType): number {
+  // Codex and OpenCode can initialize account/plugin/MCP state before their
+  // composer is stable. Keep the wait bounded, but do not inject during a
+  // startup redraw and silently lose the prompt.
+  if (agentType === 'codex') return 60_000;
+  if (agentType === 'opencode' || agentType === 'claude') return 30_000;
+  return DEFAULT_PTY_READINESS_TIMEOUT_MS;
+}
 const READINESS_TAIL_BYTES = 8 * 1024;
 
 function sanitizeMarkerComponent(value: string): string {
@@ -100,7 +110,7 @@ export function createPtyCompletionState(completionMarker: string): PtyCompletio
 }
 
 export function createPtyReadinessState(agentType: AgentType): PtyReadinessState {
-  return { agentType, tail: '', ready: false, readyReason: null };
+  return { agentType, tail: '', ready: false, readyReason: null, handledStartupPrompts: new Set() };
 }
 
 function describeMarkerWithoutEcho(marker: string): string {
@@ -131,6 +141,53 @@ function plainTerminalText(value: string): string {
 }
 
 /**
+ * Handle exact first-run confirmation screens before considering a CLI ready.
+ * Fresh branch-only worktrees trigger Claude's folder-trust screen, and fresh
+ * isolated homes trigger its bypass-permissions acknowledgement. Injecting the
+ * story prompt into either selector would deadlock until the PTY watchdog fires.
+ */
+export function handlePtyCliStartupPrompt(
+  pty: InteractivePtyProcess,
+  chunk: string,
+  state: PtyReadinessState,
+): boolean {
+  if (state.agentType !== 'claude' || state.ready) return false;
+
+  const previousTail = state.tail;
+  state.tail = `${state.tail}${plainTerminalText(chunk)}`.slice(-READINESS_TAIL_BYTES);
+  const tail = state.tail;
+  const trustKey = 'claude-folder-trust';
+  const bypassKey = 'claude-bypass-acknowledgement';
+  const trustScreen = /Accessing\s+workspace:/i.test(tail)
+    || /project\s+you\s+created\s+or\s+one\s+you\s+trust/i.test(tail);
+  const bypassScreen = /Claude\s+Code\s+running\s+in\s+Bypass\s+Permissions\s+mode/i.test(tail);
+
+  if (trustScreen) {
+    if (/Yes,\s*I\s+trust\s+this\s+folder/i.test(tail) && !state.handledStartupPrompts.has(trustKey)) {
+      state.handledStartupPrompts.add(trustKey);
+      pty.write('\r');
+    }
+    state.tail = '';
+    return true;
+  }
+
+  if (bypassScreen) {
+    if (/Yes,\s*I\s+accept/i.test(tail) && !state.handledStartupPrompts.has(bypassKey)) {
+      state.handledStartupPrompts.add(bypassKey);
+      // Claude defaults this warning to "No, exit"; select the second row.
+      pty.write('\x1b[B\r');
+    }
+    state.tail = '';
+    return true;
+  }
+
+  // Readiness detection owns the normal rolling tail; avoid appending this
+  // chunk twice when it was not a confirmation screen.
+  state.tail = previousTail;
+  return false;
+}
+
+/**
  * CLI-specific readiness evidence. We deliberately require terminal output from
  * the spawned CLI rather than sleeping after spawn: a slow banner is safe, and
  * a missing banner degrades through the caller's bounded fallback timeout.
@@ -149,7 +206,20 @@ export function detectPtyCliReadiness(
     codex: /(?:openai\s+codex|codex|›)/i,
     pi: /(?:\bpi\b|pi\s+coding|›)/i,
   };
-  const matched = rules[state.agentType].test(tail);
+  const matched = state.agentType === 'claude'
+    // Claude prints its brand on folder-trust and startup-transition screens.
+    // Require the rendered permission-mode footer before injecting into the
+    // actual composer; otherwise prompt bytes can be lost during the redraw.
+    ? rules.claude.test(tail) && /(?:accept\s+edits|shift\+tab\s+to\s+cycle)/i.test(tail)
+    : state.agentType === 'codex'
+      // Codex renders its brand while MCP clients are still starting. Wait for
+      // the final composer footer so the startup redraw cannot discard input.
+      ? rules.codex.test(tail)
+        && /[›>]\s*/.test(tail)
+        && /(?:default|tokens\s+left)/i.test(tail)
+        && (/(?:MCP\s+startup\s+(?:incomplete|complete)|MCP\s+servers\s+ready)/i.test(tail)
+          || !/Starting\s+MCP\s+servers/i.test(tail))
+      : rules[state.agentType].test(tail);
   if (!matched && !promptAtEnd) return null;
 
   // A branded banner is enough for CLIs that render their input widget later;
@@ -165,11 +235,15 @@ export async function injectPromptWithBracketedPaste(
   prompt: string,
   // Kept as a no-op compatibility option for adapters/tests built before
   // readiness-driven injection. Delaying here would reintroduce blind timing.
-  _opts: { startupDelayMs?: number } = {},
+  opts: { startupDelayMs?: number; submitDelayMs?: number } = {},
 ): Promise<void> {
+  if ((opts.startupDelayMs ?? 0) > 0) await sleep(opts.startupDelayMs!);
   pty.write(BRACKETED_PASTE_START);
   pty.write(prompt);
   pty.write(BRACKETED_PASTE_END);
+  // Claude's Ink input widget needs one render turn after bracketed paste;
+  // an immediate Enter leaves the paste preview in the composer indefinitely.
+  await sleep(opts.submitDelayMs ?? 75);
   pty.write('\r');
 }
 
@@ -224,6 +298,7 @@ export function createBaseInteractivePtyAdapter(
     resolveCommand,
     preparePrompt: appendPtyCompletionInstructions,
     injectPrompt: (pty, prompt) => injectPromptWithBracketedPaste(pty, prompt),
+    handleStartupPrompt: handlePtyCliStartupPrompt,
     detectReadiness: detectPtyCliReadiness,
     detectCompletion: detectCompletionMarkerAcrossChunks,
   };

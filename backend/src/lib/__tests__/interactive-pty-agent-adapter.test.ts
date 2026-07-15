@@ -18,6 +18,7 @@ import {
   createPtyReadinessState,
   detectCompletionMarkerAcrossChunks,
   detectPtyCliReadiness,
+  handlePtyCliStartupPrompt,
   injectPromptWithBracketedPaste,
 } from '../interactive-pty-agent-adapter';
 
@@ -51,10 +52,44 @@ describe('interactive PTY agent adapter primitives', () => {
   it('waits for CLI-specific output readiness rather than a fixed spawn delay', () => {
     const state = createPtyReadinessState('claude');
     expect(detectPtyCliReadiness('spawned but silent', state)).toBeNull();
-    expect(detectPtyCliReadiness('Claude Code v2.1\\r\\n', state)).toEqual({
+    expect(detectPtyCliReadiness('Claude Code v2.1\\r\\n', state)).toBeNull();
+    expect(detectPtyCliReadiness('❯ Try a task\\r\\n accept edits on (shift+tab to cycle)', state)).toEqual({
       type: 'ready', reason: 'claude_banner_or_prompt',
     });
-    expect(detectPtyCliReadiness('❯ ', state)).toBeNull();
+  });
+
+  it('accepts Claude first-run confirmations before declaring prompt readiness', () => {
+    const writes: string[] = [];
+    const pty = { write: (data: string) => writes.push(data) };
+    const state = createPtyReadinessState('claude');
+
+    expect(handlePtyCliStartupPrompt(
+      pty,
+      'Accessing workspace: /tmp/canary\n❯ 1. Yes, I trust this folder\n  2. No, exit',
+      state,
+    )).toBe(true);
+    expect(writes).toEqual(['\r']);
+    expect(detectPtyCliReadiness('Claude Code running in Bypass Permissions mode\n❯ 1. No, exit', state)).toBeNull();
+
+    const bypassState = createPtyReadinessState('claude');
+    expect(handlePtyCliStartupPrompt(
+      pty,
+      'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept',
+      bypassState,
+    )).toBe(true);
+    expect(writes).toEqual(['\r', '\x1b[B\r']);
+    expect(bypassState.ready).toBe(false);
+  });
+
+  it('does not treat non-Claude output as an onboarding prompt', () => {
+    const writes: string[] = [];
+    const state = createPtyReadinessState('pi');
+    expect(handlePtyCliStartupPrompt(
+      { write: (data: string) => writes.push(data) },
+      'Pi coding agent ›',
+      state,
+    )).toBe(false);
+    expect(writes).toEqual([]);
   });
 
   it('detects completion markers split across chunks', () => {

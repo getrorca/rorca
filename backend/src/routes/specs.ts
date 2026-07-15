@@ -2563,7 +2563,7 @@ router.post('/context-preview', async (req: Request, res: Response) => {
     }
 
     // Use the same forge context bundle builder for consistency
-    const parsedBody = SkillFirstForgeSchema.parse({ workspaceId, brief, model, templateId, agentOverride: 'pi' });
+    SkillFirstForgeSchema.parse({ workspaceId, brief, model, templateId, agentOverride: 'pi' });
     const resolvedModel = await resolveSpecGenerationModel(req, workspaceId, (model as string)?.trim() || undefined);
     const selectedAgent = resolveDraftingAgent('pi', resolvedModel);
 

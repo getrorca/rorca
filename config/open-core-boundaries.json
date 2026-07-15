@@ -111,6 +111,10 @@
   ],
   "review": [
     {
+      "path": "Dockerfile",
+      "reason": "Combined production image and bundled provider versions can diverge between OSS and OpenCore; review before importing."
+    },
+    {
       "path": "package.json",
       "reason": "Root package metadata diverges across OSS and OpenCore. Review before importing."
     },

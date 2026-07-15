@@ -23,22 +23,14 @@ function resolveSwaggerDirname(): string {
 }
 
 const swaggerDirname = resolveSwaggerDirname();
-const swaggerApiGlobs = Array.from(new Set([
-  path.join(swaggerDirname, '../routes/*.ts'),
-  path.join(swaggerDirname, '../routes/*.js'),
-  path.join(swaggerDirname, './swagger.ts'),
-  path.join(swaggerDirname, './swagger.js'),
-  // tsx script path when invoked from repo root.
-  path.join(process.cwd(), 'backend/src/routes/*.ts'),
-  path.join(process.cwd(), 'backend/src/routes/*.js'),
-  path.join(process.cwd(), 'backend/src/lib/swagger.ts'),
-  path.join(process.cwd(), 'backend/src/lib/swagger.js'),
-  // tsx server path when invoked from backend/.
-  path.join(process.cwd(), 'src/routes/*.ts'),
-  path.join(process.cwd(), 'src/routes/*.js'),
-  path.join(process.cwd(), 'src/lib/swagger.ts'),
-  path.join(process.cwd(), 'src/lib/swagger.js'),
-]));
+// Never load tracked TypeScript and emitted JavaScript siblings together: the
+// stale sibling can overwrite current route metadata in swagger-jsdoc's merge.
+// Source/tsx runs use TS exclusively; compiled production runs use JS.
+const swaggerSourceExtension = fs.existsSync(path.join(swaggerDirname, 'swagger.ts')) ? 'ts' : 'js';
+const swaggerApiGlobs = [
+  path.join(swaggerDirname, `../routes/*.${swaggerSourceExtension}`),
+  path.join(swaggerDirname, `./swagger.${swaggerSourceExtension}`),
+];
 
 const options: swaggerJsdoc.Options = {
   definition: {

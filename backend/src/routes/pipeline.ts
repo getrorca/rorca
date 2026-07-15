@@ -72,12 +72,7 @@ import {
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
 import { safeParseTaskManifest, type TaskManifest } from '../lib/task-manifest';
-import { computeTaskManifestHash, resolveTaskManifestArtifactPaths, validateTaskManifestId } from '../lib/task-manifest-artifacts';
-import {
-  contextSafeRelativePathList,
-  contextSafeString,
-  sanitizeContextResponseValue,
-} from '../lib/context-safety';
+import { computeTaskManifestHash, resolveTaskManifestArtifactPaths } from '../lib/task-manifest-artifacts';
 import {
   createTaskManifestExecutionEnvelope,
   writeTaskManifestExecutionEnvelope,
@@ -2533,7 +2528,7 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *               executionEnvironment: { type: string, description: "Optional; carried to the broker only when local execution-environment support is installed, otherwise defaults to remote-rorca." }
  *               executionEnvironmentId: { type: string, description: "Optional execution-environment identifier when supported." }
  *               terminal_mode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
- *               terminalMode: { type: string, enum: [ansi-html, pty], nullable: true }
+ *               terminalMode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
  *     responses:
  *       200:
  *         description: Dry-run plan or idempotency conflict

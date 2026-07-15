@@ -43,6 +43,14 @@ jest.mock('../../lib/pty-manager', () => ({
   PTY_UNAVAILABLE_HINT: 'Run: cd backend && npm rebuild node-pty',
 }));
 
+jest.mock('../../lib/execution-environment-registry', () => ({
+  assertExecutionEnvironmentReadyForRun: jest.fn().mockResolvedValue({ ready: true }),
+}));
+
+jest.mock('../../lib/claude-auth', () => ({
+  getClaudeAuthState: jest.fn().mockReturnValue({ connected: true, cliInstalled: true }),
+}));
+
 interface PipelineRunModeRow {
   terminal_mode: string | null;
   parallelism?: number | null;
