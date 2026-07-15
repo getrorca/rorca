@@ -33,7 +33,7 @@ import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
 import { synthesize } from '../lib/direction-stack';
-import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
+import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, storyAllowsNoCodeChanges, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
 import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
 import {
@@ -311,6 +311,14 @@ async function resolveAndPersistDispatchManifests(input: {
     const packet = buildStoryExecutionPacket(input.cwd, story, mode);
     const profile = { ...specProfile, ...(story.executionManifest ?? {}) };
     const criteria = acceptanceCriteriaForManifest(story);
+    // Freeze the engine's existing legitimate no-code behavior into the
+    // authoritative pre-dispatch profile; closeout never re-infers it from mode
+    // or story prose after execution starts.
+    const changePolicy = profile.changePolicy
+      ?? (storyAllowsNoCodeChanges(story as EngineUserStory, mode) ? 'no_code_allowed' : 'code_required');
+    const noCodeReason = changePolicy === 'no_code_allowed'
+      ? profile.noCodeReason ?? `Resolved from the existing ${mode} story no-code rules before dispatch.`
+      : null;
     let resolvedStoryAgent = resolveStoryAgent(story as EngineUserStory, input.agent);
     const orchestrationPolicy = loadOrchestrationConfig(input.cwd);
     if (orchestrationPolicy.capabilityMismatch === 'reroute') {
@@ -319,7 +327,7 @@ async function resolveAndPersistDispatchManifests(input: {
         resolvedStoryAgent = findCapableEngine(detectRequiredTools(story), resolvedStoryAgent) ?? resolvedStoryAgent;
       }
     }
-    const storyIsolated = input.parallelism > 1;
+    const storyIsolated = input.parallelism > 1 && input.terminalMode !== 'pty';
     const storyWorktreePath = storyIsolated
       ? path.resolve(input.cwd, '..', `${path.basename(input.cwd)}-${story.id}-run-${input.runId}`)
       : input.cwd;
@@ -371,8 +379,8 @@ async function resolveAndPersistDispatchManifests(input: {
       })),
       repositoryProfile: {
         profileId: profile.profileId ?? 'rorca-code-change-v1',
-        changePolicy: profile.changePolicy ?? 'code_required',
-        noCodeReason: profile.noCodeReason ?? null,
+        changePolicy,
+        noCodeReason,
         runtimeMetadataPaths: ['.rorca/**', '.claude/**', '.opencode/**', '.playwright-mcp/**', 'forge/logs/**', 'forge/specs/**', 'MEMORY.md', 'progress.txt'],
       },
       commandSafety: {

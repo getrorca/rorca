@@ -75,6 +75,7 @@ import {
   buildNoopRecoveryPromptSection,
   buildStoryExecutionManifestPromptSection,
   buildStoryExecutionPacket,
+  deriveRetryStoryExecutionManifest,
   verifyStoryExecutionManifest,
   type StoryExecutionManifest,
   type StoryExecutionPacket,
@@ -145,11 +146,27 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+<<<<<<< HEAD
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
+=======
+import { sanitizeCapturePayload } from './context-safety';
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
 import { runHostValidationRequirement } from './story-host-validation';
-import type { HostValidationObservation } from './story-closeout';
+import {
+  adaptStoryCloseoutEvidence,
+  createStoryAttemptResult,
+  evaluateStoryCloseout as StoryCloseoutGate,
+  listStoryAttempts,
+  persistStoryCloseoutBundle,
+  type HostValidationObservation,
+  type ObservedStoryCommit,
+  type StoryAttemptResult,
+  type StoryCloseoutDecision,
+  type StoryCloseoutHostFacts,
+  type StoryManifest,
+} from './story-closeout';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -3901,7 +3918,8 @@ async function withSpecLock(jsonPath: string, fn: () => void): Promise<void> {
   try { fn(); } finally { release(); }
 }
 
-async function markStoryPassed(jsonPath: string, storyId: string): Promise<void> {
+async function markStoryPassed(jsonPath: string, storyId: string): Promise<boolean> {
+  let transitioned = false;
   await withSpecLock(jsonPath, () => {
     const raw = fs.readFileSync(jsonPath, 'utf8');
     const spec: SpecJson = JSON.parse(raw);
@@ -3909,19 +3927,24 @@ async function markStoryPassed(jsonPath: string, storyId: string): Promise<void>
 
     for (const s of stories) {
       if (s.id === storyId) {
+        if (isPassed(s)) break;
         if (spec.userStories || s.passes !== undefined) {
           s.passes = true;
           s.notes = 'Completed by Rorca engine';
         } else {
           s.status = 'passed';
         }
+        transitioned = true;
         break;
       }
     }
 
-    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-    logger.info(`Marked ${storyId} as passed`);
+    if (transitioned) {
+      fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+      logger.info(`Marked ${storyId} as passed`);
+    }
   });
+  return transitioned;
 }
 
 async function markStorySkipped(jsonPath: string, storyId: string): Promise<void> {
@@ -4285,6 +4308,225 @@ function runGate(
   return { passed: true };
 }
 
+// ─── Story Closeout Enforcement ──────────────────────────────────────────────
+
+interface StoryCloseoutEnforcementInput {
+  manifest: StoryExecutionManifest;
+  cwd: string;
+  storyStartHead: string | null;
+  storyLogFile: string;
+  agentType: AgentType;
+  model: string | null;
+  effort: string | null;
+  piSessionId?: string;
+  attemptStartedAt: number;
+  attemptElapsedMs: number;
+  requestedAttempt: number;
+  validations: HostValidationObservation[];
+}
+
+export interface StoryCloseoutEnforcementResult {
+  manifest: StoryManifest;
+  attempt: StoryAttemptResult;
+  decision: StoryCloseoutDecision;
+}
+
+function observeCurrentStoryCommit(
+  manifest: StoryManifest,
+  cwd: string,
+  storyStartHead: string | null,
+  meaningfulFiles: readonly string[],
+): ObservedStoryCommit[] {
+  const sha = getGitHead(cwd);
+  if (!sha || sha === storyStartHead || meaningfulFiles.length === 0) return [];
+
+  const branch = getGitBranch(cwd) ?? manifest.execution.worktree.branch ?? 'detached';
+  let message = `story(${manifest.identity.storyId}): host-observed output`;
+  let author = 'rorca-execution-engine';
+  let committedAt = new Date(0).toISOString();
+  try {
+    const raw = execSync(`git show -s --format=%s%x00%an%x00%aI ${sha}`, {
+      cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    const [observedMessage, observedAuthor, observedAt] = raw.split('\u0000');
+    if (observedMessage?.trim()) message = observedMessage.trim();
+    if (observedAuthor?.trim()) author = observedAuthor.trim();
+    if (observedAt && !Number.isNaN(new Date(observedAt).getTime())) committedAt = new Date(observedAt).toISOString();
+  } catch {
+    // A valid host-observed SHA is still useful evidence. Deterministic fallbacks
+    // keep duplicate finalization idempotent even if commit metadata is unavailable.
+  }
+
+  return [{
+    workspaceId: manifest.identity.workspaceId,
+    specId: manifest.identity.specId,
+    runId: manifest.identity.runId,
+    storyId: manifest.identity.storyId,
+    sha,
+    branch,
+    message,
+    author,
+    committedAt,
+    observedBy: 'worktree_branch',
+  }];
+}
+
+function buildStoryCloseoutBundleInput(
+  input: StoryCloseoutEnforcementInput,
+  manifest: StoryManifest,
+): {
+  attempt: StoryAttemptResult;
+  host: StoryCloseoutHostFacts;
+  evidence: ReturnType<typeof adaptStoryCloseoutEvidence>;
+} {
+  const pendingChanges = getStoryWorkingTreeChanges(input.cwd);
+  const committedChanges = getCommittedStoryChangesSince(input.cwd, input.storyStartHead);
+  const meaningfulFiles = [...new Set([...committedChanges.meaningfulFiles, ...pendingChanges.meaningfulFiles])].sort();
+  const runtimeMetadataFiles = [...new Set([...committedChanges.metadataFiles, ...pendingChanges.metadataFiles])].sort();
+  const changedFiles = [...new Set([...meaningfulFiles, ...runtimeMetadataFiles])].sort();
+  const activeCommitSha = getGitHead(input.cwd) ?? manifest.execution.worktree.baseRevision;
+  const activeBranch = getGitBranch(input.cwd) ?? manifest.execution.worktree.branch ?? 'detached';
+  const activeSubjectRevision = {
+    commitSha: activeCommitSha,
+    worktreePath: input.cwd,
+    branch: activeBranch,
+  };
+  const storyCommits = observeCurrentStoryCommit(manifest, input.cwd, input.storyStartHead, meaningfulFiles);
+  const firstValidation = input.validations[0];
+  const lastValidation = input.validations[input.validations.length - 1];
+
+  const host: StoryCloseoutHostFacts = {
+    identity: { ...manifest.identity },
+    activeSubjectRevision,
+    repository: {
+      // Runtime progress/evidence files are intentionally preserved and do not
+      // make an otherwise clean story output dirty at this enforcement seam.
+      worktreeClean: pendingChanges.meaningfulFiles.length === 0,
+      changedFiles,
+      runtimeMetadataFiles,
+      headBeforeValidation: firstValidation?.repositoryRevisionBefore ?? activeCommitSha,
+      headAfterValidation: lastValidation?.repositoryRevisionAfter ?? activeCommitSha,
+    },
+    validations: [...input.validations],
+    criterionEvidence: [],
+    storyCommits,
+    // The gate runs before these pass projections by design. Their absence is
+    // not evidence of failure; contradictory pre-existing projections would be.
+    progress: null,
+    storyResult: null,
+  };
+
+  const evidence = adaptStoryCloseoutEvidence(manifest, host);
+  const hostEvidenceReferences = evidence.map((item) => `EVD-sha256:${item.payloadHash}`);
+  host.criterionEvidence = manifest.evidenceExpectations.map((expectation) => ({
+    criterionId: expectation.criterionId,
+    evidenceReferences: hostEvidenceReferences,
+    subjectRevision: activeCommitSha,
+    observedBy: 'rorca_host',
+  }));
+
+  let logByteLength = 0;
+  try { logByteLength = fs.statSync(input.storyLogFile).size; } catch { /* typed by missing output below */ }
+  const rawOutputExcerpt = readLogTail(input.storyLogFile, 7_000).trim();
+  const sanitizedOutput = rawOutputExcerpt
+    ? sanitizeCapturePayload({ value: rawOutputExcerpt }).payload
+    : null;
+  const outputExcerpt = sanitizedOutput
+    && typeof sanitizedOutput === 'object'
+    && typeof (sanitizedOutput as { value?: unknown }).value === 'string'
+    ? (sanitizedOutput as { value: string }).value
+    : null;
+  const startedAt = new Date(input.attemptStartedAt).toISOString();
+  const finishedAt = new Date(input.attemptStartedAt + Math.max(0, input.attemptElapsedMs)).toISOString();
+  const attempt = createStoryAttemptResult({
+    identity: { ...manifest.identity },
+    revisions: { ...manifest.revisions },
+    manifestHash: manifest.manifestHash,
+    agentProcess: {
+      agent: input.agentType,
+      model: input.model,
+      effort: input.effort,
+      processId: null,
+      sessionId: input.piSessionId ?? null,
+    },
+    startedAt,
+    finishedAt,
+    termination: { kind: 'exited', exitCode: 0 },
+    outputReferences: [{
+      kind: 'story_log',
+      reference: input.storyLogFile,
+      byteLength: logByteLength,
+      sha256: null,
+      redactedExcerpt: outputExcerpt,
+      truncated: logByteLength > 7_000,
+    }],
+    // Preserve existing prompts and provider output contracts. This packet only
+    // records that the successful process proposed completion; it contributes
+    // no authority or evidence to the host gate.
+    proposedCompletionPacket: {
+      manifestHash: manifest.manifestHash,
+      identity: { ...manifest.identity },
+      revisions: { ...manifest.revisions },
+      proposal: 'complete',
+      summary: 'Agent process exited successfully and proposed story completion.',
+      criterionEvidence: manifest.evidenceExpectations.map((expectation) => ({
+        criterionId: expectation.criterionId,
+        evidenceReferences: [],
+      })),
+    },
+    observedFiles: changedFiles.map((file) => ({
+      path: file,
+      changeType: 'modified',
+      runtimeMetadata: runtimeMetadataFiles.includes(file),
+      observer: 'host',
+    })),
+    observedCommits: storyCommits,
+    hostValidationObservations: [...input.validations],
+    knownIssues: [],
+  });
+
+  return { attempt, host, evidence };
+}
+
+/**
+ * The sole mode/provider-agnostic pre-pass enforcement seam. It consumes only
+ * the frozen dispatch manifest and bounded host observations, persists the
+ * idempotent LFC-008 contracts, and returns no alternate success state.
+ */
+export async function enforceStoryCloseout(
+  input: StoryCloseoutEnforcementInput,
+): Promise<StoryCloseoutEnforcementResult> {
+  const persistedAttempts = await listStoryAttempts(input.manifest.identity);
+  const requestedAttempt = Math.max(input.manifest.identity.attempt, input.requestedAttempt);
+  let manifest: StoryManifest = requestedAttempt === input.manifest.identity.attempt
+    ? input.manifest
+    : deriveRetryStoryExecutionManifest(input.manifest, requestedAttempt);
+  let bundleInput = buildStoryCloseoutBundleInput(input, manifest);
+
+  const sameAttempt = persistedAttempts.find((item) => item.identity.attempt === requestedAttempt);
+  if (sameAttempt && sameAttempt.attemptResultId !== bundleInput.attempt.attemptResultId) {
+    const nextAttempt = Math.max(requestedAttempt, ...persistedAttempts.map((item) => item.identity.attempt)) + 1;
+    manifest = deriveRetryStoryExecutionManifest(input.manifest, nextAttempt);
+    bundleInput = buildStoryCloseoutBundleInput(input, manifest);
+  }
+
+  const decision = StoryCloseoutGate({
+    manifest,
+    attempt: bundleInput.attempt,
+    host: bundleInput.host,
+  });
+  await persistStoryCloseoutBundle({
+    manifest,
+    attempt: bundleInput.attempt,
+    decision,
+    evidence: bundleInput.evidence,
+  });
+  return { manifest, attempt: bundleInput.attempt, decision };
+}
+
 // ─── Worktree Helpers ───────────────────────────────────────────────────────
 
 interface StoryWorktree {
@@ -4398,7 +4640,11 @@ async function finalizeIntegratedStoryPass(
   workspaceId: string | null,
   pending: PendingIntegratedPass,
 ): Promise<void> {
-  await markStoryPassed(config.jsonPath, pending.story.id);
+  const transitioned = await markStoryPassed(config.jsonPath, pending.story.id);
+  if (!transitioned) {
+    logger.info(`Ignored duplicate pass finalization for ${pending.story.id}`);
+    return;
+  }
 
   if (!workspaceId) return;
 
@@ -5147,6 +5393,8 @@ async function runAdversarialReview(
 
 // ─── Story Execution ────────────────────────────────────────────────────────
 
+type StoryExecutionOutcome = 'passed' | 'failed' | 'skipped' | 'closeout_blocked';
+
 async function executeStory(
   story: UserStory,
   config: EngineConfig,
@@ -5164,7 +5412,12 @@ async function executeStory(
   personaRegistry?: PersonaRegistry,
   waveIndex?: number,
   spec?: SpecJson,
+<<<<<<< HEAD
 ): Promise<'passed' | 'failed' | 'skipped'> {
+=======
+  pendingIntegratedPasses?: Map<string, PendingIntegratedPass>,
+): Promise<StoryExecutionOutcome> {
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
   const effectiveCwd = storyCwd ?? config.cwd;
   const executionManifest = config.executionManifests.get(story.id);
   if (config.executionManifests.size > 0 && !executionManifest) {
@@ -5181,6 +5434,16 @@ async function executeStory(
     }
   }
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
+<<<<<<< HEAD
+=======
+  const storyStartHead = getGitHead(effectiveCwd);
+  const allowsNoCodeChanges = executionManifest
+    ? executionManifest.repositoryProfile.changePolicy === 'no_code_allowed'
+    : storyAllowsNoCodeChanges(story, mode);
+
+  // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
+  setFallbackContext(effectiveCwd, config.runId);
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
 
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
   // stable workspace/run artifact root, not ephemeral story worktrees, so the
@@ -5861,6 +6124,7 @@ async function executeStory(
       logger.info(`${story.id} completed (exit 0)`);
 
       const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
+      let hostValidationObservations: HostValidationObservation[] = [];
       // Manifest validations bind to the committed story revision below. Legacy
       // runs retain the historical pre-commit typecheck gate.
       const gate = skipGate || executionManifest
@@ -5932,8 +6196,13 @@ async function executeStory(
           ? { meaningfulFiles: [] }
           : getStoryWorkingTreeChanges(effectiveCwd);
 
+<<<<<<< HEAD
         if (mode !== 'journey' && meaningfulFiles.length === 0) {
           if (storyAllowsNoCodeChanges(story, mode)) {
+=======
+        if (mode !== 'journey' && meaningfulFiles.length === 0 && committedMeaningfulFiles.length === 0) {
+          if (allowsNoCodeChanges) {
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
             logger.info(`${story.id}: No meaningful file changes detected, but the story is validation/documentation-only — allowing pass`);
           } else {
             const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
@@ -6081,12 +6350,27 @@ async function executeStory(
       const commitResult = gitCommitStory(effectiveCwd, story.id, story.title, mode);
 
       if (mode !== 'journey' && !commitResult.committed) {
+<<<<<<< HEAD
         const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
         retryCounts.set(story.id, noChangeRetries);
         const failureReason = commitResult.reason === 'git_error' ? 'commit_verification_failed' : 'no_code_changes';
         const failureSummary = commitResult.reason === 'git_error'
           ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
           : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
+=======
+        const committedChanges = getCommittedStoryChangesSince(effectiveCwd, storyStartHead);
+        if (committedChanges.meaningfulFiles.length > 0) {
+          logger.info(`${story.id}: Agent already committed meaningful story changes (${committedChanges.meaningfulFiles.join(', ')})`);
+        } else if (allowsNoCodeChanges) {
+          logger.info(`${story.id}: No commit required by the frozen validation/no-code profile`);
+        } else {
+          const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, noChangeRetries);
+          const failureReason = commitResult.reason === 'git_error' ? 'commit_verification_failed' : 'no_code_changes';
+          const failureSummary = commitResult.reason === 'git_error'
+            ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
+            : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
 
         const noopFallback = resolveNoopRecoveryEngine(config.cwd, effectiveAgent, executionPacket);
         if (
@@ -6161,6 +6445,7 @@ async function executeStory(
       // before/after revisions and will be blocked by closeout until rerun.
       if (executionManifest && !skipGate) {
         const manifestGate = runGate(effectiveCwd, executionManifest);
+        hostValidationObservations = manifestGate.observations ?? [];
         if (workspaceId && manifestGate.observations) {
           for (const observation of manifestGate.observations) {
             await emitWalEvent(config.port, 'validation_result', workspaceId, {
@@ -6282,6 +6567,7 @@ async function executeStory(
         }
       }
 
+<<<<<<< HEAD
       // GitReins blocking gate: runs for every agent symmetrically after optional
       // adversarial review and before any local/canonical pass finalization.
       const gitReinsConfig = loadRorcaConfig(config.cwd).execution.gitreins;
@@ -6421,6 +6707,116 @@ async function executeStory(
 
       // All checks passed — mark story as done only after the GitReins gate.
       markStoryPassed(config.jsonPath, story.id);
+=======
+      // LFC-031: one common closeout seam for every mode and provider. This is
+      // deliberately after agent/host observations and before the first local or
+      // canonical pass projection. Legacy pre-manifest runs retain their bounded
+      // compatibility path; every manifest-backed run is fail-closed here.
+      if (executionManifest) {
+        let closeout: StoryCloseoutEnforcementResult | null = null;
+        let closeoutException: string | null = null;
+        try {
+          closeout = await enforceStoryCloseout({
+            manifest: executionManifest,
+            cwd: effectiveCwd,
+            storyStartHead,
+            storyLogFile,
+            agentType: effectiveAgent,
+            model: currentModel,
+            effort: currentEffort ?? null,
+            piSessionId: result.piSessionId,
+            attemptStartedAt: agentAttemptStartedAt,
+            attemptElapsedMs: result.elapsedMs,
+            requestedAttempt: executionManifest.identity.attempt + (retryCounts.get(story.id) ?? 0),
+            validations: hostValidationObservations,
+          });
+        } catch (error: unknown) {
+          closeoutException = error instanceof Error ? error.message : String(error);
+        }
+
+        if (!closeout || closeout.decision.status !== 'accepted') {
+          const reason = closeout ? 'closeout_blocked' : 'closeout_exception';
+          const reasonCodes = closeout?.decision.reasonCodes ?? ['CLOSEOUT_EXCEPTION'];
+          const remediation = closeout?.decision.nextSafeAction.remediation
+            ?? 'Inspect closeout persistence/evaluation diagnostics and retry without changing the frozen manifest.';
+          const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, currentRetries);
+          logger.warn(`${story.id} ${reason}: ${reasonCodes.join(', ')}${closeoutException ? ` — ${closeoutException}` : ''}`);
+          recordPiProgress({
+            knownIssues: [`Story closeout blocked: ${reasonCodes.join(', ')}${closeoutException ? ` — ${closeoutException}` : ''}`],
+            validationResults: [`Closeout decision: ${reason}; no pass state was written.`],
+            remainingWork: [remediation],
+          });
+
+          if (currentRetries >= MAX_RETRIES) {
+            await markStorySkipped(config.jsonPath, story.id);
+            rsMarkStoryFailed(effectiveCwd, {
+              storyId: story.id,
+              title: story.title,
+              status: 'failed',
+              startedAt: new Date(agentAttemptStartedAt).toISOString(),
+              finishedAt: new Date(agentAttemptStartedAt + result.elapsedMs).toISOString(),
+              agentType: effectiveAgent,
+              failReason: reason,
+              retries: currentRetries,
+              elapsedMs: result.elapsedMs,
+            });
+            writeProgressTxt(effectiveCwd);
+          }
+
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              reason,
+              closeout_reason_codes: reasonCodes,
+              closeout_decision_id: closeout?.decision.decisionId ?? null,
+              attempt_result_id: closeout?.attempt.attemptResultId ?? null,
+              manifest_hash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
+              remediation,
+              error_message: closeoutException,
+              retries: currentRetries,
+              log_file: storyLogFile,
+              ...(worktreeInfo ? {
+                worktree_path: worktreeInfo.worktreePath,
+                worktree_branch: worktreeInfo.branchName,
+                worktree_preserved: true,
+              } : {}),
+              ...(graphHits != null ? { graph_hits: graphHits } : {}),
+            }, story.id);
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason,
+              closeoutReasonCodes: reasonCodes,
+              closeoutDecisionId: closeout?.decision.decisionId ?? null,
+              attemptResultId: closeout?.attempt.attemptResultId ?? null,
+              manifestHash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+            });
+          }
+          if (currentRetries >= MAX_RETRIES && workspaceId) {
+            await autoSynthesizeMemory(
+              story.id,
+              workspaceId,
+              buildStoryText(story),
+              readLogTail(storyLogFile),
+              'failed',
+              config.runId,
+              config.port,
+            );
+          }
+          await persistRetrievalOutcome(false);
+          return 'closeout_blocked';
+        }
+        logger.info(`${story.id} closeout accepted (${closeout.decision.decisionId})`);
+      }
+
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
       retryCounts.delete(story.id);
       retryCounts.delete(rateLimitKey);
 
@@ -6681,6 +7077,11 @@ export {
   preparePiRpcSession,
   isMeaningfulStoryChange,
   classifyStoryWorkingTreeChanges,
+<<<<<<< HEAD
+=======
+  getCommittedStoryChangesSince,
+  storyAllowsNoCodeChanges,
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
   formatRetrievedMemorySection,
   buildRetrievalSelectionsFromContext as buildStoryRetrievalSelections,
 };
@@ -6924,7 +7325,7 @@ async function main(): Promise<void> {
   }
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
-  if (config.parallelism > 1 && !config.specificStory) {
+  if (config.parallelism > 1 && config.terminalMode !== 'pty' && !config.specificStory) {
     process.exitCode = await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, initialExecutableStories, personaRegistry);
     return;
   }
@@ -7193,10 +7594,14 @@ async function runParallel(
         const { storyId, result } = settled.value;
         processedIds.add(storyId);
         const wt = worktreeMap.get(storyId);
-        if (result === 'failed') {
+        if (result !== 'passed') {
           failedIds.add(storyId);
-          if (wt) failedInWave.push(wt);
-        } else if (result === 'passed' && wt) {
+          if (result === 'closeout_blocked' && wt) {
+            logger.info(`  [closeout] Preserving blocked worktree for inspection: ${wt.worktreePath}`);
+          } else if (wt) {
+            failedInWave.push(wt);
+          }
+        } else if (wt) {
           passedInWave.push(wt);
         }
       } else {
@@ -7213,6 +7618,7 @@ async function runParallel(
         if (!merged) {
           logger.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
           failedIds.add(wt.storyId);
+<<<<<<< HEAD
           markStoryMergeFailed(config.jsonPath, wt.storyId);
           if (workspaceId) {
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -7225,6 +7631,17 @@ async function runParallel(
           // The merge may conflict on the spec JSON and lose the passes:true written
           // in the worktree — writing it directly here ensures it is never lost.
           try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
+=======
+          await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
+          logger.info(`  [worktree] Preserving failed merge worktree for inspection: ${wt.worktreePath}`);
+        } else {
+          if (!pendingPass) {
+            throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
+          }
+          await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+          pendingIntegratedPasses.delete(wt.storyId);
+          removeStoryWorktree(config.cwd, wt);
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
         }
         removeStoryWorktree(config.cwd, wt);
       } else {
@@ -7242,7 +7659,16 @@ async function runParallel(
           // Force-update spec JSON for every story that passed — merge can conflict on
           // this file and lose the passes:true that was written inside each worktree.
           for (const wt of passedInWave) {
+<<<<<<< HEAD
             try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
+=======
+            const pendingPass = pendingIntegratedPasses.get(wt.storyId);
+            if (!pendingPass) {
+              throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
+            }
+            await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+            pendingIntegratedPasses.delete(wt.storyId);
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
           }
           for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
         } else {
@@ -7267,6 +7693,15 @@ async function runParallel(
           // Clean up successfully merged worktrees (those NOT in the failure set)
           for (const wt of passedInWave) {
             if (!failedStoryIds.has(wt.storyId)) {
+<<<<<<< HEAD
+=======
+              const pendingPass = pendingIntegratedPasses.get(wt.storyId);
+              if (!pendingPass) {
+                throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
+              }
+              await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+              pendingIntegratedPasses.delete(wt.storyId);
+>>>>>>> 42ba6d290 (feat(LFC-031): Integrate one mode-agnostic closeout enforcement seam before story pass)
               removeStoryWorktree(config.cwd, wt);
             }
           }
@@ -7347,6 +7782,14 @@ async function resolveWorkspaceId(port: number, cwd: string): Promise<string | n
 
 // ─── Argument Parser ────────────────────────────────────────────────────────
 
+function freezeLoadedExecutionManifest<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value as Record<string, unknown>)) freezeLoadedExecutionManifest(item);
+  }
+  return value;
+}
+
 function loadExecutionManifestMap(manifestPath: string | null, runId: number): ReadonlyMap<string, StoryExecutionManifest> {
   if (!manifestPath) return new Map(); // Named legacy compatibility path only.
   const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as unknown;
@@ -7357,7 +7800,7 @@ function loadExecutionManifestMap(manifestPath: string | null, runId: number): R
     if (!verifyStoryExecutionManifest(manifest)) throw new Error('Execution manifest bundle contains a stale or invalid hash');
     if (manifest.identity.runId !== runId) throw new Error('Execution manifest bundle contains the wrong run identity');
     if (manifests.has(manifest.identity.storyId)) throw new Error(`Duplicate execution manifest for ${manifest.identity.storyId}`);
-    manifests.set(manifest.identity.storyId, manifest);
+    manifests.set(manifest.identity.storyId, freezeLoadedExecutionManifest(manifest));
   }
   return manifests;
 }
