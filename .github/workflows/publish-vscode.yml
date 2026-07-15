@@ -9,6 +9,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,5 +28,5 @@ jobs:
         run: cd rorca-vscode && npx @vscode/vsce publish -p ${{ secrets.VSCE_PAT }}
 
       - name: Publish to Open VSX Registry
-        if: ${{ secrets.OVSX_PAT != '' }}
-        run: cd rorca-vscode && npx ovsx publish -p ${{ secrets.OVSX_PAT }}
+        if: env.OVSX_PAT != ''
+        run: cd rorca-vscode && npx ovsx publish -p "$OVSX_PAT"
