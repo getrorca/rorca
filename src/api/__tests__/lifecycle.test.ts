@@ -8,6 +8,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, apiFetch } from '../../lib/apiFetch';
 import {
+  getLifecycleEvidence,
   getLifecyclePhase,
   getLifecyclePortfolio,
   recordLifecycleDecision,
@@ -49,6 +50,16 @@ describe('lifecycle API clients', () => {
     expect(path).toContain('/api/lifecycle/specs/spec%2Fa/phases/qa?');
     expect(path).toContain('snapshotId=sha256%3Asnapshot');
     expect(path).toContain('page=2');
+  });
+
+  it('pins evidence detail to the caller snapshot', async () => {
+    mockApiFetch.mockResolvedValue({});
+    await getLifecycleEvidence('ws-1', '7', 'sha256:pinned');
+
+    const [path] = mockApiFetch.mock.calls[0];
+    expect(path).toContain('/api/lifecycle/evidence/7?');
+    expect(path).toContain('workspaceId=ws-1');
+    expect(path).toContain('snapshotId=sha256%3Apinned');
   });
 
   it('preserves typed ApiError failures from mutations', async () => {

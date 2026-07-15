@@ -26,6 +26,14 @@ Every request requires `workspaceId`. Detail requests may send the prior `snapsh
 
 Evidence explicitly marked `revision_mismatch` remains inspectable but is excluded from gate satisfaction. Historical plans remain visible with stale state. Specs without a usable plan return `needs_compilation` and a safe compile route instead of failing.
 
+## Traceability and evidence inspection
+
+The spec detail response is the canonical bounded traceability view for its `snapshotId`. Each requirement includes mapped architecture decisions and stories, required gates, eligible current evidence, and retained historical/ineligible evidence. `blockers` records identify missing requirement→story, story→gate, gate→evidence, revision-lineage, and QA/merge/production coherence links with an exact remediation. The response also carries the bound plan/spec revision and the typed `spec_hash → commit_sha → artifact_digest → deployment_id` lineage. Missing and not-applicable lineage nodes are explicit and never receive synthesized identifiers.
+
+QA, merge, and production bindings are evaluated from gate-eligible evidence for the same snapshot. A commit or artifact mismatch is release-blocking and prior evidence remains audit-visible. `graphContext` is optional enrichment only: the relational plan/evidence/decision ledger remains complete in Graph Lite, unavailable, and relational-only modes.
+
+Evidence detail requests must send the snapshot that opened the inspector. Ledger changes return `409 refresh_required`; clients retain the audited item and offer an explicit refresh rather than silently replacing it. Detail payloads are normalized/redacted, bounded in the UI, and never include the raw source payload. `rawReference` is a server-classified descriptor: only existing run/log/PTY destinations, strict `https://github.com` check URLs, and bounded GitReins identities are allowlisted. Unknown schemes, provider lookalike hosts, filesystem references without an authorized run, and attachments remain copy-only.
+
 ## Portfolio KPI and view-state contract
 
 `GET /api/lifecycle` computes KPI totals over the complete filtered result set, not only the current page. Alongside phase coverage it returns `activeSpecs`, `blockedSpecs`, `missingGates`, `readyForQa`, `waitingApprovals`, and `recentPhaseTransitions`. Recent transitions are phase-scoped `lifecycle_changed` WAL events from the last 24 hours; they remain derived audit data rather than mutable phase state.

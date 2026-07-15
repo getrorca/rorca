@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { useRef } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -13,6 +14,8 @@ import {
   ExternalLink,
   X,
 } from 'lucide-react';
+import LifecycleEvidenceInspector from './LifecycleEvidenceInspector';
+import LifecycleTraceability from './LifecycleTraceability';
 import type {
   LifecycleBounded,
   LifecycleEvidenceDetail,
@@ -42,8 +45,10 @@ interface LifecyclePhaseDrawerProps {
   portfolioItem: LifecyclePortfolioItem | null;
   evidence: LifecycleQueryState<LifecycleEvidenceDetail>;
   selectedEvidenceId: string | null;
+  selectedEvidenceSnapshotId: string | null;
   onOpenEvidence: (evidenceId: string) => void;
   onCloseEvidence: () => void;
+  onRefreshEvidence: () => void;
   onClose: () => void;
   onAction: (action: LifecyclePermittedAction) => void;
   actionPending?: LifecyclePermittedAction | null;
@@ -66,7 +71,7 @@ function revisionLabel(evidence: LifecycleEvidenceSummary | undefined): string {
   return evidence.currentRevision && !evidence.stale ? 'Current revision' : 'Revision mismatch';
 }
 
-function BoundedMapping({ label, value }: { label: string; value: LifecycleBounded<string> }) {
+function BoundedMapping({ label, value, onOpenTraceability }: { label: string; value: LifecycleBounded<string>; onOpenTraceability?: (reference: string) => void }) {
   return (
     <div className="border-b border-border py-3 last:border-b-0">
       <div className="flex items-center justify-between gap-3">
@@ -75,7 +80,11 @@ function BoundedMapping({ label, value }: { label: string; value: LifecycleBound
       </div>
       {value.items.length > 0 ? (
         <ul className="mt-2 space-y-1 text-sm text-[var(--text)]">
-          {value.items.map((item) => <li key={item} className="break-words">{item}</li>)}
+          {value.items.map((item) => (
+            <li key={item} className="break-words">
+              {onOpenTraceability ? <button type="button" onClick={() => onOpenTraceability(item)} className="rounded-sm text-left text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" aria-label={`Open traceability for ${item}`}>{item}</button> : item}
+            </li>
+          ))}
         </ul>
       ) : (
         <p className="mt-2 text-sm text-muted">No mapped {label.toLowerCase()}.</p>
@@ -99,8 +108,10 @@ export default function LifecyclePhaseDrawer({
   portfolioItem,
   evidence,
   selectedEvidenceId,
+  selectedEvidenceSnapshotId,
   onOpenEvidence,
   onCloseEvidence,
+  onRefreshEvidence,
   onClose,
   onAction,
   actionPending = null,
@@ -118,6 +129,20 @@ export default function LifecyclePhaseDrawer({
   const permitted = new Set(phase.permittedActions);
   const actions = LIFECYCLE_STICKY_ACTIONS.filter((action) => permitted.has(action.id));
   const guidance = phase.nextSafeActionGuidance;
+  const evidenceTriggerRef = useRef<HTMLElement | null>(null);
+  const traceabilityViewRef = useRef<HTMLElement | null>(null);
+  const openEvidence = (evidenceId: string, trigger?: HTMLElement) => {
+    evidenceTriggerRef.current = trigger ?? null;
+    onOpenEvidence(evidenceId);
+  };
+  const closeEvidence = () => {
+    onCloseEvidence();
+    queueMicrotask(() => evidenceTriggerRef.current?.focus());
+  };
+  const openTraceability = () => {
+    traceabilityViewRef.current?.scrollIntoView?.({ block: 'start' });
+    traceabilityViewRef.current?.focus();
+  };
 
   return (
     <div className="flex min-h-full flex-col bg-bg" data-testid="lifecycle-phase-drawer">
@@ -161,11 +186,18 @@ export default function LifecyclePhaseDrawer({
         <section aria-labelledby="phase-mapping-heading">
           <SectionHeading id="phase-mapping-heading">Mapped requirements, decisions, and stories</SectionHeading>
           <div className="border-y border-border">
-            <BoundedMapping label="Requirements" value={phase.mappedRequirements} />
-            <BoundedMapping label="Decisions" value={phase.mappedDecisions} />
-            <BoundedMapping label="Stories" value={phase.mappedStories} />
+            <BoundedMapping label="Requirements" value={phase.mappedRequirements} onOpenTraceability={openTraceability} />
+            <BoundedMapping label="Decisions" value={phase.mappedDecisions} onOpenTraceability={openTraceability} />
+            <BoundedMapping label="Stories" value={phase.mappedStories} onOpenTraceability={openTraceability} />
           </div>
         </section>
+
+        {spec?.traceability && (
+          <section ref={traceabilityViewRef} tabIndex={-1} aria-labelledby="phase-traceability-heading" className="focus:outline-none">
+            <SectionHeading id="phase-traceability-heading">Requirement-to-evidence traceability</SectionHeading>
+            <LifecycleTraceability traceability={spec.traceability} snapshotId={phase.snapshotId} onOpenEvidence={openEvidence} />
+          </section>
+        )}
 
         <section aria-labelledby="phase-gates-heading">
           <SectionHeading id="phase-gates-heading">Required gates</SectionHeading>
@@ -179,7 +211,7 @@ export default function LifecyclePhaseDrawer({
                   key={gate.gateId}
                   type="button"
                   disabled={!supportingEvidence}
-                  onClick={() => supportingEvidence && onOpenEvidence(supportingEvidence.id)}
+                  onClick={(event) => supportingEvidence && openEvidence(supportingEvidence.id, event.currentTarget)}
                   className="flex w-full items-start gap-3 py-3 text-left enabled:hover:bg-surface-200/50 disabled:cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
                   aria-label={`${gate.title}. ${status ? LIFECYCLE_STATUS_LABELS[status] : 'Evaluation unknown'}. ${supportingEvidence ? 'Open supporting evidence' : 'Supporting evidence unavailable'}`}
                 >
@@ -207,7 +239,7 @@ export default function LifecyclePhaseDrawer({
               <button
                 key={item.id}
                 type="button"
-                onClick={() => onOpenEvidence(item.id)}
+                onClick={(event) => openEvidence(item.id, event.currentTarget)}
                 aria-expanded={selectedEvidenceId === item.id}
                 className="flex w-full items-start gap-3 py-3 text-left hover:bg-surface-200/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
               >
@@ -227,27 +259,12 @@ export default function LifecyclePhaseDrawer({
           )}
 
           {selectedEvidenceId && (
-            <div className="mt-3 border-l-2 border-accent pl-3" aria-live="polite">
-              <div className="flex items-center justify-between gap-3">
-                <h4 className="text-sm font-semibold text-[var(--text)]">Evidence drill-down</h4>
-                <button type="button" onClick={onCloseEvidence} className="text-xs text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Close</button>
-              </div>
-              {evidence.loading && <p className="mt-2 text-sm text-muted">Loading evidence…</p>}
-              {evidence.error && <p className="mt-2 text-sm text-error">Evidence could not load.</p>}
-              {evidence.data && (
-                <details className="mt-2 text-xs text-muted">
-                  <summary className="cursor-pointer py-1 font-medium text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Evidence payload and provenance</summary>
-                  <div className="mt-2 space-y-2 break-words">
-                    <p>Source: {evidence.data.source.system || 'Unknown'}</p>
-                    <p>Observed: {timestamp(evidence.data.observedAt)}</p>
-                    <p>Subject: {evidence.data.subject.type} · {evidence.data.subject.value}</p>
-                    <p>Revision: {evidence.data.revisionMismatch ? 'Mismatch' : 'Current'}</p>
-                    {evidence.data.excerpt && <p>{evidence.data.excerpt}</p>}
-                    <p>Payload hash: {evidence.data.payloadHash}</p>
-                  </div>
-                </details>
-              )}
-            </div>
+            <LifecycleEvidenceInspector
+              evidence={evidence}
+              pinnedSnapshotId={selectedEvidenceSnapshotId}
+              onRefresh={onRefreshEvidence}
+              onClose={closeEvidence}
+            />
           )}
         </section>
 

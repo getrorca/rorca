@@ -229,24 +229,51 @@ export interface LifecyclePlanSummary {
   compiledAt: string;
 }
 
+export type LifecycleTraceabilityBlockerKind = 'requirement_to_story' | 'story_to_gate' | 'gate_to_evidence' | 'revision' | 'subject_coherence';
+
+export interface LifecycleTraceabilityBlocker {
+  kind: LifecycleTraceabilityBlockerKind;
+  requirementReference: string | null;
+  storyReference: string | null;
+  gateId: string | null;
+  message: string;
+  remediation: string;
+}
+
 export interface LifecycleTraceabilityGate {
   gateId: string;
   phaseId: LifecyclePhaseId;
   title: string;
   status: LifecycleEvaluatedStatus;
+  subjectRevisionRequirement?: LifecycleSubjectRevisionRequirement;
+  evidenceRequirementIds?: string[];
+  currentEvidence?: LifecycleEvidenceSummary[];
+  historicalEvidence?: LifecycleEvidenceSummary[];
+}
+
+export interface LifecycleTraceabilityRequirement {
+  requirementReference: string;
+  stories: string[];
+  decisions: string[];
+  gateIds: string[];
+  evidenceRequirementIds: string[];
+  gates?: LifecycleTraceabilityGate[];
+  blockers?: LifecycleTraceabilityBlocker[];
 }
 
 export interface LifecycleTraceability {
-  requirements: LifecycleBounded<{
-    requirementReference: string;
-    stories: string[];
-    decisions: string[];
-    gateIds: string[];
-    evidenceRequirementIds: string[];
-  }>;
+  requirements: LifecycleBounded<LifecycleTraceabilityRequirement>;
   stories: LifecycleBounded<string>;
   architectureDecisions: LifecycleBounded<string>;
   gates: LifecycleBounded<LifecycleTraceabilityGate>;
+  blockers?: LifecycleBounded<LifecycleTraceabilityBlocker>;
+  boundRevision?: { specVersion: string | null; inputHash: string; planId: string; planVersion: number };
+  subjectLineage?: Array<{ type: LifecycleReleaseSubjectType; status: 'available' | 'absent' | 'not_applicable'; value: string | null }>;
+  downstreamCoherence?: {
+    status: 'consistent' | 'mismatch' | 'insufficient_evidence';
+    bindings: Array<{ phaseId: 'qa' | 'merge' | 'production'; commitSha: string | null; artifactDigest: string | null; deploymentId: string | null }>;
+  };
+  graphContext?: { mode: 'full' | 'lite' | 'unavailable' | 'relational'; relatedEvidenceLabels: string[] };
   evidence: { total: number; validForCurrentRevision: number; stale: number; boundedAt: number };
   storyReconciliation?: LifecycleStoryReconciliation | null;
 }
@@ -457,6 +484,18 @@ export interface LifecycleEvidenceListItem {
   createdAt: string;
 }
 
+export interface LifecycleRawReferenceDescriptor {
+  available: boolean;
+  accessTier: 'auth';
+  allowed: boolean;
+  kind: 'run' | 'log' | 'pty' | 'github' | 'gitreins' | 'unknown';
+  label: string;
+  reference: string | null;
+  href: string | null;
+  external: boolean;
+  rawPayloadIncluded: false;
+}
+
 export interface LifecycleEvidenceDetail extends LifecycleSnapshotRef {
   id: string;
   workspaceId: string;
@@ -475,13 +514,18 @@ export interface LifecycleEvidenceDetail extends LifecycleSnapshotRef {
   excerpt: string | null;
   actor: string | null;
   rationale: string | null;
+  expiresAt: string | null;
+  environment: string | null;
+  redactionState: 'normalized_redacted';
   details: Record<string, unknown>;
   provenanceChain: Array<{ system: string; eventId: string; observedAt: string; principal?: string; verification?: string }>;
   revisionMismatch: boolean;
+  eligibleForActiveGate: boolean;
+  invalidReasons: string[];
   lineageVerified: boolean;
   payloadHash: string;
   sourcePayloadHash: string | null;
-  rawReference: { available: boolean; accessTier: 'auth'; allowed: boolean; reference: string | null; rawPayloadIncluded: false };
+  rawReference: LifecycleRawReferenceDescriptor;
 }
 
 export interface LifecycleDecisionRecord {

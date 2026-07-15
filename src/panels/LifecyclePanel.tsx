@@ -254,8 +254,10 @@ export default function LifecyclePanel() {
             portfolioItem={selectedPortfolioItem}
             evidence={lifecycle.evidence}
             selectedEvidenceId={lifecycle.selectedEvidenceId}
+            selectedEvidenceSnapshotId={lifecycle.selectedEvidenceSnapshotId}
             onOpenEvidence={lifecycle.openEvidence}
             onCloseEvidence={lifecycle.closeEvidence}
+            onRefreshEvidence={lifecycle.refreshEvidence}
             onClose={closeDrawer}
             onAction={(action) => { void handleDrawerAction(action); }}
             actionPending={actionPending}

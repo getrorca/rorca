@@ -317,6 +317,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   const [selectedSpec, setSelectedSpec] = useState<LifecycleQueryState<LifecycleSpecResponse>>(emptyQuery);
   const [phase, setPhase] = useState<LifecycleQueryState<LifecyclePhaseResponse>>(emptyQuery);
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
+  const [selectedEvidenceSnapshotId, setSelectedEvidenceSnapshotId] = useState<string | null>(null);
   const [evidence, setEvidence] = useState<LifecycleQueryState<LifecycleEvidenceDetail>>(emptyQuery);
   const [mutationError, setMutationError] = useState<ApiError | Error | null>(null);
   const [savedViews, setSavedViews] = useState<LifecycleSavedView[]>(() => loadLifecycleSavedViews(localStorage).views);
@@ -396,7 +397,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       portfolio: value.portfolio + 1,
       detail: value.detail + 1,
       phase: value.phase + 1,
-      evidence: value.evidence + 1,
+      evidence: value.evidence,
     }));
   }, []);
 
@@ -418,6 +419,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     setPhase(emptyQuery());
     setEvidence(emptyQuery());
     setSelectedEvidenceId(null);
+    setSelectedEvidenceSnapshotId(null);
     updateUrlState({ selectedSpecId: null, selectedPhaseId: null }, true);
   }, [workspaceId, updateUrlState]);
 
@@ -478,6 +480,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     phaseSelectionKeyRef.current = selectionKey;
     if (selectionChanged) {
       setSelectedEvidenceId(null);
+      setSelectedEvidenceSnapshotId(null);
       setEvidence(emptyQuery());
     }
     setPhase((state) => selectionChanged ? { ...emptyQuery<LifecyclePhaseResponse>(), loading: true } : beginQuery(state));
@@ -520,13 +523,15 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     const generation = ++generations.current.evidence;
     const controller = new AbortController();
     setEvidence((state) => selectionChanged ? { ...emptyQuery<LifecycleEvidenceDetail>(), loading: true } : beginQuery(state));
-    getLifecycleEvidence(workspaceId, selectedEvidenceId, undefined, { signal: controller.signal, silent: true })
+    if (!selectedEvidenceSnapshotId) {
+      setEvidence((state) => queryFailure(state, new Error('Evidence cannot be inspected without a bound evaluation snapshot.')));
+      return;
+    }
+    getLifecycleEvidence(workspaceId, selectedEvidenceId, selectedEvidenceSnapshotId, { signal: controller.signal, silent: true })
       .then((data) => {
         if (generation !== generations.current.evidence || controller.signal.aborted) return;
-        const baseline = phaseRef.current.data ?? selectedSpecRef.current.data;
-        if (baseline && (baseline.evidenceHighWaterMark !== data.evidenceHighWaterMark || baseline.decisionHighWaterMark !== data.decisionHighWaterMark)) {
-          setEvidence((state) => ({ ...state, data: null, snapshotId: null, loading: false, refreshing: false, stale: true, partial: true }));
-          coordinatedRefetch(`evidence:${baseline.snapshotId}:${data.snapshotId}`);
+        if (data.snapshotId !== selectedEvidenceSnapshotId) {
+          setEvidence((state) => queryFailure(state, new Error('Evidence response did not match the pinned evaluation snapshot.')));
           return;
         }
         setEvidence(querySuccess(data, data.snapshotId));
@@ -536,7 +541,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
         setEvidence((state) => queryFailure(state, asError(error)));
       });
     return () => controller.abort();
-  }, [workspaceId, selectedEvidenceId, revisions.evidence, coordinatedRefetch]);
+  }, [workspaceId, selectedEvidenceId, selectedEvidenceSnapshotId, revisions.evidence]);
 
   useEffect(() => {
     const specData = selectedSpec.data;
@@ -563,7 +568,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     setPortfolio((state) => ({ ...state, stale: state.data !== null }));
     if (targets.detail) setSelectedSpec((state) => ({ ...state, stale: state.data !== null }));
     if (targets.phase) setPhase((state) => ({ ...state, stale: state.data !== null }));
-    if (targets.evidence) setEvidence((state) => ({ ...state, stale: state.data !== null }));
+    if (targets.evidence) setEvidence((state) => ({ ...state, stale: true }));
     if (invalidationTimer.current) return;
     invalidationTimer.current = setTimeout(() => {
       const pending = pendingInvalidation.current;
@@ -573,7 +578,8 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
         portfolio: value.portfolio + Number(pending.portfolio),
         detail: value.detail + Number(pending.detail),
         phase: value.phase + Number(pending.phase),
-        evidence: value.evidence + Number(pending.evidence),
+        // Keep an open inspector pinned until its explicit refresh is used.
+        evidence: value.evidence,
       }));
     }, options.sseDebounceMs ?? 150);
   });
@@ -587,9 +593,27 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       portfolio: value.portfolio + 1,
       detail: value.detail + Number(Boolean(urlState.selectedSpecId)),
       phase: value.phase + Number(Boolean(urlState.selectedPhaseId)),
-      evidence: value.evidence + Number(Boolean(selectedEvidenceId)),
+      evidence: value.evidence,
     }));
-  }, [urlState.selectedSpecId, urlState.selectedPhaseId, selectedEvidenceId]);
+  }, [urlState.selectedSpecId, urlState.selectedPhaseId]);
+
+  const openEvidence = useCallback((evidenceId: string) => {
+    const callerSnapshot = phaseRef.current.data?.snapshotId ?? selectedSpecRef.current.data?.snapshotId ?? null;
+    setSelectedEvidenceSnapshotId(callerSnapshot);
+    setSelectedEvidenceId(evidenceId);
+  }, []);
+
+  const closeEvidence = useCallback(() => {
+    setSelectedEvidenceId(null);
+    setSelectedEvidenceSnapshotId(null);
+  }, []);
+
+  const refreshEvidence = useCallback(() => {
+    const latestSnapshot = phaseRef.current.data?.snapshotId ?? selectedSpecRef.current.data?.snapshotId ?? null;
+    if (!selectedEvidenceId || !latestSnapshot) return;
+    setSelectedEvidenceSnapshotId(latestSnapshot);
+    setRevisions((value) => ({ ...value, evidence: value.evidence + 1 }));
+  }, [selectedEvidenceId]);
 
   const runMutation = useCallback(async <T,>(operation: () => Promise<T>, targets: Partial<InvalidationTargets>): Promise<T> => {
     setMutationError(null);
@@ -698,6 +722,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     traceability,
     evidence,
     selectedEvidenceId,
+    selectedEvidenceSnapshotId,
     loading: portfolio.loading,
     refreshing,
     empty,
@@ -715,8 +740,9 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     updateUrlState,
     selectSpec: (specId: string | null) => updateUrlState({ selectedSpecId: specId, selectedPhaseId: null }),
     selectPhase: (phaseId: LifecyclePhaseId | null) => updateUrlState({ selectedPhaseId: phaseId }),
-    openEvidence: setSelectedEvidenceId,
-    closeEvidence: () => setSelectedEvidenceId(null),
+    openEvidence,
+    closeEvidence,
+    refreshEvidence,
     setPage: (page: number) => updateUrlState({ page: Math.max(1, page) }),
     setCompact: (compact: boolean) => {
       setDisplayPreferences((current) => ({ ...current, compact }));

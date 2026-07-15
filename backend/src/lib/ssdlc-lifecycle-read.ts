@@ -853,27 +853,142 @@ async function loadOne(input: LifecycleSpecInput): Promise<{ ws: WorkspaceRow; c
   };
 }
 
-function traceability(plan: LifecyclePlan, evaluation: LifecycleEvaluation, evidenceRows: EvidenceRow[]) {
+type TraceabilityBlockerKind = 'requirement_to_story' | 'story_to_gate' | 'gate_to_evidence' | 'revision' | 'subject_coherence';
+
+interface TraceabilityBlocker {
+  kind: TraceabilityBlockerKind;
+  requirementReference: string | null;
+  storyReference: string | null;
+  gateId: string | null;
+  message: string;
+  remediation: string;
+}
+
+function traceabilityBlocker(
+  kind: TraceabilityBlockerKind,
+  references: Pick<TraceabilityBlocker, 'requirementReference' | 'storyReference' | 'gateId'>,
+  message: string,
+  remediation: string,
+): TraceabilityBlocker {
+  return { kind, ...references, message, remediation };
+}
+
+function releaseBinding(row: EvidenceRow): { commitSha: string | null; artifactDigest: string | null; deploymentId: string | null } {
+  const release = evidenceLineage(row);
+  const subject = evidenceSubject(row);
+  return {
+    commitSha: release.commitSha ?? (subject.type === 'commit_sha' ? subject.value : null),
+    artifactDigest: release.artifactDigest ?? (subject.type === 'artifact_digest' ? subject.value : null),
+    deploymentId: release.deploymentId ?? (subject.type === 'deployment_id' ? subject.value : null),
+  };
+}
+
+function traceability(plan: LifecyclePlan, evaluation: LifecycleEvaluation, evidenceRows: EvidenceRow[], specVersion: string | null) {
   const validEvidenceIds = new Set(evaluation.phases.flatMap((phase) => phase.evidence)
     .filter((item) => item.valid && item.satisfiesGate && item.evidenceId)
     .map((item) => item.evidenceId!));
-  const requirements = [...plan.requirementMappings].sort((a, b) => a.requirementReference.localeCompare(b.requirementReference)).map((mapping) => ({
-    requirementReference: mapping.requirementReference,
-    stories: mapping.targetReferences.filter((target) => target.type === 'story').map((target) => target.reference).sort(),
-    decisions: mapping.targetReferences.filter((target) => target.type === 'architecture_decision').map((target) => target.reference).sort(),
-    gateIds: [...mapping.gateIds].sort(),
-    evidenceRequirementIds: [...mapping.evidenceRequirementIds].sort(),
-  }));
+  const blockers: TraceabilityBlocker[] = [];
+  const gates = [...plan.gates].sort((a, b) => a.gateId.localeCompare(b.gateId)).map((gate) => {
+    const phase = evaluation.phases.find((candidate) => candidate.phaseId === gate.phaseId);
+    const evaluatedGate = phase?.gates.find((item) => item.gateId === gate.gateId);
+    const gateEvidence = phase
+      ? evidenceRows.filter((row) => row.gate_id === gate.gateId).map((row) => evidenceSummary(row, phase))
+      : [];
+    return {
+      gateId: gate.gateId,
+      phaseId: gate.phaseId,
+      title: gate.title,
+      status: evaluatedGate?.status ?? 'not_started',
+      subjectRevisionRequirement: gate.subjectRevisionRequirement,
+      evidenceRequirementIds: [...gate.evidenceRequirementIds].sort(),
+      currentEvidence: gateEvidence.filter((item) => item.currentRevision),
+      historicalEvidence: gateEvidence.filter((item) => !item.currentRevision),
+    };
+  });
+  const gatesById = new Map(gates.map((gate) => [gate.gateId, gate]));
+  const requirements = [...plan.requirementMappings]
+    .sort((a, b) => a.requirementReference.localeCompare(b.requirementReference))
+    .map((mapping) => {
+      const stories = mapping.targetReferences.filter((target) => target.type === 'story').map((target) => target.reference).sort();
+      const decisions = mapping.targetReferences.filter((target) => target.type === 'architecture_decision').map((target) => target.reference).sort();
+      const mappedGates = mapping.gateIds.map((gateId) => gatesById.get(gateId)).filter((gate): gate is NonNullable<typeof gate> => Boolean(gate));
+      const rowBlockers: TraceabilityBlocker[] = [];
+      if (stories.length === 0) {
+        rowBlockers.push(traceabilityBlocker('requirement_to_story', {
+          requirementReference: mapping.requirementReference, storyReference: null, gateId: null,
+        }, `Requirement ${mapping.requirementReference} has no mapped implementation story.`, `Map ${mapping.requirementReference} to at least one story in the lifecycle plan, then recompile the plan.`));
+      }
+      for (const story of stories) {
+        if (mappedGates.length === 0) rowBlockers.push(traceabilityBlocker('story_to_gate', {
+          requirementReference: mapping.requirementReference, storyReference: story, gateId: null,
+        }, `Story ${story} has no required gate through requirement ${mapping.requirementReference}.`, `Add at least one gate mapping for ${mapping.requirementReference} covering ${story}, then recompile the plan.`));
+      }
+      for (const gate of mappedGates) {
+        if (gate.currentEvidence.length === 0) rowBlockers.push(traceabilityBlocker('gate_to_evidence', {
+          requirementReference: mapping.requirementReference, storyReference: null, gateId: gate.gateId,
+        }, `Gate ${gate.gateId} has no eligible evidence for the bound revision.`, `Collect ${gate.evidenceRequirementIds.join(', ')} evidence for ${gate.gateId} on the bound immutable subject, then re-evaluate.`));
+      }
+      blockers.push(...rowBlockers);
+      return {
+        requirementReference: mapping.requirementReference,
+        stories,
+        decisions,
+        gateIds: [...mapping.gateIds].sort(),
+        evidenceRequirementIds: [...mapping.evidenceRequirementIds].sort(),
+        gates: mappedGates,
+        blockers: rowBlockers,
+      };
+    });
+
+  const evaluatedRevisionMismatches = new Set(evaluation.phases.flatMap((phase) => phase.evidence)
+    .filter((item) => item.evidenceId && item.invalidReasons.includes('subject_revision_mismatch'))
+    .map((item) => item.evidenceId!));
+  const currentRows = evidenceRows.filter((row) => !row.revision_mismatch && !evaluatedRevisionMismatches.has(row.id));
+  const lineageValues = currentRows.reduce((result, row) => {
+    const binding = releaseBinding(row);
+    result.commitSha ??= binding.commitSha;
+    result.artifactDigest ??= binding.artifactDigest;
+    result.deploymentId ??= binding.deploymentId;
+    return result;
+  }, { commitSha: null, artifactDigest: null, deploymentId: null } as { commitSha: string | null; artifactDigest: string | null; deploymentId: string | null });
+  const acceptedSubjectTypes = new Set(plan.gates.flatMap((gate) => gate.acceptedSubjectTypes));
+  const lineage = [
+    { type: 'spec_hash' as const, status: 'available' as const, value: plan.inputHash },
+    { type: 'commit_sha' as const, status: lineageValues.commitSha ? 'available' as const : acceptedSubjectTypes.has('commit_sha') ? 'absent' as const : 'not_applicable' as const, value: lineageValues.commitSha },
+    { type: 'artifact_digest' as const, status: lineageValues.artifactDigest ? 'available' as const : acceptedSubjectTypes.has('artifact_digest') ? 'absent' as const : 'not_applicable' as const, value: lineageValues.artifactDigest },
+    { type: 'deployment_id' as const, status: lineageValues.deploymentId ? 'available' as const : acceptedSubjectTypes.has('deployment_id') ? 'absent' as const : 'not_applicable' as const, value: lineageValues.deploymentId },
+  ];
+  for (const node of lineage) {
+    if (node.status === 'absent') blockers.push(traceabilityBlocker('revision', {
+      requirementReference: null, storyReference: null, gateId: null,
+    }, `The active ${node.type} lineage link is absent.`, `Collect current-revision evidence that binds the ${node.type} without inventing an identifier.`));
+  }
+
+  const activeGateRows = currentRows.filter((row) => validEvidenceIds.has(row.id));
+  const coherenceBindings = (['qa', 'merge', 'production'] as const).map((phaseId) => {
+    const row = activeGateRows.find((candidate) => candidate.phase_id === phaseId && candidate.evidence_status === 'passed');
+    return { phaseId, ...(row ? releaseBinding(row) : { commitSha: null, artifactDigest: null, deploymentId: null }) };
+  });
+  const coherenceMismatch = (['commitSha', 'artifactDigest'] as const).some((field) =>
+    new Set(coherenceBindings.map((binding) => binding[field]).filter((value): value is string => Boolean(value))).size > 1);
+  if (coherenceMismatch) blockers.push(traceabilityBlocker('subject_coherence', {
+    requirementReference: null, storyReference: null, gateId: null,
+  }, 'QA, merge, and production evidence do not bind to the same immutable commit/image.', 'Re-run the mismatched downstream gate against the active commit and artifact digest, then record replacement evidence; retain prior evidence as history.'));
+
   return {
     requirements: bounded(requirements),
     stories: bounded([...plan.storyReferences].sort()),
     architectureDecisions: bounded([...plan.architectureDecisionReferences].sort()),
-    gates: bounded([...plan.gates].sort((a, b) => a.gateId.localeCompare(b.gateId)).map((gate) => ({
-      gateId: gate.gateId,
-      phaseId: gate.phaseId,
-      title: gate.title,
-      status: evaluation.phases.find((phase) => phase.phaseId === gate.phaseId)?.gates.find((item) => item.gateId === gate.gateId)?.status ?? 'not_started',
-    }))),
+    gates: bounded(gates),
+    blockers: bounded(blockers),
+    boundRevision: { specVersion, inputHash: plan.inputHash, planId: plan.planId, planVersion: plan.planVersion },
+    subjectLineage: lineage,
+    downstreamCoherence: {
+      status: coherenceMismatch ? 'mismatch' as const : coherenceBindings.some((binding) => binding.commitSha || binding.artifactDigest)
+        ? 'consistent' as const : 'insufficient_evidence' as const,
+      bindings: coherenceBindings,
+    },
+    graphContext: { mode: 'relational' as const, relatedEvidenceLabels: [] as string[] },
     evidence: {
       total: evidenceRows.length,
       validForCurrentRevision: evidenceRows.filter((row) => validEvidenceIds.has(row.id)).length,
@@ -947,7 +1062,7 @@ export async function getLifecycleSpec(input: LifecycleSpecInput) {
     },
     phaseTimeline: phaseCells(bundle.evaluation),
     traceability: {
-      ...traceability(bundle.plan, bundle.evaluation, bundle.evidenceRows),
+      ...traceability(bundle.plan, bundle.evaluation, bundle.evidenceRows, bundle.candidate.spec_version),
       storyReconciliation: reconciliation,
     },
     currentRun: bundle.run ? { ...bundle.run, storyReconciliation: reconciliation } : null,
@@ -1119,33 +1234,78 @@ export async function getLifecyclePhase(input: LifecyclePhaseInput) {
   };
 }
 
+export interface LifecycleRawReferenceDescriptor {
+  available: boolean;
+  accessTier: 'auth';
+  allowed: boolean;
+  kind: 'run' | 'log' | 'pty' | 'github' | 'gitreins' | 'unknown';
+  label: string;
+  reference: string | null;
+  href: string | null;
+  external: boolean;
+  rawPayloadIncluded: false;
+}
+
+/** Convert an immutable source reference into an allowlisted existing UI/provider destination. */
+export function describeLifecycleRawReference(evidence: {
+  rawReference: string | null;
+  source: { type: string; system: string };
+  scope: { runId: number | null };
+}): LifecycleRawReferenceDescriptor {
+  const reference = evidence.rawReference;
+  const base = {
+    available: reference !== null,
+    accessTier: 'auth' as const,
+    reference,
+    rawPayloadIncluded: false as const,
+  };
+  if (!reference) return { ...base, allowed: false, kind: 'unknown', label: 'No raw reference', href: null, external: false };
+  const runReference = reference.match(/^(?:run-output-chunks|run|pty):(\d+)(?:\?.*)?$/);
+  const runId = runReference ? Number(runReference[1]) : evidence.scope.runId;
+  if (runId && Number.isSafeInteger(runId) && runId > 0 && (
+    runReference || reference.startsWith('wal-events:') || reference.startsWith('/') || reference.includes('.log')
+  )) {
+    const kind = reference.startsWith('pty:') ? 'pty' as const : reference.includes('.log') ? 'log' as const : 'run' as const;
+    return { ...base, allowed: true, kind, label: kind === 'pty' ? 'Open authorized run PTY' : kind === 'log' ? 'Open authorized run log' : 'Open authorized run', href: `/runs/${runId}`, external: false };
+  }
+  if (evidence.source.type === 'github_check') {
+    try {
+      const url = new URL(reference);
+      if (url.protocol === 'https:' && (url.hostname === 'github.com' || url.hostname === 'api.github.com')) {
+        return { ...base, allowed: true, kind: 'github', label: 'Open GitHub check', href: url.toString(), external: true };
+      }
+    } catch { /* non-URL GitHub references remain copy-only */ }
+  }
+  if (evidence.source.type === 'gitreins_judgment' && /^(?:gitreins|hermes):[A-Za-z0-9._:/?#=&-]+$/.test(reference)) {
+    return { ...base, allowed: true, kind: 'gitreins', label: 'Open GitReins reference', href: null, external: false };
+  }
+  return { ...base, allowed: false, kind: 'unknown', label: 'Reference is copy-only', href: null, external: false };
+}
+
 export async function getLifecycleEvidence(input: { workspaceId: string; evidenceId: string; expectedSnapshotId?: string }) {
   const ws = await workspace(input.workspaceId);
   const evidenceId = text(input.evidenceId, 'evidenceId', 32);
   if (!/^\d+$/.test(evidenceId) || evidenceId === '0') throw new ValidationError('evidenceId must be a positive integer', { field: 'evidenceId' });
   const evidence = await getNormalizedEvidenceById(ws.id, evidenceId);
-  const [evidenceMark, decisionMark] = await Promise.all([
-    queryOne<{ high_water_mark: string }>(
-      'SELECT COALESCE(MAX(id), 0)::text AS high_water_mark FROM ssdlc_lifecycle_evidence WHERE workspace_id = $1 AND spec_slug = $2',
-      [ws.id, evidence.scope.specSlug],
-    ),
-    queryOne<{ high_water_mark: string }>(
-      'SELECT COALESCE(MAX(id), 0)::text AS high_water_mark FROM ssdlc_decisions WHERE workspace_id = $1 AND spec_slug = $2',
-      [ws.id, evidence.scope.specSlug],
-    ),
-  ]);
-  const evidenceHighWaterMark = `evidence:${evidenceMark?.high_water_mark ?? '0'}`;
-  const decisionHighWaterMark = `decision:${decisionMark?.high_water_mark ?? '0'}`;
-  const snapshotId = snapshotHash({
+  // Evidence inspection is evaluated against the same immutable snapshot as the
+  // matrix/spec/phase caller. A changed ledger returns refresh_required rather
+  // than silently replacing the item under audit.
+  const loaded = await loadOne({
     workspaceId: ws.id,
     specId: evidence.scope.specSlug,
-    evidenceHighWaterMark,
-    decisionHighWaterMark,
+    expectedSnapshotId: input.expectedSnapshotId,
   });
-  refreshRequired(input.expectedSnapshotId, snapshotId, {
-    evidence: evidenceHighWaterMark,
-    decision: decisionHighWaterMark,
-  });
+  const evidenceHighWaterMark = loaded.marks.evidence;
+  const decisionHighWaterMark = loaded.marks.decision;
+  const snapshotId = loaded.snapshotId;
+  const expiresAt = typeof evidence.details.expiresAt === 'string' ? evidence.details.expiresAt : null;
+  const environment = typeof evidence.details.environment === 'string' ? evidence.details.environment : null;
+  const evaluatedEvidence = loaded.bundle?.evaluation.phases
+    .flatMap((phase) => phase.evidence)
+    .find((item) => item.evidenceId === evidence.id);
+  const invalidReasons = evaluatedEvidence?.invalidReasons ?? (evidence.revisionMismatch ? ['subject_revision_mismatch'] : []);
+  const revisionMismatch = evidence.revisionMismatch || invalidReasons.includes('subject_revision_mismatch');
+  const eligibleForActiveGate = Boolean(evaluatedEvidence?.valid && evaluatedEvidence.satisfiesGate && !revisionMismatch);
   return {
     id: evidence.id,
     workspaceId: evidence.scope.workspaceId,
@@ -1164,22 +1324,21 @@ export async function getLifecycleEvidence(input: { workspaceId: string; evidenc
     excerpt: evidence.excerpt,
     actor: evidence.actor,
     rationale: evidence.rationale,
+    expiresAt,
+    environment,
+    redactionState: 'normalized_redacted' as const,
     details: evidence.details,
     provenanceChain: evidence.provenanceChain,
-    revisionMismatch: evidence.revisionMismatch,
+    revisionMismatch,
+    eligibleForActiveGate,
+    invalidReasons,
     lineageVerified: evidence.lineageVerified,
     payloadHash: evidence.payloadHash,
     sourcePayloadHash: evidence.sourcePayloadHash,
     snapshotId,
     evidenceHighWaterMark,
     decisionHighWaterMark,
-    rawReference: {
-      available: evidence.rawReference !== null,
-      accessTier: 'auth',
-      allowed: true,
-      reference: evidence.rawReference,
-      rawPayloadIncluded: false,
-    },
+    rawReference: describeLifecycleRawReference(evidence),
   };
 }
 

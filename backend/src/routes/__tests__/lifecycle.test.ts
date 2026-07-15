@@ -67,11 +67,12 @@ describe('lifecycle aggregate read routes', () => {
     expect(mockPortfolio).not.toHaveBeenCalled();
   });
 
-  test('keeps evidence in the static namespace instead of parsing it as a spec id', async () => {
-    const response = await request(app()).get('/api/lifecycle/evidence/7?workspaceId=ws-a');
+  test('keeps evidence in the static namespace and pins it to the caller snapshot', async () => {
+    const snapshotId = `sha256:${'a'.repeat(64)}`;
+    const response = await request(app()).get(`/api/lifecycle/evidence/7?workspaceId=ws-a&snapshotId=${snapshotId}`);
 
     expect(response.status).toBe(200);
-    expect(mockEvidence).toHaveBeenCalledWith({ workspaceId: 'ws-a', evidenceId: '7', expectedSnapshotId: undefined });
+    expect(mockEvidence).toHaveBeenCalledWith({ workspaceId: 'ws-a', evidenceId: '7', expectedSnapshotId: snapshotId });
     expect(mockSpec).not.toHaveBeenCalled();
     expect(mockPhase).not.toHaveBeenCalled();
   });

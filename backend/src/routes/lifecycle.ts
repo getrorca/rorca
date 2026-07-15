@@ -227,7 +227,7 @@ router.get('/specs/:specId/phases/:phaseId', async (req, res, next) => {
  * /api/lifecycle/evidence/{evidenceId}:
  *   get:
  *     tags: [Lifecycle]
- *     summary: Read redacted normalized lifecycle evidence metadata
+ *     summary: Read redacted normalized lifecycle evidence pinned to an evaluator snapshot
  *     operationId: getLifecycleEvidence
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Evidence provenance and raw-reference locations are sensitive workspace-owned audit metadata; authenticated access returns sanitized fields and never embeds raw payloads."
@@ -247,6 +247,7 @@ router.get('/specs/:specId/phases/:phaseId', async (req, res, next) => {
  *       200: { description: Redacted immutable evidence metadata and raw-reference permission }
  *       400: { description: Invalid workspace or evidence identity }
  *       404: { description: Workspace-scoped evidence not found }
+ *       409: { description: Caller snapshot changed; refresh is required and no evidence item was silently substituted }
  */
 router.get('/evidence/:evidenceId', async (req, res, next) => {
   try {

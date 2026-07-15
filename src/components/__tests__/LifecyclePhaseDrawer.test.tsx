@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type {
@@ -88,8 +88,8 @@ function evidenceQuery(data: LifecycleEvidenceDetail | null = null): LifecycleQu
 
 function renderDrawer(overrides: Partial<React.ComponentProps<typeof LifecyclePhaseDrawer>> = {}) {
   const props: React.ComponentProps<typeof LifecyclePhaseDrawer> = {
-    phase: phase(), spec, portfolioItem, evidence: evidenceQuery(), selectedEvidenceId: null,
-    onOpenEvidence: vi.fn(), onCloseEvidence: vi.fn(), onClose: vi.fn(), onAction: vi.fn(), actionPending: null,
+    phase: phase(), spec, portfolioItem, evidence: evidenceQuery(), selectedEvidenceId: null, selectedEvidenceSnapshotId: null,
+    onOpenEvidence: vi.fn(), onCloseEvidence: vi.fn(), onRefreshEvidence: vi.fn(), onClose: vi.fn(), onAction: vi.fn(), actionPending: null,
     ...overrides,
   };
   return { ...render(<LifecyclePhaseDrawer {...props} />), props };
@@ -104,9 +104,9 @@ describe('LifecyclePhaseDrawer', () => {
     expect(screen.getByText(/Revision: Spec 7 · Plan 3 · sha256:input/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Close phase details' })).toBeInTheDocument();
 
-    const headings = ['Why required', 'Mapped requirements, decisions, and stories', 'Required gates', 'Bounded evidence', 'Blocker', 'Liveness', 'Next safe action'];
+    const headings = ['Why required', 'Mapped requirements, decisions, and stories', 'Requirement-to-evidence traceability', 'Required gates', 'Bounded evidence', 'Blocker', 'Liveness', 'Next safe action'];
     const positions = headings.map((name) => screen.getByRole('heading', { name }).compareDocumentPosition(document.body));
-    expect(positions).toHaveLength(7);
+    expect(positions).toHaveLength(8);
     const ordered = headings.map((name) => screen.getByRole('heading', { name }));
     ordered.slice(1).forEach((node, index) => expect(ordered[index].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy());
 
@@ -115,7 +115,7 @@ describe('LifecyclePhaseDrawer', () => {
     expect(screen.getByText('US-006')).toBeInTheDocument();
     expect(screen.getByText('Showing 1 of 4 evidence records.')).toBeInTheDocument();
     expect(screen.getByText('Supporting evidence is missing or unknown.')).toBeInTheDocument();
-    expect(screen.getByText(/source, time, and revision match/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/source, time, and revision match/i)).not.toBeInTheDocument();
   });
 
   it.each(['blocked', 'passed', 'deferred', 'not_applicable', 'stale', 'awaiting_approval'] as LifecycleEvaluatedStatus[])(
@@ -130,6 +130,15 @@ describe('LifecyclePhaseDrawer', () => {
     },
   );
 
+  it('drills requirement, decision, and story rows into the bounded traceability view', async () => {
+    const user = userEvent.setup();
+    renderDrawer();
+    for (const reference of ['REQ-002', 'ADR-004', 'US-006']) {
+      await user.click(screen.getByRole('button', { name: `Open traceability for ${reference}` }));
+      expect(screen.getByRole('heading', { name: 'Requirement-to-evidence traceability' }).parentElement).toHaveFocus();
+    }
+  });
+
   it('exposes source, time, revision match, and evidence drill-down from gate and evidence rows', async () => {
     const user = userEvent.setup();
     const onOpenEvidence = vi.fn();
@@ -141,6 +150,17 @@ describe('LifecyclePhaseDrawer', () => {
     await user.click(gate);
     expect(onOpenEvidence).toHaveBeenCalledWith('7');
     expect(screen.getByRole('button', { name: /Manual acceptance judgment.*Supporting evidence unavailable/i })).toBeDisabled();
+  });
+
+  it('restores focus to the evidence row when the inspector closes', async () => {
+    const user = userEvent.setup();
+    const rendered = renderDrawer();
+    const evidenceRow = screen.getByRole('button', { name: /automated_validation.*GitHub Actions/i });
+    await user.click(evidenceRow);
+    rendered.rerender(<LifecyclePhaseDrawer {...rendered.props} selectedEvidenceId="7" selectedEvidenceSnapshotId={MARKS.snapshotId} />);
+    await user.click(screen.getByRole('button', { name: 'Close Evidence Inspector' }));
+    expect(rendered.props.onCloseEvidence).toHaveBeenCalled();
+    await waitFor(() => expect(evidenceRow).toHaveFocus());
   });
 
   it('shows only the sticky actions authorized by the server', async () => {
@@ -161,11 +181,11 @@ describe('LifecyclePhaseDrawer', () => {
       source: { type: 'ci', system: 'GitHub Actions', eventId: 'check-7' }, observedAt: '2026-07-15T12:00:00.000Z', createdAt: null,
       subject: { type: 'commit_sha', value: 'abc123' }, phaseSubject: null, releaseIdentity: { commitSha: 'abc123', artifactDigest: null, deploymentId: null },
       classification: 'automated_validation', status: 'passed', trustLevel: 'provider_verified', confidence: 0.98, excerpt: 'A very long payload', actor: null, rationale: null,
-      details: {}, provenanceChain: [], revisionMismatch: false, lineageVerified: true, payloadHash: 'sha256:payload', sourcePayloadHash: null,
-      rawReference: { available: false, accessTier: 'auth', allowed: false, reference: null, rawPayloadIncluded: false }, ...MARKS,
+      expiresAt: null, environment: null, redactionState: 'normalized_redacted', details: {}, provenanceChain: [], revisionMismatch: false, eligibleForActiveGate: true, invalidReasons: [], lineageVerified: true, payloadHash: 'sha256:payload', sourcePayloadHash: null,
+      rawReference: { available: false, accessTier: 'auth', allowed: false, kind: 'unknown', label: 'No raw reference', reference: null, href: null, external: false, rawPayloadIncluded: false }, ...MARKS,
     } satisfies LifecycleEvidenceDetail;
-    renderDrawer({ selectedEvidenceId: '7', evidence: evidenceQuery(detail) });
-    const disclosure = screen.getByText('Evidence payload and provenance').closest('details');
+    renderDrawer({ selectedEvidenceId: '7', selectedEvidenceSnapshotId: MARKS.snapshotId, evidence: evidenceQuery(detail) });
+    const disclosure = screen.getByText('Bounded normalized payload and provenance').closest('details');
     expect(disclosure).not.toHaveAttribute('open');
   });
 });

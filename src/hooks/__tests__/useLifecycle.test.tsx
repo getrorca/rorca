@@ -11,6 +11,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WalEvent } from '../useWalSSE';
 import type {
+  LifecycleEvidenceDetail,
   LifecyclePhaseResponse,
   LifecyclePortfolioResponse,
   LifecycleSavedView,
@@ -104,6 +105,19 @@ function phase(snapshot = SNAPSHOT): LifecyclePhaseResponse {
     nextSafeActionGuidance: { action: 'Run QA', rationale: 'QA has not completed.', confidence: 0.95, classifier: 'phase_evaluator' },
     nextSafeAction: 'Run QA', permittedActions: ['run_phase'],
     evaluationSnapshot: { snapshotId: snapshot, ...MARKS }, snapshotId: snapshot, ...MARKS,
+  };
+}
+
+function evidence(excerpt = 'original audited evidence'): LifecycleEvidenceDetail {
+  return {
+    id: '7', workspaceId: 'ws-1', specId: 'spec-a', scope: { workspaceId: 'ws-1', specSlug: 'spec-a', runId: 42, storyId: 'US-001', phaseId: 'qa', gateId: 'gate-qa' },
+    source: { type: 'github_check', system: 'GitHub', eventId: 'check-7' }, observedAt: '2026-07-15T00:00:00.000Z', createdAt: '2026-07-15T00:00:01.000Z',
+    subject: { type: 'commit_sha', value: 'abc123' }, phaseSubject: null, releaseIdentity: { commitSha: 'abc123', artifactDigest: null, deploymentId: null },
+    classification: 'qa', status: 'passed', trustLevel: 'provider_verified', confidence: 1, excerpt, actor: null, rationale: null,
+    expiresAt: null, environment: null, redactionState: 'normalized_redacted', details: {}, provenanceChain: [], revisionMismatch: false,
+    eligibleForActiveGate: true, invalidReasons: [], lineageVerified: true, payloadHash: 'sha256:payload', sourcePayloadHash: null,
+    rawReference: { available: true, accessTier: 'auth', allowed: true, kind: 'run', label: 'Open authorized run', reference: 'run-output-chunks:42', href: '/runs/42', external: false, rawPayloadIncluded: false },
+    snapshotId: SNAPSHOT, ...MARKS,
   };
 }
 
@@ -212,6 +226,29 @@ describe('useLifecycle controller', () => {
     await waitFor(() => expect(result.current.phase.data?.phaseId).toBe('qa'));
     expect(result.current.urlState.selectedSpecId).toBe('spec-a');
     expect(result.current.urlState.selectedPhaseId).toBe('qa');
+  });
+
+  it('pins an open inspector and does not silently replace it after evidence invalidation', async () => {
+    mockEvidence.mockResolvedValue(evidence());
+    const { result } = renderHook(() => useLifecycle({ sseDebounceMs: 0 }), { wrapper: wrapper('/lifecycle?spec=spec-a&phase=qa') });
+    await waitFor(() => expect(result.current.phase.data?.snapshotId).toBe(SNAPSHOT));
+    act(() => result.current.openEvidence('7'));
+    await waitFor(() => expect(result.current.evidence.data?.excerpt).toBe('original audited evidence'));
+    expect(mockEvidence).toHaveBeenLastCalledWith('ws-1', '7', SNAPSHOT, expect.any(Object));
+    const evidenceCalls = mockEvidence.mock.calls.length;
+
+    act(() => mocks.sse?.({
+      id: 99, ts: '', event_type: 'lifecycle_changed', workspace_id: 'ws-1', spec_id: 'spec-a', story_id: 'US-001', actor: 'test',
+      payload: JSON.stringify({ workspaceId: 'ws-1', specId: 'spec-a', phaseId: 'qa', changeKind: 'evidence_persisted' }),
+    }));
+    await waitFor(() => expect(result.current.evidence.stale).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(mockEvidence).toHaveBeenCalledTimes(evidenceCalls);
+    expect(result.current.evidence.data?.excerpt).toBe('original audited evidence');
+
+    mockEvidence.mockResolvedValueOnce(evidence('explicitly refreshed evidence'));
+    act(() => result.current.refreshEvidence());
+    await waitFor(() => expect(mockEvidence).toHaveBeenCalledTimes(evidenceCalls + 1));
   });
 
   it('clears an invalid phase selection without requesting phase data', async () => {
