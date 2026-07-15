@@ -254,7 +254,7 @@ export function renderLaunchdPlist(input: ServiceRenderInput): string {
 export function renderSystemdUserService(input: ServiceRenderInput): string {
   const apiUrl = normalizeCaptureApiUrl(input.apiUrl ?? 'http://127.0.0.1:3030');
   const command = [input.nodePath ?? process.execPath, input.command, 'daemon', '--workspace', input.workspace.id, '--repo-path', input.workspace.path].map(systemdQuote).join(' ');
-  return managedText(`[Unit]\nDescription=Rorca always-on context capture for ${systemdText(input.workspace.id)}\n[Service]\nType=simple\nWorkingDirectory=${systemdQuote(input.workspace.path)}\nExecStart=${command}\nRestart=on-failure\nRestartSec=10\nEnvironment=${systemdQuote(`RORCA_API_URL=${apiUrl}`)}\n[Install]\nWantedBy=default.target\n`);
+  return managedText(`[Unit]\nDescription=Rorca always-on context capture for ${systemdText(input.workspace.id)}\n[Service]\nType=simple\nWorkingDirectory=${systemdPath(input.workspace.path)}\nExecStart=${command}\nRestart=on-failure\nRestartSec=10\nEnvironment=${systemdQuote(`RORCA_API_URL=${apiUrl}`)}\n[Install]\nWantedBy=default.target\n`);
 }
 
 export function renderWindowsFallbackScript(input: ServiceRenderInput): string {
@@ -322,6 +322,10 @@ function systemdText(value: string): string {
 function systemdQuote(value: string): string {
   const safe = systemdText(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   return /[\s'"\\%]/.test(value) ? `"${safe}"` : safe;
+}
+function systemdPath(value: string): string {
+  return systemdText(value).replace(/[\s'"\\]/gu, (character) =>
+    [...Buffer.from(character)].map((byte) => `\\x${byte.toString(16).padStart(2, '0')}`).join(''));
 }
 function shellQuote(value: string): string { return `'${value.replace(/'/g, `'\\''`)}'`; }
 function fishQuote(value: string): string { return `'${value.replace(/'/g, `\\'`)}'`; }

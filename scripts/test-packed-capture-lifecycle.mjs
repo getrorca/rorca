@@ -4,10 +4,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const npmCommand = process.platform === 'win32' ? process.execPath : 'npm';
+const npmPrefix = process.platform === 'win32'
+  ? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')]
+  : [];
 const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'rorca-packed-lifecycle-'));
 const artifacts = path.join(tempRoot, 'artifacts');
 mkdirSync(artifacts, { recursive: true });
@@ -18,12 +22,16 @@ function run(command, args, options = {}) {
   return result;
 }
 
+function runNpm(args, options = {}) {
+  return run(npmCommand, [...npmPrefix, ...args], options);
+}
+
 function npmJson(args, cwd = repoRoot) {
-  return JSON.parse(run(npm, args, { cwd }).stdout);
+  return JSON.parse(runNpm(args, { cwd }).stdout);
 }
 
 function installArtifact(consumer, tarball) {
-  run(npm, ['install', '--ignore-scripts', '--omit=dev', '--omit=optional', '--no-audit', '--no-fund', '--package-lock=false', '--save-exact', tarball], { cwd: consumer });
+  runNpm(['install', '--ignore-scripts', '--omit=dev', '--omit=optional', '--no-audit', '--no-fund', '--package-lock=false', '--save-exact', tarball], { cwd: consumer });
 }
 
 function runCapture(packageRoot, args, env, cwd, expectedStatus = 0) {
@@ -63,7 +71,7 @@ const server = http.createServer((request, response) => {
 
 try {
   if (!existsSync(path.join(repoRoot, 'packages', 'rorca-capture', 'dist', 'cli.js'))) {
-    run(npm, ['run', 'build:capture'], { cwd: repoRoot });
+    runNpm(['run', 'build:capture'], { cwd: repoRoot });
   }
   const dryPack = npmJson(['pack', '--dry-run', '--ignore-scripts', '--json'])[0];
   const files = new Map(dryPack.files.map((file) => [file.path, file]));
@@ -156,7 +164,7 @@ try {
 
   installArtifact(consumer, tarball);
   assert.equal(readFileSync(queuePath, 'utf8'), '{"preserve":true}\n');
-  run(npm, ['uninstall', '--ignore-scripts', '--no-audit', '--no-fund', 'rorca'], { cwd: consumer });
+  runNpm(['uninstall', '--ignore-scripts', '--no-audit', '--no-fund', 'rorca'], { cwd: consumer });
   assert.equal(readFileSync(queuePath, 'utf8'), '{"preserve":true}\n');
 
   assert(requests.every((item) => item.authorization === `Bearer pack-test-token-value`));
