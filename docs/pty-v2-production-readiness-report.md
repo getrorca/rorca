@@ -4,7 +4,7 @@ Date: 2026-07-15
 
 Branch: `release/pty-v2-production-ready`
 
-Starting SHA: `89aa93b40b05e5dca4a77ba22a4c5cf38cdd3a6f`
+Starting SHA: `06ef7f864c1e926cc7cb1248de5da186dbb97e5d`
 
 Merge base: `f6ad9aa763b8f5c8c7159f7766576619c03c35b4`
 
@@ -251,7 +251,7 @@ curl -NsS \
   'http://127.0.0.1:3031/api/pipeline/runs/20260316000002/output?workspaceId=pty-v2-pi-canary-20260715'
 ```
 
-The accepted SSE metadata was `terminalMode=pty`, `isPty=true`, `ptyLiveTransport=postgres-notify+db-replay`, `ptySessionStatus=exited`, `ptyPromptReadinessStatus=injected`, `ptyCompletionFileSeen=true`, and `ptyProcessAlive=false`. Raw output was base64 SSE data rather than synthetic heartbeats.
+The accepted SSE metadata was `terminalMode=pty`, `isPty=true`, `ptyLiveTransport=postgres-notify+db-replay`, `ptySessionStatus=exited`, `ptyPromptReadinessStatus=injected`, `ptyCompletionFileSeen=true`, and `ptyProcessAlive=false`. Raw output was base64 SSE data rather than synthetic heartbeats. Cleanup verified that PTY child PID `96095` was absent; stopped the disposable server/worker; removed both temporary databases (ports 5432 and 5433), the temporary auth HOME/logs, the disposable worktree/branch, and the `rorca_ptyv2_finalgate` Compose containers/network/volume.
 
 ### Final candidate gate matrix
 
