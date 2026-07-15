@@ -6,6 +6,7 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import type { QueryConfig } from 'pg';
 import { CronExpressionParser } from 'cron-parser';
 import { execSync } from 'child_process';
 import { pool, query, queryOne, dbHealthCheck } from '../db/index';
@@ -29,6 +30,7 @@ const startTime = Date.now();
 
 /** Public readiness probes must finish before launchd/client two-second checks. */
 export const BASIC_HEALTH_DEADLINE_MS = 750;
+const BASIC_HEALTH_QUERY_TIMEOUT_MS = 650;
 
 // ── Engine detection cache (30s TTL) ─────────────────────────────────────────
 
@@ -231,20 +233,28 @@ interface BasicReadinessResult {
 }
 
 async function checkBasicReadiness(): Promise<BasicReadinessResult> {
-  const result = await pool.query<{
+  type ReadinessRow = {
     active_runs: number | string;
     pg_version: string | null;
     extensions: string[] | null;
-  }>(`SELECT
-         COUNT(*) FILTER (WHERE status = 'running')::int AS active_runs,
-         current_setting('server_version', true) AS pg_version,
-         COALESCE(
-           (SELECT array_agg(extname ORDER BY extname)
-              FROM pg_catalog.pg_extension
-             WHERE extname IN ('vector', 'age', 'pgcrypto')),
-           ARRAY[]::text[]
-         ) AS extensions
-       FROM pipeline_runs`);
+  };
+  // pg supports per-query query_timeout at runtime although the QueryConfig
+  // shape in older @types/pg releases omits it. Keep it below the HTTP
+  // deadline so timed-out probes do not accumulate in the pool.
+  const readinessQuery = {
+    text: `SELECT
+             COUNT(*) FILTER (WHERE status = 'running')::int AS active_runs,
+             current_setting('server_version', true) AS pg_version,
+             COALESCE(
+               (SELECT array_agg(extname ORDER BY extname)
+                  FROM pg_catalog.pg_extension
+                 WHERE extname IN ('vector', 'age', 'pgcrypto')),
+               ARRAY[]::text[]
+             ) AS extensions
+           FROM pipeline_runs`,
+    query_timeout: BASIC_HEALTH_QUERY_TIMEOUT_MS,
+  } as QueryConfig & { query_timeout: number };
+  const result = await pool.query<ReadinessRow>(readinessQuery as QueryConfig);
   const row = result.rows[0];
   const activeRuns = Number(row?.active_runs);
   if (!Number.isSafeInteger(activeRuns) || activeRuns < 0) {
@@ -353,6 +363,21 @@ router.get('/live', (_req: Request, res: Response) => {
  *       503: { description: Readiness could not be confirmed; active run state is unknown }
  */
 router.get('/ready', basicHealthHandler);
+
+/**
+ * @swagger
+ * /api/health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Bounded readiness and active-run safety check
+ *     operationId: getHealth
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Health checks safely confirm local readiness and the active-run restart gate."
+ *     x-rorca-public-api: true
+ *     responses:
+ *       200: { description: Readiness facts confirmed before the deadline }
+ *       503: { description: Readiness unknown; restart gate remains closed }
+ */
 router.get('/', basicHealthHandler);
 
 // ── Component health check types ─────────────────────────────────────────
