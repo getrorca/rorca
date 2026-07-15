@@ -2786,7 +2786,8 @@ function printPiInstallMethods(): void {
 }
 
 async function fetchPiHealth(): Promise<HealthResponse> {
-  return fetchBackendHealth();
+  // Executable diagnostics deliberately live off the bounded readiness route.
+  return fetchJson<HealthResponse>('/api/health/detailed');
 }
 
 async function fetchPiModels(): Promise<PiModelsResponse> {
