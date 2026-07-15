@@ -5,8 +5,11 @@ set -Eeuo pipefail
 umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-EXPECTED_ROOT="/Users/dimitriteravanessian/rorca-wave3-postgres-cert"
-EXPECTED_BRANCH="wave3/postgres-cert"
+# An operator must pin the exact checkout and branch being certified. This keeps
+# the destructive-to-disposable harness reusable without silently certifying a
+# different worktree after an integration handoff.
+EXPECTED_ROOT="${RORCA_CERT_EXPECTED_ROOT:-}"
+EXPECTED_BRANCH="${RORCA_CERT_EXPECTED_BRANCH:-}"
 PG16_BIN="${PG16_BIN:-/usr/local/opt/postgresql@16/bin}"
 PGHOST_CERT="${PGHOST_CERT:-127.0.0.1}"
 PGPORT_CERT="${PGPORT_CERT:-5433}"
@@ -66,11 +69,19 @@ trap cleanup EXIT INT TERM
 
 for db in "${DBS[@]}"; do assert_disposable_name "$db"; done
 
-[[ "$ROOT" == "$EXPECTED_ROOT" ]] || { echo "REFUSE: wrong checkout: $ROOT" >&2; exit 22; }
-[[ "$(git -C "$ROOT" branch --show-current)" == "$EXPECTED_BRANCH" ]] || { echo "REFUSE: wrong branch" >&2; exit 23; }
+[[ -n "$EXPECTED_ROOT" && "$EXPECTED_ROOT" == /* ]] || {
+  echo "REFUSE: set RORCA_CERT_EXPECTED_ROOT to the absolute certification checkout" >&2
+  exit 22
+}
+[[ -n "$EXPECTED_BRANCH" ]] || {
+  echo "REFUSE: set RORCA_CERT_EXPECTED_BRANCH to the certification branch" >&2
+  exit 23
+}
+[[ "$ROOT" == "$EXPECTED_ROOT" ]] || { echo "REFUSE: wrong checkout: $ROOT" >&2; exit 24; }
+[[ "$(git -C "$ROOT" branch --show-current)" == "$EXPECTED_BRANCH" ]] || { echo "REFUSE: wrong branch" >&2; exit 25; }
 [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no -- . ':!backend/src/db/pg-migrations/050_knowledge_graph.sql')" ]] || {
   echo "REFUSE: unexpected tracked changes in certification checkout" >&2
-  exit 24
+  exit 26
 }
 
 for tool in psql createdb dropdb pg_dump pg_restore; do

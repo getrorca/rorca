@@ -6,7 +6,7 @@ This runbook certifies the Always-On Context migration chain, canonical capture/
 
 The harness:
 
-- refuses to run outside `/Users/dimitriteravanessian/rorca-wave3-postgres-cert` on `wave3/postgres-cert`;
+- requires an explicit absolute checkout and branch pin (`RORCA_CERT_EXPECTED_ROOT` and `RORCA_CERT_EXPECTED_BRANCH`) and refuses any mismatch;
 - connects to the explicit local PostgreSQL 16 listener (default `127.0.0.1:5433`) through PostgreSQL 16 client tools;
 - captures server port, data-directory hash, system-identifier hash, maintenance database, and protected `rorca` database OID before any mutation;
 - refuses a non-16 server, ambiguous identity, unavailable required extension, or mutable database name without `rorca_wave3_cert_`;
@@ -36,8 +36,10 @@ The target PostgreSQL 16 server must advertise:
 ## Run
 
 ```bash
-cd /Users/dimitriteravanessian/rorca-wave3-postgres-cert
-backend/scripts/wave3-postgres16-cert.sh .wave3-postgres-cert-evidence.log
+cd /path/to/the-reviewed-certification-checkout
+RORCA_CERT_EXPECTED_ROOT="$PWD" \
+RORCA_CERT_EXPECTED_BRANCH="$(git branch --show-current)" \
+  backend/scripts/wave3-postgres16-cert.sh .wave3-postgres-cert-evidence.log
 ```
 
 The raw `.log` is intentionally gitignored. Preserve a reviewed, redacted summary under `docs/release-certification/` and update `.wave3-postgres-cert-progress.md`.
