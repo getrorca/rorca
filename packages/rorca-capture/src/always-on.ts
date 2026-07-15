@@ -3,11 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import type { ResolvedWorkspace } from './api.js';
+import { normalizeCaptureApiUrl } from './config.js';
+import { assertSecureParent, atomicWriteFileSecure, readSecureFile } from './secure-fs.js';
 import {
   analyzeContextSafety,
   hashContextContent,
@@ -51,15 +53,16 @@ function managedText(body: string): string {
 
 function writeManaged(filePath: string, content: string, dryRun: boolean, executable = false): 'installed' | 'skipped' | 'degraded' {
   if (existsSync(filePath)) {
-    const current = readFileSync(filePath, 'utf8');
-    if (current === content) return 'skipped';
+    let current: string;
+    try { current = readSecureFile(filePath); } catch { return 'degraded'; }
+    if (current === content) {
+      const needsModeRepair = executable && process.platform !== 'win32' && (lstatSync(filePath).mode & 0o111) !== 0o111;
+      if (needsModeRepair && !dryRun) chmodSync(filePath, 0o755);
+      return needsModeRepair && !dryRun ? 'installed' : 'skipped';
+    }
     if (!current.includes(MANAGED_SENTINEL)) return 'degraded';
   }
-  if (!dryRun) {
-    mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileSync(filePath, content, { encoding: 'utf8', mode: executable ? 0o755 : 0o600 });
-    if (executable) chmodSync(filePath, 0o755);
-  }
+  if (!dryRun) atomicWriteFileSecure(filePath, content, { mode: executable ? 0o755 : 0o600 });
   return 'installed';
 }
 
@@ -98,14 +101,19 @@ export function setupAlwaysOnCapture(input: {
   policyMode: CapturePolicyMode;
   dryRun?: boolean;
 }): AlwaysOnSetupResult {
-  const { workspace, apiUrl, policyMode } = input;
+  const { workspace, policyMode } = input;
+  const apiUrl = normalizeCaptureApiUrl(input.apiUrl);
   const dryRun = input.dryRun === true;
   const captureDir = path.join(workspace.path, '.rorca', 'capture');
   const queuePath = path.join(workspace.path, '.rorca-capture-queue.jsonl');
   const installed: string[] = [];
   const skipped: string[] = [];
   const degraded: Array<{ path: string; reason: string }> = [];
-  if (!dryRun) mkdirSync(captureDir, { recursive: true });
+  if (!dryRun) {
+    mkdirSync(captureDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(captureDir, 0o700);
+    assertSecureParent(path.join(captureDir, 'state'));
+  }
 
   const files: Array<{ path: string; content: string; executable?: boolean }> = [
     {
@@ -142,7 +150,11 @@ export function setupAlwaysOnCapture(input: {
   const ignorePath = path.join(workspace.path, '.rorca-captureignore');
   files.push({ path: ignorePath, content: managedText('node_modules/\ndist/\nbuild/\n.env\n.env.*\n*.pem\n*.key\n.rorca-capture-queue.jsonl\n') });
   const manifestPath = path.join(captureDir, 'uninstall.json');
-  files.push({ path: manifestPath, content: managedJson({ workspaceId: workspace.id, removes: files.map((file) => file.path), queuePath }) });
+  files.push({ path: manifestPath, content: managedJson({
+    workspaceId: workspace.id,
+    removes: files.map((file) => file.path),
+    preserves: [queuePath, path.join(captureDir, 'state.json'), path.join(captureDir, 'status.json'), path.join(captureDir, 'service.log')],
+  }) });
 
   for (const file of files) {
     const outcome = writeManaged(file.path, file.content, dryRun, file.executable);
@@ -157,10 +169,9 @@ export function updateLocalCapturePause(workspacePath: string, paused: boolean):
   const filePath = path.join(workspacePath, '.rorca', 'capture', 'policy.json');
   let policyMode: CapturePolicyMode = 'metadata-only';
   if (existsSync(filePath)) {
-    try { policyMode = parseCapturePolicyMode((JSON.parse(readFileSync(filePath, 'utf8')) as { policyMode?: string }).policyMode); } catch { /* use safe default */ }
+    try { policyMode = parseCapturePolicyMode((JSON.parse(readSecureFile(filePath)) as { policyMode?: string }).policyMode); } catch { /* use safe default */ }
   }
-  mkdirSync(path.dirname(filePath), { recursive: true });
-  writeFileSync(filePath, managedJson({ policyMode, paused, policyVersion: '2026-07-ucc-007', updatedAt: new Date().toISOString() }), { encoding: 'utf8', mode: 0o600 });
+  atomicWriteFileSecure(filePath, managedJson({ policyMode, paused, policyVersion: '2026-07-ucc-007', updatedAt: new Date().toISOString() }), { mode: 0o600 });
 }
 
 export function teardownAlwaysOnCapture(workspacePath: string, options: { dryRun?: boolean; all?: boolean } = {}): { removed: string[]; skipped: string[] } {
@@ -168,17 +179,17 @@ export function teardownAlwaysOnCapture(workspacePath: string, options: { dryRun
   const removed: string[] = [];
   const skipped: string[] = [];
   if (!existsSync(manifestPath)) return { removed, skipped: [manifestPath] };
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { rorcaManaged?: string; removes?: unknown; queuePath?: string };
+  const manifest = JSON.parse(readSecureFile(manifestPath)) as { rorcaManaged?: string; removes?: unknown };
   if (manifest.rorcaManaged !== MANAGED_SENTINEL || !Array.isArray(manifest.removes)) throw new Error('Refusing teardown: invalid managed uninstall manifest.');
   const paths = manifest.removes.filter((item): item is string => typeof item === 'string');
-  if (options.all && manifest.queuePath) paths.push(manifest.queuePath);
   paths.push(manifestPath);
   for (const candidate of [...new Set(paths)].sort((a, b) => b.length - a.length)) {
     const resolved = path.resolve(candidate);
     const relative = path.relative(path.resolve(workspacePath), resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative) || !existsSync(resolved)) { skipped.push(resolved); continue; }
-    const stat = statSync(resolved);
-    if (stat.isFile() && resolved !== manifestPath && !readFileSync(resolved, 'utf8').includes(MANAGED_SENTINEL)) { skipped.push(resolved); continue; }
+    const stat = lstatSync(resolved);
+    if (stat.isSymbolicLink()) { skipped.push(resolved); continue; }
+    if (stat.isFile() && resolved !== manifestPath && !readSecureFile(resolved).includes(MANAGED_SENTINEL)) { skipped.push(resolved); continue; }
     if (!options.dryRun) rmSync(resolved, { recursive: stat.isDirectory(), force: true });
     removed.push(resolved);
   }
@@ -218,36 +229,66 @@ export function buildShellCaptureEnvelope(input: {
   return { id: eventId, workspaceId: input.workspace.id, source: 'shellIntegration', occurredAt, policyMode: input.policyMode, payload };
 }
 
-export function renderCaptureService(platform: NodeJS.Platform, input: { workspace: ResolvedWorkspace; command: string; apiUrl: string }): { path: string; content: string; label: string } {
-  const label = platform === 'darwin' ? `com.rorca.capture.${input.workspace.id}` : `rorca-capture-${input.workspace.id}`;
-  const args = `daemon --workspace ${shellQuote(input.workspace.id)} --repo-path ${shellQuote(input.workspace.path)}`;
-  if (platform === 'darwin') {
-    const filePath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
-    const content = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${label}</string>\n<key>ProgramArguments</key><array><string>${input.command}</string><string>daemon</string><string>--workspace</string><string>${input.workspace.id}</string><string>--repo-path</string><string>${input.workspace.path}</string></array>\n<key>WorkingDirectory</key><string>${input.workspace.path}</string>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>\n</dict></plist>\n`;
-    return { path: filePath, content, label };
-  }
-  const filePath = platform === 'linux'
-    ? path.join(os.homedir(), '.config', 'systemd', 'user', `${label}.service`)
-    : path.join(input.workspace.path, '.rorca', 'capture', 'service', `${label}.ps1`);
-  const content = platform === 'linux'
-    ? managedText(`[Unit]\nDescription=Rorca always-on context capture\n[Service]\nType=simple\nWorkingDirectory=${input.workspace.path}\nExecStart=${input.command} ${args}\nRestart=on-failure\nRestartSec=10\nEnvironment=RORCA_API_URL=${input.apiUrl}\n[Install]\nWantedBy=default.target\n`)
-    : managedText(`Set-Location -LiteralPath ${psQuote(input.workspace.path)}\n& ${psQuote(input.command)} daemon --workspace ${psQuote(input.workspace.id)} --repo-path ${psQuote(input.workspace.path)}\n`);
-  return { path: filePath, content, label };
+export type CaptureServicePaths = { serviceDir: string; serviceFile: string; taskRegistrationFile?: string; label: string };
+export type CaptureServiceRunner = (command: string, args: string[], options: { cwd: string; stdio: 'pipe' }) => { error?: Error; status: number | null };
+
+type ServiceRenderInput = { workspace: ResolvedWorkspace; command: string; apiUrl?: string; nodePath?: string; homeDir?: string; paths?: CaptureServicePaths };
+
+export function resolveCaptureServicePaths(workspace: ResolvedWorkspace, platform: NodeJS.Platform = process.platform, homeDir = os.homedir()): CaptureServicePaths {
+  const label = platform === 'darwin' ? `com.rorca.capture.${workspace.id}` : `rorca-capture-${workspace.id}`;
+  const serviceDir = platform === 'darwin'
+    ? path.join(homeDir, 'Library', 'LaunchAgents')
+    : platform === 'linux'
+      ? path.join(homeDir, '.config', 'systemd', 'user')
+      : path.join(workspace.path, '.rorca', 'capture', 'service');
+  const serviceFile = path.join(serviceDir, platform === 'darwin' ? `${label}.plist` : platform === 'linux' ? `${label}.service` : `${label}.ps1`);
+  return { serviceDir, serviceFile, label, ...(platform === 'win32' ? { taskRegistrationFile: path.join(serviceDir, `register-${label}-task.ps1`) } : {}) };
 }
 
-export function runCaptureServiceAction(input: { action: CaptureServiceAction; workspace: ResolvedWorkspace; command: string; apiUrl: string; dryRun?: boolean; platform?: NodeJS.Platform }): Record<string, unknown> {
+export function renderLaunchdPlist(input: ServiceRenderInput): string {
+  const paths = input.paths ?? resolveCaptureServicePaths(input.workspace, 'darwin', input.homeDir);
+  const args = [input.nodePath ?? process.execPath, input.command, 'daemon', '--workspace', input.workspace.id, '--repo-path', input.workspace.path];
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${xmlEscape(paths.label)}</string>\n<key>ProgramArguments</key><array>${args.map((item) => `<string>${xmlEscape(item)}</string>`).join('')}</array>\n<key>WorkingDirectory</key><string>${xmlEscape(input.workspace.path)}</string>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>\n</dict></plist>\n`;
+}
+
+export function renderSystemdUserService(input: ServiceRenderInput): string {
+  const apiUrl = normalizeCaptureApiUrl(input.apiUrl ?? 'http://127.0.0.1:3030');
+  const command = [input.nodePath ?? process.execPath, input.command, 'daemon', '--workspace', input.workspace.id, '--repo-path', input.workspace.path].map(systemdQuote).join(' ');
+  return managedText(`[Unit]\nDescription=Rorca always-on context capture for ${systemdText(input.workspace.id)}\n[Service]\nType=simple\nWorkingDirectory=${systemdQuote(input.workspace.path)}\nExecStart=${command}\nRestart=on-failure\nRestartSec=10\nEnvironment=${systemdQuote(`RORCA_API_URL=${apiUrl}`)}\n[Install]\nWantedBy=default.target\n`);
+}
+
+export function renderWindowsFallbackScript(input: ServiceRenderInput): string {
+  return managedText(`Set-Location -LiteralPath ${psQuote(input.workspace.path)}\n& ${psQuote(input.nodePath ?? process.execPath)} ${psQuote(input.command)} daemon --workspace ${psQuote(input.workspace.id)} --repo-path ${psQuote(input.workspace.path)}\n`);
+}
+
+export function renderWindowsTaskSchedulerRegistration(input: { workspace: ResolvedWorkspace; serviceFile: string; powershellPath?: string }): string {
+  const taskName = `Rorca Capture ${systemdText(input.workspace.id)}`;
+  return `# ${MANAGED_SENTINEL} | operator action required\n# Review, then run explicitly. Rendering does not register a task.\n$ScriptPath = ${psQuote(input.serviceFile)}\n$Action = New-ScheduledTaskAction -Execute ${psQuote(input.powershellPath ?? 'pwsh.exe')} -Argument ('-NoProfile -ExecutionPolicy Bypass -File "' + $ScriptPath.Replace('"', '\\"') + '"')\n$Trigger = New-ScheduledTaskTrigger -AtLogOn\nRegister-ScheduledTask -TaskName ${psQuote(taskName)} -Action $Action -Trigger $Trigger -Description 'Rorca always-on context capture'\n`;
+}
+
+export function renderCaptureService(platform: NodeJS.Platform, input: ServiceRenderInput): { path: string; content: string; label: string; taskRegistrationFile?: string } {
+  const paths = input.paths ?? resolveCaptureServicePaths(input.workspace, platform, input.homeDir);
+  const content = platform === 'darwin' ? renderLaunchdPlist({ ...input, paths }) : platform === 'linux' ? renderSystemdUserService({ ...input, paths }) : renderWindowsFallbackScript({ ...input, paths });
+  return { path: paths.serviceFile, content, label: paths.label, ...(paths.taskRegistrationFile ? { taskRegistrationFile: paths.taskRegistrationFile } : {}) };
+}
+
+export function runCaptureServiceAction(input: ServiceRenderInput & { action: CaptureServiceAction; dryRun?: boolean; platform?: NodeJS.Platform; runner?: CaptureServiceRunner }): Record<string, unknown> {
   const platform = input.platform ?? process.platform;
   const service = renderCaptureService(platform, input);
   const commands: string[] = [];
+  const runner = input.runner ?? ((command: string, args: string[], options: { cwd: string; stdio: 'pipe' }) => spawnSync(command, args, options));
   const run = (command: string, args: string[], allowFailure = false) => {
     commands.push([command, ...args].join(' '));
     if (input.dryRun) return;
-    const result = spawnSync(command, args, { cwd: input.workspace.path, stdio: 'pipe' });
+    const result = runner(command, args, { cwd: input.workspace.path, stdio: 'pipe' });
     if (!allowFailure && (result.error || result.status !== 0)) throw new Error(`${command} ${args.join(' ')} failed`);
   };
   if (input.action === 'status') return { ok: true, action: input.action, platform, serviceFile: service.path, installed: existsSync(service.path), commands };
   if (input.action === 'install') {
-    if (!input.dryRun) { mkdirSync(path.dirname(service.path), { recursive: true }); writeFileSync(service.path, service.content, 'utf8'); }
+    if (!input.dryRun) {
+      atomicWriteFileSecure(service.path, service.content, { mode: 0o600 });
+      if (platform === 'win32' && service.taskRegistrationFile) atomicWriteFileSecure(service.taskRegistrationFile, renderWindowsTaskSchedulerRegistration({ workspace: input.workspace, serviceFile: service.path }), { mode: 0o600 });
+    }
     if (platform === 'darwin') { const domain = `gui/${process.getuid?.() ?? 501}`; run('launchctl', ['bootout', `${domain}/${service.label}`], true); run('launchctl', ['bootstrap', domain, service.path]); run('launchctl', ['kickstart', '-k', `${domain}/${service.label}`]); }
     else if (platform === 'linux') { run('systemctl', ['--user', 'daemon-reload']); run('systemctl', ['--user', 'enable', '--now', service.label]); }
   } else if (input.action === 'start' || input.action === 'restart') {
@@ -259,7 +300,7 @@ export function runCaptureServiceAction(input: { action: CaptureServiceAction; w
   } else if (input.action === 'uninstall') {
     if (platform === 'darwin') run('launchctl', ['bootout', `gui/${process.getuid?.() ?? 501}/${service.label}`], true);
     else if (platform === 'linux') { run('systemctl', ['--user', 'disable', '--now', service.label], true); run('systemctl', ['--user', 'daemon-reload']); }
-    if (!input.dryRun) rmSync(service.path, { force: true });
+    if (!input.dryRun) { rmSync(service.path, { force: true }); if (service.taskRegistrationFile) rmSync(service.taskRegistrationFile, { force: true }); }
   }
   return { ok: true, action: input.action, platform, serviceFile: service.path, commands, dryRun: input.dryRun === true };
 }
@@ -273,6 +314,15 @@ export function validateRelatedCaptureFiles(workspacePath: string, files: string
   });
 }
 
+function xmlEscape(value: string): string { return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function systemdText(value: string): string {
+  if (/[\0\r\n]/.test(value)) throw new Error('Service values must not contain NUL or newlines.');
+  return value.replace(/%/g, '%%');
+}
+function systemdQuote(value: string): string {
+  const safe = systemdText(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return /[\s'"\\%]/.test(value) ? `"${safe}"` : safe;
+}
 function shellQuote(value: string): string { return `'${value.replace(/'/g, `'\\''`)}'`; }
 function fishQuote(value: string): string { return `'${value.replace(/'/g, `\\'`)}'`; }
 function psQuote(value: string): string { return `'${value.replace(/'/g, "''")}'`; }

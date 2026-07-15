@@ -7,7 +7,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -26,6 +26,7 @@ import {
 } from "./api.js";
 import { resolveCaptureConfig, type CaptureConfig, type CaptureConfigValues, type CaptureMode } from "./config.js";
 import { enqueueCaptureQueueEntry } from "./queue.js";
+import { assertSecureParent, assertSecureRegularFile, atomicWriteFileSecure, readSecureFile } from "./secure-fs.js";
 import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "./status.js";
 import {
   DEFAULT_DAEMON_INTERVAL_MS,
@@ -617,7 +618,15 @@ async function runAlwaysOnSetup(parsed: ParsedArgs, deps: CliDeps, io: CliIO): P
 async function runAlwaysOnTeardown(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
   const config = resolveCaptureConfig({ cwd: deps.cwd, env: deps.env, overrides: parsed.overrides, gitRoot: deps.gitRoot });
   const result = teardownAlwaysOnCapture(config.repoPath, { dryRun: parsed.dryRun, all: hasCommandFlag(parsed.rest, "--all") });
-  io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  const hookPath = path.join(config.repoPath, ".git", "hooks", "post-commit");
+  let hook: HookInstallResult | undefined;
+  if (existsSync(hookPath) && !parsed.dryRun) {
+    const current = readSecureFile(hookPath);
+    if (isManagedHook(current) || isLegacyRorcaHook(current)) {
+      hook = uninstallHooks({ id: config.workspaceId ?? "local", path: config.repoPath, resolvedBy: config.workspaceId ? "config" : "path" });
+    }
+  }
+  io.stdout.write(`${JSON.stringify({ ...result, ...(hook ? { hook } : {}) }, null, 2)}\n`);
   return 0;
 }
 
@@ -1715,19 +1724,22 @@ const RORCA_LEGACY_HOOK_MARKER = "# Installed by rorca-capture.";
 
 function installHooks(config: CaptureConfig, workspace: ResolvedWorkspace, options: HookInstallOptions): HookInstallResult {
   const { repoPath, hooksDir, hookPath, backupPath } = resolveHookPaths(workspace);
-  mkdirSync(hooksDir, { recursive: true });
+  mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
+  assertSecureParent(hookPath);
 
   let previousHookRelative: string | undefined;
   if (existsSync(hookPath)) {
-    const current = readFileSync(hookPath, "utf8");
+    const current = readSecureFile(hookPath);
     if (isManagedHook(current)) {
       previousHookRelative = parsePreviousHookRelative(current) ?? (existsSync(backupPath) ? RORCA_PREV_HOOK_RELATIVE : undefined);
     } else if (isLegacyRorcaHook(current)) {
       previousHookRelative = existsSync(backupPath) ? RORCA_PREV_HOOK_RELATIVE : undefined;
     } else {
       if (existsSync(backupPath)) {
+        assertSecureRegularFile(backupPath);
         throw new Error(`Cannot preserve existing hook because backup already exists: ${backupPath}`);
       }
+      assertSecureRegularFile(hookPath);
       renameSync(hookPath, backupPath);
       chmodSync(backupPath, 0o755);
       previousHookRelative = RORCA_PREV_HOOK_RELATIVE;
@@ -1741,8 +1753,7 @@ function installHooks(config: CaptureConfig, workspace: ResolvedWorkspace, optio
     strict: options.strict,
     previousHookRelative,
   });
-  writeFileSync(hookPath, hook, "utf8");
-  chmodSync(hookPath, 0o755);
+  atomicWriteFileSecure(hookPath, hook, { mode: 0o755 });
   return { hookPath, ...(previousHookRelative ? { backupPath } : {}) };
 }
 
@@ -1752,7 +1763,7 @@ function uninstallHooks(workspace: ResolvedWorkspace): HookInstallResult {
     return { hookPath, restored: false };
   }
 
-  const current = readFileSync(hookPath, "utf8");
+  const current = readSecureFile(hookPath);
   if (!isManagedHook(current) && !isLegacyRorcaHook(current)) {
     throw new Error(`Refusing to uninstall unmanaged post-commit hook: ${hookPath}`);
   }
@@ -1760,6 +1771,8 @@ function uninstallHooks(workspace: ResolvedWorkspace): HookInstallResult {
   const previousHookRelative = parsePreviousHookRelative(current) ?? (existsSync(backupPath) ? RORCA_PREV_HOOK_RELATIVE : undefined);
   const previousHookPath = previousHookRelative ? resolvePreviousHookPath(hooksDir, previousHookRelative) : undefined;
   if (previousHookPath && existsSync(previousHookPath)) {
+    assertSecureRegularFile(previousHookPath);
+    assertSecureRegularFile(hookPath);
     rmSync(hookPath, { force: true });
     renameSync(previousHookPath, hookPath);
     chmodSync(hookPath, 0o755);
@@ -1873,7 +1886,8 @@ function formatError(error: unknown): string {
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
 const currentPath = fileURLToPath(import.meta.url);
-if (entryPath === currentPath) {
+const invokedAsMain = entryPath !== "" && existsSync(entryPath) && realpathSync(entryPath) === realpathSync(currentPath);
+if (invokedAsMain) {
   runCli().then((code) => {
     process.exitCode = code;
   }).catch((error) => {
