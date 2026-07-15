@@ -62,8 +62,8 @@ async function seedRun(overrides: {
   worktree_path?: string | null;
 } = {}): Promise<number> {
   const result = await queryOne<{ id: number }>(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name, worktree_path, merge_status)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name, worktree_path, merge_status, auto_merge, merge_strategy, agent_type, agent_model)
+     VALUES ($1, $2, $3, $4, $5, $6, TRUE, 'direct', 'pi', 'openai-codex/gpt-5.6-sol') RETURNING id`,
     [
       'forge/specs/approved/test-spec.json',
       WS_ID,
@@ -184,7 +184,7 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     const res = await postRetryMerge(runId);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, runId, queued: true });
+    expect(res.body).toEqual({ ok: true, runId: Number(runId), queued: true });
   });
 
   // ── merge_status transition via endpoint ──
@@ -217,9 +217,10 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     expect(mockBossSend).toHaveBeenCalledWith(
       'pipeline:merge',
       {
-        runId,
+        runId: Number(runId),
         branch: 'feat/auto-merge-test-branch',
         workspaceId: WS_ID,
+        posture: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', source: 'manual-retry' },
       },
       expect.objectContaining({
         retryLimit: 0,

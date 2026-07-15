@@ -22,6 +22,7 @@ import simpleGit from 'simple-git';
 import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
+import { resolveMergeConflict, type MergeResolutionPosture } from './merge-conflict-resolver';
 
 // ── Tracking-only files that are always safe to resolve with --theirs ────────
 const TRACKING_PATTERNS = [
@@ -57,6 +58,7 @@ export async function performMerge(
   runId: number | string,
   branchName: string,
   workspacePath: string,
+  resolverPosture?: MergeResolutionPosture,
 ): Promise<MergeResult> {
   // Look up run row for worktree_path and workspace_id
   const run = await queryOne<{
@@ -108,7 +110,7 @@ export async function performMerge(
   let result: MergeResult;
 
   try {
-    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, runId);
+    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, runId, resolverPosture);
   } finally {
     // Always restore stash
     if (stashed) {
@@ -138,10 +140,12 @@ async function executeMerge(
   workspacePath: string,
   workspaceId: string,
   runId: number | string,
+  resolverPosture?: MergeResolutionPosture,
 ): Promise<MergeResult> {
   // 2. Safety pre-check: dry-run merge
   let preCheckConflictFiles: string[] = [];
   let preCheckIsClean = false;
+  let semanticResolved = false;
 
   try {
     await git.merge([branchName, '--no-commit', '--no-ff']);
@@ -170,6 +174,33 @@ async function executeMerge(
           '[merge-handler] Only tracking file conflicts — auto-resolvable',
         );
       } else {
+        // Manual retry only supplies a persisted, validated posture. Never infer
+        // Claude here; legacy callers remain fail-closed/manual.
+        if (resolverPosture) {
+          try {
+            await git.merge([branchName, '--no-ff', '--no-commit']);
+          } catch {
+            const resolution = await resolveMergeConflict({
+              runId, workspaceId, cwd: workspacePath, branchName, conflictFiles: realConflicts,
+              logPath: path.join(workspacePath, '.rorca', 'logs', `run_${runId}_merge_resolve.log`),
+              posture: resolverPosture,
+            });
+            if (resolution.ok) {
+              await git.commit(`merge: ${branchName} (semantic retry)`);
+              semanticResolved = true;
+              preCheckIsClean = true;
+            }
+          }
+          if (semanticResolved) {
+            logger.info({ runId, agent: resolverPosture.agent }, '[merge-handler] Semantic retry resolved conflicts');
+          }
+        }
+        if (semanticResolved) {
+          // Continue through the normal success/event/worktree cleanup path.
+        } else {
+        // Leave the worktree and branch intact, but clear the base worktree's
+        // transient conflicted merge before reporting failure.
+        try { await git.merge(['--abort']); } catch { /* already clean */ }
         // Real code conflicts — emit WAL and bail
         const walEvent = await queryOne<WalEvent>(
           `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merge_failed', $1, $2) RETURNING *`,
@@ -188,6 +219,7 @@ async function executeMerge(
           error: `Code conflicts in: ${realConflicts.join(', ')}`,
           conflictFiles: realConflicts,
         };
+        }
       }
     } else if (dryRunErr.message?.includes('Already up to date')) {
       preCheckIsClean = true;
@@ -201,8 +233,9 @@ async function executeMerge(
   }
 
   // 3. Execute the real merge
-  let mergeSuccess = false;
+  let mergeSuccess = semanticResolved;
   try {
+    if (!semanticResolved) {
     // Try fast-forward first
     try {
       await git.merge([branchName, '--ff-only']);
@@ -239,6 +272,7 @@ async function executeMerge(
           return { success: false, error: `Commit failed: ${commitErr.message}` };
         }
       }
+    }
     }
   } catch (unexpectedErr: any) {
     try { await git.merge(['--abort']); } catch { /* already clean */ }

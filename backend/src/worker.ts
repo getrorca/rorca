@@ -48,6 +48,7 @@ import {
 
 import simpleGit from 'simple-git';
 import { performMerge } from './lib/merge-handler';
+import { resolveMergeConflict, type MergeResolutionPosture } from './lib/merge-conflict-resolver';
 // Worker DB access intentionally uses the shared service-role pool helpers, not
 // withUserClient(). This process runs with RORCA_PROCESS_ROLE=worker and spawns
 // RORCA_PROCESS_ROLE=engine children to perform system-owned orchestration jobs,
@@ -237,33 +238,6 @@ async function dispatchWorkflowIfConfigured(
   }
 }
 
-// ── Claude binary + env-var stripping for agentic conflict resolution ────────
-
-const CLAUDE_BIN = process.env.CLAUDE_BIN ||
-  (() => {
-    try { return execSync('which claude', { encoding: 'utf8' }).trim(); } catch { return 'claude'; }
-  })();
-
-const CLAUDE_ENV_VARS_TO_REMOVE = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_AGENT_SDK_VERSION',
-  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
-];
-
-function buildCleanEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-      env[k] = v;
-    }
-  }
-  return env;
-}
-
-const AGENTIC_RESOLVE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const AGENTIC_RESOLVE_SIGKILL_DELAY_MS = 10_000;   // 10s after SIGTERM
-
 // ── Worker identity (stable for the lifetime of this process) ────────────────
 
 const WORKER_ID: string = crypto.randomUUID();
@@ -284,6 +258,11 @@ const activeProcesses = new Map<number, ChildProcess>();
 // writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
 
 const cancellingRuns = new Set<number>();
+
+// ── Reconciliation error counter (updated by reconcileState) ─────────────────
+// Reserved for worker health diagnostics.
+
+let _lastReconciliationErrors = 0;
 
 // ── pg-boss self-check (consecutive failure counter) ─────────────────────────
 // If boss.getQueueSize throws 3 consecutive times the pg-boss connection is
@@ -515,129 +494,6 @@ async function persistGhCliPrMetadata(
   }
 }
 
-// ── Agentic conflict resolution (US-005) ─────────────────────────────────
-// Spawns claude --print to resolve git merge conflicts.
-// Returns true if all conflicts were resolved and committed, false otherwise.
-
-async function attemptAgenticConflictResolution(
-  workspacePath: string,
-  branchName: string,
-  runId: number,
-  appendLog: (msg: string) => void,
-): Promise<boolean> {
-  const git = simpleGit(workspacePath);
-
-  // Enter conflicted merge state (--no-ff --no-commit)
-  appendLog(`[auto-merge] Starting merge of ${branchName} for agentic resolution...`);
-  try {
-    await git.merge([branchName, '--no-ff', '--no-commit']);
-    // Clean merge — commit directly
-    await git.commit(`merge: ${branchName} (auto)`);
-    appendLog('[auto-merge] Merged cleanly without conflicts.');
-    return true;
-  } catch (mergeErr: any) {
-    const msg: string = mergeErr?.message ?? String(mergeErr);
-    if (!msg.includes('CONFLICT') && !msg.includes('Automatic merge failed') && !msg.includes('fix conflicts')) {
-      appendLog(`[auto-merge] Unexpected merge error: ${msg}`);
-      try { await git.merge(['--abort']); } catch { /* best-effort */ }
-      return false;
-    }
-    // We're in conflicted state — proceed with agentic resolution
-  }
-
-  // Capture conflict diff (working tree)
-  let conflictDiff = '';
-  try { conflictDiff = await git.raw(['diff']); } catch { /* non-fatal */ }
-  if (conflictDiff.length > 50_000) {
-    conflictDiff = conflictDiff.slice(0, 50_000) + '\n... (diff truncated at 50KB)';
-  }
-
-  const prompt = [
-    `You are resolving git merge conflicts. The feature branch "${branchName}" is being merged into main for run #${runId}.`,
-    '',
-    'Here is the current conflict diff (conflict markers in working tree):',
-    '```diff',
-    conflictDiff || '(no diff output available)',
-    '```',
-    '',
-    'Your task:',
-    '1. Examine the conflicted files using the bash and read tools.',
-    '2. Resolve each conflict intelligently — understand the intent of both sides. Do NOT blindly take one side.',
-    '3. After resolving ALL conflicts, stage all files with: git add -A',
-    '4. Commit the merge with: git commit --no-edit',
-    '   (The merge commit message is already staged — --no-edit preserves it.)',
-    '',
-    `Working directory: ${workspacePath}`,
-    '',
-    'Critical: Do not exit until all conflict markers (<<<<<<<, =======, >>>>>>>) have been removed from ALL files and the merge has been committed.',
-  ].join('\n');
-
-  appendLog('[auto-merge] Spawning claude to resolve conflicts...');
-  const env = buildCleanEnv();
-
-  return new Promise<boolean>((resolve) => {
-    const child = spawn(
-      CLAUDE_BIN,
-      ['--print', '--dangerously-skip-permissions', '--output-format', 'stream-json'],
-      { cwd: workspacePath, env, stdio: ['pipe', 'pipe', 'pipe'] },
-    );
-
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-
-    let timedOut = false;
-    let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const sigtermTimer = setTimeout(() => {
-      timedOut = true;
-      appendLog('[auto-merge] Agentic resolution timed out (5 min) — sending SIGTERM');
-      child.kill('SIGTERM');
-      sigkillTimer = setTimeout(() => {
-        appendLog('[auto-merge] Claude did not exit — sending SIGKILL');
-        child.kill('SIGKILL');
-      }, AGENTIC_RESOLVE_SIGKILL_DELAY_MS);
-    }, AGENTIC_RESOLVE_TIMEOUT_MS);
-
-    child.on('exit', async (code) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-
-      if (timedOut) {
-        appendLog('[auto-merge] Agentic resolution timed out — aborting merge');
-        try { await git.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      if (code !== 0) {
-        appendLog(`[auto-merge] Claude exited with code ${code} — aborting merge`);
-        try { await git.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      // Verify no conflict markers remain
-      try {
-        await git.raw(['diff', '--check']);
-        appendLog('[auto-merge] Agentic resolution succeeded — no conflict markers remain');
-        resolve(true);
-      } catch {
-        appendLog('[auto-merge] Conflict markers still present after claude resolution — aborting');
-        try { await git.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-      }
-    });
-
-    child.on('error', async (err) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-      appendLog(`[auto-merge] Claude spawn error: ${err.message} — aborting merge`);
-      try { await git.merge(['--abort']); } catch { /* best-effort */ }
-      resolve(false);
-    });
-  });
-}
-
 // ── Auto-merge worktree after run completion (US-004 + US-005) ───────────────
 // Called from handlePipelineRun exit handler when worktreePath is set.
 // Strategy: try ff-only → fall back to --no-ff → if conflicts: agentic resolution.
@@ -651,6 +507,8 @@ async function autoMergeAfterRun(
   workspaceId: number | string,
   runId: number,
   appendLog: (msg: string) => void,
+  posture: MergeResolutionPosture,
+  envOverrides: Record<string, string>,
 ): Promise<void> {
   if (!fs.existsSync(worktreePath)) {
     appendLog('[auto-merge] Worktree already removed — skipping auto-merge');
@@ -678,6 +536,7 @@ async function autoMergeAfterRun(
 
   let mergeSuccess = false;
   let resolvedByAgentic = false;
+  let resolverReason: string | undefined;
   let conflictDiff = '';
   let conflictFiles: string[] = [];
 
@@ -730,17 +589,47 @@ async function autoMergeAfterRun(
               }
             }
           } else {
-            // Real code conflicts — abort and try agentic resolution
-            try { await git.merge(['--abort']); } catch { /* best-effort */ }
-            appendLog(`[auto-merge] Code conflicts in: ${realConflicts.join(', ')} — attempting agentic resolution`);
-
-            const resolved = await attemptAgenticConflictResolution(workspacePath, branchName, runId, appendLog);
-            if (resolved) {
-              mergeSuccess = true;
-              resolvedByAgentic = true;
+            // Resolve in the already-conflicted merge. The configured run posture
+            // is mandatory; resolver failure leaves the worktree/branch intact.
+            appendLog(`[auto-merge] Code conflicts in: ${realConflicts.join(', ')} — attempting configured semantic resolution`);
+            await emitWalEvent('merge_resolution_started', workspaceId, {
+              run_id: runId, branchName, conflictFiles: realConflicts,
+              resolverAgent: posture.agent, resolverModel: posture.model, postureSource: posture.source,
+            });
+            const resolution = await resolveMergeConflict({
+              runId,
+              workspaceId: String(workspaceId),
+              cwd: workspacePath,
+              branchName,
+              conflictFiles: realConflicts,
+              logPath: path.join(workspacePath, '.rorca', 'logs', `run_${runId}_merge_resolve.log`),
+              posture,
+              env: envOverrides,
+            });
+            if (resolution.ok) {
+              try {
+                await git.commit(`merge: ${branchName} (semantic)`);
+                mergeSuccess = true;
+                resolvedByAgentic = true;
+                appendLog(`[auto-merge] Semantic resolution succeeded via ${resolution.agent}`);
+                await emitWalEvent('merge_resolution_succeeded', workspaceId, {
+                  run_id: runId, branchName, resolvedFiles: resolution.resolvedFiles,
+                  resolverAgent: resolution.agent, resolverModel: resolution.model, postureSource: posture.source,
+                });
+              } catch (commitErr: any) {
+                appendLog(`[auto-merge] Semantic resolution commit failed: ${commitErr.message}`);
+                try { await git.merge(['--abort']); } catch { /* best-effort */ }
+              }
             } else {
-              // Capture conflict diff for WAL event payload
+              resolverReason = `merge_resolver_${resolution.reason}`;
+              appendLog(`[auto-merge] Semantic resolution failed: ${resolution.reason}`);
+              await emitWalEvent('merge_resolution_failed', workspaceId, {
+                run_id: runId, branchName, conflictFiles: realConflicts,
+                resolverReason, resolverAgent: resolution.agent, resolverModel: resolution.model,
+                postureSource: posture.source, retry_consumed: false,
+              });
               try { conflictDiff = (await git.raw(['diff'])).slice(0, 2048); } catch { /* non-fatal */ }
+              try { await git.merge(['--abort']); } catch { /* preserve worktree */ }
             }
           }
         } else if (noFfMsg.includes('Already up to date')) {
@@ -774,7 +663,7 @@ async function autoMergeAfterRun(
       run_id: runId,
       branchName,
       mergeCommitSha: sha,
-      ...(resolvedByAgentic ? { resolvedBy: 'agentic' } : {}),
+      ...(resolvedByAgentic ? { resolvedBy: 'semantic', resolverAgent: posture.agent, resolverModel: posture.model } : {}),
     });
 
     // Remove worktree directory
@@ -806,6 +695,7 @@ async function autoMergeAfterRun(
       worktreePath,
       conflictFiles,
       conflictSummary: conflictDiff,
+      ...(resolverReason ? { resolverReason, resolverAgent: posture.agent, resolverModel: posture.model, postureSource: posture.source, retry_consumed: false } : {}),
       message: mergeErrorMsg,
     });
     try { await execute(`UPDATE pipeline_runs SET merge_status = 'failed', merge_error = $2 WHERE id = $1`, [runId, conflictDiff.slice(0, 2000) || mergeErrorMsg]); } catch { /* non-fatal */ }
@@ -1032,6 +922,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       RORCA_WORKSPACE_ID: workspaceId,
       RORCA_TERMINAL_MODE: terminalMode,
     };
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+    delete env.CLAUDE_AGENT_SDK_VERSION;
+    delete env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
 
     logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Spawning execution-engine');
 
@@ -1219,7 +1113,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
             switch (effectiveMergeStrategy) {
               case 'direct': {
-                // Merge worktree branch into main + push to remote
+                // Final base merges are opt-in. Internal wave merges have already
+                // assembled the isolated run branch and are intentionally separate.
+                if (payload.autoMerge !== true) {
+                  mergeLog('[merge-strategy:direct] autoMerge=false — preserving worktree branch');
+                  try { await execute(`UPDATE pipeline_runs SET merge_status = 'not_requested' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                  break;
+                }
                 try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
                 try {
                   await autoMergeAfterRun(
@@ -1229,6 +1129,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     workspaceId,
                     runId,
                     mergeLog,
+                    { agent: payload.agent, model: payload.model, thinkingEnabled: payload.thinkingEnabled, thinkingBudget: payload.thinkingBudget, effortLevel: payload.effortLevel, source: 'run' },
+                    payload.envOverrides,
                   );
                   // Push main to remote after successful merge
                   const mergeStatus = await queryOne<{ merge_status: string }>('SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId]);
@@ -1270,7 +1172,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     throw new Error('GitHub PR integration did not persist a pr_number');
                   }
                   mergeLog(`[merge-strategy:pr] PR created (#${prNumber})`);
-                } catch (prErr: any) {
+                } catch (_prErr: any) {
                   // Fallback: try gh CLI if GitHub API integration isn't configured
                   mergeLog(`[merge-strategy:pr] GitHub integration failed: ${prErr.message}; trying gh CLI fallback`);
                   try {
@@ -1327,7 +1229,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     throw new Error('GitHub draft PR integration did not persist a pr_number');
                   }
                   mergeLog(`[merge-strategy:draft-pr] Draft PR created (#${prNumber})`);
-                } catch (prErr: any) {
+                } catch (_prErr: any) {
                   // Fallback: try gh CLI
                   mergeLog(`[merge-strategy:draft-pr] GitHub integration failed: ${prErr.message}; trying gh CLI fallback`);
                   try {
@@ -2028,9 +1930,26 @@ async function handlePipelineMerge(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
 
-    logger.info({ runId, branch, workspacePath: workspace.path }, '[worker] Executing performMerge');
+    const persisted = await queryOne<{ auto_merge: boolean | null; merge_strategy: string | null; agent_type: string | null; agent_model: string | null }>(
+      'SELECT auto_merge, merge_strategy, agent_type, agent_model FROM pipeline_runs WHERE id = $1', [runId],
+    );
+    const manualPosture = parsed.data.posture;
+    if (
+      !persisted || persisted.auto_merge !== true || persisted.merge_strategy !== 'direct' ||
+      !manualPosture || persisted.agent_type !== manualPosture.agent || persisted.agent_model !== manualPosture.model
+    ) {
+      logger.warn({ runId }, '[worker] pipeline:merge refused: persisted direct-merge posture is unavailable or changed');
+      await execute(`UPDATE pipeline_runs SET merge_status = 'failed' WHERE id = $1`, [runId]);
+      return;
+    }
 
-    const result = await performMerge(runId, branch, workspace.path);
+    logger.info({ runId, branch, workspacePath: workspace.path, agent: manualPosture.agent, source: manualPosture.source }, '[worker] Executing performMerge');
+
+    const result = await performMerge(runId, branch, workspace.path, {
+      agent: manualPosture.agent,
+      model: manualPosture.model,
+      source: 'manual-retry',
+    });
 
     if (result.success) {
       logger.info({ runId, mergeCommitSha: result.mergeCommitSha }, '[worker] pipeline:merge completed successfully');
@@ -2550,6 +2469,7 @@ async function reconcileState(): Promise<void> {
   }
 
   const totalFixed = stuckRuns.length + orphanJobs.length;
+  _lastReconciliationErrors = totalFixed;
 
   if (totalFixed > 0) {
     logger.warn({ caseA: stuckRuns.length, caseB: orphanJobs.length }, '[worker] reconcileState — mismatches resolved');

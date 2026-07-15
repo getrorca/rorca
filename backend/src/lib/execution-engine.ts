@@ -169,6 +169,7 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { resolveMergeConflict, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
@@ -4313,6 +4314,8 @@ interface StoryWorktree {
   storyId: string;
   worktreePath: string;
   branchName: string;
+  /** Immutable effective posture captured when this story actually executed. */
+  resolverPosture?: MergeResolutionPosture;
 }
 
 interface PendingIntegratedPass {
@@ -4616,9 +4619,11 @@ interface WaveMergeResult {
 
 async function autoResolveConflicts(
   cwd: string,
-  storyId: string,
+  wt: StoryWorktree,
   logDir: string,
+  config: EngineConfig,
 ): Promise<{ resolved: boolean; resolvedFiles: string[] }> {
+  const storyId = wt.storyId;
   const env = buildCleanEnv();
   const resolvedFiles: string[] = [];
 
@@ -4663,69 +4668,30 @@ async function autoResolveConflicts(
     return { resolved: true, resolvedFiles };
   }
 
-  // LLM resolution for real code conflicts.
-  conflictingFiles = realConflicts;
-
-  for (const file of conflictingFiles) {
-    const absFile = path.join(cwd, file);
-    let conflictContent: string;
-    try {
-      conflictContent = fs.readFileSync(absFile, 'utf8');
-    } catch {
-      logger.error(`  [merge] Cannot read conflicting file: ${file}`);
-      return { resolved: false, resolvedFiles };
-    }
-
-    const prompt = [
-      'Resolve this git merge conflict. Output ONLY the resolved file content with no explanation,',
-      'no markdown fences, no commentary. Choose the correct combination of both sides.',
-      '', `File: ${file}`, '', conflictContent,
-    ].join('\n');
-
-    const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(file)}.log`);
-    const resolvedContent = await new Promise<string | null>((resolve) => {
-      const args = ['--dangerously-skip-permissions', '--print', prompt];
-      let stdout = '';
-      const child = spawn(CLAUDE_BIN, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-
-      const logFd = fs.openSync(resolveLogFile, 'a');
-      child.stderr.on('data', (chunk: Buffer) => { fs.writeSync(logFd, chunk); });
-
-      const timer = setTimeout(() => {
-        try { child.kill('SIGTERM'); } catch { /* already dead */ }
-      }, 120_000);
-
-      child.on('exit', (code) => {
-        clearTimeout(timer);
-        try { fs.closeSync(logFd); } catch { /* already closed */ }
-        if (code === 0 && stdout.trim().length > 0) resolve(stdout);
-        else resolve(null);
-      });
-      child.on('error', () => {
-        clearTimeout(timer);
-        try { fs.closeSync(logFd); } catch { /* already closed */ }
-        resolve(null);
-      });
-    });
-
-    if (resolvedContent === null) {
-      logger.error(`  [merge] Auto-resolution FAILED for ${file}`);
-      return { resolved: false, resolvedFiles };
-    }
-
-    try {
-      fs.writeFileSync(absFile, resolvedContent);
-      execSync(`git add "${file}"`, { cwd, env, stdio: 'pipe' });
-      resolvedFiles.push(file);
-      logger.info(`  [merge] Resolved ${file}`);
-    } catch (err: unknown) {
-      logger.error(`  [merge] Failed to write/stage resolved ${file}: ${(err as Error).message}`);
-      return { resolved: false, resolvedFiles };
-    }
+  // Real code conflicts are resolved by the exact posture that executed this
+  // story. There is intentionally no Claude fallback for a missing posture.
+  const posture = wt.resolverPosture;
+  if (!posture) {
+    logger.error(`  [merge] ${storyId} has no captured execution posture; refusing semantic resolution`);
+    return { resolved: false, resolvedFiles };
   }
-
-  return { resolved: true, resolvedFiles };
+  const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(realConflicts[0])}.log`);
+  const resolution = await resolveMergeConflict({
+    runId: config.runId,
+    storyId,
+    workspaceId: String(config.runId),
+    cwd,
+    branchName: wt.branchName,
+    conflictFiles: realConflicts,
+    logPath: resolveLogFile,
+    posture,
+    validate: () => runGate(cwd).passed,
+  });
+  if (!resolution.ok) {
+    logger.error(`  [merge] semantic resolution failed for ${storyId}: ${resolution.reason}`);
+    return { resolved: false, resolvedFiles };
+  }
+  return { resolved: true, resolvedFiles: [...resolvedFiles, ...resolution.resolvedFiles] };
 }
 
 async function mergeWave(
@@ -4733,6 +4699,7 @@ async function mergeWave(
   waveIndex: number,
   cwd: string,
   logDir: string,
+  config: EngineConfig,
 ): Promise<WaveMergeResult> {
   const env = buildCleanEnv();
   const sorted = [...waveBranches].sort((a, b) => a.storyId.localeCompare(b.storyId));
@@ -4790,7 +4757,7 @@ async function mergeWave(
     }
 
     logger.info(`  [merge] Conflict detected for ${wt.storyId}, attempting auto-resolution...`);
-    const resolution = await autoResolveConflicts(cwd, wt.storyId, logDir);
+    const resolution = await autoResolveConflicts(cwd, wt, logDir, config);
 
     if (resolution.resolved) {
       const filesList = resolution.resolvedFiles.join(', ');
@@ -5280,6 +5247,18 @@ async function executeStory(
 
   // Per-story model override takes precedence over run-level model.
   let currentModel = story.model ?? config.agentModel;
+  // Preserve the resolved posture now, before later execution machinery can
+  // mutate/retry/reroute anything. Wave merging happens after the story exits.
+  if (worktreeInfo) {
+    worktreeInfo.resolverPosture = {
+      agent: effectiveAgent,
+      model: currentModel,
+      thinkingEnabled: config.thinkingEnabled,
+      thinkingBudget: config.thinkingBudget,
+      effortLevel: config.effortLevel,
+      source: 'story',
+    };
+  }
 
   logger.info(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
   if (worktreeInfo) logger.info(`  Worktree: ${worktreeInfo.worktreePath}`);
@@ -7208,7 +7187,7 @@ async function runParallel(
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
-        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir);
+        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir, config);
 
         if (mergeResult.success) {
           if (workspaceId) {

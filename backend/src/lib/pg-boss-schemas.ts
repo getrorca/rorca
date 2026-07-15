@@ -121,6 +121,13 @@ export const PipelineMergeJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   branch: z.string().min(1),
   workspaceId: z.string().min(1),
+  // Posture is non-secret persisted metadata. The worker re-verifies it from
+  // pipeline_runs before any semantic retry; old jobs may omit it.
+  posture: z.object({
+    agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
+    model: z.string().nullable(),
+    source: z.literal('manual-retry'),
+  }).optional(),
 }).strict();
 
 export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload>;

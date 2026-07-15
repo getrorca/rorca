@@ -87,10 +87,14 @@ async function seedRunWithMerge(overrides: {
   merge_status?: string | null;
   branch_name?: string | null;
   worktree_path?: string | null;
+  auto_merge?: boolean;
+  merge_strategy?: string;
+  agent_type?: string | null;
+  agent_model?: string | null;
 } = {}) {
   const result = await queryOne<{ id: number }>(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name, worktree_path, merge_status)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name, worktree_path, merge_status, auto_merge, merge_strategy, agent_type, agent_model)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
     [
       'forge/specs/approved/test-spec.json',
       'ws-merge',
@@ -98,6 +102,10 @@ async function seedRunWithMerge(overrides: {
       overrides.branch_name === undefined ? 'feat/test-branch-123' : overrides.branch_name,
       overrides.worktree_path === undefined ? '/tmp/worktree-test' : overrides.worktree_path,
       overrides.merge_status === undefined ? 'failed' : overrides.merge_status,
+      overrides.auto_merge ?? true,
+      overrides.merge_strategy ?? 'direct',
+      overrides.agent_type ?? 'pi',
+      overrides.agent_model ?? 'openai-codex/gpt-5.6-sol',
     ],
   );
   return result!.id;
@@ -162,6 +170,18 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     expect(res.body.error).toContain('branch_name');
   });
 
+  test('rejects branch-only and no-auto-merge runs without queueing a base merge', async () => {
+    const runId = await seedRunWithMerge({ auto_merge: false, merge_strategy: 'branch-only' });
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${runId}/retry-merge`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('autoMerge=true direct');
+    expect(mockBossSend).not.toHaveBeenCalled();
+  });
+
   test('succeeds: resets merge_status to merging and enqueues job', async () => {
     const runId = await seedRunWithMerge({ merge_status: 'failed' });
 
@@ -171,7 +191,7 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .send();
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, runId, queued: true });
+    expect(res.body).toEqual({ ok: true, runId: Number(runId), queued: true });
 
     // Verify merge_status was reset to 'merging'
     const run = await queryOne<{ merge_status: string }>(
@@ -184,9 +204,10 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     expect(mockBossSend).toHaveBeenCalledWith(
       'pipeline:merge',
       {
-        runId,
+        runId: Number(runId),
         branch: 'feat/test-branch-123',
         workspaceId: 'ws-merge',
+        posture: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', source: 'manual-retry' },
       },
       expect.objectContaining({
         retryLimit: 0,

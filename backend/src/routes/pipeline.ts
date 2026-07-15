@@ -5272,8 +5272,12 @@ router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
       branch_name: string | null;
       worktree_path: string | null;
       workspace_id: string;
+      auto_merge: boolean | null;
+      merge_strategy: string | null;
+      agent_type: string | null;
+      agent_model: string | null;
     }>(
-      'SELECT id, merge_status, branch_name, worktree_path, workspace_id FROM pipeline_runs WHERE id = $1',
+      'SELECT id, merge_status, branch_name, worktree_path, workspace_id, auto_merge, merge_strategy, agent_type, agent_model FROM pipeline_runs WHERE id = $1',
       [runId],
     );
 
@@ -5289,6 +5293,12 @@ router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
 
     if (!run.branch_name) {
       throw new ConflictError('Cannot retry merge: run has no branch_name (not a worktree run)');
+    }
+    if (run.auto_merge !== true || run.merge_strategy !== 'direct') {
+      throw new ConflictError('Cannot retry merge: only autoMerge=true direct runs may merge into the base branch');
+    }
+    if (!['claude', 'opencode', 'codex', 'pi'].includes(run.agent_type ?? '')) {
+      throw new ConflictError('Cannot retry merge: persisted configured agent is missing or invalid');
     }
 
     // Reset merge_status to 'merging' — use rowCount to detect race condition
@@ -5306,6 +5316,7 @@ router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
       runId,
       branch: run.branch_name,
       workspaceId: run.workspace_id,
+      posture: { agent: run.agent_type as 'claude' | 'opencode' | 'codex' | 'pi', model: run.agent_model, source: 'manual-retry' },
     }, {
       retryLimit: 0,
       expireInSeconds: 3600, // 1 hour
@@ -6884,7 +6895,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
           res.write('event: done\ndata: \n\n');
           res.end();
         }
-      } catch {
+      } catch (_err) {
         // Swallow DB connection errors — they're transient under heavy load.
         // The next poll tick will retry.
       }
@@ -7110,7 +7121,7 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
       // Swallow transient DB errors — next tick retries
     }
   }, 200);
-  } catch {
+  } catch (_err) {
     clearInterval(hb);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Stream setup failed' });
@@ -7155,6 +7166,18 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  *           text/event-stream:
  *             schema:
  *               type: string
+ */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+
+/**
+ * @swagger
+ * /api/pipeline/stream:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Stream WAL events (SSE)
+ *     operationId: streamPipelineEvents
+ *     responses:
+ *       200: { description: SSE stream of WAL events }
  */
 router.get('/stream', async (_req: Request, res: Response) => {
   res.writeHead(200, {
