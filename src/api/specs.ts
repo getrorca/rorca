@@ -134,6 +134,7 @@ export interface CreateSpecParams extends ApiOptions {
   postSave?: boolean | string | Record<string, unknown>;
   policyPresetId?: string;
   postSavePolicy?: unknown;
+  authoringPreflight?: Record<string, unknown>;
 }
 
 export interface CreateSpecResult {
@@ -157,6 +158,8 @@ export interface CreateSpecResult {
     saveGeneration: number | null;
   };
   contextSummary?: Record<string, unknown>;
+  authoring?: Record<string, unknown>;
+  lifecyclePlan?: Record<string, unknown>;
 }
 
 export function createSpec(
@@ -184,6 +187,7 @@ export function createSpec(
       postSave: p.postSave,
       policyPresetId: p.policyPresetId,
       postSavePolicy: p.postSavePolicy,
+      authoringPreflight: p.authoringPreflight,
     }),
     signal: p.signal,
   });
@@ -218,6 +222,8 @@ export interface ForgeSpecResult {
   model?: string | null;
   contextUsed?: unknown;
   contextSummary?: unknown;
+  authoring?: Record<string, unknown>;
+  lifecyclePlan?: Record<string, unknown>;
 }
 
 export interface ForgeBatchSpecItem {
@@ -247,6 +253,44 @@ export interface SpecGenerationContextParams extends ApiOptions {
   storyCount?: number;
   agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
   reasoning?: { enabled: boolean; effort?: string };
+}
+
+export interface SpecGenerationContextResult {
+  workspaceId: string;
+  title: string;
+  brief: string;
+  slug: string;
+  prompt: string;
+  contextUsed: unknown;
+  contextSummary: Record<string, unknown>;
+  lifecycleAuthoring: Record<string, unknown>;
+  postSaveDefaults: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface AuthoringPreflightParams extends ApiOptions {
+  workspaceId: string;
+  plannerInput: Record<string, unknown>;
+  specs: Array<Record<string, unknown>>;
+  attempt: number;
+  priorAttempts?: Array<Record<string, unknown>>;
+  materialRevisions?: string[];
+  callerSurface: string;
+  model?: string;
+}
+
+export interface AuthoringConfirmationParams extends ApiOptions {
+  workspaceId: string;
+  acceptedPlanHash: string;
+  acceptedPreflightHash: string;
+  actorIdentity: string;
+}
+
+export interface PersistSpecBatchParams extends ApiOptions {
+  workspaceId: string;
+  authoringPreflight: Record<string, unknown>;
+  drafts: Array<Record<string, unknown>>;
+  idempotencyKey?: string;
 }
 
 export function generateSpec(
@@ -285,7 +329,7 @@ export function forgeSpec(p: ForgeSpecParams): Promise<ForgeSpecResult> {
   });
 }
 
-export function getSpecGenerationContext(p: SpecGenerationContextParams): Promise<Record<string, unknown>> {
+export function getSpecGenerationContext(p: SpecGenerationContextParams): Promise<SpecGenerationContextResult> {
   return apiFetch('/api/specs/generation-context', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -303,6 +347,7 @@ export function getSpecGenerationContext(p: SpecGenerationContextParams): Promis
   });
 }
 
+<<<<<<< HEAD
 // ─── Context Preview (US-023) ────────────────────────────────────────────────
 
 export interface ContextPreviewParams extends ApiOptions {
@@ -365,6 +410,54 @@ export function getContextPreview(p: ContextPreviewParams): Promise<ContextPrevi
       workspaceId: p.workspaceId,
       model: p.model,
       templateId: p.templateId,
+    }),
+    signal: p.signal,
+  });
+}
+
+export function preflightSpecAuthoring(p: AuthoringPreflightParams): Promise<Record<string, unknown>> {
+  return apiFetch('/api/specs/authoring/preflight', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      workspaceId: p.workspaceId,
+      plannerInput: p.plannerInput,
+      specs: p.specs,
+      attempt: p.attempt,
+      priorAttempts: p.priorAttempts ?? [],
+      materialRevisions: p.materialRevisions ?? [],
+      callerSurface: p.callerSurface,
+      model: p.model,
+    }),
+    signal: p.signal,
+  });
+}
+
+export function confirmSpecAuthoring(p: AuthoringConfirmationParams): Promise<Record<string, unknown>> {
+  return apiFetch('/api/specs/authoring/preflight/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      workspaceId: p.workspaceId,
+      acceptedPlanHash: p.acceptedPlanHash,
+      acceptedPreflightHash: p.acceptedPreflightHash,
+      confirmed: true,
+      actor: { type: 'human', identity: p.actorIdentity },
+    }),
+    signal: p.signal,
+  });
+}
+
+export function persistSpecBatch(p: PersistSpecBatchParams): Promise<Record<string, unknown>> {
+  return apiFetch('/api/specs/persist/batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      workspaceId: p.workspaceId,
+      authoringPreflight: p.authoringPreflight,
+      drafts: p.drafts,
+      idempotencyKey: p.idempotencyKey,
     }),
     signal: p.signal,
   });

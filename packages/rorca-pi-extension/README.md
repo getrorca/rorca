@@ -176,8 +176,10 @@ Usage:
 
 Behavior:
 - prefers dispatching `/skill:rorca-forge` (or `/skill:rorca-forge-run` when both `--approve` and `--run` are requested)
-- the skill-first forge path is only used when the MCP surface exposes generation-context retrieval, canonical persistence, saved-spec reads, and workflow/readiness verification tools
-- Pi/skill performs the drafting, fetches the canonical generation-context bundle first, forwards `contextUsed` + `contextSummary`, and persists with explicit policy intent via `policyPresetId` or effective `postSavePolicy`
+- the skill-first forge path is only used when the MCP surface exposes generation-context retrieval, deterministic authoring preflight/confirmation, canonical one-or-batch persistence, saved-spec reads, and workflow/readiness verification tools
+- Pi/skill performs the drafting, validates the versioned `lifecycleAuthoring` bundle, proposes an explicit one-versus-many plan, submits the complete draft set to deterministic preflight, and performs at most three bounded diagnostic-driven revisions
+- multi-spec or high-risk plans require a separately recorded human confirmation receipt after the user inspects exact boundaries, requirement ownership, dependency DAG, capabilities, and revisions; model output can never imply confirmation
+- accepted persistence forwards `contextUsed` + `contextSummary` plus the accepted authoring plan/preflight identity and explicit post-save policy via `policyPresetId` or effective `postSavePolicy`
 - post-persist verification is expected to read the saved spec plus workflow/readiness surfaces and classify story skill state as `present`, `pending`, `skipped:no_installed_skills`, or `failed:<retryable_reason>` rather than assuming persist success implies enrichment success
 - if that MCP forge bundle is unavailable, the extension falls back to the shared backend `/api/specs/forge` workflow as a recovery path only
 - backend/server context backfill is a repair-only fallback, not the normal creation contract and not a substitute for true caller-observed drafting context
@@ -371,7 +373,8 @@ brief → spec → review → approve → run → inspect loop (each also resolv
 stable aliases — prefer the canonical name):
 
 - get project context: `rorca_get_context`, generation bundle `rorca_specs_generation_context`
-- create/persist a spec: `rorca_create_spec`
+- preflight/confirm authoring: `rorca_specs_authoring_preflight`, `rorca_specs_authoring_preflight_confirm`
+- create/persist one or many specs: `rorca_create_spec`, `rorca_specs_persist_batch`
 - read a spec: `rorca_get_specs_by_specId`
 - inspect workflow/readiness: `rorca_spec_workflow`, `rorca_spec_readiness`
 - list specs: `rorca_list_specs`

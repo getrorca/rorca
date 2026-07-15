@@ -391,6 +391,8 @@ export const ProposedSpecDraftSchema = z.object({
   stories: z.array(ProposedStorySchema).min(1),
 }).strict();
 
+export type ProposedSpecDraft = z.infer<typeof ProposedSpecDraftSchema>;
+
 export const AuthoringPreflightInputSchema = z.object({
   schemaVersion: z.literal(SSDLC_AUTHORING_SCHEMA_VERSION),
   acceptedPlan: AuthoringPlanSchema,
@@ -444,6 +446,7 @@ export const AuthoringPreflightResultSchema = z.object({
   schemaVersion: z.literal(SSDLC_AUTHORING_SCHEMA_VERSION),
   accepted: z.boolean(),
   planHash: Sha256Schema,
+  acceptedPreflightHash: Sha256Schema.nullable(),
   diagnostics: z.array(AuthoringDiagnosticSchema),
   amendments: z.array(AuthoringAmendmentCandidateSchema),
   coverageMatrix: AuthoringCoverageMatrixSchema,
@@ -454,5 +457,5 @@ export const AuthoringPreflightResultSchema = z.object({
 export type AuthoringPreflightResult = z.infer<typeof AuthoringPreflightResultSchema>;
 
 /** Structural projections only; Zod refinements and planner policy remain authoritative. */
-export const AUTHORING_PLAN_JSON_SCHEMA = z.toJSONSchema(AuthoringPlanSchema);
-export const AUTHORING_PREFLIGHT_JSON_SCHEMA = z.toJSONSchema(AuthoringPreflightResultSchema);
+export const AUTHORING_PLAN_JSON_SCHEMA = z.toJSONSchema(AuthoringPlanSchema, { unrepresentable: 'any' });
+export const AUTHORING_PREFLIGHT_JSON_SCHEMA = z.toJSONSchema(AuthoringPreflightResultSchema, { unrepresentable: 'any' });

@@ -37,6 +37,7 @@ import {
   type AuthoringPlan,
   type AuthoringPlannerInput,
   type AuthoringPlannerInputCandidate,
+  type AuthoringPreflightInput,
   type AuthoringPreflightInputCandidate,
   type AuthoringPreflightResult,
   type NormalizedAuthoringIntent,
@@ -852,6 +853,58 @@ function emptyCoverageMatrix(): AuthoringPreflightResult['coverageMatrix'] {
 }
 
 /**
+ * Stable identity for an accepted plan plus the complete caller-authored draft
+ * set. Cosmetic whitespace/case and list ordering do not stale preflight, while
+ * semantic story, requirement, dependency, capability, phase, gate, boundary,
+ * risk, or evidence changes do.
+ */
+export function deriveAuthoringPreflightHash(
+  input: Pick<AuthoringPreflightInput, 'acceptedPlan' | 'planHash' | 'specs'>,
+): `sha256:${string}` {
+  const normalizeList = (values: string[]): string[] => values.map(normalizedProse).sort();
+  const specs = input.specs.map((spec) => ({
+    specReference: spec.specReference,
+    stories: spec.stories.map((story) => ({
+      id: story.id,
+      title: normalizedProse(story.title).toLocaleLowerCase('en-US'),
+      description: normalizedProse(story.description).toLocaleLowerCase('en-US'),
+      requirementReferences: [...story.requirementReferences].sort(),
+      dependsOn: [...story.dependsOn].sort(),
+      capabilities: sortCapabilities(story.capabilities),
+      expectedContributions: {
+        phaseIds: [...story.expectedContributions.phaseIds].sort(),
+        gateIds: [...story.expectedContributions.gateIds].sort(),
+      },
+      acceptanceCriteria: story.acceptanceCriteria.map((criterion) => ({
+        criterionId: criterion.criterionId,
+        text: normalizeAcceptanceCriterionText(criterion.text),
+        observableOutcome: normalizeAcceptanceCriterionText(criterion.observableOutcome),
+        requirementReferences: [...criterion.requirementReferences].sort(),
+        evidenceExpectationIds: [...criterion.evidenceExpectationIds].sort(),
+      })).sort((left, right) => (
+        `${left.text}:${left.criterionId}`.localeCompare(`${right.text}:${right.criterionId}`)
+      )),
+      evidenceExpectations: story.evidenceExpectations.map((expectation) => ({
+        expectationId: expectation.expectationId,
+        kind: expectation.kind,
+        description: normalizeAcceptanceCriterionText(expectation.description),
+        observable: expectation.observable,
+      })).sort((left, right) => left.expectationId.localeCompare(right.expectationId)),
+      negativeCoverage: normalizeList(story.negativeCoverage),
+      recoveryCoverage: normalizeList(story.recoveryCoverage),
+      crossSpecReferences: [...story.crossSpecReferences].sort(),
+    })).sort((left, right) => left.id.localeCompare(right.id)),
+  })).sort((left, right) => left.specReference.localeCompare(right.specReference));
+
+  return hash({
+    schemaVersion: SSDLC_AUTHORING_SCHEMA_VERSION,
+    planHash: input.planHash,
+    normalizedIntentHash: input.acceptedPlan.normalizedIntentHash,
+    specs,
+  });
+}
+
+/**
  * Validate caller-authored story prose against a fixed accepted plan. This
  * function returns diagnostics, amendment candidates, and coverage only. It
  * never rewrites, adds, deletes, splits, merges, or persists caller content.
@@ -866,6 +919,7 @@ export function preflightAuthoringDraft(inputCandidate: AuthoringPreflightInputC
       planHash: typeof inputCandidate?.planHash === 'string' && /^sha256:[a-f0-9]{64}$/.test(inputCandidate.planHash)
         ? inputCandidate.planHash
         : `sha256:${'0'.repeat(64)}`,
+      acceptedPreflightHash: null,
       diagnostics,
       amendments: amendmentCandidates(diagnostics),
       coverageMatrix: emptyCoverageMatrix(),
@@ -1287,6 +1341,7 @@ export function preflightAuthoringDraft(inputCandidate: AuthoringPreflightInputC
     schemaVersion: SSDLC_AUTHORING_SCHEMA_VERSION,
     accepted,
     planHash: input.planHash,
+    acceptedPreflightHash: accepted ? deriveAuthoringPreflightHash(input) : null,
     diagnostics: sorted,
     amendments: amendmentCandidates(sorted),
     coverageMatrix: {

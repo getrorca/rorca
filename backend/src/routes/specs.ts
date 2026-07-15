@@ -112,6 +112,26 @@ import {
   WORKFLOW_STAGE_KEYS,
   type WorkflowStageKey,
 } from '../lib/spec-workflow';
+import {
+  AuthoringConfirmationRequestSchema,
+  AuthoringPreflightRequestSchema,
+  PersistAuthoringBindingSchema,
+  adaptCanonicalStoriesToAuthoringDraft,
+  assertAuthoringConfirmation,
+  assertAuthoritativePreflightReceipt,
+  authoringTelemetry,
+  buildLifecycleAuthoringSection,
+  buildPersistedAuthoringMetadata,
+  compilePersistedAuthoringSpec,
+  markAuthoritativeCompilation,
+  refreshAuthoringStateAfterEdit,
+  runAuthoringPreflight,
+  supersedeCurrentLifecyclePlan,
+  validatePersistAuthoringBinding,
+  type LifecycleAuthoringSection,
+  type PersistAuthoringBinding,
+} from '../lib/ssdlc-forge-authoring';
+import { planAuthoring } from '../lib/ssdlc-authoring-planner';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -348,7 +368,7 @@ function categorizeSpecError(error: any): SpecErrorCategory {
 import { createNotification } from './notifications';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
-import { AppError, ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, UnprocessableError, ValidationError } from '../lib/errors';
+import { AppError, ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router();
@@ -490,6 +510,22 @@ interface UserStory {
 /** Read a file safely, returning empty string on failure. */
 function safeReadFile(filePath: string): string {
   try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
+}
+
+async function invalidateAuthoringForMaterialEdit(
+  content: Record<string, unknown>,
+  workspaceId: string,
+  specId: string,
+  reason: string,
+): Promise<boolean> {
+  if (!refreshAuthoringStateAfterEdit(content)) return false;
+  await supersedeCurrentLifecyclePlan(workspaceId, specId);
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+     VALUES ('spec_authoring_preflight_stale', $1, $2, 'api', $3)`,
+    [workspaceId, specId, JSON.stringify({ reason, state: 'stale_authoring_preflight' })],
+  );
+  return true;
 }
 
 /**
@@ -1036,10 +1072,18 @@ const PersistSpecDraftSchema = z.object({
   postSave: z.unknown().optional(),
   policyPresetId: z.enum(POST_SAVE_POLICY_PRESET_IDS).optional(),
   postSavePolicy: z.unknown().optional(),
+  authoringPreflight: PersistAuthoringBindingSchema.optional(),
 }).refine(data => Array.isArray(data.stories) || Array.isArray(data.userStories), {
   message: 'stories (or userStories) is required',
   path: ['stories'],
 });
+
+const PersistAuthoringBatchSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  authoringPreflight: PersistAuthoringBindingSchema,
+  drafts: z.array(z.record(z.string(), z.unknown())).min(1).max(12),
+  idempotencyKey: z.string().trim().min(2).max(128).optional(),
+}).strict();
 
 function resolvePersistPostSavePolicyInput(body: Pick<z.infer<typeof PersistSpecDraftSchema>, 'postSave' | 'policyPresetId' | 'postSavePolicy'>): PostSavePolicyInput {
   const providedFields = [
@@ -1350,6 +1394,7 @@ async function seedPersistGenerationLog(input: {
   callerContextSummary?: Record<string, unknown>;
   resolvedContextSummary?: Record<string, unknown>;
   reasoning?: unknown;
+  authoring?: Record<string, unknown>;
 }): Promise<{ stageFingerprints: SpecStageFingerprints; saveGeneration: number; generationLogId: number | null }> {
   const pendingPostSave = input.postSave.enrich || input.postSave.matchSkills || input.postSave.memorySynthesis;
   const status = pendingPostSave ? 'pending_enrichment' : 'persisted';
@@ -1387,6 +1432,7 @@ async function seedPersistGenerationLog(input: {
     ...(input.resolvedContextSummary ? { contextSummary: input.resolvedContextSummary } : {}),
     ...(input.contextUsed !== undefined ? { contextUsed: input.contextUsed } : {}),
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
+    ...(input.authoring ? { authoring: input.authoring } : {}),
   };
 
   const insertedLog = await queryOne<{ id: number }>(
@@ -1639,6 +1685,7 @@ interface ForgeContextBundle {
     meta: ReturnType<typeof synthesizeWithMeta>['meta'] & { scopesMatched: string[] };
   };
   contextSummary: Record<string, unknown>;
+  lifecycleAuthoring: LifecycleAuthoringSection;
   fullPrompt: string;
   opencodeDirectionContext: string;
 }
@@ -1666,6 +1713,8 @@ interface ForgePersistResult {
     saveGeneration: number | null;
   };
   contextSummary?: Record<string, unknown>;
+  authoring: Record<string, unknown>;
+  lifecyclePlan?: { planId: string; inputHash: string; profiles: string[]; riskLevel: string };
 }
 
 async function persistExplicitDraftInternal(
@@ -1700,6 +1749,26 @@ async function persistExplicitDraftInternal(
   });
 
   const { stories: normalizedStories, changes } = normalizeExplicitDraftStories(draftStories, body.storyPrefix);
+  let authoringBinding: PersistAuthoringBinding | undefined;
+  let authoringSpec: ReturnType<typeof validatePersistAuthoringBinding>['spec'] | undefined;
+  if (body.authoringPreflight) {
+    const validated = validatePersistAuthoringBinding({
+      workspaceId,
+      slug,
+      stories: normalizedStories,
+      binding: body.authoringPreflight,
+    });
+    authoringBinding = validated.binding;
+    authoringSpec = validated.spec;
+    await assertAuthoritativePreflightReceipt(workspaceId, authoringBinding);
+    await assertAuthoringConfirmation(workspaceId, authoringBinding);
+  }
+  const persistedAuthoring = buildPersistedAuthoringMetadata({
+    binding: authoringBinding,
+    spec: authoringSpec,
+    stories: normalizedStories,
+  });
+  const telemetry = authoringTelemetry(authoringBinding, 'persisting');
 
   const catalogs = await buildCatalogContext(workspace.path, workspaceId);
   if (catalogs.skillNames.size > 0) {
@@ -1763,6 +1832,7 @@ async function persistExplicitDraftInternal(
     reasoning: body.reasoning,
     source,
     postSavePolicy: postSavePolicyMetadata(postSavePolicy),
+    authoring: persistedAuthoring,
   });
 
   const priorGenerationLog = await getEffectiveGenerationLog(slug);
@@ -1778,6 +1848,7 @@ async function persistExplicitDraftInternal(
       normalizationChanges: changes,
       postSave,
       postSavePolicy: postSavePolicyMetadata(postSavePolicy),
+      authoring: telemetry,
       ...(postSaveDecision ? { postSaveDecision } : {}),
     })],
   );
@@ -1804,7 +1875,42 @@ async function persistExplicitDraftInternal(
     callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
     resolvedContextSummary,
     reasoning: body.reasoning,
+    authoring: telemetry,
   });
+
+  let lifecyclePlan: ForgePersistResult['lifecyclePlan'];
+  if (authoringBinding && authoringSpec) {
+    try {
+      lifecyclePlan = await compilePersistedAuthoringSpec({
+        workspaceId,
+        slug,
+        version: saveGeneration,
+        specPath: writeResult.specPath,
+        binding: authoringBinding,
+        spec: authoringSpec,
+      });
+      const finalContent = JSON.parse(fs.readFileSync(writeResult.specPath, 'utf8')) as Record<string, unknown>;
+      markAuthoritativeCompilation(finalContent, lifecyclePlan);
+      fs.writeFileSync(writeResult.specPath, JSON.stringify(finalContent, null, 2), 'utf8');
+    } catch (error) {
+      const staleContent = JSON.parse(fs.readFileSync(writeResult.specPath, 'utf8')) as Record<string, unknown>;
+      const authoring = staleContent.authoring as Record<string, unknown> | undefined;
+      if (authoring) {
+        authoring.state = 'stale_authoring_preflight';
+        authoring.approvalReady = false;
+        authoring.reasonCode = 'stale_authoring_preflight';
+        authoring.lifecycleCompiler = { state: 'blocked', error: error instanceof Error ? error.message : String(error) };
+      }
+      fs.writeFileSync(writeResult.specPath, JSON.stringify(staleContent, null, 2), 'utf8');
+      await updatePersistGenerationLogForSave(slug, saveGeneration, {
+        status: 'authoring_compile_blocked',
+        summaryPatch: { authoring: authoringTelemetry(authoringBinding, 'stale_preflight') },
+        error: error instanceof Error ? error.message : String(error),
+        errorCategory: 'stale_authoring_preflight',
+      });
+      throw error;
+    }
+  }
 
   const workflowRun = await scheduleSpecPostSaveJobs(slug, workspaceId, {
     ...postSave,
@@ -1820,6 +1926,21 @@ async function persistExplicitDraftInternal(
       contextSummary: { source, explicitDraft: true },
     },
   });
+
+  const completedTelemetry = authoringTelemetry(authoringBinding, authoringBinding ? 'persisted_and_compiled' : 'persisted_incomplete');
+  await updatePersistGenerationLogForSave(slug, saveGeneration, {
+    summaryPatch: {
+      authoring: completedTelemetry,
+      ...(lifecyclePlan ? { lifecyclePlan } : {}),
+    },
+  });
+  const authoringWalEvent = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+     VALUES ('spec_authoring_persisted', $1, $2, 'authoring-persist', $3) RETURNING *`,
+    [workspaceId, slug, JSON.stringify(completedTelemetry)],
+  );
+  if (authoringWalEvent) broadcastAll(authoringWalEvent);
+  const finalPersistedContent = JSON.parse(fs.readFileSync(writeResult.specPath, 'utf8')) as Record<string, unknown>;
 
   return {
     id: writeResult.id,
@@ -1843,6 +1964,8 @@ async function persistExplicitDraftInternal(
       idempotencyKey: workflowRun.idempotencyKey,
       saveGeneration: workflowRun.saveGeneration,
     },
+    authoring: finalPersistedContent.authoring as Record<string, unknown>,
+    ...(lifecyclePlan ? { lifecyclePlan } : {}),
     ...(resolvedContextSummary ? { contextSummary: resolvedContextSummary } : {}),
   };
 }
@@ -1874,8 +1997,9 @@ function buildSkillFirstPrompt(input: {
   storyCount: number;
   storyPrefix: string;
   diagramTypes?: string[];
+  lifecycleAuthoring: LifecycleAuthoringSection;
 }): string {
-  const { synthesized, semanticGraphSection, catalogs, attachmentSection, templateContext, effectiveTitle, brief, storyCount, storyPrefix, diagramTypes } = input;
+  const { synthesized, semanticGraphSection, catalogs, attachmentSection, templateContext, effectiveTitle, brief, storyCount, storyPrefix, diagramTypes, lifecycleAuthoring } = input;
   const wantDiagrams = Array.isArray(diagramTypes) && diagramTypes.some((type) => type !== 'storyDeps');
   const diagramSchema = wantDiagrams ? [
     '',
@@ -1918,6 +2042,22 @@ function buildSkillFirstPrompt(input: {
     ...catalogSections,
     ...(attachmentSection ? [attachmentSection, ''] : []),
     ...(templateContext ? [templateContext, '---'] : []),
+    '=== SSDLC LIFECYCLE AUTHORING CONTRACT ===',
+    JSON.stringify({
+      profileVersion: lifecycleAuthoring.profileVersion,
+      normalizedIntentIdentity: lifecycleAuthoring.normalizedIntentIdentity,
+      decompositionPolicy: lifecycleAuthoring.decompositionPolicy,
+      lifecycleProfile: lifecycleAuthoring.lifecycleProfile,
+      requiredStoryCapabilities: lifecycleAuthoring.requiredStoryCapabilities,
+      wordingRules: lifecycleAuthoring.wordingRules,
+      authorityBoundary: lifecycleAuthoring.authorityBoundary,
+      preflight: {
+        endpoint: lifecycleAuthoring.preflightContract.endpoint,
+        maximumRevisionAttempts: lifecycleAuthoring.preflightContract.maximumRevisionAttempts,
+      },
+    }),
+    'Draft readable prose and lifecycle annotations against this contract. Do not claim evidence, evaluated phase status, gate waiver, approval, execution, retry, merge, or deploy authority.',
+    '=== END SSDLC LIFECYCLE AUTHORING CONTRACT ===',
     '---',
     storyCount === 0
       ? 'TASK: Draft an implementation-ready software specification JSON with an appropriate number of user stories.'
@@ -2097,6 +2237,20 @@ async function buildForgeContextBundle(input: {
   const slug = input.title
     ? input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
     : briefToSlug(input.brief);
+  const contextUsed = {
+    text: synthesized,
+    meta: {
+      ...synthResult.meta,
+      scopesMatched: [] as string[],
+    },
+  };
+  const lifecycleAuthoring = buildLifecycleAuthoringSection({
+    workspaceId: input.workspaceId,
+    title: input.title || input.brief,
+    brief: input.brief,
+    contextUsed,
+    contextSummary,
+  });
   const attachmentSection = await buildAttachmentSection(slug, (filename, status) => {
     emitAttachmentEvent(slug, filename, status, input.workspaceId).catch(() => { /* non-fatal */ });
   });
@@ -2112,6 +2266,7 @@ async function buildForgeContextBundle(input: {
     storyCount: input.storyCount,
     storyPrefix: input.storyPrefix || 'US',
     diagramTypes: input.diagramTypes,
+    lifecycleAuthoring,
   });
 
   const opencodeDirectionContext = [
@@ -2142,14 +2297,9 @@ async function buildForgeContextBundle(input: {
     synthesized,
     templateContext,
     catalogs,
-    contextUsed: {
-      text: synthesized,
-      meta: {
-        ...synthResult.meta,
-        scopesMatched: [],
-      },
-    },
+    contextUsed,
     contextSummary,
+    lifecycleAuthoring,
     fullPrompt,
     opencodeDirectionContext,
   };
@@ -2398,6 +2548,85 @@ async function executeSkillFirstForge(options: ExecuteSkillFirstForgeOptions): P
 
   appendPredictedFilesToContextSummary(bundle.contextSummary, drafted.stories, bundle.workspace.path);
 
+  const planning = planAuthoring(bundle.lifecycleAuthoring.plannerInputSeed);
+  if (!planning.acceptedPlan) {
+    throw new UnprocessableError('Shared forge authoring plan is blocked', 'AUTHORING_PLAN_BLOCKED', {
+      diagnostics: planning.diagnostics,
+    });
+  }
+  const proposedSpecs = adaptCanonicalStoriesToAuthoringDraft(planning.acceptedPlan, [{
+    specReference: planning.acceptedPlan.specBoundaries[0].specReference,
+    stories: drafted.stories,
+  }]);
+  const authoringPreflight = runAuthoringPreflight({
+    schemaVersion: 1,
+    workspaceId,
+    plannerInput: bundle.lifecycleAuthoring.plannerInputSeed,
+    specs: proposedSpecs,
+    attempt: 1,
+    priorAttempts: [],
+    callerSurface: 'api.specs.forge',
+    model: directModel || resolvedModel,
+  });
+  if (!authoringPreflight.acceptedPlan || !authoringPreflight.acceptedPreflightHash) {
+    throw new UnprocessableError(
+      authoringPreflight.state === 'blocked'
+        ? 'Shared forge exhausted bounded authoring preflight'
+        : 'Shared forge draft requires authoring revision',
+      authoringPreflight.state === 'blocked' ? 'AUTHORING_PREFLIGHT_BLOCKED' : 'AUTHORING_REVISION_REQUIRED',
+      {
+        diagnostics: authoringPreflight.diagnostics,
+        amendments: authoringPreflight.amendments,
+        clarificationQuestions: authoringPreflight.clarificationQuestions,
+        attemptSummary: authoringPreflight.attemptSummary,
+      },
+    );
+  }
+  const preflightTelemetry = {
+    authoringProfileVersion: bundle.lifecycleAuthoring.profileVersion,
+    proposedSpecCount: proposedSpecs.length,
+    acceptedSpecCount: authoringPreflight.acceptedPlan.recommendedSpecCount,
+    preflightAttemptCount: 1,
+    diagnosticsCategories: [],
+    acceptedPlanHash: authoringPreflight.acceptedPlan.acceptedPlanHash,
+    acceptedPreflightHash: authoringPreflight.acceptedPreflightHash,
+    callerSurface: 'api.specs.forge',
+    model: directModel || resolvedModel,
+    persistenceOutcome: 'not_started',
+    state: 'accepted',
+  };
+  const preflightReceipt = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
+     VALUES ('spec_authoring_preflight', $1, 'authoring-preflight', $2) RETURNING *`,
+    [workspaceId, JSON.stringify(preflightTelemetry)],
+  );
+  if (preflightReceipt) broadcastAll(preflightReceipt);
+  const authoringBinding = PersistAuthoringBindingSchema.parse({
+    schemaVersion: 1,
+    profileVersion: bundle.lifecycleAuthoring.profileVersion,
+    acceptedPlan: authoringPreflight.acceptedPlan,
+    planHash: authoringPreflight.acceptedPlan.acceptedPlanHash,
+    specs: proposedSpecs,
+    acceptedPreflightHash: authoringPreflight.acceptedPreflightHash,
+    preflightAttemptCount: 1,
+    priorAttempts: [],
+    callerSurface: 'api.specs.forge',
+    model: directModel || resolvedModel,
+    preflightReceiptId: preflightReceipt!.id,
+  });
+  if (authoringPreflight.confirmationRequired) {
+    throw new UnprocessableError(
+      'Explicit human confirmation is required before shared forge can persist this high-risk authoring plan',
+      'AUTHORING_CONFIRMATION_REQUIRED',
+      {
+        inspection: authoringPreflight.inspection,
+        draftSpecs: proposedSpecs,
+        authoringPreflight: authoringBinding,
+        confirmationEndpoint: '/api/specs/authoring/preflight/confirm',
+      },
+    );
+  }
+
   const persistResult = await persistExplicitDraftInternal(options.req, {
     workspaceId,
     title: bundle.effectiveTitle,
@@ -2409,6 +2638,8 @@ async function executeSkillFirstForge(options: ExecuteSkillFirstForgeOptions): P
     ...(drafted.mermaidDiagram ? { mermaidDiagram: drafted.mermaidDiagram } : {}),
     ...(selectedAgent === 'codex' && !directModel ? {} : { model: directModel || resolvedModel }),
     contextUsed: bundle.contextUsed as any,
+    contextSummary: bundle.contextSummary,
+    authoringPreflight: authoringBinding,
     ...(thinkingEnabled ? { reasoning: { enabled: true, ...(reasoningEffort ? { effort: reasoningEffort } : {}) } } : {}),
     source: 'skill-first-backend',
     ...(options.overwrite ? { overwrite: true } : {}),
@@ -2539,6 +2770,7 @@ router.post('/generation-context', validateBody(SkillFirstForgeSchema), async (r
       prompt: bundle.fullPrompt,
       contextUsed: bundle.contextUsed,
       contextSummary: bundle.contextSummary,
+      lifecycleAuthoring: bundle.lifecycleAuthoring,
       postSaveDefaults: resolvePostSavePolicy().legacyOptions,
     });
   } catch (error: any) {
@@ -2748,6 +2980,139 @@ async function buildHydrationPreview(workspaceId: string): Promise<{
 
 /**
  * @swagger
+ * /api/specs/authoring/preflight:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Deterministically validate a proposed authoring plan and complete draft set
+ *     operationId: preflightSpecAuthoring
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Deterministic read/validation of caller-authored spec proposals is required by every local CLI, MCP, and dashboard forge surface before canonical persistence."
+ *     x-rorca-public-api: true
+ *     description: Returns an accepted plan/preflight identity or exact diagnostics and amendments. It never persists specs, records evidence, evaluates phases, waives gates, dispatches execution, or mutates production.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [schemaVersion, workspaceId, plannerInput, specs, attempt, callerSurface]
+ *             additionalProperties: false
+ *             properties:
+ *               schemaVersion: { type: integer, enum: [1] }
+ *               workspaceId: { type: string }
+ *               plannerInput: { type: object, additionalProperties: true }
+ *               specs: { type: array, items: { type: object, additionalProperties: true } }
+ *               attempt: { type: integer, minimum: 1, maximum: 3 }
+ *               priorAttempts: { type: array, items: { type: object, additionalProperties: true } }
+ *               materialRevisions: { type: array, items: { type: string } }
+ *               callerSurface: { type: string }
+ *               model: { type: string }
+ *     responses:
+ *       200: { description: Accepted plan or bounded revision diagnostics }
+ *       400: { description: Invalid authoring contract input }
+ */
+router.post('/authoring/preflight', validateBody(AuthoringPreflightRequestSchema), async (req: Request, res: Response) => {
+  try {
+    const result = runAuthoringPreflight(req.body);
+    const parsed = AuthoringPreflightRequestSchema.parse(req.body);
+    const payload = {
+      authoringProfileVersion: parsed.plannerInput.sourceContext.version,
+      proposedSpecCount: parsed.specs.length,
+      acceptedSpecCount: result.acceptedPlan?.recommendedSpecCount ?? null,
+      preflightAttemptCount: parsed.attempt,
+      diagnosticsCategories: [...new Set(result.diagnostics.map((item) => item.code))].sort(),
+      acceptedPlanHash: result.acceptedPlanHash,
+      acceptedPreflightHash: result.acceptedPreflightHash,
+      callerSurface: parsed.callerSurface,
+      model: parsed.model ?? null,
+      persistenceOutcome: 'not_started',
+      state: result.state,
+    };
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
+       VALUES ('spec_authoring_preflight', $1, 'authoring-preflight', $2) RETURNING *`,
+      [String(parsed.workspaceId), JSON.stringify(payload)],
+    );
+    if (walEvent) broadcastAll(walEvent);
+    res.json({ ...result, preflightReceiptId: walEvent!.id, telemetry: payload });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Authoring preflight');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/authoring/preflight/confirm:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Record explicit human confirmation for a multi-spec or high-risk authoring plan
+ *     operationId: confirmSpecAuthoringPlan
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Explicit local human confirmation is a required authoring control and must be a separate auditable action rather than inferred from model output."
+ *     x-rorca-public-api: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, acceptedPlanHash, acceptedPreflightHash, confirmed, actor]
+ *             additionalProperties: false
+ *             properties:
+ *               workspaceId: { type: string }
+ *               acceptedPlanHash: { type: string }
+ *               acceptedPreflightHash: { type: string }
+ *               confirmed: { type: boolean, enum: [true] }
+ *               actor: { type: object, additionalProperties: false }
+ *     responses:
+ *       200: { description: Auditable confirmation receipt }
+ *       404: { description: Accepted preflight identity not found }
+ */
+router.post('/authoring/preflight/confirm', validateBody(AuthoringConfirmationRequestSchema), async (req: Request, res: Response) => {
+  try {
+    const input = AuthoringConfirmationRequestSchema.parse(req.body);
+    const workspaceId = String(input.workspaceId);
+    const preflightEvent = await queryOne<{ id: number }>(
+      `SELECT id FROM wal_events
+       WHERE workspace_id = $1
+         AND event_type = 'spec_authoring_preflight'
+         AND payload::jsonb->>'state' = 'accepted'
+         AND payload::jsonb->>'acceptedPlanHash' = $2
+         AND payload::jsonb->>'acceptedPreflightHash' = $3
+       ORDER BY id DESC LIMIT 1`,
+      [workspaceId, input.acceptedPlanHash, input.acceptedPreflightHash],
+    );
+    if (!preflightEvent) {
+      throw new NotFoundError('Accepted authoring preflight');
+    }
+    const payload = {
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      actorType: input.actor.type,
+      actorIdentity: input.actor.identity,
+      preflightWalEventId: preflightEvent.id,
+      inferredFromModelOutput: false,
+      grantsDownstreamApproval: false,
+    };
+    const receipt = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
+       VALUES ('spec_authoring_plan_confirmed', $1, $2, $3) RETURNING *`,
+      [workspaceId, input.actor.identity, JSON.stringify(payload)],
+    );
+    if (receipt) broadcastAll(receipt);
+    res.json({
+      confirmationReceiptId: receipt!.id,
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      grantsDownstreamApproval: false,
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Authoring confirmation');
+  }
+});
+
+/**
+ * @swagger
  * /api/specs/forge:
  *   post:
  *     tags: [Specs]
@@ -2845,6 +3210,26 @@ router.post('/forge', validateBody(SkillFirstForgeSchema), async (req: Request, 
 
     res.json(result);
   } catch (error: any) {
+    if (!(error instanceof AppError)) {
+      const category = categorizeSpecError(error);
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
+         VALUES ('spec_authoring_forge_unavailable', $1, 'authoring-forge', $2)`,
+        [req.body?.workspaceId ? String(req.body.workspaceId) : null, JSON.stringify({
+          authoringProfileVersion: 'ssdlc-lifecycle-authoring-1',
+          callerSurface: 'api.specs.forge',
+          model: req.body?.model ?? null,
+          persistenceOutcome: 'model_unavailable',
+          category,
+        })],
+      ).catch(() => { /* telemetry must not mask the typed drafting failure */ });
+      handleRouteError(
+        res,
+        new ServiceUnavailableError(`Skill-first forge drafting is unavailable (${category}); no spec was persisted`),
+        '[Specs] Forge skill-first',
+      );
+      return;
+    }
     handleRouteError(res, error, '[Specs] Forge skill-first');
   }
 });
@@ -4618,6 +5003,10 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *                   - type: object
  *                     additionalProperties: true
  *                 description: Preferred canonical alias for postSave when the caller wants an explicit policy object or preset string.
+ *               authoringPreflight:
+ *                 type: object
+ *                 additionalProperties: true
+ *                 description: Accepted deterministic authoring plan, complete preflight draft set/hash, attempt provenance, caller surface, and optional explicit-human confirmation receipt. Omit only for a legacy review draft, which persists as needs_authoring_preflight and cannot become approval-ready.
  *     responses:
  *       200:
  *         description: Spec persisted successfully
@@ -4668,6 +5057,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *                     runId: { type: integer }
  *                     status: { type: string }
  *                     saveGeneration: { type: integer, nullable: true }
+ *                 authoring:
+ *                   type: object
+ *                   additionalProperties: true
+ *                 lifecyclePlan:
+ *                   type: object
+ *                   additionalProperties: true
  *       400:
  *         description: Invalid stories, dependencies, or request fields
  *       404:
@@ -4686,6 +5081,133 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Persist explicit draft');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/persist/batch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Persist a validated multi-spec authoring plan through the canonical explicit-draft path
+ *     operationId: persistExplicitSpecDraftBatch
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Validated multi-spec authoring must reuse canonical local persistence with resumable per-spec outcomes for CLI, MCP, and dashboard clients."
+ *     x-rorca-public-api: true
+ *     description: Sequentially reuses POST /api/specs/persist semantics for one accepted parent authoring plan. Existing matching results are idempotently reused and failures are isolated for bounded resume.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, authoringPreflight, drafts]
+ *             additionalProperties: false
+ *             properties:
+ *               workspaceId: { type: string }
+ *               authoringPreflight: { type: object, additionalProperties: true }
+ *               drafts: { type: array, items: { type: object, additionalProperties: true }, minItems: 1, maxItems: 12 }
+ *               idempotencyKey: { type: string }
+ *     responses:
+ *       200: { description: All drafts persisted or idempotently reused }
+ *       207: { description: Partial persistence with resumable per-draft failures }
+ *       400: { description: Invalid batch contract }
+ *       422: { description: Stale preflight or missing confirmation }
+ */
+router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (req: Request, res: Response) => {
+  try {
+    const input = PersistAuthoringBatchSchema.parse(req.body);
+    const workspaceId = String(input.workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) throw new NotFoundError('Workspace not found');
+    await assertAuthoritativePreflightReceipt(workspaceId, input.authoringPreflight);
+    await assertAuthoringConfirmation(workspaceId, input.authoringPreflight);
+
+    const seenSlugs = new Set<string>();
+    const results: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < input.drafts.length; index += 1) {
+      const rawDraft = input.drafts[index];
+      try {
+        const draft = PersistSpecDraftSchema.parse({
+          ...rawDraft,
+          workspaceId,
+          authoringPreflight: input.authoringPreflight,
+        });
+        const title = draft.title.trim();
+        const slug = (draft.slug?.trim() || title).toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '') || briefToSlug(title);
+        if (seenSlugs.has(slug)) throw new ValidationError(`Batch contains duplicate slug ${slug}`);
+        seenSlugs.add(slug);
+        const normalized = normalizeExplicitDraftStories(draft.stories ?? draft.userStories ?? [], draft.storyPrefix);
+        validatePersistAuthoringBinding({
+          workspaceId,
+          slug,
+          stories: normalized.stories,
+          binding: input.authoringPreflight,
+        });
+
+        const existing = resolveSpecStoragePaths(workspace.path, slug).existingFile;
+        if (existing) {
+          const content = JSON.parse(fs.readFileSync(existing, 'utf8')) as Record<string, unknown>;
+          const authoring = content.authoring as Record<string, unknown> | undefined;
+          const parent = authoring?.parentAuthoringPlan as Record<string, unknown> | undefined;
+          if (parent?.acceptedPreflightHash === input.authoringPreflight.acceptedPreflightHash
+            && authoring?.state === 'validated') {
+            results.push({ index, slug, status: 'reused', resumable: true });
+            continue;
+          }
+        }
+
+        const persisted = await persistExplicitDraftInternal(req, draft, {
+          sourceMode: 'skill-first-batch',
+          invocationSurface: 'api.specs.persist.batch',
+        });
+        results.push({ index, slug: persisted.slug, status: 'persisted', lifecyclePlan: persisted.lifecyclePlan });
+      } catch (error) {
+        results.push({
+          index,
+          status: 'failed',
+          resumable: true,
+          error: error instanceof Error ? error.message : String(error),
+          code: error instanceof AppError ? error.code ?? 'UNPROCESSABLE' : 'UNPROCESSABLE',
+        });
+      }
+    }
+
+    const completed = results.filter((result) => result.status === 'persisted' || result.status === 'reused').length;
+    const failed = results.length - completed;
+    const payload = {
+      authoringProfileVersion: input.authoringPreflight.profileVersion,
+      proposedSpecCount: input.authoringPreflight.specs.length,
+      acceptedSpecCount: input.authoringPreflight.acceptedPlan.recommendedSpecCount,
+      preflightAttemptCount: input.authoringPreflight.preflightAttemptCount,
+      diagnosticsCategories: failed > 0 ? ['partial_batch_failure'] : [],
+      acceptedPlanHash: input.authoringPreflight.planHash,
+      acceptedPreflightHash: input.authoringPreflight.acceptedPreflightHash,
+      callerSurface: input.authoringPreflight.callerSurface,
+      model: input.authoringPreflight.model ?? null,
+      persistenceOutcome: failed > 0 ? 'partial' : 'persisted',
+      idempotencyKey: input.idempotencyKey ?? null,
+      completed,
+      failed,
+    };
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
+       VALUES ('spec_authoring_batch_persisted', $1, 'authoring-persist', $2) RETURNING *`,
+      [workspaceId, JSON.stringify(payload)],
+    );
+    if (walEvent) broadcastAll(walEvent);
+    res.status(failed > 0 ? 207 : 200).json({
+      status: failed > 0 ? 'partial' : 'completed',
+      parentAuthoringPlanHash: input.authoringPreflight.planHash,
+      acceptedPreflightHash: input.authoringPreflight.acceptedPreflightHash,
+      summary: { completed, failed, total: results.length },
+      results,
+      resume: failed > 0 ? { retryOnlyFailedIndexes: results.filter((result) => result.status === 'failed').map((result) => result.index) } : null,
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Persist explicit draft batch');
   }
 });
 
@@ -7652,6 +8174,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     const { generateStoryDepsDiagram } = await import('../lib/diagram-generator');
     const depsDiagram = generateStoryDepsDiagram(specContent.userStories);
     specContent.mermaidDiagram = depsDiagram.mermaid;
+    await invalidateAuthoringForMaterialEdit(specContent, workspaceId, String(specId), 'stories_added');
 
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
@@ -8094,6 +8617,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
       if (acceptanceCriteria !== undefined) stories[storyIndex].acceptanceCriteria = acceptanceCriteria;
 
       content.userStories = stories;
+      await invalidateAuthoringForMaterialEdit(content, String(workspaceId), specId, 'story_fields_edited');
       fs.writeFileSync(pendingFile, JSON.stringify(content, null, 2) + '\n');
 
       // WAL event
@@ -8278,6 +8802,7 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
     if (model !== undefined) stories[storyIndex].model = model || undefined; // null/'' clears override
 
     content.userStories = stories;
+    await invalidateAuthoringForMaterialEdit(content, String(workspaceId), specId, 'story_updated');
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
 
     // WAL event
@@ -8406,6 +8931,7 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
     }));
 
     content.userStories = reindexed;
+    await invalidateAuthoringForMaterialEdit(content, workspaceId, specId, 'story_deleted_or_reindexed');
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
 
     // WAL event
@@ -8705,8 +9231,23 @@ router.get('/:specId', async (req: Request, res: Response) => {
     }
 
     const stories: any[] = content.userStories ?? content.stories ?? [];
+    const authoringReadiness = content.authoring ?? {
+      schemaVersion: 1,
+      state: 'needs_authoring_preflight',
+      approvalReady: false,
+      reasonCode: 'needs_authoring_preflight',
+      storiesRewritten: false,
+      action: 'Submit this unchanged legacy draft through deterministic authoring preflight; Rorca will not silently rewrite its stories.',
+    };
     // The filename is canonical and also repairs identity for legacy spec files.
-    res.json({ ...content, id: specId, slug: specId, _status: specStatus, readinessPercent: computeReadiness(stories) });
+    res.json({
+      ...content,
+      id: specId,
+      slug: specId,
+      authoring: authoringReadiness,
+      _status: specStatus,
+      readinessPercent: computeReadiness(stories),
+    });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Get');
   }
@@ -8913,6 +9454,24 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
     if (!fs.existsSync(pendingFile)) {
       throw new NotFoundError(`Spec '${specId}' not found in pending`);
       return;
+    }
+
+    const pendingContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8')) as Record<string, unknown>;
+    if (await invalidateAuthoringForMaterialEdit(pendingContent, String(workspaceId), specId, 'approval_readiness_recheck')) {
+      fs.writeFileSync(pendingFile, JSON.stringify(pendingContent, null, 2), 'utf8');
+    }
+    const authoring = pendingContent.authoring;
+    if (authoring && typeof authoring === 'object' && !Array.isArray(authoring)) {
+      const authoringState = (authoring as Record<string, unknown>).state;
+      if (authoringState !== 'validated') {
+        throw new UnprocessableError('Spec approval is blocked by lifecycle authoring readiness', 'AUTHORING_PREFLIGHT_REQUIRED', {
+          authoringState,
+          reasonCode: (authoring as Record<string, unknown>).reasonCode ?? 'needs_authoring_preflight',
+          overrideAllowed: false,
+          action: (authoring as Record<string, unknown>).action
+            ?? 'Run deterministic authoring preflight against the current draft and persist the accepted identity.',
+        });
+      }
     }
 
     const readiness = await getSpecReadiness({
@@ -10898,6 +11457,7 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
     if (diagBundle.storyDeps) {
       specContent.mermaidDiagram = diagBundle.storyDeps.mermaid;
     }
+    await invalidateAuthoringForMaterialEdit(specContent, workspaceId, String(specId), 'dependencies_changed');
 
     // Write back
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
