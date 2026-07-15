@@ -5,12 +5,12 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { WifiOff } from 'lucide-react';
-import { BASE_URL } from '../lib/apiFetch';
+import { apiFetch } from '../lib/apiFetch';
 
-const HEALTH_URL = `${BASE_URL}/api/health`;
 const POLL_INTERVAL = 5_000; // 5s
+const HEALTH_TIMEOUT = 4_000;
 
 /**
  * Hook: polls /api/health + navigator.onLine.
@@ -18,18 +18,37 @@ const POLL_INTERVAL = 5_000; // 5s
  */
 export function useNetworkOffline(): boolean {
   const [offline, setOffline] = useState(false);
+  const inFlightRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const check = useCallback(async () => {
-    if (!navigator.onLine) { setOffline(true); return; }
+    if (inFlightRef.current) return;
+    if (!navigator.onLine) {
+      if (mountedRef.current) setOffline(true);
+      return;
+    }
+
+    inFlightRef.current = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), HEALTH_TIMEOUT);
     try {
-      const res = await fetch(HEALTH_URL, { method: 'GET', cache: 'no-store' });
-      setOffline(!res.ok);
+      await apiFetch<unknown>('/api/health', {
+        method: 'GET',
+        cache: 'no-store',
+        signal: controller.signal,
+        silent: true,
+      });
+      if (mountedRef.current) setOffline(false);
     } catch {
-      setOffline(true);
+      if (mountedRef.current) setOffline(true);
+    } finally {
+      window.clearTimeout(timeout);
+      inFlightRef.current = false;
     }
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     check();
     const id = setInterval(check, POLL_INTERVAL);
 
@@ -39,6 +58,7 @@ export function useNetworkOffline(): boolean {
     window.addEventListener('online', goOnline);
 
     return () => {
+      mountedRef.current = false;
       clearInterval(id);
       window.removeEventListener('offline', goOffline);
       window.removeEventListener('online', goOnline);

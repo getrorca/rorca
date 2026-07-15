@@ -5,11 +5,11 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 
 jest.mock('child_process');
 
-const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+const mockedSpawnSync = spawnSync as jest.MockedFunction<typeof spawnSync>;
 
 describe('pi-detector', () => {
   beforeEach(() => {
@@ -43,9 +43,7 @@ describe('pi-detector', () => {
 
   it('detectPi returns the missing-binary shape for a bad PI_BIN path', () => {
     process.env.PI_BIN = '/definitely/missing/pi';
-    mockedExecSync.mockImplementation(() => {
-      throw new Error('not found');
-    });
+    mockedSpawnSync.mockReturnValue({ status: 1, stdout: '', stderr: '' } as ReturnType<typeof spawnSync>);
 
     const { detectPi } = require('./pi-detector') as typeof import('./pi-detector');
 
@@ -54,5 +52,36 @@ describe('pi-detector', () => {
       piVersion: null,
       piBinPath: null,
     });
+  });
+
+  it('detectPiAvailability checks the configured executable without spawning Pi', () => {
+    process.env.PI_BIN = process.execPath;
+
+    const { detectPiAvailability } = require('./pi-detector') as typeof import('./pi-detector');
+
+    expect(detectPiAvailability()).toEqual({
+      piInstalled: true,
+      piVersion: null,
+      piBinPath: process.execPath,
+    });
+    expect(mockedSpawnSync).not.toHaveBeenCalled();
+  });
+
+  it('detectPi disables extensions and network startup during its version probe', () => {
+    process.env.PI_BIN = '/usr/local/bin/pi';
+    mockedSpawnSync.mockReturnValue({ status: 0, stdout: '0.80.6\n', stderr: '' } as ReturnType<typeof spawnSync>);
+
+    const { detectPi } = require('./pi-detector') as typeof import('./pi-detector');
+
+    expect(detectPi()).toEqual({
+      piInstalled: true,
+      piVersion: '0.80.6',
+      piBinPath: '/usr/local/bin/pi',
+    });
+    expect(mockedSpawnSync).toHaveBeenCalledWith(
+      '/usr/local/bin/pi',
+      ['--no-extensions', '--offline', '--version'],
+      expect.objectContaining({ timeout: 2_000, killSignal: 'SIGKILL' }),
+    );
   });
 });

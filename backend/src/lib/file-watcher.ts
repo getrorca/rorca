@@ -74,6 +74,14 @@ const IGNORED_PATTERNS = [
   '**/__pycache__/**',
   '**/target/**',  // Rust/Java build output
   '**/.rorca-results.jsonl',
+  // Runtime-generated files are not authoring context. Watching them creates a
+  // feedback loop: logs/capture state emit WAL events, which generate more
+  // runtime output and another change notification.
+  '**/.rorca/services/**',
+  '**/.rorca/capture/**',
+  '**/.rorca/traces/**',
+  '**/.rorca/progress/**',
+  '**/.rorca/run-state.json',
 ];
 
 // ─── Echo Suppression ────────────────────────────────────────────────────────
