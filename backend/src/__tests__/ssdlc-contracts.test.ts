@@ -179,24 +179,24 @@ describe('dispositions, statuses, and references', () => {
 
   test('derives reorder-stable requirement references and rejects normalized duplicates', () => {
     const baseInput = structuredClone(SSDLC_CONTRACT_FIXTURES[0].compilerInput);
-    baseInput.canonicalSpec.json.stories[0].acceptanceCriteria = [
+    baseInput.canonicalSpec.json.userStories[0].acceptanceCriteria = [
       'First criterion passes.',
       'Second criterion passes.',
     ];
     const reversedInput = structuredClone(baseInput);
-    reversedInput.canonicalSpec.json.stories[0].acceptanceCriteria.reverse();
+    reversedInput.canonicalSpec.json.userStories[0].acceptanceCriteria.reverse();
 
     const first = deriveAcceptanceCriterionReferences(baseInput)
       .map((item) => item.requirementReference).sort();
     const reversed = deriveAcceptanceCriterionReferences(reversedInput)
       .map((item) => item.requirementReference).sort();
     expect(reversed).toEqual(first);
-    expect(first[0]).toContain(`${baseInput.canonicalSpec.json.stories[0].id}:ac:sha256:`);
+    expect(first[0]).toContain(`${baseInput.canonicalSpec.json.userStories[0].id}:ac:sha256:`);
     expect(deriveRequirementReference('LFC-001', '  SAME   Criterion '))
       .toBe(deriveRequirementReference('LFC-001', 'same criterion'));
 
     const duplicateInput = structuredClone(baseInput);
-    duplicateInput.canonicalSpec.json.stories[0].acceptanceCriteria = ['Same criterion', ' same   criterion '];
+    duplicateInput.canonicalSpec.json.userStories[0].acceptanceCriteria = ['Same criterion', ' same   criterion '];
     const duplicate = LifecycleCompilerInputSchema.safeParse(duplicateInput);
     expect(duplicate.success).toBe(false);
     expect(duplicate.error?.issues[0].message).toContain('Duplicate acceptance criterion after normalization');

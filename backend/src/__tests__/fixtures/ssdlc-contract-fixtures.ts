@@ -127,7 +127,7 @@ function buildCompilerInput(profile: SsdlcFixtureProfile): LifecycleCompilerInpu
       contentHash: sha256(`canonical-spec:${profile}`),
       json: {
         title: `${profile} fixture`,
-        stories: [{
+        userStories: [{
           id: storyId,
           title: `Validate ${profile} lifecycle`,
           acceptanceCriteria: [fixtureCriterion(profile)],
@@ -137,17 +137,23 @@ function buildCompilerInput(profile: SsdlcFixtureProfile): LifecycleCompilerInpu
     ...optionalSources,
     compilerVersion: 'ssdlc-compiler-fixture-1',
     policyVersion: 'ssdlc-policy-fixture-1',
+    compiledAt: SSDLC_FIXTURE_TIME,
   });
 }
 
 function buildPlan(profile: SsdlcFixtureProfile, compilerInput: LifecycleCompilerInput): LifecyclePlan {
   const requirementReferences = deriveAcceptanceCriterionReferences(compilerInput)
     .map((criterion) => criterion.requirementReference);
-  const storyReferences = compilerInput.canonicalSpec.json.stories.map((story) => story.id);
+  const storyReferences = compilerInput.canonicalSpec.json.userStories.map((story) => story.id);
   const gates = CANONICAL_PHASE_IDS.map((phaseId) => ({
     gateId: `gate-${phaseId}`,
     phaseId,
     title: `${phaseId} fixture gate`,
+    evidenceKind: 'automated_validation' as const,
+    subjectRevisionRequirement: 'current_spec_revision' as const,
+    approvalRequirement: 'none' as const,
+    expirationPolicy: 'when_subject_changes' as const,
+    blockingSeverity: 'blocking' as const,
     evidenceRequirementIds: [`evidence-requirement-${phaseId}`],
     acceptedSubjectTypes: acceptedSubjectTypes(phaseId),
     downstreamSubjectCoherence: {

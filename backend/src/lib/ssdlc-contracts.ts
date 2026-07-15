@@ -84,12 +84,23 @@ export const RELEASE_SUBJECT_TYPES = [
 ] as const;
 
 export const EXECUTION_MODES = ['implementation', 'qa', 'journey'] as const;
+export const COMPILER_PROFILES = [
+  'docs-only',
+  'code-change',
+  'data-storage',
+  'security-sensitive',
+  'integration',
+  'release-operations',
+] as const;
+export const COMPILER_ANNOTATION_SOURCES = ['caller', 'pi', 'hermes'] as const;
 
 export const PhaseIdSchema = z.enum(CANONICAL_PHASE_IDS).describe('One of the 11 fixed SSDLC phase IDs.');
 export const PhaseDispositionValueSchema = z.enum(PHASE_DISPOSITIONS);
 export const EvaluatedStatusSchema = z.enum(EVALUATED_STATUSES);
 export const ReleaseSubjectTypeSchema = z.enum(RELEASE_SUBJECT_TYPES);
 export const ExecutionModeSchema = z.enum(EXECUTION_MODES);
+export const CompilerProfileSchema = z.enum(COMPILER_PROFILES);
+export const CompilerAnnotationSourceSchema = z.enum(COMPILER_ANNOTATION_SOURCES);
 
 const NonEmptyStringSchema = z.string().trim().min(1, 'Value must be non-empty');
 const StableIdSchema = z.string()
@@ -125,6 +136,7 @@ export type PhaseDispositionValue = z.infer<typeof PhaseDispositionValueSchema>;
 export type EvaluatedStatus = z.infer<typeof EvaluatedStatusSchema>;
 export type ReleaseSubjectType = z.infer<typeof ReleaseSubjectTypeSchema>;
 export type ExecutionMode = z.infer<typeof ExecutionModeSchema>;
+export type CompilerProfile = z.infer<typeof CompilerProfileSchema>;
 export type RequirementReference = z.infer<typeof RequirementReferenceSchema>;
 
 export function normalizeAcceptanceCriterionText(criterion: string): string {
@@ -150,14 +162,39 @@ export const AcceptanceCriterionSchema = z.union([
   }).strict(),
 ]);
 
+const SortedStringArraySchema = z.array(NonEmptyStringSchema)
+  .transform((items) => [...items].sort((left, right) => left.localeCompare(right)))
+  .default([]);
+
 export const CompilerStorySchema = z.object({
   id: StoryReferenceSchema,
   title: NonEmptyStringSchema,
+  description: NonEmptyStringSchema.optional(),
   acceptanceCriteria: z.array(AcceptanceCriterionSchema).min(1, 'A story needs at least one acceptance criterion'),
+  tags: SortedStringArraySchema,
+  fileHints: SortedStringArraySchema,
 }).passthrough();
 
+export const CompilerArchitectureDecisionSchema = z.object({
+  id: ArchitectureDecisionReferenceSchema,
+  title: NonEmptyStringSchema,
+}).passthrough();
+
+export const CompilerRequirementSchema = z.object({
+  id: ExplicitRequirementIdSchema,
+  text: NonEmptyStringSchema,
+  storyReferences: z.array(StoryReferenceSchema).default([]),
+  architectureDecisionReferences: z.array(ArchitectureDecisionReferenceSchema).default([]),
+}).strict();
+
 export const CanonicalSpecJsonSchema = z.object({
-  stories: z.array(CompilerStorySchema).min(1, 'Canonical spec JSON needs at least one story'),
+  userStories: z.array(CompilerStorySchema).min(1, 'Canonical spec JSON needs at least one userStory'),
+  tags: SortedStringArraySchema,
+  fileHints: SortedStringArraySchema,
+  contextSummary: z.object({ predictedFiles: SortedStringArraySchema }).passthrough().optional(),
+  architectureDecisions: z.array(CompilerArchitectureDecisionSchema).default([]),
+  requirements: z.array(CompilerRequirementSchema).default([]),
+  executionMode: ExecutionModeSchema.optional(),
 }).passthrough();
 
 export const CanonicalSpecSourceSchema = z.object({
@@ -210,7 +247,15 @@ export const COMPILER_OPTIONAL_SOURCE_DEFAULTS = Object.freeze({
   riskAssignments: [] as const,
   ownerAssignments: [] as const,
   policyAnnotations: [] as const,
+  compilerAnnotations: [] as const,
 });
+
+/** Annotation payloads remain unknown here so each proposal can be accepted or rejected independently. */
+export const CompilerAnnotationEnvelopeSchema = z.object({
+  annotationId: StableIdSchema,
+  source: CompilerAnnotationSourceSchema,
+  payload: z.unknown(),
+}).strict();
 
 export const LifecycleCompilerInputSchema = z.object({
   schemaVersion: z.literal(SSDLC_SCHEMA_VERSION),
@@ -220,17 +265,19 @@ export const LifecycleCompilerInputSchema = z.object({
   riskAssignments: sortedDefaultArray(RiskAssignmentSchema, 'assignmentId'),
   ownerAssignments: sortedDefaultArray(OwnerAssignmentSchema, 'assignmentId'),
   policyAnnotations: sortedDefaultArray(PolicyAnnotationSchema, 'annotationId'),
+  compilerAnnotations: z.array(CompilerAnnotationEnvelopeSchema).default([]),
   compilerVersion: NonEmptyStringSchema,
   policyVersion: NonEmptyStringSchema,
+  compiledAt: IsoTimestampSchema.describe('Caller-owned timestamp copied by the pure compiler.'),
 }).strict().superRefine((input, context) => {
   const storyIds = new Set<string>();
   const explicitRequirementIds = new Set<string>();
 
-  input.canonicalSpec.json.stories.forEach((story, storyIndex) => {
+  input.canonicalSpec.json.userStories.forEach((story, storyIndex) => {
     if (storyIds.has(story.id)) {
       context.addIssue({
         code: 'custom',
-        path: ['canonicalSpec', 'json', 'stories', storyIndex, 'id'],
+        path: ['canonicalSpec', 'json', 'userStories', storyIndex, 'id'],
         message: `Duplicate story reference ${story.id}`,
       });
     }
@@ -243,7 +290,7 @@ export const LifecycleCompilerInputSchema = z.object({
       if (normalizedCriteria.has(normalized)) {
         context.addIssue({
           code: 'custom',
-          path: ['canonicalSpec', 'json', 'stories', storyIndex, 'acceptanceCriteria', criterionIndex],
+          path: ['canonicalSpec', 'json', 'userStories', storyIndex, 'acceptanceCriteria', criterionIndex],
           message: `Duplicate acceptance criterion after normalization in story ${story.id}`,
         });
       }
@@ -253,13 +300,36 @@ export const LifecycleCompilerInputSchema = z.object({
         if (explicitRequirementIds.has(criterion.requirementId)) {
           context.addIssue({
             code: 'custom',
-            path: ['canonicalSpec', 'json', 'stories', storyIndex, 'acceptanceCriteria', criterionIndex, 'requirementId'],
+            path: ['canonicalSpec', 'json', 'userStories', storyIndex, 'acceptanceCriteria', criterionIndex, 'requirementId'],
             message: `Duplicate explicit requirement ID ${criterion.requirementId}`,
           });
         }
         explicitRequirementIds.add(criterion.requirementId);
       }
     });
+  });
+
+  const architectureDecisionIds = new Set<string>();
+  input.canonicalSpec.json.architectureDecisions.forEach((decision, decisionIndex) => {
+    if (architectureDecisionIds.has(decision.id)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['canonicalSpec', 'json', 'architectureDecisions', decisionIndex, 'id'],
+        message: `Duplicate architecture decision reference ${decision.id}`,
+      });
+    }
+    architectureDecisionIds.add(decision.id);
+  });
+
+  input.canonicalSpec.json.requirements.forEach((requirement, requirementIndex) => {
+    if (explicitRequirementIds.has(requirement.id)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['canonicalSpec', 'json', 'requirements', requirementIndex, 'id'],
+        message: `Duplicate explicit requirement ID ${requirement.id}`,
+      });
+    }
+    explicitRequirementIds.add(requirement.id);
   });
 
   const workspaceSources: Array<[string, Array<{ workspaceId: string }>]> = [
@@ -298,7 +368,7 @@ export function deriveAcceptanceCriterionReferences(
   input: z.input<typeof LifecycleCompilerInputSchema>,
 ): CompiledAcceptanceCriterionReference[] {
   const parsed = LifecycleCompilerInputSchema.parse(input);
-  return parsed.canonicalSpec.json.stories.flatMap((story) => story.acceptanceCriteria.map((criterion) => {
+  return parsed.canonicalSpec.json.userStories.flatMap((story) => story.acceptanceCriteria.map((criterion) => {
     const criterionText = typeof criterion === 'string' ? criterion : criterion.text;
     return {
       storyReference: story.id,
@@ -331,21 +401,27 @@ export const PhaseDispositionSchema = z.object({
         message: 'Deferred disposition requires a non-empty expiry policy',
       });
     }
-  } else {
+  } else if (value.disposition === 'required') {
     if (value.approvalReference !== undefined) {
       context.addIssue({
         code: 'custom',
         path: ['approvalReference'],
-        message: `approvalReference is only valid for deferred disposition, not ${value.disposition}`,
+        message: 'approvalReference is not valid for a required disposition',
       });
     }
     if (value.expiryPolicy !== undefined) {
       context.addIssue({
         code: 'custom',
         path: ['expiryPolicy'],
-        message: `expiryPolicy is only valid for deferred disposition, not ${value.disposition}`,
+        message: 'expiryPolicy is not valid for a required disposition',
       });
     }
+  } else if (value.expiryPolicy !== undefined && !value.approvalReference) {
+    context.addIssue({
+      code: 'custom',
+      path: ['expiryPolicy'],
+      message: 'A not-applicable expiry policy requires an approval reference',
+    });
   }
 });
 
@@ -540,10 +616,42 @@ export const EvidenceRequirementSchema = z.object({
   minimumTrustLevel: EvidenceTrustLevelSchema,
 }).strict();
 
+export const GateEvidenceKindSchema = z.enum([
+  'spec_review',
+  'architecture_review',
+  'change_review',
+  'automated_validation',
+  'security_assessment',
+  'deployment_verification',
+  'qa_assessment',
+  'merge_authorization',
+  'production_verification',
+  'learning_review',
+]);
+export const SubjectRevisionRequirementSchema = z.enum([
+  'current_spec_revision',
+  'current_commit',
+  'current_artifact',
+  'current_deployment',
+]);
+export const GateApprovalRequirementSchema = z.enum(['none', 'policy', 'human']);
+export const GateExpirationPolicySchema = z.enum([
+  'when_spec_changes',
+  'when_subject_changes',
+  'after_30_days',
+  'never',
+]);
+export const GateBlockingSeveritySchema = z.enum(['advisory', 'blocking', 'release_blocking']);
+
 export const GateDefinitionSchema = z.object({
   gateId: StableIdSchema,
   phaseId: PhaseIdSchema,
   title: NonEmptyStringSchema,
+  evidenceKind: GateEvidenceKindSchema,
+  subjectRevisionRequirement: SubjectRevisionRequirementSchema,
+  approvalRequirement: GateApprovalRequirementSchema,
+  expirationPolicy: GateExpirationPolicySchema,
+  blockingSeverity: GateBlockingSeveritySchema,
   evidenceRequirementIds: z.array(StableIdSchema).min(1, 'A gate needs at least one evidence requirement'),
   acceptedSubjectTypes: z.array(ReleaseSubjectTypeSchema)
     .min(1, 'A gate must declare accepted release-subject types')

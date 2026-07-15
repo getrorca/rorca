@@ -1,0 +1,41 @@
+{
+  "name": "security-sensitive backend change",
+  "input": {
+    "schemaVersion": 1,
+    "workspaceId": "workspace-security",
+    "canonicalSpec": {
+      "specId": "fixture-security-sensitive",
+      "version": "21",
+      "contentHash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "json": {
+        "title": "Harden authorization and secret redaction",
+        "tags": ["security", "auth"],
+        "contextSummary": { "predictedFiles": ["backend/src/lib/auth-utils.ts"] },
+        "userStories": [{
+          "id": "FIX-SECURITY-001",
+          "title": "Reject cross-tenant disclosure",
+          "description": "Harden authorization and redact secrets.",
+          "acceptanceCriteria": [{ "text": "Authorization and redaction checks reject cross-tenant secret disclosure.", "requirementId": "SEC-101" }],
+          "tags": ["tenant-isolation"],
+          "fileHints": ["backend/src/routes/security.ts"]
+        }]
+      }
+    },
+    "workspaceTags": [{ "workspaceId": "workspace-security", "tag": "security-sensitive" }],
+    "riskAssignments": [{ "workspaceId": "workspace-security", "assignmentId": "risk-security", "scopeReference": "FIX-SECURITY-001", "risk": "critical", "rationale": "Authorization boundary changes." }],
+    "ownerAssignments": [{ "workspaceId": "workspace-security", "assignmentId": "owner-security", "scopeReference": "FIX-SECURITY-001", "ownerReference": "owner-security" }],
+    "policyAnnotations": [{ "workspaceId": "workspace-security", "annotationId": "policy-security", "scopeReference": "FIX-SECURITY-001", "policyReference": "policy-security-review", "value": true }],
+    "compilerAnnotations": [],
+    "compilerVersion": "ssdlc-plan-compiler-1",
+    "policyVersion": "fixture-policy-1",
+    "compiledAt": "2026-06-15T12:00:00.000Z"
+  },
+  "expected": {
+    "profiles": ["code-change", "security-sensitive"],
+    "notApplicablePhases": [],
+    "capabilityHint": null,
+    "acceptedAnnotations": [],
+    "rejectedAnnotations": [],
+    "defaultedInputs": []
+  }
+}
