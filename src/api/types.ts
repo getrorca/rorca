@@ -58,6 +58,8 @@ export interface ArchiveSpec {
 }
 
 export interface SpecDetail {
+  id: string;
+  slug: string;
   title?: string;
   userStories?: Story[];
   stories?: Story[];

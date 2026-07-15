@@ -953,9 +953,27 @@ const ExplicitDraftReasoningSchema = z.object({
   effort: z.string().optional(),
 });
 
+const GenesisProvenanceSchema = z.object({
+  packageId: z.string().min(1).max(128),
+  packageHash: z.string().regex(/^sha256:[a-f0-9]{64}$/, 'packageHash must be a sha256 hash'),
+  contentHash: z.string().regex(/^sha256:[a-f0-9]{64}$/, 'contentHash must be a sha256 hash'),
+  canonicalStore: z.enum([
+    'pglite+genesis-vault',
+    'pglite+pgvector+genesis-vault',
+    'pglite+vault',
+    'genesis-pglite-and-local-vault',
+  ]),
+  citationSummary: z.string().min(1).max(512),
+  warningCount: z.number().int().nonnegative(),
+  skippedEvidenceCount: z.number().int().nonnegative(),
+  freshnessTs: z.string().datetime({ offset: true }),
+  bridgeVersion: z.string().min(1).max(64),
+}).passthrough();
+
 const ExplicitDraftContextUsedSchema = z.object({
   text: z.string(),
   meta: z.record(z.string(), z.unknown()),
+  genesis: GenesisProvenanceSchema.optional(),
 });
 
 const ExplicitDraftDirectionLayersSchema = z.object({
@@ -995,6 +1013,7 @@ const ExplicitDraftContextSummarySchema = z.object({
     latencyMs: z.number().nonnegative(),
   }).optional(),
   predictedFiles: z.array(z.string()).optional(),
+  genesis: GenesisProvenanceSchema.optional(),
 }).passthrough();
 
 const PersistSpecDraftSchema = z.object({
@@ -1625,6 +1644,7 @@ interface ForgeContextBundle {
 }
 
 interface ForgePersistResult {
+  id: string;
   slug: string;
   title: string;
   status: 'pending';
@@ -1802,6 +1822,7 @@ async function persistExplicitDraftInternal(
   });
 
   return {
+    id: writeResult.id,
     slug,
     title,
     status: 'pending',
@@ -4568,9 +4589,14 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *                   meta:
  *                     type: object
  *                     additionalProperties: true
+ *                   genesis:
+ *                     $ref: '#/components/schemas/GenesisProvenance'
  *               contextSummary:
  *                 type: object
  *                 description: Optional canonical context summary used by the Spec Detail Context tab (direction layers, retrieval metrics, token estimates, etc.).
+ *                 properties:
+ *                   genesis:
+ *                     $ref: '#/components/schemas/GenesisProvenance'
  *                 additionalProperties: true
  *               postSave:
  *                 oneOf:
@@ -4600,6 +4626,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *             schema:
  *               type: object
  *               properties:
+ *                 id: { type: string, description: Canonical filename identity; always equal to slug }
  *                 slug: { type: string }
  *                 title: { type: string }
  *                 postSave:
@@ -8678,7 +8705,8 @@ router.get('/:specId', async (req: Request, res: Response) => {
     }
 
     const stories: any[] = content.userStories ?? content.stories ?? [];
-    res.json({ ...content, _status: specStatus, readinessPercent: computeReadiness(stories) });
+    // The filename is canonical and also repairs identity for legacy spec files.
+    res.json({ ...content, id: specId, slug: specId, _status: specStatus, readinessPercent: computeReadiness(stories) });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Get');
   }

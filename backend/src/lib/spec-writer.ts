@@ -34,6 +34,19 @@ export interface GeneratedStory {
   suggestedReviewers?: string[];
 }
 
+export interface GenesisProvenance {
+  packageId: string;
+  packageHash: string;
+  contentHash: string;
+  canonicalStore: 'pglite+genesis-vault' | 'pglite+pgvector+genesis-vault' | 'pglite+vault' | 'genesis-pglite-and-local-vault';
+  citationSummary: string;
+  warningCount: number;
+  skippedEvidenceCount: number;
+  freshnessTs: string;
+  bridgeVersion: string;
+  [key: string]: unknown;
+}
+
 export interface ContextUsedMeta {
   standards: boolean;     // L1 was present
   conventions: boolean;   // L2 was present
@@ -47,6 +60,7 @@ export interface ContextUsedMeta {
 export interface ContextUsed {
   text: string;
   meta: ContextUsedMeta;
+  genesis?: GenesisProvenance;
 }
 
 export interface SpecReasoning {
@@ -69,6 +83,7 @@ export interface GeneratedSpec {
 }
 
 export interface WriteResult {
+  id: string;
   specPath: string;
   diagramsPath: string;
 }
@@ -77,6 +92,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
   const pendingDir = path.join(workspacePath, 'forge', 'specs', 'pending');
   const specPath = path.join(pendingDir, `${spec.slug}.json`);
   const diagramsPath = path.join(pendingDir, `${spec.slug}-diagrams.md`);
+  const canonicalSlug = path.basename(specPath, '.json');
 
   if (fs.existsSync(specPath)) {
     throw new Error(`Spec '${spec.slug}' already exists at ${specPath}. Delete it first or use a different title.`);
@@ -86,6 +102,8 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
 
   // Write spec in run-loop.sh compatible format
   const specJson: Record<string, unknown> = {
+    id: canonicalSlug,
+    slug: canonicalSlug,
     title: spec.title,
     generatedAt: new Date().toISOString(),
     ...(spec.model ? { model: spec.model } : {}),
@@ -120,5 +138,5 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
   const diagramsMd = `# ${spec.title} — Diagrams\n\nGenerated: ${new Date().toISOString()}\n\n${diagramSections}\n`;
   fs.writeFileSync(diagramsPath, diagramsMd, 'utf8');
 
-  return { specPath, diagramsPath };
+  return { id: canonicalSlug, specPath, diagramsPath };
 }
