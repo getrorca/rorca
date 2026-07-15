@@ -56,6 +56,7 @@ export type CaptureFetch = typeof fetch;
 export type CaptureApiClient = {
   get<T>(pathname: string): Promise<T>;
   post<T>(pathname: string, body: unknown): Promise<T>;
+  patch<T>(pathname: string, body: unknown): Promise<T>;
 };
 
 export type CaptureSubmitOptions = {
@@ -242,6 +243,9 @@ export function createApiClient(config: Pick<CaptureConfig, "apiUrl">, options: 
     post<T>(pathname: string, body: unknown) {
       return request<T>(pathname, { method: "POST", body: JSON.stringify(body) });
     },
+    patch<T>(pathname: string, body: unknown) {
+      return request<T>(pathname, { method: "PATCH", body: JSON.stringify(body) });
+    },
   };
 }
 
@@ -256,6 +260,9 @@ export function createCaptureClient(config: CaptureConfig, options: {
     get: api.get,
     post<T>(pathname: string, body: unknown) {
       return api.post<T>(pathname, normalizeSubmissionPayload(config, body));
+    },
+    patch<T>(pathname: string, body: unknown) {
+      return api.patch<T>(pathname, normalizeSubmissionPayload(config, body));
     },
     checkStatus() {
       return checkCaptureStatus(config, options);

@@ -25,6 +25,7 @@ import {
   type ReusableCaptureClient,
 } from "./api.js";
 import { resolveCaptureConfig, type CaptureConfig, type CaptureConfigValues, type CaptureMode } from "./config.js";
+import { enqueueCaptureQueueEntry } from "./queue.js";
 import { buildCaptureStatus, formatStatusText, MVP_COMMANDS } from "./status.js";
 import {
   DEFAULT_DAEMON_INTERVAL_MS,
@@ -61,6 +62,15 @@ import {
   parsePrIngestInput,
 } from "./pr-ingest.js";
 import {
+  buildShellCaptureEnvelope,
+  parseCapturePolicyMode,
+  runCaptureServiceAction,
+  setupAlwaysOnCapture,
+  teardownAlwaysOnCapture,
+  updateLocalCapturePause,
+  type CaptureServiceAction,
+} from "./always-on.js";
+import {
   DUCKBRAIN_IMPORT_ENDPOINT,
   DUCKBRAIN_IMPORT_EVENT_TYPE,
   importDuckBrainJsonlFile,
@@ -75,6 +85,11 @@ Usage:
   rorca capture <command> [options]   # thin alias that shells out to rorca-capture
 
 MVP commands:
+  setup --always-on --policy <mode>  Install reversible policy/shell/IDE/agent/service artifacts
+  teardown [--all]       Remove only Rorca-managed always-on artifacts
+  pause | resume         Enforce the workspace capture privacy switch locally and through the API
+  service <action>       install|start|stop|restart|status|uninstall managed user service
+  emit shell             Submit policy-redacted shell lifecycle metadata
   remember <text>        Create a pending manual memory candidate through POST /api/memory/candidates
   import-duckbrain <path> Import selected DuckBrain JSONL memories as pending memory candidates
   ingest-pr              CI mode: submit a pending PR merge/release/hotfix memory candidate
@@ -400,6 +415,26 @@ export async function runCli(argv = process.argv.slice(2), deps: CliDeps = {}): 
       return await runStatus(parsed, deps, io);
     }
 
+    if (parsed.command === "setup") {
+      return await runAlwaysOnSetup(parsed, deps, io);
+    }
+
+    if (parsed.command === "teardown") {
+      return await runAlwaysOnTeardown(parsed, deps, io);
+    }
+
+    if (parsed.command === "pause" || parsed.command === "resume") {
+      return await runCapturePrivacyControl(parsed.command, parsed, deps, io);
+    }
+
+    if (parsed.command === "service") {
+      return await runManagedServiceCommand(parsed, deps, io);
+    }
+
+    if (parsed.command === "emit") {
+      return await runEmitCommand(parsed, deps, io);
+    }
+
     if (parsed.command === "install-hooks") {
       return await runInstallHooks(parsed, deps, io);
     }
@@ -531,6 +566,118 @@ function resolveCliTokenPath(deps: CliDeps): string | undefined {
 
 function resolveCliHomeDir(deps: CliDeps): string | undefined {
   return (deps.env ?? process.env).HOME;
+}
+
+function commandOption(args: string[], flag: string): string | undefined {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function hasCommandFlag(args: string[], flag: string): boolean {
+  return args.includes(flag);
+}
+
+async function runAlwaysOnSetup(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
+  if (!hasCommandFlag(parsed.rest, "--always-on")) {
+    throw new Error("setup requires --always-on to avoid surprise capture configuration.");
+  }
+  const policyValue = commandOption(parsed.rest, "--policy");
+  if (!policyValue) throw new Error("setup requires an explicit --policy choice.");
+  const policyMode = parseCapturePolicyMode(policyValue);
+  const runtime = await resolveRuntime(parsed, deps);
+  const captureDir = path.join(runtime.workspace.path, ".rorca", "capture");
+  const queuePath = path.join(captureDir, "queue");
+
+  await runtime.client.post("/api/context-capture/bootstrap/verify", {
+    workspaceId: runtime.workspace.id,
+    workspacePath: runtime.workspace.path,
+    queuePath,
+    redactionConfigPath: path.join(captureDir, "redaction.json"),
+    captureIgnorePath: path.join(runtime.workspace.path, ".rorca-captureignore"),
+  });
+
+  const result = setupAlwaysOnCapture({
+    workspace: runtime.workspace,
+    apiUrl: runtime.config.apiUrl,
+    policyMode,
+    dryRun: parsed.dryRun,
+  });
+  let hook: HookInstallResult | undefined;
+  if (!parsed.dryRun) {
+    await runtime.client.patch(`/api/context-capture/${encodeURIComponent(runtime.workspace.id)}/policy`, {
+      policyMode,
+      activeIntegrations: { repoDaemon: true, gitHook: true, shellIntegration: true, vscodeExtension: true, agentAdapter: true, mcpSlashCommand: true },
+    });
+    hook = installHooks(runtime.config, runtime.workspace, { strict: false });
+  }
+  io.stdout.write(`${JSON.stringify({ ...result, hook }, null, 2)}\n`);
+  return result.ok ? 0 : 1;
+}
+
+async function runAlwaysOnTeardown(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
+  const config = resolveCaptureConfig({ cwd: deps.cwd, env: deps.env, overrides: parsed.overrides, gitRoot: deps.gitRoot });
+  const result = teardownAlwaysOnCapture(config.repoPath, { dryRun: parsed.dryRun, all: hasCommandFlag(parsed.rest, "--all") });
+  io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 0;
+}
+
+async function runCapturePrivacyControl(action: "pause" | "resume", parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
+  const runtime = await resolveRuntime(parsed, deps);
+  const paused = action === "pause";
+  updateLocalCapturePause(runtime.workspace.path, paused);
+  const response = await runtime.client.post(`/api/context-capture/${encodeURIComponent(runtime.workspace.id)}/${action}`, {});
+  io.stdout.write(parsed.json ? `${JSON.stringify(response, null, 2)}\n` : `Rorca capture ${action}: ok\n`);
+  return 0;
+}
+
+async function runManagedServiceCommand(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
+  const action = parsed.rest.find((item) => !item.startsWith("--")) as CaptureServiceAction | undefined;
+  if (!action || !["install", "start", "stop", "restart", "status", "uninstall"].includes(action)) {
+    throw new Error("service requires install|start|stop|restart|status|uninstall.");
+  }
+  const runtime = await resolveRuntime(parsed, deps);
+  const result = runCaptureServiceAction({
+    action,
+    workspace: runtime.workspace,
+    command: process.argv[1] || "rorca-capture",
+    apiUrl: runtime.config.apiUrl,
+    dryRun: parsed.dryRun,
+  });
+  io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return result.ok === false ? 1 : 0;
+}
+
+async function runEmitCommand(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {
+  if (parsed.rest[0] !== "shell") throw new Error("emit currently supports only `emit shell`.");
+  const runtime = await resolveRuntime(parsed, deps);
+  const command = commandOption(parsed.rest, "--command") ?? "";
+  const phase = commandOption(parsed.rest, "--phase") === "start" ? "start" : "end";
+  const policyMode = parseCapturePolicyMode(commandOption(parsed.rest, "--policy") ?? (deps.env ?? process.env).RORCA_CAPTURE_POLICY ?? "metadata-only");
+  const exitCodeValue = commandOption(parsed.rest, "--exit-code");
+  const durationValue = commandOption(parsed.rest, "--duration-ms");
+  const envelope = buildShellCaptureEnvelope({
+    workspace: runtime.workspace,
+    command,
+    phase,
+    policyMode,
+    exitCode: exitCodeValue == null ? null : Number(exitCodeValue),
+    durationMs: durationValue == null ? null : Number(durationValue),
+  });
+  if (!envelope) return 0;
+  try {
+    const response = await runtime.client.post("/api/context-capture/events", envelope);
+    if (parsed.json) io.stdout.write(`${JSON.stringify(response, null, 2)}\n`);
+  } catch (error) {
+    const queued = enqueueCaptureQueueEntry(runtime.config.queuePath, runtime.config, {
+      operation: "context-event",
+      endpoint: "/api/context-capture/events",
+      payload: envelope,
+      eventType: "shell_command",
+      contentFingerprint: String((envelope.payload as Record<string, unknown>)?.command_hash ?? "shell"),
+    });
+    if (parsed.json) io.stdout.write(`${JSON.stringify({ queued: true, duplicate: queued.duplicate, key: queued.entry.key }, null, 2)}\n`);
+  }
+  return 0;
 }
 
 async function runStatus(parsed: ParsedArgs, deps: CliDeps, io: CliIO): Promise<number> {

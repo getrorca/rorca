@@ -183,11 +183,13 @@ export async function runCaptureDaemon(options: CaptureDaemonLoopOptions): Promi
   if (last) {
     const status = readCaptureDaemonStatus(last.workspaceId, options.homeDir);
     if (status) {
-      writeCaptureDaemonStatus(last.workspaceId, {
+      const stoppedStatus = {
         ...status,
         running: false,
         last_seen: new Date().toISOString(),
-      }, options.homeDir);
+      };
+      writeCaptureDaemonStatus(last.workspaceId, stoppedStatus, options.homeDir);
+      writeWorkspaceCaptureStatus(options.config.repoPath, stoppedStatus);
     }
   }
   return last;
@@ -252,6 +254,7 @@ export async function runDaemonScanOnce(options: CaptureDaemonOptions): Promise<
   if (!dryRun) {
     writeCaptureDaemonPid(workspaceId, process.pid, options.homeDir);
     writeCaptureDaemonStatus(workspaceId, baseStatus, options.homeDir);
+    writeWorkspaceCaptureStatus(options.config.repoPath, baseStatus);
   }
 
   let lastError: string | undefined;
@@ -349,6 +352,7 @@ export async function runDaemonScanOnce(options: CaptureDaemonOptions): Promise<
   };
   if (!dryRun) {
     writeCaptureDaemonStatus(workspaceId, finalStatus, options.homeDir);
+    writeWorkspaceCaptureStatus(options.config.repoPath, finalStatus);
   }
 
   return {
@@ -486,6 +490,27 @@ export function readCaptureDaemonStatus(workspaceId: string, homeDir?: string): 
 
 export function writeCaptureDaemonStatus(workspaceId: string, status: CaptureDaemonStatusFile, homeDir?: string): void {
   writeJsonAtomic(getCaptureDaemonStatusPath(workspaceId, homeDir), status);
+}
+
+export function getWorkspaceCaptureStatusPath(repoPath: string): string {
+  return path.join(path.resolve(repoPath), ".rorca", "capture", "status.json");
+}
+
+function writeWorkspaceCaptureStatus(repoPath: string, status: CaptureDaemonStatusFile): void {
+  writeJsonAtomic(getWorkspaceCaptureStatusPath(repoPath), {
+    ...status,
+    processHealth: { manager: "local", running: status.running, pid: status.pid },
+    lastFlush: status.lastFlush?.finishedAt ?? null,
+    lastScan: status.lastScan?.finishedAt ?? null,
+    backoffMs: status.backoff.delayMs ?? 0,
+    resourceBounds: {
+      scanIntervalMs: status.intervalMs,
+      maxCommitsPerScan: status.maxCommitsPerScan,
+      maxConcurrency: DEFAULT_DAEMON_MAX_CONCURRENT_SUBMISSIONS,
+      queueWarnSize: null,
+      queueMaxSize: null,
+    },
+  });
 }
 
 export function stopCaptureDaemon(workspaceId: string, homeDir?: string): StopCaptureDaemonResult {
