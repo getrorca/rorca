@@ -89,7 +89,7 @@ Command: `cd backend && npm run soak:pty`, with both database URLs verified as `
 | `cd backend && npm run lint` | PASS — 0 errors, 41 warnings |
 | `npm run check:contract` | PASS against merge base; contract 2.0.0 |
 | `npm run lint:tier` | PASS — 73 public, 28 auth, 17 paid, 30 admin; 69 stable public API routes |
-| `npm run check:licenses` | PASS — 893 source files |
+| `npm run check:licenses` | PASS — 894 source files |
 | `npm run check:license-boundaries` | PASS/skipped by single Apache-2.0 repository policy |
 | `npm run split:check -- --allow-review` | PASS — 54 shareable, 3 review, 0 blocked, 0 unknown |
 | `npm audit --omit=dev --audit-level=high` | PASS — 0 vulnerabilities |
