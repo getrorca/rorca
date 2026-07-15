@@ -11,20 +11,22 @@
     "test": "node --max-old-space-size=8192 node_modules/.bin/jest",
     "test:golden": "node scripts/run-golden-tests.js",
     "test:golden:update": "node scripts/run-golden-tests.js --update-golden",
+    "soak:pty": "tsx scripts/pty-v2-soak.ts",
     "mcp": "npx tsx src/mcp/server.ts",
     "lint": "npx eslint src/",
     "worker": "npx tsx src/worker-supervisor.ts",
-    "postinstall": "node -e \"try{require('node-pty')}catch(e){console.warn('⚠️  node-pty native module not built. Run: npm rebuild node-pty')}\""
+    "verify:node-pty": "node scripts/verify-node-pty-install.js",
+    "postinstall": "npm run verify:node-pty"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "@playwright/mcp": "^0.0.29",
+    "@playwright/mcp": "^0.0.78",
     "@types/helmet": "^0.0.48",
     "@types/multer": "^2.0.0",
     "@types/ws": "^8.18.1",
     "chokidar": "^5.0.0",
-    "chrome-devtools-mcp": "^0.21.0",
+    "chrome-devtools-mcp": "^1.6.0",
     "commander": "^12.1.0",
     "cors": "^2.8.5",
     "cron-parser": "^5.5.0",
@@ -39,7 +41,7 @@
     "micromatch": "^4.0.8",
     "multer": "^2.0.2",
     "node-pty": "^1.1.0",
-    "nodemailer": "^6.10.1",
+    "nodemailer": "^9.0.3",
     "openai": "^6.24.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
@@ -78,7 +80,7 @@
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
-    "tsx": "^4.19.3",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.3"
   }
 }

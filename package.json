@@ -35,7 +35,7 @@
     "changelog": "npx tsx scripts/generate-changelog.ts",
     "self-register": "npx tsx forge/self-register.ts",
     "start": "node cli.js start",
-    "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true; cd .. && node --input-type=module -e \"import { existsSync, readdirSync, statSync, chmodSync } from 'node:fs'; import { join } from 'node:path'; const roots=['backend/node_modules/node-pty/prebuilds','backend/node_modules/node-pty/build/Release']; const walk=(dir)=>{if(!existsSync(dir)) return; for(const entry of readdirSync(dir)){const file=join(dir,entry); if(statSync(file).isDirectory()) walk(file); else if(entry==='spawn-helper') {try{chmodSync(file,0o755)}catch{}}}}; roots.forEach(walk);\"",
+    "postinstall": "npm --prefix backend install --omit=dev --ignore-scripts && npm --prefix backend run verify:node-pty",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build",
     "test:e2e:first-run": "npx tsx test/e2e/first-run.test.ts",
@@ -63,6 +63,7 @@
     "backend/src/db/pg-migrations/",
     "backend/package.json",
     "backend/package-lock.json",
+    "backend/scripts/verify-node-pty-install.js",
     "packages/rorca-pi-extension/",
     "forge/run-loop.sh",
     "forge/self-register.ts",
@@ -70,6 +71,9 @@
     "README.md",
     "LICENSE"
   ],
+  "overrides": {
+    "dompurify": "3.4.12"
+  },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
     "@modelcontextprotocol/client": "^2.0.0-alpha.2",
@@ -90,6 +94,7 @@
     "mermaid": "^11.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
+    "react-is": "^19.2.5",
     "react-router-dom": "^7.14.2",
     "recharts": "^3.8.1"
   },

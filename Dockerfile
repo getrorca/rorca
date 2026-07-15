@@ -19,8 +19,8 @@ COPY . .
 # Build frontend (Vite → dist/)
 RUN npx vite build
 
-# Build backend (tsc → backend/dist/)
-RUN cd backend && (npx tsc --noEmitOnError false || true)
+# Build backend (tsc → backend/dist/); fail the image build on compiler errors.
+RUN cd backend && npx tsc
 
 # Prune dev dependencies from backend node_modules
 RUN cd backend && npm prune --omit=dev
