@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import * as vscode from "vscode";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";

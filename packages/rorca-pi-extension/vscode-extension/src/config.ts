@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 export type CapturePolicyMode = "off" | "metadata-only" | "command-summary" | "explicit-transcript-import";
 
 export type RorcaCaptureConfig = {

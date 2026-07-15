@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { describe, expect, test } from "vitest";
 import { RORCA_COMMANDS, RORCA_COMMAND_TITLES, registerRorcaCommands, submitRememberSelection } from "../src/commands.js";
 import type { RorcaCaptureClient } from "../src/client.js";

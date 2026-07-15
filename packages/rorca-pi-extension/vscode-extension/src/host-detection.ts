@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 

@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import type { RorcaCaptureClient, MemoryCandidate } from "./client.js";
 import { applyMemoryCandidateGovernance } from "./client.js";
 import type { RorcaCaptureConfig } from "./config.js";

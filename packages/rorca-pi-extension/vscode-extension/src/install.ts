@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #!/usr/bin/env node
 import { installExtensionOnDetectedHosts } from "./host-detection.js";
 
