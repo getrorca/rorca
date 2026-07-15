@@ -40,7 +40,6 @@ import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
-import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
@@ -280,65 +279,6 @@ function buildExecutionReadinessSummary(
     riskyStoryCount: stories.filter(story => story.grade === 'weak').length,
     stories,
   };
-}
-
-// ─── Fallback Result Syncer ──────────────────────────────────────────────────
-// When execution-engine.ts / run-loop.ts can't POST results to the backend
-// (backend down, restart, port mismatch), they write to .rorca-results.jsonl.
-// This function reads that file and replays entries into the DB.
-
-async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
-  const entries = readFallbackResults(cwd);
-  if (entries.length === 0) return 0;
-
-  let synced = 0;
-  for (const entry of entries) {
-    try {
-      if (entry.type === 'wal') {
-        // Replay WAL event directly into DB
-        const p = entry.payload as Record<string, unknown>;
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [p.event_type ?? entry.status,
-          p.workspace_id ?? workspaceId,
-          p.spec_id ?? null,
-          p.story_id ?? entry.storyId,
-          JSON.stringify(p.payload ?? p),]);
-        broadcastAll(walEvent!);
-        synced++;
-      } else if (entry.type === 'story_result') {
-        // Replay story_result into DB
-        const p = entry.payload as Record<string, unknown>;
-        const runId = (p.runId as number) ?? entry.runId;
-        const storyId = (p.storyId as string) ?? entry.storyId;
-        const status = (p.status as string) ?? entry.status;
-
-        if (!runId || !storyId || !status) continue;
-
-        // Check if already synced (idempotent — don't double-insert)
-        const existing = await queryOne('SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2', [runId, storyId]);
-
-        if (!existing) {
-          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
-            ? JSON.stringify(p.activeSkills)
-            : null;
-          await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills)
-             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10)`, [runId, storyId, status,
-            (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
-            (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
-            (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
-            activeSkillsVal,]);
-        }
-        synced++;
-      }
-    } catch (err: any) {
-      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
-    }
-  }
-
-  if (synced > 0) {
-    deleteFallbackFile(cwd);
-    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
-  }
-  return synced;
 }
 
 // All Claude Code env vars that block nested invocation (same as llm-client.ts)
@@ -6450,12 +6390,13 @@ router.post('/story-result', async (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills,
+      logPath, blockedBy, activeSkills, idempotencyKey,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
       inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
+      idempotencyKey?: string;
     };
 
     if (!runId || !storyId || !status) {
@@ -6468,21 +6409,25 @@ router.post('/story-result', async (req: Request, res: Response) => {
       return;
     }
 
-    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12)`, [runId, storyId, status,
+    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills, ingest_key)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+       RETURNING id`, [runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
       inputTokens ?? null, outputTokens ?? null,
       modelUsed ?? null, costUsd ?? null,
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
-      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,]);
+      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
+      idempotencyKey ?? null,]);
 
-    // Also record into token_usage analytics table if tokens are present
-    if ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0)) {
+    // Only the first ingest records analytics. A retry after a response timeout
+    // returns the original logical result without double-accounting.
+    if (inserted && ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0))) {
       await recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed, reasoningTokens ?? 0, costUsd);
     }
 
-    res.status(201).json({ ok: true });
+    res.status(inserted ? 201 : 200).json({ ok: true, duplicate: !inserted });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Story result');
   }

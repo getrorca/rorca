@@ -51,6 +51,11 @@ beforeEach(() => {
       piVersion: null,
       piBinPath: null,
     }),
+    detectPiAsync: jest.fn().mockResolvedValue({
+      piInstalled: false,
+      piVersion: null,
+      piBinPath: null,
+    }),
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-test-'));
@@ -232,7 +237,7 @@ describe('GET /api/health/detailed', () => {
 
     await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, ['health-test-ws', 'TestWS', wsDir]);
 
-    const res = await request(app).get('/api/health/detailed');
+    const res = await request(app).get('/api/health/detailed?refresh=true');
     expect(res.body.pending_specs_count).toBe(baseline + 2);
   });
 
@@ -294,6 +299,11 @@ describe('GET /api/health (agentType=opencode)', () => {
         opencodeVersion: '0.2.0',
         opencodeBinPath: '/usr/local/bin/opencode',
       }),
+      detectOpenCodeAsync: jest.fn().mockResolvedValue({
+        opencodeInstalled: true,
+        opencodeVersion: '0.2.0',
+        opencodeBinPath: '/usr/local/bin/opencode',
+      }),
       requireOpenCode: jest.fn().mockReturnValue({
         opencodeInstalled: true,
         opencodeVersion: '0.2.0',
@@ -304,6 +314,11 @@ describe('GET /api/health (agentType=opencode)', () => {
     }));
     jest.mock('../../lib/pi-detector', () => ({
       detectPi: jest.fn().mockReturnValue({
+        piInstalled: true,
+        piVersion: '1.2.3',
+        piBinPath: '/usr/local/bin/pi',
+      }),
+      detectPiAsync: jest.fn().mockResolvedValue({
         piInstalled: true,
         piVersion: '1.2.3',
         piBinPath: '/usr/local/bin/pi',
@@ -361,6 +376,7 @@ describe('GET /api/health (pi detector failure)', () => {
       detectPi: jest.fn(() => {
         throw new Error('pi detector failed');
       }),
+      detectPiAsync: jest.fn().mockRejectedValue(new Error('pi detector failed')),
     }));
 
     failTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-pi-fail-test-'));

@@ -67,6 +67,7 @@ import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
+import { replayFallbackResults } from './lib/fallback-replay';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -1123,6 +1124,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     child.on('close', async () => {
       try {
         await flushPending();
+        // The engine flushes its bounded telemetry queue before process close.
+        // Replay its durable journal before deriving completion from DB state.
+        await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         const signal = capturedSignal;
@@ -1680,6 +1684,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       child.on('close', async () => {
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
         await flushPending();
+        await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         activeProcesses.delete(runId);
