@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
+import { assertRestartSafeHealth } from './lib/restart-safety.mjs';
 
 const DEFAULT_PORT = 3030;
 const ACTIONS = new Set(['render', 'install', 'start', 'stop', 'restart', 'status', 'uninstall']);
@@ -243,8 +244,7 @@ async function verifyTakeoverSafe(options) {
   // Worker startup is what applies those migrations, so a blanket response.ok
   // requirement deadlocks the safe handoff. Require the two takeover safety
   // facts directly: a connected database and independently confirmed zero runs.
-  if (!health || health.db_connected !== true) throw new Error('refusing take-over: database connectivity is not confirmed');
-  if (Number(health.active_runs) !== 0) throw new Error('refusing take-over: active pipeline runs are not confirmed to be zero');
+  assertRestartSafeHealth(health);
 }
 
 async function terminateVerified(kind, options) {
