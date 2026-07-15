@@ -8,7 +8,7 @@ Starting SHA: `89aa93b40b05e5dca4a77ba22a4c5cf38cdd3a6f`
 
 Merge base: `f6ad9aa763b8f5c8c7159f7766576619c03c35b4`
 
-Decision: **GO FOR MANUAL PROVIDER CANARIES**
+Decision: **NO-GO — provider matrix and promotion prerequisites incomplete**
 
 This is not a production GO. It does not authorize a push, merge to `main`, production deployment, production database access, automatic merge, or paid-provider execution. Production remains gated on real Pi, Claude, Codex, and OpenCode PTY canaries plus explicit operator review.
 
@@ -210,3 +210,77 @@ The final command must return no project-specific containers; it removes only `r
 4. Record the clean candidate SHA with `git rev-parse HEAD`, review this report and canary artifacts, and issue a separate explicit production GO.
 
 Until those steps pass, the only authorized conclusion is **GO FOR MANUAL PROVIDER CANARIES**.
+
+## Final provider-canary and promotion review (2026-07-15)
+
+**Decision: NO-GO.** No release branch was pushed, no branch was merged, and no production deployment was requested. Automated and Docker evidence is supportive only; it cannot replace the mandatory four-provider matrix.
+
+### Isolation and evidence handling
+
+The real Pi attempt used candidate SHA `06ef7f864c1e926cc7cb1248de5da186dbb97e5d` in disposable worktree `/tmp/rorca-ptyv2-canary-pi-20260715` on branch `canary/pty-v2-pi-20260715`, with `autoMerge=false`, `mergeStrategy=branch-only`, terminal mode `pty`, and an isolated PostgreSQL database. The approved one-story spec was deliberately limited to a committed text artifact `canary-artifacts/pty-v2-pi-canary.txt` containing `RORCA_PTY_V2_PI_CANARY_OK`; no product source was changed.
+
+The first isolated-server startup exposed the known local DB-mode hazard: native persisted mode rewrote the supplied disposable URL to `postgres://localhost:5433/rorca`. It was stopped immediately. A check after shutdown recorded the shared database migration snapshot unchanged at `188 / 20260714143000`; no canary was launched in that configuration. The accepted attempt used a temporary `HOME` with `.rorca/db-mode=byop`, a mode-0600 disposable database-url file, and a temporary copy of Pi auth that was removed during cleanup. Its health response named only `rorca_ptyv2_canary_pi_20260715`.
+
+### Provider matrix (sequential)
+
+| Order | Provider | Exact CLI / compatibility result | Real run evidence | Result |
+| --- | --- | --- | --- | --- |
+| 1 | Pi | `/Users/dimitriteravanessian/.nvm/versions/node/v22.19.0/bin/pi`, `0.80.6`; `--version`/`--help` passed and advertise PTY-required `--mode`, `--provider`, `--model`, tools, extension, and prompt options. A minimal `openai-codex/gpt-5.4` provider preflight returned `PI_CANARY_AUTH_OK`. | Run `20260316000002`, `pty`, Pi `openai-codex/gpt-5.4`, exited 0. Prompt readiness was `pi_banner_or_prompt` then `injected`; resize `100x40` and a four-byte input request both returned `{ok:true}`. PTY health recorded 874,885 raw bytes, 0 dropped, durable completion file seen, real PID `96095` no longer alive, branch-only merge gate, and a committed harmless artifact. The corrected `/api/pipeline/runs/:id/output` SSE replay delivered 2,048 base64 raw chunk events (sequences 833–2880, 593,783 bytes), including real Pi UI/model output and the artifact value; reconnect from 2880 returned zero chunks plus `done`. | **PARTIAL — do not count as a final provider PASS.** The initial live attachment used the wrong `/pty` URL and captured no live stream; cancellation was not exercised against the completed paid run. Durable replay, controls, health, process exit, and completion-file gating passed. |
+| 2 | Claude | Path resolves to `/Applications/cmux.app/Contents/Resources/bin/claude`, but both bounded probes fail: `Error: claude not found in PATH`. This is a cmux wrapper without a discoverable real Claude executable. | No paid session launched. | **BLOCKED** |
+| 3 | Codex | `codex` is absent from `PATH`. | Not attempted: sequential matrix stopped at Claude. | **NOT RUN** |
+| 4 | OpenCode | `opencode` is absent from `PATH`. | Not attempted: sequential matrix stopped at Claude. | **NOT RUN** |
+
+No provider failure was suppressed. No release-code change was made because the observed blockers are environment/credential availability and operator-side incorrect initial SSE URL, not a demonstrated candidate defect. The real Pi terminal's completion marker was not printed, but the primary completion status file was observed and the real PTY process exited code 0; this meets the split completion contract for that run only.
+
+### Exact accepted Pi commands and evidence
+
+```bash
+# Candidate-local isolated server/worker environment (temporary HOME forces BYOP)
+HOME=/tmp/rorca-ptyv2-canary-pi-home \
+DATABASE_URL=postgres://localhost:5433/rorca_ptyv2_canary_pi_20260715 \
+DATABASE_URL_TEST=postgres://localhost:5433/rorca_ptyv2_canary_pi_20260715 \
+PORT=3031 PI_BIN=/Users/dimitriteravanessian/.nvm/versions/node/v22.19.0/bin/pi \
+npx tsx backend/src/server.ts
+
+# Structured trigger payload used equivalent fields:
+# autoWorktree=false, autoMerge=false, mergeStrategy=branch-only,
+# agentOverride=pi, modelOverride=openai-codex/gpt-5.4,
+# storyId=PTYPI-001, readinessOverride=true, terminal_mode=pty.
+
+curl -NsS \
+  'http://127.0.0.1:3031/api/pipeline/runs/20260316000002/output?workspaceId=pty-v2-pi-canary-20260715'
+```
+
+The accepted SSE metadata was `terminalMode=pty`, `isPty=true`, `ptyLiveTransport=postgres-notify+db-replay`, `ptySessionStatus=exited`, `ptyPromptReadinessStatus=injected`, `ptyCompletionFileSeen=true`, and `ptyProcessAlive=false`. Raw output was base64 SSE data rather than synthetic heartbeats.
+
+### Final candidate gate matrix
+
+| Gate | Final result |
+| --- | --- |
+| `npm run check:contract` | PASS; acknowledged additive/breaking markers against merge base `f6ad9aa` |
+| `npm run lint:tier` | PASS — 73 public, 28 auth, 17 paid, 30 admin |
+| `npm run check:licenses` / `npm run check:license-boundaries` | PASS — 896 headers; single-Apache policy skip is expected |
+| `npm run lint` | PASS — 0 errors, 68 pre-existing warnings |
+| `npm run typecheck` / `npm run build` | PASS |
+| Frontend `RunTerminal` focused test | PASS — 16 tests |
+| Backend focused PTY suite final rerun | **BLOCKED SAFELY**: Jest refused to recreate the isolated database because its name lacked the `_test` suffix. It was not bypassed or redirected to another database. Earlier accepted certification remains recorded above; this final attempted rerun is not claimed as a pass. |
+| `npm pack --pack-destination /tmp/ptyv2-final-pack --json` | PASS after creating the destination directory — 914 entries |
+| `git diff --check` | PASS |
+| `npm run split:check -- --allow-review` | **FAIL / promotion blocker** — four Docker files are `unknown` in `config/open-core-boundaries.json`; export is explicitly not safe |
+| Fresh Docker Compose `rorca_ptyv2_finalgate` | PASS — rebuilt candidate images; `db`, `rorca`, and `worker` all reached `healthy`, then `down -v --remove-orphans` removed project containers/network/volume |
+
+### Production review
+
+- **Diff and policy:** candidate and `origin/main` have diverged since merge base `f6ad9aa`; `origin/main` is `3b783baa8fceed11bf939bfaaeb2a79ca682ce5d`. This is not a fast-forward ancestry relationship. No merge/rebase/push was attempted. The open-core boundary gate is additionally red.
+- **Security/privacy:** PTY input/output bounds, workspace checks, guarded agent environment, durable control queues, and provider output retention are covered by the candidate and prior certification. The canary used a temporary copied auth file only; no secret is included in this report or committed evidence.
+- **Database migrations:** all 147 candidate migrations applied to the disposable database and the accepted server/worker reruns skipped all 147. Migrations are additive; rollback must not drop PTY tables.
+- **Native packaging/observability:** candidate native `node-pty` checks and the final Docker rebuild/health smoke pass. Pi health metadata, raw durable chunks, replay cursor, prompt injection state, completion file, exit code, and orphan PID state were observed.
+- **Rollback point:** current production/main reference remains `origin/main` `3b783baa8fceed11bf939bfaaeb2a79ca682ce5d`; retain it as the rollback deployment reference. The candidate rollback procedure above still applies after any future promotion.
+
+### Required manual gates before reconsidering GO
+
+1. Repair/install subscription-authenticated CLIs, then re-run the **entire** sequential matrix in fresh disposable branch-only worktrees: Pi (including correctly attached live `/output` SSE and a safe cancellation run), Claude, Codex, OpenCode. Do not reuse this partial Pi result as the required PASS.
+2. Resolve the open-core manifest gate deliberately; do not export the Docker changes while `npm run split:check -- --allow-review` reports unknown files.
+3. Reconcile the stale release branch with current remote main in a new clean integration worktree; do not force-push or rewrite this candidate. Review branch protection and CI at `https://github.com/getrorca/rorca/settings/branches` and the pull-request checks before promotion.
+4. Once all gates are green, use only normal pushes: `git push origin release/pty-v2-production-ready`, then merge through the repository-approved PR/required-check path or a verified fast-forward worktree, followed by `git push origin main`. Do not use `--force`.
+5. Deployment is blocked: `coolify_status` could not fetch and no documented noninteractive production approval/credential was available. After repository promotion, use the documented target-host procedure in `DEPLOYMENT.md` (for example `cd /opt/rorca && docker compose build && docker compose up -d`) only with the production approver and then run its health/migration/non-destructive smoke checks.
