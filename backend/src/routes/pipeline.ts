@@ -1396,7 +1396,8 @@ const PipelineTriggerSchema = z.object({
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
-  queuedRunId: z.number().optional(),
+  // PostgreSQL BIGINT values are returned as strings by node-postgres.
+  queuedRunId: z.union([z.number(), z.string()]).optional(),
   queue: z.boolean().optional(),
   includeGraph: z.boolean().optional(),
   thinkingEnabled: z.boolean().optional(),

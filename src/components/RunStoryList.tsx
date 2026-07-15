@@ -252,7 +252,7 @@ const MAX_RETRIES = 3;
 
 // ─── Story row component ─────────────────────────────────────────────────────
 
-function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused, includeGraph, context }: {
+function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused, includeGraph, context, passEventId }: {
   story: MergedStory;
   onStoryClick?: (storyId: string) => void;
   indented?: boolean;
@@ -261,6 +261,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   isFocused?: boolean;
   includeGraph?: boolean;
   context?: StoryContextInfo;
+  passEventId?: number | null;
 }) {
   const cfg = STATUS_CONFIG[story.status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
@@ -297,16 +298,24 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
 
   // Track status transitions — animate only when status *changes* to pass
   const prevStatusRef = useRef<DerivedStatus>(story.status);
+  const lastPassEventRef = useRef<number | null>(null);
   const [justPassed, setJustPassed] = useState(false);
 
   useEffect(() => {
-    if (story.status === 'pass' && prevStatusRef.current !== 'pass') {
+    const statusTransitioned = story.status === 'pass' && prevStatusRef.current !== 'pass';
+    const passEventArrived = story.status === 'pass'
+      && passEventId != null
+      && lastPassEventRef.current !== passEventId;
+    if (statusTransitioned || passEventArrived) {
       setJustPassed(true);
       const timer = setTimeout(() => setJustPassed(false), 600);
+      if (passEventId != null) lastPassEventRef.current = passEventId;
+      prevStatusRef.current = story.status;
       return () => clearTimeout(timer);
     }
+    if (passEventId != null) lastPassEventRef.current = passEventId;
     prevStatusRef.current = story.status;
-  }, [story.status]);
+  }, [story.status, passEventId]);
 
   // Fetch output when expanding a failed story (50 lines for story log)
   useEffect(() => {
@@ -845,6 +854,14 @@ export default function RunStoryList({
   // Build SSE-derived running stories (all concurrently running in wave mode)
   // Only consider events from the current run — old story_started events from
   // previous runs for the same story_id would otherwise show stale timers.
+  const passedEventIds = useMemo(() => {
+    const passed = new Map<string, number>();
+    for (const evt of effectiveWalEvents) {
+      if (evt.event_type === 'story_passed' && evt.story_id) passed.set(evt.story_id, evt.id);
+    }
+    return passed;
+  }, [effectiveWalEvents]);
+
   const runningStoryIds = useMemo(() => {
     const running = new Set<string>();
     for (const evt of effectiveWalEvents) {
@@ -1504,6 +1521,7 @@ export default function RunStoryList({
                     isFocused={isFocused}
                     includeGraph={includeGraph}
                     context={effectiveStoryContext.get(item.story.storyId)}
+                    passEventId={passedEventIds.get(item.story.storyId) ?? null}
                   />
                 ) : item.type === 'wave-header' ? (
                   <WaveHeader

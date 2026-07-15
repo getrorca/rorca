@@ -146,7 +146,7 @@ describe('sweepOrphanProcesses', () => {
     const results = await sweepOrphanProcesses();
 
     expect(results).toHaveLength(1);
-    expect(results[0]).toEqual({ runId: 42, pid: 9999, killed: false });
+    expect(results[0]).toMatchObject({ runId: 42, pid: 9999, killed: false, ptyPid: 0, ptyKilled: false });
 
     // pipeline_runs must be updated
     expect(mockExecute).toHaveBeenCalledWith(
@@ -155,7 +155,7 @@ describe('sweepOrphanProcesses', () => {
     );
 
     // run_finished WAL event emitted
-    expect(mockExecute).toHaveBeenCalledWith(
+    expect(mockQueryOne).toHaveBeenCalledWith(
       expect.stringContaining('wal_events'),
       expect.arrayContaining(['run_finished']),
     );
@@ -185,7 +185,7 @@ describe('sweepOrphanProcesses', () => {
     const results = await sweepOrphanProcesses();
 
     expect(results).toHaveLength(1);
-    expect(results[0]).toEqual({ runId: 7, pid: ALIVE_PID, killed: true });
+    expect(results[0]).toMatchObject({ runId: 7, pid: ALIVE_PID, killed: true, ptyPid: 0, ptyKilled: false });
 
     // SIGTERM was sent
     expect(processKillSpy).toHaveBeenCalledWith(ALIVE_PID, 'SIGTERM');
@@ -235,7 +235,7 @@ describe('sweepOrphanProcesses', () => {
     expect(results).toHaveLength(1);
 
     // Collect all wal_events INSERT calls
-    const walInserts = mockExecute.mock.calls.filter(
+    const walInserts = mockQueryOne.mock.calls.filter(
       ([sql]: [string]) => sql.includes('wal_events'),
     );
 
@@ -257,12 +257,12 @@ describe('sweepOrphanProcesses', () => {
 
     await sweepOrphanProcesses();
 
-    const walInserts = mockExecute.mock.calls.filter(
+    const walInserts = mockQueryOne.mock.calls.filter(
       ([sql]: [string]) => sql.includes('wal_events'),
     );
     expect(walInserts.length).toBeGreaterThan(0);
 
-    const [, [eventType, workspaceId, payloadJson]] = walInserts[0];
+    const [, [eventType, workspaceId, _storyId, payloadJson]] = walInserts[0];
     expect(eventType).toBe('run_finished');
     expect(workspaceId).toBe(2);
     const payload = JSON.parse(payloadJson as string);
@@ -281,14 +281,14 @@ describe('sweepOrphanProcesses', () => {
 
     await sweepOrphanProcesses();
 
-    const walInserts = mockExecute.mock.calls.filter(
+    const walInserts = mockQueryOne.mock.calls.filter(
       ([sql]: [string]) => sql.includes('wal_events'),
     );
     const storyFailedCall = walInserts.find(
       ([, params]: [string, string[]]) => params[0] === 'story_failed',
     );
     expect(storyFailedCall).toBeDefined();
-    const [, [, , payloadJson]] = storyFailedCall!;
+    const [, [, , _storyId, payloadJson]] = storyFailedCall!;
     const payload = JSON.parse(payloadJson as string);
     expect(payload.reason).toBe('orphan_sweep');
     expect(payload.story_id).toBe('US-003');
@@ -330,7 +330,7 @@ describe('sweepOrphanProcesses', () => {
     const results = await sweepOrphanProcesses();
 
     expect(results).toHaveLength(1);
-    expect(results[0]).toEqual({ runId: 200, pid: 0, killed: false });
+    expect(results[0]).toMatchObject({ runId: 200, pid: 0, killed: false, ptyPid: 0, ptyKilled: false });
 
     // process.kill was never called
     expect(processKillSpy).not.toHaveBeenCalled();
@@ -369,7 +369,7 @@ describe('sweepOrphanProcesses', () => {
     const results = await sweepOrphanProcesses();
 
     expect(results).toHaveLength(1);
-    expect(results[0]).toEqual({ runId: 300, pid: 88888, killed: false });
+    expect(results[0]).toMatchObject({ runId: 300, pid: 88888, killed: false, ptyPid: 0, ptyKilled: false });
 
     // No SIGTERM or SIGKILL sent
     expect(processKillSpy).not.toHaveBeenCalledWith(88888, 'SIGTERM');
