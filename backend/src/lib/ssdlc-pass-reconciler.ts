@@ -17,7 +17,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PoolClient } from 'pg';
-import { transaction } from '../db/index';
+import { query, transaction } from '../db/index';
 import { markStoriesPassed, writeApprovedSpecAtomically } from './approved-spec-pass-store';
 import { deriveStoryContractRevision } from './story-execution-packet';
 
@@ -517,6 +517,61 @@ function assertApprovedSpecPath(workspacePath: string, specPath: string): string
     throw new TypeError('Pass reconciliation requires a workspace-scoped approved spec path');
   }
   return absolute;
+}
+
+/** Read-only reconciliation projection for aggregate lifecycle APIs. */
+export async function inspectApprovedSpecPasses(
+  input: { workspaceId: string; workspacePath: string; specPath: string },
+): Promise<PassReconciliationReport> {
+  if (!input.workspaceId.trim()) throw new TypeError('workspaceId is required');
+  const absoluteSpecPath = assertApprovedSpecPath(input.workspacePath, input.specPath);
+  if (!fs.existsSync(absoluteSpecPath)) throw new TypeError(`Approved spec not found: ${absoluteSpecPath}`);
+  const specId = path.basename(input.specPath, '.json');
+  const spec = JSON.parse(fs.readFileSync(absoluteSpecPath, 'utf8')) as ApprovedSpecDocument;
+  const rows = await query<EvidenceRow>(`
+    SELECT sr.story_id, sr.id AS result_id, sr.run_id, sr.status AS result_status,
+           COALESCE(sr.created_at, sr.started_at) AS result_observed_at,
+           sr.completion_packet,
+           sem.manifest_hash, sem.spec_revision, sem.story_revision,
+           sem.payload AS manifest_payload,
+           scd.decision_id, scd.status AS decision_status,
+           sar.attempt_result_id, sar.payload AS attempt_payload,
+           COALESCE(commits.commit_references, ARRAY[]::text[]) AS commit_references
+    FROM story_results sr
+    JOIN pipeline_runs pr ON pr.id = sr.run_id AND pr.workspace_id = $1
+    LEFT JOIN LATERAL (
+      SELECT manifest_hash, spec_revision, story_revision, payload
+      FROM story_execution_manifests
+      WHERE workspace_id = $1 AND spec_id = $2
+        AND run_id = sr.run_id AND story_id = sr.story_id
+      ORDER BY attempt DESC, created_at DESC LIMIT 1
+    ) sem ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT decision_id, status, attempt_result_id
+      FROM story_closeout_decisions
+      WHERE workspace_id = $1 AND spec_id = $2
+        AND run_id = sr.run_id AND story_id = sr.story_id
+        AND manifest_hash = sem.manifest_hash
+      ORDER BY attempt DESC, created_at DESC LIMIT 1
+    ) scd ON TRUE
+    LEFT JOIN story_attempt_results sar ON sar.attempt_result_id = scd.attempt_result_id
+    LEFT JOIN LATERAL (
+      SELECT ARRAY_AGG(commit_sha ORDER BY pushed_at, id) AS commit_references
+      FROM story_commits
+      WHERE workspace_id = $1 AND spec_id = $2
+        AND run_id = sr.run_id AND story_id = sr.story_id
+    ) commits ON TRUE
+    WHERE COALESCE(sr.spec_id, sem.payload->'identity'->>'specId') = $2
+    ORDER BY COALESCE(sr.created_at, sr.started_at) DESC, sr.id DESC
+    LIMIT 500
+  `, [input.workspaceId, specId]);
+  return classifyPassReconciliation({
+    workspaceId: input.workspaceId,
+    specId,
+    specPath: input.specPath,
+    spec,
+    evidence: rows.map((row) => mapEvidenceRow(row, input.workspacePath)),
+  });
 }
 
 /**

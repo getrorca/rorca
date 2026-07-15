@@ -1209,6 +1209,23 @@ export async function normalizeExistingRunEvidence(
   return await Promise.all(adapters);
 }
 
+export async function getNormalizedEvidenceById(
+  workspaceIdInput: string,
+  evidenceIdInput: string,
+): Promise<StoredLifecycleEvidence> {
+  const workspaceId = requiredText(workspaceIdInput, 'workspaceId', 256);
+  const evidenceId = requiredText(evidenceIdInput, 'evidenceId', 32);
+  if (!/^\d+$/.test(evidenceId) || evidenceId === '0') {
+    throw new ValidationError('evidenceId must be a positive integer', { field: 'evidenceId' });
+  }
+  const row = await queryOne<EvidenceRow>(`
+    SELECT * FROM ssdlc_lifecycle_evidence
+    WHERE workspace_id = $1 AND id = $2::bigint
+  `, [workspaceId, evidenceId]);
+  if (!row) throw new NotFoundError('Lifecycle evidence', evidenceId);
+  return sanitizeEvidenceForRendering(rowToEvidence(row));
+}
+
 export async function paginateNormalizedEvidence(
   workspaceIdInput: string,
   filters: { specSlug?: string; runId?: number; storyId?: string; phaseId?: string; gateId?: string },
