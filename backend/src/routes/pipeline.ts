@@ -54,6 +54,7 @@ import {
   type StoryChangePolicy,
 } from '../lib/story-execution-packet';
 import { persistStoryExecutionManifest } from '../lib/story-closeout';
+import { reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
@@ -134,6 +135,18 @@ function buildCleanEnvForMerge(): Record<string, string> {
 }
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
+
+function assertReconciliationAllowsAutomaticScope(report: PassReconciliationReport): void {
+  if (!report.blocking) return;
+  throw new UnprocessableError(
+    'Approved-spec pass evidence is ambiguous; automatic run scope was not calculated.',
+    'PASS_RECONCILIATION_REQUIRED',
+    {
+      reconciliation: report,
+      operatorActions: report.stories.flatMap((story) => story.operatorActions),
+    },
+  );
+}
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -1964,6 +1977,17 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
+    // Reconcile before queue-row creation, worktree creation, manifest creation,
+    // or pg-boss dispatch. An ambiguous story must never be converted into an
+    // automatic scope by the scheduler.
+    const passReconciliation = await reconcileApprovedSpecPasses({
+      workspaceId,
+      workspacePath: workspace.path,
+      specPath,
+    });
+    assertReconciliationAllowsAutomaticScope(passReconciliation);
+    (req as any)._passReconciliation = passReconciliation;
+
     // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
     //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
     const { queue } = req.body;
@@ -2681,6 +2705,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),
+      passReconciliation: (req as any)._passReconciliation,
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Trigger');
@@ -5545,6 +5570,23 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       return;
     }
 
+    // Reconcile before reading retry scope, creating a retry run/temp spec, or
+    // sending a pg-boss job. This prevents copied results and stale false flags
+    // from causing already-proven work to run again.
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as
+      { id: string; label: string; path: string } | undefined;
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+      return;
+    }
+    const passReconciliation = await reconcileApprovedSpecPasses({
+      workspaceId: originalRun.workspace_id,
+      workspacePath: workspace.path,
+      specPath: originalRun.spec_path,
+    });
+    assertReconciliationAllowsAutomaticScope(passReconciliation);
+    const reconciliationByStory = new Map(passReconciliation.stories.map((story) => [story.storyId, story]));
+
     // 2. Find all stories and their latest status from the original run
     const allStories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [originalRunId]) as StoryResultRow[];
 
@@ -5580,9 +5622,19 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       }
     }
 
-    // Include both 'fail' and 'skip' (blocked) stories as retryable
-    const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail' || s.status === 'skip');
-    const passedStories = Array.from(latestByStory.values()).filter(s => s.status === 'pass');
+    // Include only failed/blocked rows whose current reconciled projection is
+    // still not passed. Safely repaired stale flags and excluded stories cannot
+    // enter retry scope.
+    const failedStories = Array.from(latestByStory.values()).filter((s) => {
+      const reconciliation = reconciliationByStory.get(s.story_id);
+      return (s.status === 'fail' || s.status === 'skip')
+        && reconciliation?.status === 'consistent-not-passed'
+        && !reconciliation.reasonCodes.includes('EXCLUDED_STORY');
+    });
+    const passedStories = Array.from(latestByStory.values()).filter((s) => {
+      const reconciliation = reconciliationByStory.get(s.story_id);
+      return s.status === 'pass' && reconciliation?.status === 'consistent-passed';
+    });
 
     if (failedStories.length === 0) {
       throw new UnprocessableError('No failed stories to retry');
@@ -5601,14 +5653,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       storiesToRetry = failedStories;
     }
 
-    // 4. Look up workspace
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as
-      { id: string; label: string; path: string } | undefined;
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
+    // 4. The workspace was resolved before reconciliation and retry scope.
     if (originalRun.worktree_path) {
       assertReusableWorktreeFresh(
         workspace.path,
@@ -5863,6 +5908,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       retriedStories: retriedStoryInfo,
       copiedStories: passedStories.map(s => s.story_id),
       effectiveOptions: retryEffectiveOptions,
+      passReconciliation,
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Retry');
@@ -6875,8 +6921,46 @@ router.post('/story-result', async (req: Request, res: Response) => {
       throw new ValidationError('completionPacket must be an object');
     }
 
-    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills, completion_packet, ingest_key)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
+    const projection = await queryOne<{
+      workspace_id: string;
+      spec_path: string;
+      branch_name: string | null;
+      manifest_hash: string | null;
+      spec_revision: string | null;
+      story_revision: string | null;
+      closeout_decision_id: string | null;
+    }>(`
+      SELECT pr.workspace_id, pr.spec_path, pr.branch_name,
+             sem.manifest_hash, sem.spec_revision, sem.story_revision,
+             scd.decision_id AS closeout_decision_id
+      FROM pipeline_runs pr
+      LEFT JOIN LATERAL (
+        SELECT manifest_hash, spec_revision, story_revision
+        FROM story_execution_manifests
+        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
+        ORDER BY attempt DESC, created_at DESC LIMIT 1
+      ) sem ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT decision_id
+        FROM story_closeout_decisions
+        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
+          AND manifest_hash = sem.manifest_hash
+        ORDER BY attempt DESC, created_at DESC LIMIT 1
+      ) scd ON TRUE
+      WHERE pr.id = $1
+    `, [runId, storyId]);
+    if (!projection) throw new NotFoundError('Pipeline run not found');
+    const specId = path.basename(projection.spec_path, '.json');
+
+    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (
+         run_id, story_id, status, finished_at, worktree_path, worktree_branch,
+         input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by,
+         active_skills, completion_packet, spec_id, spec_revision, story_revision,
+         manifest_hash, closeout_decision_id, ingest_key
+       ) VALUES (
+         $1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
+         $14, $15, $16, $17, $18, $19
+       )
        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
        RETURNING id`, [runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
@@ -6886,14 +6970,15 @@ router.post('/story-result', async (req: Request, res: Response) => {
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
       activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
       completionPacket ? JSON.stringify(completionPacket) : null,
-      idempotencyKey ?? null,]);
+      specId,
+      projection.spec_revision,
+      projection.story_revision,
+      projection.manifest_hash,
+      projection.closeout_decision_id,
+      idempotencyKey ?? null,
+    ]);
 
     if (inserted && status === 'pass' && commitSha) {
-      const run = await queryOne<{ workspace_id: string; spec_path: string; branch_name: string | null }>(
-        'SELECT workspace_id, spec_path, branch_name FROM pipeline_runs WHERE id = $1',
-        [runId],
-      );
-      if (!run) throw new NotFoundError('Pipeline run not found');
       await execute(`
         INSERT INTO story_commits (
           story_id, spec_id, workspace_id, run_id, commit_sha, commit_message, author, pushed_at, branch_name, observed_source
@@ -6901,12 +6986,12 @@ router.post('/story-result', async (req: Request, res: Response) => {
         ON CONFLICT DO NOTHING
       `, [
         storyId,
-        path.basename(run.spec_path, '.json'),
-        run.workspace_id,
+        specId,
+        projection.workspace_id,
         runId,
         commitSha,
         commitMessage?.trim() || `story(${storyId}): host-observed output`,
-        worktreeBranch ?? run.branch_name,
+        worktreeBranch ?? projection.branch_name,
       ]);
     }
 
