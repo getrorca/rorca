@@ -13,8 +13,8 @@ const artifacts = path.join(tempRoot, 'artifacts');
 mkdirSync(artifacts, { recursive: true });
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: 'utf8', shell: process.platform === 'win32' && command.endsWith('.cmd'), ...options });
-  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed (${result.status})\n${result.stdout || ''}\n${result.stderr || ''}`);
+  const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell: process.platform === 'win32' && command.endsWith('.cmd'), ...options });
+  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed (${result.status}; ${result.error?.message ?? 'no spawn error'})\n${result.stdout || ''}\n${result.stderr || ''}`);
   return result;
 }
 
@@ -62,7 +62,9 @@ const server = http.createServer((request, response) => {
 });
 
 try {
-  run(npm, ['run', 'build:capture'], { cwd: repoRoot });
+  if (!existsSync(path.join(repoRoot, 'packages', 'rorca-capture', 'dist', 'cli.js'))) {
+    run(npm, ['run', 'build:capture'], { cwd: repoRoot });
+  }
   const dryPack = npmJson(['pack', '--dry-run', '--ignore-scripts', '--json'])[0];
   const files = new Map(dryPack.files.map((file) => [file.path, file]));
   const required = [
