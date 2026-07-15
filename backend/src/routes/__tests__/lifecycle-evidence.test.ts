@@ -5,6 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 
@@ -129,6 +131,43 @@ describe('lifecycle evidence route', () => {
     expect(mockPersistCanonicalEvidence.mock.calls[0][0].trustLevel).toBe('provider_verified');
   });
 
+  test('compatibility ingress has the identical authenticated Hermes contract', async () => {
+    const unauthenticated = await request(appWithUser())
+      .post('/api/lifecycle/evidence/hermes')
+      .send(manualEnvelope());
+    expect(unauthenticated.status).toBe(401);
+
+    const authenticated = await request(appWithUser({
+      id: 'hermes-service',
+      email: 'hermes@rorca.internal',
+      supabaseId: 'auth-hermes',
+      role: 'admin',
+    }))
+      .post('/api/lifecycle/evidence/hermes')
+      .send({ ...manualEnvelope(), kind: 'staging_result', rationale: undefined, attachmentReference: undefined });
+    expect(authenticated.status).toBe(201);
+    expect(mockPersistCanonicalEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  test('redacts secret canaries before persistence, API response, and invalidation publication', async () => {
+    const canary = 'ghp_lifecycleRouteSecretCanary';
+    const response = await request(appWithUser({
+      id: 'reviewer-1',
+      email: 'reviewer@example.test',
+      supabaseId: 'auth-reviewer-1',
+      role: 'user',
+    })).post('/api/lifecycle/evidence').send({
+      ...manualEnvelope(),
+      excerpt: `QA passed with ${canary}`,
+      details: { commandOutput: canary },
+    });
+
+    expect(response.status).toBe(201);
+    expect(JSON.stringify(mockPersistCanonicalEvidence.mock.calls[0][0])).not.toContain(canary);
+    expect(JSON.stringify(response.body)).not.toContain(canary);
+    expect(JSON.stringify(mockEmitLifecycleInvalidation.mock.calls)).not.toContain(canary);
+  });
+
   test('rejects unknown sources, subjects, fields, and oversized envelopes before persistence', async () => {
     const internal = appWithUser({
       id: 'hermes-service',
@@ -216,5 +255,13 @@ describe('lifecycle evidence route', () => {
       expect.objectContaining({ runId: 7 }),
       expect.objectContaining({ limit: 25 }),
     );
+  });
+
+  test('keeps GitReins behind Hermes with no direct client or network dependency in Rorca ingress', () => {
+    const source = fs.readFileSync(path.resolve(__dirname, '..', 'lifecycle-evidence.ts'), 'utf8');
+    expect(source).not.toMatch(/from ['"][^'"]*gitreins/i);
+    expect(source).not.toMatch(/require\([^)]*gitreins/i);
+    expect(source).not.toMatch(/(?:fetch|axios)\s*\([^)]*gitreins/i);
+    expect(source).toContain('normalizeHermesEvidence');
   });
 });

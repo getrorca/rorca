@@ -210,16 +210,18 @@ describe('pipeline reconciliation ordering', () => {
   test('runs before new-run scheduling and retry temp-spec generation/pg-boss dispatch', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', '..', 'routes', 'pipeline.ts'), 'utf8');
     const triggerStart = source.indexOf("router.post('/trigger'");
-    const retryStart = source.indexOf("router.post('/runs/:runId/retry'");
+    const retryRoute = source.indexOf("router.post('/runs/:runId/retry'");
+    const retryStart = source.indexOf('export async function retryPipelineRunHandler', retryRoute);
     const retryEnd = source.indexOf("router.post('/runs/:runId/retry-merge'", retryStart);
-    const triggerSource = source.slice(triggerStart, retryStart);
+    const triggerSource = source.slice(triggerStart, retryRoute);
     const retrySource = source.slice(retryStart, retryEnd);
 
     expect(triggerSource.indexOf('await reconcileApprovedSpecPasses(')).toBeGreaterThan(-1);
     expect(triggerSource.indexOf('await reconcileApprovedSpecPasses(')).toBeLessThan(triggerSource.indexOf("send('pipeline:run'"));
-    expect(retrySource.indexOf('await reconcileApprovedSpecPasses(')).toBeGreaterThan(-1);
-    expect(retrySource.indexOf('await reconcileApprovedSpecPasses(')).toBeLessThan(retrySource.indexOf('const retrySpecName'));
-    expect(retrySource.indexOf('await reconcileApprovedSpecPasses(')).toBeLessThan(retrySource.indexOf("send('pipeline:retry'"));
+    const retryReconciliation = retrySource.indexOf('await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)(');
+    expect(retryReconciliation).toBeGreaterThan(-1);
+    expect(retryReconciliation).toBeLessThan(retrySource.indexOf('const retrySpecName'));
+    expect(retryReconciliation).toBeLessThan(retrySource.indexOf("send('pipeline:retry'"));
   });
 });
 

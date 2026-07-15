@@ -22,6 +22,7 @@ import {
   DEPLOYMENT_SUBJECT,
   EVALUATION_TIME,
   EVALUATOR_PLAN,
+  LIFECYCLE_DELIVERY_FIXTURES,
   PHASE_EVALUATOR_FIXTURES,
   approvalDecision,
   evaluatorRunState,
@@ -50,6 +51,21 @@ describe.each(PHASE_EVALUATOR_FIXTURES)('$name', (fixture) => {
     expect(first.evaluatedStatus).toBe(first.status);
     expect(second).toEqual(first);
     expect(first.snapshot.evaluatedAt).toBe(EVALUATION_TIME.toISOString());
+  });
+});
+
+describe.each(LIFECYCLE_DELIVERY_FIXTURES)('delivery fixture: $name', (fixture) => {
+  test(`derives ${fixture.expectedStatus} from deterministic persisted facts`, () => {
+    const result = evaluatePhase(
+      structuredClone(EVALUATOR_PLAN),
+      structuredClone(fixture.evidence),
+      structuredClone(fixture.decisions),
+      evaluatorRunState(fixture.phaseId),
+      EVALUATION_TIME,
+    );
+
+    expect(result.status).toBe(fixture.expectedStatus);
+    expect(result.snapshot.evaluatedAt).toBe(EVALUATION_TIME.toISOString());
   });
 });
 

@@ -399,6 +399,9 @@ export function deriveRetryStoryExecutionManifest(
   attempt: number,
 ): ImmutableStoryExecutionManifest {
   if (!verifyStoryExecutionManifest(manifest)) throw new TypeError('Cannot retry a stale or invalid story execution manifest');
+  if (!Number.isSafeInteger(attempt) || attempt <= manifest.identity.attempt) {
+    throw new TypeError('Retry attempt identity must advance the immutable manifest attempt');
+  }
   const input: StoryExecutionManifestInput = {
     identity: { ...manifest.identity, attempt },
     revisions: { ...manifest.revisions },

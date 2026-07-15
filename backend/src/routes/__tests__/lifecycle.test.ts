@@ -116,6 +116,39 @@ describe('lifecycle aggregate read routes', () => {
     expect(response.body.details.type).toBe('refresh_required');
   });
 
+  test('a ledger write between portfolio, detail, and evidence reads requires one full refresh', async () => {
+    const portfolioSnapshot = `sha256:${'a'.repeat(64)}`;
+    let currentSnapshot = portfolioSnapshot;
+    const readAtSnapshot = (expectedSnapshotId: string | undefined, value: Record<string, unknown>) => {
+      if (expectedSnapshotId && expectedSnapshotId !== currentSnapshot) {
+        throw new ConflictError('Lifecycle evaluation snapshot is stale; refresh before acting', {
+          type: 'refresh_required',
+          requestedSnapshotId: expectedSnapshotId,
+          currentSnapshotId: currentSnapshot,
+        });
+      }
+      return { ...value, snapshotId: currentSnapshot };
+    };
+    mockPortfolio.mockImplementation(async () => readAtSnapshot(undefined, { items: [], total: 0, hasMore: false }));
+    mockSpec.mockImplementation(async ({ expectedSnapshotId }: { expectedSnapshotId?: string }) => readAtSnapshot(expectedSnapshotId, { specId: 'safe-spec' }));
+    mockEvidence.mockImplementation(async ({ expectedSnapshotId }: { expectedSnapshotId?: string }) => readAtSnapshot(expectedSnapshotId, { id: '7' }));
+
+    const portfolio = await request(app()).get('/api/lifecycle?workspaceId=ws-a');
+    expect(portfolio.status).toBe(200);
+    expect(portfolio.body.snapshotId).toBe(portfolioSnapshot);
+
+    // Deterministic write fixture: a new immutable ledger row advances the bounded snapshot.
+    currentSnapshot = `sha256:${'b'.repeat(64)}`;
+    const [detail, evidence] = await Promise.all([
+      request(app()).get(`/api/lifecycle/specs/safe-spec?workspaceId=ws-a&snapshotId=${portfolioSnapshot}`),
+      request(app()).get(`/api/lifecycle/evidence/7?workspaceId=ws-a&snapshotId=${portfolioSnapshot}`),
+    ]);
+
+    expect([detail.status, evidence.status]).toEqual([409, 409]);
+    expect(detail.body.details).toMatchObject({ type: 'refresh_required', currentSnapshotId: currentSnapshot });
+    expect(evidence.body.details).toMatchObject({ type: 'refresh_required', currentSnapshotId: currentSnapshot });
+  });
+
   test('requires workspace scope on every aggregate route', async () => {
     const responses = await Promise.all([
       request(app()).get('/api/lifecycle'),

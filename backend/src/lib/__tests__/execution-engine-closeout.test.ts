@@ -209,6 +209,7 @@ describe('execution-engine closeout architecture', () => {
     const imports = [...ENGINE_SOURCE.matchAll(/from ['"]([^'"]+)['"]/g)].map((match) => match[1]);
     const forbidden = [
       'ssdlc-lifecycle-compiler',
+      'ssdlc-plan-compiler',
       'ssdlc-phase-evaluator',
       'decomposition',
       'approval',
@@ -221,6 +222,25 @@ describe('execution-engine closeout architecture', () => {
     for (const fragment of forbidden) {
       expect(imports.some((modulePath) => modulePath.includes(fragment))).toBe(false);
     }
+  });
+
+  test('preserves all four nested-Claude environment removals and process cleanup paths', () => {
+    const envBlock = ENGINE_SOURCE.slice(
+      ENGINE_SOURCE.indexOf('const CLAUDE_ENV_VARS_TO_REMOVE'),
+      ENGINE_SOURCE.indexOf('];', ENGINE_SOURCE.indexOf('const CLAUDE_ENV_VARS_TO_REMOVE')) + 2,
+    );
+    const names = [...envBlock.matchAll(/'([A-Z][A-Z0-9_]+)'/g)].map((match) => match[1]);
+    expect(names).toEqual([
+      'CLAUDECODE',
+      'CLAUDE_CODE_ENTRYPOINT',
+      'CLAUDE_AGENT_SDK_VERSION',
+      'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
+    ]);
+    expect(ENGINE_SOURCE).toContain('!CLAUDE_ENV_VARS_TO_REMOVE.includes(k)');
+    expect(ENGINE_SOURCE).toContain("child.kill('SIGTERM')");
+    expect(ENGINE_SOURCE).toContain("child.kill('SIGKILL')");
+    expect(ENGINE_SOURCE).toContain("process.on('SIGINT'");
+    expect(ENGINE_SOURCE).toContain("process.on('SIGTERM'");
   });
 });
 

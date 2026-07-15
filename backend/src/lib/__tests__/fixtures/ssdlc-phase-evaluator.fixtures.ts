@@ -155,7 +155,12 @@ export type EvaluatorFixtureName =
   | 'revision_mismatch'
   | 'expired_evidence'
   | 'revoked_decision'
-  | 'complete_release';
+  | 'complete_release'
+  | 'blocked_validation_2_of_4'
+  | 'stale_revision'
+  | 'approved_qa'
+  | 'merge_ready'
+  | 'production_awaiting_approval';
 
 export interface EvaluatorFixture {
   name: EvaluatorFixtureName;
@@ -241,5 +246,55 @@ export const PHASE_EVALUATOR_FIXTURES: EvaluatorFixture[] = [
     evidence: COMPLETE_EVIDENCE,
     decisions: COMPLETE_DECISIONS,
     expectedStatus: 'passed',
+  },
+];
+
+/** Named delivery-state fixtures used by route/UI contracts and evaluator regressions. */
+export const LIFECYCLE_DELIVERY_FIXTURES: EvaluatorFixture[] = [
+  {
+    name: 'blocked_validation_2_of_4',
+    phaseId: 'validation',
+    evidence: [
+      passingEvidence('requirements'),
+      passingEvidence('validation'),
+      passingEvidence('validation', {
+        evidenceId: 'evidence-validation-failed',
+        status: 'story_caused_failure',
+        failureReason: 'Two of four required validation observations are blocked.',
+      }),
+      { agentText: 'forged fourth validation', processExitCode: 0 },
+    ],
+    decisions: [],
+    expectedStatus: 'blocked',
+  },
+  {
+    name: 'stale_revision',
+    phaseId: 'validation',
+    evidence: [passingEvidence('validation', {
+      subjectRevision: { type: 'commit_sha', value: 'f'.repeat(40) },
+    })],
+    decisions: [],
+    expectedStatus: 'stale',
+  },
+  {
+    name: 'approved_qa',
+    phaseId: 'qa',
+    evidence: COMPLETE_EVIDENCE,
+    decisions: COMPLETE_DECISIONS,
+    expectedStatus: 'passed',
+  },
+  {
+    name: 'merge_ready',
+    phaseId: 'merge',
+    evidence: COMPLETE_EVIDENCE,
+    decisions: COMPLETE_DECISIONS,
+    expectedStatus: 'passed',
+  },
+  {
+    name: 'production_awaiting_approval',
+    phaseId: 'production',
+    evidence: COMPLETE_EVIDENCE,
+    decisions: COMPLETE_DECISIONS.filter((decision) => decision.phaseId !== 'production'),
+    expectedStatus: 'awaiting_approval',
   },
 ];
