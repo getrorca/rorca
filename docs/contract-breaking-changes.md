@@ -26,6 +26,15 @@ Migration path:
 - Describe any temporary compatibility strategy.
 ```
 
+<!-- contract-break: 2026-07-15 GET /api/health/detailed -->
+## 2026-07-15 `GET /api/health/detailed`
+
+Justification: detailed health adds the optional `refresh` query so operations clients can request a bounded, newly sampled dependency probe instead of relying on stale cached health evidence.
+
+Migration path:
+- Existing callers may continue omitting `refresh`; the default cached-response behavior remains unchanged.
+- Clients that need a current probe may send `refresh=true` and handle the existing degraded/unavailable health response.
+
 <!-- contract-break: 2026-07-03 GET /api/health -->
 ## 2026-07-03 `GET /api/health`
 
