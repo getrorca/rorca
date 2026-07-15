@@ -3952,27 +3952,47 @@ async function withSpecLock(jsonPath: string, fn: () => void): Promise<void> {
   try { fn(); } finally { release(); }
 }
 
-async function markStoryPassed(jsonPath: string, storyId: string): Promise<void> {
+export interface MarkStoryPassedResult {
+  changed: boolean;
+  storyFound: boolean;
+}
+
+/**
+ * Canonical spec lifecycle mutation shared by engine completion and governed
+ * recovery reconciliation. The path-level lock makes repeated completion
+ * reports idempotent and prevents concurrent story writes from clobbering one
+ * another.
+ */
+export async function markStoryPassed(jsonPath: string, storyId: string): Promise<MarkStoryPassedResult> {
+  let result: MarkStoryPassedResult = { changed: false, storyFound: false };
   await withSpecLock(jsonPath, () => {
     const raw = fs.readFileSync(jsonPath, 'utf8');
     const spec: SpecJson = JSON.parse(raw);
     const stories = getStories(spec);
 
     for (const s of stories) {
-      if (s.id === storyId) {
-        if (spec.userStories || s.passes !== undefined) {
-          s.passes = true;
-          s.notes = 'Completed by Rorca engine';
-        } else {
-          s.status = 'passed';
-        }
-        break;
+      if (s.id !== storyId) continue;
+      result.storyFound = true;
+      const alreadyPassed = spec.userStories || s.passes !== undefined
+        ? s.passes === true
+        : s.status === 'passed';
+      if (alreadyPassed) break;
+      if (spec.userStories || s.passes !== undefined) {
+        s.passes = true;
+        s.notes = 'Completed by Rorca engine';
+      } else {
+        s.status = 'passed';
       }
+      result.changed = true;
+      break;
     }
 
-    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-    logger.info(`Marked ${storyId} as passed`);
+    if (result.changed) {
+      fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+      logger.info(`Marked ${storyId} as passed`);
+    }
   });
+  return result;
 }
 
 async function markStorySkipped(jsonPath: string, storyId: string): Promise<void> {

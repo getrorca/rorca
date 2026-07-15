@@ -269,7 +269,12 @@ function isPublicTool(definition: Pick<McpToolDefinition, 'capturedMethod' | 'ca
     rule.method === definition.capturedMethod && rule.pattern.test(definition.capturedPath));
 }
 
-export function getMcpToolTier(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath'>): McpTier {
+export function getMcpToolTier(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath' | 'capturedOperation'>): McpTier {
+  // OpenAPI is the authority for auth/public MCP eligibility. Preserve the
+  // legacy public allowlist for unannotated historic endpoints, but do not turn
+  // a governed auth-tier route into an accidental admin-only dead end.
+  const declaredTier = getRorcaTier(definition.capturedOperation).tier;
+  if (declaredTier === 'public' || declaredTier === 'auth') return 'public';
   return isPublicTool(definition) ? 'public' : 'admin';
 }
 
@@ -598,6 +603,12 @@ export const MCP_FRIENDLY_ALIASES: readonly McpFriendlyAlias[] = [
     description: 'Friendly alias for retrying failed stories from a prior pipeline run.',
     method: 'POST',
     path: '/api/pipeline/runs/{runId}/retry',
+  },
+  {
+    toolName: 'rorca_reconcile_checkpoint',
+    description: 'Reconcile a validated recovery checkpoint through Rorca\'s governed canonical story lifecycle.',
+    method: 'POST',
+    path: '/api/repair/checkpoints/reconcile',
   },
   {
     toolName: 'rorca_list_runs',

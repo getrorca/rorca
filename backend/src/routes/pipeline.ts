@@ -87,6 +87,7 @@ import {
 import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
 import { createRunnerJob } from '../lib/execution-runner-jobs';
+import { getRecoveryTelemetry } from '../lib/recovery-telemetry';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -8480,6 +8481,86 @@ router.post('/orphan-sweep', async (req: Request, res: Response) => {
     });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Pipeline] Orphan sweep');
+  }
+});
+
+// ─── GET /api/pipeline/telemetry — Bounded recovery telemetry ───────────────
+
+/**
+ * @swagger
+ * /api/pipeline/telemetry:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get bounded redacted recovery telemetry
+ *     operationId: getRecoveryTelemetry
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only, bounded worker/queue/run health is safe for local recovery supervisors and exposes no pg-boss payloads, logs, paths, or secrets."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string, maxLength: 128 }
+ *     responses:
+ *       200: { description: Redacted v1 recovery telemetry }
+ *       400: { description: Invalid workspace identifier }
+ *       404: { description: Workspace not found }
+ *       503: { description: Recovery telemetry capability unavailable }
+ */
+router.get('/telemetry', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : '';
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workspaceId)) {
+      throw new ValidationError('workspaceId must be a bounded identifier');
+    }
+    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    res.json(await getRecoveryTelemetry(workspaceId));
+  } catch (error: unknown) {
+    if (error instanceof ValidationError || error instanceof NotFoundError) {
+      handleRouteError(res, error, '[Pipeline] Recovery telemetry');
+      return;
+    }
+    handleRouteError(res, new ServiceUnavailableError('Recovery telemetry capability is currently unavailable'), '[Pipeline] Recovery telemetry');
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/queue/health:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get recovery-compatible queue health
+ *     operationId: getRecoveryQueueHealth
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Compatibility read surface for local recovery supervisors; it returns the same bounded redacted projection as recovery telemetry rather than pg-boss internals."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string, maxLength: 128 }
+ *     responses:
+ *       200: { description: Redacted v1 recovery telemetry }
+ *       400: { description: Invalid workspace identifier }
+ *       404: { description: Workspace not found }
+ *       503: { description: Recovery telemetry capability unavailable }
+ */
+router.get('/queue/health', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : '';
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workspaceId)) {
+      throw new ValidationError('workspaceId must be a bounded identifier');
+    }
+    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    res.json(await getRecoveryTelemetry(workspaceId));
+  } catch (error: unknown) {
+    if (error instanceof ValidationError || error instanceof NotFoundError) {
+      handleRouteError(res, error, '[Pipeline] Recovery queue health');
+      return;
+    }
+    handleRouteError(res, new ServiceUnavailableError('Recovery telemetry capability is currently unavailable'), '[Pipeline] Recovery queue health');
   }
 });
 

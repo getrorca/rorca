@@ -109,6 +109,12 @@ function hasDockerSidecar(dbMode: 'native' | 'docker' | 'byop'): boolean {
  *                       type: boolean
  *                     vector:
  *                       type: boolean
+ *                     recoveryTelemetry:
+ *                       type: boolean
+ *                       description: Bounded redacted worker/queue/run recovery telemetry is available.
+ *                     checkpointReconciliation:
+ *                       type: boolean
+ *                       description: Governed checkpoint reconciliation is available through API and MCP.
  *                 databaseCapability:
  *                   type: object
  *                   description: Canonical database runtime capability model used by frontend and operators.
@@ -132,6 +138,8 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         docker: hasDockerSidecar(databaseCapability.dbMode),
         age: databaseCapability.extensions.age,
         vector: databaseCapability.extensions.vector || vector,
+        recoveryTelemetry: true,
+        checkpointReconciliation: true,
       },
       databaseCapability,
     });
