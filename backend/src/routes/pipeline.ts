@@ -200,6 +200,15 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** PostgreSQL BIGINT values are returned as strings by pg; queue payloads require numbers. */
+function normalizePipelineRunId(value: unknown): number {
+  const runId = Number(value);
+  if (!Number.isSafeInteger(runId) || runId <= 0) {
+    throw new UnprocessableError('Database returned an invalid pipeline run ID');
+  }
+  return runId;
+}
+
 async function waitForRunPtySessionStatus(runId: number, timeoutMs = 5_000): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   let status = await getRunPtySessionStatus(runId);
@@ -1830,7 +1839,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
            RETURNING id`,
           [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions],
         );
-        runId = Number(runResult!.id);
+        runId = normalizePipelineRunId(runResult?.id);
       }
 
       const walEvent = await queryOne<WalEvent>(
@@ -2048,7 +2057,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       runId = existingRunId;
     } else {
       const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
-      runId = runResult!.id;
+      runId = normalizePipelineRunId(runResult?.id);
     }
 
     // 7. Build env overrides — workspace-specific and vault key additions only.
@@ -8047,8 +8056,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
         normalizeTerminalMode(originalRun.terminal_mode),
       ],
     );
-    if (!newRunRow) throw new Error('Failed to create new run row');
-    const newRunId = newRunRow.id;
+    if (!newRunRow) throw new UnprocessableError('Failed to create new run row');
+    const newRunId = normalizePipelineRunId(newRunRow.id);
 
     // Build the job payload (mirrors pipeline:trigger payload shape)
     const jobPayload = {

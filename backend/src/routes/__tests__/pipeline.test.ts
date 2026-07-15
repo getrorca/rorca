@@ -1211,6 +1211,17 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.agentType).toBe('claude');
     expect(res.body.agentModel).toBeNull();
 
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({ runId: res.body.runId }),
+      expect.any(Object),
+    );
+    const queuedPayload = mockSend.mock.calls.find(([queueName]) => queueName === 'pipeline:run')?.[1];
+    expect(typeof queuedPayload?.runId).toBe('number');
+    expect(Number.isSafeInteger(queuedPayload?.runId)).toBe(true);
+
     const run = await queryOne(`SELECT agent, agent_type, agent_model FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
     expect(run.agent).toBe('claude');
     expect(run.agent_type).toBe('claude');
