@@ -116,6 +116,24 @@ describe('spec readiness evaluator', () => {
     ]));
   });
 
+  it('keeps legacy specs usable while exposing needs compilation and a lazy action', () => {
+    const readiness = evaluateSpecReadiness(base({
+      planCompilationState: {
+        status: 'needs_compilation',
+        label: 'needs compilation',
+        currentPlan: null,
+        retryableReason: null,
+        compilePath: '/api/specs/spec-1/lifecycle/compile',
+      },
+    }));
+
+    expect(readiness.lifecyclePlanState.label).toBe('needs compilation');
+    expect(readiness.readinessState).toEqual({ status: 'degraded', reason: 'degraded' });
+    expect(readiness.executionGate.status).toBe('allowed');
+    expect(readiness.warnings.map((warning) => warning.code)).toContain(SpecReadinessReasonCode.PlanCompilationNeeded);
+    expect(readiness.availableActions).toContain('compile_plan');
+  });
+
   it('allows degraded-but-runnable specs with backfilled context and no installed skills', () => {
     const readiness = evaluateSpecReadiness(base({
       generationLog: {

@@ -22,6 +22,8 @@ export const SpecReadinessReasonCode = {
   ActivePipelineConflict: 'active_pipeline_conflict',
   PolicySkipped: 'policy_skipped',
   RunAnywayOverrideUsed: 'run_anyway_override_used',
+  PlanCompilationNeeded: 'plan_compilation_needed',
+  PlanCompilationFailed: 'plan_compilation_failed',
 } as const;
 
 export const SpecWorkflowReasonCode = {

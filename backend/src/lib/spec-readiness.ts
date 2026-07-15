@@ -11,6 +11,10 @@ import { query, queryOne, execute } from '../db/index';
 import { listStagesByRun, type PostSaveWorkflowRun, type PostSaveWorkflowStage, type PostSaveWorkflowRunStatus } from '../db/spec-post-save';
 import { SpecReadinessReasonCode, type SpecReadinessReason } from '../reason-codes';
 import { UnprocessableError } from './errors';
+import {
+  getSpecPlanCompilationState,
+  type SpecPlanCompilationState,
+} from './ssdlc-plan-service';
 
 export { SpecReadinessReasonCode, type SpecReadinessReason } from '../reason-codes';
 
@@ -26,7 +30,8 @@ export type SpecReadinessAction =
   | 'repair_post_save'
   | 'install_skills'
   | 'backfill_context'
-  | 'retry_failed_stage';
+  | 'retry_failed_stage'
+  | 'compile_plan';
 
 export interface SpecReadinessContextCaptureState {
   status: 'provided' | 'backfilled' | 'missing' | 'unknown';
@@ -77,6 +82,7 @@ export interface SpecExecutionGate {
 
 export interface SpecReadinessPayload {
   persistenceState: SpecReadinessPersistenceState;
+  lifecyclePlanState: SpecPlanCompilationState;
   postSaveState: SpecReadinessPostSaveState;
   readinessState: SpecReadinessStatePayload;
   executionGate: SpecExecutionGate;
@@ -104,6 +110,7 @@ export interface EvaluateSpecReadinessInput {
   legacyPostSaveStages?: Record<string, unknown> | null;
   activeWorkflowConflicts?: Array<{ id: number; status: string }>;
   activePipelineConflicts?: Array<{ id: number; status: string }>;
+  planCompilationState?: SpecPlanCompilationState;
 }
 
 function reason(
@@ -263,6 +270,25 @@ export function evaluateSpecReadiness(input: EvaluateSpecReadinessInput): SpecRe
     ));
   }
 
+  const lifecyclePlanState = input.planCompilationState ?? {
+    status: 'needs_compilation' as const,
+    label: 'needs compilation' as const,
+    currentPlan: null,
+    retryableReason: null,
+    compilePath: `/api/specs/${encodeURIComponent(input.specId)}/lifecycle/compile`,
+  };
+  if (input.planCompilationState && lifecyclePlanState.status !== 'current') {
+    const failed = lifecyclePlanState.status === 'compilation_failed';
+    warnings.push(reason(
+      failed ? SpecReadinessReasonCode.PlanCompilationFailed : SpecReadinessReasonCode.PlanCompilationNeeded,
+      failed
+        ? 'Lifecycle plan compilation failed and can be retried.'
+        : 'Lifecycle plan needs compilation before lifecycle evidence can be evaluated.',
+      'warning',
+      { lifecyclePlanState },
+    ));
+  }
+
   for (const stage of stages) {
     if (stageIsLive(stage)) {
       blockingReasons.push(reason(
@@ -316,6 +342,7 @@ export function evaluateSpecReadiness(input: EvaluateSpecReadinessInput): SpecRe
   }
   if (blockingReasons.some((r) => r.code === SpecReadinessReasonCode.MissingContext)) availableActions.add('backfill_context');
   if (warnings.some((r) => r.code === SpecReadinessReasonCode.NoInstalledSkills)) availableActions.add('install_skills');
+  if (lifecyclePlanState.status !== 'current') availableActions.add('compile_plan');
   if (!blocked) {
     availableActions.add(input.location === 'pending' ? 'approve' : 'run');
   }
@@ -332,6 +359,7 @@ export function evaluateSpecReadiness(input: EvaluateSpecReadinessInput): SpecRe
       saveGeneration: input.generationLog?.saveGeneration ?? null,
       contextCapture,
     },
+    lifecyclePlanState,
     postSaveState: {
       mode: postSaveMode,
       source,
@@ -460,6 +488,13 @@ export async function getSpecReadiness(input: {
     : [];
 
   const contextSummaryJson = asRecord(generationLog?.context_summary_json) ?? null;
+  const planCompilationState = resolved.exists
+    ? await getSpecPlanCompilationState({
+      workspaceId: input.workspaceId,
+      workspacePath: input.workspacePath,
+      specSlug: input.specId,
+    })
+    : undefined;
 
   return evaluateSpecReadiness({
     workspaceId: input.workspaceId,
@@ -477,6 +512,7 @@ export async function getSpecReadiness(input: {
     workflowStages,
     activeWorkflowConflicts: activeWorkflowConflicts.map((row) => ({ id: Number(row.id), status: row.status })),
     activePipelineConflicts: activePipelineConflicts.map((row) => ({ id: Number(row.id), status: row.status })),
+    planCompilationState,
   });
 }
 

@@ -51,6 +51,11 @@ jest.mock('../logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
+const mockCompileSpecPlan = jest.fn();
+jest.mock('../ssdlc-plan-service', () => ({
+  compileSpecPlan: (...args: unknown[]) => mockCompileSpecPlan(...args),
+}));
+
 const bestEffortPolicy = {
   version: 'v1' as const,
   presetId: 'best_effort' as const,
@@ -355,6 +360,32 @@ describe('spec-post-save-workflow v1 orchestrator', () => {
       stageKey: 'enrich',
       status: 'completed',
       allowedCurrentStatuses: ['pending', 'queued', 'running'],
+    }));
+  });
+
+  it('finalizes exactly from a terminal durable generation and reuses the shared compiler service', async () => {
+    mockListStagesByRun.mockResolvedValue([
+      stage('context', 'completed'),
+      stage('enrich', 'completed'),
+      stage('matchSkills', 'skipped'),
+      stage('memorySynthesis', 'completed'),
+    ]);
+    mockQueryOne.mockResolvedValue({ path: '/workspace' });
+    mockCompileSpecPlan.mockResolvedValue({ status: 'compiled', planId: 'plan-1' });
+
+    const { finalizeSpecPostSavePlanIfReady } = await import('../spec-post-save-workflow');
+    await expect(finalizeSpecPostSavePlanIfReady({
+      id: 7,
+      workspaceId: 'ws-1',
+      specId: 'spec-final',
+      saveGeneration: 9,
+    } as never)).resolves.toMatchObject({ status: 'compiled', planId: 'plan-1' });
+
+    expect(mockCompileSpecPlan).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      specSlug: 'spec-final',
+      expectedSaveGeneration: 9,
+      source: 'post-save-finalizer',
     }));
   });
 

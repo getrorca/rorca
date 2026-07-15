@@ -34,6 +34,7 @@ import { logger } from './logger';
 import type { PostSavePolicy } from './post-save-policy';
 import { POST_SAVE_POLICY_VERSION } from './post-save-policy';
 import type { SpecStageFingerprints } from './spec-stage-fingerprints';
+import { compileSpecPlan, type CompileSpecPlanResult } from './ssdlc-plan-service';
 
 export type SpecPostSaveWorkflowStageKey = PostSaveWorkflowStageKey;
 export type SpecPostSaveWorkflowStageStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
@@ -597,6 +598,32 @@ export async function startSpecPostSaveWorkflow(input: StartSpecPostSaveWorkflow
   return run;
 }
 
+export async function finalizeSpecPostSavePlanIfReady(
+  run: PostSaveWorkflowRun,
+  options: { throwOnFailure?: boolean; source?: 'canonical-persist' | 'post-save-finalizer' } = {},
+): Promise<CompileSpecPlanResult | null> {
+  const stages = await listStagesByRun(run.id);
+  if (!Array.isArray(stages) || stages.some((stage) => ['pending', 'queued', 'running'].includes(stage.status))) {
+    return null;
+  }
+
+  const workspace = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [run.workspaceId]);
+  if (!workspace) return null;
+  try {
+    return await compileSpecPlan({
+      workspaceId: run.workspaceId,
+      workspacePath: workspace.path,
+      specSlug: run.specId,
+      expectedSaveGeneration: run.saveGeneration,
+      source: options.source ?? 'post-save-finalizer',
+    });
+  } catch (error) {
+    logger.warn({ err: error, runId: run.id, specId: run.specId }, '[post-save-workflow] lifecycle plan finalizer deferred for retry');
+    if (options.throwOnFailure) throw error;
+    return null;
+  }
+}
+
 export async function advanceSpecPostSaveWorkflowDependencies(jobId: string): Promise<void> {
   const job = await getJob(jobId);
   if (!job) return;
@@ -609,4 +636,5 @@ export async function advanceSpecPostSaveWorkflowDependencies(jobId: string): Pr
   if (!run) return;
   await syncSpecPostSaveWorkflowStageFromJob(jobId);
   await advanceReadyStages(run, { workspaceId: job.workspaceId, specId: job.specId, memory: metadata.memory });
+  await finalizeSpecPostSavePlanIfReady(run);
 }

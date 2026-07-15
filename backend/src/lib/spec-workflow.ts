@@ -39,7 +39,8 @@ export type WorkflowActionKey =
   | 'repair_spec'
   | 'approve'
   | 'run'
-  | 'run_anyway';
+  | 'run_anyway'
+  | 'compile_plan';
 
 export interface WorkflowActionHint {
   action: WorkflowActionKey;
@@ -110,6 +111,7 @@ export interface SpecReadinessInspectionPayload {
   specId: string;
   workspaceId: string;
   persistence: SpecReadinessPayload['persistenceState'];
+  lifecyclePlan: SpecReadinessPayload['lifecyclePlanState'];
   workflow: SpecWorkflowRunSnapshot;
   stages: SpecWorkflowStageSnapshot[];
   readinessState: SpecReadinessPayload['readinessState'];
@@ -268,6 +270,23 @@ function buildTopLevelHints(input: {
       request: {
         method: 'POST',
         path: repairPath(input.specId),
+        workspaceIdLocation: 'body',
+      },
+    });
+  }
+
+  if (input.readiness.availableActions.includes('compile_plan')) {
+    hints.push({
+      action: 'compile_plan',
+      target: 'spec',
+      allowed: true,
+      label: 'Compile lifecycle plan',
+      reasonCode: input.readiness.lifecyclePlanState.status === 'compilation_failed'
+        ? SpecReadinessReasonCode.PlanCompilationFailed
+        : SpecReadinessReasonCode.PlanCompilationNeeded,
+      request: {
+        method: 'POST',
+        path: input.readiness.lifecyclePlanState.compilePath,
         workspaceIdLocation: 'body',
       },
     });
@@ -442,6 +461,7 @@ export function buildSpecReadinessInspection(input: {
     specId: input.specId,
     workspaceId: input.workspaceId,
     persistence: input.readiness.persistenceState,
+    lifecyclePlan: input.readiness.lifecyclePlanState,
     workflow: input.workflow.workflow,
     stages: input.workflow.stages,
     readinessState: input.readiness.readinessState,

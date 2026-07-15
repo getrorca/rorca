@@ -73,7 +73,11 @@ import {
   type PersistStageReason,
   type PersistStageStatus,
 } from '../lib/spec-post-save';
-import { startSpecPostSaveWorkflow, type SpecPostSaveWorkflowMemoryPayload } from '../lib/spec-post-save-workflow';
+import {
+  finalizeSpecPostSavePlanIfReady,
+  startSpecPostSaveWorkflow,
+  type SpecPostSaveWorkflowMemoryPayload,
+} from '../lib/spec-post-save-workflow';
 import type { PostSaveWorkflowRun } from '../db/spec-post-save';
 import {
   computeSpecStageFingerprints,
@@ -122,8 +126,6 @@ import {
   authoringTelemetry,
   buildLifecycleAuthoringSection,
   buildPersistedAuthoringMetadata,
-  compilePersistedAuthoringSpec,
-  markAuthoritativeCompilation,
   refreshAuthoringStateAfterEdit,
   runAuthoringPreflight,
   supersedeCurrentLifecyclePlan,
@@ -132,6 +134,11 @@ import {
   type PersistAuthoringBinding,
 } from '../lib/ssdlc-forge-authoring';
 import { planAuthoring } from '../lib/ssdlc-authoring-planner';
+import {
+  backfillWorkspacePlans,
+  compileSpecPlan,
+  markCurrentPlanStaleIfMaterialChanged,
+} from '../lib/ssdlc-plan-service';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -1085,6 +1092,16 @@ const PersistAuthoringBatchSchema = z.object({
   idempotencyKey: z.string().trim().min(2).max(128).optional(),
 }).strict();
 
+const CompileLifecyclePlanSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+}).strict();
+
+const BackfillLifecyclePlansSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  cursor: z.string().trim().min(1).nullable().optional(),
+  limit: z.number().int().min(1).max(20).optional(),
+}).strict();
+
 function resolvePersistPostSavePolicyInput(body: Pick<z.infer<typeof PersistSpecDraftSchema>, 'postSave' | 'policyPresetId' | 'postSavePolicy'>): PostSavePolicyInput {
   const providedFields = [
     body.postSave !== undefined ? 'postSave' : null,
@@ -1835,6 +1852,11 @@ async function persistExplicitDraftInternal(
     authoring: persistedAuthoring,
   });
 
+  // Canonical persistence owns the version snapshot; plan compilation remains a
+  // read-only consumer of this durable normalized generation.
+  await snapshotVersion(slug, fs.readFileSync(writeResult.specPath, 'utf8'), 'pending');
+  await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: slug });
+
   const priorGenerationLog = await getEffectiveGenerationLog(slug);
   const priorFingerprints = readStageFingerprintsFromSummary(priorGenerationLog?.context_summary_json);
 
@@ -1878,40 +1900,6 @@ async function persistExplicitDraftInternal(
     authoring: telemetry,
   });
 
-  let lifecyclePlan: ForgePersistResult['lifecyclePlan'];
-  if (authoringBinding && authoringSpec) {
-    try {
-      lifecyclePlan = await compilePersistedAuthoringSpec({
-        workspaceId,
-        slug,
-        version: saveGeneration,
-        specPath: writeResult.specPath,
-        binding: authoringBinding,
-        spec: authoringSpec,
-      });
-      const finalContent = JSON.parse(fs.readFileSync(writeResult.specPath, 'utf8')) as Record<string, unknown>;
-      markAuthoritativeCompilation(finalContent, lifecyclePlan);
-      fs.writeFileSync(writeResult.specPath, JSON.stringify(finalContent, null, 2), 'utf8');
-    } catch (error) {
-      const staleContent = JSON.parse(fs.readFileSync(writeResult.specPath, 'utf8')) as Record<string, unknown>;
-      const authoring = staleContent.authoring as Record<string, unknown> | undefined;
-      if (authoring) {
-        authoring.state = 'stale_authoring_preflight';
-        authoring.approvalReady = false;
-        authoring.reasonCode = 'stale_authoring_preflight';
-        authoring.lifecycleCompiler = { state: 'blocked', error: error instanceof Error ? error.message : String(error) };
-      }
-      fs.writeFileSync(writeResult.specPath, JSON.stringify(staleContent, null, 2), 'utf8');
-      await updatePersistGenerationLogForSave(slug, saveGeneration, {
-        status: 'authoring_compile_blocked',
-        summaryPatch: { authoring: authoringTelemetry(authoringBinding, 'stale_preflight') },
-        error: error instanceof Error ? error.message : String(error),
-        errorCategory: 'stale_authoring_preflight',
-      });
-      throw error;
-    }
-  }
-
   const workflowRun = await scheduleSpecPostSaveJobs(slug, workspaceId, {
     ...postSave,
     effectivePolicy: postSavePolicy.effectivePolicy,
@@ -1927,7 +1915,22 @@ async function persistExplicitDraftInternal(
     },
   });
 
-  const completedTelemetry = authoringTelemetry(authoringBinding, authoringBinding ? 'persisted_and_compiled' : 'persisted_incomplete');
+  const compiledPlan = await finalizeSpecPostSavePlanIfReady(workflowRun, {
+    throwOnFailure: true,
+    source: 'canonical-persist',
+  });
+  const lifecyclePlan: ForgePersistResult['lifecyclePlan'] = compiledPlan ? {
+    planId: compiledPlan.planId,
+    inputHash: compiledPlan.inputHash,
+    profiles: compiledPlan.profiles,
+    riskLevel: compiledPlan.riskLevel,
+  } : undefined;
+  const completedTelemetry = authoringTelemetry(
+    authoringBinding,
+    authoringBinding
+      ? lifecyclePlan ? 'persisted_and_compiled' : 'persisted_pending_compilation'
+      : 'persisted_incomplete',
+  );
   await updatePersistGenerationLogForSave(slug, saveGeneration, {
     summaryPatch: {
       authoring: completedTelemetry,
@@ -5211,6 +5214,93 @@ router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/lifecycle/compile:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Lazily compile or recompile one spec lifecycle plan
+ *     operationId: compileSpecLifecyclePlan
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "User-scoped lifecycle compilation persists an idempotent derived plan for an existing local spec."
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200: { description: Plan compiled or matching current plan reused }
+ *       404: { description: Workspace or spec not found }
+ *       422: { description: Retryable compilation, stale-generation, or stale-preflight blocker }
+ */
+router.post('/:specId/lifecycle/compile', validateBody(CompileLifecyclePlanSchema), async (req: Request, res: Response) => {
+  try {
+    const specSlug = String(req.params.specId);
+    const workspaceId = String(CompileLifecyclePlanSchema.parse(req.body).workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) throw new NotFoundError('Workspace not found');
+    const result = await compileSpecPlan({
+      workspaceId,
+      workspacePath: workspace.path,
+      specSlug,
+      source: 'lazy-compile',
+    });
+    res.json(result);
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Compile lifecycle plan');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/lifecycle/backfill:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Compile one bounded page of workspace lifecycle plans
+ *     operationId: backfillSpecLifecyclePlans
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Bounded workspace maintenance scans local spec storage and persists derived lifecycle plans without enqueueing jobs."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               cursor: { type: string, nullable: true }
+ *               limit: { type: integer, minimum: 1, maximum: 20, default: 20 }
+ *     responses:
+ *       200: { description: Bounded compiled/skipped/failed page and resumable cursor }
+ *       404: { description: Workspace not found }
+ */
+router.post('/lifecycle/backfill', validateBody(BackfillLifecyclePlansSchema), async (req: Request, res: Response) => {
+  try {
+    const input = BackfillLifecyclePlansSchema.parse(req.body);
+    const workspaceId = String(input.workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) throw new NotFoundError('Workspace not found');
+    res.json(await backfillWorkspacePlans({
+      workspaceId,
+      workspacePath: workspace.path,
+      cursor: input.cursor,
+      limit: input.limit,
+    }));
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Backfill lifecycle plans');
+  }
+});
+
 // ─── GET /generate/job/:jobId — Poll async chunked generation status ──────────
 
 /**
@@ -8177,6 +8267,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     await invalidateAuthoringForMaterialEdit(specContent, workspaceId, String(specId), 'stories_added');
 
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: String(specId) });
 
     await recordRetrievedContextOutcome(workspaceId, addStoriesRetrievedContext, true);
     res.json({
@@ -8497,6 +8588,7 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     restoredContent.restoredAt = new Date().toISOString();
 
     fs.writeFileSync(targetPath, JSON.stringify(restoredContent, null, 2), 'utf8');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId: String(workspaceId), workspacePath: workspace.path, specSlug: specId });
 
     // Snapshot the restored version
     const newVersion = await snapshotVersion(specId, JSON.stringify(restoredContent), currentStatus);
@@ -8619,6 +8711,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
       content.userStories = stories;
       await invalidateAuthoringForMaterialEdit(content, String(workspaceId), specId, 'story_fields_edited');
       fs.writeFileSync(pendingFile, JSON.stringify(content, null, 2) + '\n');
+      await markCurrentPlanStaleIfMaterialChanged({ workspaceId: String(workspaceId), workspacePath: workspace.path, specSlug: specId });
 
       // WAL event
       const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, ['story_edited', workspaceId, specId, storyId, JSON.stringify({
@@ -8804,6 +8897,7 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
     content.userStories = stories;
     await invalidateAuthoringForMaterialEdit(content, String(workspaceId), specId, 'story_updated');
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId: String(workspaceId), workspacePath: workspace.path, specSlug: specId });
 
     // WAL event
     const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, ['story_edited', workspaceId, specId, storyId, JSON.stringify({
@@ -8933,6 +9027,7 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
     content.userStories = reindexed;
     await invalidateAuthoringForMaterialEdit(content, workspaceId, specId, 'story_deleted_or_reindexed');
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: specId });
 
     // WAL event
     const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, ['story_deleted', workspaceId, specId, storyId, JSON.stringify({
@@ -10853,6 +10948,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
 
     content.userStories = stories;
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId: String(workspaceId), workspacePath: workspace.path, specSlug: specId });
 
     // WAL event
     const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, [eventType, workspaceId, specId, null, JSON.stringify({
@@ -11461,6 +11557,7 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
 
     // Write back
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: String(specId) });
 
     // Emit WAL event
     await execute(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`, ['dependencies_applied', specId, workspaceId, JSON.stringify({
@@ -11547,8 +11644,11 @@ router.post('/:specId/tags', async (req: Request, res: Response) => {
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
        VALUES ('tags_updated', $1, $2, $3, NOW())` + ' RETURNING *', [specId, workspaceId, JSON.stringify({ added, action: 'add' })]);
     broadcastAll(walEvent!);
+    if (added.length > 0) {
+      await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: specId });
+    }
 
-    res.json({ tags: getSpecTags(specId, workspaceId) });
+    res.json({ tags: await getSpecTags(specId, workspaceId) });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Add tags');
   }
@@ -11611,8 +11711,12 @@ router.delete('/:specId/tags/:tag', async (req: Request, res: Response) => {
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
        VALUES ('tags_updated', $1, $2, $3, NOW()) RETURNING *`, [specId, workspaceId, JSON.stringify({ removed: [tagName], action: 'remove' })]);
     broadcastAll(walEvent!);
+    const workspace = await getWorkspace(workspaceId);
+    if (workspace) {
+      await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: specId });
+    }
 
-    res.json({ tags: getSpecTags(specId, workspaceId) });
+    res.json({ tags: await getSpecTags(specId, workspaceId) });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Remove tag');
   }
@@ -12209,6 +12313,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
     specContent.mermaidDiagram = depsDiagram.mermaid;
 
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: String(specId) });
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('github_issues_imported', $1, $2, $3)` + ' RETURNING *', [specId, workspaceId, JSON.stringify({
@@ -12578,6 +12683,7 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
     specContent.mermaidDiagram = depsDiagram.mermaid;
 
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: String(specId) });
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('issues_imported', $1, $2, $3)` + ' RETURNING *', [specId, workspaceId, JSON.stringify({
@@ -13559,6 +13665,9 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
     }
 
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+    if (added.length > 0) {
+      await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: String(specId) });
+    }
 
     res.json({
       ok: true,
@@ -14650,7 +14759,9 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
       content.userStories = deduped;
       const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
       fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
-      await snapshotVersion(Array.isArray(specId) ? specId[0] : specId, JSON.stringify(content), specStatus);
+      const normalizedSpecId = Array.isArray(specId) ? specId[0] : specId;
+      await snapshotVersion(normalizedSpecId, JSON.stringify(content), specStatus);
+      await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: normalizedSpecId });
     }
 
     res.json({ fixed, changes });
