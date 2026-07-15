@@ -17,6 +17,7 @@ import type {
   LifecycleSpecResponse,
 } from '../../types/lifecycle';
 import {
+  LIFECYCLE_DISPLAY_PREFERENCES_KEY,
   LIFECYCLE_SAVED_VIEWS_KEY,
   lifecycleInvalidationTargets,
   loadLifecycleSavedViews,
@@ -70,7 +71,8 @@ function portfolio(workspace = mocks.workspaceId ?? 'none', snapshot = SNAPSHOT)
     }],
     total: 1, hasMore: false, workspace: { id: workspace, label: workspace }, phaseOrder: [], snapshotId: `set:${snapshot}`, ...MARKS,
     kpis: {
-      specs: 1, evaluatedSpecs: 1, needsCompilation: 0, blockedSpecs: 0, stories: 2,
+      specs: 1, activeSpecs: 1, evaluatedSpecs: 1, needsCompilation: 0, blockedSpecs: 0,
+      missingGates: 2, readyForQa: 1, waitingApprovals: 0, recentPhaseTransitions: 3, stories: 2,
       phases: {
         total: 11, excluded: 0, denominator: 11, passed: 1, completionRate: 1 / 11,
         byStatus: { not_started: 9, in_progress: 1, blocked: 0, awaiting_approval: 0, passed: 1, deferred: 0, not_applicable: 0, stale: 0 },
@@ -155,6 +157,34 @@ describe('lifecycle URL and saved display state', () => {
     expect(saveLifecycleSavedViews(localStorage, repeated).views).toHaveLength(12);
   });
 
+  it('persists compact and blocked-only strictly as local display preferences', async () => {
+    const first = renderHook(() => useLifecycle(), { wrapper: wrapper() });
+    await waitFor(() => expect(first.result.current.portfolio.data).not.toBeNull());
+    act(() => {
+      first.result.current.setCompact(true);
+      first.result.current.updateFilters({ blocked: true });
+    });
+    await waitFor(() => expect(JSON.parse(localStorage.getItem(LIFECYCLE_DISPLAY_PREFERENCES_KEY) ?? '{}')).toEqual({
+      compact: true,
+      blockedOnly: true,
+    }));
+    first.unmount();
+
+    const second = renderHook(() => useLifecycle(), { wrapper: wrapper() });
+    await waitFor(() => expect(second.result.current.filters.blocked).toBe(true));
+    expect(second.result.current.urlState.compact).toBe(true);
+  });
+
+  it('renames saved views without retaining lifecycle truth fields', async () => {
+    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper() });
+    await waitFor(() => expect(result.current.portfolio.data).not.toBeNull());
+    let id = '';
+    act(() => { id = result.current.saveView('My view').id; });
+    act(() => result.current.renameSavedView(id, 'Renamed view'));
+    await waitFor(() => expect(result.current.savedViews.find((view) => view.id === id)?.name).toBe('Renamed view'));
+    expect(JSON.stringify(JSON.parse(localStorage.getItem(LIFECYCLE_SAVED_VIEWS_KEY) ?? '{}'))).not.toContain('evidence');
+  });
+
   it('computes targeted lifecycle SSE invalidation', () => {
     const event: WalEvent = {
       id: 1, ts: '', event_type: 'lifecycle_changed', workspace_id: 'ws-1', spec_id: 'spec-a', story_id: null, actor: 'test',
@@ -189,10 +219,13 @@ describe('useLifecycle controller', () => {
     expect(mockPhase).not.toHaveBeenCalled();
   });
 
-  it('drives pagination from the URL', async () => {
-    renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?page=3&limit=10') });
+  it('drives pagination from the URL and resets it for every filter change', async () => {
+    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper('/lifecycle?page=3&limit=10') });
     await waitFor(() => expect(mockPortfolio).toHaveBeenCalled());
     expect(mockPortfolio.mock.calls[0][2]).toEqual({ page: 3, limit: 10 });
+    act(() => result.current.updateFilters({ status: 'blocked', phase: 'qa' }));
+    await waitFor(() => expect(result.current.pagination.page).toBe(1));
+    expect(result.current.filters).toEqual(expect.objectContaining({ status: 'blocked', phase: 'qa' }));
   });
 
   it('clears drawer selections on workspace switching and ignores the obsolete response', async () => {
@@ -223,6 +256,17 @@ describe('useLifecycle controller', () => {
     expect(result.current.portfolio.stale).toBe(true);
     next.resolve(portfolio());
     await waitFor(() => expect(result.current.portfolio.refreshing).toBe(false));
+  });
+
+  it('preserves the last successful data and timestamp when refresh fails', async () => {
+    mockPortfolio.mockResolvedValueOnce(portfolio()).mockRejectedValueOnce(new Error('Refresh unavailable'));
+    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper() });
+    await waitFor(() => expect(result.current.lastSuccessfulRefresh).not.toBeNull());
+    const successfulAt = result.current.lastSuccessfulRefresh;
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.portfolio.error?.message).toBe('Refresh unavailable'));
+    expect(result.current.portfolio.data?.items[0].title).toBe('Spec A');
+    expect(result.current.lastSuccessfulRefresh).toBe(successfulAt);
   });
 
   it('coalesces duplicate SSE events and refetches only selected queries', async () => {

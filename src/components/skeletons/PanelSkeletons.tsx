@@ -53,8 +53,8 @@ export function LifecycleMatrixSkeleton() {
         <div className="skeleton-shimmer rounded-md h-8 w-20" />
       </div>
       <div className="flex-1 overflow-hidden p-4 space-y-4">
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {Array.from({ length: 4 }).map((_, index) => <SkeletonMetricCard key={index} />)}
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2">
+          {Array.from({ length: 6 }).map((_, index) => <SkeletonMetricCard key={index} />)}
         </div>
         <div className="skeleton-shimmer rounded-lg h-10 w-full" />
         <div className="border border-border rounded-lg overflow-hidden">

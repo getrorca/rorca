@@ -26,6 +26,12 @@ Every request requires `workspaceId`. Detail requests may send the prior `snapsh
 
 Evidence explicitly marked `revision_mismatch` remains inspectable but is excluded from gate satisfaction. Historical plans remain visible with stale state. Specs without a usable plan return `needs_compilation` and a safe compile route instead of failing.
 
+## Portfolio KPI and view-state contract
+
+`GET /api/lifecycle` computes KPI totals over the complete filtered result set, not only the current page. Alongside phase coverage it returns `activeSpecs`, `blockedSpecs`, `missingGates`, `readyForQa`, `waitingApprovals`, and `recentPhaseTransitions`. Recent transitions are phase-scoped `lifecycle_changed` WAL events from the last 24 hours; they remain derived audit data rather than mutable phase state.
+
+Lifecycle Control keeps search, status, phase, risk, owner, blocked-only, sort, and pagination in URL query state. Filter changes reset to page one, and only search text is debounced. Compact mode and the last blocked-only choice are local display preferences. Saved views are a bounded, versioned local envelope containing only validated filters plus compact/page-size presentation values; evidence, approvals, and other lifecycle truth are never persisted in a view. Refreshes preserve the last readable snapshot and current URL selection while a replacement request is pending or fails.
+
 ## Local CI performance profile
 
 The local CI profile is PostgreSQL 16 on loopback, Node 22, the canonical seeded 50-spec dataset (11 phases/spec), no response cache, one warm-up request, then 20 serial measured requests. Portfolio and phase-detail p95 must remain at or below 500 ms. The read path uses bulk snapshot queries and the indexes in `20260715180000_lifecycle_read_indexes.sql`; optimize query plans before introducing caching.

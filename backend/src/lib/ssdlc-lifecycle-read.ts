@@ -726,6 +726,20 @@ function matchesPortfolio(item: ReturnType<typeof bundleItem> | ReturnType<typeo
   return true;
 }
 
+async function countRecentPhaseTransitions(workspaceId: string, specIds: string[]): Promise<number> {
+  if (specIds.length === 0) return 0;
+  const row = await queryOne<{ total: number }>(`
+    SELECT COUNT(*)::int AS total
+    FROM wal_events
+    WHERE workspace_id = $1
+      AND spec_id = ANY($2::text[])
+      AND event_type = 'lifecycle_changed'
+      AND ts >= NOW() - INTERVAL '24 hours'
+      AND NULLIF(payload->>'phaseId', '') IS NOT NULL
+  `, [workspaceId, specIds]);
+  return row?.total ?? 0;
+}
+
 function sortPortfolio(items: Array<ReturnType<typeof bundleItem> | ReturnType<typeof missingPlanItem>>, sort: LifecyclePortfolioFilters['sort']) {
   const tie = (a: typeof items[number], b: typeof items[number]) => a.specId.localeCompare(b.specId);
   return items.sort((a, b) => {
@@ -759,8 +773,14 @@ export async function getLifecyclePortfolio(input: LifecyclePortfolioInput) {
     return bundle ? bundleItem(bundle) : missingPlanItem(candidate);
   }).filter((item) => matchesPortfolio(item, input)), input.sort);
   const page = paginateArray(allItems, input.pagination, { cursorKey: (item) => item.specId });
-  const visibleBundles = built.bundles.filter((bundle) => allItems.some((item) => item.specId === bundle.candidate.spec_slug));
+  const visibleSpecIds = new Set(allItems.map((item) => item.specId));
+  const visibleBundles = built.bundles.filter((bundle) => visibleSpecIds.has(bundle.candidate.spec_slug));
   const phaseCounts = aggregatePhaseEvaluations(visibleBundles.flatMap((bundle) => bundle.evaluation.phases));
+  const recentPhaseTransitions = await countRecentPhaseTransitions(ws.id, [...visibleSpecIds]);
+  const missingGates = visibleBundles.reduce((total, bundle) => total + bundle.evaluation.phases.reduce(
+    (phaseTotal, phase) => phaseTotal + (phase.excluded ? 0 : phase.gates.filter((gate) => gate.status !== 'passed').length),
+    0,
+  ), 0);
   return {
     ...page,
     workspace: { id: ws.id, label: ws.label },
@@ -770,9 +790,17 @@ export async function getLifecyclePortfolio(input: LifecyclePortfolioInput) {
     decisionHighWaterMark: built.decisionHighWaterMark,
     kpis: {
       specs: allItems.length,
+      activeSpecs: allItems.filter((item) => item.specStatus !== 'completed' && item.specStatus !== 'rejected').length,
       evaluatedSpecs: visibleBundles.length,
       needsCompilation: allItems.filter((item) => item.state === 'needs_compilation').length,
       blockedSpecs: allItems.filter((item) => item.blocked).length,
+      missingGates,
+      readyForQa: allItems.filter((item) => item.state === 'current' && !item.blocked && item.currentPhaseId === 'qa').length,
+      waitingApprovals: allItems.reduce(
+        (total, item) => total + item.phases.filter((phase) => phase.status === 'awaiting_approval').length,
+        0,
+      ),
+      recentPhaseTransitions,
       stories: allItems.reduce((sum, item) => sum + item.storySummary.total, 0),
       phases: phaseCounts,
     },

@@ -181,9 +181,14 @@ export interface LifecyclePortfolioResponse extends LifecyclePaginated<Lifecycle
   phaseOrder: LifecyclePhaseDescriptor[];
   kpis: {
     specs: number;
+    activeSpecs: number;
     evaluatedSpecs: number;
     needsCompilation: number;
     blockedSpecs: number;
+    missingGates: number;
+    readyForQa: number;
+    waitingApprovals: number;
+    recentPhaseTransitions: number;
     stories: number;
     phases: LifecyclePhaseCounts;
   };

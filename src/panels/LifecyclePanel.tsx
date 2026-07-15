@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo } from 'react';
 import {
   AlertTriangle,
   Ban,
@@ -13,11 +13,12 @@ import {
   Circle,
   Clock3,
   RefreshCw,
-  Search,
   ShieldCheck,
 } from 'lucide-react';
 import SlideOver from '../components/SlideOver';
 import { LifecycleMatrixSkeleton } from '../components/skeletons';
+import LifecycleMetrics from './LifecycleMetrics';
+import LifecycleToolbar from './LifecycleToolbar';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useLifecycle } from '../hooks/useLifecycle';
 import { ApiError } from '../lib/apiFetch';
@@ -83,14 +84,11 @@ function LifecycleEmptyState({ hasWorkspace }: { hasWorkspace: boolean }) {
 }
 
 export default function LifecyclePanel() {
-  const { workspaceId } = useWorkspace();
+  const { workspaceId, selectedWorkspace } = useWorkspace();
   const lifecycle = useLifecycle();
-  const [search, setSearch] = useState(lifecycle.filters.search ?? '');
   const selectedSpecError = lifecycle.selectedSpec.error;
   const selectedPhaseError = lifecycle.phase.error;
   const updateUrlState = lifecycle.updateUrlState;
-
-  useEffect(() => setSearch(lifecycle.filters.search ?? ''), [lifecycle.filters.search]);
 
   // A malformed enum is normalized by useLifecycle. A syntactically valid but
   // nonexistent spec/phase is only known after the API responds, so clear that
@@ -116,11 +114,6 @@ export default function LifecyclePanel() {
     lifecycle.updateUrlState({ selectedSpecId: null, selectedPhaseId: null });
   };
 
-  const submitSearch = (event: FormEvent) => {
-    event.preventDefault();
-    lifecycle.updateFilters({ search: search.trim() || undefined });
-  };
-
   if (!workspaceId) return <LifecycleEmptyState hasWorkspace={false} />;
   if (lifecycle.portfolio.loading && !lifecycle.portfolio.data) return <LifecycleMatrixSkeleton />;
 
@@ -143,11 +136,8 @@ export default function LifecyclePanel() {
     );
   }
 
-  if (lifecycle.empty) return <LifecycleEmptyState hasWorkspace />;
-
   const data = lifecycle.portfolio.data;
   if (!data) return <LifecycleMatrixSkeleton />;
-  const completionPercent = Math.round(data.kpis.phases.completionRate * 100);
   const drawerOpen = Boolean(
     lifecycle.urlState.selectedSpecId
     && lifecycle.urlState.selectedPhaseId
@@ -156,76 +146,46 @@ export default function LifecyclePanel() {
 
   return (
     <section className="h-full min-h-0 flex flex-col bg-bg" aria-labelledby="lifecycle-control-heading">
-      <header className="shrink-0 border-b border-border bg-panel px-4 py-3 sm:px-6">
-        <div className="flex flex-wrap items-center gap-3">
-          <ShieldCheck size={22} className="text-accent" aria-hidden="true" />
-          <div>
-            <h1 id="lifecycle-control-heading" className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</h1>
-            <p className="text-xs text-muted">End-to-end delivery completeness and evidence</p>
-          </div>
-          <button
-            type="button"
-            onClick={lifecycle.refresh}
-            disabled={lifecycle.refreshing}
-            className="ml-auto inline-flex min-h-9 items-center gap-2 rounded-md border border-border bg-bg px-3 text-sm text-muted hover:bg-surface-100 hover:text-[var(--text)] disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            aria-label="Refresh Lifecycle Control"
-          >
-            <RefreshCw size={15} className={lifecycle.refreshing ? 'animate-spin' : ''} aria-hidden="true" />
-            Refresh
-          </button>
+      <header className="flex min-h-[72px] shrink-0 items-center border-b border-border bg-panel px-4 sm:px-6">
+        <ShieldCheck size={22} className="mr-3 shrink-0 text-accent" aria-hidden="true" />
+        <div className="min-w-0">
+          <h1 id="lifecycle-control-heading" className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</h1>
+          <p className="truncate text-xs text-muted">End-to-end delivery completeness and evidence</p>
+        </div>
+        <div className="ml-auto min-w-0 rounded-md border border-border bg-bg px-3 py-1.5 text-right" aria-label={`Current workspace: ${selectedWorkspace?.name ?? data.workspace.label}`}>
+          <div className="text-[10px] uppercase tracking-wide text-muted">Current workspace</div>
+          <div className="max-w-[240px] truncate text-xs font-medium text-[var(--text)]">{selectedWorkspace?.name ?? data.workspace.label}</div>
         </div>
       </header>
 
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 space-y-3">
         {(lifecycle.stale || lifecycle.partialData) && (
           <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-[var(--text)]" role="status">
             Showing the last consistent snapshot while lifecycle evidence refreshes.
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {[
-            ['Active specs', data.kpis.specs],
-            ['Lifecycle coverage', `${completionPercent}%`],
-            ['Blocked specs', data.kpis.blockedSpecs],
-            ['Needs compilation', data.kpis.needsCompilation],
-          ].map(([label, value]) => (
-            <div key={label} className="rounded-lg border border-border bg-panel p-3">
-              <div className="text-xl font-semibold text-[var(--text)]">{value}</div>
-              <div className="mt-1 text-xs text-muted">{label}</div>
+        <LifecycleMetrics kpis={data.kpis} />
+        <LifecycleToolbar lifecycle={lifecycle} phaseOrder={phaseOrder} />
+
+        {data.items.length === 0 ? (
+          <div className="flex min-h-[260px] items-center justify-center rounded-lg border border-border bg-panel p-8 text-center" role="status">
+            <div className="max-w-md">
+              <ShieldCheck size={28} className="mx-auto mb-3 text-accent" aria-hidden="true" />
+              <h2 className="text-sm font-semibold text-[var(--text)]">
+                {Object.keys(lifecycle.filters).some((key) => key !== 'sort' && lifecycle.filters[key as keyof typeof lifecycle.filters] !== undefined)
+                  ? 'No specs match the active filters'
+                  : 'No lifecycle plans yet'}
+              </h2>
+              <p className="mt-2 text-xs text-muted">
+                {Object.entries(lifecycle.filters)
+                  .filter(([key, value]) => key !== 'sort' && value !== undefined)
+                  .map(([key, value]) => `${key}: ${String(value).replace(/_/g, ' ')}`).join(' · ')
+                  || 'Lifecycle plans appear after specs are compiled.'}
+              </p>
             </div>
-          ))}
-        </div>
-
-        <form onSubmit={submitSearch} className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-panel p-2" role="search">
-          <label className="relative min-w-[220px] flex-1">
-            <span className="sr-only">Search lifecycle specs</span>
-            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              className="h-9 w-full rounded-md border border-border bg-bg pl-9 pr-3 text-sm text-[var(--text)] placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              placeholder="Search specs"
-            />
-          </label>
-          <button
-            type="button"
-            aria-pressed={lifecycle.filters.blocked === true}
-            onClick={() => lifecycle.updateFilters({ blocked: lifecycle.filters.blocked === true ? undefined : true })}
-            className={`h-9 rounded-md border px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-              lifecycle.filters.blocked === true
-                ? 'border-accent bg-accent/10 text-accent'
-                : 'border-border bg-bg text-muted hover:text-[var(--text)]'
-            }`}
-          >
-            Blocked only
-          </button>
-          <button type="submit" className="h-9 rounded-md bg-accent px-4 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
-            Apply
-          </button>
-        </form>
-
-        <div className="overflow-x-auto rounded-lg border border-border bg-panel">
+          </div>
+        ) : <div className="overflow-x-auto rounded-lg border border-border bg-panel">
           <table className="w-full min-w-[980px] border-collapse text-left text-xs">
             <caption className="sr-only">Lifecycle Control delivery phase matrix</caption>
             <thead className="bg-surface-100 text-muted">
@@ -243,7 +203,7 @@ export default function LifecyclePanel() {
                 <tr key={item.specId} className="border-b border-border last:border-b-0 hover:bg-surface-100/60">
                   <th scope="row" className="sticky left-0 z-10 border-r border-border bg-panel px-3 py-3 font-normal">
                     <div className="font-medium text-[var(--text)]">{item.title}</div>
-                    <div className="mt-1 text-muted">{item.risk} risk · {item.storySummary.total} stories</div>
+                    {!lifecycle.urlState.compact && <div className="mt-1 text-muted">{item.risk} risk · {item.storySummary.total} stories</div>}
                   </th>
                   {phaseOrder.map(({ id: phaseId, displayName }) => {
                     const cell = phaseFor(item.phases, phaseId);
@@ -253,7 +213,7 @@ export default function LifecyclePanel() {
                         <button
                           type="button"
                           onClick={() => lifecycle.updateUrlState({ selectedSpecId: item.specId, selectedPhaseId: phaseId })}
-                          className={`mx-auto flex min-h-10 min-w-10 items-center justify-center rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                          className={`mx-auto flex ${lifecycle.urlState.compact ? 'min-h-8 min-w-8' : 'min-h-10 min-w-10'} items-center justify-center rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                             selected
                               ? 'border-accent bg-accent/15 text-accent'
                               : 'border-transparent hover:border-border hover:bg-surface-200'
@@ -270,7 +230,7 @@ export default function LifecyclePanel() {
               ))}
             </tbody>
           </table>
-        </div>
+        </div>}
 
         {lifecycle.pagination.total > lifecycle.pagination.limit && (
           <nav className="flex items-center justify-end gap-2" aria-label="Lifecycle pagination">
@@ -289,11 +249,20 @@ export default function LifecyclePanel() {
             >Next</button>
           </nav>
         )}
+
+        <footer className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-t border-border px-1 text-[11px] text-muted" aria-label="Lifecycle status legend">
+          <span><CheckCircle2 size={12} className="mr-1 inline text-success" aria-hidden="true" />Passed</span>
+          <span><Clock3 size={12} className="mr-1 inline text-accent" aria-hidden="true" />In progress</span>
+          <span><AlertTriangle size={12} className="mr-1 inline text-error" aria-hidden="true" />Blocked</span>
+          <span><Circle size={11} className="mr-1 inline" aria-hidden="true" />Not started</span>
+          <span><Ban size={12} className="mr-1 inline" aria-hidden="true" />Deferred / N/A</span>
+        </footer>
       </div>
 
       <SlideOver
         isOpen={drawerOpen}
         onClose={closeDrawer}
+        desktopMaxWidth={520}
         title={`${lifecycle.selectedSpec.data?.title ?? 'Spec'} — ${lifecycle.urlState.selectedPhaseId ?? 'Phase'}`}
       >
         <div className="space-y-5 p-5 sm:p-6">

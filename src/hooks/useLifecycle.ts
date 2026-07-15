@@ -41,6 +41,7 @@ import {
 export const LIFECYCLE_SAVED_VIEWS_KEY = 'rorca.lifecycle.savedViews';
 export const LIFECYCLE_SAVED_VIEWS_VERSION = 2 as const;
 export const LIFECYCLE_SAVED_VIEWS_LIMIT = 12;
+export const LIFECYCLE_DISPLAY_PREFERENCES_KEY = 'rorca.lifecycle.displayPreferences';
 const SAVED_VIEWS_BYTE_LIMIT = 32_768;
 const DEFAULT_LIMIT = 25;
 
@@ -198,6 +199,19 @@ export function saveLifecycleSavedViews(storage: Pick<Storage, 'setItem'>, views
   return envelope;
 }
 
+interface LifecycleDisplayPreferences { compact: boolean; blockedOnly: boolean }
+
+function loadDisplayPreferences(storage: Pick<Storage, 'getItem'>): LifecycleDisplayPreferences {
+  try {
+    const value = JSON.parse(storage.getItem(LIFECYCLE_DISPLAY_PREFERENCES_KEY) ?? 'null') as unknown;
+    return isRecord(value)
+      ? { compact: value.compact === true, blockedOnly: value.blockedOnly === true }
+      : { compact: false, blockedOnly: false };
+  } catch {
+    return { compact: false, blockedOnly: false };
+  }
+}
+
 interface InvalidationTargets { portfolio: boolean; detail: boolean; phase: boolean; evidence: boolean }
 interface LifecycleWalPayload { workspaceId: string; specId: string | null; phaseId: string | null; changeKind: string }
 
@@ -306,7 +320,20 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   const [evidence, setEvidence] = useState<LifecycleQueryState<LifecycleEvidenceDetail>>(emptyQuery);
   const [mutationError, setMutationError] = useState<ApiError | Error | null>(null);
   const [savedViews, setSavedViews] = useState<LifecycleSavedView[]>(() => loadLifecycleSavedViews(localStorage).views);
+  const [displayPreferences, setDisplayPreferences] = useState<LifecycleDisplayPreferences>(() => {
+    const stored = loadDisplayPreferences(localStorage);
+    return { ...stored, compact: stored.compact || urlState.compact };
+  });
+  const [lastSuccessfulRefresh, setLastSuccessfulRefresh] = useState<string | null>(null);
   const [revisions, setRevisions] = useState({ portfolio: 0, detail: 0, phase: 0, evidence: 0 });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LIFECYCLE_DISPLAY_PREFERENCES_KEY, JSON.stringify(displayPreferences));
+    } catch {
+      // Display preferences are optional when storage is unavailable or full.
+    }
+  }, [displayPreferences]);
 
   const portfolioRef = useRef(portfolio);
   const selectedSpecRef = useRef(selectedSpec);
@@ -325,8 +352,21 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   }, [searchParams, setSearchParams]);
 
   const updateFilters = useCallback((patch: Partial<LifecyclePortfolioFilters>, replace = false) => {
+    if (Object.prototype.hasOwnProperty.call(patch, 'blocked')) {
+      setDisplayPreferences((current) => ({ ...current, blockedOnly: patch.blocked === true }));
+    }
     updateUrlState({ ...patch, page: 1 }, replace);
   }, [updateUrlState]);
+
+  useEffect(() => {
+    if (urlState.compact) {
+      // Compact was URL-backed before display preferences were introduced.
+      // Consume that legacy value once, then keep it local-only.
+      updateUrlState({ compact: false }, true);
+    } else if (!searchParams.has('blocked') && displayPreferences.blockedOnly) {
+      updateUrlState({ blocked: true, page: 1 }, true);
+    }
+  }, [displayPreferences.blockedOnly, searchParams, updateUrlState, urlState.compact]);
 
   // Normalize malformed drawer links and migrate the legacy `phaseDetail`
   // parameter without ever attempting a request for an unknown phase.
@@ -386,6 +426,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       .then((data) => {
         if (generation !== generations.current.portfolio || controller.signal.aborted) return;
         setPortfolio(querySuccess(data, data.snapshotId));
+        setLastSuccessfulRefresh(new Date().toISOString());
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted || generation !== generations.current.portfolio) return;
@@ -575,19 +616,28 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       id: `view-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name: name.trim().slice(0, 80),
       filters,
-      display: { compact: urlState.compact, limit: urlState.limit },
+      display: { compact: displayPreferences.compact, limit: urlState.limit },
       updatedAt: new Date().toISOString(),
     };
     if (!view.name) throw new Error('Saved view name is required');
     setSavedViews((current) => saveLifecycleSavedViews(localStorage, [...current, view]).views);
     return view;
-  }, [filters, urlState.compact, urlState.limit]);
+  }, [filters, displayPreferences.compact, urlState.limit]);
+
+  const renameSavedView = useCallback((id: string, name: string) => {
+    const nextName = name.trim().slice(0, 80);
+    if (!nextName) throw new Error('Saved view name is required');
+    setSavedViews((current) => saveLifecycleSavedViews(localStorage, current.map((view) => (
+      view.id === id ? { ...view, name: nextName, updatedAt: new Date().toISOString() } : view
+    ))).views);
+  }, []);
 
   const removeSavedView = useCallback((id: string) => {
     setSavedViews((current) => saveLifecycleSavedViews(localStorage, current.filter((view) => view.id !== id)).views);
   }, []);
 
   const applySavedView = useCallback((view: LifecycleSavedView) => {
+    setDisplayPreferences({ compact: view.display.compact, blockedOnly: view.filters.blocked === true });
     updateUrlState({
       search: undefined,
       status: undefined,
@@ -598,7 +648,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       blocked: undefined,
       disposition: undefined,
       ...view.filters,
-      compact: view.display.compact,
+      compact: false,
       limit: view.display.limit,
       page: 1,
     });
@@ -617,7 +667,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   ));
 
   return {
-    urlState,
+    urlState: { ...urlState, compact: displayPreferences.compact },
     filters,
     pagination: { page: urlState.page, limit: urlState.limit, total: portfolio.data?.total ?? 0, hasMore: portfolio.data?.hasMore ?? false },
     portfolio,
@@ -632,6 +682,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     error,
     stale,
     partialData,
+    lastSuccessfulRefresh,
     snapshotConsistent: (
       (!selectedPortfolioItem?.snapshotId || !selectedSpec.data || selectedPortfolioItem.snapshotId === selectedSpec.data.snapshotId)
       && snapshotsAgree(selectedSpec.data, phase.data)
@@ -645,10 +696,14 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     openEvidence: setSelectedEvidenceId,
     closeEvidence: () => setSelectedEvidenceId(null),
     setPage: (page: number) => updateUrlState({ page: Math.max(1, page) }),
-    setCompact: (compact: boolean) => updateUrlState({ compact }),
+    setCompact: (compact: boolean) => {
+      setDisplayPreferences((current) => ({ ...current, compact }));
+      if (urlState.compact) updateUrlState({ compact: false }, true);
+    },
     refresh,
     mutations,
     saveView,
+    renameSavedView,
     removeSavedView,
     applySavedView,
   };

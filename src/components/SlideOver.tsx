@@ -16,12 +16,13 @@ interface SlideOverProps {
     onClose: () => void;
     title?: React.ReactNode;
     hideHeader?: boolean;
+    desktopMaxWidth?: number;
     children: React.ReactNode;
 }
 
 const SWIPE_THRESHOLD = 100; // px to swipe down before triggering close
 
-export default function SlideOver({ isOpen, onClose, title, hideHeader, children }: SlideOverProps) {
+export default function SlideOver({ isOpen, onClose, title, hideHeader, desktopMaxWidth, children }: SlideOverProps) {
     const panelRef = useRef<HTMLDivElement>(null);
     const breakpoint = useBreakpoint();
     const isMobile = breakpoint === 'mobile';
@@ -159,8 +160,8 @@ export default function SlideOver({ isOpen, onClose, title, hideHeader, children
         );
     }
 
-    // Desktop + Tablet: right-aligned slide panel (max 480px on tablet, 800px on desktop)
-    const maxWidth = breakpoint === 'tablet' ? 480 : 800;
+    // Desktop + Tablet: right-aligned slide panel with an optional consumer-specific bound.
+    const maxWidth = desktopMaxWidth ?? (breakpoint === 'tablet' ? 480 : 800);
 
     return createPortal(
         <aside
