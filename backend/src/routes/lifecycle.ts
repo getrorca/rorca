@@ -7,6 +7,8 @@
 
 import { Router, type Request } from 'express';
 import { ValidationError } from '../lib/errors';
+import { generateLearnCloseoutCandidates } from '../lib/learn-closeout';
+import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
 import { parsePaginationParams } from '../lib/paginate';
 import {
   assertLifecyclePortfolioFilters,
@@ -217,6 +219,62 @@ router.get('/specs/:specId/phases/:phaseId', async (req, res, next) => {
       expectedSnapshotId: snapshotId,
       evidencePagination: parsePaginationParams(req, { limit: 25, maxLimit: 100 }),
     }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/lifecycle/specs/{specId}/runs/{runId}/learn-closeout:
+ *   post:
+ *     tags: [Lifecycle]
+ *     summary: Retry governed Learn closeout candidate generation for a terminal run
+ *     operationId: generateLifecycleLearnCloseout
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Closeout generation stages workspace-owned review candidates and lifecycle evidence, so it is a local operator-only recovery action."
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               modelSummarization: { type: boolean, default: false }
+ *     responses:
+ *       200: { description: Deterministic candidates generated or deduplicated }
+ *       400: { description: Invalid scope }
+ *       404: { description: Workspace-scoped run not found }
+ *       409: { description: Run is not terminal }
+ */
+router.post('/specs/:specId/runs/:runId/learn-closeout', async (req, res, next) => {
+  try {
+    const workspaceId = queryText(req, 'workspaceId', true)!;
+    const runId = Number(req.params.runId);
+    if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('runId must be a positive integer', { field: 'runId' });
+    if (req.body?.modelSummarization !== undefined && typeof req.body.modelSummarization !== 'boolean') {
+      throw new ValidationError('modelSummarization must be a boolean', { field: 'modelSummarization' });
+    }
+    const result = await generateLearnCloseoutCandidates({
+      workspaceId,
+      specId: req.params.specId,
+      runId,
+      modelSummarization: req.body?.modelSummarization === true,
+    });
+    await emitLifecycleInvalidation({ workspaceId, specId: req.params.specId, phaseId: 'learn', runId, changeKind: 'evidence_persisted' });
+    res.json(result);
   } catch (error) {
     next(error);
   }

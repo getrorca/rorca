@@ -31,13 +31,22 @@ export const CONTEXT_CAPTURE_QUEUE = 'context:capture';
 export const CONTEXT_DISTILL_QUEUE = 'context:distill';
 
 export type MemoryDistillationMode = 'off' | 'explicit-only' | 'conservative-auto-candidates' | 'trusted-auto-approve';
-export type MemoryCandidateCategory = 'Architecture' | 'Convention' | 'Bug Fix' | 'Decision' | 'Pattern' | 'Gotcha';
+export type MemoryCandidateStatus = 'pending' | 'review_required' | 'approved' | 'rejected' | 'auto_approved';
+export type MemoryCandidateCategory = 'Architecture' | 'Convention' | 'Bug Fix' | 'Decision' | 'Pattern' | 'Gotcha' | 'Follow-up';
 
 export interface MemoryDistillationSettings {
   mode: MemoryDistillationMode;
   operatorAutoApprove: boolean;
   llmSummarization: boolean;
   maxEventsPerJob: number;
+}
+
+interface PersistedContextEvent {
+  id: number;
+  workspaceId: string;
+  idempotencyKey: string;
+  contentHash: string;
+  sessionId: string | null;
 }
 
 export interface MemoryCandidateDraft {
@@ -61,6 +70,8 @@ export interface MemoryCandidateDraft {
     occurredAt: string | null;
     gitBranch: string | null;
     gitSha: string | null;
+    /** Producer-owned, redacted extension fields (for example lifecycle closeout provenance). */
+    [key: string]: unknown;
   };
   candidateHash: string;
   dedupeKey: string;
@@ -248,7 +259,116 @@ function canonicalTrustTier(trust: UnifiedContextEventPayloadType['trust_tier'])
   return 'agent_observation';
 }
 
-export async function persistCapturedContextEvent(jobData: ContextCaptureEventJobPayloadType): Promise<{ id: number; workspaceId: string; idempotencyKey: string; contentHash: string; sessionId: string | null }> {
+async function insertMemoryCandidate(candidate: MemoryCandidateDraft, settings: MemoryDistillationSettings): Promise<{ candidateId: number | null; status: MemoryCandidateStatus; memoryId: number | null; inserted: boolean }> {
+  const initialStatus = candidate.status;
+  const payload = {
+    category: candidate.category,
+    content: candidate.content,
+    confidence: candidate.confidence,
+    provenance: candidate.provenance,
+    relatedFiles: candidate.relatedFiles,
+    evidenceSnippets: candidate.evidenceSnippets,
+    defaultRetrievalEligible: false,
+  };
+  const candidateTitle = `${candidate.category}: ${candidate.content}`.slice(0, 240).trim();
+  const inserted = await queryOne<{ id: number }>(
+    `INSERT INTO memory_candidates (
+       context_event_id, workspace_id, event_type, payload_schema_version, source_system, tool_name,
+       host_application, session_id, repo_path_hash, git_branch, git_sha, related_files,
+       capture_policy, trust_tier, idempotency_key, provenance, payload, title, rule, status, category,
+       content, confidence, candidate_hash, source_content_hash, source_event_id, source_session_id,
+       evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible, dedupe_key
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6,
+       $7, $8, $9, $10, $11, $12::jsonb,
+       $13::jsonb, $14, $15, $16::jsonb, $17::jsonb, $18, $19, $20, $21,
+       $22, $23, $24, $25, $26, $27,
+       $28::jsonb, $29, $30, $31, $32
+     )
+     ON CONFLICT (workspace_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+     RETURNING id`,
+    [
+      candidate.provenance.sourceContextEventId,
+      candidate.workspaceId,
+      candidate.provenance.sourceEventType,
+      '2026-07-ucc-007.v1',
+      candidate.provenance.sourceSystem,
+      candidate.provenance.sourceTool,
+      null,
+      candidate.provenance.sourceSessionId,
+      null,
+      candidate.provenance.gitBranch,
+      candidate.provenance.gitSha,
+      JSON.stringify(candidate.relatedFiles.map((file) => ({ path: file, role: 'mentioned', hash: null }))),
+      JSON.stringify({ distilled_by: 'context-distillation', version: '2026-07-ucc-008.v1' }),
+      candidate.securitySensitive ? 'untrusted' : 'local',
+      candidate.provenance.sourceIdempotencyKey,
+      JSON.stringify(candidate.provenance),
+      JSON.stringify(payload),
+      candidateTitle || 'Captured context candidate',
+      candidate.content,
+      initialStatus,
+      candidate.category,
+      candidate.content,
+      candidate.confidence,
+      candidate.candidateHash,
+      candidate.provenance.sourceContentHash,
+      candidate.provenance.sourceEventId,
+      candidate.provenance.sourceSessionId,
+      JSON.stringify(candidate.evidenceSnippets),
+      candidate.reviewReason,
+      candidate.securitySensitive,
+      false,
+      candidate.dedupeKey,
+    ],
+  );
+
+  if (!inserted) {
+    return { candidateId: null, status: initialStatus, memoryId: null, inserted: false };
+  }
+
+  const approved = await autoApproveCandidateIfAllowed(candidate, settings);
+  if (approved.status === 'auto_approved') {
+    await execute(
+      `UPDATE memory_candidates
+          SET status = 'auto_approved', review_status = 'approved', approved_memory_id = $2,
+              resolved_at = NOW(), default_retrieval_eligible = true, updated_at = NOW()
+        WHERE id = $1`,
+      [inserted.id, approved.memoryId],
+    );
+  }
+
+  return { candidateId: inserted.id, status: approved.status, memoryId: approved.memoryId, inserted: true };
+}
+
+/**
+ * Stage a candidate from another governed producer in the existing review queue.
+ * Auto-approval and model calls are intentionally disabled at this boundary.
+ */
+export async function stageGovernedMemoryCandidate(candidate: MemoryCandidateDraft): Promise<{
+  candidateId: number;
+  status: MemoryCandidateStatus;
+  inserted: boolean;
+}> {
+  if (candidate.status !== 'pending' && candidate.status !== 'review_required') {
+    throw new TypeError('Governed candidates must enter an unresolved review state');
+  }
+  const saved = await insertMemoryCandidate(candidate, {
+    ...DEFAULT_SETTINGS,
+    mode: 'conservative-auto-candidates',
+    operatorAutoApprove: false,
+    llmSummarization: false,
+  });
+  if (saved.candidateId) return { candidateId: saved.candidateId, status: saved.status, inserted: true };
+  const existing = await queryOne<{ id: number; status: MemoryCandidateStatus }>(
+    'SELECT id, status FROM memory_candidates WHERE workspace_id = $1 AND dedupe_key = $2',
+    [candidate.workspaceId, candidate.dedupeKey],
+  );
+  if (!existing) throw new Error('memory_candidate_dedupe_lookup_failed');
+  return { candidateId: existing.id, status: existing.status, inserted: false };
+}
+
+export async function persistCapturedContextEvent(jobData: ContextCaptureEventJobPayloadType): Promise<PersistedContextEvent> {
   const payload = jobData.payload;
   const sourceRef = payload.git_sha ?? payload.provenance.source_event_id ?? payload.idempotency_key;
   const relatedFiles = [...new Set([
@@ -498,4 +618,212 @@ export async function getMemoryCandidateCounts(workspaceId: string): Promise<Rec
   return Object.fromEntries(rows.map((row) => [row.review_status, Number(row.count)]));
 }
 
+export async function listMemoryCandidates(input: {
+  workspaceId: string;
+  status?: MemoryCandidateStatus | 'all';
+  limit?: number;
+  sourceSystem?: string;
+  toolName?: string;
+  hostApp?: string;
+  eventType?: string;
+  trustTier?: string;
+  confidence?: string;
+  regulatedFlag?: boolean;
+}): Promise<Array<Record<string, unknown>>> {
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
+  const clauses = ['workspace_id = $1'];
+  const params: unknown[] = [input.workspaceId];
+  const addEquals = (column: string, value: unknown) => {
+    params.push(value);
+    clauses.push(`${column} = $${params.length}`);
+  };
+  if (input.status && input.status !== 'all') addEquals('status', input.status);
+  if (input.sourceSystem) addEquals('source_system', input.sourceSystem);
+  if (input.toolName) addEquals('tool_name', input.toolName);
+  if (input.hostApp) addEquals('host_application', input.hostApp);
+  if (input.eventType) addEquals('event_type', input.eventType);
+  if (input.trustTier) addEquals('trust_tier', input.trustTier);
+  if (input.confidence) addEquals('confidence', input.confidence);
+  if (typeof input.regulatedFlag === 'boolean') addEquals('security_sensitive', input.regulatedFlag);
+  params.push(limit);
+  return query(
+    `SELECT id, created_at, status, category, content, confidence, provenance, related_files,
+            evidence_snippets, review_reason, security_sensitive, default_retrieval_eligible,
+            approved_memory_id, context_event_id, event_type, source_system, tool_name,
+            host_application, session_id, git_branch, git_sha, capture_policy, trust_tier,
+            source_event_id, source_session_id, dedupe_key
+       FROM memory_candidates
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY created_at DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+}
+
+function relatedFilesFromCandidate(value: unknown): string[] {
+  const parsed = parseJsonish(value);
+  if (!Array.isArray(parsed)) return [];
+  return [...new Set(parsed.flatMap((item) => {
+    if (typeof item === 'string') return [item];
+    const path = stringValue(asRecord(item).path);
+    return path ? [path] : [];
+  }))];
+}
+
+export async function approveMemoryCandidate(workspaceId: string, candidateId: number): Promise<{ candidateId: number; memoryId: number; alreadyApproved: boolean } | null> {
+  const candidate = await queryOne<{
+    id: number;
+    status: MemoryCandidateStatus;
+    category: string | null;
+    content: string | null;
+    confidence: string | null;
+    related_files: unknown;
+    approved_memory_id: number | null;
+    provenance: unknown;
+  }>(
+    `SELECT id, status, category, content, confidence, related_files, approved_memory_id, provenance
+       FROM memory_candidates
+      WHERE id = $1 AND workspace_id = $2`,
+    [candidateId, workspaceId],
+  );
+  if (!candidate) return null;
+  if ((candidate.status === 'approved' || candidate.status === 'auto_approved') && candidate.approved_memory_id) {
+    return { candidateId, memoryId: candidate.approved_memory_id, alreadyApproved: true };
+  }
+  if (candidate.status === 'rejected' || !candidate.content) return null;
+
+  const relatedFiles = relatedFilesFromCandidate(candidate.related_files);
+  const provenance = asRecord(parseJsonish(candidate.provenance));
+  const sourceStoryId = stringValue(provenance.storyId);
+  const sourceSpecId = stringValue(provenance.specId);
+  const sourceRunId = typeof provenance.runId === 'number' && Number.isSafeInteger(provenance.runId) ? provenance.runId : null;
+  let embedding: number[] | null = null;
+  try {
+    embedding = await embedText(prepareText('memory', candidate.content));
+  } catch (err) {
+    logger.warn({ err, candidateId }, '[context-distillation] embedding failed while approving candidate; saving without vector');
+  }
+
+  const inserted = await queryOne<{ id: number }>(
+    `INSERT INTO memories (
+       workspace_id, category, content, confidence, related_files, embedding, source_type, source,
+       source_story_id, source_spec_id, source_run_id
+     ) VALUES ($1, $2, $3, $4, $5, $6::vector, 'auto-extracted', 'context-distillation', $7, $8, $9)
+     RETURNING id`,
+    [
+      workspaceId,
+      candidate.category ?? 'Pattern',
+      candidate.content,
+      candidate.confidence ?? 'medium',
+      JSON.stringify(relatedFiles),
+      embedding ? `[${embedding.join(',')}]` : null,
+      sourceStoryId,
+      sourceSpecId,
+      sourceRunId,
+    ],
+  );
+  if (!inserted) return null;
+  await execute(
+    `UPDATE memory_candidates
+        SET status = 'approved', review_status = 'approved', approved_memory_id = $2,
+            resolved_at = NOW(), default_retrieval_eligible = true, updated_at = NOW()
+      WHERE id = $1`,
+    [candidateId, inserted.id],
+  );
+  return { candidateId, memoryId: inserted.id, alreadyApproved: false };
+}
+
+export async function rejectMemoryCandidate(workspaceId: string, candidateId: number): Promise<boolean> {
+  const result = await execute(
+    `UPDATE memory_candidates
+        SET status = 'rejected', review_status = 'rejected', resolved_at = NOW(),
+            default_retrieval_eligible = false, updated_at = NOW()
+      WHERE id = $1 AND workspace_id = $2 AND status IN ('pending', 'review_required')`,
+    [candidateId, workspaceId],
+  );
+  return result.rowCount > 0;
+}
+
+export type MemoryCandidateReviewAction = 'edit' | 'duplicate' | 'supersede' | 'conflict' | 'defer' | 'revisit' | 'archive';
+
+export async function applyMemoryCandidateReviewAction(input: {
+  workspaceId: string;
+  candidateId: number;
+  action: MemoryCandidateReviewAction;
+  content?: string;
+  category?: string;
+  confidence?: 'high' | 'medium' | 'low';
+  note?: string;
+  targetCandidateId?: number;
+}): Promise<Record<string, unknown> | null> {
+  const candidate = await queryOne<Record<string, unknown>>(
+    `SELECT * FROM memory_candidates WHERE id = $1 AND workspace_id = $2`,
+    [input.candidateId, input.workspaceId],
+  );
+  if (!candidate) return null;
+
+  if (input.action === 'edit') {
+    const content = stringValue(input.content) ?? stringValue(candidate.content);
+    if (!content) return null;
+    const category = stringValue(input.category) ?? stringValue(candidate.category) ?? 'Pattern';
+    const confidence = input.confidence ?? (stringValue(candidate.confidence) as 'high' | 'medium' | 'low' | null) ?? 'medium';
+    await execute(
+      `UPDATE memory_candidates
+          SET content = $3, rule = $3, category = $4, confidence = $5,
+              payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object('content', $3, 'category', $4, 'confidence', $5),
+              review_reason = NULL, updated_at = NOW()
+        WHERE id = $1 AND workspace_id = $2`,
+      [input.candidateId, input.workspaceId, content, category, confidence],
+    );
+    return { candidateId: input.candidateId, action: input.action, status: candidate.status };
+  }
+
+  if (input.action === 'defer' || input.action === 'revisit') {
+    const reviewStatus = input.action === 'revisit' ? 'revisit' : 'deferred';
+    await execute(
+      `UPDATE memory_candidates
+          SET status = 'review_required', review_status = $3, review_reason = $4,
+              resolved_at = NULL, default_retrieval_eligible = false, updated_at = NOW()
+        WHERE id = $1 AND workspace_id = $2`,
+      [input.candidateId, input.workspaceId, reviewStatus, input.note ? `${reviewStatus}: ${input.note}` : `${reviewStatus}_for_later_review`],
+    );
+    return { candidateId: input.candidateId, action: input.action, status: 'review_required' };
+  }
+
+  if (input.action === 'archive') {
+    await execute(
+      `UPDATE memory_candidates
+          SET status = 'rejected', review_status = 'archived', review_reason = $3,
+              resolved_at = NOW(), default_retrieval_eligible = false, updated_at = NOW()
+        WHERE id = $1 AND workspace_id = $2`,
+      [input.candidateId, input.workspaceId, input.note ? `archived: ${input.note}` : 'archived_after_review'],
+    );
+    return { candidateId: input.candidateId, action: input.action, status: 'rejected' };
+  }
+
+  if (input.action === 'duplicate') {
+    await execute(
+      `UPDATE memory_candidates
+          SET status = 'rejected', review_status = 'duplicate', resolved_at = NOW(), default_retrieval_eligible = false,
+              review_reason = $3, updated_at = NOW()
+        WHERE id = $1 AND workspace_id = $2`,
+      [input.candidateId, input.workspaceId, input.note ? `duplicate: ${input.note}` : 'duplicate_candidate_rejected'],
+    );
+    return { candidateId: input.candidateId, action: input.action, status: 'rejected' };
+  }
+
+  const relationLabel = input.action === 'supersede' ? 'superseded_by_candidate' : 'conflicts_with_candidate';
+  const reviewStatus = input.action === 'supersede' ? 'superseded' : 'conflict';
+  const relationNote = input.targetCandidateId ? `${relationLabel}:${input.targetCandidateId}` : relationLabel;
+  await execute(
+    `UPDATE memory_candidates
+        SET status = 'rejected', review_status = $4, resolved_at = NOW(), default_retrieval_eligible = false,
+            review_reason = $3, updated_at = NOW()
+      WHERE id = $1 AND workspace_id = $2`,
+    [input.candidateId, input.workspaceId, input.note ? `${relationNote} ${input.note}` : relationNote, reviewStatus],
+  );
+  return { candidateId: input.candidateId, action: input.action, status: 'rejected', targetCandidateId: input.targetCandidateId ?? null };
+}
+
+// Imported by tests to assert no accidental transaction dependency in pure logic.
 export const __contextDistillationInternals = { normalizeSettings, canonicalEventType, canonicalTrustTier };

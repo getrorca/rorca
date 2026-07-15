@@ -69,6 +69,7 @@ import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import { replayFallbackResults } from './lib/fallback-replay';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
+import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -1402,6 +1403,22 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           } else if (status === 'done' && (!payload.safetyOptions.deploy || !payload.safetyOptions.externalSend)) {
             logger.info({ runId, safetyOptions: payload.safetyOptions }, '[worker] workflow dispatch skipped by enforced run safety policy');
           }
+
+          // Learn closeout is non-authoritative for delivery status. It runs only
+          // after release routing has persisted its final lineage/outcome fields.
+          const learnCloseout = await tryGenerateLearnCloseoutCandidates({
+            workspaceId: String(workspaceId),
+            runId,
+            specId: path.basename(specPath, '.json'),
+          });
+          await emitWalEvent('lifecycle_changed', workspaceId, {
+            workspaceId: String(workspaceId),
+            specId: path.basename(specPath, '.json'),
+            phaseId: 'learn',
+            runId,
+            changeKind: 'evidence_persisted',
+            learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
+          });
         }
 
         // Advance run queue — promote next queued run for this workspace
@@ -1515,8 +1532,8 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     const cwd = worktreePath ?? workspacePath;
 
     // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string }>(
-      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status FROM pipeline_runs WHERE id = $1',
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string; spec_path: string }>(
+      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
@@ -1815,6 +1832,19 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
               ...(retrySummary ? { summary: retrySummary } : {}),
             });
           }
+          const learnCloseout = await tryGenerateLearnCloseoutCandidates({
+            workspaceId,
+            runId,
+            specId: path.basename(runRow.spec_path, '.json'),
+          });
+          await emitWalEvent('lifecycle_changed', workspaceId, {
+            workspaceId,
+            specId: path.basename(runRow.spec_path, '.json'),
+            phaseId: 'learn',
+            runId,
+            changeKind: 'evidence_persisted',
+            learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
+          });
         } catch (err) {
           logger.error({ err, runId }, '[worker] Failed to update retry run status on exit');
         }

@@ -175,6 +175,51 @@ describe('LifecyclePhaseDrawer', () => {
     expect(onAction).toHaveBeenCalledWith('retry_smallest_scope');
   });
 
+  it('exposes a provenance-linked reviewable Learn candidate and its evidence chain', async () => {
+    const user = userEvent.setup();
+    const onOpenEvidence = vi.fn();
+    const learnPhase: LifecyclePhaseResponse = {
+      ...phase('passed'),
+      phaseId: 'learn',
+      status: 'passed',
+      learn: {
+        requiredCandidateCount: 1,
+        candidateCount: 1,
+        sourceEvidenceCount: 2,
+        reviewStates: { review_required: 1 },
+        generation: { state: 'generated', attemptedAt: '2026-07-15T12:02:00.000Z', blocker: null },
+        candidates: {
+          total: 1,
+          truncated: false,
+          items: [{
+            id: 91,
+            status: 'review_required',
+            category: 'Decision',
+            confidence: 'high',
+            securitySensitive: false,
+            defaultRetrievalEligible: false,
+            createdAt: '2026-07-15T12:02:00.000Z',
+            provenance: {
+              workspaceId: 'ws-1', specId: 'spec-a', runId: 913, storyId: 'US-006', commitSha: 'abc123',
+              releaseSubject: { type: 'commit_sha', value: 'abc123' }, sourceEvidenceIds: ['7', 'EVD-sha256:host'],
+              sourceDecisionIds: ['CLO-sha256:accepted'], deduplicationKey: 'sha256:dedupe',
+            },
+          }],
+        },
+        nextAction: 'Review 1 provenance-linked candidate.',
+      },
+    };
+    renderDrawer({ phase: learnPhase, onOpenEvidence });
+
+    const learn = screen.getByTestId('lifecycle-learn-closeout');
+    expect(within(learn).getByText('1/1')).toBeInTheDocument();
+    expect(within(learn).getByText('Decision candidate #91')).toBeInTheDocument();
+    expect(within(learn).getByText(/Workspace ws-1 · Spec spec-a · Run 913 · Story US-006/)).toBeInTheDocument();
+    expect(within(learn).getByText(/Default retrieval: Not eligible/)).toBeInTheDocument();
+    await user.click(within(learn).getByRole('button', { name: 'Evidence 7' }));
+    expect(onOpenEvidence).toHaveBeenCalledWith('7');
+  });
+
   it('keeps long evidence payload and provenance collapsed by default', () => {
     const detail = {
       id: '7', workspaceId: 'ws-1', specId: 'spec-a', scope: { workspaceId: 'ws-1', specSlug: 'spec-a', runId: 913, storyId: 'US-006', phaseId: 'validation', gateId: 'gate-validation' },

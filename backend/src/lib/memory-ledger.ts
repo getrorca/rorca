@@ -30,6 +30,7 @@ export const MEMORY_CATEGORIES = [
   'Decision',
   'Pattern',
   'Gotcha',
+  'Follow-up',
   'Run Synthesis',
 ] as const;
 

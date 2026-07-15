@@ -12,6 +12,15 @@ const mockPortfolio = jest.fn();
 const mockSpec = jest.fn();
 const mockPhase = jest.fn();
 const mockEvidence = jest.fn();
+const mockLearnCloseout = jest.fn();
+const mockLifecycleInvalidation = jest.fn();
+
+jest.mock('../../lib/learn-closeout', () => ({
+  generateLearnCloseoutCandidates: (...args: unknown[]) => mockLearnCloseout(...args),
+}));
+jest.mock('../../lib/lifecycle-mutations', () => ({
+  emitLifecycleInvalidation: (...args: unknown[]) => mockLifecycleInvalidation(...args),
+}));
 
 jest.mock('../../lib/ssdlc-lifecycle-read', () => {
   const actual = jest.requireActual('../../lib/ssdlc-lifecycle-read');
@@ -25,7 +34,7 @@ jest.mock('../../lib/ssdlc-lifecycle-read', () => {
 });
 
 import lifecycleRouter from '../lifecycle';
-import { ConflictError } from '../../lib/errors';
+import { ConflictError, NotFoundError } from '../../lib/errors';
 import { errorHandler } from '../../lib/error-handler';
 
 function app() {
@@ -41,6 +50,8 @@ beforeEach(() => {
   mockSpec.mockResolvedValue({ specId: 'safe-spec' });
   mockPhase.mockResolvedValue({ specId: 'safe-spec', phaseId: 'qa', evidence: { items: [], total: 0, hasMore: false } });
   mockEvidence.mockResolvedValue({ id: '7', rawReference: { accessTier: 'auth', rawPayloadIncluded: false } });
+  mockLearnCloseout.mockResolvedValue({ status: 'generated', candidateIds: [91] });
+  mockLifecycleInvalidation.mockResolvedValue(undefined);
 });
 
 describe('lifecycle aggregate read routes', () => {
@@ -147,6 +158,30 @@ describe('lifecycle aggregate read routes', () => {
     expect([detail.status, evidence.status]).toEqual([409, 409]);
     expect(detail.body.details).toMatchObject({ type: 'refresh_required', currentSnapshotId: currentSnapshot });
     expect(evidence.body.details).toMatchObject({ type: 'refresh_required', currentSnapshotId: currentSnapshot });
+  });
+
+  test('retries Learn closeout through the workspace/spec/run scoped producer', async () => {
+    const response = await request(app())
+      .post('/api/lifecycle/specs/safe-spec/runs/42/learn-closeout?workspaceId=ws-a')
+      .send({ modelSummarization: true });
+
+    expect(response.status).toBe(200);
+    expect(mockLearnCloseout).toHaveBeenCalledWith({
+      workspaceId: 'ws-a', specId: 'safe-spec', runId: 42, modelSummarization: true,
+    });
+    expect(mockLifecycleInvalidation).toHaveBeenCalledWith({
+      workspaceId: 'ws-a', specId: 'safe-spec', phaseId: 'learn', runId: 42, changeKind: 'evidence_persisted',
+    });
+  });
+
+  test('denies a run that is not owned by the requested workspace', async () => {
+    mockLearnCloseout.mockRejectedValueOnce(new NotFoundError('Pipeline run', '42'));
+    const response = await request(app())
+      .post('/api/lifecycle/specs/safe-spec/runs/42/learn-closeout?workspaceId=ws-b')
+      .send({});
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('NOT_FOUND');
   });
 
   test('requires workspace scope on every aggregate route', async () => {

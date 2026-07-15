@@ -268,6 +268,60 @@ export default function LifecyclePhaseDrawer({
           )}
         </section>
 
+        {phase.phaseId === 'learn' && (
+          <section aria-labelledby="phase-learn-heading" data-testid="lifecycle-learn-closeout">
+            <SectionHeading id="phase-learn-heading">Governed Learn closeout</SectionHeading>
+            {phase.learn ? (
+              <div className="space-y-3 text-sm">
+                <div className="grid grid-cols-2 gap-2 rounded-md border border-border bg-panel p-3">
+                  <span className="text-muted">Required candidates</span>
+                  <strong className="text-right text-[var(--text)]">{phase.learn.candidateCount}/{phase.learn.requiredCandidateCount}</strong>
+                  <span className="text-muted">Source evidence</span>
+                  <strong className="text-right text-[var(--text)]">{phase.learn.sourceEvidenceCount}</strong>
+                  <span className="text-muted">Generation</span>
+                  <strong className="text-right text-[var(--text)]">{readable(phase.learn.generation.state)}</strong>
+                </div>
+                {phase.learn.generation.blocker && (
+                  <p className="rounded-md border border-error/30 bg-error/10 p-3 text-error">
+                    {phase.learn.generation.blocker.message}
+                  </p>
+                )}
+                <ul className="divide-y divide-border border-y border-border" aria-label="Provenance-linked Learn candidates">
+                  {phase.learn.candidates.items.map((candidate) => (
+                    <li key={candidate.id} className="space-y-2 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <strong className="text-[var(--text)]">{candidate.category ?? 'Memory'} candidate #{candidate.id}</strong>
+                        <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted">{readable(candidate.status)}</span>
+                      </div>
+                      <p className="text-xs text-muted">
+                        Workspace {candidate.provenance.workspaceId ?? 'unknown'} · Spec {candidate.provenance.specId ?? 'unknown'} · Run {candidate.provenance.runId ?? 'unknown'} · Story {candidate.provenance.storyId ?? 'run'}
+                      </p>
+                      <p className="break-all text-xs text-muted">
+                        Subject {candidate.provenance.releaseSubject
+                          ? `${readable(candidate.provenance.releaseSubject.type)} ${candidate.provenance.releaseSubject.value}`
+                          : 'unknown'} · Commit {candidate.provenance.commitSha ?? 'unknown'}
+                      </p>
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        {candidate.provenance.sourceEvidenceIds.map((evidenceId) => (/^\d+$/.test(evidenceId) ? (
+                          <button key={evidenceId} type="button" onClick={(event) => openEvidence(evidenceId, event.currentTarget)} className="rounded-sm text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+                            Evidence {evidenceId}
+                          </button>
+                        ) : <span key={evidenceId} className="text-muted">Evidence {evidenceId}</span>))}
+                      </div>
+                      {candidate.securitySensitive && <p className="text-xs text-warning">Sensitive delivery fact — human review is mandatory.</p>}
+                      <p className="text-xs text-muted">Default retrieval: {candidate.defaultRetrievalEligible ? 'Eligible after review' : 'Not eligible'}</p>
+                    </li>
+                  ))}
+                  {phase.learn.candidates.items.length === 0 && <li className="py-3 text-muted">No reviewable candidate exists. Learn remains not started or blocked.</li>}
+                </ul>
+                <p className="border-l-2 border-accent pl-3 text-[var(--text)]">Next action: {phase.learn.nextAction}</p>
+              </div>
+            ) : (
+              <p className="text-warning">Learn closeout status is unavailable; this phase cannot be presented as passed.</p>
+            )}
+          </section>
+        )}
+
         <section aria-labelledby="phase-blocker-heading">
           <SectionHeading id="phase-blocker-heading">Blocker</SectionHeading>
           <div className={`flex items-start gap-2 text-sm ${phase.blocker ? 'text-error' : 'text-muted'}`}>

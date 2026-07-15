@@ -41,20 +41,21 @@ import {
   recordContextCaptureSubmission,
   upsertContextCaptureControlState,
 } from '../lib/context-capture-controls';
+import { getBoss } from '../lib/pg-boss';
 import {
+  applyMemoryCandidateReviewAction,
+  approveMemoryCandidate,
   getMemoryCandidateCounts,
   getMemoryDistillationSettings,
+  listMemoryCandidates,
+  rejectMemoryCandidate,
   upsertMemoryDistillationSettings,
+  type MemoryCandidateReviewAction,
+  type MemoryCandidateStatus,
   type MemoryDistillationMode,
 } from '../lib/context-distillation';
-import {
-  importExternalMemoryCandidates,
-  stageExternalMemoryImportCandidates,
-  type ExternalMemoryImportFormat,
-  type ExternalMemoryImportVendor,
-} from '../lib/external-memory-import-adapters';
-import { getBoss } from '../lib/pg-boss';
-import { attachTopicSSE, broadcastTopic } from '../lib/sse-hub';
+import { attachTopicSSE, broadcastAll, broadcastTopic } from '../lib/sse-hub';
+import { importExternalMemoryCandidates, stageExternalMemoryImportCandidates, type ExternalMemoryImportFormat, type ExternalMemoryImportVendor } from '../lib/external-memory-import-adapters';
 
 const router = Router();
 
@@ -69,6 +70,171 @@ async function loadWorkspace(workspaceId: string): Promise<WorkspaceRow> {
   const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
   if (!workspace) throw new NotFoundError('Workspace', workspaceId);
   return workspace;
+}
+
+function isInside(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function assertInsideWorkspace(workspacePath: string, candidatePath: string, name: string): void {
+  if (!isInside(workspacePath, candidatePath)) {
+    throw new ValidationError(`${name} must be inside the workspace path`, { workspacePath, candidatePath });
+  }
+}
+
+function assertExpectedBootstrapPath(workspacePath: string, candidatePath: string, name: string, expectedRelativePath: string): void {
+  assertInsideWorkspace(workspacePath, candidatePath, name);
+  const expectedPath = path.resolve(workspacePath, expectedRelativePath);
+  if (path.resolve(candidatePath) !== expectedPath) {
+    throw new ValidationError(`${name} must be ${expectedRelativePath} for always-on capture setup`, {
+      workspacePath,
+      candidatePath,
+      expectedPath,
+    });
+  }
+}
+
+function parseDistillationMode(value: unknown): MemoryDistillationMode {
+  if (value === 'off' || value === 'explicit-only' || value === 'conservative-auto-candidates' || value === 'trusted-auto-approve') return value;
+  throw new ValidationError('Invalid distillation mode', { mode: value });
+}
+
+function parseCandidateStatus(value: unknown): MemoryCandidateStatus | 'all' {
+  if (value === undefined || value === null || value === 'all') return 'all';
+  if (value === 'pending' || value === 'review_required' || value === 'approved' || value === 'rejected' || value === 'auto_approved') return value;
+  throw new ValidationError('Invalid candidate status', { status: value });
+}
+
+function parseOptionalString(value: unknown, fieldName: string, allowed?: readonly string[]): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new ValidationError(`${fieldName} must be a string`);
+  if (allowed && !allowed.includes(value)) throw new ValidationError(`Invalid ${fieldName}`, { [fieldName]: value, allowed });
+  return value;
+}
+
+function parseOptionalBoolean(value: unknown, fieldName: string): boolean | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === 'true' || value === true) return true;
+  if (value === 'false' || value === false) return false;
+  throw new ValidationError(`${fieldName} must be true or false`);
+}
+
+function parseCandidateReviewAction(value: unknown): MemoryCandidateReviewAction {
+  if (value === 'edit' || value === 'duplicate' || value === 'supersede' || value === 'conflict' || value === 'defer' || value === 'revisit' || value === 'archive') return value;
+  throw new ValidationError('Invalid candidate review action', { action: value });
+}
+
+function contextCaptureTopic(workspaceId: string): string {
+  return `context-capture:${workspaceId}`;
+}
+
+function publishCaptureEvent(workspaceId: string, event: Record<string, unknown>): void {
+  broadcastTopic(contextCaptureTopic(workspaceId), { workspaceId, occurredAt: new Date().toISOString(), ...event });
+}
+
+async function emitCandidateReviewInvalidation(input: {
+  workspaceId: string;
+  candidateId: number;
+  action: string;
+  reviewState: string;
+}): Promise<void> {
+  const candidate = await queryOne<{ provenance: unknown }>(
+    'SELECT provenance FROM memory_candidates WHERE id = $1 AND workspace_id = $2',
+    [input.candidateId, input.workspaceId],
+  );
+  const provenance = candidate?.provenance && typeof candidate.provenance === 'object' && !Array.isArray(candidate.provenance)
+    ? candidate.provenance as Record<string, unknown>
+    : {};
+  const specId = typeof provenance.specId === 'string' ? provenance.specId : null;
+  const storyId = typeof provenance.storyId === 'string' ? provenance.storyId : null;
+  const payload = {
+    workspaceId: input.workspaceId,
+    specId,
+    phaseId: 'learn',
+    changeKind: 'learn_candidate_reviewed',
+    candidateId: input.candidateId,
+    action: input.action,
+    reviewState: input.reviewState,
+    affectedCell: { specId, phaseId: 'learn' },
+  };
+  const wal = await queryOne<{ id: number; ts: Date | string }>(
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
+     VALUES ('lifecycle_changed', $1, $2, $3, 'user', $4::jsonb)
+     RETURNING id, ts`,
+    [input.workspaceId, specId, storyId, JSON.stringify(payload)],
+  );
+  if (wal) {
+    broadcastAll({
+      id: wal.id,
+      event_type: 'lifecycle_changed',
+      workspace_id: input.workspaceId,
+      spec_id: specId,
+      story_id: storyId,
+      actor: 'user',
+      payload: JSON.stringify(payload),
+      ts: new Date(wal.ts).toISOString(),
+    } as any);
+  }
+}
+
+function parsePositiveInt(value: unknown, fieldName: string, fallback: number, max: number): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) throw new ValidationError(`${fieldName} must be an integer between 1 and ${max}`);
+  return parsed;
+}
+
+function parseCandidateId(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new ValidationError('candidateId must be a positive integer');
+  return parsed;
+}
+
+function parsePolicyMode(value: unknown): CapturePolicyMode {
+  return normalizeCapturePolicyMode(value, 'metadata-only');
+}
+
+function parseImportVendor(value: unknown): ExternalMemoryImportVendor {
+  const vendor = assertString(value, 'vendor') as ExternalMemoryImportVendor;
+  return vendor;
+}
+
+function parseImportFormat(value: unknown): ExternalMemoryImportFormat | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === 'json' || value === 'jsonl' || value === 'markdown') return value;
+  throw new ValidationError('Invalid import format', { format: value });
+}
+
+function resolveWorkspaceSourceFile(workspacePath: string, value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const raw = assertString(value, 'sourceFile');
+  const resolved = path.isAbsolute(raw) ? raw : path.resolve(workspacePath, raw);
+  assertInsideWorkspace(workspacePath, resolved, 'sourceFile');
+  return resolved;
+}
+
+function isCliCapturePayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const eventType = (payload as Record<string, unknown>).eventType;
+  return eventType === 'cli_command' || eventType === 'shell_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
+}
+
+function assertAgentMetadata(payload: unknown): void {
+  if (!payload || typeof payload !== 'object') return;
+  const obj = payload as Record<string, unknown>;
+  if (obj.eventType !== 'agent_memory' && obj.eventType !== 'adapter_context' && obj.eventType !== 'explicit_memory') return;
+  for (const key of ['source_system', 'tool_name', 'session_id']) {
+    const sourceIdentity = obj.source_identity && typeof obj.source_identity === 'object' ? obj.source_identity as Record<string, unknown> : undefined;
+    const value = obj[key] ?? sourceIdentity?.[key];
+    if (typeof value !== 'string' || !String(value).trim()) {
+      throw new ValidationError(`Adapter payload requires ${key} metadata`);
+    }
+  }
+}
+
+function sha256(value: string): string {
+  return `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
 }
 
 function stringValue(value: unknown): string | null {
@@ -575,18 +741,208 @@ router.get('/distillation/:workspaceId/config', async (req, res) => {
  *     responses:
  *       200: { description: Updated distillation settings }
  */
-router.patch('/distillation/:workspaceId/config', async (req, res) => {
-  const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
-  const mode = req.body.mode as MemoryDistillationMode | undefined;
-  if (mode && !['off', 'explicit-only', 'conservative-auto-candidates', 'trusted-auto-approve'].includes(mode)) throw new ValidationError('Invalid distillation mode');
-  if (req.body.operatorAutoApprove === true && mode !== 'trusted-auto-approve' && (await getMemoryDistillationSettings(workspace.id)).mode !== 'trusted-auto-approve') throw new ValidationError('operatorAutoApprove requires trusted-auto-approve mode');
-  const settings = await upsertMemoryDistillationSettings(workspace.id, {
-    ...(mode ? { mode } : {}),
-    ...(typeof req.body.operatorAutoApprove === 'boolean' ? { operatorAutoApprove: req.body.operatorAutoApprove } : {}),
-    ...(typeof req.body.llmSummarization === 'boolean' ? { llmSummarization: req.body.llmSummarization } : {}),
-    ...(req.body.maxEventsPerJob != null ? { maxEventsPerJob: parsePositiveInt(req.body.maxEventsPerJob, 'maxEventsPerJob', 25, 100) } : {}),
-  });
-  res.json({ ok: true, workspaceId: workspace.id, settings });
+router.patch('/distillation/:workspaceId/config', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+
+    const patch: Parameters<typeof upsertMemoryDistillationSettings>[1] = {};
+    if (req.body.mode !== undefined) patch.mode = parseDistillationMode(req.body.mode);
+    if (req.body.operatorAutoApprove !== undefined) {
+      if (typeof req.body.operatorAutoApprove !== 'boolean') throw new ValidationError('operatorAutoApprove must be a boolean');
+      patch.operatorAutoApprove = req.body.operatorAutoApprove;
+    }
+    if (req.body.llmSummarization !== undefined) {
+      if (typeof req.body.llmSummarization !== 'boolean') throw new ValidationError('llmSummarization must be a boolean');
+      patch.llmSummarization = req.body.llmSummarization;
+    }
+    if (req.body.maxEventsPerJob !== undefined) {
+      if (!Number.isInteger(req.body.maxEventsPerJob) || req.body.maxEventsPerJob < 1 || req.body.maxEventsPerJob > 100) {
+        throw new ValidationError('maxEventsPerJob must be an integer between 1 and 100');
+      }
+      patch.maxEventsPerJob = req.body.maxEventsPerJob;
+    }
+
+    const settings = await upsertMemoryDistillationSettings(workspaceId, patch);
+    const candidateCounts = await getMemoryCandidateCounts(workspaceId);
+    res.json({ ok: true, workspaceId, settings, candidateCounts });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates:
+ *   get:
+ *     tags: [Context Capture]
+ *     summary: List reviewable memory candidates from context distillation
+ *     operationId: listContextDistillationCandidates
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Candidate review exposes local captured context snippets and approval state, so it is operator-only maintenance surface."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [all, pending, review_required, approved, rejected, auto_approved] }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *     responses:
+ *       200: { description: Candidate list }
+ *       404: { description: Workspace not found }
+ */
+router.get('/distillation/:workspaceId/candidates', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const status = parseCandidateStatus(req.query.status);
+    const limit = parsePositiveInt(req.query.limit, 'limit', 50, 100);
+    const sourceSystem = parseOptionalString(req.query.sourceSystem, 'sourceSystem');
+    const toolName = parseOptionalString(req.query.toolName, 'toolName');
+    const hostApp = parseOptionalString(req.query.hostApp, 'hostApp');
+    const eventType = parseOptionalString(req.query.eventType, 'eventType');
+    const trustTier = parseOptionalString(req.query.trustTier, 'trustTier', ['untrusted', 'local', 'verified', 'privileged']);
+    const confidence = parseOptionalString(req.query.confidence, 'confidence', ['high', 'medium', 'low']);
+    const regulatedFlag = parseOptionalBoolean(req.query.regulatedFlag, 'regulatedFlag');
+    const candidates = await listMemoryCandidates({ workspaceId, status, limit, sourceSystem, toolName, hostApp, eventType, trustTier, confidence, regulatedFlag });
+    res.json({ ok: true, workspaceId, candidates });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates/{candidateId}/approve:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Approve a distilled memory candidate into default retrieval
+ *     operationId: approveContextDistillationCandidate
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Approving a candidate promotes captured local context into retrieval memory, which is an operator-only side effect."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: candidateId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Candidate approved }
+ *       404: { description: Workspace or candidate not found }
+ */
+router.post('/distillation/:workspaceId/candidates/:candidateId/approve', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const candidateId = parseCandidateId(req.params.candidateId);
+    const approved = await approveMemoryCandidate(workspaceId, candidateId);
+    if (!approved) throw new NotFoundError('Memory candidate', String(candidateId));
+    await emitCandidateReviewInvalidation({ workspaceId, candidateId, action: 'approve', reviewState: 'approved' });
+    publishCaptureEvent(workspaceId, { type: 'candidate_approved', candidateId, memoryId: approved.memoryId });
+    res.json({ ok: true, workspaceId, ...approved });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates/{candidateId}/reject:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Reject a distilled memory candidate
+ *     operationId: rejectContextDistillationCandidate
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Rejecting a candidate changes local memory review state and is operator-only maintenance surface."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: candidateId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Candidate rejected }
+ *       404: { description: Workspace or candidate not found }
+ */
+router.post('/distillation/:workspaceId/candidates/:candidateId/reject', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const candidateId = parseCandidateId(req.params.candidateId);
+    const rejected = await rejectMemoryCandidate(workspaceId, candidateId);
+    if (!rejected) throw new NotFoundError('Memory candidate', String(candidateId));
+    await emitCandidateReviewInvalidation({ workspaceId, candidateId, action: 'reject', reviewState: 'rejected' });
+    publishCaptureEvent(workspaceId, { type: 'candidate_rejected', candidateId });
+    res.json({ ok: true, workspaceId, candidateId, status: 'rejected' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/context-capture/distillation/{workspaceId}/candidates/{candidateId}/action:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Apply a review action to a context memory candidate
+ *     operationId: actionContextDistillationCandidate
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Candidate review actions mutate local captured context review state and can alter later retrieval eligibility."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: candidateId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Candidate action applied }
+ *       400: { description: Invalid action }
+ *       404: { description: Workspace or candidate not found }
+ */
+router.post('/distillation/:workspaceId/candidates/:candidateId/action', async (req, res, next) => {
+  try {
+    const workspaceId = assertString(req.params.workspaceId, 'workspaceId');
+    const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) throw new NotFoundError('Workspace', workspaceId);
+    const candidateId = parseCandidateId(req.params.candidateId);
+    const action = parseCandidateReviewAction(req.body.action);
+    const targetCandidateId = req.body.targetCandidateId === undefined || req.body.targetCandidateId === null || req.body.targetCandidateId === ''
+      ? undefined
+      : parseCandidateId(req.body.targetCandidateId);
+    const result = await applyMemoryCandidateReviewAction({
+      workspaceId,
+      candidateId,
+      action,
+      content: typeof req.body.content === 'string' ? req.body.content : undefined,
+      category: typeof req.body.category === 'string' ? req.body.category : undefined,
+      confidence: req.body.confidence === 'high' || req.body.confidence === 'medium' || req.body.confidence === 'low' ? req.body.confidence : undefined,
+      note: typeof req.body.note === 'string' ? req.body.note : undefined,
+      targetCandidateId,
+    });
+    if (!result) throw new NotFoundError('Memory candidate', String(candidateId));
+    await emitCandidateReviewInvalidation({ workspaceId, candidateId, action, reviewState: String(result.status ?? action) });
+    publishCaptureEvent(workspaceId, { type: 'candidate_action', candidateId, action, targetCandidateId: targetCandidateId ?? null });
+    res.json({ ok: true, workspaceId, ...result });
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

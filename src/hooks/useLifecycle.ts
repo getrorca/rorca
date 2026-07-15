@@ -218,7 +218,10 @@ interface LifecycleWalPayload { workspaceId: string; specId: string | null; phas
 function walPayload(event: WalEvent): LifecycleWalPayload | null {
   if (event.event_type !== 'lifecycle_changed' && event.event_type !== 'decision_recorded') return null;
   try {
-    const value = JSON.parse(event.payload ?? '{}') as unknown;
+    // pg returns JSONB as an object for freshly inserted/broadcast WAL rows,
+    // while historical/query fixtures expose the serialized string contract.
+    const rawPayload = event.payload as unknown;
+    const value = typeof rawPayload === 'string' ? JSON.parse(rawPayload || '{}') as unknown : rawPayload;
     if (!isRecord(value) || typeof value.workspaceId !== 'string' || typeof value.changeKind !== 'string') return null;
     return {
       workspaceId: value.workspaceId,

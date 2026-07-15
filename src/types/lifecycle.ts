@@ -122,6 +122,41 @@ export interface LifecyclePhaseDescriptor {
   displayName: string;
 }
 
+export interface LifecycleLearnCandidate {
+  id: number;
+  status: string;
+  category: string | null;
+  confidence: string | null;
+  securitySensitive: boolean;
+  defaultRetrievalEligible: boolean;
+  createdAt: string | null;
+  provenance: {
+    workspaceId: string | null;
+    specId: string | null;
+    runId: number | null;
+    storyId: string | null;
+    commitSha: string | null;
+    releaseSubject: { type: string; value: string } | null;
+    sourceEvidenceIds: string[];
+    sourceDecisionIds: string[];
+    deduplicationKey: string | null;
+  };
+}
+
+export interface LifecycleLearnSummary {
+  requiredCandidateCount: number;
+  candidateCount: number;
+  sourceEvidenceCount: number;
+  reviewStates: Record<string, number>;
+  generation: {
+    state: 'not_started' | 'generated' | 'blocked';
+    attemptedAt: string | null;
+    blocker: { code: string; message: string; retryable: boolean } | null;
+  };
+  candidates: LifecycleBounded<LifecycleLearnCandidate>;
+  nextAction: string;
+}
+
 export interface LifecyclePhaseCell {
   phaseId: LifecyclePhaseId;
   displayName: string;
@@ -132,6 +167,7 @@ export interface LifecyclePhaseCell {
   rationale?: string | null;
   blocker: string | null;
   nextSafeAction: string | null;
+  learn?: LifecycleLearnSummary;
 }
 
 export type LifecycleEvidenceSource = 'database' | 'wal' | 'log' | 'pty' | 'process' | 'worker' | 'git' | 'completion_packet' | 'retry';
@@ -449,6 +485,7 @@ export interface LifecyclePhaseResponse extends LifecycleSnapshotRef {
   /** Backward-compatible evaluator action text. Prefer nextSafeActionGuidance in new UI. */
   nextSafeAction: string | null;
   permittedActions: LifecyclePermittedAction[];
+  learn?: LifecycleLearnSummary;
   evaluationSnapshot: LifecycleEvaluationSnapshot | LifecycleSnapshotRef;
   recompileHint?: { safe: true; method: 'POST'; href: string };
 }

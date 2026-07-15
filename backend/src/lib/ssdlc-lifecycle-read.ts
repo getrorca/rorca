@@ -133,6 +133,23 @@ interface RunRow {
   passed_stories: number;
   failed_stories: number;
   total_stories: number;
+  learn_closeout_status: 'not_started' | 'generated' | 'blocked';
+  learn_closeout_blocker: Record<string, unknown> | null;
+  learn_closeout_attempted_at: Date | string | null;
+  learn_candidate_count: number;
+  learn_candidate_ids: unknown;
+  learn_source_evidence_count: number;
+}
+interface LearnCandidateRow {
+  id: number;
+  spec_slug: string;
+  status: string;
+  category: string | null;
+  confidence: string | null;
+  provenance: Record<string, unknown> | string | null;
+  security_sensitive: boolean;
+  default_retrieval_eligible: boolean;
+  created_at: Date | string;
 }
 
 export interface LifecyclePortfolioFilters {
@@ -173,6 +190,7 @@ interface EvaluationBundle {
   evidenceHighWaterMark: string;
   decisionHighWaterMark: string;
   run: ReturnType<typeof runContext>;
+  learn: ReturnType<typeof learnSummary>;
   risk: typeof RISK_LEVELS[number];
   owner: { id: string; label: string } | null;
   planState: SpecPlanCompilationState['status'];
@@ -367,12 +385,31 @@ async function loadDecisions(specSlugs: string[], workspaceId: string): Promise<
   `, [workspaceId, specSlugs, LIFECYCLE_EVALUATION_DECISION_LIMIT]);
 }
 
+async function loadLearnCandidates(specSlugs: string[], workspaceId: string): Promise<Map<string, LearnCandidateRow[]>> {
+  if (specSlugs.length === 0) return new Map();
+  const rows = await query<LearnCandidateRow>(`
+    SELECT * FROM (
+      SELECT mc.id, mc.provenance->>'specId' AS spec_slug, mc.status, mc.category, mc.confidence,
+             mc.provenance, mc.security_sensitive, mc.default_retrieval_eligible, mc.created_at,
+             ROW_NUMBER() OVER (PARTITION BY mc.provenance->>'specId' ORDER BY mc.created_at DESC, mc.id DESC) AS bounded_rank
+        FROM memory_candidates mc
+       WHERE mc.workspace_id = $1
+         AND mc.provenance->>'kind' = 'lifecycle_closeout'
+         AND mc.provenance->>'specId' = ANY($2::text[])
+    ) bounded WHERE bounded_rank <= 200
+    ORDER BY spec_slug, created_at DESC, id DESC
+  `, [workspaceId, specSlugs]);
+  return new Map(specSlugs.map((slug) => [slug, rows.filter((row) => row.spec_slug === slug)]));
+}
+
 async function loadRuns(specSlugs: string[], workspaceId: string): Promise<Map<string, RunRow>> {
   if (specSlugs.length === 0) return new Map();
   const rows = await query<RunRow>(`
     SELECT DISTINCT ON (regexp_replace(spec_path, '^.*/|\\.json$', '', 'g'))
            regexp_replace(spec_path, '^.*/|\\.json$', '', 'g') AS spec_slug,
            id, status, pid, started_at, finished_at, queue_position, trigger_type, agent_type,
+           learn_closeout_status, learn_closeout_blocker, learn_closeout_attempted_at,
+           learn_candidate_count, learn_candidate_ids, learn_source_evidence_count,
            (SELECT COUNT(*)::int FROM story_results sr WHERE sr.run_id = pipeline_runs.id AND sr.status = 'pass') AS passed_stories,
            (SELECT COUNT(*)::int FROM story_results sr WHERE sr.run_id = pipeline_runs.id AND sr.status IN ('fail', 'timeout')) AS failed_stories,
            (SELECT COUNT(*)::int FROM story_results sr WHERE sr.run_id = pipeline_runs.id) AS total_stories
@@ -467,6 +504,70 @@ function evaluatorDecision(row: DecisionRow, activeReleaseSubject: ReleaseSubjec
   };
 }
 
+function learnSummary(row: RunRow | undefined, candidates: LearnCandidateRow[]) {
+  const selectedIds = new Set(asArray(row?.learn_candidate_ids).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id)));
+  const scopedCandidates = row?.learn_closeout_status === 'generated'
+    ? candidates.filter((candidate) => selectedIds.has(candidate.id))
+    : [];
+  const parsed = scopedCandidates.map((candidate) => {
+    const provenance = record(candidate.provenance);
+    const release = record(provenance.releaseSubject);
+    return {
+      id: candidate.id,
+      status: candidate.status,
+      category: candidate.category,
+      confidence: candidate.confidence,
+      securitySensitive: candidate.security_sensitive,
+      defaultRetrievalEligible: candidate.default_retrieval_eligible,
+      createdAt: iso(candidate.created_at),
+      provenance: {
+        workspaceId: typeof provenance.workspaceId === 'string' ? provenance.workspaceId : null,
+        specId: typeof provenance.specId === 'string' ? provenance.specId : null,
+        runId: typeof provenance.runId === 'number' ? provenance.runId : null,
+        storyId: typeof provenance.storyId === 'string' ? provenance.storyId : null,
+        commitSha: typeof provenance.commitSha === 'string' ? provenance.commitSha : null,
+        releaseSubject: typeof release.type === 'string' && typeof release.value === 'string' ? { type: release.type, value: release.value } : null,
+        sourceEvidenceIds: asArray(provenance.sourceEvidenceIds).filter((id): id is string => typeof id === 'string').slice(0, 16),
+        sourceDecisionIds: asArray(provenance.sourceDecisionIds).filter((id): id is string => typeof id === 'string').slice(0, 16),
+        deduplicationKey: typeof provenance.deduplicationKey === 'string' ? provenance.deduplicationKey : null,
+      },
+    };
+  });
+  const reviewStates = parsed.reduce<Record<string, number>>((counts, item) => {
+    counts[item.status] = (counts[item.status] ?? 0) + 1;
+    return counts;
+  }, {});
+  const blockerRecord = record(row?.learn_closeout_blocker);
+  const generationState = row?.learn_closeout_status ?? 'not_started';
+  const blocker = generationState === 'blocked' || parsed.length === 0
+    ? {
+      code: typeof blockerRecord.code === 'string' ? blockerRecord.code : parsed.length === 0 ? 'no_reviewable_candidates' : 'generation_blocked',
+      message: typeof blockerRecord.message === 'string' ? blockerRecord.message : parsed.length === 0
+        ? 'No provenance-linked reviewable Learn candidate has been generated.'
+        : 'Learn closeout generation is blocked.',
+      retryable: blockerRecord.retryable !== false,
+    }
+    : null;
+  const unresolved = parsed.filter((item) => item.status === 'pending' || item.status === 'review_required').length;
+  return {
+    requiredCandidateCount: 1,
+    candidateCount: parsed.length,
+    sourceEvidenceCount: Number(row?.learn_source_evidence_count ?? 0),
+    reviewStates,
+    generation: {
+      state: generationState,
+      attemptedAt: iso(row?.learn_closeout_attempted_at),
+      blocker,
+    },
+    candidates: bounded(parsed, 25),
+    nextAction: blocker
+      ? 'Retry Learn closeout after resolving the reported evidence blocker.'
+      : unresolved > 0
+        ? `Review ${unresolved} provenance-linked candidate${unresolved === 1 ? '' : 's'}.`
+        : 'Inspect the reviewed candidate evidence chain.',
+  };
+}
+
 function runContext(row: RunRow | undefined, evidence: EvidenceRow[], workspaceId: string): null | {
   id: number;
   status: string;
@@ -551,18 +652,21 @@ function candidateTitle(candidate: CandidateRow): string {
   return typeof content.title === 'string' ? content.title : candidate.title ?? candidate.spec_slug;
 }
 
-function phaseCells(evaluation: LifecycleEvaluation) {
+function phaseCells(evaluation: LifecycleEvaluation, learn?: ReturnType<typeof learnSummary>) {
   return CANONICAL_PHASES.map((canonical) => {
     const phase = evaluation.phases.find((item) => item.phaseId === canonical.id)!;
+    const learnMissing = canonical.id === 'learn' && (!learn || learn.candidateCount < learn.requiredCandidateCount);
+    const learnBlocked = canonical.id === 'learn' && learn?.generation.state === 'blocked';
     return {
       phaseId: canonical.id,
       displayName: canonical.displayName,
-      status: phase.status,
+      status: learnBlocked ? 'blocked' as const : learnMissing ? 'not_started' as const : phase.status,
       disposition: phase.disposition.disposition,
       gateProgress: { passed: phase.counts.passed, required: phase.counts.total },
       rationale: phase.disposition.rationale,
-      blocker: phase.blockerReason ?? null,
-      nextSafeAction: phase.nextSafeAction ?? phase.nextUnmetGate?.nextSafeAction ?? null,
+      blocker: learnBlocked || learnMissing ? learn?.generation.blocker?.message ?? 'A reviewable Learn candidate is required.' : phase.blockerReason ?? null,
+      nextSafeAction: canonical.id === 'learn' && learn ? learn.nextAction : phase.nextSafeAction ?? phase.nextUnmetGate?.nextSafeAction ?? null,
+      ...(canonical.id === 'learn' && learn ? { learn } : {}),
     };
   });
 }
@@ -589,10 +693,11 @@ async function buildBundles(ws: WorkspaceRow, candidates: CandidateRow[], expect
     return parsed.success ? [{ candidate, plan: parsed.data }] : [];
   });
   const specSlugs = candidates.map((item) => item.spec_slug);
-  const [allEvidence, allDecisions, runs] = await Promise.all([
+  const [allEvidence, allDecisions, runs, learnCandidates] = await Promise.all([
     loadEvidence(specSlugs, ws.id),
     loadDecisions(specSlugs, ws.id),
     loadRuns(specSlugs, ws.id),
+    loadLearnCandidates(specSlugs, ws.id),
   ]);
   const evidenceBySpec = new Map(specSlugs.map((slug) => [slug, allEvidence.filter((row) => row.spec_slug === slug)]));
   const decisionsBySpec = new Map(specSlugs.map((slug) => [slug, allDecisions.filter((row) => row.spec_slug === slug)]));
@@ -638,6 +743,7 @@ async function buildBundles(ws: WorkspaceRow, candidates: CandidateRow[], expect
       evidenceHighWaterMark: entry.evidenceHighWaterMark,
       decisionHighWaterMark: entry.decisionHighWaterMark,
       run: runContext(runs.get(candidate.spec_slug), entry.evidenceRows, ws.id),
+      learn: learnSummary(runs.get(candidate.spec_slug), learnCandidates.get(candidate.spec_slug) ?? []),
       risk: planRisk(candidate),
       owner: candidate.owner_id ? { id: candidate.owner_id, label: candidate.owner_label ?? candidate.owner_id } : null,
       planState: candidate.plan_is_current ? 'current' : 'stale',
@@ -712,7 +818,7 @@ function bundleItem(bundle: EvaluationBundle) {
       inputHash: bundle.plan.inputHash,
       planVersion: bundle.plan.planVersion,
     },
-    phases: phaseCells(evaluation),
+    phases: phaseCells(evaluation, bundle.learn),
     snapshotId: evaluation.snapshot.snapshotId,
     evidenceHighWaterMark: bundle.evidenceHighWaterMark,
     decisionHighWaterMark: bundle.decisionHighWaterMark,
@@ -1061,7 +1167,7 @@ export async function getLifecycleSpec(input: LifecycleSpecInput) {
       completionRate: bundle.evaluation.counts.completionRate,
       counts: bundle.evaluation.counts,
     },
-    phaseTimeline: phaseCells(bundle.evaluation),
+    phaseTimeline: phaseCells(bundle.evaluation, bundle.learn),
     traceability: {
       ...traceability(bundle.plan, bundle.evaluation, bundle.evidenceRows, bundle.candidate.spec_version),
       storyReconciliation: reconciliation,
@@ -1230,6 +1336,7 @@ export async function getLifecyclePhase(input: LifecyclePhaseInput) {
       : phase.nextSafeAction ?? phase.nextUnmetGate?.nextSafeAction ?? null,
     nextSafeActionGuidance: phaseActionGuidance(phase, bundle.planState !== 'current'),
     permittedActions: permittedActions(phase, bundle.planState !== 'current'),
+    ...(input.phaseId === 'learn' ? { learn: bundle.learn } : {}),
     evaluationSnapshot: bundle.evaluation.snapshot,
     snapshotId: bundle.evaluation.snapshot.snapshotId,
     evidenceHighWaterMark: bundle.evidenceHighWaterMark,

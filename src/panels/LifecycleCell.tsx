@@ -73,6 +73,11 @@ export function lifecycleCellExplanation(specTitle: string, phaseName: string, c
     const progress = cell.gateProgress ?? { passed: 0, required: 0 };
     parts.push(`${progress.passed} of ${progress.required} required gates passed.`);
   }
+  if (cell.learn) {
+    parts.push(`${cell.learn.candidateCount} of ${cell.learn.requiredCandidateCount} required candidates and ${cell.learn.sourceEvidenceCount} source evidence records.`);
+    const reviewStates = Object.entries(cell.learn.reviewStates).map(([state, count]) => `${count} ${state.replace(/_/g, ' ')}`).join(', ');
+    if (reviewStates) parts.push(`Review states: ${reviewStates}.`);
+  }
   if (cell.blocker) parts.push(`Blocker: ${cell.blocker}.`);
   if (cell.nextSafeAction) parts.push(`Next safe action: ${cell.nextSafeAction}.`);
   return parts.join(' ');
@@ -125,9 +130,11 @@ function LifecycleCell({
       </span>
       {!compact && (
         <span className="lifecycle-cell__detail">
-          {excluded
-            ? (cell.rationale?.trim() ? 'Rationale available' : 'Rationale missing')
-            : `${progress.passed}/${progress.required} gates`}
+          {cell.learn
+            ? `${cell.learn.candidateCount}/${cell.learn.requiredCandidateCount} candidates · ${cell.learn.sourceEvidenceCount} evidence`
+            : excluded
+              ? (cell.rationale?.trim() ? 'Rationale available' : 'Rationale missing')
+              : `${progress.passed}/${progress.required} gates`}
         </span>
       )}
     </button>

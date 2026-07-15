@@ -208,6 +208,10 @@ describe('lifecycle URL and saved display state', () => {
     };
     expect(lifecycleInvalidationTargets(event, 'ws-1', 'spec-a', 'qa')).toEqual({ portfolio: true, detail: true, phase: true, evidence: true });
     expect(lifecycleInvalidationTargets(event, 'ws-2', 'spec-a', 'qa').portfolio).toBe(false);
+    expect(lifecycleInvalidationTargets({
+      ...event,
+      payload: { workspaceId: 'ws-1', specId: 'spec-a', phaseId: 'learn', changeKind: 'evidence_persisted' } as unknown as string,
+    }, 'ws-1', 'spec-a', 'learn')).toEqual({ portfolio: true, detail: true, phase: true, evidence: true });
     expect(lifecycleInvalidationTargets(event, 'ws-1', 'other', 'qa')).toEqual({ portfolio: true, detail: false, phase: false, evidence: false });
     expect(lifecycleInvalidationTargets({
       ...event,
