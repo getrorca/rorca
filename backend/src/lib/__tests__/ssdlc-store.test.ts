@@ -219,7 +219,7 @@ describe('compiled plans', () => {
 });
 
 describe('append-only evidence', () => {
-  test('rejects an exact duplicate replay with ConflictError', async () => {
+  test('returns an exact duplicate replay idempotently without an audit conflict', async () => {
     mockQueryOne
       .mockResolvedValueOnce(undefined)
       .mockImplementationOnce(async (_sql, params) => evidenceRow({ payload_hash: params?.[13] }) as never);
@@ -228,7 +228,7 @@ describe('append-only evidence', () => {
     jest.clearAllMocks();
     mockQueryOne.mockResolvedValueOnce(evidenceRow({ payload_hash: inserted.payloadHash }) as never);
 
-    await expect(appendEvidence(evidenceInput)).rejects.toBeInstanceOf(ConflictError);
+    await expect(appendEvidence(evidenceInput)).resolves.toMatchObject({ id: inserted.id, payloadHash: inserted.payloadHash });
     expect(mockExecute).not.toHaveBeenCalled();
   });
 

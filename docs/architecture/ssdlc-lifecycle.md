@@ -76,6 +76,14 @@ Evaluators apply the shared `STATUS_PRECEDENCE` in order: **stale → blocked �
 
 Release subjects are only `spec_hash | commit_sha | artifact_digest | deployment_id`. Every gate declares accepted types and explicit QA, Merge, and Production coherence (`same_subject`, `derived_from_subject`, or `not_applicable`). QA and Merge must evaluate the declared immutable commit/artifact relationship; Production may evaluate a deployment derived from that same verified chain. A successful check against a different subject cannot satisfy the gate.
 
+### Normalized evidence and Hermes ingress
+
+[`ssdlc-evidence.ts`](../../backend/src/lib/ssdlc-evidence.ts) is the single thin normalization contract. Internal adapters side-write immutable records from `story_results`, `story_commits`, validation/completion WAL events, GitHub check events, and output-chunk metadata after a run finishes. Adapter errors produce retryable `ssdlc_evidence_adapter_error` WAL events and never update `pipeline_runs` or `story_results`.
+
+Hermes remains the external integration/auth boundary for GitReins judgments, manual QA, staging, deployment, and memory-closeout candidates. It submits one bounded `hermes.evidence.v1` envelope to `POST /api/lifecycle/evidence/hermes`. Rorca derives source type, actor, and trust from the envelope kind plus the authenticated server principal; body claims cannot impersonate automation or upgrade trust. Exact source-event replay returns the existing record. A different canonical payload under the same `(workspace, source system, source event ID)` is rejected and audited in WAL.
+
+The ledger stores a redacted excerpt of at most 8 KiB and an opaque raw reference of at most 4 KiB. PTY/output chunks and logs stay in their existing storage. Every record includes explicit nullable workspace/spec/run/story/phase/gate scope keys, typed subject and phase-subject identities, release lineage, classified outcome, trust, confidence, provenance chain, and `revisionMismatch`. Gate evaluation requires `passed`, a policy-explicit accepted trust level, a coherent current subject, and gate-appropriate identity: commit for code, artifact digest plus commit lineage for build/staging, and deployment ID bound to that exact artifact and commit for production. `unknown` never passes.
+
 ### Completeness
 
 The version-1 completeness contract forbids placeholder UI, TODO-backed primary flows, fake success states, and deferral of specified normal, negative, recovery, responsive, accessibility, or light-theme journeys to an unspecified later release. A plan that weakens any of these literals is invalid. Product delivery may still use governed phase disposition where genuinely appropriate; it may not relabel unfinished specified behavior as “post-v1.”

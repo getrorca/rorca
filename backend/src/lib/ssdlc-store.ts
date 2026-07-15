@@ -572,28 +572,26 @@ async function findEvidenceBySource(
   `, [workspaceId, sourceSystem, sourceIdempotencyKey]);
 }
 
-async function rejectEvidenceReplay(existing: EvidenceRow, payloadHash: string): Promise<never> {
-  if (existing.payload_hash !== payloadHash) {
-    await execute(`
-      INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
-      SELECT 'ssdlc_evidence_source_conflict', $1, $2, $3, 'ssdlc-store', $4::jsonb
-      FROM workspaces w
-      WHERE w.id = $1
-    `, [
-      existing.workspace_id,
-      existing.spec_slug,
-      existing.story_id,
-      JSON.stringify({
-        sourceSystem: existing.source_system,
-        sourceIdempotencyKey: existing.source_idempotency_key,
-        existingPayloadHash: existing.payload_hash,
-        replayPayloadHash: payloadHash,
-        evidenceId: existing.id,
-      }),
-    ]);
-    throw new ConflictError('Evidence source id was replayed with a conflicting payload; the conflict was audit-recorded');
-  }
-  throw new ConflictError('Duplicate lifecycle evidence replay rejected by source idempotency key');
+async function resolveEvidenceReplay(existing: EvidenceRow, payloadHash: string): Promise<LifecycleEvidence> {
+  if (existing.payload_hash === payloadHash) return evidenceFromRow(existing);
+  await execute(`
+    INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
+    SELECT 'ssdlc_evidence_source_conflict', $1, $2, $3, 'ssdlc-store', $4::jsonb
+    FROM workspaces w
+    WHERE w.id = $1
+  `, [
+    existing.workspace_id,
+    existing.spec_slug,
+    existing.story_id,
+    JSON.stringify({
+      sourceSystem: existing.source_system,
+      sourceIdempotencyKey: existing.source_idempotency_key,
+      existingPayloadHash: existing.payload_hash,
+      replayPayloadHash: payloadHash,
+      evidenceId: existing.id,
+    }),
+  ]);
+  throw new ConflictError('Evidence source id was replayed with a conflicting payload; the conflict was audit-recorded');
 }
 
 export async function appendEvidence(input: AppendEvidenceInput): Promise<LifecycleEvidence> {
@@ -634,7 +632,7 @@ export async function appendEvidence(input: AppendEvidenceInput): Promise<Lifecy
   });
 
   const existing = await findEvidenceBySource(workspaceId, sourceSystem, sourceKey);
-  if (existing) return await rejectEvidenceReplay(existing, payloadHash);
+  if (existing) return await resolveEvidenceReplay(existing, payloadHash);
 
   let row: EvidenceRow | undefined;
   try {
@@ -675,7 +673,7 @@ export async function appendEvidence(input: AppendEvidenceInput): Promise<Lifecy
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
     const concurrent = await findEvidenceBySource(workspaceId, sourceSystem, sourceKey);
-    if (concurrent) return await rejectEvidenceReplay(concurrent, payloadHash);
+    if (concurrent) return await resolveEvidenceReplay(concurrent, payloadHash);
     throw new ConflictError('Duplicate lifecycle evidence replay rejected');
   }
 
