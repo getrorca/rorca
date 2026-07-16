@@ -1,5 +1,48 @@
-/* Default: dark theme (King Mode) */
+/* Light-first product theme. Explicit theme selectors preserve deterministic SSR/loading colors. */
 :root,
+[data-theme="light"] {
+  --bg: #fafafa;
+  --panel: #ffffff;
+  --surface-200: #f4f4f5;
+  --border: #e4e4e7;
+  --text: #09090b;
+  --text-muted: #52525b; /* Zinc-600: 7.21:1 on #fafafa — passes WCAG AA */
+  --accent: #0a6963;
+  --accent-hover: #0c7f7a;
+  --accent-border: #0a6963;
+  --accent-contrast: #ffffff;
+  --success: #047857;
+  --warning: #a14807;
+  --error: #b91c1c;
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --status-healthy: var(--success);
+  --status-healthy-bg: rgba(4, 120, 87, 0.08);
+  --status-degraded: var(--warning);
+  --status-degraded-bg: rgba(161, 72, 7, 0.08);
+  --status-offline: var(--error);
+  --status-offline-bg: rgba(185, 28, 28, 0.07);
+  --skeleton: #e5e5e5;
+  --skeleton-shimmer: #f5f5f5;
+  --terminal-bg: #f5f5f5;
+  --terminal-fg: #1e1e1e;
+  --terminal-line: #e0e0e0;
+  --switch-knob: #ffffff;
+  --kbd-bg: rgba(255, 255, 255, 0.2);
+  --backdrop-opacity: 0.5;
+  --motion-duration-feedback: 140ms;
+  --motion-duration-drawer: 150ms;
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --inline-code-bg: rgba(0, 0, 0, 0.06);
+  --code-block-bg: rgba(0, 0, 0, 0.05);
+  --code-block-text: #1e1e1e;
+  --scrollbar-track: #f4f4f5;
+  --scrollbar-thumb: #d4d4d8;
+  --scrollbar-thumb-hover: #a1a1aa;
+  color-scheme: light;
+}
+
 [data-theme="dark"] {
   --bg: #0b0b18;
   --panel: #10101f;
@@ -7,9 +50,10 @@
   --border: #2d2d4a;
   --text: #fafafa;
   --text-muted: #a1a1aa; /* 4.65:1 on #0b0b18 — passes WCAG AA */
-  --accent: #3a9996; /* Very matte aqua — desaturated, mid-dark */
-  --accent-hover: #4db5b1; /* Step brighter for hover fill */
-  --accent-border: #5dd4cf; /* Bright aqua for rings/outlines — pops on dark navy */
+  --accent: #3a9996;
+  --accent-hover: #4db5b1;
+  --accent-border: #5dd4cf;
+  --accent-contrast: #ffffff;
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
@@ -37,43 +81,4 @@
   --scrollbar-thumb: #2d2d4a;
   --scrollbar-thumb-hover: #3d3d5c;
   color-scheme: dark;
-}
-
-[data-theme="light"] {
-  --bg: #fafafa;
-  --panel: #ffffff;
-  --surface-200: #f4f4f5;
-  --border: #e4e4e7;
-  --text: #09090b;
-  --text-muted: #52525b; /* Zinc-600: 7.21:1 on #fafafa — passes WCAG AA */
-  --accent: #0a6963; /* Very matte teal for light mode */
-  --accent-hover: #0c7f7a;
-  --accent-border: #0fa8a1; /* Bright teal for rings/outlines in light mode */
-  --success: #10b981;
-  --warning: #f59e0b;
-  --error: #ef4444;
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-error: var(--error);
-  --status-healthy: var(--success);
-  --status-healthy-bg: rgba(16, 185, 129, 0.12);
-  --status-degraded: var(--warning);
-  --status-degraded-bg: rgba(245, 158, 11, 0.12);
-  --status-offline: var(--error);
-  --status-offline-bg: rgba(239, 68, 68, 0.12);
-  --skeleton: #e5e5e5;
-  --skeleton-shimmer: #f5f5f5;
-  --terminal-bg: #f5f5f5;
-  --terminal-fg: #1e1e1e;
-  --terminal-line: #e0e0e0;
-  --switch-knob: #ffffff;
-  --kbd-bg: rgba(255, 255, 255, 0.2);
-  --backdrop-opacity: 0.5;
-  --inline-code-bg: rgba(0, 0, 0, 0.06);
-  --code-block-bg: rgba(0, 0, 0, 0.05);
-  --code-block-text: #1e1e1e;
-  --scrollbar-track: #f4f4f5;
-  --scrollbar-thumb: #d4d4d8;
-  --scrollbar-thumb-hover: #a1a1aa;
-  color-scheme: light;
 }

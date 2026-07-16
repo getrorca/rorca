@@ -123,6 +123,15 @@ export interface PipelineRun {
   agentType: string | null;
   agentModel: string | null;
   terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
+  effective_options?: {
+    model: string | null;
+    effort: string | null;
+    worktree: { enabled: boolean; path: string | null; branch: string | null };
+    merge: { strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; autoMerge: boolean };
+    graph: { enabled: boolean };
+    terminal: 'ansi-html' | 'pty' | 'native-pty';
+    safety: { guard: string; allowBackendJest: boolean; deploy: boolean; externalSend: boolean; policyLocked: boolean };
+  } | null;
   lifecycleStatus?: string | null;
   lifecycle_status?: string | null;
   lifecyclePhase?: string | null;

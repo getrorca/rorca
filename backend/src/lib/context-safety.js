@@ -902,12 +902,24 @@ export const DEFAULT_CONTEXT_REDACTION_PATTERNS = [
     },
     {
         name: 'github-token',
-        pattern: '\\bgh[pousr]_[A-Za-z0-9_]{20,}\\b',
+        // Provider prefixes are strong enough to redact deliberately shortened
+        // canaries as well as full-length credentials.
+        pattern: '\\bgh[pousr]_[A-Za-z0-9_]{8,}\\b',
         replacement: '[REDACTED_GITHUB_TOKEN]',
     },
     {
+        name: 'slack-token',
+        pattern: '\\bxox[baprs]-[A-Za-z0-9-]{8,}\\b',
+        replacement: '[REDACTED_SLACK_TOKEN]',
+    },
+    {
+        name: 'anthropic-secret-key',
+        pattern: '\\bsk-ant-[A-Za-z0-9_-]{8,}\\b',
+        replacement: 'sk-ant-[REDACTED]',
+    },
+    {
         name: 'openai-secret-key',
-        pattern: '\\bsk-[A-Za-z0-9_-]{20,}\\b',
+        pattern: '\\bsk-(?!ant-)[A-Za-z0-9_-]{20,}\\b',
         replacement: 'sk-[REDACTED]',
     },
     {

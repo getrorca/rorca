@@ -38,7 +38,7 @@ interface WalEventRow {
  *       Returns a paginated, filterable list of WAL (Write-Ahead Log) events with full-text search support.
  *       Also returns distinct event types for filter dropdowns.
  *       Common event types include generate, spec_approved, spec_rejected, run_started,
- *       story_started, story_passed, story_failed, story_skipped, run_finished,
+ *       story_started, story_passed, story_failed, story_skipped, story_reconciled, run_finished,
  *       worktree_created, worktree_merged, run_blocked, context_file_changed,
  *       story_escalated, skill_installed, skill_removed, skill_matched,
  *       terminal_session_started, and terminal_session_ended.

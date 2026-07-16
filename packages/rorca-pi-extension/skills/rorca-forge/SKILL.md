@@ -19,14 +19,16 @@ Rorca is the system of record that validates, enriches, and saves the result.
 
 ## Core workflow
 
-1. understand the brief
-2. validate the workspace/scope
-3. gather just enough context
-4. validate whether the retrieved context is actually relevant
-5. retrieve more context if needed
-6. draft the spec in canonical Rorca shape
-7. hand the draft to Rorca persistence/enrichment
-8. confirm the saved spec slug and summarize the result
+1. understand the brief and validate workspace/scope
+2. fetch `rorca_specs_generation_context` and validate its versioned `lifecycleAuthoring` section before drafting
+3. gather and evaluate just enough relevant context
+4. propose the authoring plan (explicit one-versus-many decision, boundaries, requirement ownership, and dependency DAG)
+5. draft the complete canonical spec set with lifecycle story annotations
+6. call deterministic authoring preflight, revise only from diagnostics, and stop after at most 3 total attempts
+7. if multi-spec/high-risk confirmation is required, show the exact inspection payload and obtain a separate explicit human confirmation receipt
+8. persist one spec through `rorca_create_spec`, or the complete validated set through the existing batch/persist surface
+9. verify canonical saves, post-save workflow/readiness, and authoritative lifecycle compiler identity
+10. summarize saved slugs, preflight attempts, policy, and unresolved caveats
 
 ## Architecture summary
 
@@ -61,18 +63,21 @@ Use tools/internal operations to gather context such as:
 - relevant approved spec lookup
 - graph/retrieval queries
 - curated skill-library previews if available
-- `rorca_specs_generation_context` when available, so you can fetch the canonical skill-first forge context bundle (`prompt`, `contextUsed`, `contextSummary`, `postSaveDefaults`) before persisting
+- `rorca_specs_generation_context` before drafting, so you can fetch the canonical skill-first forge context bundle (`prompt`, `contextUsed`, `contextSummary`, `postSaveDefaults`, `lifecycleAuthoring`)
+- `rorca_specs_authoring_preflight` / `rorca_preflight_spec_authoring` for deterministic plan + complete draft-set validation
+- `rorca_specs_authoring_preflight_confirm` / `rorca_confirm_spec_authoring_plan` only after the user explicitly confirms the exact inspection payload
 
 ### Mutation and persistence
 Use structured operations for:
 - `rorca_create_spec` as the canonical explicit create-spec path when available
 - `rorca_persist_spec` as a compatibility alias for the same persistence contract
+- `rorca_persist_spec_batch` / `rorca_specs_persist_batch` for a validated multi-spec set sharing one parent authoring-plan identity
 - `rorca_get_specs_by_specId` to verify the saved stories and inspect story-level `suggestedSkills`
 - `rorca_spec_workflow` / `rorca_specs_by_specId_workflow` and `rorca_spec_readiness` / `rorca_specs_by_specId_readiness` to verify durable post-save state after persistence
 - `rorca_retry_spec_stage` or `rorca_repair_spec` when verification shows a retryable post-save failure
-- `rorca_approve_spec` / `rorca_specs_by_specId_approve` if approval was requested
-- `rorca_trigger_run` / `rorca_pipeline_trigger` only when the launcher explicitly requested auto-run
-- patch stories if needed before approval
+- patch stories if needed before handoff to approval; any material patch requires a new preflight
+
+This forge skill ends at canonical specs plus lifecycle annotations and compiler verification. It never dispatches a run, selects wave/PTY behavior, authorizes retry/merge/deploy, or treats an authored QA/Journey story as completion evidence. Composite skills may begin a separate approve/run workflow only after forge has returned successfully.
 
 ### MCP vs internal adapters vs REST
 - prefer MCP when running in an environment where MCP is the primary structured tool surface
@@ -192,38 +197,53 @@ Rorca backend should remain authoritative for things like:
 
 Your responsibility is to produce the best draft possible and then hand it off correctly.
 
+## Lifecycle authoring and bounded revision contract
+
+Before writing stories, validate that `lifecycleAuthoring.status` is `ready`, its `profileVersion` and planner version are supported, and it contains normalized intent identity, decomposition policy, phase obligations, required story capabilities, evidence expectations, wording rules, authority prohibitions, and preflight metadata.
+
+If the section is missing or invalid:
+- return `authoring_profile_unavailable` when policy permits a clearly degraded legacy review draft
+- return `authoring_profile_required` and do not imply phase-aware authoring when policy requires preflight
+- never synthesize a successful profile from model prose
+
+Submit the caller-proposed planner input and **all** draft specs to deterministic preflight. On each rejected attempt:
+- record attempt number, diagnostic categories, amendments applied, and material revisions
+- preserve readable model-authored titles/descriptions/criteria; change structure or prose only where diagnostics require it
+- never remove required coverage, weaken a gate, invent evidence, or alter normalized intent merely to pass
+- stop after 3 total attempts by default and return `authoring_preflight_blocked` plus unresolved blockers/clarification questions
+
+Before multi-spec or high-risk persistence, show the returned inspection object verbatim: exact spec count, boundaries, requirement ownership, dependency DAG, required capabilities, and material revisions. Confirmation must be a distinct human action through the confirmation operation; never infer it from model output or set `actor.type: human` yourself.
+
 ## Persistence contract behavior
 
-Once you have a complete draft:
-1. if `rorca_specs_generation_context` is available, fetch it before persisting; do not skip that call and rely on server backfill instead
-2. carry its `contextUsed` and `contextSummary` through the persist call so the saved spec and Context tab preserve what context informed the draft
-3. make the persist payload explicitly policy-aware: pass either `policyPresetId` when a preset is known or an effective `postSavePolicy` object derived from the bundle/defaults; do not hide policy choice behind vague success copy
-4. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
-5. keep post-save enrich and matchSkills enabled unless the launcher or user explicitly asked for an opt-out; server-side context backfill is repair-only fallback, not the normal creation contract
-6. read the saved spec back via `rorca_get_specs_by_specId`
-7. verify that a real slug/id exists and that the saved story set broadly matches the draft
-8. inspect `rorca_spec_workflow` or `rorca_spec_readiness` after save and classify each story's skill-injection state honestly:
+Once deterministic preflight accepts the complete draft set:
+1. carry `contextUsed`, `contextSummary`, the accepted plan/hash, complete preflight spec set/hash, authoritative `preflightReceiptId`, attempt summaries, caller surface, and model through persistence as `authoringPreflight`
+2. make persistence explicitly policy-aware via `policyPresetId` or effective `postSavePolicy`
+3. for one spec, use `rorca_create_spec` (or `rorca_persist_spec`) with the stable boundary slug
+4. for multiple specs, use the existing bounded batch/persist operation with one parent identity; preserve stable slugs/cross-spec links and report per-spec persisted/reused/failed outcomes for resume
+5. keep post-save enrich and matchSkills enabled unless explicitly opted out; context backfill remains repair-only
+6. read every saved spec back and verify its authoring state is `validated`, accepted preflight hash matches, and authoritative `lifecyclePlan` compiler identity is present; `needs_authoring_preflight` and `stale_authoring_preflight` are incomplete review states, not success
+7. inspect workflow/readiness and classify each story's skill-injection state honestly:
    - `present` — the saved story already has the expected `suggestedSkills` outcome
    - `pending` — the match-skills stage is still pending/queued/running
    - `skipped:no_installed_skills` — the stage was skipped because no installed skills were available
    - `failed:<retryable_reason>` — the workflow/readiness surface shows a retryable failure or dependency block
-9. if verification shows `failed:<retryable_reason>`, explain the retryable reason and point to `rorca_retry_spec_stage` / `rorca_repair_spec` rather than pretending persistence fully succeeded
-10. if `autoApprove` is true, approve via `rorca_approve_spec`
-11. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
+8. if verification shows `failed:<retryable_reason>`, explain the retryable reason and point to `rorca_retry_spec_stage` / `rorca_repair_spec` rather than pretending persistence fully succeeded
 
-Do not claim the spec was saved or enriched unless structured reads confirm both persistence and the relevant workflow/readiness state.
+Do not approve or run from this skill, and do not claim the spec was saved, enriched, or lifecycle-current unless structured reads confirm those states.
 
 ## Output contract
 
 At the end, provide:
-- saved spec slug
+- saved spec slug(s) and parent authoring-plan/preflight hashes
 - workspace id
 - short summary of the spec
-- short story list summary
+- explicit one-versus-many decision, boundaries, dependency summary, and short story list
 - policy used (`policyPresetId` or the effective `postSavePolicy` you sent)
 - story-level skill verification summary using `present`, `pending`, `skipped:no_installed_skills`, or `failed:<retryable_reason>`
+- preflight attempt summaries and any unresolved blockers/clarification questions
 - assumptions or caveats that materially matter
-- whether approval/run should happen next
+- whether separate approval/run workflows should happen next
 
 ## Final reminder
 

@@ -8,11 +8,15 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { ChildProcess } from 'child_process';
+import { SkillRegistry } from './skill-registry';
+import { detectCapability } from './reasoning-detector';
 
 export interface PiServerSkillFilesResult {
   skillFiles: string[];
   generatedSkillFile: string;
   workspaceSkillFile?: string;
+  workspaceSkillFiles: string[];
 }
 
 export interface PiProgressLogSeed {
@@ -50,6 +54,80 @@ export interface PiProgressLogUpdate {
   knownIssues?: string[];
   validationResults?: string[];
   implementationPlan?: string[];
+  closeoutState?: string[];
+}
+
+export type PiCompletionStatus =
+  | 'agent_proposed'
+  | 'validated'
+  | 'blocked'
+  | 'timeout'
+  | 'cancelled'
+  | 'worker_shutdown';
+
+export interface PiCompletionPacket {
+  schemaVersion: 'rorca.pi-completion-packet.v1';
+  status: PiCompletionStatus;
+  summary: string;
+  implementation: string[];
+  changedFiles: string[];
+  commandsAndResults: string[];
+  unresolvedRisks: string[];
+  remainingWork: string[];
+  progressLogPath: string;
+}
+
+export interface PiOwnedProcessLike {
+  pid?: number;
+  exitCode: number | null;
+  signalCode?: NodeJS.Signals | null;
+  kill(signal?: NodeJS.Signals | number): boolean;
+  once(event: 'exit', listener: () => void): unknown;
+}
+
+export interface TerminatePiOwnedProcessOptions {
+  detachedProcessGroup: boolean;
+  graceMs?: number;
+  killWaitMs?: number;
+  platform?: NodeJS.Platform;
+  signalProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
+}
+
+export interface PiModelCatalogEntry {
+  provider: string;
+  model: string;
+  thinking: boolean;
+}
+
+export interface PiModelEffortSelection {
+  model: string;
+  effort: 'low' | 'medium' | 'high' | 'max' | 'xhigh' | null;
+}
+
+export interface PiCliModelEffortArgs {
+  provider: string | null;
+  model: string | null;
+  thinking: string | null;
+  args: string[];
+}
+
+export interface PiRunSafetyOptions {
+  autoWorktree: boolean;
+  autoMerge: boolean;
+  mergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
+  deploy: boolean;
+  externalSend: boolean;
+  policyLocked: boolean;
+}
+
+export class PiExecutionPreflightError extends Error {
+  readonly code: 'catalog_unavailable' | 'unsupported_model' | 'unsupported_effort';
+
+  constructor(code: PiExecutionPreflightError['code'], message: string) {
+    super(message);
+    this.name = 'PiExecutionPreflightError';
+    this.code = code;
+  }
 }
 
 const SECTION_LIMITS: Record<keyof PiProgressLogUpdate, number> = {
@@ -60,6 +138,7 @@ const SECTION_LIMITS: Record<keyof PiProgressLogUpdate, number> = {
   knownIssues: 12,
   validationResults: 16,
   implementationPlan: 12,
+  closeoutState: 8,
 };
 
 const SECTION_HEADINGS: Array<{ key: keyof PiProgressLogUpdate; heading: string }> = [
@@ -70,7 +149,10 @@ const SECTION_HEADINGS: Array<{ key: keyof PiProgressLogUpdate; heading: string 
   { key: 'modifiedFiles', heading: 'Modified Files' },
   { key: 'knownIssues', heading: 'Known Issues' },
   { key: 'validationResults', heading: 'Validation Results' },
+  { key: 'closeoutState', heading: 'Closeout State' },
 ];
+
+const activeProgressLogs = new Map<string, string>();
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -115,6 +197,17 @@ function readPackageScripts(filePath: string): Set<string> {
   const scripts = pkg?.scripts;
   if (!scripts || typeof scripts !== 'object') return new Set<string>();
   return new Set(Object.keys(scripts as Record<string, unknown>));
+}
+
+function atomicWriteFile(filePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.${process.hrtime.bigint()}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, content, { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    try { fs.unlinkSync(tempPath); } catch { /* rename succeeded or temp was never created */ }
+  }
 }
 
 function appendSectionBlock(parts: string[], heading: string, items: string[]): void {
@@ -171,12 +264,13 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     'Repeat this loop until completion is proven, not merely attempted:',
     '1. Understand the requirements and acceptance criteria.',
     '2. Create or update a concise implementation plan in the progress log.',
-    '3. Make small, controlled code changes.',
-    '4. Run all relevant safe validation checks.',
-    '5. Inspect failures, fix bugs, and rerun checks.',
-    '6. Compare the result against the original requirements and done definition.',
-    '7. Update the compact progress log so the task survives context compaction.',
-    '8. Continue until there are no known bugs, failing checks, or incomplete requirements.',
+    '3. Make one small, controlled implementation batch.',
+    '4. Run the narrowest relevant safe validation check.',
+    '5. Self-review the batch, inspect failures, fix bugs, and rerun the focused check.',
+    '6. Run broader repository validation only after focused checks pass.',
+    '7. Compare the result against the original requirements and done definition.',
+    '8. Update the compact progress log so the task survives context compaction.',
+    '9. Continue until there are no known bugs, failing checks, or incomplete requirements.',
     '',
     '## Planning Rules',
     '- Break the task into ordered implementation steps before writing code.',
@@ -203,6 +297,8 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     '- If a check fails, diagnose the root cause, fix it, and rerun the relevant checks.',
     '- Continue until all available and relevant checks pass, or clearly record what is blocked.',
     '- Never claim success while known validation failures remain.',
+    '- A failed self-check stays inside the bounded repair loop until a rerun passes or the failure is classified as a hard blocker.',
+    '- A process exit code or syntactically valid packet is only an agent proposal; the host closeout gate decides story status.',
     '',
     '## Progress Log Rules',
     '- If the task prompt provides a progress log path, use it as the source of truth.',
@@ -215,7 +311,8 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     '  - Modified Files',
     '  - Known Issues',
     '  - Validation Results',
-    '- Update the log after planning, after each major implementation batch, and after validation/fix cycles.',
+    '  - Closeout State',
+    '- Update the log after planning, after each implementation batch, after every validation/fix cycle, and immediately before closeout.',
     '- When retries happen, treat the log as the handoff record from the previous attempt.',
     '',
     '## Completion Rules',
@@ -230,14 +327,16 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
     '- What tests/checks were run',
     '- What passed or failed',
     '- Any unresolved issues',
-    '- A clear completion status',
+    '- A clear agent-proposed or blocked status (never claim host approval)',
+    '',
+    'The completion packet must list implementation, changed files, commands/results, unresolved risks, and remaining work. Host verification remains authoritative.',
   ].join('\n');
 }
 
-export function writePiAutonomousRunnerSkill(runId: number): string {
-  const filePath = path.join(os.tmpdir(), `rorca-pi-autonomous-runner-${runId}.md`);
-  const content = buildPiAutonomousRunnerSkillMarkdown();
-  fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+export function writePiAutonomousRunnerSkill(runId: number, storyId?: string): string {
+  const storySuffix = storyId ? `-${storyId.replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
+  const filePath = path.join(os.tmpdir(), `rorca-pi-autonomous-runner-${runId}${storySuffix}.md`);
+  atomicWriteFile(filePath, buildPiAutonomousRunnerSkillMarkdown());
   return filePath;
 }
 
@@ -249,14 +348,22 @@ export function resolveWorkspacePiSkillFile(cwd: string): string | undefined {
   return candidates.find(candidate => fs.existsSync(candidate));
 }
 
-export function buildPiServerSkillFiles(cwd: string, runId: number): PiServerSkillFilesResult {
-  const generatedSkillFile = writePiAutonomousRunnerSkill(runId);
+export function buildPiServerSkillFiles(cwd: string, runId: number, storyId?: string): PiServerSkillFilesResult {
+  const generatedSkillFile = writePiAutonomousRunnerSkill(runId, storyId);
+  const registry = new SkillRegistry().discoverFilesystem(cwd);
+  const workspaceSkillFiles = registry.getAll()
+    .filter(skill => skill.source === 'rorca-skills' && skill.filePath.length > 0)
+    // The generated runner is authoritative; never inject a workspace copy of
+    // the same named skill and accidentally load its guidance twice.
+    .filter(skill => skill.metadata.name.toLowerCase() !== 'rorca-autonomous-runner')
+    .map(skill => skill.filePath);
   const workspaceSkillFile = resolveWorkspacePiSkillFile(cwd);
-  const skillFiles = [generatedSkillFile, workspaceSkillFile].filter((value): value is string => Boolean(value));
+  const skillFiles = [...new Set([generatedSkillFile, ...workspaceSkillFiles])];
   return {
-    skillFiles: [...new Set(skillFiles)],
+    skillFiles,
     generatedSkillFile,
     workspaceSkillFile,
+    workspaceSkillFiles,
   };
 }
 
@@ -420,7 +527,9 @@ export function ensurePiStoryProgressLog(filePath: string, seed: PiProgressLogSe
   appendSectionBlock(parts, 'Known Issues', []);
   appendSectionBlock(parts, 'Validation Results', []);
 
-  fs.writeFileSync(filePath, parts.join('\n'), { encoding: 'utf8', mode: 0o600 });
+  appendSectionBlock(parts, 'Closeout State', []);
+
+  atomicWriteFile(filePath, parts.join('\n'));
 }
 
 export function recordPiStoryProgressLog(filePath: string, update: PiProgressLogUpdate): void {
@@ -439,7 +548,237 @@ export function recordPiStoryProgressLog(filePath: string, update: PiProgressLog
     content = replaceSection(content, heading, merged);
   }
 
-  fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+  atomicWriteFile(filePath, content);
+}
+
+export function registerPiStoryProgressLog(ownerId: string, filePath: string): () => void {
+  activeProgressLogs.set(ownerId, filePath);
+  return () => {
+    if (activeProgressLogs.get(ownerId) === filePath) activeProgressLogs.delete(ownerId);
+  };
+}
+
+export function flushActivePiStoryProgressLogs(
+  status: Exclude<PiCompletionStatus, 'agent_proposed' | 'validated'>,
+  summary: string,
+): Array<{ ownerId: string; packet: PiCompletionPacket }> {
+  const packets: Array<{ ownerId: string; packet: PiCompletionPacket }> = [];
+  for (const [ownerId, filePath] of activeProgressLogs) {
+    recordPiStoryProgressLog(filePath, {
+      knownIssues: [summary],
+      remainingWork: ['Resume from this progress log after the host confirms it is safe to retry.'],
+      closeoutState: [`${status}: ${summary}`],
+    });
+    packets.push({ ownerId, packet: buildPiCompletionPacket(filePath, status, summary) });
+  }
+  return packets;
+}
+
+export function buildPiCompletionPacket(
+  filePath: string,
+  status: PiCompletionStatus,
+  summary: string,
+): PiCompletionPacket {
+  const content = fileExists(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+  return {
+    schemaVersion: 'rorca.pi-completion-packet.v1',
+    status,
+    summary: summary.trim() || status,
+    implementation: readSectionItems(content, 'Completed Work'),
+    changedFiles: readSectionItems(content, 'Modified Files'),
+    commandsAndResults: readSectionItems(content, 'Validation Results'),
+    unresolvedRisks: readSectionItems(content, 'Known Issues'),
+    remainingWork: readSectionItems(content, 'Remaining Work'),
+    progressLogPath: filePath,
+  };
+}
+
+export async function deletePiGeneratedSkillFile(filePath?: string): Promise<void> {
+  if (!filePath) return;
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+  }
+}
+
+export async function cleanupPiRunTempArtifacts(runId: number): Promise<void> {
+  const prefix = `rorca-pi-autonomous-runner-${runId}`;
+  let entries: string[] = [];
+  try { entries = await fs.promises.readdir(os.tmpdir()); } catch { return; }
+  await Promise.all(entries
+    .filter(entry => entry === `${prefix}.md`
+      || (entry.startsWith(`${prefix}-`) && entry.endsWith('.md'))
+      || (entry.startsWith(`${prefix}.md.`) && entry.endsWith('.tmp'))
+      || (entry.startsWith(`${prefix}-`) && entry.endsWith('.tmp')))
+    .map(entry => deletePiGeneratedSkillFile(path.join(os.tmpdir(), entry))));
+}
+
+export async function terminatePiOwnedProcessTree(
+  child: PiOwnedProcessLike | ChildProcess,
+  options: TerminatePiOwnedProcessOptions,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode != null) return;
+
+  const platform = options.platform ?? process.platform;
+  const graceMs = options.graceMs ?? 10_000;
+  const killWaitMs = options.killWaitMs ?? 1_000;
+  const signalProcessGroup = options.signalProcessGroup ?? ((pid, signal) => process.kill(pid, signal));
+  let exited = false;
+  const exitPromise = new Promise<void>((resolve) => {
+    child.once('exit', () => {
+      exited = true;
+      resolve();
+    });
+  });
+
+  const signalOwnedTree = (signal: NodeJS.Signals): void => {
+    if (options.detachedProcessGroup && platform !== 'win32' && child.pid && child.pid > 0) {
+      try {
+        signalProcessGroup(-child.pid, signal);
+        return;
+      } catch { /* process group already exited; fall back to direct child */ }
+    }
+    try { child.kill(signal); } catch { /* already exited */ }
+  };
+
+  signalOwnedTree('SIGTERM');
+  await Promise.race([
+    exitPromise,
+    new Promise<void>(resolve => setTimeout(resolve, graceMs)),
+  ]);
+  if (exited || child.exitCode !== null || child.signalCode != null) return;
+
+  signalOwnedTree('SIGKILL');
+  await Promise.race([
+    exitPromise,
+    new Promise<void>(resolve => setTimeout(resolve, killWaitMs)),
+  ]);
+}
+
+export function buildPiCliModelEffortArgs(
+  requestedModel: string | null,
+  effort?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+): PiCliModelEffortArgs {
+  const segments = requestedModel?.trim().split('/').filter(Boolean) ?? [];
+  if (segments[0] === 'pi') segments.shift();
+  const provider = segments.length > 1 ? segments.shift() ?? null : null;
+  const model = segments.join('/') || null;
+  const bareModel = model?.split('/').pop()?.toLowerCase() ?? '';
+  const isDeepSeekV4 = bareModel === 'deepseek-v4-pro' || bareModel === 'deepseek-v4-flash';
+  let thinking: string | null = effort ?? null;
+  if (effort && isDeepSeekV4) {
+    if (effort === 'low') thinking = 'off';
+    else if (effort === 'medium') thinking = 'high';
+    else if (effort === 'max' || effort === 'xhigh') thinking = 'xhigh';
+  } else if (effort === 'max') {
+    thinking = 'xhigh';
+  }
+
+  const args = [
+    ...(provider ? ['--provider', provider] : []),
+    ...(model ? ['--model', model] : []),
+    ...(thinking ? ['--thinking', thinking] : []),
+  ];
+  return { provider, model, thinking, args };
+}
+
+export function resolvePiRunSafetyOptions(
+  specPath: string,
+  spec: Record<string, unknown>,
+  requested: Pick<PiRunSafetyOptions, 'autoWorktree' | 'autoMerge' | 'mergeStrategy'>,
+): PiRunSafetyOptions {
+  const stories = Array.isArray(spec.userStories)
+    ? spec.userStories as Array<{ id?: unknown }>
+    : Array.isArray(spec.phases)
+      ? (spec.phases as Array<{ stories?: Array<{ id?: unknown }> }>).flatMap(phase => phase.stories ?? [])
+      : [];
+  const identityText = [specPath, spec.id, spec.title, spec.specName]
+    .filter(value => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+  const policyLocked = identityText.includes('evidence-driven-ssdlc')
+    || identityText.includes('evidence driven ssdlc')
+    || stories.some(story => story.id === 'LFC-009');
+
+  if (policyLocked) {
+    return {
+      autoWorktree: true,
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      deploy: false,
+      externalSend: false,
+      policyLocked: true,
+    };
+  }
+
+  return {
+    ...requested,
+    deploy: true,
+    externalSend: true,
+    policyLocked: false,
+  };
+}
+
+export function preflightPiModelAndEffort(
+  requestedModel: string | null,
+  requestedEffort: string | null | undefined,
+  catalog: readonly PiModelCatalogEntry[],
+  defaultModel = 'openai-codex/gpt-5.4',
+): PiModelEffortSelection {
+  if (catalog.length === 0) {
+    throw new PiExecutionPreflightError(
+      'catalog_unavailable',
+      'Pi model catalog is unavailable; refusing to mutate run state without validating model and effort.',
+    );
+  }
+
+  const byQualifiedId = new Map(catalog.map(entry => [`${entry.provider}/${entry.model}`, entry]));
+  const requested = requestedModel?.trim() || defaultModel;
+  let selected = byQualifiedId.get(requested);
+  if (!selected && !requested.includes('/')) {
+    const bareMatches = catalog.filter(entry => entry.model === requested);
+    if (bareMatches.length === 1) selected = bareMatches[0];
+  }
+  if (!selected) {
+    throw new PiExecutionPreflightError(
+      'unsupported_model',
+      `Pi model "${requested}" is not present in the installed Pi model catalog.`,
+    );
+  }
+
+  const model = `${selected.provider}/${selected.model}`;
+  const effort = requestedEffort?.trim() || null;
+  if (effort) {
+    const allowed = detectCapability(model).effortLevels;
+    if (!selected.thinking || !allowed.includes(effort)) {
+      throw new PiExecutionPreflightError(
+        'unsupported_effort',
+        `Pi effort "${effort}" is not supported by model "${model}". Supported values: ${allowed.join(', ') || 'none'}.`,
+      );
+    }
+  }
+
+  return {
+    model,
+    effort: effort as PiModelEffortSelection['effort'],
+  };
+}
+
+export function buildPiModeExecutionGuidance(mode: 'impl' | 'qa' | 'journey'): string {
+  const modeGuidance = mode === 'qa'
+    ? 'Preserve QA mode: add or update tests with real assertions, run them safely, and do not change production behavior unless the story explicitly requires a defect fix.'
+    : mode === 'journey'
+      ? 'Preserve Journey mode: verify the stated user journey against the running application, capture concrete observations, and only edit code to fix issues found by that journey.'
+      : 'Preserve Implementation mode: make the smallest production, test, configuration, and documentation changes required by the story.';
+  return [
+    '## Pi Execution Requirements',
+    '- You are running inside a non-interactive autonomous pipeline.',
+    `- ${modeGuidance}`,
+    '- Plan, implement one small batch, run focused validation, self-review/fix, then run broad validation.',
+    '- A failed check must be fixed and rerun or classified as a hard blocker; it cannot silently become success.',
+    '- Your final response is an agent proposal only. The shared host closeout gate decides story pass.',
+  ].join('\n');
 }
 
 export function buildPiStoryPromptContext(context: PiStoryPromptContext): string {
@@ -450,8 +789,9 @@ export function buildPiStoryPromptContext(context: PiStoryPromptContext): string
       ? `Current attempt: ${context.attempt}/${context.maxAttempts}`
       : undefined,
     'Before each major step, read this log and keep it updated.',
-    'Use the progress log as the source of truth across retries and compaction.',
-    'Plan -> implement -> validate -> review -> fix -> repeat until complete.',
+    'Use the progress log as the source of truth across retries and compaction; never truncate prior retry evidence.',
+    'Update it after planning, each implementation batch, every validation/fix cycle, broad validation, and closeout.',
+    'Plan -> small batch -> focused validation -> self-review/fix -> broad validation -> closeout.',
     'Do not run backend Jest/npm-test commands against live databases; the autonomous command guard will block unsafe attempts.',
     '',
   ].filter(Boolean) as string[];

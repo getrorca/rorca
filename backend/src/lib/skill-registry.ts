@@ -148,18 +148,15 @@ export class SkillRegistry {
   }
 
   /**
-   * Scan .rorca/skills/ and .claude/skills/ for .md files with YAML frontmatter,
-   * then merge in DB-persisted skills.
-   *
-   * @param workspacePath - Root path of the workspace.
-   * @returns This registry instance (for chaining).
+   * Scan only workspace skill files. This synchronous, database-free path is
+   * used by subprocess preflight where a live DB lookup would make skill
+   * injection mutable and non-deterministic.
    */
-  async discover(workspacePath: string): Promise<SkillRegistry> {
+  discoverFilesystem(workspacePath: string): SkillRegistry {
     this.skills = [];
     this.byName = new Map();
     this.warnings = [];
 
-    // Scan filesystem directories
     const scanDirs: { dir: string; source: string }[] = [
       { dir: path.join(workspacePath, '.rorca', 'skills'), source: 'rorca-skills' },
       { dir: path.join(workspacePath, '.claude', 'skills'), source: 'claude-skills' },
@@ -168,10 +165,20 @@ export class SkillRegistry {
     for (const { dir, source } of scanDirs) {
       if (!fs.existsSync(dir)) continue;
       const mdFiles = this.findMdFiles(dir);
-      for (const filePath of mdFiles) {
-        this.loadSkillFile(filePath, source);
-      }
+      for (const filePath of mdFiles) this.loadSkillFile(filePath, source);
     }
+
+    return this;
+  }
+
+  /**
+   * Scan workspace files, then merge in DB-persisted skills.
+   *
+   * @param workspacePath - Root path of the workspace.
+   * @returns This registry instance (for chaining).
+   */
+  async discover(workspacePath: string): Promise<SkillRegistry> {
+    this.discoverFilesystem(workspacePath);
 
     // Merge DB-persisted skills (don't overwrite filesystem-discovered ones)
     const dbSkills = await query<{

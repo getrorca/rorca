@@ -1263,6 +1263,12 @@ describe('OC-006: Pipeline trigger agent integration', () => {
 
   test('trigger with agentOverride=pi creates a standard queued/run-now pipeline run', async () => {
     await seedRunnableSpec('pi-agent-record');
+    const piDetector = require('../../lib/pi-detector') as typeof import('../../lib/pi-detector');
+    jest.spyOn(piDetector, 'detectPi').mockReturnValue({ piInstalled: true, piVersion: '0.67.2', piBinPath: '/usr/local/bin/pi' });
+    jest.spyOn(piDetector, 'listPiModels').mockReturnValue([{
+      provider: 'openai-codex', model: 'gpt-5.4', contextTokens: 272000,
+      maxOutTokens: 128000, thinking: true, images: true,
+    }]);
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -1280,7 +1286,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(['queued', 'running']).toContain(run.status);
   });
 
-  test('trigger with agentOverride=pi remaps unavailable spec models to an available local Pi model', async () => {
+  test('trigger with agentOverride=pi rejects an unavailable spec model before creating a run', async () => {
     const spec = await seedRunnableSpec('pi-model-fallback') as any;
     spec.model = 'claude-sonnet-4-6';
     fs.writeFileSync(path.join(wsDir, 'forge', 'specs', 'approved', 'pi-model-fallback.json'), JSON.stringify(spec, null, 2), 'utf8');
@@ -1302,19 +1308,80 @@ describe('OC-006: Pipeline trigger agent integration', () => {
       },
     ]);
 
+    const before = await queryOne<{ count: string }>('SELECT COUNT(*)::text AS count FROM pipeline_runs');
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ specPath: 'forge/specs/approved/pi-model-fallback.json', workspaceId: 'ws-pipe', agentOverride: 'pi' });
 
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('pi_preflight:unsupported_model');
+    const after = await queryOne<{ count: string }>('SELECT COUNT(*)::text AS count FROM pipeline_runs');
+    expect(after?.count).toBe(before?.count);
+  });
+
+  test('trigger with Pi gpt-5.6-sol/xhigh persists locked effective options', async () => {
+    const spec = await seedRunnableSpec('rorca-evidence-driven-ssdlc') as any;
+    spec.title = 'Rorca Evidence-Driven SSDLC Lifecycle and Autonomous Delivery Steward';
+    spec.model = 'openai-codex/gpt-5.6-sol';
+    spec.agentOverride = 'pi';
+    spec.effortLevel = 'xhigh';
+    spec.userStories[0].id = 'LFC-009';
+    fs.writeFileSync(
+      path.join(wsDir, 'forge', 'specs', 'approved', 'rorca-evidence-driven-ssdlc.json'),
+      JSON.stringify(spec, null, 2),
+      'utf8',
+    );
+
+    const piDetector = require('../../lib/pi-detector') as typeof import('../../lib/pi-detector');
+    jest.spyOn(piDetector, 'detectPi').mockReturnValue({
+      piInstalled: true,
+      piVersion: '0.67.2',
+      piBinPath: '/usr/local/bin/pi',
+    });
+    jest.spyOn(piDetector, 'listPiModels').mockReturnValue([{
+      provider: 'openai-codex',
+      model: 'gpt-5.6-sol',
+      contextTokens: 272000,
+      maxOutTokens: 128000,
+      thinking: true,
+      images: true,
+    }]);
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/rorca-evidence-driven-ssdlc.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: false,
+        autoMerge: true,
+        mergeStrategy: 'direct',
+      });
+
     expect(res.status).toBe(201);
-    const run = await queryOne(`SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
-    expect(run.agent_type).toBe('pi');
-    expect(run.agent_model).toBe('openai-codex/gpt-5.4');
+    expect(res.body.effectiveOptions).toMatchObject({
+      model: 'openai-codex/gpt-5.6-sol',
+      effort: 'xhigh',
+      worktree: { enabled: true },
+      merge: { strategy: 'branch-only', autoMerge: false },
+      safety: { deploy: false, externalSend: false, policyLocked: true },
+    });
+    const run = await queryOne<{ effective_options: Record<string, unknown> }>(
+      'SELECT effective_options FROM pipeline_runs WHERE id = $1',
+      [res.body.runId],
+    );
+    expect(run?.effective_options).toMatchObject(res.body.effectiveOptions);
   });
 
   test('queued trigger also works for agentOverride=pi', async () => {
     await seedRunnableSpec('pi-queued');
+    const piDetector = require('../../lib/pi-detector') as typeof import('../../lib/pi-detector');
+    jest.spyOn(piDetector, 'detectPi').mockReturnValue({ piInstalled: true, piVersion: '0.67.2', piBinPath: '/usr/local/bin/pi' });
+    jest.spyOn(piDetector, 'listPiModels').mockReturnValue([{
+      provider: 'openai-codex', model: 'gpt-5.4', contextTokens: 272000,
+      maxOutTokens: 128000, thinking: true, images: true,
+    }]);
 
     const res = await request(app)
       .post('/api/pipeline/trigger')

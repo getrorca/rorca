@@ -59,6 +59,13 @@ export const PipelineRunJobPayload = z.object({
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
+  safetyOptions: z.object({
+    deploy: z.boolean(),
+    externalSend: z.boolean(),
+    policyLocked: z.boolean(),
+  }).strict().optional().default({ deploy: true, externalSend: true, policyLocked: false }),
+  /** Host-resolved immutable story manifests. Optional only for audited legacy jobs. */
+  executionManifestPath: z.string().min(1).optional(),
   // Non-secret execution options only. Credentials and workspace values are
   // referenced below and resolved by the worker immediately before spawn.
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
@@ -95,13 +102,20 @@ export const PipelineRetryJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   originalRunId: z.coerce.number().int().positive(),
   storyIds: z.array(z.string()),
+  scopeHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  previewHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  approvedPreview: z.record(z.string(), z.unknown()),
+  generatedPlanHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
   retrySpecPath: z.string().min(1),
   agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),
   worktreePath: z.string().nullable(),
+  branchName: z.string().nullable(),
   sequenceOffset: z.number().int().min(0),
+  /** Host-resolved immutable retry manifests. Optional only for audited legacy jobs. */
+  executionManifestPath: z.string().min(1).optional(),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   secretReferences: ExecutionSecretReferencesSchema.optional(),
   includeGraph: z.boolean().optional().default(false),

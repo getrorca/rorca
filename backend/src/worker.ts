@@ -66,6 +66,8 @@ import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import { replayFallbackResults } from './lib/fallback-replay';
+import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
+import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
@@ -387,7 +389,7 @@ async function emitWalEvent(
       });
     }
   } catch (err) {
-    logger.warn({ err, eventType }, '[worker] Failed to emit WAL event');
+    logger.warn({ err, eventType }, '[worker] Failed to emit WAL event through /api/wal');
   }
 }
 
@@ -512,7 +514,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -686,6 +688,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     if (includeGraph) {
       engineArgs.push('--include-graph');
+    }
+    if (executionManifestPath) {
+      engineArgs.push('--execution-manifests', executionManifestPath);
     }
     // agentOverride is already incorporated into the `agent` field via pipeline.ts resolution;
     // the --agent flag above uses payload.agent which already reflects the override.
@@ -1053,8 +1058,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               }
 
               case 'branch-only': {
-                // Just ensure branch is on remote — no PR, no merge
+                // Locked autonomous safety retains the branch locally. It cannot
+                // push or create any other external-send side effect.
                 try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                if (!payload.safetyOptions.externalSend) {
+                  mergeLog(`[merge-strategy:branch-only] Branch retained locally: ${payload.branchName}. External send is disabled by enforced run policy.`);
+                  break;
+                }
                 try {
                   const git = simpleGit(worktreePath);
                   await git.push('origin', payload.branchName, ['--set-upstream']);
@@ -1068,7 +1078,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           }
 
           // US-034: Finalize existing draft PR on run completion (for runs that started with a draft PR).
-          if (payload.branchName && effectiveMergeStrategy === 'direct') {
+          if (payload.safetyOptions.externalSend && payload.branchName && effectiveMergeStrategy === 'direct') {
             try {
               const prRow = await queryOne<{ pr_number: number | null }>(
                 'SELECT pr_number FROM pipeline_runs WHERE id = $1',
@@ -1114,9 +1124,27 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           });
 
           // Workflow dispatch (US-026)
-          if (status === 'done') {
+          if (status === 'done' && payload.safetyOptions.deploy && payload.safetyOptions.externalSend) {
             await dispatchWorkflowIfConfigured(workspaceId, runId);
+          } else if (status === 'done' && (!payload.safetyOptions.deploy || !payload.safetyOptions.externalSend)) {
+            logger.info({ runId, safetyOptions: payload.safetyOptions }, '[worker] workflow dispatch skipped by enforced run safety policy');
           }
+
+          // Learn closeout is non-authoritative for delivery status. It runs only
+          // after release routing has persisted its final lineage/outcome fields.
+          const learnCloseout = await tryGenerateLearnCloseoutCandidates({
+            workspaceId: String(workspaceId),
+            runId,
+            specId: path.basename(specPath, '.json'),
+          });
+          await emitWalEvent('lifecycle_changed', workspaceId, {
+            workspaceId: String(workspaceId),
+            specId: path.basename(specPath, '.json'),
+            phaseId: 'learn',
+            runId,
+            changeKind: 'evidence_persisted',
+            learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
+          });
         }
 
         await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (status === 'done' ? 'finished' : 'failed'), {
@@ -1236,6 +1264,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       model,
       worktreePath,
       sequenceOffset,
+      executionManifestPath,
       envOverrides,
       secretReferences,
       includeGraph,
@@ -1244,14 +1273,18 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       thinkingBudget,
       effortLevel,
       reasoningEffort,
+      previewHash,
+      approvedPreview: approvedPreviewRaw,
+      generatedPlanHash,
     } = payload;
+    const approvedPreview = approvedPreviewRaw as unknown as RetryPreviewPacket;
 
     // Effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
 
     // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null }>(
-      'SELECT workspace_id, parallelism, terminal_mode, branch_name FROM pipeline_runs WHERE id = $1',
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string; spec_path: string }>(
+      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
@@ -1260,12 +1293,26 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
     const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
+    if (runRow.status === 'cancelled') {
+      logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
+      return;
+    }
+    const previewRow = await queryOne<{ status: string }>(
+      `SELECT status FROM pipeline_retry_previews WHERE preview_hash = $1 AND retry_run_id = $2`,
+      [previewHash, runId],
+    );
+    if (previewRow?.status !== 'dispatched' || !verifyRetryPreview(approvedPreview)) {
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_preview_not_authorized' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'preview_not_authorized' });
+      return;
+    }
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
         workspacePath,
         worktreePath,
         expectedBranchName: branchName,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
       });
       if (!worktreeValidation.ok) {
         logger.error(
@@ -1291,12 +1338,38 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       }
     }
 
-    // 3. Retry runs use the same authoritative lifecycle as fresh runs.
+    // Re-read the generated retry spec after queue handoff and compare its
+    // executable plan before marking the run started. A prompt/model cannot
+    // authorize work absent from this frozen preview.
+    if (!fs.existsSync(retrySpecPath)) {
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_spec_missing' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'retry_spec_missing' });
+      return;
+    }
+    const actualRetrySpec = JSON.parse(fs.readFileSync(retrySpecPath, 'utf8')) as Record<string, unknown>;
+    const planComparison = compareRetryPlanToPreview(actualRetrySpec, approvedPreview);
+    if (!planComparison.matches || planComparison.scopeHash !== generatedPlanHash || retryHash(approvedPreview.scope.executable.map((entry) => entry.storyId)) !== payload.scopeHash) {
+      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'worker_scope_mismatch' WHERE preview_hash = $1`, [previewHash]);
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_scope_mismatch' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, {
+        run_id: runId,
+        original_run_id: originalRunId,
+        preview_hash: previewHash,
+        approved_scope: planComparison.approved,
+        actual_scope: planComparison.actual,
+        reason: 'worker_scope_mismatch',
+      });
+      return;
+    }
+
+    // Retry runs use the same authoritative lifecycle as fresh runs.
     await transitionRunLifecycle(runId, 'starting', {
       owner: 'worker_retry',
       transport: isPtyTerminalMode(effectiveTerminalMode) ? 'pty_pending' : 'pipe',
       process: 'launching',
     });
+
+    // Mark the new run as running — set worker_id so orphan sweep knows this run belongs to us.
     await execute(
       `UPDATE pipeline_runs SET status = 'running', started_at = NOW(), worker_id = $2 WHERE id = $1`,
       [runId, WORKER_ID],
@@ -1358,6 +1431,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     if (reasoningEffort) {
       engineArgs.push('--reasoning-effort', reasoningEffort);
+    }
+    if (executionManifestPath) {
+      engineArgs.push('--execution-manifests', executionManifestPath);
     }
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
@@ -1533,6 +1609,19 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
               ...(retrySummary ? { summary: retrySummary } : {}),
             });
           }
+          const learnCloseout = await tryGenerateLearnCloseoutCandidates({
+            workspaceId,
+            runId,
+            specId: path.basename(runRow.spec_path, '.json'),
+          });
+          await emitWalEvent('lifecycle_changed', workspaceId, {
+            workspaceId,
+            specId: path.basename(runRow.spec_path, '.json'),
+            phaseId: 'learn',
+            runId,
+            changeKind: 'evidence_persisted',
+            learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
+          });
         } catch (err) {
           logger.error({ err, runId }, '[worker] Failed to update retry run status on exit');
         }
@@ -2379,8 +2468,8 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  // 2. Wait up to 15s for child processes to exit (poll every 500ms)
-  const DRAIN_TIMEOUT_MS = 15_000;
+  // 2. Wait up to 30s for child processes to flush closeout state and exit (poll every 500ms)
+  const DRAIN_TIMEOUT_MS = 30_000;
   const DRAIN_POLL_MS = 500;
   const drainDeadline = Date.now() + DRAIN_TIMEOUT_MS;
 
@@ -2391,7 +2480,7 @@ async function shutdown(signal: string): Promise<void> {
   // 3. SIGKILL any remaining child processes that did not exit in time
   if (activeProcesses.size > 0) {
     const remaining = Array.from(activeProcesses.keys());
-    logger.warn({ remaining }, '[worker] shutdown — children did not exit in 15s, sending SIGKILL');
+    logger.warn({ remaining }, '[worker] shutdown — children did not exit in 30s, sending SIGKILL');
     for (const [runId, child] of activeProcesses) {
       try { child.kill('SIGKILL'); } catch { /* best-effort */ }
       try { await signalDurableRunPty(runId, 'SIGKILL'); } catch { /* best-effort */ }

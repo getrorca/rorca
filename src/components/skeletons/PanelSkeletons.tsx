@@ -43,6 +43,36 @@ export function BoardSkeleton() {
   );
 }
 
+/** Lifecycle matrix skeleton: KPI cards, filters, phase headers, and rows. */
+export function LifecycleMatrixSkeleton() {
+  return (
+    <div className="lifecycle-control h-full flex flex-col bg-bg" aria-label="Loading Lifecycle Control" role="status">
+      <div className="flex min-h-[72px] shrink-0 items-center gap-3 border-b border-border bg-panel px-4 sm:px-6">
+        <span className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</span>
+        <div className="flex-1" />
+        <div className="lifecycle-skeleton-block h-9 w-32 rounded-md" />
+      </div>
+      <div className="flex-1 overflow-hidden p-3 sm:p-4 space-y-3">
+        <div className="grid min-h-[88px] grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+          {Array.from({ length: 6 }).map((_, index) => <SkeletonMetricCard key={index} />)}
+        </div>
+        <div className="h-[78px] rounded-lg border border-border bg-panel p-2">
+          <div className="lifecycle-skeleton-block h-9 w-full rounded-md" />
+        </div>
+        <div className="overflow-hidden rounded-xl border border-border bg-panel">
+          <div className="overflow-hidden">
+            <div className="lifecycle-skeleton-matrix grid min-w-[1710px] grid-cols-[280px_repeat(11,130px)] gap-px bg-border">
+              {Array.from({ length: 12 }).map((_, index) => <div key={`header-${index}`} className="lifecycle-skeleton-block h-10" />)}
+              {Array.from({ length: 48 }).map((_, index) => <div key={`cell-${index}`} className="lifecycle-skeleton-block h-16" />)}
+            </div>
+          </div>
+        </div>
+      </div>
+      <span className="sr-only">Loading metrics, filters, and lifecycle phases.</span>
+    </div>
+  );
+}
+
 /**
  * List skeleton: table header + 8 grey row rectangles with varying widths.
  * Matches SpecsPanel list view / archive table.

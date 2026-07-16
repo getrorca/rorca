@@ -7,7 +7,7 @@
 
 import { Router, Request, Response } from 'express';
 import { isUtf8 } from 'buffer';
-import { spawn } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -31,18 +31,42 @@ import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
 import { synthesize } from '../lib/direction-stack';
-import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
+import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, storyAllowsNoCodeChanges, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
 import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
-import { checkSpec, type CapabilityStory } from '../lib/tool-capability-checker';
+import {
+  check as checkStoryCapability,
+  checkSpec,
+  detectRequiredTools,
+  findCapableEngine,
+  type CapabilityStory,
+  type StoryCapabilityReport,
+} from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
-import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
+import {
+  buildStoryExecutionPacket,
+  createStoryExecutionManifest,
+  deriveStoryContractRevision,
+  detectExecutionModeFromSpec,
+  type ImmutableStoryExecutionManifest,
+  type StoryChangePolicy,
+} from '../lib/story-execution-packet';
+import { persistStoryExecutionManifest } from '../lib/story-closeout';
+import { inspectApprovedSpecPasses, reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
+import { classifyRunLiveness } from '../lib/ssdlc-liveness';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import { synthesizeRunMemory } from '../lib/auto-memory';
+import * as piDetector from '../lib/pi-detector';
+import {
+  PiExecutionPreflightError,
+  preflightPiModelAndEffort,
+  resolvePiRunSafetyOptions,
+} from '../lib/pi-autonomous-runner';
 import { logger } from '../lib/logger';
+import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
@@ -63,9 +87,24 @@ import {
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
-import { sweepOrphanProcesses } from '../worker';
-import { validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
-import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
+import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
+import { safelyRefreshReusableWorktree, validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
+import { PipelineRetryJobPayload } from '../lib/pg-boss-schemas';
+import {
+  buildGovernedRetrySpec,
+  compareRetryPlanToPreview,
+  createRetryPreview,
+  createRetryPreviewIdentity,
+  resolveRetryScope,
+  retryHash,
+  verifyRetryPreview,
+  verifyRetryPreviewIdentity,
+  type RetryExecutionOptions,
+  type RetryPlanStatus,
+  type RetryPlanStory,
+  type RetryPreviewIdentity,
+  type RetryPreviewPacket,
+} from '../lib/retry-governance';
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
@@ -93,6 +132,37 @@ import {
   redactSecretText,
   resolveExecutionSecrets,
 } from '../lib/execution-secret-references';
+import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
+import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
+
+const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
+
+async function postRetryWalEvent(eventType: 'retry_preview_generated' | 'retry_scope_mismatch' | 'ssdlc_retry_preview_denied', workspaceId: string, payload: Record<string, unknown>): Promise<void> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${process.env.PORT ?? '3030'}/api/wal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event_type: eventType, workspace_id: workspaceId, payload }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  } catch (error) {
+    // The durable preview/refusal row remains authoritative if the API is
+    // restarting; never bypass /api/wal with a direct insert.
+    logger.warn({ error, eventType, workspaceId }, '[retry] WAL API emission failed');
+  }
+}
+
+function assertReconciliationAllowsAutomaticScope(report: PassReconciliationReport): void {
+  if (!report.blocking) return;
+  throw new UnprocessableError(
+    'Approved-spec pass evidence is ambiguous; automatic run scope was not calculated.',
+    'PASS_RECONCILIATION_REQUIRED',
+    {
+      reconciliation: report,
+      operatorActions: report.stories.flatMap((story) => story.operatorActions),
+    },
+  );
+}
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -352,6 +422,165 @@ function isPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+interface DispatchManifestProfile {
+  profileId?: string;
+  changePolicy?: StoryChangePolicy;
+  noCodeReason?: string;
+  baselineFailurePolicy?: 'block' | 'allow_with_host_evidence';
+}
+
+interface DispatchManifestStory extends CapabilityStory {
+  acceptance?: string;
+  excluded?: boolean;
+  passes?: boolean;
+  model?: string;
+  effort?: string;
+  agent?: AgentType;
+  executionManifest?: DispatchManifestProfile;
+}
+
+function acceptanceCriteriaForManifest(story: DispatchManifestStory): string[] {
+  if (Array.isArray(story.acceptanceCriteria) && story.acceptanceCriteria.length > 0) return story.acceptanceCriteria;
+  return typeof story.acceptance === 'string'
+    ? story.acceptance.split('\n').map((line) => line.replace(/^[-*]\s*/, '').trim()).filter(Boolean)
+    : [];
+}
+
+/** Resolve historical/null run metadata to a valid engine without changing public Unknown telemetry. */
+function resolveDispatchAgent(value: unknown): AgentType {
+  const normalized = normalizeRunAgentType(value);
+  return normalized === 'unknown' ? activeAgent : normalized;
+}
+
+async function resolveAndPersistDispatchManifests(input: {
+  workspaceId: string;
+  specId: string;
+  runId: number;
+  specJson: Record<string, unknown>;
+  cwd: string;
+  agent: AgentType;
+  model: string | null;
+  effort: string | null;
+  terminalMode: TerminalMode;
+  worktreePath: string | null;
+  branchName: string | null;
+  autoMerge: boolean;
+  mergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
+  parallelism: number;
+  /** Retry-only immutable revision bindings from the parent run. */
+  frozenRevisionsByStory?: ReadonlyMap<string, { specRevision: string; storyRevision: string }>;
+  attemptByStory?: ReadonlyMap<string, number>;
+}): Promise<{ path: string; manifests: ImmutableStoryExecutionManifest[] }> {
+  const phaseStories = Array.isArray(input.specJson.phases)
+    ? (input.specJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap((phase) => phase.stories ?? [])
+    : [];
+  const stories = (Array.isArray(input.specJson.userStories) ? input.specJson.userStories : phaseStories) as DispatchManifestStory[];
+  const mode = detectExecutionModeFromSpec(input.specJson as { mode?: string; phases?: unknown });
+  const specProfile = (input.specJson.executionManifest as DispatchManifestProfile | undefined) ?? {};
+  const baseRevision = execSync('git rev-parse HEAD', { cwd: input.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const specRevision = deriveStoryContractRevision(input.specJson);
+  const manifests: ImmutableStoryExecutionManifest[] = [];
+  const dispatchAgent = resolveDispatchAgent(input.agent);
+
+  for (const story of stories.filter((item) => !item.excluded)) {
+    const packet = buildStoryExecutionPacket(input.cwd, story, mode);
+    const profile = { ...specProfile, ...(story.executionManifest ?? {}) };
+    const criteria = acceptanceCriteriaForManifest(story);
+    // Freeze the engine's existing legitimate no-code behavior into the
+    // authoritative pre-dispatch profile; closeout never re-infers it from mode
+    // or story prose after execution starts.
+    const changePolicy = profile.changePolicy
+      ?? (storyAllowsNoCodeChanges(story as EngineUserStory, mode) ? 'no_code_allowed' : 'code_required');
+    const noCodeReason = changePolicy === 'no_code_allowed'
+      ? profile.noCodeReason ?? `Resolved from the existing ${mode} story no-code rules before dispatch.`
+      : null;
+    let resolvedStoryAgent = resolveStoryAgent(story as EngineUserStory, dispatchAgent);
+    const orchestrationPolicy = loadOrchestrationConfig(input.cwd);
+    if (orchestrationPolicy.capabilityMismatch === 'reroute') {
+      const capability = checkStoryCapability(story, resolvedStoryAgent);
+      if (!capability.compatible) {
+        resolvedStoryAgent = findCapableEngine(detectRequiredTools(story), resolvedStoryAgent) ?? resolvedStoryAgent;
+      }
+    }
+    const storyIsolated = input.parallelism > 1 && input.terminalMode !== 'pty';
+    const storyWorktreePath = storyIsolated
+      ? path.resolve(input.cwd, '..', `${path.basename(input.cwd)}-${story.id}-run-${input.runId}`)
+      : input.cwd;
+    const storyBranch = storyIsolated
+      ? `feat/${input.specId}-${story.id}-run-${input.runId}`
+      : input.branchName;
+    const frozenRevisions = input.frozenRevisionsByStory?.get(story.id);
+    const manifest = createStoryExecutionManifest({
+      identity: {
+        workspaceId: input.workspaceId,
+        specId: input.specId,
+        storyId: story.id,
+        runId: input.runId,
+        attempt: input.attemptByStory?.get(story.id) ?? 1,
+      },
+      revisions: frozenRevisions ?? {
+        specRevision,
+        storyRevision: deriveStoryContractRevision(story),
+      },
+      executionMode: mode,
+      execution: {
+        agent: resolvedStoryAgent,
+        model: story.model ?? input.model,
+        effort: story.effort ?? input.effort,
+        terminal: input.terminalMode,
+        worktree: {
+          enabled: storyIsolated || Boolean(input.worktreePath),
+          path: storyWorktreePath,
+          branch: storyBranch,
+          baseRevision,
+        },
+        merge: {
+          enabled: input.autoMerge,
+          strategy: input.mergeStrategy,
+          targetBranch: input.mergeStrategy === 'direct' ? 'main' : null,
+        },
+      },
+      validationPlan: packet.validationCommands.map((command, index) => ({
+        id: `validation-${index + 1}`,
+        command: '/bin/sh',
+        args: ['-lc', command],
+        required: true,
+        revisionSensitive: true,
+        timeoutMs: 300_000,
+      })),
+      evidenceExpectations: criteria.map((criterion, index) => ({
+        criterionId: `${story.id}:ac:${deriveStoryContractRevision(criterion)}`,
+        description: criterion,
+        requiredEvidenceKinds: ['validation', 'revision'],
+      })),
+      repositoryProfile: {
+        profileId: profile.profileId ?? 'rorca-code-change-v1',
+        changePolicy,
+        noCodeReason,
+        runtimeMetadataPaths: ['.rorca/**', '.claude/**', '.opencode/**', '.playwright-mcp/**', 'forge/logs/**', 'forge/specs/**', 'MEMORY.md', 'progress.txt'],
+      },
+      commandSafety: {
+        profileId: 'autonomous-command-guard-v1',
+        guardVersion: '1',
+        guardedWorkingDirectory: storyWorktreePath,
+        allowedWorkingDirectories: [storyWorktreePath],
+        blockedCommandPatterns: ['backend/Jest-style tests without an isolated *_test database'],
+        redactedEnvironmentKeys: ['ANTHROPIC_API_KEY', 'DATABASE_URL', 'DATABASE_URL_TEST', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'],
+        allowBackendJest: false,
+        baselineFailurePolicy: profile.baselineFailurePolicy ?? 'block',
+      },
+    });
+    await persistStoryExecutionManifest(manifest);
+    manifests.push(manifest);
+  }
+
+  const runtimeDir = path.join(input.cwd, '.rorca', 'runtime');
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  const manifestPath = path.join(runtimeDir, `run-${input.runId}-story-execution-manifests.json`);
+  fs.writeFileSync(manifestPath, JSON.stringify(manifests, null, 2), { encoding: 'utf8', mode: 0o600 });
+  return { path: manifestPath, manifests };
+}
+
 function buildExecutionReadinessSummary(
   workspacePath: string,
   specJson: Record<string, unknown>,
@@ -398,6 +627,66 @@ function buildExecutionReadinessSummary(
     riskyStoryCount: stories.filter(story => story.grade === 'weak').length,
     stories,
   };
+}
+
+// ─── Fallback Result Syncer ──────────────────────────────────────────────────
+// When execution-engine.ts / run-loop.ts can't POST results to the backend
+// (backend down, restart, port mismatch), they write to .rorca-results.jsonl.
+// This function reads that file and replays entries into the DB.
+
+async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
+  const entries = readFallbackResults(cwd);
+  if (entries.length === 0) return 0;
+
+  let synced = 0;
+  for (const entry of entries) {
+    try {
+      if (entry.type === 'wal') {
+        // Replay WAL event directly into DB
+        const p = entry.payload as Record<string, unknown>;
+        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [p.event_type ?? entry.status,
+          p.workspace_id ?? workspaceId,
+          p.spec_id ?? null,
+          p.story_id ?? entry.storyId,
+          JSON.stringify(p.payload ?? p),]);
+        broadcastAll(walEvent!);
+        synced++;
+      } else if (entry.type === 'story_result') {
+        // Replay story_result into DB
+        const p = entry.payload as Record<string, unknown>;
+        const runId = (p.runId as number) ?? entry.runId;
+        const storyId = (p.storyId as string) ?? entry.storyId;
+        const status = (p.status as string) ?? entry.status;
+
+        if (!runId || !storyId || !status) continue;
+
+        // Check if already synced (idempotent — don't double-insert)
+        const existing = await queryOne('SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2', [runId, storyId]);
+
+        if (!existing) {
+          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
+            ? JSON.stringify(p.activeSkills)
+            : null;
+          await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills, completion_packet)
+             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`, [runId, storyId, status,
+            (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
+            (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
+            (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
+            activeSkillsVal,
+            p.completionPacket && typeof p.completionPacket === 'object' ? JSON.stringify(p.completionPacket) : null,]);
+        }
+        synced++;
+      }
+    } catch (err: any) {
+      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
+    }
+  }
+
+  if (synced > 0) {
+    deleteFallbackFile(cwd);
+    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
+  }
+  return synced;
 }
 
 // All Claude Code env vars that block nested invocation (same as llm-client.ts)
@@ -484,6 +773,67 @@ const outputBuffers = new Map<number, OutputBuffer>();
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+interface EffectiveRunOptions {
+  model: string | null;
+  effort: string | null;
+  worktree: { enabled: boolean; path: string | null; branch: string | null };
+  merge: { strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; autoMerge: boolean };
+  graph: { enabled: boolean };
+  terminal: TerminalMode;
+  safety: {
+    guard: 'autonomous-command-guard-v1';
+    allowBackendJest: false;
+    deploy: boolean;
+    externalSend: boolean;
+    policyLocked: boolean;
+  };
+}
+
+function isEffectiveRunOptions(value: unknown): value is EffectiveRunOptions {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Partial<EffectiveRunOptions>;
+  return Boolean(candidate.worktree && typeof candidate.worktree.enabled === 'boolean'
+    && candidate.merge && ['direct', 'pr', 'draft-pr', 'branch-only'].includes(candidate.merge.strategy)
+    && typeof candidate.merge.autoMerge === 'boolean'
+    && candidate.graph && typeof candidate.graph.enabled === 'boolean'
+    && candidate.safety && candidate.safety.guard === 'autonomous-command-guard-v1'
+    && candidate.safety.allowBackendJest === false
+    && typeof candidate.safety.deploy === 'boolean'
+    && typeof candidate.safety.externalSend === 'boolean'
+    && typeof candidate.safety.policyLocked === 'boolean');
+}
+
+function buildEffectiveRunOptions(input: {
+  model: string | null;
+  effort: string | null | undefined;
+  autoWorktree: boolean;
+  worktreePath: string | null;
+  branchName: string | null;
+  mergeStrategy: EffectiveRunOptions['merge']['strategy'];
+  autoMerge: boolean;
+  includeGraph: boolean;
+  terminal: TerminalMode;
+  policyLocked: boolean;
+  deploy: boolean;
+  externalSend: boolean;
+}): EffectiveRunOptions {
+  return {
+    model: input.model,
+    effort: input.effort ?? null,
+    worktree: { enabled: input.autoWorktree, path: input.worktreePath, branch: input.branchName },
+    merge: { strategy: input.mergeStrategy, autoMerge: input.autoMerge },
+    graph: { enabled: input.includeGraph },
+    terminal: input.terminal,
+    safety: {
+      guard: 'autonomous-command-guard-v1',
+      allowBackendJest: false,
+      deploy: input.deploy,
+      externalSend: input.externalSend,
+      policyLocked: input.policyLocked,
+    },
+  };
+}
+
 interface PipelineRunRow {
   id: number;
   spec_path: string;
@@ -515,11 +865,12 @@ interface PipelineRunRow {
   pr_number?: number | null;
   pr_creating?: boolean | null;
   pr_creation_error?: string | null;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
   triggered_via: 'queue' | 'run_now';
   auto_worktree: boolean;
   include_graph: boolean;
   terminal_mode: TerminalMode | null;
-  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
+  effective_options: EffectiveRunOptions | null;
   idempotency_key?: string | null;
   task_manifest_id?: string | null;
   task_manifest_artifacts?: Record<string, unknown> | string | null;
@@ -882,6 +1233,10 @@ function assertNoLegacyHermesRepairMetadataOnPipelineTrigger(body: Record<string
   );
 }
 
+// Keep registration immediately before the handler declaration so source-level
+// dispatch audits can bound the complete trigger path from route to queue send.
+router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigger);
+
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
@@ -943,10 +1298,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       specId: specIdForReadiness,
       specPath,
     });
-    assertSpecReadinessAllowsMutation(specReadiness, readinessOverrideRequested);
-    if (specReadiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
-      await recordSpecReadinessOverride({ workspaceId, specId: specIdForReadiness, action: 'run', readiness: specReadiness });
-    }
+    // Do not record overrides yet. Agent/model/effort preflight below must fail
+    // before any run/readiness mutation is persisted.
     (req as any)._specReadiness = specReadiness;
 
     // 2. Budget cap guard — block if hard cap exceeded for this period
@@ -971,78 +1324,86 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
     const specEffortLevel: string | undefined = typeof specModelJson.effortLevel === 'string' ? specModelJson.effortLevel : undefined;
     const specThinkingEnabled: boolean | undefined = typeof specModelJson.thinkingEnabled === 'boolean' ? specModelJson.thinkingEnabled : undefined;
-    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (reasoning?.enabled ?? specThinkingEnabled ?? specReasoning?.enabled ?? undefined);
-    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? reasoning?.effort ?? effortLevel ?? specReasoning?.effort ?? specEffortLevel;
-    // Model comes from: request modelOverride > spec.model > workflow router model > null
-    const resolvedAgentModel: string | null = modelOverride ?? manifestExecutionModelOverride ?? specLevelModel ?? wfConfig.model ?? activeModel ?? null;
+    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined
+      ? thinkingEnabled
+      : (reasoning?.enabled ?? specThinkingEnabled ?? specReasoning?.enabled ?? undefined);
+    let resolvedReasoningEffort: string | undefined = reasoningEffort
+      ?? reasoning?.effort
+      ?? effortLevel
+      ?? specReasoning?.effort
+      ?? specEffortLevel;
 
-    // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
-    // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
-    const OPENCODE_PROVIDER_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/'];
-    // Note: 'anthropic/' prefix is intentionally excluded — anthropic/claude-* models must stay on Claude CLI.
-    // Only non-Claude provider prefixes trigger the OpenCode auto-switch.
-    const modelNeedsOpenCode = resolvedAgentModel != null && OPENCODE_PROVIDER_PREFIXES.some(p => resolvedAgentModel.startsWith(p));
-    // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models.
-    // Exclude anthropic/claude-* (OpenRouter format for Claude models — should still use Claude CLI).
-    const modelIsNonClaude = resolvedAgentModel != null
-      && resolvedAgentModel.includes('/')
-      && !resolvedAgentModel.startsWith('claude-')
-      && !resolvedAgentModel.startsWith('anthropic/claude-');
-    const runtimeAgent: AgentType = wfConfig.runtime === 'native'
-      ? activeAgent
-      : wfConfig.runtime as AgentType;
-    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !manifestExecutionAgentOverride && !specLevelAgent && runtimeAgent === 'claude';
-    // Priority: request agentOverride > manifest override > spec-level override > model auto-detect > workflow runtime.
-    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? (manifestExecutionAgentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : runtimeAgent);
+    // Preserve the canonical execution-option precedence shared with task-manifest dispatch.
+    const executionOptions = resolveExecutionOptions({
+      requestAgentOverride: agentOverride,
+      manifestAgentOverride: manifestExecutionAgentOverride,
+      specAgentOverride: specLevelAgent,
+      requestModelOverride: modelOverride,
+      manifestModelOverride: manifestExecutionModelOverride,
+      specModel: specLevelModel,
+      workflowConfig: wfConfig,
+      activeAgentFallback: activeAgent,
+      activeModelFallback: activeModel,
+      log: logger,
+    });
+    const resolvedAgentType: AgentType = executionOptions.resolvedAgentType;
+    let finalAgentModel = executionOptions.finalAgentModel;
 
-    // Translate model IDs for OpenCode execution.
-    // OpenCode expects "provider/org/model" format (e.g. "openrouter/anthropic/claude-opus-4.6").
-    // Rorca stores models as either:
-    //   - Claude-style IDs: "claude-opus-4-6" (Anthropic SDK format, dashes)
-    //   - OpenRouter catalog IDs: "z-ai/glm-5", "anthropic/claude-opus-4.6" (org/model)
-    //   - Already-prefixed: "openrouter/z-ai/glm-5", "openai/gpt-4o"
-    let finalAgentModel = resolvedAgentModel;
-    if (finalAgentModel && resolvedAgentType === 'opencode') {
-      // Already has a known provider prefix — pass through as-is
-      if (modelNeedsOpenCode) {
-        // e.g. "openrouter/z-ai/glm-5", "openai/gpt-4o" — already correct
+    let piCatalog: piDetector.PiModel[] | null = null;
+    const preflightPiSelection = (model: string | null, effort: string | null | undefined) => {
+      if (!piCatalog) {
+        const piStatus = piDetector.detectPi();
+        if (!piStatus.piInstalled || !piStatus.piBinPath) {
+          throw new ValidationError('pi_preflight:not_installed');
+        }
+        piCatalog = piDetector.listPiModels(piStatus.piBinPath);
       }
-      // Claude SDK model IDs → OpenRouter format (dashes to dots, add anthropic/ prefix)
-      else if (/^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/')) {
-        // claude-opus-4-6 → anthropic/claude-opus-4.6
-        // claude-sonnet-4-6 → anthropic/claude-sonnet-4.6
-        // claude-haiku-4-5-20251001 → anthropic/claude-haiku-4.5 (strip date suffix)
-        const openRouterId = finalAgentModel
-          .replace(/-(\d+)-(\d+)(?:-\d{8})?$/, '-$1.$2')  // "4-6" → "4.6", strip date
-          .replace(/-(\d{8})$/, '');                         // catch remaining date suffixes
-        finalAgentModel = `openrouter/anthropic/${openRouterId}`;
+      try {
+        return preflightPiModelAndEffort(model, effort, piCatalog, DEFAULT_PI_MODEL);
+      } catch (error: unknown) {
+        if (error instanceof PiExecutionPreflightError) {
+          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+        }
+        throw error;
       }
-      // Bare org/model from OpenRouter catalog (e.g. "z-ai/glm-5", "anthropic/claude-opus-4.6")
-      else if (modelIsNonClaude) {
-        finalAgentModel = `openrouter/${finalAgentModel}`;
-      }
-    }
-
-    // When running with Claude CLI, only claude-* model IDs are valid.
-    // If the spec has an OpenRouter model (e.g. "z-ai/glm-5") but the user
-    // explicitly selected Claude CLI, clear the model so Claude uses its default.
-    if (resolvedAgentType === 'claude' && finalAgentModel) {
-      const isClaudeModel = /^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/');
-      if (!isClaudeModel) {
-        finalAgentModel = null;
-      }
-    }
+    };
 
     if (resolvedAgentType === 'pi') {
-      const sharedResolution = resolveExecutionOptions({
-        requestAgentOverride: resolvedAgentType,
-        requestModelOverride: finalAgentModel,
-        activeAgentFallback: activeAgent,
-        activeModelFallback: activeModel,
-        resolvePiModel: true,
-        log: logger,
-      });
-      finalAgentModel = sharedResolution.finalAgentModel;
+      const selection = preflightPiSelection(finalAgentModel, resolvedReasoningEffort);
+      finalAgentModel = selection.model;
+      resolvedReasoningEffort = selection.effort ?? undefined;
+    }
+
+    // Per-story Pi assignments use the same model/effort mechanism and must be
+    // validated before readiness, run-row, worktree, hook, or queue mutation.
+    const phaseStoriesForPreflight = Array.isArray(specModelJson.phases)
+      ? (specModelJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap(phase => phase.stories ?? [])
+      : [];
+    const storiesForPreflight = (Array.isArray(specModelJson.userStories)
+      ? specModelJson.userStories
+      : phaseStoriesForPreflight) as DispatchManifestStory[];
+    for (const dispatchStory of storiesForPreflight) {
+      if (dispatchStory.excluded) continue;
+      if (resolveStoryAgent(dispatchStory as EngineUserStory, resolvedAgentType) !== 'pi') continue;
+      preflightPiSelection(
+        dispatchStory.model ?? executionOptions.resolvedAgentModel,
+        dispatchStory.effort ?? resolvedReasoningEffort,
+      );
+    }
+
+    // Lock initial SSDLC safety before the first mutation. Prose/_notes cannot
+    // weaken these values; retries consume the persisted structured options.
+    const autonomousSafety = resolvePiRunSafetyOptions(specPath, specModelJson, {
+      autoWorktree: Boolean(autoWorktree),
+      autoMerge: Boolean(autoWorktree) && autoMerge !== false,
+      mergeStrategy: mergeStrategy ?? 'direct',
+    });
+
+    // All model/effort/safety preflight has succeeded. Readiness override audit
+    // is the first intentional mutation in this trigger path.
+    assertSpecReadinessAllowsMutation(specReadiness, readinessOverrideRequested);
+    if (specReadiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
+      await recordSpecReadinessOverride({ workspaceId, specId: specIdForReadiness, action: 'run', readiness: specReadiness });
     }
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
@@ -1235,10 +1596,28 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
+    // Reconcile before queue-row creation, worktree creation, manifest creation,
+    // or pg-boss dispatch. An ambiguous story must never be converted into an
+    // automatic scope by the scheduler.
+    const passReconciliation = await reconcileApprovedSpecPasses({
+      workspaceId,
+      workspacePath: workspace.path,
+      specPath,
+    });
+    assertReconciliationAllowsAutomaticScope(passReconciliation);
+    (req as any)._passReconciliation = passReconciliation;
+
     // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
     //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
     const { queue } = req.body;
-    const useExternalPiOrchestration = resolvedAgentType === 'pi' && isPiExternalOrchestrationEnabled();
+    const effectiveAutoWorktreeRequest = autonomousSafety.policyLocked
+      ? autonomousSafety.autoWorktree
+      : Boolean(autoWorktree);
+    // The locked SSDLC policy must use the canonical in-engine Pi runner; the
+    // optional external orchestration mode would bypass its cleanup/closeout seam.
+    const useExternalPiOrchestration = resolvedAgentType === 'pi'
+      && isPiExternalOrchestrationEnabled()
+      && !autonomousSafety.policyLocked;
 
     if (!queuedRunId && !reservedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
@@ -1256,21 +1635,46 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
+        const queuedSpecSlug = path.basename(specPath, '.json').replace(/[^a-z0-9-]/gi, '-');
+        const queuedBranchName = effectiveAutoWorktreeRequest ? `feat/${queuedSpecSlug}` : null;
+        const queuedWorktreePath = queuedBranchName
+          ? path.resolve(workspace.path, '..', `${path.basename(workspace.path)}-${queuedBranchName.replace(/\//g, '-')}`)
+          : null;
+        const queuedMergeStrategy = autonomousSafety.policyLocked
+          ? 'branch-only'
+          : (mergeStrategy ?? 'direct');
+        const queuedAutoMerge = autonomousSafety.policyLocked
+          ? false
+          : effectiveAutoWorktreeRequest && autoMerge !== false;
+        const queuedEffectiveOptions = buildEffectiveRunOptions({
+          model: finalAgentModel,
+          effort: resolvedReasoningEffort,
+          autoWorktree: effectiveAutoWorktreeRequest,
+          worktreePath: queuedWorktreePath,
+          branchName: queuedBranchName,
+          mergeStrategy: queuedMergeStrategy,
+          autoMerge: queuedAutoMerge,
+          includeGraph: includeGraph ?? false,
+          terminal: resolvedTerminalMode,
+          policyLocked: autonomousSafety.policyLocked,
+          deploy: autonomousSafety.deploy,
+          externalSend: autonomousSafety.externalSend,
+        });
         const queuedBaseTriggerOptions = Object.fromEntries(
           Object.entries({
-            autoWorktree: !!autoWorktree,
-            autoMerge,
-            mergeStrategy,
+            autoWorktree: effectiveAutoWorktreeRequest,
+            autoMerge: queuedAutoMerge,
+            mergeStrategy: queuedMergeStrategy,
             triggerType: triggerType === 'scheduled' ? 'scheduled' : 'manual',
             forceSequential,
             agentOverride,
             modelOverride,
             storyId,
             includeGraph,
-            thinkingEnabled,
+            thinkingEnabled: resolvedThinkingEnabled,
             thinkingBudget,
             effortLevel,
-            reasoningEffort,
+            reasoningEffort: resolvedReasoningEffort,
             reasoning,
             rerunFromScratch,
             readinessOverride,
@@ -1282,8 +1686,35 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         );
         const queuedTriggerOptions = JSON.stringify({ ...queuedBaseTriggerOptions, ...(triggerOptions ?? {}) });
         const queuedTaskManifestArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, auto_merge, include_graph, merge_strategy, agent, agent_type, agent_model, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, autoMerge ?? true, includeGraph ?? false, mergeStrategy ?? null, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, queuedTaskManifestArtifacts, queuedTriggerOptions]);
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
+          (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via,
+           auto_worktree, auto_merge, merge_strategy, include_graph, agent, agent_type, agent_model,
+           terminal_mode, execution_environment, branch_name, worktree_path, effective_options,
+           idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+          VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11,
+                  $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20::jsonb)
+          RETURNING id`, [
+          specPath,
+          workspaceId,
+          triggerType === 'scheduled' ? 'scheduled' : 'manual',
+          position,
+          effectiveAutoWorktreeRequest,
+          queuedAutoMerge,
+          queuedMergeStrategy,
+          includeGraph ?? false,
+          resolvedAgentType,
+          resolvedAgentType,
+          finalAgentModel,
+          resolvedTerminalMode,
+          resolvedExecutionEnvironment.effective,
+          queuedBranchName,
+          queuedWorktreePath,
+          JSON.stringify(queuedEffectiveOptions),
+          idempotencyKey ?? null,
+          manifestId ?? null,
+          queuedTaskManifestArtifacts,
+          queuedTriggerOptions,
+        ]);
         const queuedId = normalizeWorkerRunId(queueResult?.id);
 
         const executionReadiness = (req as any)._executionReadiness;
@@ -1295,6 +1726,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           terminalMode: resolvedTerminalMode,
           terminal_mode: resolvedTerminalMode,
           executionEnvironment: resolvedExecutionEnvironment.effective,
+          effectiveOptions: queuedEffectiveOptions,
           ...(idempotencyKey ? { idempotencyKey } : {}),
           ...(manifestId ? { manifestId } : {}),
           ...(taskManifestArtifacts ? { artifacts: taskManifestArtifacts } : {}),
@@ -1313,7 +1745,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       }
 
       // ── 4b. Run Now with autoWorktree: allow up to run_now_max_concurrent ──
-      if (autoWorktree) {
+      if (effectiveAutoWorktreeRequest) {
         const concurrencyRows = await query<{ key: string; value: string }>(
           `SELECT key, value FROM worker_settings WHERE key = 'run_now_max_concurrent'`,
         );
@@ -1376,6 +1808,41 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         );
         runId = normalizeWorkerRunId(runResult?.id);
       }
+      const piNativeEffectiveOptions = buildEffectiveRunOptions({
+        model: finalAgentModel,
+        effort: resolvedReasoningEffort,
+        autoWorktree: false,
+        worktreePath: null,
+        branchName: null,
+        mergeStrategy: mergeStrategy ?? 'branch-only',
+        autoMerge: false,
+        includeGraph: includeGraph ?? false,
+        terminal: resolvedTerminalMode,
+        policyLocked: false,
+        deploy: true,
+        externalSend: true,
+      });
+      await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
+        JSON.stringify(piNativeEffectiveOptions),
+        runId,
+      ]);
+      const piNativeSpec = JSON.parse(fs.readFileSync(path.join(workspace.path, specPath), 'utf8')) as Record<string, unknown>;
+      const piNativeManifests = await resolveAndPersistDispatchManifests({
+        workspaceId: workspace.id,
+        specId,
+        runId,
+        specJson: piNativeSpec,
+        cwd: workspace.path,
+        agent: resolvedAgentType,
+        model: finalAgentModel ?? null,
+        effort: resolvedReasoningEffort ?? effortLevel ?? null,
+        terminalMode: resolvedTerminalMode,
+        worktreePath: null,
+        branchName: null,
+        autoMerge: false,
+        mergeStrategy: mergeStrategy ?? 'branch-only',
+        parallelism: 1,
+      });
 
       const walEvent = await queryOne<WalEvent>(
         `INSERT INTO wal_events (event_type, workspace_id, spec_id, payload)
@@ -1409,6 +1876,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           task_manifest_artifacts: taskManifestArtifacts ?? null,
           trigger_options: triggerOptions,
         }) } : {}),
+        executionManifestPath: piNativeManifests.path,
+        executionManifestHashes: piNativeManifests.manifests.map((manifest) => manifest.manifestHash),
+        effectiveOptions: piNativeEffectiveOptions,
         specReadiness: (req as any)._specReadiness,
       });
       return;
@@ -1466,7 +1936,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     }
 
     // 5. Determine CWD — main workspace or new worktree
-    const needsWorktree = autoWorktree || orchestration?.mode === 'wave-parallel';
+    const needsWorktree = effectiveAutoWorktreeRequest || orchestration?.mode === 'wave-parallel';
     let cwd = workspace.path;
     let branchName: string | null = null;
     let worktreePath: string | null = null;
@@ -1511,8 +1981,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     //    If queuedRunId is provided, promote the existing queued row instead of inserting
     // A base-branch merge is opt-in. Worktree isolation alone must never imply
-    // permission to merge its branch back into the workspace.
-    const computedAutoMerge = needsWorktree && autoMerge === true;
+    // permission to merge its branch back into the workspace, and policy-locked
+    // autonomous runs cannot acquire merge authority from request defaults.
+    const computedAutoMerge = autonomousSafety.policyLocked
+      ? false
+      : needsWorktree && autoMerge === true;
 
     // Resolve merge strategy: request param > spec JSON > workspace config > 'direct'
     let resolvedMergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' = 'direct';
@@ -1536,6 +2009,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           }
         } catch { /* non-fatal */ }
       }
+    }
+
+    if (autonomousSafety.policyLocked) {
+      resolvedMergeStrategy = 'branch-only';
     }
 
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
@@ -1600,6 +2077,25 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
       runId = normalizeWorkerRunId(runResult?.id);
     }
+
+    const effectiveRunOptions = buildEffectiveRunOptions({
+      model: finalAgentModel,
+      effort: resolvedReasoningEffort,
+      autoWorktree: needsWorktree,
+      worktreePath,
+      branchName,
+      mergeStrategy: resolvedMergeStrategy,
+      autoMerge: computedAutoMerge,
+      includeGraph: includeGraph ?? false,
+      terminal: resolvedTerminalMode,
+      policyLocked: autonomousSafety.policyLocked,
+      deploy: autonomousSafety.deploy,
+      externalSend: autonomousSafety.externalSend,
+    });
+    await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
+      JSON.stringify(effectiveRunOptions),
+      runId,
+    ]);
 
     // 7. Queue only non-secret options. pg-boss persists its payload, so all
     // workspace values and provider credentials travel as opaque references and
@@ -1714,7 +2210,28 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       startFromStoryId = startFromStory?.id ?? undefined;
     } catch { /* spec read error — non-fatal, worker will handle */ }
 
-    // 10. Enqueue the pipeline run via pg-boss.
+    // 10. Resolve immutable per-story manifests before queue dispatch. The
+    // engine receives the resulting execution-only contract and does not
+    // recompute lifecycle evidence or command-safety policy from story prose.
+    const dispatchSpec = JSON.parse(fs.readFileSync(absSpecPath, 'utf8')) as Record<string, unknown>;
+    const manifestBundle = await resolveAndPersistDispatchManifests({
+      workspaceId: workspace.id,
+      specId: path.basename(specPath, '.json'),
+      runId,
+      specJson: dispatchSpec,
+      cwd,
+      agent: resolvedAgentType,
+      model: finalAgentModel ?? null,
+      effort: resolvedReasoningEffort ?? effortLevel ?? null,
+      terminalMode: resolvedTerminalMode,
+      worktreePath,
+      branchName,
+      autoMerge: computedAutoMerge,
+      mergeStrategy: resolvedMergeStrategy,
+      parallelism,
+    });
+
+    // 11. Enqueue the pipeline run via pg-boss.
     //     The worker process picks it up and does the actual spawn / execution.
     //     Job ID = String(runId) for direct lookup by runId.
     const resolvedJobEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(resolvedReasoningEffort ?? '')
@@ -1734,6 +2251,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
+      safetyOptions: {
+        deploy: autonomousSafety.deploy,
+        externalSend: autonomousSafety.externalSend,
+        policyLocked: autonomousSafety.policyLocked,
+      },
+      executionManifestPath: manifestBundle.path,
       envOverrides,
       secretReferences,
       ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
@@ -1804,6 +2327,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       agentModel: finalAgentModel,
       terminalMode: resolvedTerminalMode,
       terminal_mode: resolvedTerminalMode,
+      effectiveOptions: effectiveRunOptions,
       lifecycleStatus: 'queued',
       lifecycle_status: 'queued',
       lifecyclePhase: 'queued',
@@ -1819,13 +2343,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(canonicalReadiness ? { specReadiness: canonicalReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),
+      passReconciliation: (req as any)._passReconciliation,
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Trigger');
   }
 }
-
-router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigger);
 
 const TaskManifestTriggerRequestSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]).optional(),
@@ -4036,6 +4559,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       lifecycle_status: run.lifecycleStatus,
       lifecyclePhase: run.lifecyclePhase,
       lifecycle_phase: run.lifecyclePhase,
+      effectiveOptions: run.effective_options ?? null,
       // US-004: Expose worktree fields at top level for easy frontend access
       worktreePath: run.worktree_path || null,
       branchName: run.branch_name || null,
@@ -4048,6 +4572,44 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Get run');
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/liveness:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Classify a run from bounded runtime evidence
+ *     operationId: getPipelineRunLiveness
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only, run-scoped lifecycle evidence helps local CLI and MCP operators choose a safe recovery action."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: storyId
+ *         schema: { type: string }
+ *         description: Optionally limit story and completion evidence to one story.
+ *     responses:
+ *       200: { description: Bounded liveness classification and next safe action }
+ *       404: { description: Run not found }
+ */
+router.get('/runs/:runId/liveness', async (req: Request, res: Response) => {
+  try {
+    const runId = Number(req.params.runId);
+    if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+    const storyId = typeof req.query.storyId === 'string' && req.query.storyId.trim()
+      ? req.query.storyId.trim().slice(0, 200)
+      : undefined;
+    const classification = await classifyRunLiveness(runId, { storyId });
+    if (!classification) throw new NotFoundError('Run not found');
+    res.json(classification);
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Pipeline] Get run liveness');
   }
 });
 
@@ -4840,6 +5402,23 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
 // Accepts optional 'storyIds' array; when omitted, retries all failed stories.
 // Preserves original failed story_result rows for audit trail.
 
+const PipelineRetrySchema = z.object({
+  storyIds: z.array(z.string().trim().min(1).max(256)).max(100).optional(),
+  forceSequential: z.boolean().optional(),
+  previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+  approvalToken: z.string().trim().min(8).max(512).optional(),
+  cancelPreview: z.boolean().optional(),
+  safeMode: z.boolean().optional(),
+  approvedPreview: z.record(z.string(), z.unknown()).optional(),
+  previewIdentity: z.object({
+    schemaVersion: z.literal('retry-preview-identity.v1'),
+    previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    originalRunId: z.number().int().positive(),
+    expiresAt: z.string().datetime(),
+    signature: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  }).strict().optional(),
+}).strict();
+
 /**
  * @swagger
  * /api/pipeline/runs/{runId}/retry:
@@ -4848,9 +5427,9 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
  *     summary: Retry failed stories in a pipeline run via pg-boss job queue
  *     operationId: retryPipelineRun
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Retrying failed local stories is part of the stable open-source execution workflow and has no billing or admin side effects."
+ *     x-rorca-rationale: "Governed retry is part of the stable local automation contract; preview hashes, scope validation, and idempotency preserve safety without removing existing public CLI/MCP compatibility."
  *     x-rorca-public-api: true
- *     description: Re-executes failed stories from a completed or partially failed pipeline run, optionally filtering to specific story IDs. Enqueues a pipeline:retry pg-boss job; worker handles the actual spawn.
+ *     description: Two-phase governed retry. First call without previewHash returns a read-only exact packet plus expiring identity; dispatch recomputes scope and submits to the existing queue only when packet, identity, hash, policy, and replay key still match.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4869,12 +5448,33 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
  *               forceSequential:
  *                 type: boolean
  *                 description: Force the retry run to execute sequentially (parallelism = 1)
+ *               safeMode:
+ *                 type: boolean
+ *                 description: Explicitly preview branch-only/no-send safety changes instead of destructive option replay
+ *               previewHash:
+ *                 type: string
+ *                 description: Hash returned by the preview call and approved for dispatch
+ *               approvedPreview:
+ *                 type: object
+ *                 description: Exact packet returned by the read-only preview call
+ *               previewIdentity:
+ *                 type: object
+ *                 description: Unexpired self-verifying identity returned with the packet
+ *               approvalToken:
+ *                 type: string
+ *                 description: Existing explicit operator approval token required when the preview marks requiresApproval
+ *               cancelPreview:
+ *                 type: boolean
+ *                 description: Cancel this preview before dispatch
  *     responses:
- *       201: { description: "Retry job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, queued: { type: boolean }, jobId: { type: string }, runId: { type: integer } } } } } }
+ *       200: { description: "Governed retry preview, cancellation, or duplicate dispatch result" }
+ *       201: { description: "Approved retry job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, queued: { type: boolean }, runId: { type: integer }, previewHash: { type: string } } } } } }
  *       404: { description: "Run not found" }
  *       409: { description: "Retry job already queued for this run" }
  */
-router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
+router.post('/runs/:runId/retry', validateBody(PipelineRetrySchema), retryPipelineRunHandler);
+
+export async function retryPipelineRunHandler(req: Request, res: Response): Promise<void> {
   try {
     const originalRunId = parseInt(String(req.params.runId), 10);
     if (isNaN(originalRunId)) {
@@ -4882,7 +5482,17 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       return;
     }
 
-    const { storyIds, forceSequential } = req.body as { storyIds?: string[]; forceSequential?: boolean };
+    const { storyIds, forceSequential, previewHash, approvalToken, cancelPreview, safeMode, approvedPreview: approvedPreviewRaw, previewIdentity } = req.body as {
+      storyIds?: string[];
+      forceSequential?: boolean;
+      previewHash?: string;
+      approvalToken?: string;
+      cancelPreview?: boolean;
+      approvedPreview?: RetryPreviewPacket;
+      previewIdentity?: RetryPreviewIdentity;
+      /** Explicitly preview branch-only/no-send safety changes instead of replaying destructive options. */
+      safeMode?: boolean;
+    };
 
     // 1. Fetch the original run
     const originalRunRow = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [originalRunId]) as PipelineRunRow | undefined;
@@ -4894,10 +5504,27 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const originalRun = normalizePipelineRun(originalRunRow);
 
     // Only retry runs that have terminal failure states
-    if (!['failed', 'done', 'partial_failure'].includes(originalRun.status)) {
+    if (!['failed', 'done', 'completed', 'partial_failure'].includes(originalRun.status)) {
       throw new ConflictError(`Cannot retry run with status '${originalRun.status}'`);
       return;
     }
+
+    // Reconcile before reading retry scope, creating a retry run/temp spec, or
+    // sending a pg-boss job. This prevents copied results and stale false flags
+    // from causing already-proven work to run again.
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as
+      { id: string; label: string; path: string } | undefined;
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+      return;
+    }
+    const passReconciliation = await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)({
+      workspaceId: originalRun.workspace_id,
+      workspacePath: workspace.path,
+      specPath: originalRun.spec_path,
+    });
+    assertReconciliationAllowsAutomaticScope(passReconciliation);
+    const reconciliationByStory = new Map(passReconciliation.stories.map((story) => [story.storyId, story]));
 
     // 2. Find all stories and their latest status from the original run
     const allStories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [originalRunId]) as StoryResultRow[];
@@ -4934,9 +5561,19 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       }
     }
 
-    // Include both 'fail' and 'skip' (blocked) stories as retryable
-    const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail' || s.status === 'skip');
-    const passedStories = Array.from(latestByStory.values()).filter(s => s.status === 'pass');
+    // Include only failed/blocked rows whose current reconciled projection is
+    // still not passed. Safely repaired stale flags and excluded stories cannot
+    // enter retry scope.
+    const failedStories = Array.from(latestByStory.values()).filter((s) => {
+      const reconciliation = reconciliationByStory.get(s.story_id);
+      return (s.status === 'fail' || s.status === 'skip')
+        && reconciliation?.status === 'consistent-not-passed'
+        && !reconciliation.reasonCodes.includes('EXCLUDED_STORY');
+    });
+    const passedStories = Array.from(latestByStory.values()).filter((s) => {
+      const reconciliation = reconciliationByStory.get(s.story_id);
+      return s.status === 'pass' && reconciliation?.status === 'consistent-passed';
+    });
 
     if (failedStories.length === 0) {
       throw new UnprocessableError('No failed stories to retry');
@@ -4955,34 +5592,274 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       storiesToRetry = failedStories;
     }
 
-    // 4. Look up workspace
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as
-      { id: string; label: string; path: string } | undefined;
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
+    // 4. Classify reusable worktree state for the governed preview. Unsafe
+    // states are surfaced rather than silently reset or deleted.
+    let worktreePreflight = originalRun.worktree_path
+      ? validateReusableWorktree({
+        workspacePath: workspace.path,
+        worktreePath: originalRun.worktree_path,
+        expectedBranchName: originalRun.branch_name ?? null,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+      })
+      : null;
+
+    const originalEffectiveOptions = isEffectiveRunOptions(originalRun.effective_options)
+      ? originalRun.effective_options
+      : buildEffectiveRunOptions({
+      model: originalRun.agent_model ?? null,
+      effort: null,
+      autoWorktree: originalRun.auto_worktree ?? Boolean(originalRun.worktree_path),
+      worktreePath: originalRun.worktree_path ?? null,
+      branchName: originalRun.branch_name ?? null,
+      mergeStrategy: originalRun.merge_strategy ?? 'branch-only',
+      autoMerge: originalRun.auto_merge ?? false,
+      includeGraph: originalRun.include_graph ?? false,
+      terminal: originalRun.terminal_mode,
+      policyLocked: false,
+      // Missing/legacy option snapshots fail closed. Retry policy may preserve
+      // capabilities only when a complete host-authored snapshot proves them.
+      deploy: false,
+      externalSend: false,
+    });
+    // Canonical API metadata intentionally preserves Unknown for historical
+    // rows; retry execution still needs the legacy active-agent fallback.
+    const retryAgent = resolveDispatchAgent(originalRunRow.agent_type ?? originalRunRow.agent);
+    let retryModel = originalEffectiveOptions.model ?? originalRun.agent_model ?? null;
+    let retryEffort = originalEffectiveOptions.effort;
+    if (retryAgent === 'pi') {
+      const piStatus = piDetector.detectPi();
+      if (!piStatus.piInstalled || !piStatus.piBinPath) throw new ValidationError('pi_preflight:not_installed');
+      try {
+        const selection = preflightPiModelAndEffort(
+          retryModel,
+          retryEffort,
+          piDetector.listPiModels(piStatus.piBinPath),
+          DEFAULT_PI_MODEL,
+        );
+        retryModel = selection.model;
+        retryEffort = selection.effort;
+      } catch (error: unknown) {
+        if (error instanceof PiExecutionPreflightError) {
+          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+        }
+        throw error;
+      }
+    }
+
+    const absSpecPath = path.join(workspace.path, originalRun.spec_path);
+    if (!fs.existsSync(absSpecPath)) throw new UnprocessableError(`Spec file not found at ${absSpecPath}`);
+    const sourceSpecJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8')) as Record<string, unknown>;
+    const phaseStories = Array.isArray(sourceSpecJson.phases)
+      ? (sourceSpecJson.phases as Array<{ stories?: RetryPlanStory[] }>).flatMap((phase) => phase.stories ?? [])
+      : [];
+    const retryPlanStories = (Array.isArray(sourceSpecJson.userStories) ? sourceSpecJson.userStories : phaseStories) as RetryPlanStory[];
+    const retryStatuses: RetryPlanStatus[] = retryPlanStories.map((story) => {
+      const reconciled = reconciliationByStory.get(story.id);
+      const latest = latestByStory.get(story.id);
+      if (story.excluded || reconciled?.reasonCodes.includes('EXCLUDED_STORY')) return { storyId: story.id, status: 'excluded' };
+      if (story.skipped) return { storyId: story.id, status: 'skipped' };
+      if (reconciled?.status === 'consistent-passed') return { storyId: story.id, status: 'passed' };
+      if (latest && (latest.status === 'fail' || latest.status === 'skip')) return { storyId: story.id, status: 'failed' };
+      return { storyId: story.id, status: 'other' };
+    });
+    const retryScope = resolveRetryScope({ stories: retryPlanStories, statuses: retryStatuses, requestedStoryIds: storyIds });
+    if (retryScope.executable.length === 0) throw new UnprocessableError('No executable failed stories remain in the requested retry scope');
+    storiesToRetry = retryScope.executable
+      .map((entry) => latestByStory.get(entry.storyId))
+      .filter((entry): entry is StoryResultRow => Boolean(entry));
+
+    if (previewHash && worktreePreflight?.classification === 'stale_base' && originalRun.worktree_path) {
+      const refresh = safelyRefreshReusableWorktree({
+        workspacePath: workspace.path,
+        worktreePath: originalRun.worktree_path,
+        expectedBranchName: originalRun.branch_name ?? null,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+      });
+      await execute(
+        `UPDATE pipeline_retry_previews SET override_record = COALESCE(override_record, '{}'::jsonb) || $2::jsonb WHERE preview_hash = $1`,
+        [previewHash, JSON.stringify({ worktreeRefresh: refresh })],
+      );
+      worktreePreflight = validateReusableWorktree({
+        workspacePath: workspace.path,
+        worktreePath: originalRun.worktree_path,
+        expectedBranchName: originalRun.branch_name ?? null,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+      });
+    }
+
+    // Initial trigger and retry dispatch resolve the same host-enforced policy.
+    // Structured policy wins; spec prose (including `_notes`) is never authority.
+    const retrySafety = resolvePiRunSafetyOptions(originalRun.spec_path, sourceSpecJson, {
+      autoWorktree: originalEffectiveOptions.worktree.enabled,
+      autoMerge: originalEffectiveOptions.merge.autoMerge,
+      mergeStrategy: originalEffectiveOptions.merge.strategy,
+    });
+    const enforceSafeRetry = safeMode === true || retrySafety.policyLocked;
+    const replayedOptions: RetryExecutionOptions = {
+      agent: retryAgent,
+      model: retryModel,
+      effort: retryEffort,
+      terminalMode: originalRun.terminal_mode,
+      includeGraph: originalRun.include_graph ?? originalEffectiveOptions.graph.enabled,
+      worktree: {
+        ...originalEffectiveOptions.worktree,
+        enabled: retrySafety.autoWorktree,
+      },
+      merge: enforceSafeRetry
+        ? { strategy: 'branch-only', autoMerge: false }
+        : { strategy: retrySafety.mergeStrategy, autoMerge: retrySafety.autoMerge },
+      safety: {
+        deploy: enforceSafeRetry ? false : retrySafety.deploy,
+        externalSend: enforceSafeRetry ? false : retrySafety.externalSend,
+        policyLocked: retrySafety.policyLocked,
+        allowBackendJest: false,
+      },
+    };
+    const unsafeWorktree = worktreePreflight != null
+      && !['fresh', 'dirty_expected_work', 'stale_base'].includes(worktreePreflight.classification);
+    const destructiveReplay = replayedOptions.merge.autoMerge
+      || replayedOptions.merge.strategy === 'direct'
+      || replayedOptions.safety.deploy
+      || replayedOptions.safety.externalSend;
+    const highRisk = destructiveReplay || Boolean(worktreePreflight && worktreePreflight.classification !== 'fresh');
+    const retryPreview = createRetryPreview({
+      originalRunId,
+      scope: retryScope,
+      options: replayedOptions,
+      forceSequential: Boolean(forceSequential || highRisk),
+      requiresApproval: destructiveReplay || unsafeWorktree,
+    });
+    const scopeHash = retryHash(retryPreview.scope.executable.map((entry) => entry.storyId));
+
+    if (!previewHash) {
+      // Preview is deliberately read-only: no approval row, WAL record, run, or
+      // queue job exists until the caller dispatches this exact expiring packet.
+      const identity = createRetryPreviewIdentity(retryPreview);
+      res.status(200).json({ ok: true, preview: retryPreview, previewIdentity: identity, worktreePreflight, passReconciliation });
       return;
     }
 
-    if (originalRun.worktree_path) {
-      assertReusableWorktreeFresh(
-        workspace.path,
-        originalRun.worktree_path,
-        originalRun.branch_name ?? null,
+    if (!approvedPreviewRaw || !previewIdentity || !verifyRetryPreview(approvedPreviewRaw)) {
+      await postRetryWalEvent('ssdlc_retry_preview_denied', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        reason: 'missing_or_invalid_packet',
+      });
+      throw new ConflictError('Dispatch requires the exact self-verifying retry preview packet');
+    }
+    if (approvedPreviewRaw.previewHash !== previewHash || approvedPreviewRaw.originalRunId !== originalRunId) {
+      await postRetryWalEvent('ssdlc_retry_preview_denied', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        reason: 'mismatched_run_or_hash',
+      });
+      throw new ConflictError('Retry preview identity does not match the requested run/hash');
+    }
+    const identityCheck = verifyRetryPreviewIdentity(previewIdentity, approvedPreviewRaw);
+    if (!identityCheck.valid) {
+      await postRetryWalEvent('ssdlc_retry_preview_denied', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        reason: identityCheck.reason,
+      });
+      throw new ConflictError(
+        identityCheck.reason === 'expired' ? 'Retry preview has expired; generate a new preview' : 'Retry preview identity is invalid or mismatched',
+        { reason: identityCheck.reason },
       );
     }
-
-    // 5. Duplicate-job guard — check for an active pipeline:retry job for this runId.
-    //    Job IDs are retry-<runId>-<timestamp> so uniqueness alone won't block duplicates.
-    //    We query pgboss.job directly to find any active/created job for this runId.
-    const existingJob = await queryOne<{ id: string }>(
-      `SELECT id FROM pgboss.job WHERE name = 'pipeline:retry' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
-      [String(originalRunId)],
-    ).catch(() => undefined); // pgboss schema might not exist yet in test envs
-
-    if (existingJob) {
-      throw new ConflictError('A retry job for this run is already queued or active');
+    if (cancelPreview) {
+      res.json({ ok: true, cancelled: true, previewHash });
       return;
     }
+
+    const storedPreviewRow = await queryOne<{ packet: RetryPreviewPacket; status: string; retry_run_id: number | null; approval_token: string | null }>(
+      `SELECT packet, status, retry_run_id, approval_token
+       FROM pipeline_retry_previews WHERE preview_hash = $1 AND original_run_id = $2`,
+      [previewHash, originalRunId],
+    );
+    if (storedPreviewRow?.status === 'dispatched' && storedPreviewRow.retry_run_id) {
+      await emitLifecycleInvalidation({
+        workspaceId: originalRun.workspace_id,
+        specId: path.basename(originalRun.spec_path, '.json'),
+        runId: storedPreviewRow.retry_run_id,
+        changeKind: 'retry_dispatched',
+      });
+      res.status(200).json({ ok: true, queued: true, duplicate: true, runId: storedPreviewRow.retry_run_id, originalRunId, previewHash });
+      return;
+    }
+    if (storedPreviewRow && (storedPreviewRow.status === 'cancelled' || storedPreviewRow.status === 'refused')) {
+      throw new ConflictError('Retry preview is no longer dispatchable');
+    }
+    if (retryPreview.previewHash !== previewHash) {
+      await postRetryWalEvent('retry_scope_mismatch', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        approved_preview_hash: previewHash,
+        actual_preview_hash: retryPreview.previewHash,
+        approved_scope: approvedPreviewRaw.scope.executable,
+        actual_scope: retryPreview.scope.executable,
+      });
+      throw new ConflictError('Retry scope differs from the approved preview; generate a new preview');
+    }
+    const approvedPreview = approvedPreviewRaw;
+    if (approvedPreview.requiresApproval && !approvalToken) {
+      throw new ForbiddenError('Retry preview requires the existing explicit operator approval path before destructive options may be replayed');
+    }
+    if (unsafeWorktree) throw new ConflictError(`Worktree preflight requires operator action (${worktreePreflight?.classification})`);
+
+    const dispatchIdempotencyKey = req.get('Idempotency-Key')?.trim() || `retry:${previewHash}`;
+    const approvalClaim = await queryOne<{ preview_hash: string }>(
+      `INSERT INTO pipeline_retry_previews (
+         preview_hash, original_run_id, workspace_id, scope_hash, status, packet,
+         approval_token, preview_identity_hash, expires_at, idempotency_key, approved_at
+       ) VALUES ($1, $2, $3, $4, 'approved', $5::jsonb, $6, $7, $8, $9, NOW())
+       ON CONFLICT DO NOTHING
+       RETURNING preview_hash`,
+      [
+        previewHash,
+        originalRunId,
+        originalRun.workspace_id,
+        scopeHash,
+        JSON.stringify(approvedPreview),
+        approvalToken ? retryHash({ approvalToken }) : null,
+        retryHash(previewIdentity),
+        previewIdentity.expiresAt,
+        dispatchIdempotencyKey,
+      ],
+    );
+    if (!approvalClaim) {
+      const replay = await queryOne<{ preview_hash: string; retry_run_id: number | null; status: string }>(
+        `SELECT preview_hash, retry_run_id, status FROM pipeline_retry_previews
+         WHERE workspace_id = $1 AND idempotency_key = $2`,
+        [originalRun.workspace_id, dispatchIdempotencyKey],
+      );
+      if (replay?.status === 'dispatched' && replay.retry_run_id) {
+        await emitLifecycleInvalidation({
+          workspaceId: originalRun.workspace_id,
+          specId: path.basename(originalRun.spec_path, '.json'),
+          runId: replay.retry_run_id,
+          changeKind: 'retry_dispatched',
+        });
+        res.status(200).json({ ok: true, queued: true, duplicate: true, runId: replay.retry_run_id, originalRunId, previewHash });
+        return;
+      }
+      if (!replay || replay.preview_hash !== previewHash) {
+        throw new ConflictError('Retry dispatch Idempotency-Key was reused with a different preview');
+      }
+      // The unique preview/idempotency claim is the single dispatch owner. A
+      // concurrent/restart replay must never create a second run while that
+      // owner is still approved but not durably marked dispatched.
+      throw new ConflictError('Retry preview dispatch is already in progress; replay after its durable queue outcome');
+    }
+
+    // 5. Duplicate-job guard — check for an active pipeline:retry job for this run and scope.
+    //    Correlation stays in job data; pg-boss owns and generates the UUID id.
+    const existingJob = await queryOne<{ id: string; run_id: string | null }>(
+      `SELECT id::text, data->>'runId' AS run_id FROM pgboss.job
+       WHERE name = 'pipeline:retry'
+         AND data->>'originalRunId' = $1
+         AND data->>'scopeHash' = $2
+         AND state IN ('created', 'active', 'retry')
+       LIMIT 1`,
+      [String(originalRunId), scopeHash],
+    ).catch(() => undefined);
+    if (existingJob) throw new ConflictError('An active retry job already owns this approved scope');
 
     // 6. Capture sequenceOffset BEFORE creating the new run row to avoid race conditions
     //    between two simultaneous retry requests. The worker starts chunks at sequenceOffset + 1.
@@ -4992,81 +5869,50 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     );
     const sequenceOffset = seqRow?.max_seq ?? 0;
 
-    const originalTriggerOptions = (() => {
-      const raw = originalRun.trigger_options;
-      if (!raw) return {} as Record<string, unknown>;
-      if (typeof raw === 'string') {
-        try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {} as Record<string, unknown>; }
-      }
-      return raw;
-    })();
-    const isAgentType = (value: unknown): value is AgentType =>
-      value === 'claude' || value === 'opencode' || value === 'codex' || value === 'pi';
-    const isMergeStrategy = (value: unknown): value is 'direct' | 'pr' | 'draft-pr' | 'branch-only' =>
-      value === 'direct' || value === 'pr' || value === 'draft-pr' || value === 'branch-only';
-    const retryAgent: AgentType = isAgentType(originalRun.agent_type)
-      ? originalRun.agent_type
-      : isAgentType(originalRun.agent)
-        ? originalRun.agent
-        : 'claude';
-    const retryModel = originalRun.agent_model ?? null;
-    const retryTerminalMode = normalizeTerminalMode(originalRun.terminal_mode);
-    const retryParallelism = isPtyTerminalMode(retryTerminalMode) ? 1 : (forceSequential ? 1 : (originalRun.parallelism ?? 1));
-    const retryAutoWorktree = Boolean(originalRun.auto_worktree ?? originalRun.worktree_path);
-    const retryAutoMerge = Boolean(originalRun.auto_merge);
-    const retryIncludeGraph = Boolean(originalRun.include_graph);
-    const retryMergeStrategy = isMergeStrategy(originalRun.merge_strategy)
-      ? originalRun.merge_strategy
-      : 'direct';
-    const retryThinkingEnabled = typeof originalTriggerOptions.thinkingEnabled === 'boolean'
-      ? originalTriggerOptions.thinkingEnabled
-      : undefined;
-    const retryThinkingBudget = typeof originalTriggerOptions.thinkingBudget === 'number'
-      ? originalTriggerOptions.thinkingBudget
-      : undefined;
-    const retryEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(String(originalTriggerOptions.effortLevel ?? ''))
-      ? originalTriggerOptions.effortLevel as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
-      : undefined;
-    const retryReasoningEffort = typeof originalTriggerOptions.reasoningEffort === 'string'
-      ? originalTriggerOptions.reasoningEffort
-      : undefined;
-    const retryBaseTriggerOptions = { ...originalTriggerOptions };
-    delete retryBaseTriggerOptions.orchestration;
-
-    // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id.
-    //    Preserve the original run's engine/options so retry cannot silently fall
-    //    back to the process-global activeAgent/activeModel.
+    // 7. Create a NEW pipeline_run linked to the original while preserving the
+    // host-enforced model, effort, worktree, merge, graph, terminal, and safety options.
+    const retryTerminalMode = normalizeTerminalMode(approvedPreview.options.terminalMode);
+    const retryParallelism = isPtyTerminalMode(retryTerminalMode)
+      ? 1
+      : approvedPreview.forceSequential ? 1 : (originalRun.parallelism ?? 1);
+    const retryEffectiveOptions: EffectiveRunOptions = {
+      ...originalEffectiveOptions,
+      model: approvedPreview.options.model,
+      effort: approvedPreview.options.effort,
+      worktree: { ...approvedPreview.options.worktree },
+      merge: { ...approvedPreview.options.merge },
+      graph: { enabled: approvedPreview.options.includeGraph },
+      terminal: retryTerminalMode,
+      safety: { ...originalEffectiveOptions.safety, ...approvedPreview.options.safety },
+    };
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
-       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id,
-        parallelism, agent, agent_type, agent_model, auto_worktree, auto_merge, include_graph,
-        merge_strategy, terminal_mode, triggered_via, trigger_options)
-       VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'run_now', $15::jsonb)
-       RETURNING id`, [
+      (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
+       retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
+       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options)
+      VALUES ($1, $2, 'queued', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
+              $11, $12, $13, $14, $15::jsonb)
+      RETURNING id`, [
       originalRun.spec_path,
       originalRun.workspace_id,
       originalRun.branch_name,
       originalRun.worktree_path,
       originalRunId,
       retryParallelism,
-      retryAgent,
-      retryAgent,
-      retryModel,
-      retryAutoWorktree,
-      retryAutoMerge,
-      retryIncludeGraph,
-      retryMergeStrategy,
       retryTerminalMode,
-      JSON.stringify({
-        ...retryBaseTriggerOptions,
-        forceSequential: forceSequential === true ? true : originalTriggerOptions.forceSequential,
-        agentOverride: retryAgent,
-        modelOverride: retryModel ?? undefined,
-        includeGraph: retryIncludeGraph,
-        terminal_mode: retryTerminalMode,
-        mergeStrategy: retryMergeStrategy,
-      }),
+      approvedPreview.options.agent,
+      approvedPreview.options.agent,
+      approvedPreview.options.model,
+      approvedPreview.options.worktree.enabled,
+      approvedPreview.options.merge.autoMerge,
+      approvedPreview.options.includeGraph,
+      approvedPreview.options.merge.strategy,
+      JSON.stringify(retryEffectiveOptions),
     ]);
     const newRunId = normalizeWorkerRunId(newRunResult!.id);
+    await execute(
+      `UPDATE pipeline_retry_previews SET retry_run_id = $2 WHERE preview_hash = $1 AND status = 'approved'`,
+      [previewHash, newRunId],
+    );
 
     // 8. Copy successful story results from the original run to the new run
     for (const passed of passedStories) {
@@ -5111,25 +5957,10 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       retriedStoryInfo.push({ storyId: story.story_id, attempt });
     }
 
-    // Emit run_started WAL event for the new retry run
-    const runStartEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_started', $1, $2)` + ' RETURNING *', [originalRun.workspace_id, JSON.stringify({
-      run_id: newRunId,
-      spec_path: originalRun.spec_path,
-      retried_from_run_id: originalRunId,
-      retried_stories: storiesToRetry.map(s => s.story_id),
-    })]);
-    broadcastAll(runStartEvent!);
-
     // 10. Read the original spec and write a temporary retry spec.
     //     Include all stories so dependency resolution works correctly — passed stories
     //     (passes:true) are skipped naturally by the engine.
-    const absSpecPath = path.join(workspace.path, originalRun.spec_path);
-    if (!fs.existsSync(absSpecPath)) {
-      throw new UnprocessableError(`Spec file not found at ${absSpecPath}`);
-      return;
-    }
-
-    const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+    const specJson = buildGovernedRetrySpec(sourceSpecJson, approvedPreview.scope);
     const retrySpecName = `retry-${newRunId}-${Date.now()}.json`;
     const retrySpecDir = path.join(workspace.path, 'forge', 'specs', 'approved');
     const retrySpecPath = path.join(retrySpecDir, retrySpecName);
@@ -5145,60 +5976,123 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       providers: ['anthropic', 'openai-compat', 'openrouter'],
     });
 
-    // 12. Validate job payload with Zod before sending to pg-boss.
-    //     Invalid payloads must throw here — pg-boss failure handling is not a substitute.
-    const PipelineRetryJobPayloadSchema = z.object({
-      runId: z.number().int().positive(),
-      originalRunId: z.number().int().positive(),
-      storyIds: z.array(z.string()),
-      workspacePath: z.string().min(1),
-      specPath: z.string().min(1),
-      retrySpecPath: z.string().min(1),
-      agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
-      model: z.string().nullable(),
-      worktreePath: z.string().nullable(),
-      sequenceOffset: z.number().int().min(0),
-      envOverrides: z.record(z.string(), z.string()),
-      secretReferences: z.object({
-        version: z.literal('v1'), workspaceId: z.string(), vaultUserId: z.string().optional(),
-        providers: z.array(z.enum(['anthropic', 'openrouter', 'openai-compat'])), includeWorkspaceEnv: z.literal(true),
-      }).strict(),
-      includeGraph: z.boolean().optional().default(false),
-      terminalMode: z.enum(['ansi-html', 'pty', 'native-pty']).optional().default('ansi-html'),
-      thinkingEnabled: z.boolean().optional(),
-      thinkingBudget: z.number().int().positive().optional(),
-      effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
-      reasoningEffort: z.string().optional(),
+    // Reuse the existing pre-run approval path. Explicit approval tokens are
+    // audit claims, not a bypass for a failing workspace hook. Resolve secrets
+    // only for the hook process; decrypted values never enter the queue payload.
+    const retryHookSecrets = await resolveExecutionSecrets(secretReferences);
+    const retryHookResults = await runHooks(
+      originalRun.workspace_id,
+      'pre_run',
+      approvedPreview.options.worktree.path ?? workspace.path,
+      { ...retryHookSecrets, ...envOverrides },
+    );
+    const failedRetryHook = retryHookResults.find((result) => result.exitCode !== 0);
+    if (failedRetryHook) {
+      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'pre_run_hook_failed' WHERE preview_hash = $1`, [previewHash]);
+      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'pre_run_hook_failed' WHERE id = $1`, [newRunId]);
+      throw new ForbiddenError(`Retry pre-run approval hook failed: ${failedRetryHook.command}`);
+    }
+
+    // 12. Resolve retry manifests from the same immutable policy/profile inputs
+    // before dispatch. Retry gets a new run identity; prior failed attempts stay
+    // attached to the original run for audit.
+    const retryCwd = approvedPreview.options.worktree.path ?? workspace.path;
+    const parentManifestRevisions = await query<{ story_id: string; spec_revision: string; story_revision: string }>(
+      `SELECT DISTINCT ON (story_id) story_id, spec_revision, story_revision
+       FROM story_execution_manifests
+       WHERE run_id = $1 AND story_id = ANY($2::text[])
+       ORDER BY story_id, attempt DESC`,
+      [originalRunId, approvedPreview.scope.executable.map((entry) => entry.storyId)],
+    );
+    const frozenRevisionsByStory = new Map(parentManifestRevisions.map((row) => [row.story_id, {
+      specRevision: row.spec_revision,
+      storyRevision: row.story_revision,
+    }]));
+    const attemptByStory = new Map(retriedStoryInfo.map((story) => [story.storyId, story.attempt + 1]));
+    const retryManifests = await resolveAndPersistDispatchManifests({
+      workspaceId: workspace.id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      runId: Number(newRunId),
+      specJson,
+      cwd: retryCwd,
+      agent: approvedPreview.options.agent,
+      model: approvedPreview.options.model,
+      effort: approvedPreview.options.effort,
+      terminalMode: retryTerminalMode,
+      worktreePath: approvedPreview.options.worktree.path,
+      branchName: approvedPreview.options.worktree.branch,
+      autoMerge: approvedPreview.options.merge.autoMerge,
+      mergeStrategy: approvedPreview.options.merge.strategy,
+      parallelism: retryParallelism,
+      frozenRevisionsByStory,
+      attemptByStory,
     });
 
-    const jobPayload = PipelineRetryJobPayloadSchema.parse({
+    // 13. Recompute the actual generated execution plan immediately before
+    // dispatch. Neither manifests nor prompt prose can widen this frozen scope.
+    const planComparison = compareRetryPlanToPreview(specJson, approvedPreview);
+    if (!planComparison.matches) {
+      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'generated_plan_mismatch' WHERE preview_hash = $1`, [previewHash]);
+      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'retry_scope_mismatch' WHERE id = $1`, [newRunId]);
+      await postRetryWalEvent('retry_scope_mismatch', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        retry_run_id: newRunId,
+        preview_hash: previewHash,
+        approved_scope: planComparison.approved,
+        actual_scope: planComparison.actual,
+      });
+      throw new ConflictError('Generated retry execution plan differs from the approved preview');
+    }
+
+    const jobPayload = PipelineRetryJobPayload.parse({
       runId: Number(newRunId),
       originalRunId,
-      storyIds: storiesToRetry.map(s => s.story_id),
+      storyIds: planComparison.actual,
+      scopeHash,
+      previewHash,
+      approvedPreview: approvedPreview as unknown as Record<string, unknown>,
+      generatedPlanHash: planComparison.scopeHash,
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
       retrySpecPath,
-      agent: retryAgent,
-      model: retryModel,
-      worktreePath: originalRun.worktree_path ?? null,
+      agent: approvedPreview.options.agent,
+      model: approvedPreview.options.model,
+      worktreePath: approvedPreview.options.worktree.path,
+      branchName: approvedPreview.options.worktree.branch,
+      terminalMode: normalizeTerminalMode(approvedPreview.options.terminalMode),
       sequenceOffset,
+      executionManifestPath: retryManifests.path,
       envOverrides,
       secretReferences,
-      includeGraph: retryIncludeGraph,
-      terminalMode: retryTerminalMode,
-      ...(retryThinkingEnabled !== undefined ? { thinkingEnabled: retryThinkingEnabled } : {}),
-      ...(retryThinkingBudget !== undefined ? { thinkingBudget: retryThinkingBudget } : {}),
-      ...(retryEffortLevel ? { effortLevel: retryEffortLevel } : {}),
-      ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
+      includeGraph: approvedPreview.options.includeGraph,
+      ...(approvedPreview.options.effort ? { effortLevel: approvedPreview.options.effort } : {}),
     });
 
-    // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
-    await getBoss().send('pipeline:retry', jobPayload, {
+    // 14. Enqueue through the existing queue. Explicit queue creation is
+    // idempotent and pg-boss generates the UUID; runId remains payload data.
+    const boss = getBoss();
+    await boss.createQueue('pipeline:retry');
+    const bossJobId = await boss.send('pipeline:retry', jobPayload, {
       retryLimit: 0,
-      expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
+      expireInSeconds: 300,
     });
+    if (!bossJobId) {
+      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'pgboss_send_returned_null' WHERE preview_hash = $1`, [previewHash]);
+      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'retry_dispatch_failed' WHERE id = $1`, [newRunId]);
+      throw new ServiceUnavailableError('Retry queue rejected dispatch');
+    }
+    await execute(
+      `UPDATE pipeline_retry_previews SET status = 'dispatched', retry_run_id = $2, boss_job_id = $3::uuid, dispatched_at = NOW() WHERE preview_hash = $1 AND status = 'approved'`,
+      [previewHash, newRunId, bossJobId],
+    );
 
     logger.info(`[Pipeline] Enqueued pipeline:retry job for newRunId=${newRunId} (originalRunId=${originalRunId})`);
+    await emitLifecycleInvalidation({
+      workspaceId: originalRun.workspace_id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      runId: newRunId,
+      changeKind: 'retry_dispatched',
+    });
 
     res.status(201).json({
       ok: true,
@@ -5206,13 +6100,17 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       runId: newRunId,
       originalRunId,
       queuePosition: 1,
+      previewHash,
+      scopeHash,
       retriedStories: retriedStoryInfo,
       copiedStories: passedStories.map(s => s.story_id),
+      effectiveOptions: retryEffectiveOptions,
+      passReconciliation,
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Retry');
   }
-});
+}
 
 // ─── POST /api/pipeline/runs/:runId/retry-merge — Retry a failed worktree merge ─
 // Re-enqueues the merge job for a run whose merge_status is 'failed'.
@@ -6394,6 +7292,8 @@ async function recordTokenUsage(
  *     tags: [Pipeline]
  *     summary: Record a story outcome from the execution engine
  *     operationId: recordStoryResult
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Internal execution-engine closeout write — operator-only because it mutates canonical story result metadata."
  *     description: Called by run-loop.ts or execution-engine.ts to insert a story_results row after a story finishes. Also records token usage into the analytics table when tokens are present.
  *     requestBody:
  *       required: true
@@ -6408,6 +7308,8 @@ async function recordTokenUsage(
  *               status: { type: string, enum: [pass, fail, skip, excluded] }
  *               worktreePath: { type: string, nullable: true }
  *               worktreeBranch: { type: string, nullable: true }
+ *               commitSha: { type: string, nullable: true, description: "Host-observed story/worktree branch commit" }
+ *               commitMessage: { type: string, nullable: true }
  *               inputTokens: { type: integer, nullable: true }
  *               outputTokens: { type: integer, nullable: true }
  *               modelUsed: { type: string, nullable: true }
@@ -6415,6 +7317,7 @@ async function recordTokenUsage(
  *               logPath: { type: string, nullable: true }
  *               blockedBy: { type: array, items: { type: string }, nullable: true }
  *               activeSkills: { type: array, items: { type: string }, nullable: true }
+ *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
  *     responses:
  *       201: { description: "Story result recorded" }
  *       400: { description: "Missing required fields or invalid status" }
@@ -6423,14 +7326,15 @@ async function recordTokenUsage(
 router.post('/story-result', async (req: Request, res: Response) => {
   try {
     const {
-      runId, storyId, status, worktreePath, worktreeBranch,
+      runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills, idempotencyKey,
+      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
-      worktreePath?: string; worktreeBranch?: string;
+      worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
       inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
+      completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
     };
 
@@ -6444,8 +7348,53 @@ router.post('/story-result', async (req: Request, res: Response) => {
       return;
     }
 
-    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills, ingest_key)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    if (commitSha && !/^[0-9a-f]{40}$/i.test(commitSha)) {
+      throw new ValidationError('commitSha must be a full git SHA');
+    }
+    if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
+      throw new ValidationError('completionPacket must be an object');
+    }
+
+    const projection = await queryOne<{
+      workspace_id: string;
+      spec_path: string;
+      branch_name: string | null;
+      manifest_hash: string | null;
+      spec_revision: string | null;
+      story_revision: string | null;
+      closeout_decision_id: string | null;
+    }>(`
+      SELECT pr.workspace_id, pr.spec_path, pr.branch_name,
+             sem.manifest_hash, sem.spec_revision, sem.story_revision,
+             scd.decision_id AS closeout_decision_id
+      FROM pipeline_runs pr
+      LEFT JOIN LATERAL (
+        SELECT manifest_hash, spec_revision, story_revision
+        FROM story_execution_manifests
+        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
+        ORDER BY attempt DESC, created_at DESC LIMIT 1
+      ) sem ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT decision_id
+        FROM story_closeout_decisions
+        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
+          AND manifest_hash = sem.manifest_hash
+        ORDER BY attempt DESC, created_at DESC LIMIT 1
+      ) scd ON TRUE
+      WHERE pr.id = $1
+    `, [runId, storyId]);
+    if (!projection) throw new NotFoundError('Pipeline run not found');
+    const specId = path.basename(projection.spec_path, '.json');
+
+    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (
+         run_id, story_id, status, finished_at, worktree_path, worktree_branch,
+         input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by,
+         active_skills, completion_packet, spec_id, spec_revision, story_revision,
+         manifest_hash, closeout_decision_id, ingest_key
+       ) VALUES (
+         $1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
+         $14, $15, $16, $17, $18, $19
+       )
        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
        RETURNING id`, [runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
@@ -6454,7 +7403,31 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
       activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
-      idempotencyKey ?? null,]);
+      completionPacket ? JSON.stringify(completionPacket) : null,
+      specId,
+      projection.spec_revision,
+      projection.story_revision,
+      projection.manifest_hash,
+      projection.closeout_decision_id,
+      idempotencyKey ?? null,
+    ]);
+
+    if (inserted && status === 'pass' && commitSha) {
+      await execute(`
+        INSERT INTO story_commits (
+          story_id, spec_id, workspace_id, run_id, commit_sha, commit_message, author, pushed_at, branch_name, observed_source
+        ) VALUES ($1,$2,$3,$4,$5,$6,'rorca-execution-engine',NOW(),$7,'worktree_branch')
+        ON CONFLICT DO NOTHING
+      `, [
+        storyId,
+        specId,
+        projection.workspace_id,
+        runId,
+        commitSha,
+        commitMessage?.trim() || `story(${storyId}): host-observed output`,
+        worktreeBranch ?? projection.branch_name,
+      ]);
+    }
 
     // Only the first ingest records analytics. A retry after a response timeout
     // returns the original logical result without double-accounting.
@@ -7992,6 +8965,25 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
     if (!newRunRow) throw new Error('Failed to create new run row');
     const newRunId = normalizeWorkerRunId(newRunRow.id);
 
+    const dlqCwd = originalRun.worktree_path ?? workspace.path;
+    const dlqSpec = JSON.parse(fs.readFileSync(path.join(workspace.path, originalRun.spec_path), 'utf8')) as Record<string, unknown>;
+    const dlqManifests = await resolveAndPersistDispatchManifests({
+      workspaceId: originalRun.workspace_id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      runId: newRunId,
+      specJson: dlqSpec,
+      cwd: dlqCwd,
+      agent: retryAgent,
+      model: originalRun.agent_model ?? null,
+      effort: null,
+      terminalMode: normalizeTerminalMode(originalRun.terminal_mode),
+      worktreePath: originalRun.worktree_path ?? null,
+      branchName: originalRun.branch_name ?? null,
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      parallelism: 1,
+    });
+
     // Build the job payload (mirrors pipeline:trigger payload shape)
     const jobPayload = {
       runId: newRunId,
@@ -8004,6 +8996,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       terminalMode: normalizeTerminalMode(originalRun.terminal_mode),
       autoWorktree: false,
       autoMerge: false,
+      executionManifestPath: dlqManifests.path,
       envOverrides: {},
     };
 

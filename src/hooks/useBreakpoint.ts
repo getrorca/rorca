@@ -10,15 +10,15 @@ import { useState, useEffect } from 'react';
 export type Breakpoint = 'mobile' | 'tablet' | 'desktop';
 
 const MOBILE_MAX = 639;   // < 640px
-const TABLET_MAX = 1023;  // 640px–1023px
-// desktop = >= 1024px
+const TABLET_MAX = 1024;  // 640px–1024px (the canonical tablet QA viewport is 1024×768)
+// desktop = >= 1025px
 
 /**
  * Returns the current responsive breakpoint: 'mobile' | 'tablet' | 'desktop'.
  * Updates reactively via matchMedia listeners.
  */
 export function useBreakpoint(): Breakpoint {
-  const [bp, setBp] = useState<Breakpoint>(() => classify(window.innerWidth));
+  const [bp, setBp] = useState<Breakpoint>(() => classifyBreakpoint(window.innerWidth));
 
   useEffect(() => {
     const mqlMobile = window.matchMedia(`(max-width: ${MOBILE_MAX}px)`);
@@ -43,9 +43,9 @@ export function useBreakpoint(): Breakpoint {
   return bp;
 }
 
-function classify(w: number): Breakpoint {
-  if (w <= MOBILE_MAX) return 'mobile';
-  if (w <= TABLET_MAX) return 'tablet';
+export function classifyBreakpoint(width: number): Breakpoint {
+  if (width <= MOBILE_MAX) return 'mobile';
+  if (width <= TABLET_MAX) return 'tablet';
   return 'desktop';
 }
 

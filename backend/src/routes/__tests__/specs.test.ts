@@ -15,6 +15,8 @@ import { query, queryOne, execute } from '../../db/index';
 import { updateJobStatus } from '../../db/spec-jobs';
 import { advancePersistPostSaveDependencies, syncPersistPostSaveStageFromJob } from '../../lib/spec-post-save';
 import { SpecReadinessReasonCode } from '../../reason-codes';
+import { adaptCanonicalStoriesToAuthoringDraft } from '../../lib/ssdlc-forge-authoring';
+import { planAuthoring } from '../../lib/ssdlc-authoring-planner';
 
 /** pg returns jsonb columns as already-parsed objects; this handles both cases */
 function parsePayload(p: unknown): Record<string, unknown> {
@@ -288,6 +290,73 @@ test('POST /api/specs/generation-context returns a prompt bundle for skill-first
   expect(typeof res.body.prompt).toBe('string');
   expect(res.body.prompt).toContain('Spec brief: Draft a context-aware spec');
   expect(res.body.contextSummary).toBeDefined();
+  expect(res.body.lifecycleAuthoring).toMatchObject({
+    schemaVersion: 1,
+    profileVersion: 'ssdlc-lifecycle-authoring-1',
+    status: 'ready',
+    decompositionPolicy: {
+      defaultDecision: 'one_spec_unless_independent_boundary_is_proven',
+      maximumSpecs: 12,
+    },
+    preflightContract: { maximumRevisionAttempts: 3 },
+    authorityBoundary: {
+      evaluatedLifecycleStatus: 'forbidden',
+      completionEvidence: 'forbidden',
+      executionDispatch: 'forbidden',
+    },
+  });
+  expect(res.body.lifecycleAuthoring.normalizedIntentIdentity.normalizedIntentHash).toMatch(/^sha256:/);
+  expect(res.body.lifecycleAuthoring.requiredPhaseObligations).toHaveLength(11);
+  expect(res.body.lifecycleAuthoring.requiredStoryCapabilities.length).toBeGreaterThan(0);
+});
+
+test('POST /api/specs/authoring/preflight returns accepted deterministic identity for a complete one-spec draft', async () => {
+  const contextRes = await request(app)
+    .post('/api/specs/generation-context')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({ workspaceId: 'ws-test', title: 'Preflight Route', brief: 'Users can authenticate and recover safely' });
+  expect(contextRes.status).toBe(200);
+  const plannerInput = contextRes.body.lifecycleAuthoring.plannerInputSeed;
+  const planning = planAuthoring(plannerInput);
+  expect(planning.acceptedPlan).not.toBeNull();
+  const canonical = JSON.parse(validLlmResponse).stories;
+  const specs = adaptCanonicalStoriesToAuthoringDraft(planning.acceptedPlan!, [{
+    specReference: planning.acceptedPlan!.specBoundaries[0].specReference,
+    stories: canonical,
+  }]);
+
+  const res = await request(app)
+    .post('/api/specs/authoring/preflight')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      schemaVersion: 1,
+      workspaceId: 'ws-test',
+      plannerInput,
+      specs,
+      attempt: 1,
+      priorAttempts: [],
+      callerSurface: 'test.specs-route',
+      model: 'test-model',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.state).toBe('accepted');
+  expect(res.body.acceptedPlanHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+  expect(res.body.acceptedPreflightHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+  expect(res.body.preflightReceiptId).toEqual(expect.any(Number));
+  expect(res.body.inspection).toMatchObject({ exactSpecCount: 1 });
+  expect(res.body.preflight.draftMutationCount).toBe(0);
+  expect(res.body.executionAuthority).toBe('none');
+  const event = await queryOne<{ payload: unknown }>(
+    `SELECT payload FROM wal_events WHERE event_type = 'spec_authoring_preflight' ORDER BY id DESC LIMIT 1`,
+  );
+  expect(parsePayload(event!.payload)).toMatchObject({
+    authoringProfileVersion: 'ssdlc-lifecycle-authoring-1',
+    proposedSpecCount: 1,
+    acceptedSpecCount: 1,
+    preflightAttemptCount: 1,
+    persistenceOutcome: 'not_started',
+  });
 });
 
 test('POST /api/specs/forge uses Pi drafting and persists via the explicit-draft path', async () => {
@@ -854,6 +923,13 @@ describe('POST /api/specs/persist', () => {
     expect(saved.source).toBe('explicit-draft');
     expect(saved.userStories).toHaveLength(2);
     expect(saved.contextUsed).toBeUndefined();
+    expect(saved.authoring).toMatchObject({
+      state: 'needs_authoring_preflight',
+      approvalReady: false,
+      reasonCode: 'needs_authoring_preflight',
+      storiesRewritten: false,
+    });
+    expect(res.body.authoring).toEqual(saved.authoring);
     expect(saved.contextSummary).toBeUndefined();
     expect(saved.postSavePolicy).toMatchObject({
       callerPolicy: { enrich: false, matchSkills: false, memorySynthesis: false },

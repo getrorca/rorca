@@ -1,0 +1,36 @@
+{
+  "name": "low-risk docs",
+  "input": {
+    "schemaVersion": 1,
+    "workspaceId": "workspace-docs",
+    "canonicalSpec": {
+      "specId": "fixture-docs-only",
+      "version": "3",
+      "contentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "json": {
+        "title": "Document the lifecycle contract",
+        "tags": ["documentation"],
+        "contextSummary": { "predictedFiles": ["docs/ssdlc-lifecycle.md"] },
+        "userStories": [{
+          "id": "FIX-DOCS-001",
+          "title": "Publish lifecycle documentation",
+          "description": "Update documentation without runtime behavior changes.",
+          "acceptanceCriteria": ["The lifecycle reference is accurate, linked, and reviewable."],
+          "tags": ["docs"],
+          "fileHints": ["README.md"]
+        }]
+      }
+    },
+    "compilerVersion": "ssdlc-plan-compiler-1",
+    "policyVersion": "fixture-policy-1",
+    "compiledAt": "2026-06-15T12:00:00.000Z"
+  },
+  "expected": {
+    "profiles": ["docs-only"],
+    "notApplicablePhases": ["architecture", "security", "staging", "qa", "production"],
+    "capabilityHint": null,
+    "acceptedAnnotations": [],
+    "rejectedAnnotations": [],
+    "defaultedInputs": ["workspaceTags", "riskAssignments", "ownerAssignments", "policyAnnotations", "compilerAnnotations"]
+  }
+}

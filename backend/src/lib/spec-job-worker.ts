@@ -229,7 +229,7 @@ export async function registerSpecJobHandlers(boss: PgBoss): Promise<void> {
   );
   await boss.work(SPEC_MATCH_SKILLS_QUEUE, { batchSize: 1 }, (jobs) =>
     handleSpecJobs(jobs, SPEC_MATCH_SKILLS_QUEUE, (payload, onProgress) =>
-      runMatchSkillsJob(payload.workspaceId, payload.specId, onProgress),
+      runMatchSkillsJob(payload.workspaceId, payload.specId, onProgress, { jobId: payload.jobId }),
     ),
   );
   await boss.work(SPEC_MEMORY_SYNTHESIS_QUEUE, { batchSize: 1 }, (jobs) =>

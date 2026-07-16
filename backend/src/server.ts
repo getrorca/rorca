@@ -137,6 +137,11 @@ import {
 } from './lib/mcp-auth';
 import { summarizeRorcaTiers } from './lib/tier-auth';
 import { planGate } from './lib/plan-gate';
+import lifecycleRouter from './routes/lifecycle';
+import lifecycleEvidenceRouter from './routes/lifecycle-evidence';
+import lifecycleDecisionsRouter from './routes/lifecycle-decisions';
+import lifecycleMutationsRouter from './routes/lifecycle-mutations';
+import { startSsdlcEvidenceNormalizer } from './lib/ssdlc-evidence-subscriber';
 import { randomUUID } from 'crypto';
 
 
@@ -466,6 +471,10 @@ app.use('/api/workflow-router', workflowRouterRouter);
 app.use('/api/retrieval-traces', retrievalTracesRouter);
 app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/gitreins', gitReinsEvidenceRouter);
+app.use('/api/lifecycle', lifecycleRouter);
+app.use('/api/lifecycle', lifecycleEvidenceRouter);
+app.use('/api/lifecycle', lifecycleDecisionsRouter);
+app.use('/api/lifecycle', lifecycleMutationsRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
@@ -509,6 +518,9 @@ if (BACKGROUND_RUNTIME_ENABLED) {
 
   // US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
   startCheckRunPoster();
+
+  // LFC-005: Normalize run/story evidence as an isolated immutable side-write.
+  startSsdlcEvidenceNormalizer();
 
   // PR-019: Auto-rotate memory after each pipeline run completion
   // PR-018: Auto-deduplicate memory after rotation (post-run)

@@ -21,7 +21,9 @@ describe("rorca skill launcher", () => {
       queue: false,
     })).toEqual([
       ["rorca_specs_generation_context"],
-      ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
+      ["rorca_specs_authoring_preflight", "rorca_preflight_spec_authoring"],
+      ["rorca_specs_authoring_preflight_confirm", "rorca_confirm_spec_authoring_plan"],
+      ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist", "rorca_persist_spec_batch", "rorca_specs_persist_batch"],
       ["rorca_get_specs_by_specId"],
       ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
     ]);
@@ -39,7 +41,9 @@ describe("rorca skill launcher", () => {
       queue: true,
     })).toEqual([
       ["rorca_specs_generation_context"],
-      ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist"],
+      ["rorca_specs_authoring_preflight", "rorca_preflight_spec_authoring"],
+      ["rorca_specs_authoring_preflight_confirm", "rorca_confirm_spec_authoring_plan"],
+      ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist", "rorca_persist_spec_batch", "rorca_specs_persist_batch"],
       ["rorca_get_specs_by_specId"],
       ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
       ["rorca_approve_spec", "rorca_specs_by_specId_approve"],
@@ -60,7 +64,10 @@ describe("rorca skill launcher", () => {
       modelOverride: "openai-codex/gpt-5.4",
     });
 
-    expect(prompt).toContain("forgeSequence: [rorca_specs_generation_context, draft_in_pi, rorca_create_spec, get_saved_spec, inspect_workflow_or_readiness, verify_saved_spec]");
+    expect(prompt).toContain("forgeSequence: [rorca_specs_generation_context, validate_lifecycle_authoring, propose_one_or_many_plan, draft_complete_spec_set, rorca_specs_authoring_preflight, revise_max_3, explicit_human_confirmation_if_required, persist_one_or_batch");
+    expect(prompt).toContain("authoringContract: lifecycleAuthoring is mandatory for phase-aware claims");
+    expect(prompt).toContain("revisionContract: record each attempt and material revisions, stop after at most 3 attempts");
+    expect(prompt).toContain("confirmationContract: show exact spec count, boundaries, requirement ownership, dependency DAG, required capabilities, and revisions");
     expect(prompt).toContain("contextContract: fetch rorca_specs_generation_context before persistence, then forward its contextUsed and contextSummary into rorca_create_spec or rorca_persist_spec");
     expect(prompt).toContain("policyContract: persist with explicit policy metadata by passing either policyPresetId or postSavePolicy derived from the effective post-save policy/postSaveDefaults bundle, and report which preset or effective policy was used");
     expect(prompt).toContain("policyPresetId");
@@ -69,15 +76,17 @@ describe("rorca skill launcher", () => {
     expect(prompt).toContain("skipped:no_installed_skills");
     expect(prompt).toContain("failed:<retryable_reason>");
     expect(prompt).toContain("fallbackContract: backend/server contextSummary backfill is a repair-only fallback and must not be treated as the normal creation contract or as a substitute for caller-observed drafting context");
-    expect(prompt).toContain("availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_recall, rorca_search, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness");
+    expect(prompt).toContain("availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_specs_authoring_preflight, rorca_preflight_spec_authoring, rorca_specs_authoring_preflight_confirm, rorca_confirm_spec_authoring_plan");
 
     const forgeSequenceIndex = prompt.indexOf("forgeSequence:");
+    const authoringContractIndex = prompt.indexOf("authoringContract:");
     const contextContractIndex = prompt.indexOf("contextContract:");
     const policyContractIndex = prompt.indexOf("policyContract:");
     const verificationContractIndex = prompt.indexOf("verificationContract:");
     const briefIndex = prompt.indexOf("brief: |");
     expect(forgeSequenceIndex).toBeGreaterThan(-1);
-    expect(contextContractIndex).toBeGreaterThan(forgeSequenceIndex);
+    expect(authoringContractIndex).toBeGreaterThan(forgeSequenceIndex);
+    expect(contextContractIndex).toBeGreaterThan(authoringContractIndex);
     expect(policyContractIndex).toBeGreaterThan(contextContractIndex);
     expect(verificationContractIndex).toBeGreaterThan(policyContractIndex);
     expect(briefIndex).toBeGreaterThan(verificationContractIndex);
