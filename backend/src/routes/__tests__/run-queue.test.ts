@@ -28,7 +28,10 @@ process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, tmpDir]);
+await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WORKSPACE_ID, tmpDir]);
+  await execute(`DELETE FROM run_queue WHERE workspace_id = $1`, [WORKSPACE_ID]);
+  // Status is global; clear unrelated runs left by other suites in the shared test DB.
+  await execute(`UPDATE pipeline_runs SET status = 'done', finished_at = NOW() WHERE status = 'running'`);
 
   authToken = await getAuthToken(app);
 });

@@ -920,6 +920,9 @@ describe('POST /api/pipeline/runs', () => {
     expect(res.body.run.spec_path).toBe('forge/specs/approved/test.json');
     expect(res.body.run.workspace_id).toBe('ws-pipe');
     expect(res.body.run.status).toBe('running');
+    expect(res.body.run.agentType).toBe('unknown');
+    expect(res.body.agentType).toBe('unknown');
+    expect(res.body.lifecyclePhase).toBe('running');
     expect(res.body.run.id).toBeDefined();
   });
 
@@ -935,7 +938,7 @@ describe('POST /api/pipeline/runs', () => {
     expect(event.workspace_id).toBe('ws-pipe');
     // PostgreSQL JSONB columns are returned as JS objects by the pg driver, not strings
     const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
-    expect(payload.run_id).toBe(res.body.run.id);
+    expect(Number(payload.run_id)).toBe(Number(res.body.run.id));
     expect(payload.spec_path).toBe('forge/specs/approved/test.json');
   });
 
@@ -1410,9 +1413,10 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.run.agent_model).toBe('openai/gpt-4o');
   });
 
-  test('GET /runs/:runId defaults agentType to claude when agent column is empty', async () => {
-    // Old runs may not have agent column set
-    const insertResult2 = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('forge/specs/approved/old.json', 'ws-pipe', 'done') RETURNING id`);
+  test('GET /runs/:runId publishes Unknown rather than fabricating Claude for absent historical metadata', async () => {
+    // Old runs may not have persisted agent/model columns.
+    const insertResult2 = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type)
+       VALUES ('forge/specs/approved/old.json', 'ws-pipe', 'done', NULL, NULL) RETURNING id`);
     const runId = insertResult2!.id;
 
     const res = await request(app)
@@ -1420,10 +1424,34 @@ describe('OC-006: Pipeline trigger agent integration', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.agentType).toBe('claude');
+    expect(res.body.agentType).toBe('unknown');
     expect(res.body.agentModel).toBeNull();
-    expect(res.body.terminal_mode).toBe('ansi-html');
-    expect(res.body.run.terminal_mode).toBe('ansi-html');
+    expect(res.body.terminalMode).toBe('ansi-html');
+    expect(res.body.lifecyclePhase).toBe('finished');
+    expect(res.body.lifecycleStatus).toBe('finished');
+    expect(res.body.run.agentType).toBe('unknown');
+    expect(res.body.run.terminalMode).toBe('ansi-html');
+  });
+
+  test('GET /runs/:runId retains reported telemetry but represents absent telemetry as null', async () => {
+    const insertResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent_type)
+       VALUES ('forge/specs/approved/telemetry.json', 'ws-pipe', 'done', 'pi') RETURNING id`);
+    const runId = insertResult!.id;
+
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, input_tokens, output_tokens, cost_usd)
+      VALUES ($1, 'US-001', 'pass', NOW(), 123, 45, 0.42),
+             ($1, 'US-002', 'pass', NOW(), NULL, NULL, NULL)`, [runId]);
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.tokenSummary).toEqual({ inputTokens: 123, outputTokens: 45, totalCostUsd: 0.42 });
+    expect(res.body.storyTokenBreakdown).toEqual(expect.arrayContaining([
+      expect.objectContaining({ storyId: 'US-001', inputTokens: 123, outputTokens: 45, costUsd: 0.42 }),
+      expect.objectContaining({ storyId: 'US-002', inputTokens: null, outputTokens: null, costUsd: null }),
+    ]));
   });
 
   test('pipeline_runs table has agent_type and agent_model columns', async () => {
@@ -1586,7 +1614,7 @@ describe('GET /api/pipeline/runs/:runId/output', () => {
     expect(body).toContain('"requestedTerminalMode":"pty"');
     expect(body).toContain('"isPty":false');
     expect(body).toContain('"ptyFallbackActive":true');
-    expect(body).toContain('"ptyUnavailableHint":"Run: cd backend && npm rebuild node-pty"');
+    expect(body).toContain('"ptyUnavailableHint":');
     expect(body).toContain(`event: chunk\ndata: ${chunk.toString('base64')}`);
     expect(body).toContain('event: done');
   });

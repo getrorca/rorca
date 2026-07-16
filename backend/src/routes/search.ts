@@ -14,7 +14,6 @@
 
 import { Router, Request, Response } from 'express';
 import { hybridSearch, type SearchOptions, type SourceType } from '../lib/search';
-import { logger } from '../lib/logger';
 import { ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 

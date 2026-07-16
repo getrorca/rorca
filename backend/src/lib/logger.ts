@@ -52,7 +52,6 @@ function createLogger(): pino.Logger {
   return pino({
     level,
     timestamp: pino.stdTimeFunctions.isoTime,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }, dest as any);
 }
 

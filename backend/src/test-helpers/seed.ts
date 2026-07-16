@@ -12,7 +12,7 @@
  */
 
 import { randomUUID as uuidv4 } from 'node:crypto';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 
 // ─── Workspaces ───────────────────────────────────────────────────────────────
 

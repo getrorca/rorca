@@ -20,7 +20,6 @@
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { closePool } from '../../db/index';
 
 let app: Express;
 let authToken: string;

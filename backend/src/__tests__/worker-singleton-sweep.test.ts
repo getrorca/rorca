@@ -199,7 +199,7 @@ describe('recoverStaleJobs', () => {
     );
 
     // Should emit WAL event with reason:'worker_crash_recovery'
-    expect(mockExecute).toHaveBeenCalledWith(
+    expect(mockQueryOne).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO wal_events'),
       expect.arrayContaining([
         'run_finished',
@@ -334,7 +334,7 @@ describe('sweepOrphanProcesses (heartbeat-aware)', () => {
     );
 
     // WAL event emitted with reason:'orphan_sweep'
-    expect(mockExecute).toHaveBeenCalledWith(
+    expect(mockQueryOne).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO wal_events'),
       expect.arrayContaining([
         'run_finished',

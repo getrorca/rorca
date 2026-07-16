@@ -37,9 +37,14 @@ export type MemoryCandidateInput = {
 
 export class RorcaApiClient {
   readonly baseUrl: string;
+  readonly defaultHeaders: Record<string, string>;
 
-  constructor(baseUrl: string = process.env.RORCA_PI_API_URL || "http://127.0.0.1:3030") {
+  constructor(
+    baseUrl: string = process.env.RORCA_PI_API_URL || "http://127.0.0.1:3030",
+    options: { headers?: Record<string, string> } = {},
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.defaultHeaders = { ...(options.headers ?? {}) };
   }
 
   async getHealth(): Promise<HealthResponse> {
@@ -244,6 +249,13 @@ export class RorcaApiClient {
     });
   }
 
+  async configureCapturePolicy(input: { workspaceId: string; policyMode: string; activeIntegrations?: Record<string, unknown>; ignoredPaths?: string[] }): Promise<unknown> {
+    return this.fetchJson(`/api/context-capture/${encodeURIComponent(input.workspaceId)}/policy`, {
+      method: "PATCH",
+      body: JSON.stringify({ policyMode: input.policyMode, activeIntegrations: input.activeIntegrations, ignoredPaths: input.ignoredPaths }),
+    });
+  }
+
   async fetchJson<T>(pathname: string, init?: RequestInit, timeoutMs: number = 30_000): Promise<T> {
     const response = await fetch(`${this.baseUrl}${pathname}`, {
       ...init,
@@ -251,6 +263,7 @@ export class RorcaApiClient {
       headers: {
         Accept: "application/json",
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...this.defaultHeaders,
         ...(init?.headers || {}),
       },
     });

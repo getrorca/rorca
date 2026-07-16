@@ -12,6 +12,7 @@ import { spawnSync } from 'child_process';
 import {
   createAutonomousCommandGuard,
   deriveAutonomousBackendJestEnv,
+  sanitizeAutonomousAgentEnv,
 } from '../autonomous-command-guard';
 
 describe('autonomous-command-guard', () => {
@@ -54,6 +55,20 @@ describe('autonomous-command-guard', () => {
     ).toBeNull();
   });
 
+  test('strips Rorca infrastructure credentials from autonomous CLI environments', () => {
+    expect(sanitizeAutonomousAgentEnv({
+      PATH: '/usr/bin',
+      DATABASE_URL: 'postgres://prod-secret',
+      PGPASSWORD: 'db-secret',
+      JWT_SECRET: 'jwt-secret',
+      GITHUB_TOKEN: 'github-secret',
+      ANTHROPIC_API_KEY: 'provider-key-required-by-selected-cli',
+    })).toEqual({
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'provider-key-required-by-selected-cli',
+    });
+  });
+
   test('auto-routes backend Jest commands to a derived _test database', () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-guard-ws-'));
     const backend = path.join(workspace, 'backend');
@@ -77,6 +92,7 @@ describe('autonomous-command-guard', () => {
         env: {
           ...process.env,
           DATABASE_URL: 'postgres://rorca:rorca@127.0.0.1:5433/rorca',
+          DATABASE_URL_TEST: '',
         } as Record<string, string>,
       });
 
@@ -110,6 +126,7 @@ describe('autonomous-command-guard', () => {
       env: {
         ...process.env,
         DATABASE_URL: 'postgres://rorca:rorca@db.example.com:5432/rorca',
+        DATABASE_URL_TEST: '',
       } as Record<string, string>,
     });
 

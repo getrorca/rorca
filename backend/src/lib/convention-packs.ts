@@ -22,7 +22,6 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as yaml from 'js-yaml';
 import { type PackJson, PackJsonSchema } from './pack-registry';
 import { type PersonaMetadata, type PersonaCategory, PERSONA_CATEGORIES, parseFrontmatter } from './agent-personas';
 import { ValidationError } from './errors';

@@ -47,7 +47,7 @@ beforeEach(async () => {
   }
 });
 
-test('debug: simple test', async () => {
+test('debug: server loads successfully', async () => {
   process.stderr.write('TEST_BODY_REACHED\n');
-  expect(1).toBe(1);
+  expect(app).toBeDefined();
 });

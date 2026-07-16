@@ -16,6 +16,7 @@ import { activeAgent, activeModel, agentType } from '../lib/config';
 import { detectOpenCodeAsync, type OpenCodeStatus } from '../lib/opencode-detector';
 import { detectCodexAsync, type CodexStatus } from '../lib/codex-detector';
 import { detectPiAsync, type PiStatus } from '../lib/pi-detector';
+import { getPtyCliCompatibilityAsync } from '../lib/pty-cli-compat';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
@@ -773,7 +774,10 @@ router.get('/detailed', async (req: Request, res: Response, next: NextFunction) 
 
     // Child-process probes are asynchronous and cached, so a broken executable
     // cannot freeze the event loop or liveness endpoint.
-    const engineSnapshot = await detectEngineSnapshot();
+    const [engineSnapshot, ptyCliCompatibility] = await Promise.all([
+      detectEngineSnapshot(),
+      getPtyCliCompatibilityAsync(),
+    ]);
     const { opencode, codex, pi, engines } = engineSnapshot;
     const mcp = getMcpBridgeHealth();
 
@@ -802,6 +806,9 @@ router.get('/detailed', async (req: Request, res: Response, next: NextFunction) 
       piVersion: pi.piVersion,
       piBinPath: pi.piBinPath,
       engines,
+      // Expensive executable help/version probes live only on detailed health
+      // and run asynchronously so a broken provider CLI cannot block liveness.
+      ptyCliCompatibility,
       embeddings: getQueueStats(),
       cache: cacheStats(),
       activeJobs,

@@ -391,11 +391,11 @@ router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
   // Validate schema
   const result = RorcaConfigSchema.safeParse(parsed);
   if (!result.success) {
-    const errors = result.error.issues.map(i => ({
-      path: i.path.join('.'),
-      message: i.message,
+    const issues = result.error.issues.map(issue => ({
+      path: issue.path.join('.'),
+      message: issue.message,
     }));
-    throw new ValidationError('Schema validation failed');
+    throw new ValidationError('Schema validation failed', { issues });
     return;
   }
 

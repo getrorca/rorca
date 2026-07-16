@@ -519,22 +519,3 @@ function extractHighlights(headline: string): string[] {
   }
   return matches;
 }
-
-function generateMemorySnippet(text: string, queryText: string): string {
-  const lowerText = text.toLowerCase();
-  const lowerQuery = queryText.toLowerCase();
-  const idx = lowerText.indexOf(lowerQuery);
-
-  if (idx === -1) {
-    return text.slice(0, 150);
-  }
-
-  const start = Math.max(0, idx - 50);
-  const end = Math.min(text.length, idx + queryText.length + 100);
-  let snippet = text.slice(start, end);
-
-  if (start > 0) snippet = '...' + snippet;
-  if (end < text.length) snippet = snippet + '...';
-
-  return snippet;
-}

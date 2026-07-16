@@ -7,6 +7,7 @@
 
 import React, { type ReactElement } from 'react';
 import { render, type RenderOptions, type RenderResult } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { WorkspaceProvider } from '../contexts/WorkspaceContext';
 import { AuthProvider } from '../contexts/AuthContext';
 import { ThemeProvider } from '../contexts/ThemeContext';
@@ -65,7 +66,7 @@ export function renderWithProviders(
         <ToastProvider>
           <AuthProvider>
             <HelpTipsProvider>
-              <WorkspaceProvider>{children}</WorkspaceProvider>
+              <MemoryRouter><WorkspaceProvider>{children}</WorkspaceProvider></MemoryRouter>
             </HelpTipsProvider>
           </AuthProvider>
         </ToastProvider>

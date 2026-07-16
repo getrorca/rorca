@@ -6,14 +6,14 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { spawn, execSync } from 'child_process';
+import { isUtf8 } from 'buffer';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
-import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
@@ -22,21 +22,19 @@ import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-cl
 import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
-import type { AuthUser } from '../lib/auth-utils';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
-import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { parsePaginationParams } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
-import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
+import { parseLine } from '../lib/semantic-log-parser';
 import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
-import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
 import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
-import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
+import { checkSpec, type CapabilityStory } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
@@ -48,30 +46,33 @@ import { logger } from '../lib/logger';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
-import { authRequired } from '../lib/auth-utils';
+import { authRequired, isSuperUser } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
+import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
+import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
+import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
+import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
+  getRunPtySessionHealth,
   getRunPtySessionStatus,
+  getRunPtyOutputLimits,
+  listRecentRunPtyChunks,
   listRunPtyChunks,
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
-import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
+import { sweepOrphanProcesses } from '../worker';
 import { validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
+import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
   recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
 import { safeParseTaskManifest, type TaskManifest } from '../lib/task-manifest';
-import { computeTaskManifestHash, resolveTaskManifestArtifactPaths, validateTaskManifestId } from '../lib/task-manifest-artifacts';
-import {
-  contextSafeRelativePathList,
-  contextSafeString,
-  sanitizeContextResponseValue,
-} from '../lib/context-safety';
+import { computeTaskManifestHash, resolveTaskManifestArtifactPaths } from '../lib/task-manifest-artifacts';
 import {
   createTaskManifestExecutionEnvelope,
   writeTaskManifestExecutionEnvelope,
@@ -86,31 +87,6 @@ import {
 import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
 import { createRunnerJob } from '../lib/execution-runner-jobs';
-import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
-
-// ── Claude binary + env-var stripping for agentic conflict resolution ─────────
-// Same pattern as execution-engine.ts — strips nested-session detection vars.
-const CLAUDE_BIN_PIPELINE = process.env.CLAUDE_BIN ||
-  (() => {
-    try { return execSync('which claude', { encoding: 'utf8' }).trim(); } catch { return 'claude'; }
-  })();
-
-const CLAUDE_ENV_VARS_STRIP = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_AGENT_SDK_VERSION',
-  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
-];
-
-function buildCleanEnvForMerge(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_STRIP.includes(k)) {
-      env[k] = v;
-    }
-  }
-  return env;
-}
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -191,31 +167,159 @@ function emitSemanticSteps(text: string, agent: string, res: Response): void {
   }
 }
 
-function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): void {
-  res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
+const RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS = 10_000;
+
+/**
+ * Respect Node's writable high-water mark. Durable cursors make it safe to end
+ * a stalled attachment and let EventSource replay, rather than buffering an
+ * unbounded transcript in the server process for a slow consumer.
+ */
+async function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): Promise<boolean> {
+  if (res.destroyed || res.writableEnded) return false;
+  const accepted = res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
+  if (accepted) return true;
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onClose);
+      resolve(result);
+    };
+    const onDrain = () => finish(true);
+    const onClose = () => finish(false);
+    const timer = setTimeout(() => {
+      finish(false);
+      if (!res.destroyed) res.destroy();
+    }, RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS);
+    timer.unref?.();
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onClose);
+  });
 }
 
-function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function readBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
-/** PostgreSQL BIGINT values are returned as strings by pg; queue payloads require numbers. */
-function normalizePipelineRunId(value: unknown): number {
-  const runId = Number(value);
-  if (!Number.isSafeInteger(runId) || runId <= 0) {
-    throw new UnprocessableError('Database returned an invalid pipeline run ID');
+// PTY output SSE is a durable event-driven transport. The execution engine
+// commits raw bytes to run_pty_output_chunks; PostgreSQL NOTIFY wakes Express
+// immediately, and Express reads those committed rows by sequence. Bounded
+// polling remains a recovery path for listener reconnects/notification loss.
+const RUN_OUTPUT_PTY_LIVE_TRANSPORT = 'postgres-notify+db-replay' as const;
+const RUN_OUTPUT_PTY_REPLAY_SOURCE = 'run_pty_output_chunks' as const;
+const RUN_OUTPUT_ANSI_REPLAY_SOURCE = 'run_output_chunks' as const;
+type RunOutputReplaySource = typeof RUN_OUTPUT_PTY_REPLAY_SOURCE | typeof RUN_OUTPUT_ANSI_REPLAY_SOURCE;
+const RUN_OUTPUT_PTY_POLL_INTERVAL_MS = readBoundedIntegerEnv('RORCA_PTY_OUTPUT_POLL_INTERVAL_MS', 2_000, 250, 10_000);
+const RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS = RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 2;
+const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
+const RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS = Math.max(1_000, RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 5);
+const RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS = readBoundedIntegerEnv('RORCA_OUTPUT_REPLAY_MAX_CHUNKS', 2_048, 100, 25_000);
+const RUN_OUTPUT_REPLAY_BATCH_CHUNKS = getRunPtyOutputLimits().replayBatchChunks;
+const MAX_PTY_COLS = 500;
+const MAX_PTY_ROWS = 200;
+const MAX_PTY_INPUT_CHUNK_BYTES = 65_536;
+
+async function assertPipelineWorkspaceAccess(req: Request, workspaceId: string): Promise<void> {
+  const user = req.user;
+  if (!user) throw new ForbiddenError('Authentication required');
+  if (isSuperUser(user)) return;
+  const membership = await queryOne<{ role: string }>(
+    'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_auth_id = $2',
+    [workspaceId, user.supabaseId],
+  );
+  if (!membership) throw new ForbiddenError('Run does not belong to an accessible workspace');
+}
+
+function parseOutputResumeCursor(value: string, source: 'afterSequence' | 'Last-Event-ID'): number {
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    throw new ValidationError(`${source} must be a non-negative integer sequence`);
   }
-  return runId;
+  const sequence = Number(value);
+  if (!Number.isSafeInteger(sequence)) {
+    throw new ValidationError(`${source} must be a safe integer sequence`);
+  }
+  return sequence;
 }
 
-async function waitForRunPtySessionStatus(runId: number, timeoutMs = 5_000): Promise<string | null> {
-  const deadline = Date.now() + timeoutMs;
-  let status = await getRunPtySessionStatus(runId);
-  while (status === null && Date.now() < deadline) {
-    await sleepMs(100);
-    status = await getRunPtySessionStatus(runId);
+/** A durable cursor is valid only within one output store's sequence space. */
+function parseOutputReplaySource(value: string): RunOutputReplaySource {
+  if (value === RUN_OUTPUT_PTY_REPLAY_SOURCE || value === RUN_OUTPUT_ANSI_REPLAY_SOURCE) {
+    return value;
   }
-  return status;
+  throw new ValidationError('outputSource must be run_pty_output_chunks or run_output_chunks');
+}
+
+function isPtyPidAlive(pid: number | null | undefined): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySessionHealth>>): Record<string, unknown> | null {
+  if (!health) return null;
+  const totalOutputBytes = typeof health.total_output_bytes === 'number'
+    ? health.total_output_bytes
+    : Number.parseInt(String(health.total_output_bytes ?? 0), 10) || 0;
+  const processAlive = health.status === 'active' && isPtyPidAlive(health.child_pid);
+  return {
+    ptySessionStatus: health.status,
+    pty_session_status: health.status,
+    ptyChildPid: health.child_pid,
+    pty_child_pid: health.child_pid,
+    ptyProcessAlive: processAlive,
+    pty_process_alive: processAlive,
+    ptyLastOutputAt: health.last_output_at,
+    pty_last_output_at: health.last_output_at,
+    ptyLastHeartbeatAt: health.last_heartbeat_at,
+    pty_last_heartbeat_at: health.last_heartbeat_at,
+    ptyCompletionMarker: health.completion_marker,
+    pty_completion_marker: health.completion_marker,
+    ptyCompletionMarkerSeen: Boolean(health.completion_marker_seen_at),
+    pty_completion_marker_seen: Boolean(health.completion_marker_seen_at),
+    ptyCompletionMarkerSeenAt: health.completion_marker_seen_at,
+    pty_completion_marker_seen_at: health.completion_marker_seen_at,
+    ptyCompletionFileSeen: Boolean(health.completion_file_seen_at),
+    pty_completion_file_seen: Boolean(health.completion_file_seen_at),
+    ptyCompletionFileSeenAt: health.completion_file_seen_at,
+    pty_completion_file_seen_at: health.completion_file_seen_at,
+    ptyCompletionFileError: health.completion_file_error,
+    pty_completion_file_error: health.completion_file_error,
+    ptyTerminalMarkerSeen: Boolean(health.terminal_marker_seen_at),
+    pty_terminal_marker_seen: Boolean(health.terminal_marker_seen_at),
+    ptyPromptReadinessStatus: health.prompt_readiness_status,
+    pty_prompt_readiness_status: health.prompt_readiness_status,
+    ptyPromptReadinessReason: health.prompt_readiness_reason,
+    pty_prompt_readiness_reason: health.prompt_readiness_reason,
+    ptyPromptReadyAt: health.prompt_ready_at,
+    pty_prompt_ready_at: health.prompt_ready_at,
+    ptyPromptInjectedAt: health.prompt_injected_at,
+    pty_prompt_injected_at: health.prompt_injected_at,
+    ptyTotalOutputBytes: totalOutputBytes,
+    pty_total_output_bytes: totalOutputBytes,
+    ptyDroppedOutputBytes: Number(health.dropped_output_bytes ?? 0),
+    pty_dropped_output_bytes: Number(health.dropped_output_bytes ?? 0),
+    ptyOutputTruncated: Boolean(health.output_truncated_at),
+    pty_output_truncated: Boolean(health.output_truncated_at),
+    ptyOutputTruncatedAt: health.output_truncated_at,
+    pty_output_truncated_at: health.output_truncated_at,
+  };
+}
+
+function writePtyHealthEvent(res: Response, healthPayload: Record<string, unknown> | null): void {
+  if (!healthPayload) return;
+  res.write(`event: pty_health\ndata: ${JSON.stringify(healthPayload)}\n\n`);
 }
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
@@ -333,216 +437,6 @@ function assertReusableBranchFresh(workspacePath: string, branchName: string): v
   );
 }
 
-/**
- * Write synthesized direction stack to `.opencode/skills/rorca.md` in the workspace.
- * OpenCode reads skill files from this directory automatically.
- * Returns the absolute path of the written file (for cleanup), or null if nothing to write.
- */
-async function writeOpenCodeSkillFile(workspaceCwd: string, workspaceId: string, specBrief: string): Promise<string | null> {
-  // Fetch direction layers from DB
-  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
-
-  const wsRow = await queryOne('SELECT domain FROM workspaces WHERE id = $1', [workspaceId]) as { domain: string | null } | undefined;
-  const domain = wsRow?.domain;
-
-  const l2Row = domain
-    ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
-    : undefined;
-
-  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
-
-  // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null } | undefined;
-
-  // Fetch team layers
-  const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
-
-  let teamL1: string | undefined;
-  let teamL2: string | undefined;
-  if (access) {
-    const tl1 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    const tl2 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    teamL1 = tl1?.content_yaml;
-    teamL2 = tl2?.content_yaml;
-  }
-
-  const synthesized = synthesize({
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    l3: l3Row?.content_yaml,
-    teamL1,
-    teamL2,
-    schemaSnapshot: ctx?.schema_snapshot || undefined,
-    specBrief,
-  });
-
-  // Write to .opencode/skills/rorca/SKILL.md (OpenCode requires skills/<name>/SKILL.md structure)
-  const skillDir = path.join(workspaceCwd, '.opencode', 'skills', 'rorca');
-  fs.mkdirSync(skillDir, { recursive: true });
-  const skillPath = path.join(skillDir, 'SKILL.md');
-
-  const content = [
-    '---',
-    'name: rorca',
-    'description: Rorca direction stack context — synthesized project standards, domain profile, and workspace context for this pipeline run.',
-    '---',
-    '',
-    '# Rorca Direction Stack',
-    '',
-    'This file is auto-generated by Rorca before each pipeline run.',
-    'It contains the synthesized direction stack context for this workspace.',
-    'Do NOT edit manually — it will be overwritten on the next run.',
-    '',
-    synthesized,
-  ].join('\n');
-
-  fs.writeFileSync(skillPath, content);
-  return skillPath;
-}
-
-/** Remove the OpenCode skill file and clean up empty parent dirs. */
-function removeOpenCodeSkillFile(skillPath: string): void {
-  try {
-    fs.unlinkSync(skillPath);
-    // Clean up .opencode/skills/rorca/ directory, then .opencode/skills/, then .opencode/
-    const rorcaDir = path.dirname(skillPath);  // .opencode/skills/rorca/
-    const rorcaRemaining = fs.readdirSync(rorcaDir);
-    if (rorcaRemaining.length === 0) {
-      fs.rmdirSync(rorcaDir);
-      const skillsDir = path.dirname(rorcaDir);  // .opencode/skills/
-      const skillsRemaining = fs.readdirSync(skillsDir);
-      if (skillsRemaining.length === 0) {
-        fs.rmdirSync(skillsDir);
-        const ocDir = path.dirname(skillsDir);  // .opencode/
-        const ocRemaining = fs.readdirSync(ocDir);
-        if (ocRemaining.length === 0) {
-          fs.rmdirSync(ocDir);
-        }
-      }
-    }
-  } catch { /* best-effort cleanup */ }
-}
-
-// ─── Codex AGENTS.md Direction Stack Injection ──────────────────────────────
-
-const RORCA_MARKER_START = '# === RORCA DIRECTION START ===';
-const RORCA_MARKER_END = '# === RORCA DIRECTION END ===';
-
-/**
- * Write synthesized direction stack to workspace root `AGENTS.md` for Codex CLI.
- *
- * Codex CLI auto-discovers AGENTS.md files from the Git root down and injects them
- * as context before the user prompt. By writing direction stack to AGENTS.md in the
- * workspace root, Codex stories get the full L1-L5 direction context automatically.
- *
- * If AGENTS.md already exists, appends a clearly delimited section. If not, creates it.
- * Returns metadata needed for cleanup: path, whether file existed, and original content.
- */
-interface CodexAgentsMdState {
-  agentsMdPath: string;
-  existed: boolean;
-  originalContent: string | null;
-}
-
-async function writeCodexAgentsMd(workspaceCwd: string, workspaceId: string, specBrief: string): Promise<CodexAgentsMdState | null> {
-  // Fetch direction layers from DB (same pattern as writeOpenCodeSkillFile)
-  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
-
-  const wsRow = await queryOne('SELECT domain FROM workspaces WHERE id = $1', [workspaceId]) as { domain: string | null } | undefined;
-  const domain = wsRow?.domain;
-
-  const l2Row = domain
-    ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
-    : undefined;
-
-  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
-
-  // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null } | undefined;
-
-  // Fetch team layers
-  const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
-
-  let teamL1: string | undefined;
-  let teamL2: string | undefined;
-  if (access) {
-    const tl1 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    const tl2 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    teamL1 = tl1?.content_yaml;
-    teamL2 = tl2?.content_yaml;
-  }
-
-  const synthesized = synthesize({
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    l3: l3Row?.content_yaml,
-    teamL1,
-    teamL2,
-    schemaSnapshot: ctx?.schema_snapshot || undefined,
-    specBrief,
-  });
-
-  const agentsMdPath = path.join(workspaceCwd, 'AGENTS.md');
-  let existed = false;
-  let originalContent: string | null = null;
-
-  try {
-    originalContent = fs.readFileSync(agentsMdPath, 'utf8');
-    existed = true;
-  } catch { /* file doesn't exist */ }
-
-  const rorcaSection = [
-    '',
-    RORCA_MARKER_START,
-    '',
-    '# Rorca Direction Stack',
-    '',
-    'This section is auto-generated by Rorca before each pipeline run.',
-    'It contains the synthesized direction stack context for this workspace.',
-    'Do NOT edit manually — it will be overwritten on the next run.',
-    '',
-    synthesized,
-    '',
-    RORCA_MARKER_END,
-    '',
-  ].join('\n');
-
-  if (existed && originalContent !== null) {
-    // Remove any existing Rorca section first (stale from previous run)
-    const cleaned = stripRorcaSection(originalContent);
-    fs.writeFileSync(agentsMdPath, cleaned + rorcaSection);
-  } else {
-    fs.writeFileSync(agentsMdPath, rorcaSection.trimStart());
-  }
-
-  return { agentsMdPath, existed, originalContent };
-}
-
-/** Remove Rorca markers section from content string. */
-function stripRorcaSection(content: string): string {
-  const startIdx = content.indexOf(RORCA_MARKER_START);
-  const endIdx = content.indexOf(RORCA_MARKER_END);
-  if (startIdx === -1 || endIdx === -1) return content;
-
-  const before = content.substring(0, startIdx);
-  const after = content.substring(endIdx + RORCA_MARKER_END.length);
-  // Trim trailing newlines from the join point to avoid double blank lines
-  return before.replace(/\n+$/, '\n') + after.replace(/^\n+/, '');
-}
-
-/** Remove Rorca direction stack from AGENTS.md, restoring original state. */
-function removeCodexAgentsMd(state: CodexAgentsMdState): void {
-  try {
-    if (!state.existed) {
-      // Rorca created this file — delete it entirely
-      fs.unlinkSync(state.agentsMdPath);
-    } else if (state.originalContent !== null) {
-      // Restore the original content
-      fs.writeFileSync(state.agentsMdPath, state.originalContent);
-    }
-  } catch { /* best-effort cleanup */ }
-}
-
 /** FR-005: When a pipeline run finishes with status='done', snapshot spec version as 'completed'. */
 async function markSpecCompleted(specPath: string): Promise<void> {
   try {
@@ -568,393 +462,6 @@ async function markSpecCompleted(specPath: string): Promise<void> {
     await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, 'completed')`, [slug, nextVer, content]);
   } catch {
     // Non-fatal — completed status is also derived from pipeline_runs at query time
-  }
-}
-
-// ─── Auto-merge worktree on run completion ─────────────────────────────────────
-// Called after run_finished WAL event. Merges the run-level worktree branch back
-// into the main workspace branch automatically. Zero user action required.
-//
-// Strategy:
-//   1. Stash any uncommitted workspace changes
-//   2. Dry-run merge (safety pre-check) — bail out if real code conflicts detected
-//   3. Try --ff-only (no merge commit, cleanest)
-//   4. Fall back to --no-ff; auto-resolve tracking files (.rorca/run-state.json, progress.txt)
-//   5. If real code conflicts: abort + emit worktree_merge_failed WAL event (no merge attempted)
-//   6. On success: emit worktree_merged WAL event + remove the worktree directory
-//   7. Always restore stash
-
-// ─── Agentic conflict resolution via claude --print ────────────────────────────
-// Called when git merge --no-ff produces real code conflicts.
-// Spawns a claude session with the conflict diff and instructions to resolve.
-// Returns true if resolution succeeded (no conflict markers remain), false otherwise.
-
-const AGENTIC_RESOLVE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const AGENTIC_RESOLVE_SIGKILL_DELAY_MS = 10_000;   // 10s after SIGTERM
-
-async function attemptAgenticConflictResolution(
-  workspacePath: string,
-  branchName: string,
-  runId: number,
-  workspaceId: string,
-  appendLog: (msg: string, color?: string) => void,
-): Promise<boolean> {
-  const simpleGitForResolve = simpleGit(workspacePath);
-
-  // 1. Start the real --no-ff merge to enter the conflicted state
-  appendLog(`Starting merge of ${branchName} for agentic resolution...`, '\x1b[33m');
-  try {
-    await simpleGitForResolve.merge([branchName, '--no-ff', '--no-commit']);
-    // Merged cleanly — commit and return success (shouldn't happen after pre-check, but handle it)
-    await simpleGitForResolve.commit(`merge: ${branchName} (auto)`);
-    appendLog('Merged cleanly without conflicts — committed.', '\x1b[32m');
-    return true;
-  } catch (mergeErr: any) {
-    const msg: string = mergeErr?.message ?? String(mergeErr);
-    if (
-      !msg.includes('CONFLICT') &&
-      !msg.includes('Automatic merge failed') &&
-      !msg.includes('fix conflicts')
-    ) {
-      // Unexpected error — abort and fail
-      appendLog(`Unexpected merge error: ${msg}`, '\x1b[31m');
-      try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-      return false;
-    }
-    // Expected: we're now in a conflicted state
-  }
-
-  // 2. Capture the conflict diff (working tree after failed merge)
-  let conflictDiff = '';
-  try {
-    conflictDiff = await simpleGitForResolve.raw(['diff']);
-  } catch { /* non-fatal — proceed with empty diff */ }
-  // Truncate to 50KB to avoid prompt bloat
-  if (conflictDiff.length > 50_000) {
-    conflictDiff = conflictDiff.slice(0, 50_000) + '\n... (diff truncated at 50KB)';
-  }
-
-  // 3. Build the resolution prompt
-  const resolutionPrompt = [
-    `You are resolving git merge conflicts. The feature branch "${branchName}" is being merged into main for run #${runId}.`,
-    '',
-    'Here is the current conflict diff (conflict markers in working tree):',
-    '```diff',
-    conflictDiff || '(no diff output available)',
-    '```',
-    '',
-    'Your task:',
-    '1. Examine the conflicted files using the bash and read tools.',
-    '2. Resolve each conflict intelligently — understand the intent of both sides. Do NOT blindly take one side.',
-    '3. After resolving ALL conflicts, stage all files with: git add -A',
-    '4. Commit the merge with: git commit --no-edit',
-    '   (The merge commit message is already staged — --no-edit preserves it.)',
-    '',
-    `Working directory: ${workspacePath}`,
-    '',
-    'Critical: Do not exit until all conflict markers (<<<<<<<, =======, >>>>>>>) have been removed from ALL files and the commit has been made.',
-  ].join('\n');
-
-  // 4. Spawn claude --print with clean env
-  appendLog('Spawning claude to resolve conflicts...', '\x1b[33m');
-  const env = buildCleanEnvForMerge();
-
-  return new Promise<boolean>((resolve) => {
-    const child = spawn(
-      CLAUDE_BIN_PIPELINE,
-      ['--print', '--dangerously-skip-permissions', '--output-format', 'stream-json'],
-      { cwd: workspacePath, env, stdio: ['pipe', 'pipe', 'pipe'] },
-    );
-
-    // Write prompt to stdin then close it
-    child.stdin?.write(resolutionPrompt);
-    child.stdin?.end();
-
-    let timedOut = false;
-    let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // 5-minute timeout → SIGTERM, then 10s → SIGKILL
-    const sigtermTimer = setTimeout(() => {
-      timedOut = true;
-      appendLog('Agentic resolution timed out (5 min) — sending SIGTERM', '\x1b[31m');
-      child.kill('SIGTERM');
-      sigkillTimer = setTimeout(() => {
-        appendLog('Claude did not exit — sending SIGKILL', '\x1b[31m');
-        child.kill('SIGKILL');
-      }, AGENTIC_RESOLVE_SIGKILL_DELAY_MS);
-    }, AGENTIC_RESOLVE_TIMEOUT_MS);
-
-    child.stdout?.on('data', (data: Buffer) => {
-      // Log claude output summary (truncated)
-      const text = data.toString('utf8').slice(0, 200).replace(/\n/g, ' ');
-      if (text.trim()) appendLog(`[claude] ${text}`, '\x1b[90m');
-    });
-
-    child.on('exit', async (code) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-
-      if (timedOut) {
-        appendLog('Agentic resolution timed out — aborting merge', '\x1b[31m');
-        try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      if (code !== 0) {
-        appendLog(`Claude exited with code ${code} — aborting merge`, '\x1b[31m');
-        try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      // 5. Verify no conflict markers remain using git diff --check
-      try {
-        await simpleGitForResolve.raw(['diff', '--check']);
-        // git diff --check exits 0 if no conflict markers — resolution succeeded
-        appendLog('Agentic resolution succeeded — no conflict markers remain', '\x1b[32m');
-        resolve(true);
-      } catch {
-        // Conflict markers remain — abort
-        appendLog('Conflict markers still present after claude resolution — aborting', '\x1b[31m');
-        try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-      }
-    });
-
-    child.on('error', async (err) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-      appendLog(`Claude spawn error: ${err.message} — aborting merge`, '\x1b[31m');
-      try { await simpleGitForResolve.merge(['--abort']); } catch { /* best-effort */ }
-      resolve(false);
-    });
-  });
-}
-
-// OutputBuffer is declared after the router — forward-declare the type here for use in autoMergeWorktree
-type MergeOutputBuffer = { chunks: string[]; done: boolean; subscribers: Set<(chunk: string) => void> };
-
-async function autoMergeWorktree(
-  workspacePath: string,
-  worktreePath: string,
-  branchName: string,
-  workspaceId: string,
-  runId: number,
-  buf: MergeOutputBuffer,
-  logPath: string,
-): Promise<void> {
-  const appendLog = (msg: string, color = '\x1b[36m') => {
-    const line = `\r\n${color}[auto-merge] ${msg}\x1b[0m\r\n`;
-    buf.chunks.push(line);
-    buf.subscribers.forEach(cb => cb(line));
-    try { fs.appendFileSync(logPath, line); } catch { /* best-effort */ }
-  };
-
-  // Skip if the worktree directory no longer exists (already manually merged/removed)
-  if (!fs.existsSync(worktreePath)) {
-    appendLog('Worktree already removed — skipping auto-merge', '\x1b[90m');
-    return;
-  }
-
-  const git = simpleGit(workspacePath);
-
-  // 1. Stash any uncommitted workspace changes so the merge can proceed
-  let stashed = false;
-  try {
-    const status = await git.status();
-    if (status.files.length > 0) {
-      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
-      stashed = true;
-      appendLog('Stashed uncommitted workspace changes');
-    }
-  } catch (err: any) {
-    appendLog(`Stash failed — proceeding without stash: ${err.message}`, '\x1b[33m');
-  }
-
-  // ── Tracking-only files that are always safe to resolve with --theirs ──────
-  const TRACKING_PATTERNS = [
-    '.rorca/run-state.json',
-    'progress.txt',
-    '.rorca/memory/runs/',
-  ];
-
-  // 2. Safety pre-check: dry-run merge to detect any conflicts BEFORE touching main
-  appendLog(`Pre-checking merge safety for ${branchName}...`);
-  let preCheckConflictFiles: string[] = [];
-  let preCheckIsClean = false;
-  try {
-    await git.merge([branchName, '--no-commit', '--no-ff']);
-    // Merged cleanly in dry-run (no CONFLICT markers) — abort it, proceed with real merge
-    preCheckIsClean = true;
-    try { await git.merge(['--abort']); } catch { /* nothing to abort on clean ff */ }
-  } catch (dryRunErr: any) {
-    if (
-      dryRunErr.message?.includes('CONFLICT') ||
-      dryRunErr.message?.includes('Automatic merge failed') ||
-      dryRunErr.message?.includes('fix conflicts')
-    ) {
-      // Collect conflict files before aborting
-      try {
-        const diffOut = await git.raw(['diff', '--name-only', '--diff-filter=U']);
-        preCheckConflictFiles = diffOut.trim().split('\n').filter(Boolean);
-      } catch { /* continue */ }
-      try { await git.merge(['--abort']); } catch { /* already clean */ }
-
-      // Only auto-resolve tracking files — real code conflicts block the merge
-      const realConflicts = preCheckConflictFiles.filter(
-        f => !TRACKING_PATTERNS.some(tp => f.includes(tp))
-      );
-
-      if (realConflicts.length === 0) {
-        // Only tracking files conflict — safe to merge with auto-resolution
-        preCheckIsClean = true;
-        appendLog(
-          `Pre-check: only tracking file conflicts (${preCheckConflictFiles.join(', ')}) — auto-resolvable`,
-          '\x1b[33m',
-        );
-      } else {
-        // Real code conflicts — attempt agentic resolution via claude --print
-        appendLog(
-          `Pre-check: code conflicts detected in: ${realConflicts.join(', ')} — attempting agentic resolution`,
-          '\x1b[33m',
-        );
-        const agenticResolved = await attemptAgenticConflictResolution(
-          workspacePath, branchName, runId, workspaceId, appendLog,
-        );
-        if (agenticResolved) {
-          // Claude resolved the conflicts — merge succeeded
-          preCheckIsClean = true; // skip the normal merge path below — already committed
-          // Emit success WAL event and clean up (skip to the merge-success block)
-          let sha = '';
-          try { sha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
-          const walEvt = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merged', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, branchName, mergeCommitSha: sha, resolvedBy: 'agentic' })]);
-          broadcastAll(walEvt!);
-          try { await git.raw(['worktree', 'remove', '--force', worktreePath]); appendLog(`Worktree removed: ${path.basename(worktreePath)}`, '\x1b[32m'); } catch { /* non-fatal */ }
-          try { await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-          // Restore stash and return — no further merge needed
-          if (stashed) {
-            try { await git.stash(['pop']); appendLog('Restored stashed workspace changes'); } catch (popErr: any) { appendLog(`Stash pop conflict — run 'git stash pop' manually: ${popErr.message}`, '\x1b[33m'); }
-          }
-          return;
-        } else {
-          // Agentic resolution failed — emit failure WAL event
-          appendLog('Agentic resolution failed — worktree preserved for manual resolution', '\x1b[31m');
-          let conflictDiff = '';
-          try { conflictDiff = (await git.raw(['diff'])).slice(0, 2048); } catch { /* non-fatal */ }
-          const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merge_failed', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
-            run_id: runId,
-            branchName,
-            worktreePath,
-            conflictFiles: realConflicts,
-            conflictSummary: conflictDiff,
-            message: 'Agentic merge resolution failed — resolve conflicts manually via the Worktrees panel.',
-          })]);
-          broadcastAll(walEvent!);
-          if (stashed) {
-            try { await git.stash(['pop']); appendLog('Restored stashed workspace changes'); } catch (popErr: any) { appendLog(`Stash pop conflict — run 'git stash pop' manually: ${popErr.message}`, '\x1b[33m'); }
-          }
-          return;
-        }
-      }
-    } else if (dryRunErr.message?.includes('Already up to date')) {
-      preCheckIsClean = true;
-      appendLog('Already up to date — nothing to merge', '\x1b[32m');
-    } else {
-      appendLog(`Pre-check error: ${dryRunErr.message}`, '\x1b[31m');
-      return; // unknown error — don't attempt the merge
-    }
-  }
-
-  if (!preCheckIsClean) return;
-
-  // 3. Pre-check passed — execute the real merge
-  let mergeSuccess = false;
-  try {
-    appendLog(`Merging ${branchName} into workspace...`);
-
-    // Try fast-forward first (no merge commit, cleanest)
-    try {
-      await git.merge([branchName, '--ff-only']);
-      appendLog('Merged via fast-forward — no conflicts', '\x1b[32m');
-      mergeSuccess = true;
-    } catch {
-      // ff-only failed — do no-ff merge with tracking-file auto-resolution
-      try {
-        await git.merge([branchName, '--no-ff', '--no-commit']);
-      } catch (mergeErr: any) {
-        // Expected if tracking files conflict — resolve them now
-        if (
-          mergeErr.message?.includes('CONFLICT') ||
-          mergeErr.message?.includes('Automatic merge failed')
-        ) {
-          // Auto-resolve tracking files (pre-check already confirmed only these conflict)
-          for (const file of preCheckConflictFiles) {
-            try {
-              await git.raw(['checkout', '--theirs', '--', file]);
-              await git.add(file);
-              appendLog(`Auto-resolved tracking file: ${file}`);
-            } catch { /* best-effort */ }
-          }
-        } else {
-          throw mergeErr;
-        }
-      }
-
-      // Commit the merge
-      try {
-        await git.commit(`merge: ${branchName} (auto)`);
-        appendLog('Merged (no-ff) — no conflicts', '\x1b[32m');
-        mergeSuccess = true;
-      } catch (commitErr: any) {
-        if (commitErr.message?.includes('nothing to commit') || commitErr.message?.includes('nothing added')) {
-          appendLog('Merged — already up to date', '\x1b[32m');
-          mergeSuccess = true;
-        } else {
-          try { await git.merge(['--abort']); } catch { /* already clean */ }
-          appendLog(`Commit failed: ${commitErr.message}`, '\x1b[31m');
-        }
-      }
-    }
-  } catch (unexpectedErr: any) {
-    try { await git.merge(['--abort']); } catch { /* already clean */ }
-    appendLog(`Unexpected merge error: ${unexpectedErr.message}`, '\x1b[31m');
-  } finally {
-    // 4. Always restore stash — even if merge failed
-    if (stashed) {
-      try {
-        await git.stash(['pop']);
-        appendLog('Restored stashed workspace changes');
-      } catch (popErr: any) {
-        appendLog(
-          `Stash pop conflict — run 'git stash pop' manually to restore your changes: ${popErr.message}`,
-          '\x1b[33m',
-        );
-      }
-    }
-  }
-
-  // 5. On success: emit WAL event + remove worktree directory
-  if (mergeSuccess) {
-    let mergeCommitSha = '';
-    try { mergeCommitSha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
-
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merged', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, branchName, mergeCommitSha })]);
-    broadcastAll(walEvent!);
-
-    // Remove the worktree directory — run is done, branch merged
-    try {
-      await git.raw(['worktree', 'remove', '--force', worktreePath]);
-      appendLog(`Worktree removed: ${path.basename(worktreePath)}`, '\x1b[32m');
-    } catch (rmErr: any) {
-      // Worktree removal is best-effort — not a failure
-      appendLog(`Worktree removal skipped: ${(rmErr as Error).message}`, '\x1b[33m');
-    }
-
-    // Clear worktree_path from pipeline_runs so UI knows it's merged
-    try {
-      await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]);
-    } catch { /* non-fatal */ }
   }
 }
 
@@ -984,9 +491,10 @@ interface PipelineRunRow {
   finished_at: string | null;
   retried_from_run_id: number | null;
   log_path: string | null;
-  agent: string;
-  agent_type: string;
+  agent: string | null;
+  agent_type: string | null;
   agent_model: string | null;
+  lifecycle_phase?: string | null;
   parallelism: number;
   opencode_server_pid: number | null;
   total_input_tokens: number | null;
@@ -1010,6 +518,9 @@ interface PipelineRunRow {
   task_manifest_id?: string | null;
   task_manifest_artifacts?: Record<string, unknown> | string | null;
   trigger_options?: Record<string, unknown> | string | null;
+  lifecycle_status?: string | null;
+  lifecycle_updated_at?: string | null;
+  lifecycle_diagnostics?: Record<string, unknown> | string | null;
 }
 
 function resolveRequestedTerminalMode(value: string | null | undefined): TerminalMode {
@@ -1022,16 +533,43 @@ function resolveRequestedTerminalMode(value: string | null | undefined): Termina
   return value;
 }
 
+/** Convert PostgreSQL BIGINT IDs to the strict numeric worker contract safely. */
+function normalizeWorkerRunId(value: unknown): number {
+  const runId = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(runId) || runId <= 0) {
+    throw new ServiceUnavailableError('Pipeline run ID cannot be represented safely by the execution worker.');
+  }
+  return runId;
+}
+
 function assertTerminalModeAvailable(mode: TerminalMode): void {
   if (isPtyTerminalMode(mode) && !PTY_AVAILABLE) {
     throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
   }
 }
 
-function normalizePipelineRun<T extends { terminal_mode?: string | null }>(run: T): Omit<T, 'terminal_mode'> & { terminal_mode: TerminalMode } {
+type CanonicalPipelineRun<T extends PipelineRunRow> = Omit<T, 'agent_type' | 'agent_model' | 'terminal_mode' | 'lifecycle_status'> & {
+  agent_type: NormalizedRunAgentType;
+  agent_model: string | null;
+  terminal_mode: TerminalMode;
+  lifecycle_status: RunLifecycleStatus;
+} & ReturnType<typeof normalizeRunMetadata>;
+
+function normalizePipelineRun<T extends PipelineRunRow>(run: T): CanonicalPipelineRun<T> {
+  const metadata = normalizeRunMetadata(run);
+  const lifecycleStatus = metadata.lifecyclePhase ?? lifecycleFromLegacyStatus(run.status);
   return {
     ...run,
-    terminal_mode: normalizeTerminalMode(run.terminal_mode),
+    // Missing historical agent telemetry remains Unknown. Lifecycle stays
+    // backend-owned and never comes from terminal/WAL inference.
+    agent_type: metadata.agentType,
+    agent_model: metadata.agentModel,
+    terminal_mode: metadata.terminalMode,
+    ...metadata,
+    lifecycle_status: lifecycleStatus,
+    lifecycleStatus,
+    lifecyclePhase: lifecycleStatus,
+    lifecycle_phase: lifecycleStatus,
   };
 }
 
@@ -1279,13 +817,15 @@ const PipelineTriggerSchema = z.object({
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
-  queuedRunId: z.number().optional(),
+  // PostgreSQL BIGINT values are returned as strings by node-postgres.
+  queuedRunId: z.union([z.number(), z.string()]).optional(),
   queue: z.boolean().optional(),
   includeGraph: z.boolean().optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
+  reasoning: z.object({ enabled: z.boolean(), effort: z.string().optional() }).optional(),
   forceRerun: z.boolean().optional(),
   rerunFromScratch: z.boolean().optional(),
   readinessOverride: z.boolean().optional(),
@@ -1339,7 +879,7 @@ function assertNoLegacyHermesRepairMetadataOnPipelineTrigger(body: Record<string
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1374,9 +914,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       // Model comes from spec JSON only
       const model: string = specJson.model ?? DEFAULT_MODEL;
 
-      const dryRunReasoningOptions = thinkingEnabled !== undefined
-        ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
-        : undefined;
+      const dryRunReasoningOptions = reasoning !== undefined
+        ? { enabled: reasoning.enabled, effort: reasoning.effort ?? effortLevel ?? undefined }
+        : thinkingEnabled !== undefined
+          ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
+          : undefined;
       const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
       res.json({
         dryRun: true,
@@ -1421,23 +963,81 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
     // Read spec-level reasoning config — used as defaults when trigger request omits reasoning params
     const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
-    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
-    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
+    const specEffortLevel: string | undefined = typeof specModelJson.effortLevel === 'string' ? specModelJson.effortLevel : undefined;
+    const specThinkingEnabled: boolean | undefined = typeof specModelJson.thinkingEnabled === 'boolean' ? specModelJson.thinkingEnabled : undefined;
+    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (reasoning?.enabled ?? specThinkingEnabled ?? specReasoning?.enabled ?? undefined);
+    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? reasoning?.effort ?? effortLevel ?? specReasoning?.effort ?? specEffortLevel;
+    // Model comes from: request modelOverride > spec.model > workflow router model > null
+    const resolvedAgentModel: string | null = modelOverride ?? manifestExecutionModelOverride ?? specLevelModel ?? wfConfig.model ?? activeModel ?? null;
 
-    const executionOptions = resolveExecutionOptions({
-      requestAgentOverride: agentOverride,
-      manifestAgentOverride: manifestExecutionAgentOverride,
-      specAgentOverride: specLevelAgent,
-      requestModelOverride: modelOverride,
-      manifestModelOverride: manifestExecutionModelOverride,
-      specModel: specLevelModel,
-      workflowConfig: wfConfig,
-      activeAgentFallback: activeAgent,
-      activeModelFallback: activeModel,
-      log: logger,
-    });
-    const resolvedAgentType: AgentType = executionOptions.resolvedAgentType;
-    const finalAgentModel = executionOptions.finalAgentModel;
+    // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
+    // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
+    const OPENCODE_PROVIDER_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/'];
+    // Note: 'anthropic/' prefix is intentionally excluded — anthropic/claude-* models must stay on Claude CLI.
+    // Only non-Claude provider prefixes trigger the OpenCode auto-switch.
+    const modelNeedsOpenCode = resolvedAgentModel != null && OPENCODE_PROVIDER_PREFIXES.some(p => resolvedAgentModel.startsWith(p));
+    // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models.
+    // Exclude anthropic/claude-* (OpenRouter format for Claude models — should still use Claude CLI).
+    const modelIsNonClaude = resolvedAgentModel != null
+      && resolvedAgentModel.includes('/')
+      && !resolvedAgentModel.startsWith('claude-')
+      && !resolvedAgentModel.startsWith('anthropic/claude-');
+    const runtimeAgent: AgentType = wfConfig.runtime === 'native'
+      ? activeAgent
+      : wfConfig.runtime as AgentType;
+    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !manifestExecutionAgentOverride && !specLevelAgent && runtimeAgent === 'claude';
+    // Priority: request agentOverride > manifest override > spec-level override > model auto-detect > workflow runtime.
+    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? (manifestExecutionAgentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : runtimeAgent);
+
+    // Translate model IDs for OpenCode execution.
+    // OpenCode expects "provider/org/model" format (e.g. "openrouter/anthropic/claude-opus-4.6").
+    // Rorca stores models as either:
+    //   - Claude-style IDs: "claude-opus-4-6" (Anthropic SDK format, dashes)
+    //   - OpenRouter catalog IDs: "z-ai/glm-5", "anthropic/claude-opus-4.6" (org/model)
+    //   - Already-prefixed: "openrouter/z-ai/glm-5", "openai/gpt-4o"
+    let finalAgentModel = resolvedAgentModel;
+    if (finalAgentModel && resolvedAgentType === 'opencode') {
+      // Already has a known provider prefix — pass through as-is
+      if (modelNeedsOpenCode) {
+        // e.g. "openrouter/z-ai/glm-5", "openai/gpt-4o" — already correct
+      }
+      // Claude SDK model IDs → OpenRouter format (dashes to dots, add anthropic/ prefix)
+      else if (/^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/')) {
+        // claude-opus-4-6 → anthropic/claude-opus-4.6
+        // claude-sonnet-4-6 → anthropic/claude-sonnet-4.6
+        // claude-haiku-4-5-20251001 → anthropic/claude-haiku-4.5 (strip date suffix)
+        const openRouterId = finalAgentModel
+          .replace(/-(\d+)-(\d+)(?:-\d{8})?$/, '-$1.$2')  // "4-6" → "4.6", strip date
+          .replace(/-(\d{8})$/, '');                         // catch remaining date suffixes
+        finalAgentModel = `openrouter/anthropic/${openRouterId}`;
+      }
+      // Bare org/model from OpenRouter catalog (e.g. "z-ai/glm-5", "anthropic/claude-opus-4.6")
+      else if (modelIsNonClaude) {
+        finalAgentModel = `openrouter/${finalAgentModel}`;
+      }
+    }
+
+    // When running with Claude CLI, only claude-* model IDs are valid.
+    // If the spec has an OpenRouter model (e.g. "z-ai/glm-5") but the user
+    // explicitly selected Claude CLI, clear the model so Claude uses its default.
+    if (resolvedAgentType === 'claude' && finalAgentModel) {
+      const isClaudeModel = /^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/');
+      if (!isClaudeModel) {
+        finalAgentModel = null;
+      }
+    }
+
+    if (resolvedAgentType === 'pi') {
+      const sharedResolution = resolveExecutionOptions({
+        requestAgentOverride: resolvedAgentType,
+        requestModelOverride: finalAgentModel,
+        activeAgentFallback: activeAgent,
+        activeModelFallback: activeModel,
+        resolvePiModel: true,
+        log: logger,
+      });
+      finalAgentModel = sharedResolution.finalAgentModel;
+    }
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedExecutionEnvironment.effective === 'remote-rorca' && resolvedAgentType === 'claude') {
@@ -1504,7 +1104,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           throw new ForbiddenError('engine_auth_required');
           return;
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof ForbiddenError) throw error;
         // Spec parse error — non-fatal for auth scanning, let the trigger proceed
       }
     }
@@ -1537,7 +1138,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
               missingTools: s.result.missingTools,
               warnings: s.result.warnings,
             }));
-            throw new ValidationError('capability_mismatch');
+            throw new ValidationError('capability_mismatch', { incompatible });
             return;
           }
 
@@ -1552,8 +1153,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           }));
           (req as any)._capabilityMismatchMode = mismatchMode;
         }
-      } catch {
-        // Non-fatal — let the trigger proceed
+      } catch (error) {
+        if (error instanceof ValidationError) throw error;
+        // Spec parse or capability inspection errors are non-fatal.
       }
     }
 
@@ -1621,10 +1223,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
     const hasExecutionEngine = executionEngineEntrypoint.exists;
     const hasBashRunLoop = fs.existsSync(runLoopSh);
-    const useExecutionEngine = hasExecutionEngine;
 
     if (!hasExecutionEngine && !hasBashRunLoop) {
-      throw new UnprocessableError(`No execution engine found — expected execution-engine.js or execution-engine.ts`);
+      throw new UnprocessableError('No execution engine found — expected execution-engine.js or execution-engine.ts');
       return;
     }
 
@@ -1664,6 +1265,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
             thinkingBudget,
             effortLevel,
             reasoningEffort,
+            reasoning,
             rerunFromScratch,
             readinessOverride,
             runAnywayOverride,
@@ -1672,14 +1274,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
             executionEnvironment: resolvedExecutionEnvironment.effective,
           }).filter(([, value]) => value !== undefined)
         );
+        const queuedTriggerOptions = JSON.stringify({ ...queuedBaseTriggerOptions, ...(triggerOptions ?? {}) });
         const queuedTaskManifestArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
-        const queuedTriggerOptions = JSON.stringify({
-          ...queuedBaseTriggerOptions,
-          ...(triggerOptions ?? {}),
-        });
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, queuedTaskManifestArtifacts, queuedTriggerOptions]);
-        const queuedId = queueResult!.id;
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, auto_merge, include_graph, merge_strategy, agent, agent_type, agent_model, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, autoMerge ?? true, includeGraph ?? false, mergeStrategy ?? null, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, queuedTaskManifestArtifacts, queuedTriggerOptions]);
+        const queuedId = normalizeWorkerRunId(queueResult?.id);
 
         const executionReadiness = (req as any)._executionReadiness;
         const canonicalReadiness = (req as any)._specReadiness;
@@ -1747,39 +1346,29 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       const serializedExternalArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
       const serializedExternalTriggerOptions = triggerOptions ? JSON.stringify(triggerOptions) : null;
       let runId: number;
-
       if (existingRunId) {
         await execute(
           `UPDATE pipeline_runs
-              SET spec_path = $1,
-                  workspace_id = $2,
-                  status = 'pi_native',
-                  trigger_type = $3,
-                  agent = $4,
-                  agent_type = $5,
-                  agent_model = $6,
-                  started_at = NULL,
-                  finished_at = NULL,
-                  pid = NULL,
-                  triggered_via = $7,
-                  terminal_mode = $8,
-                  idempotency_key = COALESCE($9, idempotency_key),
-                  task_manifest_id = COALESCE($10, task_manifest_id),
-                  task_manifest_artifacts = COALESCE($11::jsonb, task_manifest_artifacts),
-                  trigger_options = COALESCE($12::jsonb, trigger_options)
-            WHERE id = $13`,
-          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions, existingRunId],
+              SET spec_path = $1, workspace_id = $2, status = 'pi_native', trigger_type = $3,
+                  agent = $4, agent_type = $5, agent_model = $6, started_at = NULL,
+                  finished_at = NULL, pid = NULL, triggered_via = $7, terminal_mode = $8,
+                  execution_environment = $9, idempotency_key = COALESCE($10, idempotency_key),
+                  task_manifest_id = COALESCE($11, task_manifest_id),
+                  task_manifest_artifacts = COALESCE($12::jsonb, task_manifest_artifacts),
+                  trigger_options = COALESCE($13::jsonb, trigger_options)
+            WHERE id = $14`,
+          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions, existingRunId],
         );
-        runId = Number(existingRunId);
+        runId = normalizeWorkerRunId(existingRunId);
       } else {
         const runResult = await queryOne<{ id: number }>(
           `INSERT INTO pipeline_runs
-             (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-           VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11::jsonb, COALESCE($12::jsonb, '{}'::jsonb))
+             (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+           VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12::jsonb, COALESCE($13::jsonb, '{}'::jsonb))
            RETURNING id`,
-          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions],
+          [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions],
         );
-        runId = normalizePipelineRunId(runResult?.id);
+        runId = normalizeWorkerRunId(runResult?.id);
       }
 
       const walEvent = await queryOne<WalEvent>(
@@ -1863,6 +1452,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     } catch {
       // Spec parse error — fall back to sequential
       logger.info('[orchestration] Using sequential (spec parse error, fallback)');
+    }
+
+    if (isPtyTerminalMode(resolvedTerminalMode) && parallelism > 1) {
+      parallelism = 1;
+      logger.info('[orchestration] Forced sequential because PTY sessions are run-scoped interactive terminals');
     }
 
     // 5. Determine CWD — main workspace or new worktree
@@ -1997,7 +1591,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       runId = existingRunId;
     } else {
       const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
-      runId = normalizePipelineRunId(runResult?.id);
+      runId = normalizeWorkerRunId(runResult?.id);
     }
 
     // 7. Build env overrides — workspace-specific and vault key additions only.
@@ -2149,6 +1743,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // 10. Enqueue the pipeline run via pg-boss.
     //     The worker process picks it up and does the actual spawn / execution.
     //     Job ID = String(runId) for direct lookup by runId.
+    const resolvedJobEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(resolvedReasoningEffort ?? '')
+      ? resolvedReasoningEffort as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+      : effortLevel;
+
     const jobPayload = {
       runId,
       specPath,
@@ -2170,7 +1768,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(agentOverride ? { agentOverride } : {}),
       ...(resolvedThinkingEnabled !== undefined ? { thinkingEnabled: resolvedThinkingEnabled } : {}),
       ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
-      ...(effortLevel ? { effortLevel } : {}),
+      ...(resolvedJobEffortLevel ? { effortLevel: resolvedJobEffortLevel } : {}),
       ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
       ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
       ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
@@ -2231,18 +1829,16 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       agentModel: finalAgentModel,
       terminalMode: resolvedTerminalMode,
       terminal_mode: resolvedTerminalMode,
+      lifecycleStatus: 'queued',
+      lifecycle_status: 'queued',
+      lifecyclePhase: 'queued',
+      lifecycle_phase: 'queued',
       executionEnvironment: resolvedExecutionEnvironment.effective,
       ...(runnerJobId ? { runnerJobId } : {}),
       ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
       ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
       ...(effectiveTaskManifestArtifacts ? { artifacts: effectiveTaskManifestArtifacts } : {}),
       ...(effectiveTaskManifestArtifactRefs ? { artifactRefs: effectiveTaskManifestArtifactRefs } : {}),
-      ...(effectiveTriggerOptions ? { manifestSource: buildManifestSourceFromRun({
-        idempotency_key: effectiveIdempotencyKey ?? null,
-        task_manifest_id: effectiveManifestId ?? null,
-        task_manifest_artifacts: effectiveTaskManifestArtifacts ?? null,
-        trigger_options: effectiveTriggerOptions,
-      }) } : {}),
       ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
@@ -2931,8 +2527,8 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh] }
  *               executionEnvironment: { type: string, description: "Optional; carried to the broker only when local execution-environment support is installed, otherwise defaults to remote-rorca." }
  *               executionEnvironmentId: { type: string, description: "Optional execution-environment identifier when supported." }
- *               terminal_mode: { type: string, enum: [ansi-html, pty], nullable: true }
- *               terminalMode: { type: string, enum: [ansi-html, pty], nullable: true }
+ *               terminal_mode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
+ *               terminalMode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
  *     responses:
  *       200:
  *         description: Dry-run plan or idempotency conflict
@@ -3784,7 +3380,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
 
     const runResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES ($1, $2, 'running', 'quick-run') RETURNING id`, [relativeSpecPath, workspaceId]);
-    const runId = runResult!.id;
+    const runId = normalizeWorkerRunId(runResult!.id);
 
     // Build clean env
     const env: Record<string, string> = {};
@@ -3992,7 +3588,7 @@ router.post('/runs', async (req: Request, res: Response) => {
 
     const result = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode) VALUES ($1, $2, 'running', $3) RETURNING id`, [specPath, workspaceId, resolvedTerminalMode]);
 
-    const runId = result!.id;
+    const runId = normalizeWorkerRunId(result!.id);
 
     const runRow = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow;
     const run = normalizePipelineRun(runRow);
@@ -4002,7 +3598,17 @@ router.post('/runs', async (req: Request, res: Response) => {
 
     broadcastAll(walEvent!);
 
-    res.status(201).json({ run, terminalMode: run.terminal_mode, terminal_mode: run.terminal_mode });
+    res.status(201).json({
+      run,
+      agentType: run.agentType,
+      agentModel: run.agentModel,
+      terminalMode: run.terminalMode,
+      terminal_mode: run.terminalMode,
+      lifecycleStatus: run.lifecycleStatus,
+      lifecycle_status: run.lifecycleStatus,
+      lifecyclePhase: run.lifecyclePhase,
+      lifecycle_phase: run.lifecyclePhase,
+    });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Create run');
   }
@@ -4312,7 +3918,8 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
 
     // Read spec JSON to return full userStories list (including pending ones)
     // OC-029: Include per-story engine assignment in response
-    const runAgentType = (run.agent_type || run.agent || 'claude') as AgentType;
+    const normalizedRunAgent = normalizeRunAgentType(run.agent_type);
+    const runAgentType: AgentType | null = normalizedRunAgent === 'unknown' ? null : normalizedRunAgent;
     let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean; excluded?: boolean; agent?: string; reroute?: { fromEngine: string; toEngine: string; reason: string } }[] = [];
     let specModel: string | null = null;
     try {
@@ -4324,7 +3931,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
           specModel = specJson.model || null;
           if (Array.isArray(specJson.userStories)) {
             specStories = specJson.userStories.map((s: any) => {
-              const storyAgent = resolveStoryAgent(s, runAgentType);
+              const storyAgent = runAgentType ? resolveStoryAgent(s, runAgentType) : null;
               const reroute = reroutedStories.get(s.id);
               return {
                 id: s.id,
@@ -4361,19 +3968,31 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     }
 
     // Aggregate token counts and cost from story_results
-    const tokenRow = await queryOne(`SELECT COALESCE(SUM(input_tokens), 0) AS total_input,
-              COALESCE(SUM(output_tokens), 0) AS total_output,
-              COALESCE(SUM(cost_usd), 0) AS total_cost
-       FROM story_results WHERE run_id = $1`, [runId]) as { total_input: number; total_output: number; total_cost: number };
+    const tokenRow = await queryOne(`SELECT SUM(input_tokens) AS total_input,
+              SUM(output_tokens) AS total_output,
+              SUM(cost_usd) AS total_cost
+       FROM story_results WHERE run_id = $1`, [runId]) as { total_input: number | null; total_output: number | null; total_cost: number | null } | undefined;
 
-    // Per-story token breakdown
+    const nullableNumber = (value: unknown): number | null => {
+      if (value === null || value === undefined) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const tokenSummary = {
+      inputTokens: nullableNumber(tokenRow?.total_input),
+      outputTokens: nullableNumber(tokenRow?.total_output),
+      totalCostUsd: nullableNumber(tokenRow?.total_cost),
+    };
+
+    // Null means the transport never reported this telemetry. Do not turn an
+    // unknown PTY count/cost into a fabricated zero in the public DTO.
     const storyTokenBreakdown = stories.map((s) => ({
       storyId: s.story_id,
       status: s.status,
-      inputTokens: s.input_tokens ?? 0,
-      outputTokens: s.output_tokens ?? 0,
+      inputTokens: s.input_tokens,
+      outputTokens: s.output_tokens,
       modelUsed: s.model_used ?? null,
-      costUsd: s.cost_usd ?? 0,
+      costUsd: s.cost_usd,
     }));
 
     // CIE-007: Read run-state.json for real-time story progress fallback
@@ -4381,7 +4000,10 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     try {
       const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
       if (workspace) {
-        runState = readRunState(workspace.path);
+        // Isolated runs write live state inside their worktree, not the dirty/main
+        // workspace. Reading only workspace.path makes active worktree runs appear
+        // stuck at 0/N even while stories complete.
+        runState = readRunState(run.worktree_path || workspace.path);
         // Only include if it belongs to this run
         if (runState && runState.runId !== runId) runState = null;
       }
@@ -4431,19 +4053,19 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       stories,
       specStories,
       specModel,
-      agentType: run.agent_type ?? null,
-      agentModel: run.agent_model || null,
-      terminalMode: run.terminal_mode,
-      terminal_mode: run.terminal_mode,
+      agentType: run.agentType,
+      agentModel: run.agentModel,
+      terminalMode: run.terminalMode,
+      terminal_mode: run.terminalMode,
+      lifecycleStatus: run.lifecycleStatus,
+      lifecycle_status: run.lifecycleStatus,
+      lifecyclePhase: run.lifecyclePhase,
+      lifecycle_phase: run.lifecyclePhase,
       // US-004: Expose worktree fields at top level for easy frontend access
       worktreePath: run.worktree_path || null,
       branchName: run.branch_name || null,
       includeGraph: run.include_graph ?? false,
-      tokenSummary: {
-        inputTokens: tokenRow.total_input,
-        outputTokens: tokenRow.total_output,
-        totalCostUsd: tokenRow.total_cost,
-      },
+      tokenSummary,
       storyTokenBreakdown,
       runState,
       contextComparison,
@@ -4876,9 +4498,9 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
 
     // Verify run exists
     const run = await queryOne(
-      'SELECT id FROM pipeline_runs WHERE id = $1',
+      'SELECT id, workspace_id, spec_path, worktree_path FROM pipeline_runs WHERE id = $1',
       [runId]
-    ) as { id: number } | undefined;
+    ) as { id: number; workspace_id: string; spec_path: string; worktree_path: string | null } | undefined;
     if (!run) {
       throw new NotFoundError('Run not found');
     }
@@ -4940,6 +4562,19 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
       title?: string;
       snippet?: string;
       category?: string;
+      confidence?: string | null;
+      source?: string | null;
+      sourceStoryId?: string | null;
+      sourceSpecId?: string | null;
+      sourceRunId?: number | null;
+      relatedFiles?: string[];
+      canonicalKey?: string;
+      pinned?: boolean;
+      createdAt?: string | null;
+      updatedAt?: string | null;
+      decision?: 'keep' | 'drop' | 'needs-more' | 'conflict';
+      conflictsWith?: string[];
+      supersededBy?: string;
       selected: boolean;
       enteredPrompt?: boolean;
       relevanceScore: number;
@@ -4960,6 +4595,149 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
         : []
     );
 
+    const normalizeStringArray = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string')
+      : [];
+
+    const deriveMemoryTitle = (candidate: Record<string, any>): string | undefined => {
+      if (typeof candidate.title === 'string' && candidate.title.trim().length > 0) {
+        return candidate.title.trim();
+      }
+      const text = typeof candidate.snippet === 'string'
+        ? candidate.snippet
+        : typeof candidate.text === 'string'
+          ? candidate.text
+          : '';
+      const [title] = text.split(':', 1);
+      if (title.trim().length >= 4 && title.trim().length <= 120) return title.trim();
+      return undefined;
+    };
+
+    const deriveMemorySnippet = (candidate: Record<string, any>): string | undefined => {
+      if (typeof candidate.snippet === 'string' && candidate.snippet.trim().length > 0) {
+        return candidate.snippet.trim();
+      }
+      if (typeof candidate.text === 'string' && candidate.text.trim().length > 0) {
+        return candidate.text.trim();
+      }
+      return undefined;
+    };
+
+    interface ContextReceipt {
+      specPath: string | null;
+      specId: string | null;
+      specTitle: string | null;
+      storyId: string;
+      storyTitle: string | null;
+      storyDescription: string | null;
+      acceptanceCriteria: string[];
+      retrievalQuery: string;
+      promptRawRef: string | null;
+      promptExcerpt: string | null;
+      promptBytes: number | null;
+      promptUnavailableReason: string | null;
+      receiptSteps: string[];
+    }
+
+    const excerptText = (text: string, max = 1800): string => {
+      const compact = text.replace(/\r\n/g, '\n').trim();
+      if (compact.length <= max) return compact;
+      return `${compact.slice(0, max).trimEnd()}…`;
+    };
+
+    const normalizeStoryCriteria = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string')
+      : [];
+
+    const resolveStoryFromSpec = async (storyId: string): Promise<Pick<ContextReceipt, 'specPath' | 'specId' | 'specTitle' | 'storyTitle' | 'storyDescription' | 'acceptanceCriteria'>> => {
+      const fallback = {
+        specPath: run.spec_path ?? null,
+        specId: run.spec_path ? path.basename(run.spec_path, '.json') : null,
+        specTitle: null,
+        storyTitle: null,
+        storyDescription: null,
+        acceptanceCriteria: [],
+      };
+
+      try {
+        const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+        const roots = [run.worktree_path, workspace?.path].filter((value): value is string => Boolean(value));
+        for (const root of roots) {
+          const specPath = path.join(root, run.spec_path);
+          if (!fs.existsSync(specPath)) continue;
+          const spec = JSON.parse(fs.readFileSync(specPath, 'utf8')) as Record<string, any>;
+          const stories = Array.isArray(spec.userStories)
+            ? spec.userStories
+            : Array.isArray(spec.stories)
+              ? spec.stories
+              : [];
+          const story = stories.find((entry: any) => entry && String(entry.id) === storyId) as Record<string, any> | undefined;
+          return {
+            specPath: run.spec_path ?? null,
+            specId: typeof spec.id === 'string' ? spec.id : fallback.specId,
+            specTitle: typeof spec.title === 'string' ? spec.title : typeof spec.specName === 'string' ? spec.specName : null,
+            storyTitle: typeof story?.title === 'string' ? story.title : null,
+            storyDescription: typeof story?.description === 'string' ? story.description : null,
+            acceptanceCriteria: normalizeStoryCriteria(story?.acceptanceCriteria),
+          };
+        }
+      } catch {
+        // Receipt metadata is best-effort; retrieval detail should still render.
+      }
+      return fallback;
+    };
+
+    const resolvePromptReceipt = async (storyId: string): Promise<Pick<ContextReceipt, 'promptRawRef' | 'promptExcerpt' | 'promptBytes' | 'promptUnavailableReason'>> => {
+      try {
+        const promptRows = await query<{ payload: string | Record<string, any> }>(
+          `SELECT payload FROM wal_events
+           WHERE event_type = 'context_trace'
+             AND (payload->>'run_id')::bigint = $1
+             AND payload->>'phase' = 'prompt'
+             AND payload->>'storyId' = $2
+           ORDER BY id DESC
+           LIMIT 5`,
+          [runId, storyId],
+        );
+        const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+        const traceRoots = workspace ? await listContextTraceRoots(runId, workspace.path, run.worktree_path) : [];
+
+        for (const row of promptRows) {
+          const event = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+          const rawRef = event && typeof event.rawRef === 'string' ? event.rawRef : null;
+          if (!rawRef) continue;
+          for (const traceRoot of traceRoots) {
+            const record = lookupTraceRecord(traceRoot, rawRef);
+            const prompt = record?.payload && typeof record.payload === 'object' && typeof (record.payload as Record<string, unknown>).prompt === 'string'
+              ? (record.payload as Record<string, string>).prompt
+              : null;
+            if (prompt) {
+              return {
+                promptRawRef: rawRef,
+                promptExcerpt: excerptText(prompt),
+                promptBytes: Buffer.byteLength(prompt),
+                promptUnavailableReason: null,
+              };
+            }
+          }
+          return {
+            promptRawRef: rawRef,
+            promptExcerpt: null,
+            promptBytes: typeof event.metrics?.bytes === 'number' ? event.metrics.bytes : null,
+            promptUnavailableReason: 'Prompt trace metadata exists, but the raw prompt artifact is unavailable for this run.',
+          };
+        }
+      } catch {
+        // Prompt receipt is best-effort.
+      }
+      return {
+        promptRawRef: null,
+        promptExcerpt: null,
+        promptBytes: null,
+        promptUnavailableReason: 'No prompt trace was recorded for this story, likely because the run predates context tracing.',
+      };
+    };
+
     const selectedCandidates: NormalizedCandidate[] = [];
     const droppedCandidates: NormalizedCandidate[] = [];
 
@@ -4973,9 +4751,22 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
         key: candidate.key,
         origin: candidate.origin,
         sourceType: typeof candidate.sourceType === 'string' ? candidate.sourceType : undefined,
-        title: typeof candidate.title === 'string' ? candidate.title : undefined,
-        snippet: typeof candidate.snippet === 'string' ? candidate.snippet : undefined,
+        title: deriveMemoryTitle(candidate),
+        snippet: deriveMemorySnippet(candidate),
         category: typeof candidate.category === 'string' ? candidate.category : undefined,
+        confidence: typeof candidate.confidence === 'string' ? candidate.confidence : null,
+        source: typeof candidate.source === 'string' ? candidate.source : null,
+        sourceStoryId: typeof candidate.sourceStoryId === 'string' ? candidate.sourceStoryId : null,
+        sourceSpecId: typeof candidate.sourceSpecId === 'string' ? candidate.sourceSpecId : null,
+        sourceRunId: typeof candidate.sourceRunId === 'number' ? candidate.sourceRunId : null,
+        relatedFiles: normalizeStringArray(candidate.relatedFiles),
+        canonicalKey: typeof candidate.canonicalKey === 'string' ? candidate.canonicalKey : undefined,
+        pinned: typeof candidate.pinned === 'boolean' ? candidate.pinned : undefined,
+        createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : null,
+        updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : null,
+        decision: ['keep', 'drop', 'needs-more', 'conflict'].includes(candidate.decision) ? candidate.decision : undefined,
+        conflictsWith: normalizeStringArray(candidate.conflictsWith),
+        supersededBy: typeof candidate.supersededBy === 'string' ? candidate.supersededBy : undefined,
         selected: isSelected,
         enteredPrompt: isSelected,
         relevanceScore: typeof candidate.finalScore === 'number' ? candidate.finalScore : 0,
@@ -4988,7 +4779,9 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
         },
         matchedSkills: Array.isArray(candidate.matchedSkills)
           ? candidate.matchedSkills.filter((s: any) => typeof s === 'string')
-          : undefined,
+          : Array.isArray(candidate.scoring?.breakdown?.skillAlignment?.matchedSkills)
+            ? candidate.scoring.breakdown.skillAlignment.matchedSkills.filter((s: any) => typeof s === 'string')
+            : undefined,
         keptOrDroppedReason: Array.isArray(candidate.reasons) && candidate.reasons.length > 0
           ? candidate.reasons.join('; ')
           : (candidate.decision === 'keep' ? 'Selected' : 'Dropped'),
@@ -5024,11 +4817,31 @@ router.get('/runs/:runId/retrieval-telemetry/:telemetryId', async (req: Request,
       }
     }
 
+    const storyId = storyWithTelemetry.story_id;
+    const [storyReceipt, promptReceipt] = await Promise.all([
+      resolveStoryFromSpec(storyId),
+      resolvePromptReceipt(storyId),
+    ]);
+    const contextReceipt: ContextReceipt = {
+      ...storyReceipt,
+      ...promptReceipt,
+      storyId,
+      retrievalQuery: telemetryRow.query_preview,
+      receiptSteps: [
+        `Story ${storyId} triggered context retrieval.`,
+        `${selCount}/${candCount} memory candidates were selected for agent context.`,
+        promptReceipt.promptExcerpt
+          ? 'The selected context was assembled into the final agent prompt.'
+          : 'The final prompt excerpt is unavailable for this run, but retrieval metadata is still shown.',
+      ],
+    };
+
     res.json({
       telemetryId: telemetryRow.id,
       runId,
-      storyId: storyWithTelemetry.story_id,
+      storyId,
       query: telemetryRow.query_preview,
+      contextReceipt,
       selectedCandidates,
       droppedCandidates,
       candidateCount: candCount,
@@ -5222,8 +5035,8 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
         ? originalRun.agent
         : 'claude';
     const retryModel = originalRun.agent_model ?? null;
-    const retryParallelism = forceSequential ? 1 : (originalRun.parallelism ?? 1);
     const retryTerminalMode = normalizeTerminalMode(originalRun.terminal_mode);
+    const retryParallelism = isPtyTerminalMode(retryTerminalMode) ? 1 : (forceSequential ? 1 : (originalRun.parallelism ?? 1));
     const retryAutoWorktree = Boolean(originalRun.auto_worktree ?? originalRun.worktree_path);
     const retryAutoMerge = Boolean(originalRun.auto_merge);
     const retryIncludeGraph = Boolean(originalRun.include_graph);
@@ -5278,7 +5091,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
         mergeStrategy: retryMergeStrategy,
       }),
     ]);
-    const newRunId = newRunResult!.id;
+    const newRunId = normalizeWorkerRunId(newRunResult!.id);
 
     // 8. Copy successful story results from the original run to the new run
     for (const passed of passedStories) {
@@ -5440,22 +5253,21 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
  *       - in: path
  *         name: runId
  *         required: true
- *         schema: { type: integer }
+ *         schema: { type: string, pattern: '^[0-9]+$' }
  *     responses:
- *       200: { description: "Merge job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, queued: { type: boolean } } } } } }
+ *       200: { description: "Merge job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: string }, queued: { type: boolean } } } } } }
  *       404: { description: "Run not found" }
  *       409: { description: "merge_status is not failed" }
  */
 router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
   try {
-    const runId = parseInt(String(req.params.runId), 10);
-    if (isNaN(runId)) {
+    const runId = String(req.params.runId);
+    if (!/^[1-9][0-9]*$/.test(runId)) {
       throw new ValidationError('Invalid runId');
-      return;
     }
 
     const run = await queryOne<{
-      id: number;
+      id: string;
       merge_status: string | null;
       branch_name: string | null;
       worktree_path: string | null;
@@ -5807,6 +5619,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     const { status } = run;
 
     // Already done — conflict
@@ -5845,6 +5658,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
         `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queue_position = NULL WHERE id = $1`,
         [runId],
       );
+      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_cancel' });
 
       // Recalculate queue positions for remaining queued runs
       const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
@@ -5865,16 +5679,18 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     // Deliver cancel job to the worker for SIGTERM/SIGKILL sequencing.
     await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
 
-    // Best-effort: if the PID is already dead (worker crashed, process exited),
-    // mark the run cancelled immediately rather than waiting for the worker.
+    // If both the engine and its independently tracked PTY process are gone,
+    // finalize inline. A dead wrapper PID alone is not enough: the forkpty child
+    // may still be alive and must remain visible to the worker cancellation job.
+    const ptyHealth = await getRunPtySessionHealth(runId);
     const pidAlive = run.pid ? isPidAlive(run.pid) : false;
-
-    if (!pidAlive) {
+    if (mayFinalizePtyCancellationInline(pidAlive, ptyHealth?.status)) {
       // Process is already gone — handle cancellation inline
       await execute(
         `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,
         [runId],
       );
+      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'pid_not_alive' });
       const walEvent = await queryOne<WalEvent>(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
         [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString(), reason: 'pid_not_alive' })],
@@ -5884,15 +5700,8 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
-    // PID is alive — send SIGTERM directly as a best-effort fallback alongside the worker job
-    if (run.pid) {
-      try {
-        process.kill(run.pid, 'SIGTERM');
-      } catch {
-        // ESRCH (already dead) or EPERM (no permission) — ignore, worker will handle it
-      }
-    }
-
+    // The worker owns process-tree termination. Do not race it with a direct
+    // PID signal here: a stale/recycled PID must not be targeted by the API.
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
     // AppError subclasses are caught and serialized by the centralized error handler
@@ -5938,6 +5747,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     if (run.status !== 'queued') {
       throw new ConflictError(`Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE`);
       return;
@@ -5955,6 +5765,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
 
     // Mark as cancelled
     await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
+    await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_delete' });
 
     // Recalculate positions for remaining queued runs
     const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
@@ -5991,8 +5802,8 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *             type: object
  *             required: [cols, rows]
  *             properties:
- *               cols: { type: integer, minimum: 1 }
- *               rows: { type: integer, minimum: 1 }
+ *               cols: { type: integer, minimum: 1, maximum: 500 }
+ *               rows: { type: integer, minimum: 1, maximum: 200 }
  *     responses:
  *       200: { description: PTY resize request recorded }
  */
@@ -6003,22 +5814,24 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     const rows = parseInt(String(req.body?.rows), 10);
 
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
-    if (!Number.isInteger(cols) || cols <= 0 || !Number.isInteger(rows) || rows <= 0) {
-      throw new ValidationError('cols and rows must be positive integers');
+    if (!Number.isInteger(cols) || cols <= 0 || cols > MAX_PTY_COLS
+      || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
+      throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
     }
     if (!PTY_AVAILABLE) {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
 
-    const run = await queryOne<{ terminal_mode: string | null; status: string }>(
-      'SELECT terminal_mode, status FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ terminal_mode: string | null; status: string; workspace_id: string }>(
+      'SELECT terminal_mode, status, workspace_id FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!run) throw new NotFoundError('Run not found');
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     if (!isPtyTerminalMode(normalizeTerminalMode(run.terminal_mode))) {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
-    if (['done', 'failed', 'cancelled'].includes(run.status)) {
+    if (['done', 'failed', 'partial_failure', 'cancelled'].includes(run.status)) {
       throw new ConflictError('Run is no longer active');
     }
 
@@ -6095,19 +5908,23 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
     if (input.length === 0) {
       throw new ValidationError('PTY input chunk cannot be empty');
     }
-    if (input.length > 65_536) {
+    if (input.length > MAX_PTY_INPUT_CHUNK_BYTES) {
       throw new ValidationError('PTY input chunk is too large');
     }
+    if (!isUtf8(input)) {
+      throw new ValidationError('dataBase64 must decode to valid UTF-8 terminal input');
+    }
 
-    const run = await queryOne<{ terminal_mode: string | null; status: string }>(
-      'SELECT terminal_mode, status FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ terminal_mode: string | null; status: string; workspace_id: string }>(
+      'SELECT terminal_mode, status, workspace_id FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!run) throw new NotFoundError('Run not found');
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
     if (!isPtyTerminalMode(normalizeTerminalMode(run.terminal_mode))) {
       throw new ConflictError('Run is not using PTY terminal mode');
     }
-    if (['done', 'failed', 'cancelled'].includes(run.status)) {
+    if (['done', 'failed', 'partial_failure', 'cancelled'].includes(run.status)) {
       throw new ConflictError('Run is no longer active');
     }
 
@@ -6116,7 +5933,10 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ConflictError('Run PTY session is not active');
     }
 
-    await requestRunPtyInput(runId, input);
+    const accepted = await requestRunPtyInput(runId, input);
+    if (!accepted) {
+      throw new ConflictError('PTY input queue is full or the session is no longer active');
+    }
     res.json({ ok: true, runId, bytes: input.length });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] PTY input');
@@ -6138,12 +5958,22 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
  *     x-rorca-public-api: true
- *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store so late joiners can rebuild the terminal from byte 0.
+ *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store. Committed PostgreSQL notifications wake streams immediately, durable sequence replay supports reconnects, and bounded polling recovers from notification loss.
  *     parameters:
  *       - in: path
  *         name: runId
  *         required: true
  *         schema: { type: integer }
+ *       - in: query
+ *         name: afterSequence
+ *         required: false
+ *         schema: { type: integer, minimum: 0 }
+ *         description: Explicit durable output cursor for refresh persistence. Overrides Last-Event-ID when both are supplied.
+ *       - in: query
+ *         name: outputSource
+ *         required: false
+ *         schema: { type: string, enum: [run_pty_output_chunks, run_output_chunks] }
+ *         description: Optional durable store identity paired with afterSequence. A changed source resets the cursor so independent PTY and ANSI sequence spaces cannot suppress fallback output.
  *     responses:
  *       200:
  *         description: SSE stream with chunk events (base64 data) and done event
@@ -6159,26 +5989,56 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     return;
   }
 
-  // Validate workspace ownership if workspaceId is provided
+  // Resolve and authorize the run before committing SSE headers. This keeps
+  // lookup failures as normal HTTP errors instead of half-open event streams.
+  const runRow = await queryOne(
+    'SELECT workspace_id, agent_type, agent, agent_model, status, lifecycle_status, terminal_mode FROM pipeline_runs WHERE id = $1',
+    [runId],
+  ) as { workspace_id: string; agent_type: string; agent: string; agent_model: string | null; status: string; lifecycle_status: string | null; terminal_mode: string | null } | undefined;
+  if (!runRow) throw new NotFoundError('Run not found');
+
+  await assertPipelineWorkspaceAccess(req, runRow.workspace_id);
   const wsId = req.query.workspaceId as string | undefined;
-  if (wsId) {
-    const ownerCheck = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: number } | undefined;
-    if (ownerCheck && String(ownerCheck.workspace_id) !== wsId) {
-      throw new ForbiddenError('Run does not belong to this workspace');
-      return;
-    }
+  if (wsId && String(runRow.workspace_id) !== wsId) {
+    throw new ForbiddenError('Run does not belong to this workspace');
   }
+
+  // A query cursor survives explicit browser refresh/navigation. It deliberately
+  // overrides Last-Event-ID, which EventSource may retain from an older stream.
+  const afterSequenceQuery = req.query.afterSequence;
+  if (Array.isArray(afterSequenceQuery)) {
+    throw new ValidationError('afterSequence must be a single non-negative integer sequence');
+  }
+  const afterSequence = typeof afterSequenceQuery === 'string' ? afterSequenceQuery : null;
+  const outputSourceQuery = req.query.outputSource;
+  if (Array.isArray(outputSourceQuery)) {
+    throw new ValidationError('outputSource must be a single replay source');
+  }
+  const requestedReplaySource = typeof outputSourceQuery === 'string'
+    ? parseOutputReplaySource(outputSourceQuery)
+    : null;
+  const lastEventId = req.get('Last-Event-ID');
+  const resumeSource = afterSequence !== null ? 'afterSequence' : lastEventId !== undefined ? 'Last-Event-ID' : null;
+  let hasResumeCursor = resumeSource !== null;
+  let lastSequence = hasResumeCursor
+    ? parseOutputResumeCursor(afterSequence ?? lastEventId!, resumeSource!)
+    : 0;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
+  res.write('retry: 1000\n\n');
   res.write(': connected\n\n');
 
-  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
+  const hb = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write(': hb\n\n');
+  }, 15_000);
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
+  let unsubscribeOutputWakeup: (() => void) | null = null;
   const cleanupOutputStream = () => {
     if (streamClosed) return;
     streamClosed = true;
@@ -6187,40 +6047,52 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       clearInterval(pollInterval);
       pollInterval = null;
     }
-    req.off('close', cleanupOutputStream);
-  };
-  const finishOutputStream = () => {
-    cleanupOutputStream();
-    if (!res.destroyed && !res.writableEnded) {
-      res.write('event: done\ndata: \n\n');
-      res.end();
-    }
+    unsubscribeOutputWakeup?.();
+    unsubscribeOutputWakeup = null;
   };
   req.on('close', cleanupOutputStream);
 
-  // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = await queryOne('SELECT agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
-  const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
-  const requestedTerminalMode = normalizeTerminalMode(runRow?.terminal_mode);
-  const terminalStatuses = ['done', 'failed', 'cancelled'];
+  // One canonical metadata source powers both this SSE DTO and HTTP DTOs.
+  const runMetadata = normalizeRunMetadata(runRow);
+  const agent = runMetadata.agentType;
+  const requestedTerminalMode = runMetadata.terminalMode;
+  const terminalStatuses = ['done', 'failed', 'partial_failure', 'cancelled'];
+  const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
   const requestedPtyMode = isPtyTerminalMode(requestedTerminalMode);
   const ptyStatusAtOpen = requestedPtyMode
-    ? await waitForRunPtySessionStatus(runId, runRow && terminalStatuses.includes(runRow.status) ? 0 : 5_000)
+    ? await getRunPtySessionStatus(runId)
     : null;
-  // A run may be marked PTY before/without a PTY session if the child spawn fails
-  // early. In that case the engine still mirrors logs to run_output_chunks. Late
-  // joiners must see those chunks instead of a blank native terminal. The short
-  // wait above covers the normal startup race where the UI subscribes just before
-  // execution-engine has inserted run_pty_sessions.
-  const usePtyCapture = requestedPtyMode && ptyStatusAtOpen !== null;
+  // An active PTY run is legitimately session-pending while context routing and
+  // prompt assembly run. Never permanently demote it because the browser attached
+  // before node-pty started. A terminal run with no session is a real fallback.
+  const usePtyCapture = requestedPtyMode
+    && PTY_AVAILABLE
+    && (ptyStatusAtOpen !== null || !runIsTerminalAtOpen);
+  const ptyHealthPayloadAtOpen = usePtyCapture
+    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId))
+    : null;
   const terminalMode = usePtyCapture ? requestedTerminalMode : 'ansi-html';
   const isPty = usePtyCapture;
+  const replaySource: RunOutputReplaySource = isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : RUN_OUTPUT_ANSI_REPLAY_SOURCE;
+  // PTY and ANSI captures intentionally have independent sequence spaces. A
+  // resume cursor from the other source must never suppress freshly selected
+  // fallback output; force the same bounded first-attach semantics instead.
+  const cursorReset = hasResumeCursor && requestedReplaySource !== null && requestedReplaySource !== replaySource;
+  if (cursorReset) {
+    hasResumeCursor = false;
+    lastSequence = 0;
+  }
   const ptyFallbackActive = requestedPtyMode && !isPty;
   const ptyFallbackReason = ptyFallbackActive
     ? PTY_AVAILABLE
       ? 'pty-session-unavailable'
       : 'node-pty-unavailable'
     : null;
+  const ptyUnavailableHint = ptyFallbackReason === 'node-pty-unavailable'
+    ? PTY_UNAVAILABLE_HINT
+    : ptyFallbackReason === 'pty-session-unavailable'
+      ? 'Inspect engine startup logs; the requested PTY session was never created.'
+      : null;
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();
     return;
@@ -6230,40 +6102,89 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // PTY stream has no PTY session, this is the canonical demotion signal for the
   // TUI: keep the ANSI replay stream open and label it as degraded/replay-only.
   res.write(`event: run_meta\ndata: ${JSON.stringify({
-    agentType: agent,
-    agentModel: runRow?.agent_model ?? null,
+    agentType: runMetadata.agentType,
+    agentModel: runMetadata.agentModel,
     terminalMode,
+    lifecyclePhase: runMetadata.lifecyclePhase,
+    lifecycle_phase: runMetadata.lifecyclePhase,
     terminal_mode: terminalMode,
+    lifecycleStatus: runRow.lifecycle_status ?? lifecycleFromLegacyStatus(runRow.status),
+    lifecycle_status: runRow.lifecycle_status ?? lifecycleFromLegacyStatus(runRow.status),
     requestedTerminalMode,
     requested_terminal_mode: requestedTerminalMode,
     isPty,
     ptyAvailable: PTY_AVAILABLE,
     ptyFallbackActive,
     ptyFallbackReason,
-    ptyUnavailableHint: ptyFallbackActive ? PTY_UNAVAILABLE_HINT : null,
-    pty_unavailable_hint: ptyFallbackActive ? PTY_UNAVAILABLE_HINT : null,
+    ptyLiveTransport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
+    pty_live_transport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
+    outputSource: replaySource,
+    output_source: replaySource,
+    cursorReset,
+    cursor_reset: cursorReset,
+    ptyReplaySource: replaySource,
+    pty_replay_source: replaySource,
+    ptyPollIntervalMs: isPty ? RUN_OUTPUT_PTY_POLL_INTERVAL_MS : null,
+    pty_poll_interval_ms: isPty ? RUN_OUTPUT_PTY_POLL_INTERVAL_MS : null,
+    ptyExpectedMaxLatencyMs: isPty ? RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS : null,
+    pty_expected_max_latency_ms: isPty ? RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS : null,
+    ptyUnavailableHint,
+    pty_unavailable_hint: ptyUnavailableHint,
+    ...(ptyHealthPayloadAtOpen ?? {}),
   })}\n\n`);
+  writePtyHealthEvent(res, ptyHealthPayloadAtOpen);
 
-  // ── Replay all existing chunks (late-join support) ────────────────────────
+  // ── Replay existing chunks (late-join/reconnect support) ──────────────────
+  // EventSource sends Last-Event-ID automatically after a disconnect. The
+  // validated cursor above resumes exactly after that sequence; first attaches
+  // get a bounded tail instead of an unbounded historical transcript.
   interface ChunkRow { sequence: number; chunk: Buffer }
-  let lastSequence = 0;
+  let lastPtyHealthSignature = JSON.stringify(ptyHealthPayloadAtOpen ?? {});
+  let lastPtyHealthEmitAt = Date.now();
+  let pollInFlight = false;
 
+  let initialReplayMayHaveMore = false;
   if (usePtyCapture) {
-    const existingChunks = await listRunPtyChunks(runId);
+    const existingChunks = hasResumeCursor
+      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS)
+      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS);
+    initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
+    if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
+      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+    }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      writeOutputChunkEvent(res, row.sequence, chunkBuf);
+      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+        cleanupOutputStream();
+        return;
+      }
       lastSequence = row.sequence;
     }
   } else {
-    const existingChunks = await query<ChunkRow>(
-      'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 ORDER BY sequence ASC',
-      [runId],
-    );
+    const existingChunks = hasResumeCursor
+      ? await query<ChunkRow>(
+          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC LIMIT $3',
+          [runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS],
+        )
+      : await query<ChunkRow>(
+          `SELECT sequence, chunk
+           FROM (
+             SELECT sequence, chunk FROM run_output_chunks
+             WHERE run_id = $1 ORDER BY sequence DESC LIMIT $2
+           ) recent ORDER BY sequence ASC`,
+          [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
+        );
 
+    initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
+    if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
+      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+    }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      writeOutputChunkEvent(res, row.sequence, chunkBuf);
+      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+        cleanupOutputStream();
+        return;
+      }
       emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
       lastSequence = row.sequence;
     }
@@ -6276,48 +6197,165 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 
   // ── If the run is already terminal, close immediately ────────────────────
-  if (runRow && terminalStatuses.includes(runRow.status)) {
-    finishOutputStream();
+  if (terminalStatuses.includes(runRow.status) && !initialReplayMayHaveMore) {
+    clearInterval(hb);
+    res.write('event: done\ndata: \n\n');
+    res.end();
     return;
   }
 
   // ── Poll for new chunks while run is active ───────────────────────────────
-  // Checks every 200 ms; uses lastSequence to fetch only new rows efficiently.
-  pollInterval = setInterval(async () => {
+  // Uses lastSequence to fetch only new rows efficiently. PostgreSQL NOTIFY
+  // drives the normal path; this cadence is the bounded recovery fallback.
+  const pollOutput = async (): Promise<void> => {
+    if (pollInFlight || streamClosed) return;
+    pollInFlight = true;
+    const pollStartedAt = Date.now();
+    let drainImmediately = false;
     try {
+      let fetchedBatchIsFull = false;
       if (usePtyCapture) {
-        const newChunks = await listRunPtyChunks(runId, lastSequence);
+        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS);
+        fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          writeOutputChunkEvent(res, row.sequence, chunkBuf);
+          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+            cleanupOutputStream();
+            return;
+          }
           lastSequence = row.sequence;
         }
       } else {
         const newChunks = await query<ChunkRow>(
-          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
-          [runId, lastSequence],
+          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC LIMIT $3',
+          [runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS],
         );
+        fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
 
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          writeOutputChunkEvent(res, row.sequence, chunkBuf);
+          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+            cleanupOutputStream();
+            return;
+          }
           emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
           lastSequence = row.sequence;
         }
       }
 
-      const [statusRow, ptyStatus] = await Promise.all([
-        queryOne<{ status: string }>('SELECT status FROM pipeline_runs WHERE id = $1', [runId]),
-        usePtyCapture ? getRunPtySessionStatus(runId) : Promise.resolve(null),
+      const [statusRow, ptyHealth] = await Promise.all([
+        queryOne<{ status: string; lifecycle_status: string | null }>(
+          'SELECT status, lifecycle_status FROM pipeline_runs WHERE id = $1', [runId],
+        ),
+        usePtyCapture ? getRunPtySessionHealth(runId) : Promise.resolve(null),
       ]);
-      const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
-      if (!statusRow || terminalStatuses.includes(statusRow.status) || ptyTerminal) {
-        finishOutputStream();
+      const ptyHealthPayload = normalizePtyHealthPayload(ptyHealth);
+      if (ptyHealthPayload) {
+        const now = Date.now();
+        const signature = JSON.stringify(ptyHealthPayload);
+        if (signature !== lastPtyHealthSignature || now - lastPtyHealthEmitAt > RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS) {
+          writePtyHealthEvent(res, ptyHealthPayload);
+          lastPtyHealthSignature = signature;
+          lastPtyHealthEmitAt = now;
+        }
       }
-    } catch {
-      finishOutputStream();
+      const ptyStatus = ptyHealth?.status ?? null;
+      const runBecameTerminal = Boolean(statusRow && terminalStatuses.includes(statusRow.status));
+      const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
+
+      // An attached browser may have observed the legitimate PTY startup-pending
+      // state before the engine later failed to create any session. Demote that
+      // same stream at terminal state and replay the durable wrapper transcript,
+      // so the operator sees the startup diagnostic without reconnecting.
+      if (usePtyCapture && ptyStatus === null && runBecameTerminal) {
+        const fallbackChunks = await query<ChunkRow>(
+          `SELECT sequence, chunk
+           FROM (
+             SELECT sequence, chunk FROM run_output_chunks
+             WHERE run_id = $1 ORDER BY sequence DESC LIMIT $2
+           ) recent ORDER BY sequence ASC`,
+          [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
+        );
+        res.write(`event: run_meta\ndata: ${JSON.stringify({
+          agentType: runMetadata.agentType,
+          agentModel: runMetadata.agentModel,
+          terminalMode: 'ansi-html',
+          lifecyclePhase: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
+          lifecycle_phase: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
+          lifecycleStatus: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
+          lifecycle_status: statusRow?.lifecycle_status ?? lifecycleFromLegacyStatus(statusRow?.status),
+          terminal_mode: 'ansi-html',
+          requestedTerminalMode,
+          requested_terminal_mode: requestedTerminalMode,
+          isPty: false,
+          ptyAvailable: PTY_AVAILABLE,
+          ptyFallbackActive: true,
+          ptyFallbackReason: 'pty-session-unavailable',
+          ptyUnavailableHint: 'The requested PTY session was never created; showing the durable engine transcript.',
+          pty_unavailable_hint: 'The requested PTY session was never created; showing the durable engine transcript.',
+          outputSource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+          output_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+          // This stream previously emitted PTY IDs. Tell the browser to reset
+          // its persisted cursor before accepting ANSI IDs from a new source.
+          cursorReset: true,
+          cursor_reset: true,
+          ptyReplaySource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+          pty_replay_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+        })}\n\n`);
+        if (fallbackChunks[0]?.sequence > 1) {
+          res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: fallbackChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+        }
+        for (const row of fallbackChunks) {
+          const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+            cleanupOutputStream();
+            return;
+          }
+          emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+        }
+      }
+
+      if (!statusRow || runBecameTerminal || ptyTerminal) {
+        // Never emit done before a bounded cursor batch has fully drained.
+        // Queue another non-overlapping poll; an exact-multiple batch simply
+        // performs one empty confirmation read before closing.
+        if (fetchedBatchIsFull) {
+          drainImmediately = true;
+        } else {
+          cleanupOutputStream();
+          res.write('event: done\ndata: \n\n');
+          res.end();
+        }
+      } else if (fetchedBatchIsFull) {
+        // Active noisy streams drain in bounded slices without waiting for the
+        // recovery interval, while `pollInFlight` prevents overlap.
+        drainImmediately = true;
+      }
+      const elapsedMs = Date.now() - pollStartedAt;
+      if (usePtyCapture && elapsedMs > RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS) {
+        logger.warn({ runId, elapsedMs, pollIntervalMs: RUN_OUTPUT_PTY_POLL_INTERVAL_MS }, '[pipeline-output] slow PTY DB poll');
+      }
+    } catch (err: unknown) {
+      logger.warn({ err, runId, terminalMode }, '[pipeline-output] transient output poll failure; allowing SSE reconnect');
+      cleanupOutputStream();
+      // A transport failure is not run completion. Emit a retryable error and
+      // end the HTTP response without a `done` marker so EventSource reconnects
+      // with Last-Event-ID and resumes exactly where it stopped.
+      res.write(`event: stream_error\ndata: ${JSON.stringify({ retryable: true, code: 'OUTPUT_POLL_FAILED', afterSequence: lastSequence })}\n\n`);
+      res.end();
+    } finally {
+      pollInFlight = false;
+      if (drainImmediately && !streamClosed && !req.destroyed && !res.destroyed) {
+        queueMicrotask(() => { void pollOutput(); });
+      }
     }
-  }, 200);
+  };
+
+  // PostgreSQL NOTIFY provides immediate cross-process wakeups after durable
+  // chunk commits. The interval remains as loss/reconnect protection.
+  unsubscribeOutputWakeup = subscribeRunOutput(runId, () => { void pollOutput(); });
+  pollInterval = setInterval(() => { void pollOutput(); }, RUN_OUTPUT_PTY_POLL_INTERVAL_MS);
+  if (initialReplayMayHaveMore) void pollOutput();
 
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();
@@ -6740,9 +6778,10 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
 
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
-  // Resolve agent type for semantic parsing
-  const runRow = await queryOne('SELECT agent, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { agent: string; workspace_id: string } | undefined;
-  const agent = runRow?.agent ?? 'claude';
+  // Semantic parsing may proceed with an explicit unknown engine, but never
+  // claim that missing historical metadata was Claude.
+  const runRow = await queryOne('SELECT agent, agent_type, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { agent: string | null; agent_type: string | null; workspace_id: string } | undefined;
+  const agent = normalizeRunMetadata(runRow ?? {}).agentType;
 
   // Find story log file: check WAL event payload first, then scan forge/logs/
   let storyLogPath: string | null = null;
@@ -6845,7 +6884,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
           res.write('event: done\ndata: \n\n');
           res.end();
         }
-      } catch (err) {
+      } catch {
         // Swallow DB connection errors — they're transient under heavy load.
         // The next poll tick will retry.
       }
@@ -6996,11 +7035,12 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
     if (pollInterval) clearInterval(pollInterval);
   });
 
-  // Resolve agent type for semantic parsing
-  const runRow = await queryOne<{ agent: string; workspace_id: string }>(
-    'SELECT agent, workspace_id FROM pipeline_runs WHERE id = $1', [runId]
+  // Semantic parsing may proceed with an explicit unknown engine, but never
+  // claim that missing historical metadata was Claude.
+  const runRow = await queryOne<{ agent: string | null; agent_type: string | null; workspace_id: string }>(
+    'SELECT agent, agent_type, workspace_id FROM pipeline_runs WHERE id = $1', [runId]
   );
-  const agent = runRow?.agent ?? 'claude';
+  const agent = normalizeRunMetadata(runRow ?? {}).agentType;
 
   // ── Replay phase: send all existing chunks ──
   // (may be empty if StoryLogFollower hasn't written yet — poll loop will pick them up)
@@ -7070,7 +7110,7 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
       // Swallow transient DB errors — next tick retries
     }
   }, 200);
-  } catch (err) {
+  } catch {
     clearInterval(hb);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Stream setup failed' });
@@ -7087,50 +7127,6 @@ async function isStoryDone(runId: number, storyId: string): Promise<boolean> {
     [storyId, runId]
   );
   return !!row;
-}
-
-/** Resolve story log file path from WAL event or filesystem scan. Returns path or triggers waiting-mode SSE. */
-async function resolveStoryLogPath(runId: number, storyId: string, workspaceId: string | null): Promise<string> {
-  // 1. Check story_started WAL event for log_file path
-  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(
-    `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`,
-    [storyId, runId]
-  );
-  if (walRow?.payload) {
-    try {
-      const payload = typeof walRow.payload === 'string' ? JSON.parse(walRow.payload) : walRow.payload;
-      if (payload.log_file && fs.existsSync(String(payload.log_file))) {
-        return String(payload.log_file);
-      }
-    } catch { /* ignore */ }
-  }
-
-  // 2. Filesystem fallback: scan forge/specs/logs/ and forge/logs/
-  if (workspaceId) {
-    const workspace = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
-    if (workspace) {
-      const logDirs = [
-        path.join(workspace.path, 'forge', 'specs', 'logs'),
-        path.join(workspace.path, 'forge', 'logs'),
-      ];
-      for (const logDir of logDirs) {
-        if (fs.existsSync(logDir)) {
-          try {
-            const files = fs.readdirSync(logDir)
-              .filter(f => f.startsWith(`${storyId}_`) && f.endsWith('.log'))
-              .sort()
-              .reverse();
-            if (files.length > 0) {
-              return path.join(logDir, files[0]);
-            }
-          } catch { /* ignore */ }
-        }
-      }
-    }
-  }
-
-  // 3. No log file found — return a placeholder that startTailing handles gracefully
-  return path.join(os.tmpdir(), `rorca-story-${runId}-${storyId}.log`);
 }
 
 // ─── GET /api/pipeline/stream — SSE event stream ─────────────────────────────
@@ -7345,7 +7341,6 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
           }
         }
 
-        const range = baseRef ? `${baseRef}..${branchName}` : branchName;
         const log = await git.log({ from: baseRef || undefined, to: branchName, maxCount: 100 });
         commits = log.all.map((c) => ({
           sha: c.hash,
@@ -7667,7 +7662,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
         status: 'failed',
         reason: 'orphan_cleanup',
         error: 'Run was still marked as running after backend restart — process likely crashed.',
-        agent_type: run.agent_type ?? 'claude',
+        agent_type: normalizeRunAgentType(run.agent_type),
       })]);
       broadcastAll(walEvent!);
     } catch {
@@ -7675,7 +7670,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
     }
 
     cleaned++;
-    logger.info(`[Cleanup] Run ${run.id} (agent: ${run.agent_type ?? 'claude'}) marked as failed (orphan cleanup)`);
+    logger.info(`[Cleanup] Run ${run.id} (agent: ${normalizeRunAgentType(run.agent_type)}) marked as failed (orphan cleanup)`);
   }
 
   if (cleaned > 0) {
@@ -7953,8 +7948,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       spec_path: string;
       workspace_id: string;
       status: string;
-      agent: string;
-      agent_type: string;
+      agent: string | null;
+      agent_type: string | null;
       agent_model: string | null;
       branch_name: string | null;
       worktree_path: string | null;
@@ -7985,6 +7980,11 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       return;
     }
 
+    const retryAgent = normalizeRunAgentType(originalRun.agent_type ?? originalRun.agent);
+    if (retryAgent === 'unknown') {
+      throw new UnprocessableError('Cannot retry a run without recorded agent metadata. Select an execution engine and trigger a new run.');
+    }
+
     // Create new pipeline_run linked to original
     const newRunRow = await queryOne<{ id: number }>(
       `INSERT INTO pipeline_runs
@@ -7995,21 +7995,21 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
         originalRun.spec_path,
         originalRun.workspace_id,
         originalRunId,
-        originalRun.agent,
-        originalRun.agent_type,
+        retryAgent,
+        retryAgent,
         originalRun.agent_model,
         normalizeTerminalMode(originalRun.terminal_mode),
       ],
     );
-    if (!newRunRow) throw new UnprocessableError('Failed to create new run row');
-    const newRunId = normalizePipelineRunId(newRunRow.id);
+    if (!newRunRow) throw new Error('Failed to create new run row');
+    const newRunId = normalizeWorkerRunId(newRunRow.id);
 
     // Build the job payload (mirrors pipeline:trigger payload shape)
     const jobPayload = {
       runId: newRunId,
       specPath: originalRun.spec_path,
       workspacePath: workspace.path,
-      agent: (originalRun.agent_type ?? originalRun.agent ?? 'claude') as 'claude' | 'opencode' | 'codex' | 'pi',
+      agent: retryAgent,
       model: originalRun.agent_model ?? null,
       worktreePath: originalRun.worktree_path ?? null,
       branchName: originalRun.branch_name ?? null,

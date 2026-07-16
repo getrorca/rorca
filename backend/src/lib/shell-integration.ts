@@ -13,12 +13,6 @@ import * as path from 'path';
 import * as os from 'os';
 import { logger } from './logger';
 
-// OSC 133 sequence markers
-const OSC_PROMPT_START = '\x1b]133;A\x07'; // Prompt start
-const OSC_PROMPT_END = '\x1b]133;B\x07'; // Prompt end / command start
-const OSC_OUTPUT_START = '\x1b]133;C\x07'; // Command output start
-const OSC_COMMAND_END_PREFIX = '\x1b]133;D;'; // Command end with exit code (followed by code and \x07)
-
 // Shell integration scripts (injected into PS1/PROMPT)
 const BASH_INTEGRATION = `
 # Rorca Shell Integration for Bash

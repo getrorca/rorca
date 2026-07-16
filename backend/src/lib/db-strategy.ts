@@ -424,6 +424,10 @@ export function setPersistedByopDatabaseUrl(databaseUrl: string): void {
 function getEffectiveDatabaseUrl(mode: DbMode, env: NodeJS.ProcessEnv = process.env): string {
   const current = env.DATABASE_URL?.trim() || '';
   if (mode === 'byop') {
+    // An explicit process-level mode is an isolation boundary for CI, canaries,
+    // and managed deployments; its URL must not be replaced by a user's
+    // persisted local selection.
+    if (env.RORCA_DB_MODE?.trim() === 'byop') return current || readPersistedByopDatabaseUrl() || '';
     return readPersistedByopDatabaseUrl() || current;
   }
   return current || getDbConnectionString(mode);
@@ -541,6 +545,11 @@ export function buildDatabaseCapabilityFromHealth(health: Pick<DbHealthResult, '
 }
 
 export function detectDbMode(): DbMode {
+  const environmentMode = process.env.RORCA_DB_MODE?.trim();
+  if (environmentMode === 'native' || environmentMode === 'docker' || environmentMode === 'byop') {
+    return environmentMode;
+  }
+
   const persistedMode = readDbModeFile();
   if (persistedMode === 'docker' || persistedMode === 'native') {
     return persistedMode;

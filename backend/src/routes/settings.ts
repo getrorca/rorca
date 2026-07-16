@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getEffectiveUser } from '../lib/get-user';
-import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 

@@ -8,7 +8,6 @@
 import { Router, Request, Response } from 'express';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { handleRouteError } from '../lib/async-handler';
-import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();

@@ -23,7 +23,6 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
-import { ValidationError, NotFoundError } from '../lib/errors';
 import { query, queryOne, execute } from '../db/index';
 import { describeRuntimeGraph, getRuntimeGraphCapability } from '../lib/graph-runtime';
 import { graphStats } from '../lib/knowledge-graph';
@@ -625,7 +624,7 @@ router.post('/capture-status', validateBody(CaptureStatusReportSchema), async (r
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
-    } catch (e) {
+    } catch (_e) {
       // Table may already exist — safe to ignore
     }
 

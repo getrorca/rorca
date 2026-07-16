@@ -8,7 +8,6 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
 import { renderWithProviders } from '../../test/helpers';
 import MemoryPanel from '../MemoryPanel';
 
@@ -403,11 +402,7 @@ afterAll(() => {
 });
 
 function renderMemoryPanel() {
-  return renderWithProviders(
-    <MemoryRouter>
-      <MemoryPanel />
-    </MemoryRouter>,
-  );
+  return renderWithProviders(<MemoryPanel />);
 }
 
 beforeEach(() => {

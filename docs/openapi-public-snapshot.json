@@ -1,6 +1,6 @@
 {
-  "contractVersion": "4.0.0",
-  "generatedAt": "2026-07-15T08:56:51.252Z",
+  "contractVersion": "6.0.0",
+  "generatedAt": "2026-07-16T02:03:58.297Z",
   "routes": [
     {
       "method": "GET",
@@ -3870,6 +3870,27 @@
           "schema": {
             "type": "integer"
           }
+        },
+        {
+          "name": "afterSequence",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "outputSource",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "run_pty_output_chunks",
+              "run_output_chunks"
+            ],
+            "type": "string"
+          }
         }
       ],
       "responseSchema": {
@@ -3883,7 +3904,7 @@
           }
         }
       },
-      "hash": "sha256:2da61f1f03565ec86f76999cd45aca33a66eb88828fca3abd5c3ca349d842df5"
+      "hash": "sha256:e68df8483ab6eb4f2fd764b8c6968219d140b7f9601c0486f18026f51cc6b6d0"
     },
     {
       "method": "POST",
@@ -3898,10 +3919,12 @@
               "schema": {
                 "properties": {
                   "cols": {
+                    "maximum": 500,
                     "minimum": 1,
                     "type": "integer"
                   },
                   "rows": {
+                    "maximum": 200,
                     "minimum": 1,
                     "type": "integer"
                   }
@@ -3927,7 +3950,7 @@
       "responseSchema": {
         "200": {}
       },
-      "hash": "sha256:0c7d890b1de79d09694defcaab084608cfa1b893efffbde021812ed113bd1993"
+      "hash": "sha256:e1b74808682335a01b0239173fae564c200d94feab43f6276447d0a3ba2d4231"
     },
     {
       "method": "GET",
@@ -4161,7 +4184,8 @@
                   "terminal_mode": {
                     "enum": [
                       "ansi-html",
-                      "pty"
+                      "pty",
+                      "native-pty"
                     ],
                     "nullable": true,
                     "type": "string"
@@ -4169,7 +4193,8 @@
                   "terminalMode": {
                     "enum": [
                       "ansi-html",
-                      "pty"
+                      "pty",
+                      "native-pty"
                     ],
                     "nullable": true,
                     "type": "string"
@@ -4198,7 +4223,7 @@
         "409": {},
         "422": {}
       },
-      "hash": "sha256:8c6ce52dc89a84c164046c455b816671bfceb1d548329d675efc3e9bd7d7f528"
+      "hash": "sha256:8beff74c282556146184c8baf891822626022fecfb02d921d3caa877f56c1bab"
     },
     {
       "method": "POST",
@@ -7801,11 +7826,19 @@
                   "contextSummary": {
                     "additionalProperties": true,
                     "description": "Optional canonical context summary used by the Spec Detail Context tab (direction layers, retrieval metrics, token estimates, etc.).",
+                    "properties": {
+                      "genesis": {
+                        "$ref": "#/components/schemas/GenesisProvenance"
+                      }
+                    },
                     "type": "object"
                   },
                   "contextUsed": {
                     "description": "Optional synthesized context text + metadata captured by a skill-first caller.",
                     "properties": {
+                      "genesis": {
+                        "$ref": "#/components/schemas/GenesisProvenance"
+                      },
                       "meta": {
                         "additionalProperties": true,
                         "type": "object"
@@ -7929,6 +7962,10 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "id": {
+                    "description": "Canonical filename identity; always equal to slug",
+                    "type": "string"
+                  },
                   "postSave": {
                     "properties": {
                       "enrich": {
@@ -8033,7 +8070,7 @@
         "404": {},
         "409": {}
       },
-      "hash": "sha256:b88fae37b212d8c85626d8d138e8bcfdb9855ec922c4ce2a2e94b2b39a8f4870"
+      "hash": "sha256:a22c0394db4df23994ec939c10f8f83ab1442ee82c468f41992bee2c5ecfe60f"
     },
     {
       "method": "GET",

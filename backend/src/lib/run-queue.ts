@@ -10,7 +10,7 @@ import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 
 interface QueuedRunRow {
-  id: number;
+  id: number | string;
   spec_path: string;
   workspace_id: string;
   queued_at: string;
@@ -70,7 +70,7 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
     const nextQueued = await queryOne<QueuedRunRow>(
       `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
-       ORDER BY queued_at ASC LIMIT 1`,
+       ORDER BY queued_at ASC NULLS LAST, id ASC LIMIT 1`,
       [workspaceId],
     );
 

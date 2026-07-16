@@ -5,12 +5,15 @@ WORKDIR /app
 
 # Install dependencies first (cache layer)
 COPY package.json package-lock.json* ./
-RUN npm ci --ignore-scripts
+# The repository lockfile is resolved with legacy peer-dependency semantics.
+RUN npm ci --ignore-scripts --legacy-peer-deps
 
 # Copy source and build
 COPY tsconfig.json vite.config.ts postcss.config.js tailwind.config.ts index.html ./
 COPY src/ src/
 COPY shared/ shared/
+# The dashboard imports these canonical readiness types directly.
+COPY backend/src/reason-codes.ts backend/src/
 # Empty VITE_API_URL makes apiFetch call same-origin (nginx proxies /api to backend)
 ENV VITE_API_URL=
 RUN npx vite build

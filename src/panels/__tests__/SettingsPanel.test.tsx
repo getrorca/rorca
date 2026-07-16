@@ -10,7 +10,8 @@ import { waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../test/helpers';
 
 // ─── Mock react-router-dom (SettingsPanel uses useLocation + useNavigate) ─────
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-router-dom')>(),
   useNavigate: vi.fn(() => vi.fn()),
   useLocation: vi.fn(() => ({ pathname: '/settings/general', search: '', hash: '', state: null })),
   useParams: vi.fn(() => ({})),

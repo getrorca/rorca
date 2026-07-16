@@ -562,7 +562,7 @@ describe('specContextBundle', () => {
   });
 
   it('shouldExcludeItem rejects captured and unverified trust items', () => {
-    
+
     const captured: BundleItem = {
       content: 'x',
       provenance: { source: 'memory', ref: 'm1', trust: 'captured' },
@@ -583,7 +583,7 @@ describe('specContextBundle', () => {
   // ── Composition with approved candidates ───────────────────────────────
 
   it('composeWithApprovedCandidates excludes captured/unverified items', () => {
-    
+
     const base = createEmptyBundle('ws-1', 'deadbeef');
 
     const approved: BundleItem = {
@@ -608,7 +608,7 @@ describe('specContextBundle', () => {
   });
 
   it('composeWithApprovedCandidates adds new sections', () => {
-    
+
     const base = createEmptyBundle('ws-1', 'deadbeef');
 
     const item: BundleItem = {
@@ -626,7 +626,7 @@ describe('specContextBundle', () => {
   });
 
   it('composeWithApprovedCandidates appends traceIds from item provenance', () => {
-    
+
     const base = createEmptyBundle('ws-1', 'deadbeef');
 
     const item: BundleItem = {
@@ -646,7 +646,7 @@ describe('specContextBundle', () => {
   // ── Empty bundle factory ───────────────────────────────────────────────
 
   it('createEmptyBundle returns a valid bundle with all 8 sections empty', () => {
-    
+
     const bundle = createEmptyBundle('ws-1', 'deadbeef');
 
     expect(specContextBundle.safeParse(bundle).success).toBe(true);
@@ -662,7 +662,7 @@ describe('specContextBundle', () => {
   });
 
   it('createEmptyBundle stamps workspaceId, briefHash, and createdAt', () => {
-    
+
     const bundle = createEmptyBundle('ws-test', 'hash123', 'abc1234');
 
     expect(bundle.workspaceId).toBe('ws-test');
@@ -674,7 +674,7 @@ describe('specContextBundle', () => {
   // ── Adaptation: context_summary_json ↔ SpecContextBundle ───────────────
 
   it('adaptFromContextSummary maps direction layers into directions section', () => {
-    
+
     const summary = {
       directionLayers: {
         l1: 'Use async/await for all DB calls',
@@ -697,7 +697,7 @@ describe('specContextBundle', () => {
   });
 
   it('adaptFromContextSummary maps skills into memories section', () => {
-    
+
     const summary = {
       skills: ['excalidraw-diagram', 'rorca-approve'],
     };
@@ -711,7 +711,7 @@ describe('specContextBundle', () => {
   });
 
   it('adaptFromContextSummary handles null/undefined summary gracefully', () => {
-    
+
 
     const nullBundle = adaptFromContextSummary(null, 'ws-1', 'deadbeef');
     expect(specContextBundle.safeParse(nullBundle).success).toBe(true);
@@ -723,7 +723,7 @@ describe('specContextBundle', () => {
   });
 
   it('adaptFromContextSummary sets degraded when estimatedTokens exceeds model window', () => {
-    
+
     const summary = {
       estimatedTokens: 300_000,
       modelContextWindow: 200_000,
@@ -733,7 +733,7 @@ describe('specContextBundle', () => {
   });
 
   it('adaptToContextSummary round-trips basic direction and skills', () => {
-    
+
     const summary = {
       directionLayers: {
         l1: 'Direction L1: Global Standards',
@@ -753,14 +753,14 @@ describe('specContextBundle', () => {
   });
 
   it('adaptFromContextSummary tolerates empty summary (no directionLayers, no skills)', () => {
-    
+
     const bundle = adaptFromContextSummary({}, 'ws-1', 'deadbeef');
     expect(specContextBundle.safeParse(bundle).success).toBe(true);
     expect(bundle.sections.length).toBe(0);
   });
 
   it('adaptFromContextSummary tolerates extra unknown keys (forward compat)', () => {
-    
+
     const summary = {
       directionLayers: { l1: 'Some direction' },
       futureFeatureFlag: true,

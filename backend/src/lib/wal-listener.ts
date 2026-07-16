@@ -21,7 +21,7 @@
 
 import { Client, type ClientConfig } from 'pg';
 import { broadcastAll, type WalEvent } from './sse-hub';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { logger } from './logger';
 
 // ── Backoff Configuration ───────────────────────────────────────────────

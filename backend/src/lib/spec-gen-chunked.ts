@@ -20,7 +20,7 @@
  */
 
 import { chatComplete, getActiveProvider, type ChatOptions } from './llm-client';
-import { query, queryOne, execute } from '../db/index';
+import { execute } from '../db/index';
 import { logger } from './logger';
 
 // ─── Constants ──────────────────────────────────────────────────────────────

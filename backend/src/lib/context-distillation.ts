@@ -31,6 +31,8 @@ export const CONTEXT_CAPTURE_QUEUE = 'context:capture';
 export const CONTEXT_DISTILL_QUEUE = 'context:distill';
 
 export type MemoryDistillationMode = 'off' | 'explicit-only' | 'conservative-auto-candidates' | 'trusted-auto-approve';
+/** Legacy candidate lifecycle names retained for cross-client compatibility. */
+export type MemoryCandidateStatus = 'pending' | 'review_required' | 'approved' | 'rejected' | 'auto_approved';
 export type MemoryCandidateCategory = 'Architecture' | 'Convention' | 'Bug Fix' | 'Decision' | 'Pattern' | 'Gotcha';
 
 export interface MemoryDistillationSettings {
@@ -45,6 +47,8 @@ export interface MemoryCandidateDraft {
   category: MemoryCandidateCategory;
   content: string;
   confidence: 'high' | 'medium' | 'low';
+  status: Extract<MemoryCandidateStatus, 'pending' | 'review_required'>;
+  defaultRetrievalEligible: false;
   securitySensitive: boolean;
   regulatedDomain: boolean;
   relatedFiles: string[];
@@ -118,6 +122,10 @@ export async function getMemoryDistillationSettings(workspaceId: string): Promis
     [workspaceId],
   );
   return normalizeSettings(row);
+}
+
+export function isCandidateVisibleInDefaultRetrieval(status: MemoryCandidateStatus): boolean {
+  return status === 'approved' || status === 'auto_approved';
 }
 
 export async function upsertMemoryDistillationSettings(workspaceId: string, patch: Partial<MemoryDistillationSettings>): Promise<MemoryDistillationSettings> {
@@ -205,6 +213,8 @@ export function distillContextEventToCandidate(input: {
     category,
     content,
     confidence: payload.eventType === 'explicit_memory' ? 'high' : 'medium',
+    status: securitySensitive ? 'review_required' : 'pending',
+    defaultRetrievalEligible: false,
     securitySensitive,
     regulatedDomain,
     relatedFiles,

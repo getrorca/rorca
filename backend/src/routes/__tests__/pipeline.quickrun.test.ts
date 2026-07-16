@@ -134,12 +134,10 @@ describe('POST /api/pipeline/quick-run — context injection', () => {
     jest.spyOn(dirStack, 'synthesize').mockReturnValue('DIRECTION CONTENT');
 
     // Spy on fs.promises.readFile to simulate MEMORY.md present
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(fs.promises, 'readFile').mockResolvedValue('MEMORY CONTENT' as any);
 
     // Spy on db.query to return two skills for installed_skills
     const db = require('../../db/index');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(db, 'query').mockImplementation(async (...args: unknown[]) => {
       const sql = args[0] as string;
       if (sql.includes('installed_skills')) {
@@ -198,7 +196,6 @@ describe('POST /api/pipeline/quick-run — context injection', () => {
     jest.spyOn(fs.promises, 'readFile').mockRejectedValue(enoentError);
 
     const db = require('../../db/index');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(db, 'query').mockImplementation(async (...args: unknown[]) => {
       const sql = args[0] as string;
       if (sql.includes('installed_skills')) return [];
@@ -227,11 +224,9 @@ describe('POST /api/pipeline/quick-run — context injection', () => {
     const dirStack = require('../../lib/direction-stack');
     jest.spyOn(dirStack, 'synthesize').mockReturnValue('');
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(fs.promises, 'readFile').mockResolvedValue('MEMORY CONTENT' as any);
 
     const db = require('../../db/index');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(db, 'query').mockImplementation(async (...args: unknown[]) => {
       const sql = args[0] as string;
       if (sql.includes('installed_skills')) return [{ name: 'react', description: 'React' }];
@@ -263,11 +258,9 @@ describe('POST /api/pipeline/quick-run — context injection', () => {
     const dirStack = require('../../lib/direction-stack');
     jest.spyOn(dirStack, 'synthesize').mockReturnValue('DIRECTION CONTENT');
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(fs.promises, 'readFile').mockResolvedValue('MEMORY CONTENT' as any);
 
     const db = require('../../db/index');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(db, 'query').mockImplementation(async (..._args: unknown[]) => []);
 
     // Act
@@ -296,7 +289,6 @@ describe('POST /api/pipeline/quick-run — context injection', () => {
     jest.spyOn(fs.promises, 'readFile').mockRejectedValue(enoentError);
 
     const db = require('../../db/index');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     jest.spyOn(db, 'query').mockImplementation(async (..._args: unknown[]) => []);
 
     // Act

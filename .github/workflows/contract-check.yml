@@ -51,5 +51,7 @@ jobs:
       - name: Start backend
         run: npm run dev:server:contract > /tmp/rorca-contract-server.log 2>&1 &
       - run: npm run check:contract
+        env:
+          RORCA_CONTRACT_BASE_URL: http://127.0.0.1:3030
       - if: always()
         run: cat /tmp/rorca-contract-server.log

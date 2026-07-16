@@ -30,12 +30,17 @@ const mockQueryOne = jest.fn().mockImplementation(async (sql: string) => {
 const mockExecute = jest.fn().mockImplementation(async (sql: string, params: unknown[]) => {
   if (sql.includes('worker_settings')) {
     // UPSERT — store the value
-    mockWorkerRow['max_concurrent_runs'] = String(params[0]);
+    mockWorkerRow[String(params[0])] = String(params[1]);
   }
   return { rowCount: 1 };
 });
 
-const mockQuery = jest.fn().mockResolvedValue([]);
+const mockQuery = jest.fn().mockImplementation(async (sql: string) => {
+  if (sql.includes('worker_settings')) {
+    return Object.entries(mockWorkerRow).map(([key, value]) => ({ key, value }));
+  }
+  return [];
+});
 
 jest.mock('../db/index', () => ({
   query: (...args: unknown[]) => mockQuery(...args),

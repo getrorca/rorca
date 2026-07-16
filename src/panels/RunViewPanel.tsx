@@ -24,6 +24,7 @@ import type { StoryContextInfo } from '../components/RunStoryList';
 import RunMetadataPanel from '../components/RunMetadataPanel';
 import AgentBadge from '../components/AgentBadge';
 import { getAgentModelDisplayName, normalizeAgentType } from '../lib/agent-display';
+import { normalizeRunTokenTelemetry, type RunTokenTelemetry } from '../lib/run-metadata';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
@@ -124,7 +125,7 @@ interface RunApiResponse extends RunEngineWireFields {
   specModel?: string | null;
   agentType?: string;
   agentModel?: string | null;
-  tokenSummary?: { inputTokens: number; outputTokens: number };
+  tokenSummary?: Partial<RunTokenTelemetry>;
   runState?: RunStateSnapshot | null;
   contextComparison?: ContextComparisonData | null;
   storyTokenBreakdown?: StoryTokenEntry[];
@@ -939,7 +940,11 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const dlqCheckedRef = useRef(false);
 
   const [specModel, setSpecModel] = useState<string | null>(null);
-  const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
+  const [tokenSummary, setTokenSummary] = useState<RunTokenTelemetry>({
+    inputTokens: null,
+    outputTokens: null,
+    totalCostUsd: null,
+  });
   const [contextComparison, setContextComparison] = useState<ContextComparisonData | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   const [dbStories, setDbStories] = useState<StoryResultSeed[]>([]);
@@ -1278,7 +1283,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         setPrInfoBase({ state: 'failed', errorMsg: data.run.pr_creation_error });
       }
       if (data.specModel !== undefined) setSpecModel(data.specModel);
-      if (data.tokenSummary) setTokenSummary(data.tokenSummary);
+      if (data.tokenSummary) setTokenSummary(normalizeRunTokenTelemetry(data.tokenSummary));
       if (data.runState !== undefined) setRunState(data.runState ?? null);
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
       if (data.specStories) { setTotalStories(data.specStories.length); setSpecStories(data.specStories); }

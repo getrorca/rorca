@@ -5,8 +5,14 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { execSync } from 'child_process';
+
 import {
   classifyStoryWorkingTreeChanges,
+  getCommittedStoryChangesSince,
   getStoriesFromStart,
   isMeaningfulStoryChange,
   resolveClaudeCliModelId,
@@ -45,6 +51,31 @@ describe('execution-engine meaningful change detection', () => {
   test('treats project-local pi extension source as meaningful code', () => {
     expect(isMeaningfulStoryChange('.pi/agent/extensions/rorca/lib/story-executor.ts')).toBe(true);
     expect(isMeaningfulStoryChange('.pi/extensions/rorca-mcp/index.ts')).toBe(true);
+  });
+
+  test('detects meaningful files from agent-created commits even when the worktree is clean', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-story-commit-detection-'));
+    try {
+      execSync('git init', { cwd: dir, stdio: 'pipe' });
+      execSync('git config user.email test@example.com', { cwd: dir, stdio: 'pipe' });
+      execSync('git config user.name Test', { cwd: dir, stdio: 'pipe' });
+      fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'src', 'index.ts'), 'export const before = true;\n');
+      execSync('git add -A && git commit -m initial', { cwd: dir, stdio: 'pipe' });
+      const baseHead = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
+
+      fs.writeFileSync(path.join(dir, 'src', 'index.ts'), 'export const after = true;\n');
+      fs.mkdirSync(path.join(dir, '.rorca'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.rorca', 'run-state.json'), '{}\n');
+      execSync('git add -A && git commit -m "agent committed story output"', { cwd: dir, stdio: 'pipe' });
+
+      const status = execSync('git status --porcelain=v1', { cwd: dir, encoding: 'utf8' }).trim();
+      expect(status).toBe('');
+      expect(getCommittedStoryChangesSince(dir, baseHead).meaningfulFiles).toEqual(['src/index.ts']);
+      expect(getCommittedStoryChangesSince(dir, baseHead).metadataFiles).toEqual(['.rorca/run-state.json']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('restricts sequential continuation to the requested start story and following stories', () => {

@@ -44,8 +44,12 @@ export interface CapabilityWarning {
 }
 
 type TriggerTerminalFields = {
+  agentType?: PipelineRun['agentType'];
+  agentModel?: PipelineRun['agentModel'];
   terminalMode?: TerminalMode;
   terminal_mode?: TerminalMode;
+  lifecyclePhase?: PipelineRun['lifecyclePhase'];
+  lifecycle_phase?: PipelineRun['lifecycle_phase'];
 };
 
 export type TriggerResponse =

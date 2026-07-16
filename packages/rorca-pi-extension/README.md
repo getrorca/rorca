@@ -529,6 +529,34 @@ packages/rorca-pi-extension/
     types.ts        # shared types
 ```
 
+## Rorca Capture VS Code-compatible extension
+
+This package also carries the Rorca Capture VS Code extension in [`vscode-extension/`](./vscode-extension/). It is intentionally colocated with the Pi extension so Hermes/agent-host distribution can share one package while the VS Code code stays out of `src/` and `backend/src/`.
+
+The extension uses only stable VS Code APIs and is workspace-trust aware. It captures editor/workspace metadata, file-save events, terminal/task lifecycle metadata, git context, session summaries, and explicit `Rorca: Remember Selection` memory candidates. Proprietary AI chat panes in Cursor/Windsurf are not accessed unless a host provides an explicit compatible adapter API; Rorca falls back to editor, shell, git, and daemon capture layers.
+
+Commands contributed:
+
+- `Rorca: Capture Session Summary`
+- `Rorca: Remember Selection`
+- `Rorca: Pause Capture`
+- `Rorca: Show Capture Status`
+- `Rorca: Review Candidates`
+
+Setup/detection is non-fatal for missing hosts:
+
+```bash
+cd packages/rorca-pi-extension/vscode-extension
+npm run compile
+npm run setup:hosts -- --vsix ./rorca-capture-vscode-0.1.0.vsix --json
+```
+
+See [`vscode-extension/COMPATIBILITY.md`](./vscode-extension/COMPATIBILITY.md) for the host matrix, VSIX fallback, degraded compatibility reporting, and notes about the backend swagger/tier lint limitation.
+
+## Rorca capture agent adapters
+
+`rorca-capture setup --always-on` also renders project-local adapters for Pi, Claude Code, Codex, and OpenCode. Pi gets `.pi/extensions/rorca/capture-command.json` with a `/rorca-remember` alias; Claude Code gets slash-command/MCP config that references `~/.rorca/mcp-token` by path only; Codex/OpenCode get pass-through wrappers that keep native args and exit codes intact. Use `rorca-capture remember --workspace-id <id> --source-system <pi|claude_code|codex|opencode> --tool-name <name> --session-id <id> --message <summary>` as the explicit fallback anywhere a host lacks stable hooks.
+
 ## Additional docs
 
 - store-style listing copy: `packages/rorca-pi-extension/STORE-LISTING.md`

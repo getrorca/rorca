@@ -27,7 +27,7 @@ import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
-import { ValidationError, NotFoundError } from '../lib/errors';
+import { NotFoundError } from '../lib/errors';
 import { redactObject } from '../lib/context-safety';
 
 const router = Router();

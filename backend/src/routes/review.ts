@@ -13,7 +13,6 @@ import { query, queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { getEffectiveUser } from '../lib/get-user';
 import { handleRouteError } from '../lib/async-handler';
-import { logger } from '../lib/logger';
 import { GoneError, NotFoundError, ValidationError } from '../lib/errors';
 
 // Two routers: one for spec-scoped endpoints (auth), one for public review access

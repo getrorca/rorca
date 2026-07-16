@@ -70,6 +70,7 @@ import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
 import { startEmbeddingPipeline } from './lib/embedding-pipeline';
 import { startWalListener } from './lib/wal-listener';
+import { startRunOutputListener, stopRunOutputListener } from './lib/run-output-listener';
 import { subscribe, type WalEvent } from './lib/sse-hub';
 import { rotateMemory } from './lib/memory-ledger';
 import { deduplicateMemory } from './lib/memory-dedup';
@@ -602,8 +603,10 @@ if (process.env.NODE_ENV !== 'test') {
     initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
     // US-004: Recover in-flight stories from before server restart
     storyLogFollower.recover().catch(err => logger.error({ err }, '[story-log-follower] Recovery failed'));
-    // US-003: Start dedicated LISTEN/NOTIFY client for real-time WAL event push
+    // US-003: Start dedicated LISTEN/NOTIFY clients for real-time WAL and
+    // durable terminal-output wakeups. Output still has a polling fallback.
     startWalListener();
+    startRunOutputListener();
   });
 
   let shuttingDown = false;
@@ -614,6 +617,7 @@ if (process.env.NODE_ENV !== 'test') {
 
     shuttingDown = true;
     logger.info({ signal }, '[server] Graceful shutdown started');
+    await stopRunOutputListener();
 
     httpServer.close(() => {
       logger.info({ signal }, '[server] HTTP server closed');

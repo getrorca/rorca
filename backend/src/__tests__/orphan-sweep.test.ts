@@ -141,7 +141,7 @@ describe('sweepOrphanProcesses', () => {
     );
 
     // WAL: run_finished with reason:'orphan_sweep'
-    expect(mockExecute).toHaveBeenCalledWith(
+    expect(mockQueryOne).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO wal_events'),
       expect.arrayContaining([
         'run_finished',
@@ -190,7 +190,7 @@ describe('sweepOrphanProcesses', () => {
     expect(killSpy).toHaveBeenCalledWith(8888, 'SIGTERM');
 
     // WAL: run_finished with reason:'orphan_sweep'
-    expect(mockExecute).toHaveBeenCalledWith(
+    expect(mockQueryOne).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO wal_events'),
       expect.arrayContaining([
         'run_finished',
@@ -200,7 +200,7 @@ describe('sweepOrphanProcesses', () => {
     );
 
     // WAL: story_failed for the incomplete story
-    expect(mockExecute).toHaveBeenCalledWith(
+    expect(mockQueryOne).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO wal_events'),
       expect.arrayContaining([
         'story_failed',
@@ -210,7 +210,7 @@ describe('sweepOrphanProcesses', () => {
     );
 
     // story_failed WAL payload contains reason:'orphan_sweep'
-    const walCalls = mockExecute.mock.calls.filter(
+    const walCalls = mockQueryOne.mock.calls.filter(
       (c: unknown[]) =>
         typeof c[0] === 'string' &&
         c[0].includes('INSERT INTO wal_events') &&
@@ -218,7 +218,7 @@ describe('sweepOrphanProcesses', () => {
         c[1][0] === 'story_failed',
     );
     expect(walCalls.length).toBeGreaterThan(0);
-    const storyFailedPayload = JSON.parse(walCalls[0][1][2] as string);
+    const storyFailedPayload = JSON.parse(walCalls[0][1][3] as string);
     expect(storyFailedPayload.reason).toBe('orphan_sweep');
   });
 

@@ -123,6 +123,10 @@ export interface PipelineRun {
   agentType: string | null;
   agentModel: string | null;
   terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
+  lifecycleStatus?: string | null;
+  lifecycle_status?: string | null;
+  lifecyclePhase?: string | null;
+  lifecycle_phase?: string | null;
 }
 
 export interface StoryResult {

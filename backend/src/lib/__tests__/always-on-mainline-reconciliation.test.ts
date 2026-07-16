@@ -119,7 +119,7 @@ describe('Always-On Context mainline reconciliation', () => {
   });
 
   test('reconciliation migration is additive and never manages pgboss schema', () => {
-    const migration = fs.readFileSync(path.resolve(__dirname, '../../db/pg-migrations/20260714150000_always_on_context_mainline_reconciliation.sql'), 'utf8');
+    const migration = fs.readFileSync(path.resolve(__dirname, '../../db/pg-migrations/20260715130000_always_on_context_mainline_reconciliation.sql'), 'utf8');
     expect(migration).not.toMatch(/(?:CREATE|ALTER|DROP|DELETE\s+FROM)\s+(?:TABLE\s+)?pgboss\./i);
     expect(migration).not.toMatch(/ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(?:status|category|content|payload)\b/i);
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS distillation_status');

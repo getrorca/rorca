@@ -82,7 +82,7 @@ try {
     'packages/rorca-capture/package.json',
     'backend/src/lib/context-safety.js',
     'backend/src/lib/package.json',
-    'backend/src/db/pg-migrations/20260714150000_always_on_context_mainline_reconciliation.sql',
+    'backend/src/db/pg-migrations/20260715130000_always_on_context_mainline_reconciliation.sql',
     'docs/always-on-context-packaging.md',
     'docs/universal-context-capture.md',
     'scripts/install.sh',

@@ -31,6 +31,10 @@ export interface PipelineRun {
   queued_at?: string | null;
   triggered_via?: 'queue' | 'run_now';
   auto_worktree?: boolean;
+  lifecycleStatus?: string | null;
+  lifecycle_status?: string | null;
+  lifecyclePhase?: string | null;
+  lifecycle_phase?: string | null;
 }
 
 type PipelineRunWire = Omit<PipelineRun, 'agentType' | 'agentModel'> & {

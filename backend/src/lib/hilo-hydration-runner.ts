@@ -33,11 +33,9 @@
 
 import { execFile } from 'child_process';
 import * as fs from 'fs';
-import * as path from 'path';
 
 import {
   updateHydration,
-  type HydrationCounts,
   type WorkspaceHydration,
 } from '../db/workspace-hydration';
 import { type HiloConfig } from './hilo-config';

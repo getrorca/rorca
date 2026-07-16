@@ -12,7 +12,7 @@ import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
-import { DEFAULT_MODEL, ALL_MODELS, getModelsForProviders, fetchOpenRouterModels } from '../lib/llm-client';
+import { DEFAULT_MODEL, ALL_MODELS, fetchOpenRouterModels } from '../lib/llm-client';
 import type { ProviderType, ModelInfo } from '../lib/llm-client';
 import { detectCapability } from '../lib/reasoning-detector';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';

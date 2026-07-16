@@ -1,6 +1,6 @@
 {
   "name": "rorca",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "AI spec orchestration pipeline — turn plain-English briefs into validated, executed code",
   "type": "module",
   "workspaces": [
@@ -45,7 +45,7 @@
     "self-register": "npx tsx forge/self-register.ts",
     "start": "node cli.js start",
     "reconcile": "npm --prefix backend run reconcile --",
-    "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
+    "postinstall": "node backend/scripts/install-dependencies.js",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build",
     "test:e2e:first-run": "npx tsx test/e2e/first-run.test.ts",
@@ -66,6 +66,7 @@
   },
   "files": [
     "bin/rorca.js",
+    "bin/rorca-capture.js",
     "cli.js",
     "dist/",
     "backend/dist/",
@@ -74,6 +75,8 @@
     "backend/src/lib/package.json",
     "backend/package.json",
     "backend/package-lock.json",
+    "backend/scripts/install-dependencies.js",
+    "backend/scripts/verify-node-pty-install.js",
     "packages/rorca-pi-extension/",
     "packages/rorca-capture/dist/",
     "packages/rorca-capture/package.json",
@@ -90,6 +93,9 @@
     "README.md",
     "LICENSE"
   ],
+  "overrides": {
+    "dompurify": "3.4.12"
+  },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
     "@modelcontextprotocol/client": "^2.0.0-alpha.2",
