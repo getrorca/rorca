@@ -20,26 +20,29 @@ export function queryTimerMiddleware(req: Request, res: Response, next: NextFunc
   const start = performance.now();
   const originalEnd = res.end;
   const originalJson = res.json;
-
-  // Intercept res.json to measure time before response is sent
-  res.json = function (body?: any) {
+  let slowRequestLogged = false;
+  const logSlowRequestOnce = () => {
+    if (slowRequestLogged) return;
     const elapsed = performance.now() - start;
-    if (elapsed > SLOW_QUERY_THRESHOLD_MS) {
-      logger.warn(
-        `[QueryTimer] SLOW ${req.method} ${req.originalUrl} — ${elapsed.toFixed(1)}ms (threshold: ${SLOW_QUERY_THRESHOLD_MS}ms)`
-      );
-    }
+    if (elapsed <= SLOW_QUERY_THRESHOLD_MS) return;
+    slowRequestLogged = true;
+    logger.warn(
+      `[QueryTimer] SLOW ${req.method} ${req.originalUrl} — ${elapsed.toFixed(1)}ms (threshold: ${SLOW_QUERY_THRESHOLD_MS}ms)`
+    );
+  };
+
+  // Express res.json eventually calls res.end; guard the shared logger so a
+  // JSON response produces one slow marker rather than two synchronous writes.
+  res.json = function (body?: any) {
+    logSlowRequestOnce();
     return originalJson.call(this, body);
   };
 
   // Also intercept res.end for SSE and non-JSON responses
   const wrappedEnd: typeof res.end = function (this: Response, ...args: any[]) {
-    const elapsed = performance.now() - start;
-    // Only log for non-SSE endpoints (SSE connections are long-lived)
-    if (elapsed > SLOW_QUERY_THRESHOLD_MS && !res.getHeader('Content-Type')?.toString().includes('text/event-stream')) {
-      logger.warn(
-        `[QueryTimer] SLOW ${req.method} ${req.originalUrl} — ${elapsed.toFixed(1)}ms (threshold: ${SLOW_QUERY_THRESHOLD_MS}ms)`
-      );
+    // Only log for non-SSE endpoints (SSE connections are long-lived).
+    if (!res.getHeader('Content-Type')?.toString().includes('text/event-stream')) {
+      logSlowRequestOnce();
     }
     return originalEnd.apply(this, args as any);
   } as typeof res.end;

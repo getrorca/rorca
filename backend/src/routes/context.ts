@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import * as crypto from 'crypto';
 import * as path from 'path';
@@ -22,7 +22,7 @@ import {
 import { validateBody } from '../lib/validate';
 import { chatComplete } from '../lib/llm-client';
 import { handleRouteError } from '../lib/async-handler';
-import { ValidationError, UnprocessableError, NotFoundError } from '../lib/errors';
+import { ValidationError, UnprocessableError, NotFoundError, PayloadTooLargeError } from '../lib/errors';
 import { createJob, updateJobStatus } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
 import { queryOne } from '../db/index';
@@ -111,12 +111,35 @@ const ALLOWED_EXTENSIONS = ['.md', '.txt', '.sql', '.prisma', '.ts', '.tsx', '.j
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 10 },
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 10,
+    fields: 4,
+    fieldNestingDepth: 1,
+  } as NonNullable<multer.Options['limits']> & { fieldNestingDepth: number },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     cb(null, ALLOWED_EXTENSIONS.includes(ext));
   },
 });
+
+function parseContextUpload(req: Request, res: Response, next: NextFunction): void {
+  upload.array('files')(req, res, (err: unknown) => {
+    if (!err) {
+      next();
+      return;
+    }
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        next(new PayloadTooLargeError('File size exceeds 5MB limit'));
+        return;
+      }
+      next(new ValidationError(`Invalid multipart upload: ${err.code}`));
+      return;
+    }
+    next(err);
+  });
+}
 
 /**
  * @swagger
@@ -220,7 +243,7 @@ router.post('/extract', validateBody(ContextExtractSchema), async (req: Request,
  *                 tokenCount: { type: integer }
  *       400: { description: "No files or invalid targetLayer" }
  */
-router.post('/upload', upload.array('files'), async (req: Request, res: Response) => {
+router.post('/upload', parseContextUpload, async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[] | undefined;
 

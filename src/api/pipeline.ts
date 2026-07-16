@@ -7,6 +7,11 @@
 
 import { apiFetch } from '../lib/apiFetch';
 import type { SpecReadinessPayload } from '../lib/specReadiness';
+import {
+  normalizePipelineRunDetailResponse,
+  normalizePipelineRunListResponse,
+  type RunEngineWireFields,
+} from './run-dto';
 import type {
   ApiOptions,
   PaginatedResponse,
@@ -94,18 +99,25 @@ export interface ListRunsParams extends ApiOptions {
   cursor?: string;
 }
 
-export function listRuns(p: ListRunsParams): Promise<PaginatedResponse<PipelineRun>> {
+type PipelineRunWire = Omit<PipelineRun, 'agentType' | 'agentModel'> & RunEngineWireFields;
+
+export async function listRuns(p: ListRunsParams): Promise<PaginatedResponse<PipelineRun>> {
   const qs = new URLSearchParams({ workspaceId: p.workspaceId });
   if (p.limit) qs.set('limit', String(p.limit));
   if (p.cursor) qs.set('cursor', p.cursor);
-  return apiFetch(`/api/pipeline/runs?${qs}`, { signal: p.signal });
+  const response = await apiFetch<PaginatedResponse<PipelineRunWire>>(`/api/pipeline/runs?${qs}`, { signal: p.signal });
+  return normalizePipelineRunListResponse(response);
 }
 
-export function getRun(
+export async function getRun(
   runId: number,
   opts?: ApiOptions,
 ): Promise<{ run: PipelineRun; stories: StoryResult[] }> {
-  return apiFetch(`/api/pipeline/runs/${runId}`, { signal: opts?.signal });
+  const response = await apiFetch<RunEngineWireFields & { run: PipelineRunWire; stories: StoryResult[] }>(
+    `/api/pipeline/runs/${runId}`,
+    { signal: opts?.signal },
+  );
+  return normalizePipelineRunDetailResponse(response);
 }
 
 export function pauseRun(

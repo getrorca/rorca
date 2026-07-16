@@ -45,9 +45,17 @@ vi.mock('../../components/MultiPaneTerminal', () => ({
 }));
 
 vi.mock('../../components/AppHeader', () => ({
-  default: vi.fn(({ title, actions }: { title?: React.ReactNode; actions?: React.ReactNode }) => (
+  default: vi.fn(({
+    title,
+    breadcrumbs,
+    actions,
+  }: {
+    title?: React.ReactNode;
+    breadcrumbs?: React.ReactNode;
+    actions?: React.ReactNode;
+  }) => (
     <div data-testid="app-header">
-      <div>{title}</div>
+      <div>{breadcrumbs ?? title}</div>
       <div>{actions}</div>
     </div>
   )),
@@ -189,6 +197,103 @@ describe('RunViewPanel', () => {
         document.querySelector('[data-testid="run-terminal"]');
       expect(specEl).toBeInTheDocument();
     }, { timeout: 3000 });
+  });
+
+  it('uses one normalized Pi engine/model in the header and metadata panel', async () => {
+    const piRun = createMockRun({
+      id: 57,
+      status: 'done',
+      workspace_id: 'ws-1',
+      agent_type: 'pi',
+      agent_model: 'openai-codex/gpt-5.6-sol',
+    });
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${piRun.id}`)) {
+        return {
+          run: piRun,
+          stories: [],
+          specStories: [],
+          agentType: 'pi',
+          agentModel: 'openai-codex/gpt-5.6-sol',
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={piRun.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Pi')).toHaveLength(2);
+      expect(screen.getByTestId('run-engine-model')).toHaveTextContent('GPT 5.6 Sol');
+      expect(screen.getByTestId('run-engine-model')).toHaveAttribute('title', 'openai-codex/gpt-5.6-sol');
+      expect(screen.getByText('openai-codex/gpt-5.6-sol')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
+  });
+
+  it('uses top-level camelCase compatibility for both run header and metadata', async () => {
+    const compatibilityRun = {
+      ...createMockRun({ id: 58, status: 'done', workspace_id: 'ws-1' }),
+      agent_type: null,
+      agent_model: null,
+    };
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${compatibilityRun.id}`)) {
+        return {
+          run: compatibilityRun,
+          stories: [],
+          specStories: [],
+          agentType: 'codex',
+          agentModel: 'gpt-5.6-sol',
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={compatibilityRun.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Codex')).toHaveLength(2);
+      expect(screen.getByText('gpt-5.6-sol')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
+  });
+
+  it('renders missing historical run provenance as Unknown in both surfaces', async () => {
+    const historicalRun = {
+      ...createMockRun({ id: 59, status: 'done', workspace_id: 'ws-1' }),
+      agent_type: null,
+      agent_model: null,
+    };
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${historicalRun.id}`)) {
+        return {
+          run: historicalRun,
+          stories: [],
+          specStories: [],
+          agentType: null,
+          agentModel: null,
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={historicalRun.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(screen.getAllByText('Unknown')).toHaveLength(2));
+    expect(screen.queryByText('Claude')).not.toBeInTheDocument();
   });
 
   it('renders tab navigation', async () => {

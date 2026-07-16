@@ -70,6 +70,11 @@ export const DEFAULT_CONTEXT_REDACTION_PATTERNS: ContextRedactionPattern[] = [
     replacement: '[REDACTED_SECRET_ASSIGNMENT]',
   },
   {
+    name: 'cli-secret-argument',
+    pattern: "--?(?:api[-_]?key|token|secret|password|key)\\s+(?:=\\s*)?[\"\\']?[^\"\\'\\s]+",
+    replacement: '[REDACTED_SECRET_ARGUMENT]',
+  },
+  {
     name: 'github-token',
     pattern: '\\bgh[pousr]_[A-Za-z0-9_]{20,}\\b',
     replacement: '[REDACTED_GITHUB_TOKEN]',

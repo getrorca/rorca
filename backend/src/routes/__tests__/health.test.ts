@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
+import express, { type Express } from 'express';
 import request from 'supertest';
 import { execute } from '../../db/index';
 
@@ -24,6 +24,14 @@ jest.mock('../../lib/llm-client', () => ({
 
 let app: Express;
 let tmpDir: string;
+
+function buildHealthTestApp(): Express {
+  const testApp = express();
+  // Require after each suite's detector/config mocks are registered.
+  const healthRouter = require('../health').default;
+  testApp.use('/api/health', healthRouter);
+  return testApp;
+}
 
 beforeEach(() => {
   jest.resetModules();
@@ -43,7 +51,7 @@ beforeEach(() => {
       piVersion: null,
       piBinPath: null,
     }),
-    detectPiAvailability: jest.fn().mockReturnValue({
+    detectPiAsync: jest.fn().mockResolvedValue({
       piInstalled: false,
       piVersion: null,
       piBinPath: null,
@@ -54,8 +62,7 @@ beforeEach(() => {
   const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
-  const serverMod = require('../../server');
-  app = serverMod.default;
+  app = buildHealthTestApp();
 });
 
 afterEach(() => {
@@ -74,9 +81,11 @@ describe('GET /api/health', () => {
     expect(typeof res.body.uptime).toBe('number');
     expect(res.body).toHaveProperty('db_connected', true);
     expect(res.body).toHaveProperty('active_runs', 0);
-    expect(res.body).toHaveProperty('piInstalled', false);
-    expect(res.body).toHaveProperty('piVersion', null);
-    expect(res.body).toHaveProperty('piBinPath', null);
+    expect(res.body).toHaveProperty('readiness.confirmed', true);
+    expect(res.body).toHaveProperty('readiness.deadlineMs', 750);
+    expect(res.body).not.toHaveProperty('piInstalled');
+    expect(res.body).not.toHaveProperty('engines');
+    expect(res.body).not.toHaveProperty('components');
     expect(res.body).toHaveProperty('mcpTransport', 'http');
     expect(res.body).toHaveProperty('mcp.enabled', true);
     expect(res.body).toHaveProperty('mcp.status', 'healthy');
@@ -98,15 +107,6 @@ describe('GET /api/health', () => {
     expect(String(res.body.databaseCapability.connection.url ?? '')).not.toContain('@');
   });
 
-  it('runs the process-free Pi availability check only once per engine-cache refresh', async () => {
-    const { detectPiAvailability } = require('../../lib/pi-detector') as { detectPiAvailability: jest.Mock };
-
-    const res = await request(app).get('/api/health');
-
-    expect(res.status).toBe(200);
-    expect(detectPiAvailability).toHaveBeenCalledTimes(1);
-  });
-
   it('returns no-cache headers', async () => {
     const res = await request(app).get('/api/health');
 
@@ -119,6 +119,30 @@ describe('GET /api/health', () => {
     // No auth header — should still return 200
     const res = await request(app).get('/api/health');
     expect(res.status).toBe(200);
+  });
+
+  it('provides process-only liveness and an explicit readiness alias', async () => {
+    const live = await request(app).get('/api/health/live');
+    expect(live.status).toBe(200);
+    expect(live.body).toMatchObject({ status: 'alive', version: expect.any(String) });
+    expect(live.body).not.toHaveProperty('db_connected');
+
+    const ready = await request(app).get('/api/health/ready');
+    expect(ready.status).toBe(200);
+    expect(ready.body).toMatchObject({
+      status: 'healthy',
+      db_connected: true,
+      readiness: { confirmed: true, deadlineMs: 750 },
+    });
+  });
+
+  it('never invokes executable diagnostics on basic health', async () => {
+    const piDetector = require('../../lib/pi-detector') as { detectPi: jest.Mock };
+    piDetector.detectPi.mockClear();
+
+    await request(app).get('/api/health');
+
+    expect(piDetector.detectPi).not.toHaveBeenCalled();
   });
 
   it('reports active runs count', async () => {
@@ -135,8 +159,7 @@ describe('GET /api/health', () => {
   it('reports MCP disabled when RORCA_SERVE_MCP=false', async () => {
     process.env.RORCA_SERVE_MCP = 'false';
     jest.resetModules();
-    const serverMod = require('../../server');
-    const mcpDisabledApp = serverMod.default as Express;
+    const mcpDisabledApp = buildHealthTestApp();
 
     const res = await request(mcpDisabledApp).get('/api/health');
     expect(res.status).toBe(200);
@@ -176,6 +199,14 @@ describe('GET /api/health/detailed', () => {
     expect(res.body).toHaveProperty('databaseCapability.graphMode');
     expect(res.body).toHaveProperty('databaseSetup.selectedMode');
     expect(res.body.databaseSetup.modes).toHaveLength(3);
+    expect(res.body).toHaveProperty('piInstalled', false);
+    expect(res.body).toHaveProperty('piVersion', null);
+    expect(res.body).toHaveProperty('piBinPath', null);
+    expect(res.body).toHaveProperty('engines');
+    expect(res.body).toHaveProperty('components.database');
+    expect(res.body).toHaveProperty('components.worker');
+    expect(res.body).toHaveProperty('activeJobs');
+    expect(res.body).toHaveProperty('scheduledJobs');
     expect(res.body.dbMode).toBe(res.body.databaseCapability.dbMode);
     expect(res.body.graphMode).toBe(res.body.databaseCapability.graphMode);
   });
@@ -206,7 +237,7 @@ describe('GET /api/health/detailed', () => {
 
     await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, ['health-test-ws', 'TestWS', wsDir]);
 
-    const res = await request(app).get('/api/health/detailed');
+    const res = await request(app).get('/api/health/detailed?refresh=true');
     expect(res.body.pending_specs_count).toBe(baseline + 2);
   });
 
@@ -268,6 +299,11 @@ describe('GET /api/health (agentType=opencode)', () => {
         opencodeVersion: '0.2.0',
         opencodeBinPath: '/usr/local/bin/opencode',
       }),
+      detectOpenCodeAsync: jest.fn().mockResolvedValue({
+        opencodeInstalled: true,
+        opencodeVersion: '0.2.0',
+        opencodeBinPath: '/usr/local/bin/opencode',
+      }),
       requireOpenCode: jest.fn().mockReturnValue({
         opencodeInstalled: true,
         opencodeVersion: '0.2.0',
@@ -282,9 +318,9 @@ describe('GET /api/health (agentType=opencode)', () => {
         piVersion: '1.2.3',
         piBinPath: '/usr/local/bin/pi',
       }),
-      detectPiAvailability: jest.fn().mockReturnValue({
+      detectPiAsync: jest.fn().mockResolvedValue({
         piInstalled: true,
-        piVersion: null,
+        piVersion: '1.2.3',
         piBinPath: '/usr/local/bin/pi',
       }),
     }));
@@ -293,35 +329,34 @@ describe('GET /api/health (agentType=opencode)', () => {
     const _dbPath = path.join(ocTmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
-    const serverMod = require('../../server');
-    ocApp = serverMod.default;
+    ocApp = buildHealthTestApp();
 });
 
   afterEach(() => {
 fs.rmSync(ocTmpDir, { recursive: true, force: true });
   });
 
-  it('includes opencodeInstalled and opencodeVersion when agentType=opencode', async () => {
+  it('keeps executable status off basic health', async () => {
     const res = await request(ocApp).get('/api/health');
 
     expect(res.status).toBe(200);
-    expect(res.body.opencodeInstalled).toBe(true);
-    expect(res.body.opencodeVersion).toBe('0.2.0');
-    expect(res.body.piInstalled).toBe(true);
-    expect(res.body.piVersion).toBeNull();
-    expect(res.body.piBinPath).toBe('/usr/local/bin/pi');
+    expect(res.body).not.toHaveProperty('opencodeInstalled');
+    expect(res.body).not.toHaveProperty('piInstalled');
   });
 
-  it('includes opencode fields in detailed health too', async () => {
+  it('includes executable status in detailed health', async () => {
     const res = await request(ocApp).get('/api/health/detailed');
 
     expect(res.status).toBe(200);
     expect(res.body.opencodeInstalled).toBe(true);
     expect(res.body.opencodeVersion).toBe('0.2.0');
+    expect(res.body.piInstalled).toBe(true);
+    expect(res.body.piVersion).toBe('1.2.3');
+    expect(res.body.piBinPath).toBe('/usr/local/bin/pi');
   });
 });
 
-describe('GET /api/health (pi availability check failure)', () => {
+describe('GET /api/health (pi detector failure)', () => {
   let failApp: Express;
   let failTmpDir: string;
 
@@ -341,25 +376,22 @@ describe('GET /api/health (pi availability check failure)', () => {
       detectPi: jest.fn(() => {
         throw new Error('pi detector failed');
       }),
-      detectPiAvailability: jest.fn(() => {
-        throw new Error('pi availability check failed');
-      }),
+      detectPiAsync: jest.fn().mockRejectedValue(new Error('pi detector failed')),
     }));
 
     failTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-pi-fail-test-'));
     const _dbPath = path.join(failTmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
-    const serverMod = require('../../server');
-    failApp = serverMod.default;
+    failApp = buildHealthTestApp();
   });
 
   afterEach(() => {
 fs.rmSync(failTmpDir, { recursive: true, force: true });
   });
 
-  it('returns 200 and null pi fields when the availability check throws', async () => {
-    const res = await request(failApp).get('/api/health');
+  it('returns 200 and null pi fields when detailed detectPi throws', async () => {
+    const res = await request(failApp).get('/api/health/detailed');
 
     expect(res.status).toBe(200);
     expect(res.body.piInstalled).toBe(false);

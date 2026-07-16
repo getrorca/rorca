@@ -5,24 +5,25 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { CaptureConfig } from "./config.js";
 import { buildCaptureStatus, type CaptureStatus } from "./status.js";
 import {
   enqueueCaptureQueueEntry,
+  mutateCaptureQueueAtomic,
   normalizeCapturePayloadForDisk,
   readCaptureQueue,
   sanitizeCaptureErrorMessage,
   updateCaptureQueueEntryFailure,
-  writeCaptureQueueAtomic,
   type CaptureQueueEntry,
   type CaptureQueueOperation,
   type EnqueueCaptureQueueResult,
   type JsonObject,
   type JsonValue,
 } from "./queue.js";
+import { assertSecureParent } from "./secure-fs.js";
 
 export const MCP_TOKEN_RELATIVE_PATH = ".rorca/mcp-token";
 
@@ -56,6 +57,7 @@ export type CaptureFetch = typeof fetch;
 export type CaptureApiClient = {
   get<T>(pathname: string): Promise<T>;
   post<T>(pathname: string, body: unknown): Promise<T>;
+  patch<T>(pathname: string, body: unknown): Promise<T>;
 };
 
 export type CaptureSubmitOptions = {
@@ -160,32 +162,60 @@ export function getDefaultMcpTokenPath(home = homedir()): string {
 }
 
 export function inspectMcpToken(tokenPath = getDefaultMcpTokenPath()): TokenStatus {
-  if (!existsSync(tokenPath)) {
-    return { path: tokenPath, exists: false, modeOk: false };
+  try {
+    const opened = openValidatedToken(tokenPath);
+    closeSync(opened.fd);
+    return opened.status;
+  } catch (error) {
+    if (isMissingFile(error)) return { path: tokenPath, exists: false, modeOk: false };
+    return { path: tokenPath, exists: true, modeOk: false };
   }
-
-  if (process.platform === "win32") {
-    return { path: tokenPath, exists: true, modeOk: true };
-  }
-
-  const mode = (statSync(tokenPath).mode & 0o777).toString(8).padStart(3, "0");
-  return { path: tokenPath, exists: true, mode, modeOk: mode === "600" };
 }
 
 export function readMcpToken(tokenPath = getDefaultMcpTokenPath()): string {
-  const status = inspectMcpToken(tokenPath);
-  if (!status.exists) {
-    throw new CaptureApiError("MCP Bearer token file not found at ~/.rorca/mcp-token.", 401, "AUTH_ERROR", {
-      tokenPath,
-    });
+  let opened: ReturnType<typeof openValidatedToken>;
+  try {
+    opened = openValidatedToken(tokenPath);
+  } catch (error) {
+    const missing = isMissingFile(error);
+    throw new CaptureApiError(
+      missing ? "MCP Bearer token file not found at ~/.rorca/mcp-token." : "MCP Bearer token path must be a current-user-owned, non-symlink regular file with mode 0600 in a secure parent directory.",
+      401,
+      "AUTH_ERROR",
+      { tokenPath },
+    );
   }
-  if (!status.modeOk) {
-    throw new CaptureApiError("MCP Bearer token file must have mode 0600.", 401, "AUTH_ERROR", {
-      tokenPath,
-      mode: status.mode,
-    });
+  try {
+    return readFileSync(opened.fd, "utf8").trim();
+  } finally {
+    closeSync(opened.fd);
   }
-  return readFileSync(tokenPath, "utf8").trim();
+}
+
+function openValidatedToken(tokenPath: string): { fd: number; status: TokenStatus } {
+  assertSecureParent(tokenPath, { privateParent: isDefaultTokenPath(tokenPath) });
+  const fd = openSync(tokenPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("Token is not a regular file");
+    if (process.platform !== "win32" && typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error("Token is not owned by the current user");
+    }
+    const mode = process.platform === "win32" ? undefined : (stat.mode & 0o777).toString(8).padStart(3, "0");
+    if (mode !== undefined && mode !== "600") throw new Error("Token mode is not 0600");
+    return { fd, status: { path: tokenPath, exists: true, ...(mode ? { mode } : {}), modeOk: true } };
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+function isDefaultTokenPath(tokenPath: string): boolean {
+  return path.resolve(tokenPath) === path.resolve(getDefaultMcpTokenPath());
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 export function createApiClient(config: Pick<CaptureConfig, "apiUrl">, options: {
@@ -242,6 +272,9 @@ export function createApiClient(config: Pick<CaptureConfig, "apiUrl">, options: 
     post<T>(pathname: string, body: unknown) {
       return request<T>(pathname, { method: "POST", body: JSON.stringify(body) });
     },
+    patch<T>(pathname: string, body: unknown) {
+      return request<T>(pathname, { method: "PATCH", body: JSON.stringify(body) });
+    },
   };
 }
 
@@ -256,6 +289,9 @@ export function createCaptureClient(config: CaptureConfig, options: {
     get: api.get,
     post<T>(pathname: string, body: unknown) {
       return api.post<T>(pathname, normalizeSubmissionPayload(config, body));
+    },
+    patch<T>(pathname: string, body: unknown) {
+      return api.patch<T>(pathname, normalizeSubmissionPayload(config, body));
     },
     checkStatus() {
       return checkCaptureStatus(config, options);
@@ -329,14 +365,12 @@ export async function flushCaptureQueue(
 
     try {
       await submitQueueEntry(client, current);
-      pending = pending.filter((entry) => entry.key !== current.key);
-      writeCaptureQueueAtomic(queuePath, pending);
+      pending = mutateCaptureQueueAtomic(queuePath, (entries) => entries.filter((entry) => entry.key !== current.key));
       submitted += 1;
     } catch (error) {
       const retryable = isRetryableFlushError(error);
       const updated = updateCaptureQueueEntryFailure({ entry: current, error, retryable, now: options.now });
-      pending = pending.map((entry) => entry.key === current.key ? updated : entry);
-      writeCaptureQueueAtomic(queuePath, pending);
+      pending = mutateCaptureQueueAtomic(queuePath, (entries) => entries.map((entry) => entry.key === current.key ? updated : entry));
       failed += 1;
       failures.push({ key: current.key, retryable, message: updated.lastError ?? "Unknown capture queue error" });
     }

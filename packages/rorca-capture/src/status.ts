@@ -9,7 +9,7 @@ import type { CaptureConfig } from "./config.js";
 import type { ResolvedWorkspace, TokenStatus } from "./api.js";
 import { CONTEXT_SAFETY_CONTRACT_VERSION, DEFAULT_CONTEXT_IGNORE_PATHS } from "./context-safety.js";
 
-export const MVP_COMMANDS = ["remember", "import-duckbrain", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"] as const;
+export const MVP_COMMANDS = ["setup", "teardown", "pause", "resume", "service", "emit", "remember", "import-duckbrain", "ingest-pr", "ingest-commit", "ingest-git", "install-hooks", "daemon", "status", "flush"] as const;
 
 export type CaptureApiReachabilityStatus = {
   reachable: boolean | null;

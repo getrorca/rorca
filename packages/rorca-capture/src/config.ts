@@ -17,6 +17,7 @@ import {
   type NormalizedContextIgnoreSettings,
   type NormalizedContextRedactionSettings,
 } from "./context-safety.js";
+import { assertSecureParent } from "./secure-fs.js";
 
 export const DEFAULT_RORCA_API_URL = "http://localhost:3030";
 export const DEFAULT_CAPTURE_QUEUE_RELATIVE_PATH = ".rorca-capture-queue.jsonl";
@@ -155,13 +156,21 @@ export function resolveCaptureConfig(options: ResolveCaptureConfigOptions = {}):
     values.apiUrl = DEFAULT_RORCA_API_URL;
     sources.apiUrl = "auto";
   }
-  values.apiUrl = values.apiUrl.replace(/\/$/, "");
+  values.apiUrl = normalizeCaptureApiUrl(values.apiUrl);
 
   if (!values.queuePath) {
     values.queuePath = path.join(values.repoPath, DEFAULT_CAPTURE_QUEUE_RELATIVE_PATH);
     sources.queuePath = "auto";
   } else if (!path.isAbsolute(values.queuePath)) {
     values.queuePath = path.join(values.repoPath, values.queuePath);
+  }
+  values.queuePath = path.resolve(values.queuePath);
+  try {
+    assertSecureParent(values.queuePath);
+  } catch (error) {
+    throw new CaptureConfigError(`Unsafe capture queue path: ${error instanceof Error ? error.message : String(error)}`, "INVALID_CONFIG", {
+      queuePath: values.queuePath,
+    });
   }
 
   const captureIgnoreFile = loadContextCaptureIgnoreFile(values.repoPath);
@@ -194,6 +203,22 @@ export function resolveCaptureConfig(options: ResolveCaptureConfigOptions = {}):
     },
     apiOnly: true,
   };
+}
+
+export function normalizeCaptureApiUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new CaptureConfigError("Rorca capture API URL is invalid.", "INVALID_CONFIG");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new CaptureConfigError("Rorca capture API URL must use http or https.", "INVALID_CONFIG");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new CaptureConfigError("Rorca capture API URL must not contain credentials, query tokens, or fragments.", "INVALID_CONFIG");
+  }
+  return parsed.toString().replace(/\/$/, "");
 }
 
 export function detectGitRoot(cwd: string): string | null {

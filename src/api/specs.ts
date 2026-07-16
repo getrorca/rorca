@@ -137,6 +137,7 @@ export interface CreateSpecParams extends ApiOptions {
 }
 
 export interface CreateSpecResult {
+  id: string;
   slug: string;
   title: string;
   status: 'pending';

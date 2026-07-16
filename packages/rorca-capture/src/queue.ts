@@ -5,8 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import path from "node:path";
+import { existsSync } from "node:fs";
 import type { CaptureConfig } from "./config.js";
 import {
   hashContextContent,
@@ -14,6 +13,7 @@ import {
   redactContextPayload,
   redactContextText,
 } from "./context-safety.js";
+import { assertSecureParent, atomicWriteFileSecure, readSecureFile, withSecureFileLock } from "./secure-fs.js";
 
 export const CAPTURE_QUEUE_VERSION = 1 as const;
 
@@ -127,23 +127,46 @@ export function enqueueCaptureQueueEntry(
   config: CaptureConfig,
   input: BuildCaptureQueueEntryInput,
 ): EnqueueCaptureQueueResult {
-  const existing = readCaptureQueue(queuePath);
-  const entry = buildCaptureQueueEntry(config, {
-    ...input,
-    sequence: input.sequence ?? nextCaptureQueueSequence(existing),
-  });
-  const duplicate = existing.find((item) => item.key === entry.key);
-  if (duplicate) {
-    return { entry: duplicate, queued: false, duplicate: true };
-  }
+  return withSecureFileLock(queuePath, () => {
+    const existing = readCaptureQueueUnlocked(queuePath);
+    const entry = buildCaptureQueueEntry(config, {
+      ...input,
+      sequence: input.sequence ?? nextCaptureQueueSequence(existing),
+    });
+    const duplicate = existing.find((item) => item.key === entry.key);
+    if (duplicate) {
+      return { entry: duplicate, queued: false, duplicate: true };
+    }
 
-  writeCaptureQueueAtomic(queuePath, [...existing, entry]);
-  return { entry, queued: true, duplicate: false };
+    writeCaptureQueueUnlocked(queuePath, [...existing, entry]);
+    return { entry, queued: true, duplicate: false };
+  });
 }
 
 export function readCaptureQueue(queuePath: string): CaptureQueueEntry[] {
   if (!existsSync(queuePath)) return [];
-  const text = readFileSync(queuePath, "utf8");
+  assertSecureParent(queuePath);
+  return readCaptureQueueUnlocked(queuePath);
+}
+
+export function writeCaptureQueueAtomic(queuePath: string, entries: CaptureQueueEntry[]): void {
+  withSecureFileLock(queuePath, () => writeCaptureQueueUnlocked(queuePath, entries));
+}
+
+export function mutateCaptureQueueAtomic(
+  queuePath: string,
+  mutate: (entries: CaptureQueueEntry[]) => CaptureQueueEntry[],
+): CaptureQueueEntry[] {
+  return withSecureFileLock(queuePath, () => {
+    const next = mutate(readCaptureQueueUnlocked(queuePath));
+    writeCaptureQueueUnlocked(queuePath, next);
+    return next;
+  });
+}
+
+function readCaptureQueueUnlocked(queuePath: string): CaptureQueueEntry[] {
+  if (!existsSync(queuePath)) return [];
+  const text = readSecureFile(queuePath);
   if (!text.trim()) return [];
 
   return text.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line, index) => {
@@ -156,18 +179,10 @@ export function readCaptureQueue(queuePath: string): CaptureQueueEntry[] {
   }).sort((left, right) => left.sequence - right.sequence);
 }
 
-export function writeCaptureQueueAtomic(queuePath: string, entries: CaptureQueueEntry[]): void {
-  mkdirSync(path.dirname(queuePath), { recursive: true });
-  const tmpPath = `${queuePath}.tmp`;
+function writeCaptureQueueUnlocked(queuePath: string, entries: CaptureQueueEntry[]): void {
   const ordered = [...entries].sort((left, right) => left.sequence - right.sequence);
   const content = ordered.length > 0 ? `${ordered.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "";
-  writeFileSync(tmpPath, content, { encoding: "utf8", mode: 0o600 });
-  try {
-    chmodSync(tmpPath, 0o600);
-  } catch {
-    // Best effort on platforms that do not support POSIX modes.
-  }
-  renameSync(tmpPath, queuePath);
+  atomicWriteFileSecure(queuePath, content, { mode: 0o600 });
 }
 
 export function updateCaptureQueueEntryFailure(input: {

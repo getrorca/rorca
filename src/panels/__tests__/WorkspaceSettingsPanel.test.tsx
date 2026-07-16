@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { waitFor } from '@testing-library/react';
+import { fireEvent, waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../test/helpers';
 import WorkspaceSettingsPanel, { WsContextSection } from '../WorkspaceSettingsPanel';
 
@@ -153,5 +153,47 @@ describe('WorkspaceSettingsPanel', () => {
     expect(document.body.textContent).toContain('Markdown files Rorca injects during spec execution');
     expect(document.body.textContent).toContain('Rorca assembles the matched files into each spec/run context packet');
     expect(document.body.textContent).toContain('docs are not auto-memorized by default');
+  });
+
+  it('loads count-only capture status and exposes privacy controls', async () => {
+    mockApiFetch.mockImplementation(async (requestPath: string) => {
+      if (requestPath.endsWith('/status')) {
+        return {
+          status: {
+            policyMode: 'metadata-only',
+            paused: false,
+            activeIntegrations: { repoDaemon: true, gitHook: true },
+            ignoredPaths: ['.env', '*.pem'],
+            queueDepth: 2,
+            redactionPolicy: { version: '2026-07-ucc-007', availableModes: ['off', 'metadata-only', 'repo-and-command', 'ide-assisted', 'full'] },
+            lastCapturedEvent: {
+              occurredAt: '2026-07-14T12:00:00Z',
+              eventType: 'git_commit',
+              integrationId: 'repoDaemon:rorca-capture',
+              redactionDiagnostics: { redactionCount: 1, ignoredPathCount: 2, redactionTypes: ['token'], regulatedDomainFlags: [], truncated: false },
+            },
+            auditLog: [],
+          },
+        };
+      }
+      if (requestPath.endsWith('/monitoring')) {
+        return {
+          status: 'healthy', reasons: [], advisories: [],
+          queues: { capture: { depth: 2, failed: 0 }, distillation: { depth: 1, failed: 0 } },
+          worker: { status: 'ok', ageSeconds: 4 },
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(<WsContextSection workspaceId="ws-1" showToast={vi.fn()} />);
+    fireEvent.click(document.querySelector('button[role="tab"][aria-selected="false"]') as HTMLButtonElement);
+
+    await waitFor(() => expect(document.body.textContent).toContain('Always-on capture'));
+    expect(document.body.textContent).toContain('metadata-only');
+    expect(document.body.textContent).toContain('repoDaemon, gitHook');
+    expect(document.body.textContent).not.toContain('super-secret-value');
+    expect(mockApiFetch).toHaveBeenCalledWith('/api/context-capture/ws-1/status');
+    expect(mockApiFetch).toHaveBeenCalledWith('/api/context-capture/ws-1/monitoring');
   });
 });

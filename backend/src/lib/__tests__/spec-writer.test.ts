@@ -64,6 +64,7 @@ describe('writeSpec', () => {
 
     expect(fs.existsSync(result.specPath)).toBe(true);
     expect(fs.existsSync(result.diagramsPath)).toBe(true);
+    expect(result.id).toBe('test-feature');
     expect(result.specPath).toContain('test-feature.json');
     expect(result.diagramsPath).toContain('test-feature-diagrams.md');
   });
@@ -73,6 +74,8 @@ describe('writeSpec', () => {
     const result = writeSpec(tmpDir, spec);
     const json = JSON.parse(fs.readFileSync(result.specPath, 'utf8'));
 
+    expect(json.id).toBe('test-feature');
+    expect(json.slug).toBe('test-feature');
     expect(json.title).toBe('Test Feature');
     expect(json.userStories).toBeDefined();
     expect(json.stories).toBeUndefined();

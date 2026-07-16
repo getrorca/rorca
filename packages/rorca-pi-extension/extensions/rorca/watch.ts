@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RorcaApiClient } from "./api.js";
 import { buildWatchSnapshot, formatRunNotify, formatRunWidget } from "./format.js";
 import type { ExtensionState } from "./types.js";

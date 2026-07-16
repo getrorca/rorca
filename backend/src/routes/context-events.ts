@@ -10,6 +10,8 @@ import { z } from 'zod';
 import { queryOne } from '../db/index';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { broadcastAll } from '../lib/sse-hub';
+import { enqueueContextDistillation } from '../lib/context-distillation';
+import { getBoss } from '../lib/pg-boss';
 import {
   CONTEXT_SAFETY_CONTRACT_VERSION,
   loadContextCaptureIgnoreFile,
@@ -178,6 +180,17 @@ async function findByIdempotencyKey(idempotencyKey: string): Promise<ContextEven
   );
 }
 
+async function enqueueDistillationBestEffort(event: ContextEventResponse): Promise<void> {
+  if (event.payload.payload_schema_version !== '2026-07-ucc-007.v1') return;
+  try {
+    await enqueueContextDistillation(getBoss(), event.workspaceId, Number(event.id));
+  } catch {
+    // The synchronous public CCS ingestion contract remains durable when the
+    // worker/pg-boss runtime is unavailable. A later distillation sweep can
+    // process rows whose distillation_status is still NULL.
+  }
+}
+
 /**
  * @swagger
  * /api/context-events:
@@ -254,6 +267,7 @@ router.post('/', async (req: Request, res: Response) => {
   const existing = await findByIdempotencyKey(idempotencyKey);
   if (existing) {
     await emitContextEventCreated(existing, true);
+    await enqueueDistillationBestEffort(existing);
     res.status(200).json({ event: existing, created: false, idempotent: true });
     return;
   }
@@ -312,6 +326,7 @@ router.post('/', async (req: Request, res: Response) => {
     const concurrentExisting = await findByIdempotencyKey(idempotencyKey);
     if (concurrentExisting) {
       await emitContextEventCreated(concurrentExisting, true);
+      await enqueueDistillationBestEffort(concurrentExisting);
       res.status(200).json({ event: concurrentExisting, created: false, idempotent: true });
       return;
     }
@@ -319,6 +334,7 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   await emitContextEventCreated(inserted, false);
+  await enqueueDistillationBestEffort(inserted);
   res.status(201).json({ event: inserted, created: true, idempotent: false });
 });
 

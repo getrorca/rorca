@@ -11,7 +11,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { execute } from '../../db/index';
+import { execute, queryOne } from '../../db/index';
 
 let app: Express;
 let tmpDir: string;
@@ -89,4 +89,28 @@ test('empty WAL returns events:[], total:0', async () => {
   expect(res.status).toBe(200);
   expect(res.body.items).toEqual([]);
   expect(res.body.total).toBe(0);
+});
+
+test('POST idempotency key prevents a retry after response loss from duplicating WAL', async () => {
+  const body = {
+    event_type: 'story_token_update',
+    workspace_id: 'ws-1',
+    story_id: 'US-001',
+    idempotency_key: 'wal-test-idempotency-1',
+    occurred_at: '2026-07-15T00:00:00.000Z',
+    payload: { run_id: 42, cumulative_input: 100, cumulative_output: 20 },
+  };
+
+  const first = await request(app).post('/api/wal').send(body);
+  const retry = await request(app).post('/api/wal').send(body);
+  const count = await queryOne<{ count: number }>(
+    'SELECT COUNT(*)::int AS count FROM wal_events WHERE ingest_key = $1',
+    [body.idempotency_key],
+  );
+
+  expect(first.status).toBe(201);
+  expect(first.body.duplicate).toBe(false);
+  expect(retry.status).toBe(200);
+  expect(retry.body).toMatchObject({ id: first.body.id, duplicate: true });
+  expect(count?.count).toBe(1);
 });

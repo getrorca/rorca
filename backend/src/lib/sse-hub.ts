@@ -30,6 +30,8 @@ type TopicSubscriber<T = unknown> = (event: T) => void;
 
 const subscribers = new Map<number, Subscriber>();
 const topicSubscribers = new Map<string, Map<number, TopicSubscriber>>();
+const recentlyBroadcastWalIds = new Set<number>();
+const MAX_RECENT_WAL_IDS = 2_048;
 let nextId = 1;
 
 /**
@@ -47,6 +49,18 @@ export function subscribe(fn: Subscriber): () => void {
  * Broadcast a WAL event to all current subscribers.
  */
 export function broadcastAll(event: WalEvent): void {
+  // The inserting route and PostgreSQL LISTEN/NOTIFY can observe the same row in
+  // one process. Suppress that duplicate without hiding events inserted by a
+  // different process (which arrive only through LISTEN here).
+  if (Number.isSafeInteger(event.id)) {
+    if (recentlyBroadcastWalIds.has(event.id)) return;
+    recentlyBroadcastWalIds.add(event.id);
+    if (recentlyBroadcastWalIds.size > MAX_RECENT_WAL_IDS) {
+      const oldest = recentlyBroadcastWalIds.values().next().value as number | undefined;
+      if (oldest !== undefined) recentlyBroadcastWalIds.delete(oldest);
+    }
+  }
+
   for (const fn of subscribers.values()) {
     try {
       fn(event);
@@ -106,4 +120,14 @@ export function attachSSE(res: Response): () => void {
     res.write(`event: wal_event\ndata: ${JSON.stringify(event)}\n\n`);
   });
   return unsubscribe;
+}
+
+/**
+ * Wire an Express SSE response to a named topic. Routes use this helper rather
+ * than bypassing the hub with direct writes.
+ */
+export function attachTopicSSE<T = unknown>(topic: string, res: Response, eventName = 'message'): () => void {
+  return subscribeTopic<T>(topic, (event) => {
+    res.write(`event: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`);
+  });
 }

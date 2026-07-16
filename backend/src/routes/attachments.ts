@@ -24,7 +24,12 @@ const ALLOWED_CONTENT_TYPES = new Set([
 
 const pendingUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 1,
+    fields: 4,
+    fieldNestingDepth: 1,
+  } as NonNullable<multer.Options['limits']> & { fieldNestingDepth: number }, // 10MB; Multer 2.2 supports this before its DefinitelyTyped declaration
   fileFilter: (_req, file, cb) => {
     if (ALLOWED_CONTENT_TYPES.has(file.mimetype)) {
       cb(null, true);
@@ -122,12 +127,16 @@ router.post(
     pendingUpload.single('file')(req, res, (err: any) => {
       if (err) {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          throw new PayloadTooLargeError('File size exceeds 10MB limit');
+          next(new PayloadTooLargeError('File size exceeds 10MB limit'));
           return;
         }
         if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
           const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
-          throw new ValidationError(`Unsupported file type: ${mimeType}`);
+          next(new ValidationError(`Unsupported file type: ${mimeType}`));
+          return;
+        }
+        if (err instanceof multer.MulterError) {
+          next(new ValidationError(`Invalid multipart upload: ${err.code}`));
           return;
         }
         next(err);

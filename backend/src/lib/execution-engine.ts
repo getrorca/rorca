@@ -34,6 +34,7 @@
  */
 
 import { spawn, execSync, type ChildProcess } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -81,9 +82,14 @@ import {
   loadOrchestrationConfig,
 } from './complexity-scorer';
 import { parseClaudeLogTokens } from './claude-token-parser';
-import { parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
+import { parseOpenCodeEvent, parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
 import { calculateCost } from './model-pricing';
-import { retryPost, writeFallbackResult, type FallbackResultEntry } from './resilient-post';
+import {
+  CoalescingPostQueue,
+  retryPost,
+  writeFallbackResult,
+  type FallbackResultEntry,
+} from './resilient-post';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -953,14 +959,49 @@ function getNextStory(stories: UserStory[]): UserStory | null {
   return null;
 }
 
-/** Effective CWD for fallback file writes — set by executeStory / main before use. */
+/** Stable run root for fallback writes; never point this at ephemeral story worktrees. */
 let _fallbackCwd: string | null = null;
-/** Current run ID for fallback entries. */
-let _fallbackRunId: number = 0;
+let _fallbackRunId = 0;
+let _walTelemetryQueue: CoalescingPostQueue | null = null;
+const _tokenAccumulators = new Map<string, {
+  baseInput: number;
+  baseOutput: number;
+  baseCost: number;
+  lastInput: number;
+  lastOutput: number;
+  lastCost: number;
+  lastTurn: number;
+  sequence: number;
+}>();
 
 function setFallbackContext(cwd: string, runId: number): void {
   _fallbackCwd = cwd;
   _fallbackRunId = runId;
+  if (!_walTelemetryQueue) {
+    _walTelemetryQueue = new CoalescingPostQueue({
+      maxPending: 64,
+      concurrency: 2,
+      timeoutMs: 750,
+      maxRetries: 1,
+      failureCooldownMs: 2_000,
+      persistFallback: entry => writeFallbackResult(cwd, entry),
+    });
+  }
+}
+
+function tokenTelemetryKey(runId: number, storyId: string): string {
+  return `${runId}:story_token_update:${storyId}`;
+}
+
+async function flushStoryTokenTelemetry(runId: number, storyId: string): Promise<void> {
+  await _walTelemetryQueue?.flushKey(tokenTelemetryKey(runId, storyId), 1_250);
+}
+
+async function shutdownWalTelemetry(): Promise<void> {
+  const queue = _walTelemetryQueue;
+  _walTelemetryQueue = null;
+  await queue?.shutdown(2_000);
+  _tokenAccumulators.clear();
 }
 
 
@@ -989,12 +1030,16 @@ async function emitWalEvent(
   storyId?: string,
   specId?: string,
 ): Promise<void> {
+  const occurredAt = new Date().toISOString();
+  const idempotencyKey = `wal:${_fallbackRunId}:${randomUUID()}`;
   const body = {
     event_type: eventType,
     workspace_id: workspaceId,
     story_id: storyId ?? null,
     spec_id: specId ?? null,
     payload,
+    idempotency_key: idempotencyKey,
+    occurred_at: occurredAt,
   };
 
   const ok = await retryPost(
@@ -1010,10 +1055,13 @@ async function emitWalEvent(
       status: eventType,
       runId: _fallbackRunId,
       retries: 3,
-      ts: new Date().toISOString(),
+      ts: occurredAt,
+      idempotencyKey,
       payload: body,
     };
-    writeFallbackResult(_fallbackCwd, entry);
+    if (!await writeFallbackResult(_fallbackCwd, entry)) {
+      throw new Error(`WAL fallback persistence failed for ${eventType}`);
+    }
   }
 }
 
@@ -1069,9 +1117,11 @@ async function postStoryResult(
   port: number,
   body: Record<string, unknown>,
 ): Promise<void> {
+  const idempotencyKey = `story-result:${_fallbackRunId}:${randomUUID()}`;
+  const deliveryBody = { ...body, idempotencyKey };
   const ok = await retryPost(
     engineApiEndpoint(port, '/api/pipeline/story-result'),
-    body,
+    deliveryBody,
     `story-result:${body.storyId ?? 'unknown'}`,
   );
 
@@ -1083,9 +1133,12 @@ async function postStoryResult(
       runId: _fallbackRunId,
       retries: 3,
       ts: new Date().toISOString(),
-      payload: body,
+      idempotencyKey,
+      payload: deliveryBody,
     };
-    writeFallbackResult(_fallbackCwd, entry);
+    if (!await writeFallbackResult(_fallbackCwd, entry)) {
+      throw new Error(`Story-result fallback persistence failed for ${String(body.storyId ?? 'unknown')}`);
+    }
   }
 }
 
@@ -2706,10 +2759,10 @@ function runAgent(
     case 'claude':
       return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
     case 'opencode':
-      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
+      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
-      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
+      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, mcpServers);
     case 'pi':
       return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers);
   }
@@ -2990,6 +3043,7 @@ function spawnOpenCode(
   logFile: string,
   agentModel: string | null,
   attachAddr: string | null,
+  onTokenUpdate?: TokenUpdateCallback,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
@@ -3062,11 +3116,31 @@ function spawnOpenCode(
     // tool_result (full file contents as escaped JSON) produce giant JSON blobs
     // in the terminal — skip them.
     let ocLineBuf = '';
+    let cumulativeInput = 0;
+    let cumulativeOutput = 0;
+    let turnCount = 0;
     const forwardOpenCodeStdoutLine = (line: string): void => {
       const trimmed = line.trim();
       if (!trimmed) return;
       try {
         const ev = JSON.parse(trimmed);
+        const parsedUsage = parseOpenCodeEvent(ev).tokenUsage;
+        const stepTokens = ev.type === 'step_finish' ? ev.part?.tokens : undefined;
+        const usage = parsedUsage ?? (stepTokens
+          ? { inputTokens: Number(stepTokens.input ?? 0), outputTokens: Number(stepTokens.output ?? 0) }
+          : null);
+        if (usage && onTokenUpdate && (usage.inputTokens > 0 || usage.outputTokens > 0)) {
+          cumulativeInput += usage.inputTokens;
+          cumulativeOutput += usage.outputTokens;
+          turnCount++;
+          onTokenUpdate({
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            turn: turnCount,
+            cumulativeInput,
+            cumulativeOutput,
+          });
+        }
         if (ev.type === 'step_finish' || ev.type === 'step_start' || ev.type === 'tool_result') return;
         process.stdout.write(trimmed + '\n');
       } catch {
@@ -3177,6 +3251,7 @@ function spawnCodex(
   timeoutMs: number,
   logFile: string,
   model?: string | null,
+  _onTokenUpdate?: TokenUpdateCallback,
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
@@ -4837,9 +4912,6 @@ async function executeStory(
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
-  // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
-  setFallbackContext(effectiveCwd, config.runId);
-
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
   // stable workspace/run artifact root, not ephemeral story worktrees, so the
   // payload remains inspectable after worktree cleanup. The writer also resumes
@@ -5218,24 +5290,81 @@ async function executeStory(
     logger.info(`[pi] Session options ready for ${story.id}`);
   }
 
-  // Real-time token update callback — emits WAL events as tokens stream in
-  const tokenUpdateCallback: TokenUpdateCallback | undefined =
-    workspaceId && (effectiveAgent === 'claude' || effectiveAgent === 'pi')
-      ? (update) => {
-          // Fire-and-forget WAL event for live token streaming
-          emitWalEvent(config.port, 'story_token_update', workspaceId, {
+  // Every agent path receives the same callback contract. Claude, Pi, and
+  // usage-bearing OpenCode JSON feed a latest-value queue; Codex retains final
+  // story-result accounting because its stdout contract has no live usage.
+  const tokenUpdateCallback: TokenUpdateCallback | undefined = workspaceId
+    ? (update) => {
+        const key = tokenTelemetryKey(config.runId, story.id);
+        const accumulator = _tokenAccumulators.get(key) ?? {
+          baseInput: 0, baseOutput: 0, baseCost: 0,
+          lastInput: 0, lastOutput: 0, lastCost: 0,
+          lastTurn: 0, sequence: 0,
+        };
+        // Agent subprocess retries/reroutes restart their local cumulative
+        // counters. Carry the completed attempt forward so coalescing never
+        // replaces a larger run total with a smaller per-attempt total.
+        const restarted = update.turn <= accumulator.lastTurn
+          || update.cumulativeInput < accumulator.lastInput
+          || update.cumulativeOutput < accumulator.lastOutput;
+        if (restarted) {
+          accumulator.baseInput += accumulator.lastInput;
+          accumulator.baseOutput += accumulator.lastOutput;
+          accumulator.baseCost += accumulator.lastCost;
+        }
+        accumulator.lastInput = update.cumulativeInput;
+        accumulator.lastOutput = update.cumulativeOutput;
+        accumulator.lastCost = update.cumulativeCostUsd ?? accumulator.lastCost;
+        accumulator.lastTurn = update.turn;
+        accumulator.sequence++;
+        _tokenAccumulators.set(key, accumulator);
+
+        const cumulativeInput = accumulator.baseInput + update.cumulativeInput;
+        const cumulativeOutput = accumulator.baseOutput + update.cumulativeOutput;
+        const cumulativeCostUsd = accumulator.baseCost + (update.cumulativeCostUsd ?? 0);
+        const occurredAt = new Date().toISOString();
+        const idempotencyKey = `wal-token:${config.runId}:${story.id}:${randomUUID()}`;
+        const body = {
+          event_type: 'story_token_update',
+          workspace_id: workspaceId,
+          story_id: story.id,
+          spec_id: null,
+          payload: {
             run_id: config.runId,
             story_id: story.id,
             input_tokens: update.inputTokens,
             output_tokens: update.outputTokens,
-            cumulative_input: update.cumulativeInput,
-            cumulative_output: update.cumulativeOutput,
+            cumulative_input: cumulativeInput,
+            cumulative_output: cumulativeOutput,
             ...(update.costUsd != null ? { cost_usd: update.costUsd } : {}),
-            ...(update.cumulativeCostUsd != null ? { cumulative_cost_usd: update.cumulativeCostUsd } : {}),
+            ...(update.cumulativeCostUsd != null ? { cumulative_cost_usd: cumulativeCostUsd } : {}),
             turn: update.turn,
-          }, story.id).catch(() => { /* best-effort — don't block execution */ });
-        }
-      : undefined;
+            telemetry_sequence: accumulator.sequence,
+          },
+          idempotency_key: idempotencyKey,
+          occurred_at: occurredAt,
+        };
+        const fallback: FallbackResultEntry = {
+          type: 'wal',
+          storyId: story.id,
+          status: 'story_token_update',
+          runId: config.runId,
+          retries: 1,
+          ts: occurredAt,
+          idempotencyKey,
+          coalesceKey: key,
+          sequence: accumulator.sequence,
+          payload: body,
+        };
+        _walTelemetryQueue?.enqueue({
+          key,
+          url: engineApiEndpoint(config.port, '/api/wal'),
+          body,
+          label: 'WAL:story_token_update',
+          fallback,
+        });
+      }
+    : undefined;
 
   const persistRetrievalOutcome = async (success: boolean): Promise<void> => {
     await recordRetrievalSelectionsOutcome(workspaceId, retrievalSelections, success);
@@ -5314,6 +5443,10 @@ async function executeStory(
         exitCode: result.exitCode,
         stageDurationMs: Math.max(0, Date.now() - agentAttemptStartedAt),
       }, '[engine] telemetry');
+
+    // Preserve token-update ordering relative to terminal story events without
+    // ever waiting through the critical-event 3×10s retry policy.
+    await flushStoryTokenTelemetry(config.runId, story.id);
 
     // Extract token usage from log file after agent exits
     const tokenUsage = extractTokenUsage(
@@ -6392,6 +6525,7 @@ async function main(): Promise<void> {
       logger.info('');
       logger.info('[engine] Received SIGINT — stopping run');
       await runRegisteredPtyCleanupTasks();
+      await shutdownWalTelemetry();
       await cleanupBrowserServers();
       process.exit(130);
     })();
@@ -6401,6 +6535,7 @@ async function main(): Promise<void> {
     void (async () => {
       logger.error('[engine] Received SIGTERM — terminating run before completion');
       await runRegisteredPtyCleanupTasks();
+      await shutdownWalTelemetry();
       await cleanupBrowserServers();
       process.exit(143);
     })();
@@ -6542,6 +6677,7 @@ async function main(): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
   } finally {
+    await shutdownWalTelemetry();
     await cleanupBrowserServers();
   }
 }
