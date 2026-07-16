@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, Loader2, ShieldAlert, X } from 'lucide-react';
 import type {
   LifecycleDecisionType,
@@ -102,7 +103,7 @@ export default function LifecycleGovernedActionDialog({
     && !decisionDenied;
 
   const title = dialog.kind === 'retry' ? 'Retry preview' : decisionLabel(dialog.decisionType);
-  return (
+  return createPortal(
     <div ref={dialogRef} className="lifecycle-governed-dialog fixed inset-0 z-[140] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="lifecycle-action-title">
       <div className="lifecycle-governed-dialog__surface flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-border bg-bg">
         <header className="sticky top-0 z-10 flex items-start gap-3 border-b border-border bg-bg px-5 py-4">
@@ -173,6 +174,7 @@ export default function LifecycleGovernedActionDialog({
           </button>
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

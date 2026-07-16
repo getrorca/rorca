@@ -1,6 +1,6 @@
 {
-  "contractVersion": "6.0.0",
-  "generatedAt": "2026-07-16T02:03:58.297Z",
+  "contractVersion": "7.0.0",
+  "generatedAt": "2026-07-16T06:33:43.803Z",
   "routes": [
     {
       "method": "GET",
@@ -3834,6 +3834,33 @@
     },
     {
       "method": "GET",
+      "path": "/api/pipeline/runs/{runId}/liveness",
+      "parameters": [
+        {
+          "name": "runId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "storyId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {}
+      },
+      "hash": "sha256:0dae8bc7840d62cd28caee483fc271bf96c6c4253aac1723a8ef41217b025bf3"
+    },
+    {
+      "method": "GET",
       "path": "/api/pipeline/runs/{runId}/log",
       "parameters": [
         {
@@ -4053,8 +4080,32 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "approvalToken": {
+                    "description": "Existing explicit operator approval token required when the preview marks requiresApproval",
+                    "type": "string"
+                  },
+                  "approvedPreview": {
+                    "description": "Exact packet returned by the read-only preview call",
+                    "type": "object"
+                  },
+                  "cancelPreview": {
+                    "description": "Cancel this preview before dispatch",
+                    "type": "boolean"
+                  },
                   "forceSequential": {
                     "description": "Force the retry run to execute sequentially (parallelism = 1)",
+                    "type": "boolean"
+                  },
+                  "previewHash": {
+                    "description": "Hash returned by the preview call and approved for dispatch",
+                    "type": "string"
+                  },
+                  "previewIdentity": {
+                    "description": "Unexpired self-verifying identity returned with the packet",
+                    "type": "object"
+                  },
+                  "safeMode": {
+                    "description": "Explicitly preview branch-only/no-send safety changes instead of destructive option replay",
                     "type": "boolean"
                   },
                   "storyIds": {
@@ -4080,16 +4131,17 @@
         }
       ],
       "responseSchema": {
+        "200": {},
         "201": {
           "content": {
             "application/json": {
               "schema": {
                 "properties": {
-                  "jobId": {
-                    "type": "string"
-                  },
                   "ok": {
                     "type": "boolean"
+                  },
+                  "previewHash": {
+                    "type": "string"
                   },
                   "queued": {
                     "type": "boolean"
@@ -4106,7 +4158,7 @@
         "404": {},
         "409": {}
       },
-      "hash": "sha256:719233bff39bb836289f4d0b4477bf43690765ca36cb48de49dd9173e75abed9"
+      "hash": "sha256:38dd330b5ff3389c07cd6bf257b9965dbcd1f1ecd5b70e6525d5e5381af17d8b"
     },
     {
       "method": "POST",
@@ -7020,6 +7072,136 @@
     },
     {
       "method": "POST",
+      "path": "/api/specs/authoring/preflight",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "attempt": {
+                    "maximum": 3,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "callerSurface": {
+                    "type": "string"
+                  },
+                  "materialRevisions": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "plannerInput": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "priorAttempts": {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "schemaVersion": {
+                    "enum": [
+                      1
+                    ],
+                    "type": "integer"
+                  },
+                  "specs": {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "schemaVersion",
+                  "workspaceId",
+                  "plannerInput",
+                  "specs",
+                  "attempt",
+                  "callerSurface"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "400": {}
+      },
+      "hash": "sha256:76351386f243770ed66ee4e711ba2393c7fc6d0ab5514b1fca535a623b31807e"
+    },
+    {
+      "method": "POST",
+      "path": "/api/specs/authoring/preflight/confirm",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "acceptedPlanHash": {
+                    "type": "string"
+                  },
+                  "acceptedPreflightHash": {
+                    "type": "string"
+                  },
+                  "actor": {
+                    "additionalProperties": false,
+                    "type": "object"
+                  },
+                  "confirmed": {
+                    "enum": [
+                      true
+                    ],
+                    "type": "boolean"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "acceptedPlanHash",
+                  "acceptedPreflightHash",
+                  "confirmed",
+                  "actor"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {}
+      },
+      "hash": "sha256:ffc941f078454dea65220aa6b01f308556764f584fad23277d8946a49b64ba5c"
+    },
+    {
+      "method": "POST",
       "path": "/api/specs/context-preview",
       "parameters": [
         {
@@ -7819,6 +8001,11 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "authoringPreflight": {
+                    "additionalProperties": true,
+                    "description": "Accepted deterministic authoring plan, complete preflight draft set/hash, attempt provenance, caller surface, and optional explicit-human confirmation receipt. Omit only for a legacy review draft, which persists as needs_authoring_preflight and cannot become approval-ready.",
+                    "type": "object"
+                  },
                   "brief": {
                     "description": "Optional original brief for provenance/memory synthesis",
                     "type": "string"
@@ -7962,9 +8149,17 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "authoring": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
                   "id": {
                     "description": "Canonical filename identity; always equal to slug",
                     "type": "string"
+                  },
+                  "lifecyclePlan": {
+                    "additionalProperties": true,
+                    "type": "object"
                   },
                   "postSave": {
                     "properties": {
@@ -8070,7 +8265,59 @@
         "404": {},
         "409": {}
       },
-      "hash": "sha256:a22c0394db4df23994ec939c10f8f83ab1442ee82c468f41992bee2c5ecfe60f"
+      "hash": "sha256:0ff3a33864ebcd03723135968435c7dfba9c9a14337fde870798b753df593b38"
+    },
+    {
+      "method": "POST",
+      "path": "/api/specs/persist/batch",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "authoringPreflight": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "drafts": {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "maxItems": 12,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "authoringPreflight",
+                  "drafts"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "207": {},
+        "400": {},
+        "422": {}
+      },
+      "hash": "sha256:cdb431274ab573ce09178cf2192b46556f30efd69dcda224958ade2e58beb27b"
     },
     {
       "method": "GET",

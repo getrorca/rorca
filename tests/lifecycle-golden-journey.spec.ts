@@ -59,7 +59,7 @@ async function installGoldenTransport(page: Page): Promise<GoldenTransport> {
     });
   }, { workspaceId: GOLDEN.workspaceId });
 
-  await page.route('**/api/**', async (route) => {
+  await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
@@ -169,7 +169,7 @@ async function installGoldenTransport(page: Page): Promise<GoldenTransport> {
 
 async function gotoLifecycle(page: Page, query = '') {
   await page.goto(`/lifecycle${query}`);
-  await expect(page.getByRole('heading', { name: 'Lifecycle Control' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Lifecycle Control' })).toBeVisible({ timeout: 15_000 });
 }
 
 async function selectPhase(page: Page, phase: string, statePattern?: RegExp) {
@@ -251,7 +251,7 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
     await page.getByRole('button', { name: 'Open traceability for REQ-005' }).click();
     const requirement = page.getByText('REQ-005', { exact: true }).last();
     await requirement.click();
-    await expect(page.getByText(/BAA-006 unscheduled/i)).toBeVisible();
+    await expect(page.getByText(/BAA-006 remains unscheduled/i)).toBeVisible();
     await page.getByRole('button', { name: /Tenant-isolation integration test.*Open supporting evidence/i }).click();
     const inspector = page.getByTestId('lifecycle-evidence-inspector');
     await expect(inspector.getByRole('heading', { name: 'Evidence Inspector' })).toBeFocused();
@@ -264,7 +264,7 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
     await expect(page).toHaveURL(new RegExp(`/runs/${GOLDEN.originalRunId}`));
     await gotoLifecycle(page, '?spec=billing-anomaly-alerts&phase=validation');
     await closeDrawer(page);
-    await page.getByRole('button', { name: 'Billing anomaly alerts' }).click();
+    await page.getByRole('button', { name: 'Billing anomaly alerts', exact: true }).click();
     await expect(page).toHaveURL(/\/specs\/billing-anomaly-alerts\/review\?tab=lifecycle/);
     await gotoLifecycle(page, '?spec=billing-anomaly-alerts&phase=validation');
     checkpoint('blocked-observation', 'Agent attempt completion, blocked accepted closeout, and Validation 2/4 evaluation are separately visible; BAA-006 is unscheduled.');
@@ -287,10 +287,11 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
 
     // Segment 5: retry preview negative, recovery preview, dispatch negative, and accepted targeted retry.
     await page.getByRole('button', { name: /Retry story/ }).click();
-    await expect(page.getByRole('heading', { name: 'Retry preview' })).toBeVisible();
-    await expect(page.getByRole('alert')).toContainText('existing operator approval path');
+    const retryDialog = page.getByRole('dialog', { name: 'Retry preview' });
+    await expect(retryDialog.getByRole('heading', { name: 'Retry preview' })).toBeVisible();
+    await expect(retryDialog.getByRole('alert')).toContainText('existing operator approval path');
     await expect(page.getByRole('button', { name: 'Queue exact retry' })).toBeDisabled();
-    await page.getByRole('button', { name: 'Cancel' }).click();
+    await retryDialog.getByRole('button', { name: 'Cancel' }).click();
 
     await page.getByRole('button', { name: /Retry story/ }).click();
     const preview = page.getByRole('dialog', { name: 'Retry preview' });

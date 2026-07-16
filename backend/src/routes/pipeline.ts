@@ -5474,8 +5474,9 @@ const PipelineRetrySchema = z.object({
  *     tags: [Pipeline]
  *     summary: Retry failed stories in a pipeline run via pg-boss job queue
  *     operationId: retryPipelineRun
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Retry preview and dispatch expose workspace-owned execution scope and can create a retry run, so an authenticated caller and governed packet are required."
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Governed retry is part of the stable local automation contract; preview hashes, scope validation, and idempotency preserve safety without removing existing public CLI/MCP compatibility."
+ *     x-rorca-public-api: true
  *     description: Two-phase governed retry. First call without previewHash returns a read-only exact packet plus expiring identity; dispatch recomputes scope and submits to the existing queue only when packet, identity, hash, policy, and replay key still match.
  *     parameters:
  *       - in: path
