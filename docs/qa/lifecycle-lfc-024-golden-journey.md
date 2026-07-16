@@ -1,6 +1,6 @@
 # LFC-024 — Lifecycle golden journey runbook
 
-Date: 2026-07-15  
+Date: 2026-07-15
 Fixture: `lfc-024-billing-anomaly-alerts-v1`
 
 ## Purpose and authority
