@@ -1,4 +1,4 @@
--- 20260714160000_ssdlc_lifecycle.sql
+-- 20260714161000_ssdlc_lifecycle.sql
 -- Minimal durable storage for compiled SSDLC plans, normalized evidence, and governed decisions.
 -- Phase state is intentionally derived from evidence and active decisions rather than persisted.
 -- runPgMigrations supplies the transaction boundary for this file.

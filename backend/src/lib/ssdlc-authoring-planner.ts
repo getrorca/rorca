@@ -72,6 +72,7 @@ const VAGUE_LANGUAGE = /\b(works? as expected|works? correctly|properly|as neede
 const IMPLEMENTATION_TASK_TITLE = /^(implement|build|create|add|update|refactor|change|modify)\b/i;
 const OUTCOME_LANGUAGE = /\b(so that|allows?|enables?|prevents?|preserves?|ensures?|users?|operators?|customers?|callers?|system|service|workflow|outcome|recovery|contract)\b/i;
 const UMBRELLA_LANGUAGE = /\b(everything|entire system|all phases|whole platform|end[- ]to[- ]end implementation)\b/i;
+const STABLE_REFERENCE = /^[A-Za-z][A-Za-z0-9._:/-]{1,127}$/;
 
 export interface AuthoringIntentRequirementCandidate {
   reference: string;
@@ -176,8 +177,13 @@ function sortDiagnostics(diagnostics: AuthoringDiagnostic[]): AuthoringDiagnosti
 
 function zodDiagnostics(error: z.ZodError, root: string): AuthoringDiagnostic[] {
   return error.issues.map((issue) => {
-    const path = [root, ...issue.path.map(String)].join('.');
     const isUnknownField = issue.code === 'unrecognized_keys';
+    const unknownFields = isUnknownField ? issue.keys.map(String) : [];
+    const path = [
+      root,
+      ...issue.path.map(String),
+      ...(unknownFields.length === 1 ? unknownFields : []),
+    ].join('.');
     return diagnostic({
       code: isUnknownField ? 'NON_AUTHORITATIVE_FIELD' : 'INVALID_AUTHORING_INPUT',
       severity: 'blocker',
@@ -185,7 +191,7 @@ function zodDiagnostics(error: z.ZodError, root: string): AuthoringDiagnostic[] 
       message: isUnknownField
         ? `Caller proposal contains unsupported authority-bearing or unknown fields: ${issue.message}`
         : `Authoring input is invalid: ${issue.message}`,
-      references: issue.path.map(String),
+      references: [...issue.path.map(String), ...unknownFields],
       amendment: 'Remove unsupported fields or correct the contract value, then resubmit the unchanged draft explicitly.',
     });
   });
@@ -841,7 +847,7 @@ function amendmentCandidates(diagnostics: AuthoringDiagnostic[]): AuthoringPrefl
   return diagnostics.filter((item) => item.severity !== 'info').map((item) => ({
     amendmentId: `AMEND-${hash({ code: item.code, path: item.path, references: item.references })
       .slice('sha256:'.length, 'sha256:'.length + 16).toUpperCase()}`,
-    targetReference: item.references[0] ?? 'authoring-draft',
+    targetReference: item.references.find((reference) => STABLE_REFERENCE.test(reference)) ?? 'authoring-draft',
     reasonCode: item.code,
     instruction: item.amendment ?? item.message,
     requiresCallerResubmission: true as const,

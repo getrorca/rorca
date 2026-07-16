@@ -21,6 +21,7 @@ import {
   AUTHORING_SPEC_LIMITS,
   AuthoringPlanSchema,
   AuthoringPlannerInputSchema,
+  ProposedSpecDraftCandidateSchema,
   ProposedSpecDraftSchema,
   SPEC_BOUNDARY_SIGNAL_KINDS,
   SSDLC_AUTHORING_SCHEMA_VERSION,
@@ -63,7 +64,8 @@ export const AuthoringPreflightRequestSchema = z.object({
   schemaVersion: z.literal(SSDLC_AUTHORING_SCHEMA_VERSION),
   workspaceId: z.union([z.string().min(1), z.number()]),
   plannerInput: AuthoringPlannerInputSchema,
-  specs: z.array(ProposedSpecDraftSchema).min(1).max(AUTHORING_SPEC_LIMITS.maximum),
+  // Preserve untrusted draft keys for the strict inner preflight validator.
+  specs: z.array(ProposedSpecDraftCandidateSchema).min(1).max(AUTHORING_SPEC_LIMITS.maximum),
   attempt: z.number().int().min(1).max(DEFAULT_AUTHORING_PREFLIGHT_ATTEMPTS),
   priorAttempts: z.array(AttemptSummarySchema).max(DEFAULT_AUTHORING_PREFLIGHT_ATTEMPTS - 1).default([]),
   materialRevisions: z.array(z.string().trim().min(1)).max(64).default([]),

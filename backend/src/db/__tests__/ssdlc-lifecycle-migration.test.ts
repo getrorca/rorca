@@ -10,7 +10,7 @@ import path from 'node:path';
 import { execute, query, transaction } from '../index';
 import { checkDuplicatePrefixes } from '../pg-index';
 
-const migrationFile = '20260714160000_ssdlc_lifecycle.sql';
+const migrationFile = '20260714161000_ssdlc_lifecycle.sql';
 const migrationPath = path.join(__dirname, '..', 'pg-migrations', migrationFile);
 
 describe('LFC-002 SSDLC lifecycle migration', () => {
@@ -20,7 +20,7 @@ describe('LFC-002 SSDLC lifecycle migration', () => {
     const migrationDir = path.join(__dirname, '..', 'pg-migrations');
     const files = fs.readdirSync(migrationDir).filter((file) => file.endsWith('.sql'));
     expect(() => checkDuplicatePrefixes(files)).not.toThrow();
-    expect(migrationFile).toMatch(/^20260714160000_/);
+    expect(migrationFile).toMatch(/^20260714161000_/);
     expect(sql.match(/CREATE TABLE IF NOT EXISTS/g)).toHaveLength(3);
     expect(sql).not.toMatch(/phase_status/i);
     expect(sql).not.toMatch(/\bCREATE\s+(?:TABLE|INDEX|SCHEMA).*pgboss/is);

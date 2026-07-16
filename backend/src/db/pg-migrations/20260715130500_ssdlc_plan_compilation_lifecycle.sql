@@ -1,4 +1,4 @@
--- 20260715130000_ssdlc_plan_compilation_lifecycle.sql
+-- 20260715130500_ssdlc_plan_compilation_lifecycle.sql
 -- LFC-004: idempotent plan activation, provenance, and retryable compilation readiness.
 -- runPgMigrations supplies the transaction boundary for this file.
 

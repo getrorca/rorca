@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { checkDuplicatePrefixes } from '../pg-index';
 
-const migrationFile = '20260715130000_ssdlc_plan_compilation_lifecycle.sql';
+const migrationFile = '20260715130500_ssdlc_plan_compilation_lifecycle.sql';
 const migrationDirectory = path.join(__dirname, '..', 'pg-migrations');
 const sql = fs.readFileSync(path.join(migrationDirectory, migrationFile), 'utf8');
 

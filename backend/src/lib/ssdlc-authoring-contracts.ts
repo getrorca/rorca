@@ -393,6 +393,14 @@ export const ProposedSpecDraftSchema = z.object({
 
 export type ProposedSpecDraft = z.infer<typeof ProposedSpecDraftSchema>;
 
+/**
+ * Key-preserving transport contract for an untrusted authored draft candidate.
+ * The request envelope must retain every model-authored field so the strict
+ * ProposedSpecDraftSchema can reject it with preflight diagnostics rather than
+ * letting an outer object parser strip it or short-circuit diagnostic handling.
+ */
+export const ProposedSpecDraftCandidateSchema = z.record(z.string(), z.unknown());
+
 export const AuthoringPreflightInputSchema = z.object({
   schemaVersion: z.literal(SSDLC_AUTHORING_SCHEMA_VERSION),
   acceptedPlan: AuthoringPlanSchema,
@@ -401,7 +409,12 @@ export const AuthoringPreflightInputSchema = z.object({
 }).strict();
 
 export type AuthoringPreflightInput = z.infer<typeof AuthoringPreflightInputSchema>;
-export type AuthoringPreflightInputCandidate = z.input<typeof AuthoringPreflightInputSchema>;
+export type AuthoringPreflightInputCandidate = Omit<
+  z.input<typeof AuthoringPreflightInputSchema>,
+  'specs'
+> & {
+  specs: Array<z.infer<typeof ProposedSpecDraftCandidateSchema>>;
+};
 
 export const RequirementCoverageRowSchema = z.object({
   requirementReference: ExplicitRequirementIdSchema,

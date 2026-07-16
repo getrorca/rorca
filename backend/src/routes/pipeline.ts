@@ -464,6 +464,12 @@ function acceptanceCriteriaForManifest(story: DispatchManifestStory): string[] {
     : [];
 }
 
+/** Resolve historical/null run metadata to a valid engine without changing public Unknown telemetry. */
+function resolveDispatchAgent(value: unknown): AgentType {
+  const normalized = normalizeRunAgentType(value);
+  return normalized === 'unknown' ? activeAgent : normalized;
+}
+
 async function resolveAndPersistDispatchManifests(input: {
   workspaceId: string;
   specId: string;
@@ -492,6 +498,7 @@ async function resolveAndPersistDispatchManifests(input: {
   const baseRevision = execSync('git rev-parse HEAD', { cwd: input.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const specRevision = deriveStoryContractRevision(input.specJson);
   const manifests: ImmutableStoryExecutionManifest[] = [];
+  const dispatchAgent = resolveDispatchAgent(input.agent);
 
   for (const story of stories.filter((item) => !item.excluded)) {
     const packet = buildStoryExecutionPacket(input.cwd, story, mode);
@@ -505,7 +512,7 @@ async function resolveAndPersistDispatchManifests(input: {
     const noCodeReason = changePolicy === 'no_code_allowed'
       ? profile.noCodeReason ?? `Resolved from the existing ${mode} story no-code rules before dispatch.`
       : null;
-    let resolvedStoryAgent = resolveStoryAgent(story as EngineUserStory, input.agent);
+    let resolvedStoryAgent = resolveStoryAgent(story as EngineUserStory, dispatchAgent);
     const orchestrationPolicy = loadOrchestrationConfig(input.cwd);
     if (orchestrationPolicy.capabilityMismatch === 'reroute') {
       const capability = checkStoryCapability(story, resolvedStoryAgent);
@@ -1243,6 +1250,10 @@ function assertNoLegacyHermesRepairMetadataOnPipelineTrigger(body: Record<string
     },
   );
 }
+
+// Keep registration immediately before the handler declaration so source-level
+// dispatch audits can bound the complete trigger path from route to queue send.
+router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigger);
 
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
@@ -2386,8 +2397,6 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     handleRouteError(res, error, '[Pipeline] Trigger');
   }
 }
-
-router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigger);
 
 const TaskManifestTriggerRequestSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]).optional(),
@@ -5659,7 +5668,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       deploy: false,
       externalSend: false,
     });
-    const retryAgent = (originalRun.agent_type ?? originalRun.agent ?? activeAgent) as AgentType;
+    // Canonical API metadata intentionally preserves Unknown for historical
+    // rows; retry execution still needs the legacy active-agent fallback.
+    const retryAgent = resolveDispatchAgent(originalRunRow.agent_type ?? originalRunRow.agent);
     let retryModel = originalEffectiveOptions.model ?? originalRun.agent_model ?? null;
     let retryEffort = originalEffectiveOptions.effort;
     if (retryAgent === 'pi') {
@@ -8993,7 +9004,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       runId: newRunId,
       specJson: dlqSpec,
       cwd: dlqCwd,
-      agent: (originalRun.agent_type ?? originalRun.agent ?? 'claude') as AgentType,
+      agent: retryAgent,
       model: originalRun.agent_model ?? null,
       effort: null,
       terminalMode: normalizeTerminalMode(originalRun.terminal_mode),

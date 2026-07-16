@@ -1,4 +1,4 @@
--- 20260715120000_normalize_ssdlc_evidence.sql
+-- 20260715121000_normalize_ssdlc_evidence.sql
 -- LFC-005: immutable normalized lifecycle evidence provenance, trust, and revision identity.
 -- Extends the existing LFC-002 ledger; large output remains in its canonical chunk/log storage.
 
