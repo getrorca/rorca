@@ -17,6 +17,7 @@ const mockPoolCtor = jest.fn((_config?: unknown) => ({
   query: (...args: unknown[]) => mockPoolQuery(...args),
   end: (...args: unknown[]) => mockPoolEnd(...args),
 }));
+const dedicatedTestDatabaseUrl = process.env.RORCA_TEST_DATABASE_URL;
 
 jest.mock('fs', () => ({
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
@@ -75,6 +76,14 @@ describe('db-strategy', () => {
     const { detectDbMode, buildDatabaseCapability } = require('../db-strategy');
     expect(detectDbMode()).toBe('byop');
     expect(buildDatabaseCapability({ connected: true }).connection.port).toBe(55493);
+  });
+
+  afterEach(() => {
+    if (dedicatedTestDatabaseUrl) {
+      process.env.DATABASE_URL = dedicatedTestDatabaseUrl;
+    } else {
+      delete process.env.DATABASE_URL;
+    }
   });
 
   it('returns byop when DATABASE_URL points to a non-local host and no explicit mode is persisted', () => {

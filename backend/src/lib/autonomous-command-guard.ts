@@ -10,7 +10,6 @@ import * as os from 'os';
 import * as path from 'path';
 
 const GUARD_DIR_PREFIX = 'rorca-autonomous-guard-';
-const LOCAL_DB_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 const AUTONOMOUS_SECRET_ENV_KEYS = new Set([
   'DATABASE_URL', 'DATABASE_URL_TEST', 'TEST_DATABASE_URL',
   'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE',
@@ -70,21 +69,10 @@ function buildAutonomousBackendJestEnv(url: URL): AutonomousBackendJestEnv | nul
 }
 
 export function deriveAutonomousBackendJestEnv(env: Record<string, string | undefined>): AutonomousBackendJestEnv | null {
-  const explicitTestUrl = parseUrl(env.DATABASE_URL_TEST);
-  const explicitTestEnv = explicitTestUrl ? buildAutonomousBackendJestEnv(explicitTestUrl) : null;
-  if (explicitTestEnv) return explicitTestEnv;
-
-  const databaseUrl = parseUrl(env.DATABASE_URL);
-  if (!databaseUrl) return null;
-  if (!LOCAL_DB_HOSTS.has(databaseUrl.hostname.toLowerCase())) return null;
-
-  const pgDatabase = getDatabaseName(databaseUrl);
-  if (!pgDatabase) return null;
-  if (!pgDatabase.endsWith('_test')) {
-    databaseUrl.pathname = `/${pgDatabase}_test`;
-  }
-
-  return buildAutonomousBackendJestEnv(databaseUrl);
+  // Never transform production credentials into test credentials. Autonomous
+  // runners require an explicit dedicated target, matching the Jest contract.
+  const explicitTestUrl = parseUrl(env.RORCA_TEST_DATABASE_URL || env.DATABASE_URL_TEST);
+  return explicitTestUrl ? buildAutonomousBackendJestEnv(explicitTestUrl) : null;
 }
 
 function resolveRealCommand(command: string): string | null {
@@ -146,6 +134,7 @@ esac
 
 if [[ $is_jest_like -eq 1 ]]; then
   if [[ $is_backend_dir -eq 1 && "$autonomous_jest_db_url" =~ _test($|[?&/]) ]]; then
+    export RORCA_TEST_DATABASE_URL="$autonomous_jest_db_url"
     export DATABASE_URL="$autonomous_jest_db_url"
     export DATABASE_URL_TEST="$autonomous_jest_db_url"
     export NODE_ENV=test
