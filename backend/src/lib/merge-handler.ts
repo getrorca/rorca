@@ -31,6 +31,15 @@ const TRACKING_PATTERNS = [
   '.rorca/memory/runs/',
 ];
 
+/** WAL is an operator surface: preserve bounded diagnostics, never local paths or diffs. */
+export function redactMergeDiagnostics(value: string, workspacePath?: string): string {
+  const withoutWorkspace = workspacePath ? value.split(workspacePath).join('<workspace>') : value;
+  return withoutWorkspace
+    .replace(/(?:^|\s)\/?(?:Users|private|tmp|home)\/[^\s:'"\n]+/g, ' <path>')
+    .replace(/^(?:\+\+\+|---|@@|[+-](?!\s*\d)).*$/gm, '[redacted-diff]')
+    .slice(0, 512);
+}
+
 export interface MergeResult {
   success: boolean;
   /** Set when success=false — describes what went wrong */
@@ -59,7 +68,12 @@ export async function performMerge(
   branchName: string,
   workspacePath: string,
   resolverPosture?: MergeResolutionPosture,
+  resolverEnv: Record<string, string> = {},
 ): Promise<MergeResult> {
+  const normalizedRunId = Number(runId);
+  if (!Number.isSafeInteger(normalizedRunId) || normalizedRunId <= 0) {
+    return { success: false, error: 'Invalid run ID' };
+  }
   // Look up run row for worktree_path and workspace_id
   const run = await queryOne<{
     workspace_id: string;
@@ -120,7 +134,7 @@ export async function performMerge(
   let result: MergeResult;
 
   try {
-    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, runId, resolverPosture);
+    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, normalizedRunId, resolverPosture, resolverEnv);
   } finally {
     // Always restore stash
     if (stashed) {
@@ -149,8 +163,9 @@ async function executeMerge(
   worktreePath: string | null,
   workspacePath: string,
   workspaceId: string,
-  runId: number | string,
+  runId: number,
   resolverPosture?: MergeResolutionPosture,
+  resolverEnv: Record<string, string> = {},
 ): Promise<MergeResult> {
   // 2. Safety pre-check: dry-run merge
   let preCheckConflictFiles: string[] = [];
@@ -194,6 +209,7 @@ async function executeMerge(
               runId, workspaceId, cwd: workspacePath, branchName, conflictFiles: realConflicts,
               logPath: path.join(workspacePath, '.rorca', 'logs', `run_${runId}_merge_resolve.log`),
               posture: resolverPosture,
+              env: resolverEnv,
             });
             if (resolution.ok) {
               await git.commit(`merge: ${branchName} (semantic retry)`);
@@ -217,9 +233,9 @@ async function executeMerge(
           [workspaceId, JSON.stringify({
             run_id: runId,
             branchName,
-            worktreePath,
+            worktree: path.basename(worktreePath ?? ''),
             conflictFiles: realConflicts,
-            message: 'Auto-merge failed — code conflicts detected. Resolve manually or retry after fixing.',
+            message: redactMergeDiagnostics('Auto-merge failed — code conflicts detected. Resolve manually or retry after fixing.', workspacePath),
           })],
         );
         if (walEvent) broadcastAll(walEvent);

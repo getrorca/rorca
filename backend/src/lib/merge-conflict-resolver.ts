@@ -11,6 +11,7 @@ import { getCodexAuthState } from './codex-auth';
 import { detectOpenCode } from './opencode-detector';
 import { detectPi, listPiModels } from './pi-detector';
 import { logger } from './logger';
+import { normalizeOpenCodeModel, shouldResolvePiRpcStory } from './agent-completion-protocol';
 
 export type ResolverAgent = 'claude' | 'opencode' | 'codex' | 'pi';
 export type ResolverReason = 'not_ready' | 'timeout' | 'agent_exit' | 'validation_failed' | 'spawn_error';
@@ -38,7 +39,20 @@ export interface MergeResolutionRequest {
   env?: Record<string, string>;
   /** Engine-specific validation (for example configured integration gates). */
   validate?: () => boolean | Promise<boolean>;
+  /** Existing OpenCode server attachment supplied by the run, never inferred from env. */
+  attachAddr?: string | null;
   timeoutMs?: number;
+}
+
+/** A semantic resolver may act only when all conflicting contributions share one posture. */
+export function resolvePostureConsensus(postures: Array<MergeResolutionPosture | undefined>): MergeResolutionPosture | null {
+  const defined = postures.filter((posture): posture is MergeResolutionPosture => posture !== undefined);
+  if (defined.length === 0) return null;
+  const key = (posture: MergeResolutionPosture) => JSON.stringify({
+    agent: posture.agent, model: posture.model, thinkingEnabled: posture.thinkingEnabled ?? false,
+    thinkingBudget: posture.thinkingBudget ?? null, effortLevel: posture.effortLevel ?? null,
+  });
+  return defined.every(posture => key(posture) === key(defined[0])) ? defined[0] : null;
 }
 
 export type MergeResolutionResult =
@@ -109,7 +123,7 @@ export function buildMergeResolverCommand(posture: MergeResolutionPosture): { co
       return { command: binary('CLAUDE_BIN', 'claude'), args: ['--dangerously-skip-permissions', '--print', '--verbose', '--output-format', 'stream-json', ...(model ? ['--model', model] : []), ...(posture.thinkingEnabled ? ['--thinking'] : []), ...(posture.thinkingBudget ? ['--thinking-budget', String(posture.thinkingBudget)] : []), ...(posture.effortLevel ? ['--effort', posture.effortLevel] : [])] };
     }
     case 'opencode':
-      return { command: detectOpenCode().opencodeBinPath ?? binary('OPENCODE_BIN', 'opencode'), args: ['run', '--format', 'json', ...(posture.model ? ['--model', posture.model] : [])] };
+      return { command: detectOpenCode().opencodeBinPath ?? binary('OPENCODE_BIN', 'opencode'), args: ['run', '--format', 'json', ...(posture.model ? ['--model', normalizeOpenCodeModel(posture.model)] : [])] };
     case 'codex':
       return { command: binary('CODEX_BIN', 'codex'), args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(posture.model ? ['--model', posture.model] : [])] };
     case 'pi': {
@@ -123,14 +137,47 @@ function runGit(cwd: string, args: string[]): string | null {
   try { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch { return null; }
 }
 
-function validateGitResolution(request: MergeResolutionRequest): boolean {
+function normalizedPathSet(paths: string[]): Set<string> | null {
+  const result = new Set<string>();
+  for (const raw of paths) {
+    const value = raw.trim().replace(/\\/g, '/');
+    if (!value || value.startsWith('/') || value === '..' || value.startsWith('../') || value.includes('/../')) return null;
+    result.add(value);
+  }
+  return result;
+}
+
+function samePathSet(left: Set<string>, right: Set<string>): boolean {
+  return left.size === right.size && [...left].every(path => right.has(path));
+}
+
+/**
+ * A semantic resolver is contained to the exact conflict set.  It may neither
+ * smuggle unrelated staged files into the merge nor leave working-tree debris
+ * behind for a later commit.
+ */
+export function validateGitResolution(request: MergeResolutionRequest): boolean {
+  const allowed = normalizedPathSet(request.conflictFiles);
+  if (!allowed || allowed.size !== request.conflictFiles.length) return false;
   const unmerged = runGit(request.cwd, ['ls-files', '-u']);
-  if (unmerged === null || unmerged.trim()) return false;
   const staged = runGit(request.cwd, ['diff', '--cached', '--name-only']);
-  if (staged === null) return false;
-  const stagedSet = new Set(staged.split('\n').filter(Boolean));
-  if (!request.conflictFiles.every(file => stagedSet.has(file))) return false;
+  const unstaged = runGit(request.cwd, ['diff', '--name-only']);
+  const untracked = runGit(request.cwd, ['ls-files', '--others', '--exclude-standard']);
+  if ([unmerged, staged, unstaged, untracked].some(value => value === null)) return false;
+  if (unmerged!.trim() || unstaged!.trim() || untracked!.trim()) return false;
+  const stagedSet = normalizedPathSet(staged!.split('\n').filter(Boolean));
+  if (!stagedSet || !samePathSet(stagedSet, allowed)) return false;
   return runGit(request.cwd, ['diff', '--cached', '--check']) !== null;
+}
+
+function terminateProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (process.platform !== 'win32' && child.pid) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch { /* fall back to the direct child */ }
+  try { child.kill(signal); } catch { /* already gone */ }
 }
 
 function promptFor(request: MergeResolutionRequest): string {
@@ -159,13 +206,22 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
   fs.mkdirSync(path.dirname(request.logPath), { recursive: true });
   const env = createAutonomousCommandGuard({ cwd: request.cwd, env: buildCleanResolverEnv(request.env) }).env;
   const command = buildMergeResolverCommand(posture);
+  if (posture.agent === 'opencode' && request.attachAddr) {
+    command.args.splice(3, 0, '--attach', request.attachAddr);
+  }
   const log = fs.createWriteStream(request.logPath, { flags: 'a' });
   log.write(`[merge-resolver] agent=${posture.agent} model=${posture.model ?? 'default'} source=${posture.source} files=${request.conflictFiles.join(',')}\n`);
 
   return new Promise<MergeResolutionResult>((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(command.command, command.args, { cwd: request.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn(command.command, command.args, {
+        cwd: request.cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // Group ownership lets timeout cleanup kill tools/tests spawned by the resolver.
+        detached: process.platform !== 'win32',
+      });
     } catch {
       log.end();
       resolve(result('spawn_error'));
@@ -183,9 +239,9 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
         for (const line of lines) {
           try {
             const event = JSON.parse(line) as { type?: string };
-            if (event.type === 'turn_end') {
+            if (shouldResolvePiRpcStory(String(event.type ?? ''))) {
               piCompleted = true;
-              try { child.kill('SIGTERM'); } catch { /* already closed */ }
+              terminateProcessGroup(child, 'SIGTERM');
             }
           } catch { /* Pi diagnostics are recorded in the resolution log */ }
         }
@@ -206,8 +262,8 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
     const timeout = setTimeout(() => {
       timedOut = true;
       log.write('[merge-resolver] timeout; SIGTERM\n');
-      try { child.kill('SIGTERM'); } catch { /* already exited */ }
-      killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, KILL_DELAY_MS);
+      terminateProcessGroup(child, 'SIGTERM');
+      killTimer = setTimeout(() => terminateProcessGroup(child, 'SIGKILL'), KILL_DELAY_MS);
     }, request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     let settled = false;
     const finish = async (reason?: ResolverReason) => {

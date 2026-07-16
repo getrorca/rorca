@@ -20,6 +20,7 @@ import {
   buildMergeResolverCommand,
   checkMergeResolverReadiness,
   resolveMergeConflict,
+  resolvePostureConsensus,
   type MergeResolutionPosture,
 } from '../merge-conflict-resolver';
 
@@ -63,6 +64,11 @@ describe('configured merge conflict resolver', () => {
     ]));
   });
 
+  test('normalizes OpenCode models through the shared execution protocol', () => {
+    expect(buildMergeResolverCommand(posture('opencode', 'claude-sonnet-4-6')).args)
+      .toEqual(expect.arrayContaining(['--model', 'openrouter/anthropic/claude-sonnet-4.6']));
+  });
+
   test('Pi readiness and posture preserve the Pi provider/model', () => {
     expect(checkMergeResolverReadiness(posture('pi', 'openai-codex/gpt-5.6-sol'))).toBe(true);
     expect(buildMergeResolverCommand(posture('pi', 'openai-codex/gpt-5.6-sol')).args).toEqual(expect.arrayContaining([
@@ -79,6 +85,17 @@ describe('configured merge conflict resolver', () => {
     });
     expect(result).toMatchObject({ ok: false, reason: 'not_ready', agent: 'opencode' });
     expect(childProcess.spawn).not.toHaveBeenCalled();
+  });
+
+  test('fails closed for mixed contribution postures until an operator supplies one posture', () => {
+    expect(resolvePostureConsensus([
+      posture('pi', 'openai-codex/gpt-5.6-sol'),
+      posture('opencode', 'openai/gpt-5'),
+    ])).toBeNull();
+    expect(resolvePostureConsensus([
+      posture('pi', 'openai-codex/gpt-5.6-sol'),
+      posture('pi', 'openai-codex/gpt-5.6-sol'),
+    ])).toMatchObject({ agent: 'pi' });
   });
 
   test('does not substitute Claude for a configured non-Claude posture', () => {

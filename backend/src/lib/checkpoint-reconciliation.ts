@@ -49,7 +49,15 @@ export const checkpointValidationAttestationSchema = z.object({
 export type CheckpointValidationAttestation = z.infer<typeof checkpointValidationAttestationSchema>;
 
 interface WorkspaceRow { path: string; }
-interface RunRow { workspace_id: string; spec_path: string; status: string; branch_name: string | null; }
+interface RunRow {
+  workspace_id: string;
+  spec_path: string;
+  status: string;
+  branch_name: string | null;
+  auto_merge: boolean | null;
+  merge_strategy: string | null;
+  merge_status: string | null;
+}
 interface AttestationRow {
   id: string; workspace_id: string; run_id: number; story_id: string; branch_name: string;
   checkpoint_sha: string; validation_gate: string; evidence_digest: string; passed_at: string; expires_at: string; revoked_at: string | null;
@@ -103,6 +111,16 @@ async function assertExactBranchHead(workspacePath: string, checkpointSha: strin
   return head.toLowerCase();
 }
 
+async function assertCommitReachableFromBase(workspacePath: string, checkpointSha: string): Promise<void> {
+  try {
+    await simpleGit(workspacePath).raw(['merge-base', '--is-ancestor', checkpointSha, 'HEAD']);
+  } catch {
+    throw new ConflictError('Checkpoint commit is not reachable from the integrated base', {
+      code: 'CHECKPOINT_NOT_BASE_INTEGRATED',
+    });
+  }
+}
+
 export interface CheckpointReconciliationResult {
   reconciled: true; idempotent: boolean; workspaceId: string; specId: string; runId: number;
   storyId: string; branch: string; checkpointSha: string; attestationId: string;
@@ -117,7 +135,10 @@ export async function reconcileCheckpoint(input: CheckpointReconciliationInput):
 
     const [workspaceResult, runResult, attestationResult] = await Promise.all([
       client.query<WorkspaceRow>('SELECT path FROM workspaces WHERE id = $1', [input.workspaceId]),
-      client.query<RunRow>('SELECT workspace_id, spec_path, status, branch_name FROM pipeline_runs WHERE id = $1', [input.runId]),
+      client.query<RunRow>(
+        'SELECT workspace_id, spec_path, status, branch_name, auto_merge, merge_strategy, merge_status FROM pipeline_runs WHERE id = $1',
+        [input.runId],
+      ),
       client.query<AttestationRow>(
         `SELECT id, workspace_id, run_id, story_id, branch_name, checkpoint_sha, validation_gate, evidence_digest, passed_at, expires_at, revoked_at
          FROM checkpoint_validation_attestations WHERE id = $1 FOR SHARE`, [input.attestationId],
@@ -145,6 +166,9 @@ export async function reconcileCheckpoint(input: CheckpointReconciliationInput):
     }
     if (!['failed', 'cancelled'].includes(run.status)) throw new ConflictError('Pipeline run is not terminal and recoverable', { code: 'CHECKPOINT_RUN_NOT_RECOVERABLE' });
     if (!run.branch_name || run.branch_name !== input.branch) throw new ConflictError('Checkpoint branch does not match pipeline run branch', { code: 'CHECKPOINT_BRANCH_MISMATCH' });
+    if (run.auto_merge !== true || run.merge_strategy !== 'direct' || run.merge_status !== 'merged') {
+      throw new ConflictError('Checkpoint contribution is not base-integrated', { code: 'CHECKPOINT_BRANCH_NOT_INTEGRATED' });
+    }
 
     const checkpointSha = await assertExactBranchHead(workspace.path, input.checkpointSha, input.branch);
     const provenanceResult = await client.query<ProvenanceRow>(
@@ -158,6 +182,8 @@ export async function reconcileCheckpoint(input: CheckpointReconciliationInput):
       if (!same) throw new ConflictError('Story was already reconciled with different immutable checkpoint provenance', { code: 'CHECKPOINT_PROVENANCE_CONFLICT' });
       return { reconciled: true, idempotent: true, workspaceId: input.workspaceId, specId: input.specId, runId: input.runId, storyId: input.storyId, branch: input.branch, checkpointSha, attestationId: input.attestationId, validationGate: attestation.validation_gate };
     }
+
+    await assertCommitReachableFromBase(workspace.path, checkpointSha);
 
     // Re-read while locked: a story deleted after gate validation is never passed.
     const specPath = path.join(workspace.path, canonicalSpecPath(input.specId));

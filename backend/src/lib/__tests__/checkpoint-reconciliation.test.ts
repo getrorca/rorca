@@ -25,11 +25,19 @@ const input: CheckpointReconciliationInput = {
   branch: 'recovery/checkpoint', checkpointSha: SHA, attestationId: ATTESTATION_ID, attestationDigest: DIGEST,
 };
 
-function installTransaction(options: { attestation?: Partial<Record<string, unknown>>; provenance?: unknown[] } = {}) {
+function installTransaction(options: {
+  attestation?: Partial<Record<string, unknown>>;
+  provenance?: unknown[];
+  run?: Partial<Record<string, unknown>>;
+} = {}) {
   const client = { query: jest.fn(async (sql: string) => {
     if (sql.includes('pg_advisory_xact_lock')) return { rows: [] };
     if (sql.includes('SELECT path FROM workspaces')) return { rows: [{ path: '/workspace' }] };
-    if (sql.includes('SELECT workspace_id, spec_path')) return { rows: [{ workspace_id: 'ws-recovery', spec_path: 'forge/specs/approved/recovery-spec.json', status: 'failed', branch_name: 'recovery/checkpoint' }] };
+    if (sql.includes('SELECT workspace_id, spec_path')) return { rows: [{
+      workspace_id: 'ws-recovery', spec_path: 'forge/specs/approved/recovery-spec.json',
+      status: 'failed', branch_name: 'recovery/checkpoint', auto_merge: true,
+      merge_strategy: 'direct', merge_status: 'merged', ...options.run,
+    }] };
     if (sql.includes('checkpoint_validation_attestations')) return { rows: [{ id: ATTESTATION_ID, workspace_id: 'ws-recovery', run_id: 21, story_id: 'US-002', branch_name: 'recovery/checkpoint', checkpoint_sha: SHA, validation_gate: 'ci', evidence_digest: DIGEST, passed_at: new Date(Date.now() - 1_000).toISOString(), expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null, ...options.attestation }] };
     if (sql.includes('FROM checkpoint_reconciliations')) return { rows: options.provenance ?? [] };
     if (sql.includes('INSERT INTO wal_events')) return { rows: [{ id: 77 }] };
@@ -64,6 +72,24 @@ describe('checkpoint reconciliation attestation contract', () => {
   it('rejects forged attestations before canonical story mutation', async () => {
     installTransaction({ attestation: { checkpoint_sha: 'f'.repeat(40) } });
     await expect(reconcileCheckpoint(input)).rejects.toMatchObject({ code: 'CONFLICT', details: { code: 'CHECKPOINT_ATTESTATION_MISMATCH' } });
+    expect(mockedMarkPassed).not.toHaveBeenCalled();
+  });
+
+  it('rejects contribution evidence until direct base integration is recorded', async () => {
+    installTransaction({ run: { auto_merge: false, merge_strategy: 'branch-only', merge_status: 'pending' } });
+    await expect(reconcileCheckpoint(input)).rejects.toMatchObject({
+      code: 'CONFLICT', details: { code: 'CHECKPOINT_BRANCH_NOT_INTEGRATED' },
+    });
+    expect(mockedMarkPassed).not.toHaveBeenCalled();
+  });
+
+  it('rejects a checkpoint that is not reachable from the integrated base', async () => {
+    mockedGit.mockReturnValue({ raw: jest.fn()
+      .mockResolvedValueOnce(`${SHA}\n`)
+      .mockRejectedValueOnce(new Error('not ancestor')) });
+    await expect(reconcileCheckpoint(input)).rejects.toMatchObject({
+      code: 'CONFLICT', details: { code: 'CHECKPOINT_NOT_BASE_INTEGRATED' },
+    });
     expect(mockedMarkPassed).not.toHaveBeenCalled();
   });
 

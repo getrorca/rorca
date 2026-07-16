@@ -7143,18 +7143,6 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  *             schema:
  *               type: string
  */
-const HEARTBEAT_INTERVAL_MS = 15_000;
-
-/**
- * @swagger
- * /api/pipeline/stream:
- *   get:
- *     tags: [Pipeline]
- *     summary: Stream WAL events (SSE)
- *     operationId: streamPipelineEvents
- *     responses:
- *       200: { description: SSE stream of WAL events }
- */
 router.get('/stream', async (_req: Request, res: Response) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',

@@ -111,6 +111,8 @@ import {
 } from './complexity-scorer';
 import { parseClaudeLogTokens } from './claude-token-parser';
 import { parseOpenCodeEvent, parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
+import { normalizeOpenCodeModel, shouldResolvePiRpcStory } from './agent-completion-protocol';
+export { shouldResolvePiRpcStory } from './agent-completion-protocol';
 import { calculateCost } from './model-pricing';
 import {
   CoalescingPostQueue,
@@ -169,7 +171,7 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
-import { resolveMergeConflict, type MergeResolutionPosture } from './merge-conflict-resolver';
+import { resolveMergeConflict, resolvePostureConsensus, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
@@ -523,6 +525,16 @@ const CODEX_BIN = process.env.CODEX_BIN ||
 const PI_BIN = process.env.PI_BIN || (() => {
   try { return execSync('which pi', { encoding: 'utf8' }).trim(); } catch { return 'pi'; }
 })();
+
+function terminateChildProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (process.platform !== 'win32' && child.pid) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch { /* direct-child fallback below */ }
+  try { child.kill(signal); } catch { /* already exited */ }
+}
 
 interface PiCliSelection {
   provider: string | null;
@@ -1195,39 +1207,6 @@ async function postStoryResult(
   }
 }
 
-/**
- * Translate any model ID to the format OpenCode expects: "provider/org/model".
- * OpenCode requires the full triple format, e.g. "openrouter/z-ai/glm-5".
- *
- * Two-phase normalization:
- *   Phase 1 — Fix Claude version separators ANYWHERE in the string.
- *             Rorca uses hyphens (claude-sonnet-4-6), OpenRouter uses dots (claude-sonnet-4.6).
- *             This runs first so IDs like "openrouter/anthropic/claude-sonnet-4-6"
- *             are fixed BEFORE the prefix check (which would otherwise pass them through broken).
- *   Phase 2 — Add provider prefix if missing.
- *             "claude-sonnet-4.6" → "openrouter/anthropic/claude-sonnet-4.6"
- *             "z-ai/glm-5" → "openrouter/z-ai/glm-5"
- */
-function normalizeOpenCodeModel(model: string): string {
-  // Phase 1: Normalize Claude version separators (hyphens→dots, strip date suffixes).
-  // "openrouter/anthropic/claude-sonnet-4-6" → "openrouter/anthropic/claude-sonnet-4.6"
-  let m = model.replace(/(claude-[a-z]+-\d+)-(\d+)(?:-\d{8})?/, '$1.$2');
-
-  // Phase 2: Ensure correct provider prefix
-  const KNOWN_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/', 'opencode/'];
-  if (KNOWN_PREFIXES.some(p => m.startsWith(p))) return m;
-
-  // Bare Claude ID → needs openrouter/anthropic/ prefix
-  if (/^claude-/.test(m)) return `openrouter/anthropic/${m}`;
-
-  // anthropic/claude-* without outer prefix → needs openrouter/ prefix
-  if (/^anthropic\/claude-/.test(m)) return `openrouter/${m}`;
-
-  // Other bare catalog IDs (z-ai/glm-5) → needs openrouter/ prefix
-  if (m.includes('/')) return `openrouter/${m}`;
-  return m;
-}
-
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -1244,10 +1223,6 @@ function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = bui
 
 function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
-}
-
-export function shouldResolvePiRpcStory(eventType: string): boolean {
-  return eventType === 'agent_end';
 }
 
 function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
@@ -1322,6 +1297,7 @@ async function startPiRpcServer(
     cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
   });
 
   const server: PiRpcServer = {
@@ -1441,7 +1417,7 @@ async function startPiRpcServer(
     _piRpcExitCleanupRegistered = true;
     process.on('exit', () => {
       for (const activeServer of _piRpcServers) {
-        try { activeServer.process.kill('SIGTERM'); } catch { /* already gone */ }
+        terminateChildProcessGroup(activeServer.process, 'SIGTERM');
       }
     });
   }
@@ -1462,7 +1438,7 @@ async function stopSinglePiRpcServer(server: PiRpcServer): Promise<void> {
   });
 
   try {
-    server.process.kill('SIGTERM');
+    terminateChildProcessGroup(server.process, 'SIGTERM');
   } catch {
     return;
   }
@@ -1473,7 +1449,7 @@ async function stopSinglePiRpcServer(server: PiRpcServer): Promise<void> {
   ]);
 
   if (!finished) {
-    try { server.process.kill('SIGKILL'); } catch { /* already gone */ }
+    terminateChildProcessGroup(server.process, 'SIGKILL');
     await exitPromise.catch(() => {});
   }
 }
@@ -4601,7 +4577,7 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
         logger.warn(`  [worktree] Runtime-only merge conflicts — auto-resolving (--ours): ${conflicted.join(', ')}`);
         const quotedFiles = conflicted.map(f => `"${f}"`).join(' ');
         execSync(`git checkout --ours -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
-        execSync('git add -A', { cwd: workspaceCwd, env, stdio: 'pipe' });
+        execSync(`git add -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
 
         const validation = validateIntegratedWorktree(workspaceCwd, getIntegrationCandidateFiles(workspaceCwd));
         if (!validation.ok) {
@@ -4642,6 +4618,8 @@ async function autoResolveConflicts(
   wt: StoryWorktree,
   logDir: string,
   config: EngineConfig,
+  workspaceId: string,
+  contributingPostures: MergeResolutionPosture[],
 ): Promise<{ resolved: boolean; resolvedFiles: string[] }> {
   const storyId = wt.storyId;
   const env = buildCleanEnv();
@@ -4690,22 +4668,23 @@ async function autoResolveConflicts(
 
   // Real code conflicts are resolved by the exact posture that executed this
   // story. There is intentionally no Claude fallback for a missing posture.
-  const posture = wt.resolverPosture;
-  if (!posture) {
-    logger.error(`  [merge] ${storyId} has no captured execution posture; refusing semantic resolution`);
+  const posture = resolvePostureConsensus([...contributingPostures, wt.resolverPosture]);
+  if (!posture || !workspaceId) {
+    logger.error(`  [merge] ${storyId} has mixed/missing contribution posture or workspace identity; explicit operator posture required`);
     return { resolved: false, resolvedFiles };
   }
   const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(realConflicts[0])}.log`);
   const resolution = await resolveMergeConflict({
     runId: config.runId,
     storyId,
-    workspaceId: String(config.runId),
+    workspaceId,
     cwd,
     branchName: wt.branchName,
     conflictFiles: realConflicts,
     logPath: resolveLogFile,
     posture,
     validate: () => runGate(cwd).passed,
+    attachAddr: config.attachAddr,
   });
   if (!resolution.ok) {
     logger.error(`  [merge] semantic resolution failed for ${storyId}: ${resolution.reason}`);
@@ -4720,6 +4699,8 @@ async function mergeWave(
   cwd: string,
   logDir: string,
   config: EngineConfig,
+  workspaceId: string,
+  integratedPostures: MergeResolutionPosture[],
 ): Promise<WaveMergeResult> {
   const env = buildCleanEnv();
   const sorted = [...waveBranches].sort((a, b) => a.storyId.localeCompare(b.storyId));
@@ -4770,6 +4751,7 @@ async function mergeWave(
       try {
         execSync(`git commit -m "merge: ${wt.storyId}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
         logger.info(`  [merge] ${wt.storyId} merged cleanly`);
+        if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch {
         logger.info(`  [merge] ${wt.storyId} merged (no changes to commit)`);
       }
@@ -4777,7 +4759,7 @@ async function mergeWave(
     }
 
     logger.info(`  [merge] Conflict detected for ${wt.storyId}, attempting auto-resolution...`);
-    const resolution = await autoResolveConflicts(cwd, wt, logDir, config);
+    const resolution = await autoResolveConflicts(cwd, wt, logDir, config, workspaceId, integratedPostures);
 
     if (resolution.resolved) {
       const filesList = resolution.resolvedFiles.join(', ');
@@ -4785,8 +4767,8 @@ async function mergeWave(
         ? `merge(wave-${waveIndex}): resolved conflicts in ${filesList}`
         : `merge(wave-${waveIndex}): auto-resolved conflicts`;
       try {
-        // Try normal commit first
-        execSync(`git add -A`, { cwd, env, stdio: 'pipe' });
+        // The resolver validates/stages exactly the declared conflict paths.
+        // Never widen its containment boundary with `git add -A` here.
         const validation = validateIntegratedWorktree(cwd, getIntegrationCandidateFiles(cwd));
         if (!validation.ok) {
           logger.error(`  [merge] ${wt.storyId} failed post-resolution integration validation: ${validation.reason} ${validation.files.join(', ')}`);
@@ -4801,6 +4783,7 @@ async function mergeWave(
         );
         totalConflictsResolved += resolution.resolvedFiles.length;
         logger.info(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+        if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch (commitErr: unknown) {
         // Fallback: try git merge --continue
         logger.warn(`  [merge] git commit failed, trying merge --continue: ${(commitErr as Error).message}`);
@@ -4808,6 +4791,7 @@ async function mergeWave(
           execSync('git -c core.editor=true merge --continue', { cwd, env, stdio: 'pipe', timeout: 30_000 });
           totalConflictsResolved += resolution.resolvedFiles.length;
           logger.info(`  [merge] ${wt.storyId} merged via --continue with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+          if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
         } catch (contErr: unknown) {
           logger.error(`  [merge] Commit after resolution failed for ${wt.storyId}: ${(contErr as Error).message}`);
           try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
@@ -5534,6 +5518,18 @@ async function executeStory(
       ...(graphHits != null ? { graph_hits: graphHits } : {}),
     }, story.id);
   };
+
+  if (worktreeInfo && workspaceId && worktreeInfo.resolverPosture) {
+    // Append-only WAL provenance is immutable once the effective posture is
+    // known. Later retries/reroutes must create a new contribution record.
+    await emitWalEvent(config.port, 'story_contribution_started', workspaceId, {
+      run_id: config.runId,
+      story_id: story.id,
+      completion_scope: 'story_worktree',
+      worktree_branch: worktreeInfo.branchName,
+      posture: worktreeInfo.resolverPosture,
+    }, story.id);
+  }
 
   if (effectiveAgent !== 'pi' || isPtyTerminalMode(config.terminalMode)) {
     await emitStoryStarted();
@@ -7040,6 +7036,7 @@ async function runParallel(
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
+  const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
@@ -7167,7 +7164,7 @@ async function runParallel(
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
-        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir, config);
+        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir, config, workspaceId ?? '', integratedPostures);
 
         if (mergeResult.success) {
           if (workspaceId) {
@@ -7177,6 +7174,7 @@ async function runParallel(
             });
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
+          // Advance each story only after its contribution reached the run branch.
           for (const wt of passedInWave) {
             const pendingPass = pendingIntegratedPasses.get(wt.storyId);
             if (pendingPass) {
