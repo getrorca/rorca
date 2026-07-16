@@ -8,6 +8,7 @@
 import {
   classifyRunLiveness,
   classifySSDLCLiveness,
+  SSDLC_LIVENESS_MAX_FUTURE_SKEW_MS,
   SSDLC_LIVENESS_SIGNAL_LIMIT,
   type LivenessCollectorDependencies,
   type LivenessEvidenceReference,
@@ -173,6 +174,28 @@ describe('classifySSDLCLiveness', () => {
     }));
 
     expect(result.state).toBe('unknown');
+  });
+
+  it('does not let a far-future activity timestamp keep an orphan active forever', () => {
+    const farFuture = new Date(NOW.getTime() + SSDLC_LIVENESS_MAX_FUTURE_SKEW_MS + 86_400_000).toISOString();
+    const result = classify(signals({
+      process: { available: false, alive: null, owned: null },
+      activities: [evidence('wal', farFuture, 'poisoned future token timestamp')],
+    }));
+
+    expect(result.state).toBe('unknown');
+    expect(result.lastMeaningfulActivity).toBeNull();
+    expect(result.nextSafeAction.action).toBe('inspect evidence');
+  });
+
+  it('ignores activity outside the configured lookback instead of reviving the run', () => {
+    const result = classifySSDLCLiveness(signals({
+      process: { available: true, alive: false, owned: null },
+      activities: [evidence('wal', '2026-07-13T11:59:30.000Z', 'ancient token event')],
+    }), { now: () => NOW, lookbackMs: 60_000, inactivityThresholdMs: 60_000 });
+
+    expect(result.state).toBe('stalled');
+    expect(result.lastMeaningfulActivity).toBeNull();
   });
 
   it('classifies a stale running DB row with a dead process as stalled', () => {

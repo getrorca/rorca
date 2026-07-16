@@ -39,6 +39,7 @@ import { errorHandler } from '../../lib/error-handler';
 
 function app() {
   const instance = express();
+  instance.use(express.json());
   instance.use('/api/lifecycle', lifecycleRouter);
   instance.use(errorHandler);
   return instance;

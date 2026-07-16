@@ -14,6 +14,7 @@ import { WORKER_HEARTBEAT_STALE_MS } from './worker-heartbeat';
 export const SSDLC_LIVENESS_SIGNAL_LIMIT = 32;
 export const SSDLC_LIVENESS_STORY_LIMIT = 100;
 export const SSDLC_LIVENESS_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
+export const SSDLC_LIVENESS_MAX_FUTURE_SKEW_MS = 30_000;
 
 export type SSDLCLivenessState = 'active' | 'quiet_active' | 'stalled' | 'blocked' | 'completed' | 'unknown';
 export type SSDLCLivenessAction =
@@ -127,12 +128,22 @@ function validDate(value: string | null | undefined): Date | null {
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
-function mostRecent(references: readonly LivenessEvidenceReference[]): Date | null {
+function mostRecent(
+  references: readonly LivenessEvidenceReference[],
+  now: Date,
+  lookbackMs: number,
+): Date | null {
   let latest: Date | null = null;
+  const oldestAccepted = now.getTime() - lookbackMs;
+  const newestAccepted = now.getTime() + SSDLC_LIVENESS_MAX_FUTURE_SKEW_MS;
   for (const reference of references) {
     if (!reference.meaningful) continue;
     const observed = validDate(reference.observedAt);
-    if (observed && (!latest || observed > latest)) latest = observed;
+    if (!observed || observed.getTime() < oldestAccepted || observed.getTime() > newestAccepted) continue;
+    // Small clock skew may be accepted, but never move the activity clock ahead
+    // of the evaluator and thereby extend liveness indefinitely.
+    const bounded = observed > now ? now : observed;
+    if (!latest || bounded > latest) latest = bounded;
   }
   return latest;
 }
@@ -226,7 +237,7 @@ export function classifySSDLCLiveness(
   const evidence = signals.activities
     .filter((item) => item.available || item.detail.length > 0)
     .sort((a, b) => (validDate(b.observedAt)?.getTime() ?? 0) - (validDate(a.observedAt)?.getTime() ?? 0));
-  const lastActivity = mostRecent(evidence);
+  const lastActivity = mostRecent(evidence, now, options.lookbackMs);
   const activityAge = lastActivity ? now.getTime() - lastActivity.getTime() : Number.POSITIVE_INFINITY;
   const startedAge = now.getTime() - (validDate(signals.startedAt)?.getTime() ?? 0);
   const recentMeaningfulActivity = activityAge <= options.inactivityThresholdMs;

@@ -37,6 +37,17 @@ describe('lifecycle dependency and infrastructure boundaries', () => {
     expect(mutations).toContain("from './sse-hub'");
   });
 
+  test('portfolio, phase, traceability, and inspector reads share a repeatable-read snapshot', () => {
+    const source = fs.readFileSync(path.join(srcRoot, 'lib', 'ssdlc-lifecycle-read.ts'), 'utf8');
+
+    expect(source).toContain('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    expect(source).toMatch(/getLifecyclePortfolio[\s\S]*?return withLifecycleReadSnapshot\(async \(db\)/);
+    expect(source).toMatch(/async function loadOne[\s\S]*?return withLifecycleReadSnapshot\(async \(db\)/);
+    for (const loader of ['loadCandidates', 'loadEvidence', 'loadDecisions', 'loadRuns', 'loadLearnCandidates']) {
+      expect(source).toMatch(new RegExp(`function ${loader}\\([\\s\\S]*?db: LifecycleReadDb`));
+    }
+  });
+
   test('migrations do not hand-manage any pgboss table or schema', () => {
     const migrationDirectory = path.join(srcRoot, 'db', 'pg-migrations');
     const migrations = sourceFiles(migrationDirectory, (name) => name.endsWith('.sql'));

@@ -14,7 +14,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { query, queryOne } from '../db/index';
+import type { PoolClient } from 'pg';
+import { query, queryOne, transaction } from '../db/index';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
 import { paginateArray, type PaginationParams } from './paginate';
 import {
@@ -52,6 +53,27 @@ const EVALUATED_STATUSES = [
 ] as const;
 const RISK_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
+
+interface LifecycleReadDb {
+  query<T>(sql: string, params?: unknown[]): Promise<T[]>;
+  queryOne<T>(sql: string, params?: unknown[]): Promise<T | undefined>;
+}
+
+const DEFAULT_READ_DB: LifecycleReadDb = { query, queryOne };
+
+function clientReadDb(client: PoolClient): LifecycleReadDb {
+  return {
+    query: async <T>(sql: string, params?: unknown[]) => (await client.query(sql, params)).rows as T[],
+    queryOne: async <T>(sql: string, params?: unknown[]) => (await client.query(sql, params)).rows[0] as T | undefined,
+  };
+}
+
+async function withLifecycleReadSnapshot<T>(read: (db: LifecycleReadDb) => Promise<T>): Promise<T> {
+  return transaction(async (client) => {
+    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    return read(clientReadDb(client));
+  });
+}
 
 interface WorkspaceRow { id: string; path: string; label: string }
 interface CandidateRow {
@@ -231,12 +253,12 @@ function stableEvaluationTime(): Date {
   return new Date(Math.floor(Date.now() / 60_000) * 60_000);
 }
 
-async function workspace(workspaceIdInput: string): Promise<WorkspaceRow> {
+async function workspace(workspaceIdInput: string, db: LifecycleReadDb = DEFAULT_READ_DB): Promise<WorkspaceRow> {
   const workspaceId = text(workspaceIdInput, 'workspaceId');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(workspaceId)) {
     throw new ValidationError('workspaceId must be a stable workspace identifier', { field: 'workspaceId' });
   }
-  const row = await queryOne<WorkspaceRow>('SELECT id, path, label FROM workspaces WHERE id = $1', [workspaceId]);
+  const row = await db.queryOne<WorkspaceRow>('SELECT id, path, label FROM workspaces WHERE id = $1', [workspaceId]);
   if (!row) throw new NotFoundError('Workspace', workspaceId);
   return row;
 }
@@ -267,8 +289,8 @@ function discoverWorkspaceSpecs(workspacePath: string): Array<{ specSlug: string
   return [...discovered.values()];
 }
 
-async function loadCandidates(ws: WorkspaceRow, search?: string): Promise<CandidateRow[]> {
-  const rows = await query<CandidateRow>(`
+async function loadCandidates(ws: WorkspaceRow, search?: string, db: LifecycleReadDb = DEFAULT_READ_DB): Promise<CandidateRow[]> {
+  const rows = await db.query<CandidateRow>(`
     WITH indexed AS (
       SELECT s.spec_slug, s.spec_title AS title, s.status AS spec_status, s.generated_at
       FROM spec_search_index s
@@ -347,9 +369,9 @@ async function loadCandidates(ws: WorkspaceRow, search?: string): Promise<Candid
   return candidates;
 }
 
-async function loadEvidence(specSlugs: string[], workspaceId: string): Promise<EvidenceRow[]> {
+async function loadEvidence(specSlugs: string[], workspaceId: string, db: LifecycleReadDb = DEFAULT_READ_DB): Promise<EvidenceRow[]> {
   if (specSlugs.length === 0) return [];
-  return await query<EvidenceRow>(`
+  return await db.query<EvidenceRow>(`
     SELECT * FROM (
       SELECT e.id::text, e.spec_slug, e.run_id, e.story_id, e.phase_id, e.gate_id,
              e.source_type, e.source_system, e.source_idempotency_key,
@@ -367,9 +389,9 @@ async function loadEvidence(specSlugs: string[], workspaceId: string): Promise<E
   `, [workspaceId, specSlugs, LIFECYCLE_EVALUATION_EVIDENCE_LIMIT]);
 }
 
-async function loadDecisions(specSlugs: string[], workspaceId: string): Promise<DecisionRow[]> {
+async function loadDecisions(specSlugs: string[], workspaceId: string, db: LifecycleReadDb = DEFAULT_READ_DB): Promise<DecisionRow[]> {
   if (specSlugs.length === 0) return [];
-  return await query<DecisionRow>(`
+  return await db.query<DecisionRow>(`
     SELECT * FROM (
       SELECT d.id::text, d.spec_slug, d.run_id, d.story_id, d.phase_id, d.gate_id,
              d.decision_type, d.rationale, d.evidence_gap, d.subject_type, d.subject_value,
@@ -385,9 +407,9 @@ async function loadDecisions(specSlugs: string[], workspaceId: string): Promise<
   `, [workspaceId, specSlugs, LIFECYCLE_EVALUATION_DECISION_LIMIT]);
 }
 
-async function loadLearnCandidates(specSlugs: string[], workspaceId: string): Promise<Map<string, LearnCandidateRow[]>> {
+async function loadLearnCandidates(specSlugs: string[], workspaceId: string, db: LifecycleReadDb = DEFAULT_READ_DB): Promise<Map<string, LearnCandidateRow[]>> {
   if (specSlugs.length === 0) return new Map();
-  const rows = await query<LearnCandidateRow>(`
+  const rows = await db.query<LearnCandidateRow>(`
     SELECT * FROM (
       SELECT mc.id, mc.provenance->>'specId' AS spec_slug, mc.status, mc.category, mc.confidence,
              mc.provenance, mc.security_sensitive, mc.default_retrieval_eligible, mc.created_at,
@@ -402,9 +424,9 @@ async function loadLearnCandidates(specSlugs: string[], workspaceId: string): Pr
   return new Map(specSlugs.map((slug) => [slug, rows.filter((row) => row.spec_slug === slug)]));
 }
 
-async function loadRuns(specSlugs: string[], workspaceId: string): Promise<Map<string, RunRow>> {
+async function loadRuns(specSlugs: string[], workspaceId: string, db: LifecycleReadDb = DEFAULT_READ_DB): Promise<Map<string, RunRow>> {
   if (specSlugs.length === 0) return new Map();
-  const rows = await query<RunRow>(`
+  const rows = await db.query<RunRow>(`
     SELECT DISTINCT ON (regexp_replace(spec_path, '^.*/|\\.json$', '', 'g'))
            regexp_replace(spec_path, '^.*/|\\.json$', '', 'g') AS spec_slug,
            id, status, pid, started_at, finished_at, queue_position, trigger_type, agent_type,
@@ -433,6 +455,31 @@ function evidenceLineage(row: EvidenceRow): Record<string, string> {
   ].flatMap((key) => typeof release[key] === 'string' ? [[key, release[key] as string]] : []));
 }
 
+export interface ReleaseIdentitySelectorEvidence {
+  source_type: string;
+  subject_type: ReleaseSubject['type'];
+  evidence_status: string;
+  trust_level: string;
+  revision_mismatch: boolean;
+  lineage_verified: boolean;
+}
+
+/** Only authoritative successful observations may select the active release identity. */
+export function canSelectActiveReleaseIdentity(row: ReleaseIdentitySelectorEvidence): boolean {
+  if (row.evidence_status !== 'passed' || row.revision_mismatch) return false;
+  if (row.trust_level !== 'host_observed' && row.trust_level !== 'provider_verified') return false;
+  if (row.subject_type === 'commit_sha') {
+    return ['story_commit', 'github_check', 'wal_validation'].includes(row.source_type);
+  }
+  if (row.subject_type === 'artifact_digest') {
+    return row.lineage_verified && ['github_check', 'staging_result'].includes(row.source_type);
+  }
+  if (row.subject_type === 'deployment_id') {
+    return row.lineage_verified && row.source_type === 'deployment_proof';
+  }
+  return false;
+}
+
 function activeSubjects(plan: LifecyclePlan, provenance: Record<string, unknown>, evidence: EvidenceRow[]): {
   activeReleaseSubject: ReleaseSubject;
   activeSubjects: LifecycleEvaluationRunState['activeSubjects'];
@@ -446,7 +493,7 @@ function activeSubjects(plan: LifecyclePlan, provenance: Record<string, unknown>
   };
   const lineage: NonNullable<LifecycleEvaluationRunState['releaseLineage']> = {};
   for (const row of evidence) {
-    if (row.revision_mismatch) continue;
+    if (!canSelectActiveReleaseIdentity(row)) continue;
     const release = evidenceLineage(row);
     if (!lineage.commitSha && release.commitSha) lineage.commitSha = release.commitSha;
     if (!lineage.artifactDigest && release.artifactDigest) lineage.artifactDigest = release.artifactDigest;
@@ -682,7 +729,12 @@ function refreshRequired(expected: string | undefined, current: string, marks: {
   });
 }
 
-async function buildBundles(ws: WorkspaceRow, candidates: CandidateRow[], expectedSnapshotId?: string): Promise<{
+async function buildBundles(
+  ws: WorkspaceRow,
+  candidates: CandidateRow[],
+  expectedSnapshotId?: string,
+  db: LifecycleReadDb = DEFAULT_READ_DB,
+): Promise<{
   bundles: EvaluationBundle[];
   evidenceHighWaterMark: string;
   decisionHighWaterMark: string;
@@ -694,10 +746,10 @@ async function buildBundles(ws: WorkspaceRow, candidates: CandidateRow[], expect
   });
   const specSlugs = candidates.map((item) => item.spec_slug);
   const [allEvidence, allDecisions, runs, learnCandidates] = await Promise.all([
-    loadEvidence(specSlugs, ws.id),
-    loadDecisions(specSlugs, ws.id),
-    loadRuns(specSlugs, ws.id),
-    loadLearnCandidates(specSlugs, ws.id),
+    loadEvidence(specSlugs, ws.id, db),
+    loadDecisions(specSlugs, ws.id, db),
+    loadRuns(specSlugs, ws.id, db),
+    loadLearnCandidates(specSlugs, ws.id, db),
   ]);
   const evidenceBySpec = new Map(specSlugs.map((slug) => [slug, allEvidence.filter((row) => row.spec_slug === slug)]));
   const decisionsBySpec = new Map(specSlugs.map((slug) => [slug, allDecisions.filter((row) => row.spec_slug === slug)]));
@@ -837,9 +889,13 @@ function matchesPortfolio(item: ReturnType<typeof bundleItem> | ReturnType<typeo
   return true;
 }
 
-async function countRecentPhaseTransitions(workspaceId: string, specIds: string[]): Promise<number> {
+async function countRecentPhaseTransitions(
+  workspaceId: string,
+  specIds: string[],
+  db: LifecycleReadDb = DEFAULT_READ_DB,
+): Promise<number> {
   if (specIds.length === 0) return 0;
-  const row = await queryOne<{ total: number }>(`
+  const row = await db.queryOne<{ total: number }>(`
     SELECT COUNT(*)::int AS total
     FROM wal_events
     WHERE workspace_id = $1
@@ -875,9 +931,10 @@ function sortPortfolio(items: Array<ReturnType<typeof bundleItem> | ReturnType<t
 }
 
 export async function getLifecyclePortfolio(input: LifecyclePortfolioInput) {
-  const ws = await workspace(input.workspaceId);
-  const candidates = await loadCandidates(ws, input.search);
-  const built = await buildBundles(ws, candidates, input.expectedSnapshotId);
+  return withLifecycleReadSnapshot(async (db) => {
+  const ws = await workspace(input.workspaceId, db);
+  const candidates = await loadCandidates(ws, input.search, db);
+  const built = await buildBundles(ws, candidates, input.expectedSnapshotId, db);
   const bySpec = new Map(built.bundles.map((bundle) => [bundle.candidate.spec_slug, bundle]));
   const allItems = sortPortfolio(candidates.map((candidate) => {
     const bundle = bySpec.get(candidate.spec_slug);
@@ -887,7 +944,7 @@ export async function getLifecyclePortfolio(input: LifecyclePortfolioInput) {
   const visibleSpecIds = new Set(allItems.map((item) => item.specId));
   const visibleBundles = built.bundles.filter((bundle) => visibleSpecIds.has(bundle.candidate.spec_slug));
   const phaseCounts = aggregatePhaseEvaluations(visibleBundles.flatMap((bundle) => bundle.evaluation.phases));
-  const recentPhaseTransitions = await countRecentPhaseTransitions(ws.id, [...visibleSpecIds]);
+  const recentPhaseTransitions = await countRecentPhaseTransitions(ws.id, [...visibleSpecIds], db);
   const missingGates = visibleBundles.reduce((total, bundle) => total + bundle.evaluation.phases.reduce(
     (phaseTotal, phase) => phaseTotal + (phase.excluded ? 0 : phase.gates.filter((gate) => gate.status !== 'passed').length),
     0,
@@ -916,18 +973,20 @@ export async function getLifecyclePortfolio(input: LifecyclePortfolioInput) {
       phases: phaseCounts,
     },
   };
+  });
 }
 
 async function loadOne(input: LifecycleSpecInput): Promise<{ ws: WorkspaceRow; candidate: CandidateRow; bundle: EvaluationBundle | null; marks: { evidence: string; decision: string }; snapshotId: string }> {
-  const ws = await workspace(input.workspaceId);
+  return withLifecycleReadSnapshot(async (db) => {
+  const ws = await workspace(input.workspaceId, db);
   const specId = text(input.specId, 'specId', 128);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(specId)) {
     throw new ValidationError('specId must be a stable spec slug', { field: 'specId' });
   }
-  const candidates = await loadCandidates(ws);
+  const candidates = await loadCandidates(ws, undefined, db);
   const candidate = candidates.find((item) => item.spec_slug === specId);
   if (!candidate) throw new NotFoundError('Lifecycle spec', specId);
-  const built = await buildBundles(ws, [candidate]);
+  const built = await buildBundles(ws, [candidate], undefined, db);
   const bundle = built.bundles[0] ?? null;
   if (bundle) {
     try {
@@ -958,6 +1017,7 @@ async function loadOne(input: LifecycleSpecInput): Promise<{ ws: WorkspaceRow; c
     marks: { evidence: built.evidenceHighWaterMark, decision: built.decisionHighWaterMark },
     snapshotId,
   };
+  });
 }
 
 type TraceabilityBlockerKind = 'requirement_to_story' | 'story_to_gate' | 'gate_to_evidence' | 'revision' | 'subject_coherence';

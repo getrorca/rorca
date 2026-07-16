@@ -1268,6 +1268,20 @@ interface EffectiveRunOptions {
   };
 }
 
+function isEffectiveRunOptions(value: unknown): value is EffectiveRunOptions {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Partial<EffectiveRunOptions>;
+  return Boolean(candidate.worktree && typeof candidate.worktree.enabled === 'boolean'
+    && candidate.merge && ['direct', 'pr', 'draft-pr', 'branch-only'].includes(candidate.merge.strategy)
+    && typeof candidate.merge.autoMerge === 'boolean'
+    && candidate.graph && typeof candidate.graph.enabled === 'boolean'
+    && candidate.safety && candidate.safety.guard === 'autonomous-command-guard-v1'
+    && candidate.safety.allowBackendJest === false
+    && typeof candidate.safety.deploy === 'boolean'
+    && typeof candidate.safety.externalSend === 'boolean'
+    && typeof candidate.safety.policyLocked === 'boolean');
+}
+
 function buildEffectiveRunOptions(input: {
   model: string | null;
   effort: string | null | undefined;
@@ -5786,7 +5800,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       })
       : null;
 
-    const originalEffectiveOptions = originalRun.effective_options ?? buildEffectiveRunOptions({
+    const originalEffectiveOptions = isEffectiveRunOptions(originalRun.effective_options)
+      ? originalRun.effective_options
+      : buildEffectiveRunOptions({
       model: originalRun.agent_model ?? null,
       effort: null,
       autoWorktree: originalRun.auto_worktree ?? Boolean(originalRun.worktree_path),
@@ -5797,8 +5813,10 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       includeGraph: originalRun.include_graph ?? false,
       terminal: originalRun.terminal_mode,
       policyLocked: false,
-      deploy: true,
-      externalSend: true,
+      // Missing/legacy option snapshots fail closed. Retry policy may preserve
+      // capabilities only when a complete host-authored snapshot proves them.
+      deploy: false,
+      externalSend: false,
     });
     const retryAgent = (originalRun.agent_type ?? originalRun.agent ?? activeAgent) as AgentType;
     let retryModel = originalEffectiveOptions.model ?? originalRun.agent_model ?? null;

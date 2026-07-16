@@ -223,6 +223,27 @@ describe('lifecycle evidence route', () => {
     expect(mockPersistCanonicalEvidence).not.toHaveBeenCalled();
   });
 
+  test('does not treat an arbitrary internal service identity as a provider adapter', async () => {
+    const response = await request(appWithUser({
+      id: 'scheduler-service',
+      email: 'scheduler@rorca.internal',
+      supabaseId: 'internal-service-token',
+      role: 'admin',
+    }))
+      .post('/api/lifecycle/evidence')
+      .send({
+        ...manualEnvelope(),
+        kind: 'deployment_proof',
+        rationale: undefined,
+        attachmentReference: undefined,
+        sourceSystem: 'claimed-production-provider',
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body.details).toMatchObject({ classification: 'blocked', source: 'deployment_proof' });
+    expect(mockPersistCanonicalEvidence).not.toHaveBeenCalled();
+  });
+
   test('publishes only bounded invalidation metadata after durable persistence', async () => {
     await request(appWithUser({
       id: 'reviewer-1',

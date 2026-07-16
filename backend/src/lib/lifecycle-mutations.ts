@@ -6,7 +6,7 @@
  */
 
 import crypto from 'node:crypto';
-import { execute, queryOne } from '../db/index';
+import { queryOne, transaction } from '../db/index';
 import { ConflictError, ValidationError } from './errors';
 import { broadcastAll, type WalEvent } from './sse-hub';
 
@@ -71,44 +71,51 @@ export async function runIdempotentLifecycleMutation<T>(input: {
   mutate: () => Promise<T>;
 }): Promise<{ value: T; replayed: boolean; responseStatus: number }> {
   const requestHash = lifecycleRequestHash(input.request);
-  await execute(
-    `INSERT INTO lifecycle_mutation_requests (
-       workspace_id, operation, idempotency_key, request_hash, status
-     ) VALUES ($1, $2, $3, $4, 'pending')
-     ON CONFLICT (workspace_id, operation, idempotency_key) DO NOTHING`,
-    [input.workspaceId, input.operation, input.idempotencyKey, requestHash],
-  );
-  const existing = await queryOne<MutationRequestRow>(
-    `SELECT request_hash, status, response_status, response_body
-     FROM lifecycle_mutation_requests
-     WHERE workspace_id = $1 AND operation = $2 AND idempotency_key = $3`,
-    [input.workspaceId, input.operation, input.idempotencyKey],
-  );
-  if (!existing) throw new ConflictError('Lifecycle mutation idempotency claim could not be acquired');
-  if (existing.request_hash !== requestHash) {
-    throw new ConflictError('Idempotency-Key was reused with a different lifecycle request', {
-      operation: input.operation,
-      idempotencyKey: input.idempotencyKey,
-    });
-  }
-  if (existing.status === 'completed') {
-    return {
-      value: existing.response_body as T,
-      replayed: true,
-      responseStatus: existing.response_status ?? input.responseStatus ?? 200,
-    };
-  }
+  const lockKey = `lifecycle-mutation:${input.workspaceId}:${input.operation}:${input.idempotencyKey}`;
+  return transaction(async (client) => {
+    // A pending row alone is not ownership: two callers can both observe it and
+    // execute. Serialize the complete replay decision so only one mutation runs.
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
+    await client.query(
+      `INSERT INTO lifecycle_mutation_requests (
+         workspace_id, operation, idempotency_key, request_hash, status
+       ) VALUES ($1, $2, $3, $4, 'pending')
+       ON CONFLICT (workspace_id, operation, idempotency_key) DO NOTHING`,
+      [input.workspaceId, input.operation, input.idempotencyKey, requestHash],
+    );
+    const existing = (await client.query<MutationRequestRow>(
+      `SELECT request_hash, status, response_status, response_body
+       FROM lifecycle_mutation_requests
+       WHERE workspace_id = $1 AND operation = $2 AND idempotency_key = $3
+       FOR UPDATE`,
+      [input.workspaceId, input.operation, input.idempotencyKey],
+    )).rows[0];
+    if (!existing) throw new ConflictError('Lifecycle mutation idempotency claim could not be acquired');
+    if (existing.request_hash !== requestHash) {
+      throw new ConflictError('Idempotency-Key was reused with a different lifecycle request', {
+        operation: input.operation,
+        idempotencyKey: input.idempotencyKey,
+      });
+    }
+    if (existing.status === 'completed') {
+      return {
+        value: existing.response_body as T,
+        replayed: true,
+        responseStatus: existing.response_status ?? input.responseStatus ?? 200,
+      };
+    }
 
-  const value = await input.mutate();
-  const responseStatus = input.responseStatus ?? 200;
-  await execute(
-    `UPDATE lifecycle_mutation_requests
-     SET status = 'completed', response_status = $4, response_body = $5::jsonb, completed_at = NOW()
-     WHERE workspace_id = $1 AND operation = $2 AND idempotency_key = $3
-       AND request_hash = $6`,
-    [input.workspaceId, input.operation, input.idempotencyKey, responseStatus, JSON.stringify(value), requestHash],
-  );
-  return { value, replayed: false, responseStatus };
+    const value = await input.mutate();
+    const responseStatus = input.responseStatus ?? 200;
+    await client.query(
+      `UPDATE lifecycle_mutation_requests
+       SET status = 'completed', response_status = $4, response_body = $5::jsonb, completed_at = NOW()
+       WHERE workspace_id = $1 AND operation = $2 AND idempotency_key = $3
+         AND request_hash = $6`,
+      [input.workspaceId, input.operation, input.idempotencyKey, responseStatus, JSON.stringify(value), requestHash],
+    );
+    return { value, replayed: false, responseStatus };
+  });
 }
 
 /** Persist bounded invalidation metadata, then publish that exact WAL row. */

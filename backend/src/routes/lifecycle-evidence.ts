@@ -21,12 +21,15 @@ const router = Router();
 
 function requestPrincipal(req: Request): EvidencePrincipal {
   if (!req.user) throw new AuthError();
-  const internalAdapter = req.user.role === 'admin'
-    && (req.user.email.endsWith('@rorca.internal') || req.user.id === 'system');
+  // An internal-looking email suffix is not an adapter capability. Only the
+  // dedicated Hermes principal may turn provider observations into authoritative
+  // evidence; scheduler and other internal services remain non-authoritative.
+  const hermesAdapter = req.user.role === 'admin'
+    && req.user.email.toLowerCase() === 'hermes@rorca.internal';
   return {
     id: req.user.id,
     displayName: req.user.email,
-    adapterVerified: internalAdapter,
+    adapterVerified: hermesAdapter,
   };
 }
 
