@@ -417,7 +417,8 @@ app.use('/api/context-candidates', contextCandidatesRouter);
 app.use('/api/context-capture', contextCaptureRouter);
 app.use('/api/workspaces', captureIngestRouter);
 app.use('/api/pipeline', pipelineRouter);
-app.use('/api/repair', recoveryRouter);
+// Admin-only and deliberately absent from MCP/OpenAPI tool generation.
+app.use('/api/admin/recovery', recoveryRouter);
 app.use('/api/execution-environments', executionEnvironmentsRouter);
 app.use('/api/pipeline/hooks', hooksRouter);
 app.use('/api/pipeline/schedules', schedulesRouter);

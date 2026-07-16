@@ -1,62 +1,81 @@
-/** Governed recovery routes for external local supervisors such as Hermes. */
-import { Router, type Request, type Response } from 'express';
+/** Admin-only recovery routes. These are intentionally not MCP-generated. */
+import { Router, type Request, type Response, type NextFunction } from 'express';
 import { handleRouteError } from '../lib/async-handler';
-import {
-  checkpointReconciliationSchema,
-  reconcileCheckpoint,
-} from '../lib/checkpoint-reconciliation';
-import { ValidationError } from '../lib/errors';
+import { checkpointReconciliationSchema, reconcileCheckpoint } from '../lib/checkpoint-reconciliation';
+import { AdminRequiredError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
+/** Defense in depth: server auth injects req.user, and this route verifies admin. */
+function requireRecoveryAdmin(req: Request, _res: Response, next: NextFunction): void {
+  if (req.user?.role !== 'admin') {
+    next(new AdminRequiredError());
+    return;
+  }
+  next();
+}
+
 /**
  * @swagger
- * /api/repair/checkpoints/reconcile:
+ * /api/admin/recovery/checkpoints/reconcile:
  *   post:
- *     tags: [Pipeline]
- *     summary: Reconcile a validated checkpoint into canonical story lifecycle
- *     operationId: reconcileCheckpoint
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "A checkpoint changes a workspace-owned canonical story lifecycle, so only authenticated local automation may submit it after Rorca independently validates workspace, run, branch, commit, and fresh validation evidence."
+ *     tags: [Admin]
+ *     summary: Reconcile a trusted validation attestation into story lifecycle
+ *     operationId: reconcileAdminCheckpoint
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "This mutates canonical story state and is restricted to authenticated platform administrators; it is deliberately excluded from MCP."
+ *     x-rorca-mcp: false
  *     description: >
- *       Governed checkpoint ingestion for local recovery supervisors. Rorca does
- *       not accept database mutations, raw worker payloads, logs, paths, or
- *       secrets. It verifies the run ownership and failed/cancelled lifecycle,
- *       exact approved spec, run branch, commit ancestry, story dependencies,
- *       and fresh successful validation evidence before using the same canonical
- *       execution-engine story completion service used by normal execution.
+ *       Admin-only REST recovery surface. The caller supplies an opaque trusted
+ *       attestation reference, not validation commands or summaries. Rorca
+ *       independently verifies immutable attestation binding, exact full branch
+ *       head, approved spec, recoverable run, and provenance under a database
+ *       advisory lock before using the canonical story completion service.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [workspaceId, specId, runId, storyId, branch, commitSha, validation]
+ *             additionalProperties: false
+ *             required: [workspaceId, specId, runId, storyId, branch, checkpointSha, attestationId, attestationDigest]
  *             properties:
  *               workspaceId: { type: string }
  *               specId: { type: string }
  *               runId: { type: integer, minimum: 1 }
  *               storyId: { type: string }
  *               branch: { type: string }
- *               commitSha: { type: string, description: "Checkpoint commit SHA on the run branch" }
- *               validation:
- *                 type: object
- *                 required: [passed, completedAt, commitSha, command, summary]
- *                 properties:
- *                   passed: { type: boolean, enum: [true] }
- *                   completedAt: { type: string, format: date-time, description: "Must be no older than 24 hours" }
- *                   commitSha: { type: string, description: "Must equal commitSha" }
- *                   command: { type: string, description: "Validation command; hashed before WAL persistence" }
- *                   summary: { type: string, description: "Validation summary; hashed before WAL persistence" }
+ *               checkpointSha: { type: string, pattern: '^[0-9a-fA-F]{40}$', description: Exact full current run-branch head }
+ *               attestationId: { type: string, format: uuid }
+ *               attestationDigest: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
  *     responses:
- *       201: { description: Checkpoint reconciled and WAL evidence emitted }
- *       200: { description: Idempotent replay; story was already reconciled }
+ *       201:
+ *         description: Checkpoint reconciled with immutable provenance
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [reconciled, idempotent, workspaceId, specId, runId, storyId, branch, checkpointSha, attestationId, validationGate]
+ *               properties:
+ *                 reconciled: { type: boolean, enum: [true] }
+ *                 idempotent: { type: boolean, enum: [false] }
+ *                 workspaceId: { type: string }
+ *                 specId: { type: string }
+ *                 runId: { type: integer }
+ *                 storyId: { type: string }
+ *                 branch: { type: string }
+ *                 checkpointSha: { type: string, pattern: '^[0-9a-f]{40}$' }
+ *                 attestationId: { type: string, format: uuid }
+ *                 validationGate: { type: string, enum: [execution-engine, ci] }
+ *                 walEventId: { type: integer }
+ *       200: { description: Exact idempotent replay of existing provenance }
  *       400: { description: Invalid bounded request }
- *       404: { description: Workspace, run, approved spec, or story not found }
- *       409: { description: Workspace/spec/run/branch/dependency lifecycle conflict }
- *       422: { description: Missing commit or stale/invalid validation evidence }
+ *       403: { description: Admin access required }
+ *       404: { description: Workspace, run, approved spec, story, or attestation not found }
+ *       409: { description: Attestation, branch-head, provenance, lifecycle, or race conflict }
+ *       422: { description: Revoked, expired, or invalid trusted attestation }
  */
-router.post('/checkpoints/reconcile', async (req: Request, res: Response) => {
+router.post('/checkpoints/reconcile', requireRecoveryAdmin, async (req: Request, res: Response) => {
   try {
     const parsed = checkpointReconciliationSchema.safeParse(req.body);
     if (!parsed.success) {

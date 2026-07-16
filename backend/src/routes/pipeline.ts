@@ -88,6 +88,11 @@ import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '..
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
 import { createRunnerJob } from '../lib/execution-runner-jobs';
 import { getRecoveryTelemetry } from '../lib/recovery-telemetry';
+import {
+  createExecutionSecretReferences,
+  redactSecretText,
+  resolveExecutionSecrets,
+} from '../lib/execution-secret-references';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -1596,51 +1601,17 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       runId = normalizeWorkerRunId(runResult?.id);
     }
 
-    // 7. Build env overrides — workspace-specific and vault key additions only.
-    //    The worker already inherits its own process.env when spawning the execution engine,
-    //    so we only need to pass the EXTRA vars here (vault keys, workspace env vars).
-    //    DO NOT dump all of process.env here — it bloats the pg-boss payload unnecessarily.
+    // 7. Queue only non-secret options. pg-boss persists its payload, so all
+    // workspace values and provider credentials travel as opaque references and
+    // are resolved by the worker only immediately before it spawns the engine.
     const envOverrides: Record<string, string> = {};
-
-    // Inject workspace-specific env vars (decrypted)
-    const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
-    for (const [k, v] of Object.entries(workspaceEnvVars)) {
-      envOverrides[k] = v;
-    }
-
-    // Inject vault API key from workflow config (WR-006).
-    // wfConfig.apiKey is the resolved key for the primary provider (vault → env fallback).
-    // Map it to the correct env var based on the provider from wfConfig.
-    if (wfConfig.apiKey) {
-      const providerEnvMap: Record<string, string> = {
-        anthropic: 'ANTHROPIC_API_KEY',
-        openrouter: 'OPENROUTER_API_KEY',
-        'openai-compat': 'OPENAI_API_KEY',
-      };
-      const envVarName = providerEnvMap[wfConfig.provider];
-      if (envVarName) {
-        envOverrides[envVarName] = wfConfig.apiKey;
-      }
-      if (wfConfig.baseUrl && wfConfig.provider === 'openai-compat') {
-        envOverrides['OPENAI_BASE_URL'] = wfConfig.baseUrl;
-      }
-    }
-    // Also inject vault keys for OTHER providers — stories may use per-story agent assignments
-    // (OC-029) that require a different provider than the primary one.
-    const otherProviders: Array<{ provider: string; envKey: string; baseUrlKey?: string }> = [
-      { provider: 'anthropic', envKey: 'ANTHROPIC_API_KEY' },
-      { provider: 'openai-compat', envKey: 'OPENAI_API_KEY', baseUrlKey: 'OPENAI_BASE_URL' },
-      { provider: 'openrouter', envKey: 'OPENROUTER_API_KEY' },
-    ];
-    for (const { provider, envKey, baseUrlKey } of otherProviders) {
-      if (envOverrides[envKey]) continue; // Already set by wfConfig above
-      const vaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, provider) : null;
-      if (vaultKey) {
-        envOverrides[envKey] = vaultKey.key;
-        if (baseUrlKey && vaultKey.baseUrl) {
-          envOverrides[baseUrlKey] = vaultKey.baseUrl;
-        }
-      }
+    const secretReferences = createExecutionSecretReferences({
+      workspaceId,
+      vaultUserId: pipelineUser?.id,
+      providers: ['anthropic', 'openai-compat', 'openrouter'],
+    });
+    if (wfConfig.baseUrl && wfConfig.provider === 'openai-compat') {
+      envOverrides.OPENAI_BASE_URL = wfConfig.baseUrl;
     }
 
 
@@ -1663,12 +1634,13 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     //    Hooks run synchronously in the trigger request so the caller gets immediate feedback.
     const logPath = workspaceLogPath(workspace.path, runId);
     await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [logPath, runId]);
-    const preRunResults = await runHooks(workspaceId, 'pre_run', cwd, envOverrides);
+    const hookSecrets = await resolveExecutionSecrets(secretReferences);
+    const preRunResults = await runHooks(workspaceId, 'pre_run', cwd, { ...hookSecrets, ...envOverrides });
     if (preRunResults.length > 0) {
-      const hookOutput = preRunResults.map(r =>
+      const hookOutput = redactSecretText(preRunResults.map(r =>
         `\x1b[36m[pre_run hook: ${r.command}]\x1b[0m\n${r.output}` +
         (r.exitCode !== 0 ? `\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\n` : '\n')
-      ).join('');
+      ).join(''), hookSecrets);
       fs.writeFileSync(logPath, hookOutput);
 
       const failed = preRunResults.find(r => r.exitCode !== 0);
@@ -1763,6 +1735,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
       envOverrides,
+      secretReferences,
       ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
       ...(storyId ? { specificStory: storyId } : {}),
       triggeredVia,
@@ -5163,18 +5136,14 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     fs.mkdirSync(retrySpecDir, { recursive: true });
     fs.writeFileSync(retrySpecPath, JSON.stringify(specJson, null, 2));
 
-    // 11. Build env overrides (same logic as pipeline trigger)
+    // 11. A retry follows the same opaque-secret contract as a fresh run.
+    // Never serialize process.env or decrypted workspace values into pg-boss.
     const envOverrides: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-        envOverrides[k] = v;
-      }
-    }
-    envOverrides['RORCA_PROCESS_ROLE'] = 'engine';
-    const wsEnvVars = getWorkspaceEnvVars(originalRun.workspace_id);
-    for (const [k, v] of Object.entries(wsEnvVars)) {
-      envOverrides[k] = v;
-    }
+    const secretReferences = createExecutionSecretReferences({
+      workspaceId: originalRun.workspace_id,
+      vaultUserId: (await getEffectiveUser(req))?.id,
+      providers: ['anthropic', 'openai-compat', 'openrouter'],
+    });
 
     // 12. Validate job payload with Zod before sending to pg-boss.
     //     Invalid payloads must throw here — pg-boss failure handling is not a substitute.
@@ -5190,6 +5159,10 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       worktreePath: z.string().nullable(),
       sequenceOffset: z.number().int().min(0),
       envOverrides: z.record(z.string(), z.string()),
+      secretReferences: z.object({
+        version: z.literal('v1'), workspaceId: z.string(), vaultUserId: z.string().optional(),
+        providers: z.array(z.enum(['anthropic', 'openrouter', 'openai-compat'])), includeWorkspaceEnv: z.literal(true),
+      }).strict(),
       includeGraph: z.boolean().optional().default(false),
       terminalMode: z.enum(['ansi-html', 'pty', 'native-pty']).optional().default('ansi-html'),
       thinkingEnabled: z.boolean().optional(),
@@ -5210,6 +5183,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       worktreePath: originalRun.worktree_path ?? null,
       sequenceOffset,
       envOverrides,
+      secretReferences,
       includeGraph: retryIncludeGraph,
       terminalMode: retryTerminalMode,
       ...(retryThinkingEnabled !== undefined ? { thinkingEnabled: retryThinkingEnabled } : {}),
@@ -8503,7 +8477,30 @@ router.post('/orphan-sweep', async (req: Request, res: Response) => {
  *         required: true
  *         schema: { type: string, maxLength: 128 }
  *     responses:
- *       200: { description: Redacted v1 recovery telemetry }
+ *       200:
+ *         description: Redacted bounded v1 recovery telemetry
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [contractVersion, available, redacted, observedAt, workspaceId, worker, queue, runs, limits]
+ *               properties:
+ *                 contractVersion: { type: string, enum: [v1] }
+ *                 available: { type: boolean, enum: [true] }
+ *                 redacted: { type: boolean, enum: [true] }
+ *                 observedAt: { type: string, format: date-time }
+ *                 workspaceId: { type: string }
+ *                 worker:
+ *                   type: object
+ *                   required: [active, heartbeatAgeSeconds, staleAfterSeconds, activeChildProcesses]
+ *                   properties:
+ *                     active: { type: boolean }
+ *                     heartbeatAgeSeconds: { type: integer, nullable: true }
+ *                     staleAfterSeconds: { type: integer, minimum: 1 }
+ *                     activeChildProcesses: { type: integer, minimum: 0 }
+ *                 queue: { type: object, properties: { health: { type: string, enum: [healthy, degraded, critical] }, queued: { type: integer }, active: { type: integer }, oldestQueuedAgeSeconds: { type: integer, nullable: true }, staleActive: { type: integer } } }
+ *                 runs: { type: array, maxItems: 20, items: { type: object, required: [runId, status, ageSeconds, heartbeatAgeSeconds], properties: { runId: { type: integer, minimum: 1 }, status: { type: string }, ageSeconds: { type: integer, minimum: 0 }, heartbeatAgeSeconds: { type: integer, nullable: true } } } }
+ *                 limits: { type: object, required: [maxRuns, returnedRuns], properties: { maxRuns: { type: integer, maximum: 20 }, returnedRuns: { type: integer, maximum: 20 } } }
  *       400: { description: Invalid workspace identifier }
  *       404: { description: Workspace not found }
  *       503: { description: Recovery telemetry capability unavailable }
@@ -8542,7 +8539,23 @@ router.get('/telemetry', async (req: Request, res: Response) => {
  *         required: true
  *         schema: { type: string, maxLength: 128 }
  *     responses:
- *       200: { description: Redacted v1 recovery telemetry }
+ *       200:
+ *         description: Redacted bounded v1 recovery telemetry
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [contractVersion, available, redacted, observedAt, workspaceId, worker, queue, runs, limits]
+ *               properties:
+ *                 contractVersion: { type: string, enum: [v1] }
+ *                 available: { type: boolean, enum: [true] }
+ *                 redacted: { type: boolean, enum: [true] }
+ *                 observedAt: { type: string, format: date-time }
+ *                 workspaceId: { type: string }
+ *                 worker: { type: object }
+ *                 queue: { type: object }
+ *                 runs: { type: array, maxItems: 20, items: { type: object, properties: { runId: { type: integer }, status: { type: string }, ageSeconds: { type: integer }, heartbeatAgeSeconds: { type: integer, nullable: true } } } }
+ *                 limits: { type: object }
  *       400: { description: Invalid workspace identifier }
  *       404: { description: Workspace not found }
  *       503: { description: Recovery telemetry capability unavailable }

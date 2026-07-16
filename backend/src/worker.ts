@@ -70,6 +70,7 @@ import { replayFallbackResults } from './lib/fallback-replay';
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { prepareRunSpecSnapshot } from './lib/run-spec-snapshot';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
+import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -710,7 +711,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
   // but each spawns an independent child process that should run in parallel.
   await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
-    logger.info({ jobId, data: job.data }, '[worker] pipeline:run received');
+    logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:run received');
 
     // 1. Validate payload via Zod
     const parsed = PipelineRunJobPayload.safeParse(job.data);
@@ -720,7 +721,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -915,8 +916,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
     // Then strip the 4 Claude vars that must not propagate to nested invocations.
+    const resolvedSecrets = await resolveExecutionSecrets(secretReferences);
     const env: Record<string, string> = {
       ...buildCleanEnv(),
+      ...resolvedSecrets,
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
       RORCA_WORKSPACE_ID: workspaceId,
@@ -1130,7 +1133,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     runId,
                     mergeLog,
                     { agent: payload.agent, model: payload.model, thinkingEnabled: payload.thinkingEnabled, thinkingBudget: payload.thinkingBudget, effortLevel: payload.effortLevel, source: 'run' },
-                    payload.envOverrides,
+                    { ...resolvedSecrets, ...payload.envOverrides },
                   );
                   // Push main to remote after successful merge
                   const mergeStatus = await queryOne<{ merge_status: string }>('SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId]);
@@ -1403,7 +1406,7 @@ function syncRetrySpecPassesToOriginalSpec(params: {
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
-    logger.info({ jobId, data: job.data }, '[worker] pipeline:retry received');
+    logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:retry received');
 
     // 1. Validate payload via Zod
     const parsed = PipelineRetryJobPayload.safeParse(job.data);
@@ -1425,6 +1428,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       worktreePath,
       sequenceOffset,
       envOverrides,
+      secretReferences,
       includeGraph,
       terminalMode: payloadTerminalMode,
       thinkingEnabled,
@@ -1551,8 +1555,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
     // Strip the 4 Claude vars that must not propagate to nested invocations.
     const { CLAUDECODE: _a, CLAUDE_CODE_ENTRYPOINT: _b, CLAUDE_AGENT_SDK_VERSION: _c, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: _d, ...inheritedEnvRetry } = process.env as Record<string, string>;
+    const resolvedSecrets = await resolveExecutionSecrets(secretReferences);
     const env = {
       ...inheritedEnvRetry,
+      ...resolvedSecrets,
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
       RORCA_WORKSPACE_ID: workspaceId,

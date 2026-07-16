@@ -3,6 +3,7 @@ jest.mock('../run-queue', () => ({ getWorkspaceRecoveryQueueSummary: jest.fn() }
 jest.mock('../worker-heartbeat', () => ({
   getLatestWorkerHeartbeat: jest.fn(),
   isWorkerHeartbeatStale: jest.fn(),
+  WORKER_HEARTBEAT_STALE_MS: 90_000,
 }));
 
 import { query } from '../../db/index';
@@ -44,11 +45,13 @@ describe('getRecoveryTelemetry', () => {
       available: true,
       redacted: true,
       workspaceId: 'ws-recovery',
-      runs: [{ sourceRef: 'run:42', status: 'failed' }],
+      runs: [{ runId: 42, status: 'failed' }],
+      worker: { staleAfterSeconds: 90 },
       limits: { maxRuns: 20, returnedRuns: 1 },
     });
     expect(JSON.stringify(telemetry)).not.toContain('must-not-leak');
     expect(JSON.stringify(telemetry)).not.toContain('/secret/log');
+    expect(JSON.stringify(telemetry)).not.toMatch(/payload|env|path/i);
     expect(mockedQuery).toHaveBeenCalledWith(expect.stringContaining('LIMIT $2'), ['ws-recovery', 20]);
   });
 

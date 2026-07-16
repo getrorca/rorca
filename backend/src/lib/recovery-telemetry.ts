@@ -7,7 +7,7 @@
  */
 import { query } from '../db/index';
 import { getWorkspaceRecoveryQueueSummary } from './run-queue';
-import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from './worker-heartbeat';
+import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale, WORKER_HEARTBEAT_STALE_MS } from './worker-heartbeat';
 
 const MAX_RUNS = 20;
 
@@ -24,11 +24,13 @@ export interface RecoveryTelemetry {
   contractVersion: 'v1';
   available: true;
   redacted: true;
-  generatedAt: string;
+  /** Timestamp at which this bounded projection was observed. */
+  observedAt: string;
   workspaceId: string;
   worker: {
     active: boolean;
     heartbeatAgeSeconds: number | null;
+    staleAfterSeconds: number;
     activeChildProcesses: number;
   };
   queue: {
@@ -39,7 +41,8 @@ export interface RecoveryTelemetry {
     staleActive: number;
   };
   runs: Array<{
-    sourceRef: string;
+    /** Bounded canonical run attribution; no job payload or path is exposed. */
+    runId: number;
     status: string;
     ageSeconds: number;
     heartbeatAgeSeconds: number | null;
@@ -78,7 +81,7 @@ export async function getRecoveryTelemetry(workspaceId: string): Promise<Recover
   const workerActive = heartbeat ? !isWorkerHeartbeatStale(heartbeat.last_seen, now) : false;
   const workerHeartbeatAge = heartbeat ? ageSeconds(heartbeat.last_seen, now) : null;
   const runs = runRows.map((run) => ({
-    sourceRef: `run:${run.id}`,
+    runId: Number(run.id),
     status: run.status,
     ageSeconds: ageSeconds(run.started_at ?? run.queued_at ?? run.finished_at, now),
     heartbeatAgeSeconds: run.last_heartbeat ? ageSeconds(run.last_heartbeat, now) : null,
@@ -88,11 +91,12 @@ export async function getRecoveryTelemetry(workspaceId: string): Promise<Recover
     contractVersion: 'v1',
     available: true,
     redacted: true,
-    generatedAt: new Date(now).toISOString(),
+    observedAt: new Date(now).toISOString(),
     workspaceId,
     worker: {
       active: workerActive,
       heartbeatAgeSeconds: workerHeartbeatAge,
+      staleAfterSeconds: Math.floor(WORKER_HEARTBEAT_STALE_MS / 1000),
       activeChildProcesses: Math.max(0, heartbeat?.active_jobs ?? 0),
     },
     queue: {

@@ -1,23 +1,19 @@
 import { swaggerSpec } from '../swagger';
-import { buildMcpToolTierResolver, getMcpToolDefinitions, MCP_FRIENDLY_ALIASES } from '../mcp-http';
+import { getMcpToolDefinitions } from '../mcp-http';
 
-test('recovery contracts are discoverable through OpenAPI and MCP', () => {
+test('recovery contracts are discoverable with correct REST/MCP authority', () => {
   const spec = swaggerSpec as any;
   expect(spec.paths['/api/pipeline/telemetry']?.get).toMatchObject({
-    'x-rorca-tier': 'public',
-    'x-rorca-public-api': true,
+    'x-rorca-tier': 'public', 'x-rorca-public-api': true,
   });
-  expect(spec.paths['/api/repair/checkpoints/reconcile']?.post).toMatchObject({
-    'x-rorca-tier': 'auth',
+  expect(spec.paths['/api/pipeline/telemetry']?.get.responses['200'].content['application/json'].schema.required)
+    .toEqual(expect.arrayContaining(['contractVersion', 'observedAt', 'runs']));
+  expect(spec.paths['/api/admin/recovery/checkpoints/reconcile']?.post).toMatchObject({
+    'x-rorca-tier': 'admin', 'x-rorca-mcp': false,
   });
 
-  const definitions = getMcpToolDefinitions(spec);
-  expect(definitions.map((definition) => definition.toolName)).toEqual(expect.arrayContaining([
-    'rorca_pipeline_telemetry',
-    'rorca_repair_checkpoints_reconcile',
-  ]));
-  expect(MCP_FRIENDLY_ALIASES).toEqual(expect.arrayContaining([
-    expect.objectContaining({ toolName: 'rorca_reconcile_checkpoint' }),
-  ]));
-  expect(buildMcpToolTierResolver(spec)('rorca_repair_checkpoints_reconcile')).toBe('public');
+  const toolNames = getMcpToolDefinitions(spec).map((definition) => definition.toolName);
+  expect(toolNames).toContain('rorca_pipeline_telemetry');
+  expect(toolNames).not.toContain('rorca_admin_recovery_checkpoints_reconcile');
+  expect(toolNames).not.toContain('rorca_repair_checkpoints_reconcile');
 });

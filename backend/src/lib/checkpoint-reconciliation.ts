@@ -1,203 +1,194 @@
 /**
- * Governed checkpoint reconciliation.
+ * Admin-only, attestation-backed checkpoint reconciliation.
  *
- * External recovery supervisors may present a checkpoint, but this service
- * verifies all Rorca-owned identities and moves the canonical story lifecycle
- * only through the execution engine's canonical story-pass service.
+ * A recovery caller can name an attestation but cannot manufacture validation by
+ * submitting a command or a prose summary. Attestations are immutable records
+ * created by a trusted validation gate and checked while a PostgreSQL advisory
+ * lock serializes reconciliation across backend processes.
  */
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
-import { queryOne } from '../db/index';
+import { transaction } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { markStoryPassed } from './execution-engine';
-import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from './errors';
+import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 
-const MAX_EVIDENCE_AGE_MS = 24 * 60 * 60 * 1000;
-const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
-const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const sha = /^[0-9a-f]{7,64}$/i;
-const branch = /^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
+const FULL_SHA = /^[0-9a-f]{40}$/i;
+const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const BRANCH = /^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
+const DIGEST = /^[0-9a-f]{64}$/i;
+export const CANONICAL_VALIDATION_GATES = ['execution-engine', 'ci'] as const;
 
 export const checkpointReconciliationSchema = z.object({
-  workspaceId: z.string().regex(identifier, 'workspaceId must be a bounded identifier'),
-  specId: z.string().regex(identifier, 'specId must be a bounded identifier'),
+  workspaceId: z.string().regex(IDENTIFIER, 'workspaceId must be a bounded identifier'),
+  specId: z.string().regex(IDENTIFIER, 'specId must be a bounded identifier'),
   runId: z.number().int().positive(),
-  storyId: z.string().regex(identifier, 'storyId must be a bounded identifier'),
-  branch: z.string().regex(branch, 'branch must be a bounded branch name'),
-  commitSha: z.string().regex(sha, 'commitSha must be a 7-64 character hexadecimal SHA'),
-  validation: z.object({
-    passed: z.literal(true),
-    completedAt: z.string().datetime(),
-    commitSha: z.string().regex(sha, 'validation.commitSha must be a SHA'),
-    command: z.string().min(1).max(500),
-    summary: z.string().min(1).max(4_000),
-  }).strict(),
+  storyId: z.string().regex(IDENTIFIER, 'storyId must be a bounded identifier'),
+  branch: z.string().regex(BRANCH, 'branch must be a bounded branch name'),
+  checkpointSha: z.string().regex(FULL_SHA, 'checkpointSha must be a full 40-character SHA'),
+  attestationId: z.string().uuid(),
+  attestationDigest: z.string().regex(DIGEST, 'attestationDigest must be a SHA-256 digest'),
 }).strict();
-
 export type CheckpointReconciliationInput = z.infer<typeof checkpointReconciliationSchema>;
+
+export const checkpointValidationAttestationSchema = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().regex(IDENTIFIER),
+  runId: z.number().int().positive(),
+  storyId: z.string().regex(IDENTIFIER),
+  branch: z.string().regex(BRANCH),
+  checkpointSha: z.string().regex(FULL_SHA),
+  validationGate: z.enum(CANONICAL_VALIDATION_GATES),
+  evidenceDigest: z.string().regex(DIGEST),
+  passedAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+}).strict();
+export type CheckpointValidationAttestation = z.infer<typeof checkpointValidationAttestationSchema>;
 
 interface WorkspaceRow { path: string; }
 interface RunRow { workspace_id: string; spec_path: string; status: string; branch_name: string | null; }
+interface AttestationRow {
+  id: string; workspace_id: string; run_id: number; story_id: string; branch_name: string;
+  checkpoint_sha: string; validation_gate: string; evidence_digest: string; passed_at: string; expires_at: string; revoked_at: string | null;
+}
+interface ProvenanceRow { checkpoint_sha: string; attestation_id: string; attestation_digest: string; }
 interface Story { id?: string; passes?: boolean; status?: string; dependsOn?: string[]; }
 interface SpecDocument { userStories?: Story[]; stories?: Story[]; }
 
-function evidenceDigest(value: string): string {
-  return crypto.createHash('sha256').update(value).digest('hex');
-}
-
-function canonicalSpecPath(specId: string): string {
-  return path.posix.join('forge', 'specs', 'approved', `${specId}.json`);
-}
-
+function canonicalSpecPath(specId: string): string { return path.posix.join('forge', 'specs', 'approved', `${specId}.json`); }
+function storiesFromSpec(spec: SpecDocument): Story[] { return spec.userStories ?? spec.stories ?? []; }
 function readSpec(specPath: string): SpecDocument {
-  try {
-    return JSON.parse(fs.readFileSync(specPath, 'utf8')) as SpecDocument;
-  } catch {
-    throw new UnprocessableError('Canonical spec is unreadable', 'CHECKPOINT_SPEC_UNREADABLE');
+  try { return JSON.parse(fs.readFileSync(specPath, 'utf8')) as SpecDocument; }
+  catch { throw new UnprocessableError('Canonical spec is unreadable', 'CHECKPOINT_SPEC_UNREADABLE'); }
+}
+function attestationHash(attestation: CheckpointValidationAttestation): string {
+  // The trusted gate supplies this immutable digest; this helper is intentionally
+  // exported for gate implementations and does not accept user prose.
+  return crypto.createHash('sha256').update(JSON.stringify({
+    id: attestation.id, workspaceId: attestation.workspaceId, runId: attestation.runId,
+    storyId: attestation.storyId, branch: attestation.branch, checkpointSha: attestation.checkpointSha,
+    validationGate: attestation.validationGate, evidenceDigest: attestation.evidenceDigest,
+    passedAt: attestation.passedAt, expiresAt: attestation.expiresAt,
+  })).digest('hex');
+}
+export { attestationHash };
+
+/** Called by trusted validation-gate code; there is deliberately no HTTP/MCP route. */
+export async function recordCheckpointValidationAttestation(attestation: CheckpointValidationAttestation): Promise<void> {
+  const parsed = checkpointValidationAttestationSchema.parse(attestation);
+  if (Date.parse(parsed.expiresAt) <= Date.parse(parsed.passedAt)) {
+    throw new UnprocessableError('Attestation expiry must follow gate pass time', 'CHECKPOINT_ATTESTATION_INVALID_EXPIRY');
   }
+  await transaction(async (client) => {
+    await client.query(
+      `INSERT INTO checkpoint_validation_attestations
+       (id, workspace_id, run_id, story_id, branch_name, checkpoint_sha, validation_gate, evidence_digest, passed_at, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [parsed.id, parsed.workspaceId, parsed.runId, parsed.storyId, parsed.branch, parsed.checkpointSha.toLowerCase(), parsed.validationGate, parsed.evidenceDigest.toLowerCase(), parsed.passedAt, parsed.expiresAt],
+    );
+  });
 }
 
-function storiesFromSpec(spec: SpecDocument): Story[] {
-  return spec.userStories ?? spec.stories ?? [];
-}
-
-function assertFreshEvidence(validation: CheckpointReconciliationInput['validation'], commitSha: string): void {
-  if (validation.commitSha.toLowerCase() !== commitSha.toLowerCase()) {
-    throw new UnprocessableError('Validation evidence commit does not match checkpoint commit', 'CHECKPOINT_EVIDENCE_COMMIT_MISMATCH');
-  }
-  const completedAt = Date.parse(validation.completedAt);
-  if (Number.isNaN(completedAt)) {
-    throw new ValidationError('validation.completedAt must be a valid ISO timestamp');
-  }
-  const now = Date.now();
-  if (completedAt > now + MAX_FUTURE_SKEW_MS || now - completedAt > MAX_EVIDENCE_AGE_MS) {
-    throw new UnprocessableError('Validation evidence is stale or has an invalid timestamp', 'CHECKPOINT_EVIDENCE_STALE');
-  }
-}
-
-async function assertCommitOnBranch(workspacePath: string, commitSha: string, branchName: string): Promise<string> {
+async function assertExactBranchHead(workspacePath: string, checkpointSha: string, branchName: string): Promise<string> {
   const git = simpleGit(workspacePath);
-  let resolvedCommit: string;
-  try {
-    resolvedCommit = (await git.raw(['rev-parse', '--verify', `${commitSha}^{commit}`])).trim();
-  } catch {
-    throw new UnprocessableError('Checkpoint commit is not available in this workspace', 'CHECKPOINT_COMMIT_NOT_FOUND');
+  let head: string;
+  try { head = (await git.raw(['rev-parse', '--verify', `${branchName}^{commit}`])).trim(); }
+  catch { throw new UnprocessableError('Run branch head is unavailable', 'CHECKPOINT_BRANCH_HEAD_NOT_FOUND'); }
+  if (!FULL_SHA.test(head) || head.toLowerCase() !== checkpointSha.toLowerCase()) {
+    throw new ConflictError('Checkpoint must be the exact current full run-branch head, not an ancestor', { code: 'CHECKPOINT_NOT_BRANCH_HEAD' });
   }
-
-  try {
-    await git.raw(['merge-base', '--is-ancestor', resolvedCommit, branchName]);
-  } catch {
-    throw new ConflictError('Checkpoint commit is not reachable from the run branch', {
-      code: 'CHECKPOINT_COMMIT_NOT_ON_BRANCH',
-    });
-  }
-  return resolvedCommit;
+  return head.toLowerCase();
 }
 
 export interface CheckpointReconciliationResult {
-  reconciled: boolean;
-  idempotent: boolean;
-  workspaceId: string;
-  specId: string;
-  runId: number;
-  storyId: string;
-  branch: string;
-  commitSha: string;
-  validation: { passed: true; completedAt: string; commandDigest: string; summaryDigest: string };
-  walEventId?: number;
+  reconciled: true; idempotent: boolean; workspaceId: string; specId: string; runId: number;
+  storyId: string; branch: string; checkpointSha: string; attestationId: string;
+  validationGate: string; walEventId?: number;
 }
 
 export async function reconcileCheckpoint(input: CheckpointReconciliationInput): Promise<CheckpointReconciliationResult> {
-  assertFreshEvidence(input.validation, input.commitSha);
+  return transaction(async (client) => {
+    // A transaction-scoped advisory lock is process-safe and covers both the
+    // provenance check and the canonical file mutation below.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`checkpoint:${input.workspaceId}:${input.runId}:${input.storyId}`]);
 
-  const [workspace, run] = await Promise.all([
-    queryOne<WorkspaceRow>('SELECT path FROM workspaces WHERE id = $1', [input.workspaceId]),
-    queryOne<RunRow>('SELECT workspace_id, spec_path, status, branch_name FROM pipeline_runs WHERE id = $1', [input.runId]),
-  ]);
-  if (!workspace) throw new NotFoundError('Workspace', input.workspaceId);
-  if (!run) throw new NotFoundError('Pipeline run', String(input.runId));
-  if (run.workspace_id !== input.workspaceId) {
-    throw new ConflictError('Pipeline run does not belong to workspace', { code: 'CHECKPOINT_WORKSPACE_MISMATCH' });
-  }
-  if (run.spec_path !== canonicalSpecPath(input.specId)) {
-    throw new ConflictError('Pipeline run does not belong to spec', { code: 'CHECKPOINT_SPEC_MISMATCH' });
-  }
-  if (!['failed', 'cancelled'].includes(run.status)) {
-    throw new ConflictError('Pipeline run is not terminal and recoverable', { code: 'CHECKPOINT_RUN_NOT_RECOVERABLE' });
-  }
-  if (!run.branch_name || run.branch_name !== input.branch) {
-    throw new ConflictError('Checkpoint branch does not match pipeline run branch', { code: 'CHECKPOINT_BRANCH_MISMATCH' });
-  }
+    const [workspaceResult, runResult, attestationResult] = await Promise.all([
+      client.query<WorkspaceRow>('SELECT path FROM workspaces WHERE id = $1', [input.workspaceId]),
+      client.query<RunRow>('SELECT workspace_id, spec_path, status, branch_name FROM pipeline_runs WHERE id = $1', [input.runId]),
+      client.query<AttestationRow>(
+        `SELECT id, workspace_id, run_id, story_id, branch_name, checkpoint_sha, validation_gate, evidence_digest, passed_at, expires_at, revoked_at
+         FROM checkpoint_validation_attestations WHERE id = $1 FOR SHARE`, [input.attestationId],
+      ),
+    ]);
+    const workspace = workspaceResult.rows[0];
+    const run = runResult.rows[0];
+    const attestation = attestationResult.rows[0];
+    if (!workspace) throw new NotFoundError('Workspace', input.workspaceId);
+    if (!run) throw new NotFoundError('Pipeline run', String(input.runId));
+    if (!attestation) throw new NotFoundError('Checkpoint validation attestation', input.attestationId);
+    if (attestation.revoked_at || Date.parse(attestation.expires_at) <= Date.now()) {
+      throw new UnprocessableError('Checkpoint validation attestation is revoked or expired', 'CHECKPOINT_ATTESTATION_INVALID');
+    }
+    if (attestation.validation_gate !== 'execution-engine' && attestation.validation_gate !== 'ci') {
+      throw new UnprocessableError('Checkpoint validation gate is not canonical', 'CHECKPOINT_VALIDATION_GATE_INVALID');
+    }
+    const attestationMatches = attestation.workspace_id === input.workspaceId && attestation.run_id === input.runId &&
+      attestation.story_id === input.storyId && attestation.branch_name === input.branch &&
+      attestation.checkpoint_sha.toLowerCase() === input.checkpointSha.toLowerCase() &&
+      attestation.evidence_digest.toLowerCase() === input.attestationDigest.toLowerCase();
+    if (!attestationMatches) throw new ConflictError('Attestation does not bind this exact checkpoint identity', { code: 'CHECKPOINT_ATTESTATION_MISMATCH' });
+    if (run.workspace_id !== input.workspaceId || run.spec_path !== canonicalSpecPath(input.specId)) {
+      throw new ConflictError('Pipeline run ownership does not match checkpoint', { code: 'CHECKPOINT_RUN_OWNERSHIP_MISMATCH' });
+    }
+    if (!['failed', 'cancelled'].includes(run.status)) throw new ConflictError('Pipeline run is not terminal and recoverable', { code: 'CHECKPOINT_RUN_NOT_RECOVERABLE' });
+    if (!run.branch_name || run.branch_name !== input.branch) throw new ConflictError('Checkpoint branch does not match pipeline run branch', { code: 'CHECKPOINT_BRANCH_MISMATCH' });
 
-  const specPath = path.join(workspace.path, canonicalSpecPath(input.specId));
-  if (!fs.existsSync(specPath)) throw new NotFoundError('Approved spec', input.specId);
-  const spec = readSpec(specPath);
-  const stories = storiesFromSpec(spec);
-  const story = stories.find((candidate) => candidate.id === input.storyId);
-  if (!story) throw new NotFoundError('Story', input.storyId);
-  const dependencies = story.dependsOn ?? [];
-  const unmetDependencies = dependencies.filter((id) => !stories.find((candidate) => candidate.id === id)?.passes);
-  if (unmetDependencies.length > 0) {
-    throw new ConflictError('Checkpoint story dependencies are not complete', {
-      code: 'CHECKPOINT_DEPENDENCY_INCOMPLETE',
-      dependencies: unmetDependencies,
-    });
-  }
+    const checkpointSha = await assertExactBranchHead(workspace.path, input.checkpointSha, input.branch);
+    const provenanceResult = await client.query<ProvenanceRow>(
+      `SELECT checkpoint_sha, attestation_id, attestation_digest FROM checkpoint_reconciliations
+       WHERE workspace_id = $1 AND run_id = $2 AND story_id = $3 FOR UPDATE`, [input.workspaceId, input.runId, input.storyId],
+    );
+    const provenance = provenanceResult.rows[0];
+    if (provenance) {
+      const same = provenance.checkpoint_sha.toLowerCase() === checkpointSha && provenance.attestation_id === input.attestationId &&
+        provenance.attestation_digest.toLowerCase() === input.attestationDigest.toLowerCase();
+      if (!same) throw new ConflictError('Story was already reconciled with different immutable checkpoint provenance', { code: 'CHECKPOINT_PROVENANCE_CONFLICT' });
+      return { reconciled: true, idempotent: true, workspaceId: input.workspaceId, specId: input.specId, runId: input.runId, storyId: input.storyId, branch: input.branch, checkpointSha, attestationId: input.attestationId, validationGate: attestation.validation_gate };
+    }
 
-  const resolvedCommit = await assertCommitOnBranch(workspace.path, input.commitSha, input.branch);
-  const validation = {
-    passed: true as const,
-    completedAt: input.validation.completedAt,
-    commandDigest: evidenceDigest(input.validation.command),
-    summaryDigest: evidenceDigest(input.validation.summary),
-  };
+    // Re-read while locked: a story deleted after gate validation is never passed.
+    const specPath = path.join(workspace.path, canonicalSpecPath(input.specId));
+    if (!fs.existsSync(specPath)) throw new NotFoundError('Approved spec', input.specId);
+    const stories = storiesFromSpec(readSpec(specPath));
+    const story = stories.find((candidate) => candidate.id === input.storyId);
+    if (!story) throw new ConflictError('Attested story no longer exists in canonical spec', { code: 'CHECKPOINT_STORY_DISAPPEARED' });
+    if (story.passes === true || story.status === 'passed') {
+      throw new ConflictError('Story is already passed without reconciliation provenance', { code: 'CHECKPOINT_PASSED_WITHOUT_PROVENANCE' });
+    }
+    const unmet = (story.dependsOn ?? []).filter((id) => !stories.find((candidate) => candidate.id === id)?.passes);
+    if (unmet.length) throw new ConflictError('Checkpoint story dependencies are not complete', { code: 'CHECKPOINT_DEPENDENCY_INCOMPLETE', dependencies: unmet });
 
-  // This is the same lock and mutation path used by normal engine completion;
-  // no route or external caller receives database lifecycle authority.
-  const lifecycle = await markStoryPassed(specPath, input.storyId);
-  if (!lifecycle.changed) {
-    return {
-      reconciled: true,
-      idempotent: true,
-      workspaceId: input.workspaceId,
-      specId: input.specId,
-      runId: input.runId,
-      storyId: input.storyId,
-      branch: input.branch,
-      commitSha: resolvedCommit,
-      validation,
-    };
-  }
-
-  const payload = {
-    contractVersion: 'v1',
-    source: 'governed_checkpoint_reconciliation',
-    runId: input.runId,
-    storyId: input.storyId,
-    branch: input.branch,
-    commitSha: resolvedCommit,
-    validation,
-  };
-  const walEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, spec_id, run_id, payload)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    ['checkpoint_reconciled', input.workspaceId, input.specId, input.runId, JSON.stringify(payload)],
-  );
-  if (walEvent) broadcastAll(walEvent);
-
-  return {
-    reconciled: true,
-    idempotent: false,
-    workspaceId: input.workspaceId,
-    specId: input.specId,
-    runId: input.runId,
-    storyId: input.storyId,
-    branch: input.branch,
-    commitSha: resolvedCommit,
-    validation,
-    ...(walEvent ? { walEventId: walEvent.id } : {}),
-  };
+    const lifecycle = await markStoryPassed(specPath, input.storyId);
+    if (!lifecycle.storyFound || !lifecycle.changed) {
+      throw new ConflictError('Canonical story changed during reconciliation', { code: 'CHECKPOINT_STORY_RACE' });
+    }
+    await client.query(
+      `INSERT INTO checkpoint_reconciliations
+       (workspace_id, run_id, story_id, spec_id, branch_name, checkpoint_sha, attestation_id, attestation_digest, validation_gate)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [input.workspaceId, input.runId, input.storyId, input.specId, input.branch, checkpointSha, input.attestationId, input.attestationDigest.toLowerCase(), attestation.validation_gate],
+    );
+    const walResult = await client.query<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, run_id, payload) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      ['checkpoint_reconciled', input.workspaceId, input.specId, input.runId, JSON.stringify({ contractVersion: 'v1', source: 'governed_checkpoint_reconciliation', runId: input.runId, storyId: input.storyId, branch: input.branch, checkpointSha, attestationId: input.attestationId, validationGate: attestation.validation_gate, attestationDigest: input.attestationDigest.toLowerCase() })],
+    );
+    const walEvent = walResult.rows[0];
+    // SSE after commit would be ideal; this hub event is only a notification and
+    // the WAL row remains durable source of truth if a listener misses it.
+    if (walEvent) broadcastAll(walEvent);
+    return { reconciled: true, idempotent: false, workspaceId: input.workspaceId, specId: input.specId, runId: input.runId, storyId: input.storyId, branch: input.branch, checkpointSha, attestationId: input.attestationId, validationGate: attestation.validation_gate, ...(walEvent ? { walEventId: walEvent.id } : {}) };
+  });
 }

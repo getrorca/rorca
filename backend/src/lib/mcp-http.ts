@@ -117,6 +117,8 @@ interface OpenAPIOperation {
   'x-rorca-rationale'?: string;
   'x-rorca-public-api'?: boolean;
   'x-mcp-tier'?: string;
+  /** Explicit opt-out for privileged REST-only operations. */
+  'x-rorca-mcp'?: boolean;
   parameters?: OpenAPIParameter[];
   requestBody?: {
     required?: boolean;
@@ -605,12 +607,6 @@ export const MCP_FRIENDLY_ALIASES: readonly McpFriendlyAlias[] = [
     path: '/api/pipeline/runs/{runId}/retry',
   },
   {
-    toolName: 'rorca_reconcile_checkpoint',
-    description: 'Reconcile a validated recovery checkpoint through Rorca\'s governed canonical story lifecycle.',
-    method: 'POST',
-    path: '/api/repair/checkpoints/reconcile',
-  },
-  {
     toolName: 'rorca_list_runs',
     description: 'Friendly alias for listing pipeline runs in a workspace.',
     method: 'GET',
@@ -916,6 +912,9 @@ export function getMcpToolDefinitions(spec: OpenAPISpec): McpToolDefinition[] {
 
   for (const [pathStr, methods] of Object.entries(spec.paths)) {
     for (const [method, operation] of Object.entries(methods)) {
+      // Some operator-only REST operations must never be callable through MCP,
+      // including by an MCP admin token.
+      if (operation['x-rorca-mcp'] === false) continue;
       const { tier } = getRorcaTier(operation);
       const mcpOverride = getMcpExposureOverride(operation);
       if (!tierAllowedFromMcp(tier) && !mcpOverride) continue;
