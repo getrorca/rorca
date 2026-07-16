@@ -154,7 +154,7 @@ function buildCleanEnvForMerge(): Record<string, string> {
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
-async function postRetryWalEvent(eventType: 'retry_preview_generated' | 'retry_scope_mismatch', workspaceId: string, payload: Record<string, unknown>): Promise<void> {
+async function postRetryWalEvent(eventType: 'retry_preview_generated' | 'retry_scope_mismatch' | 'ssdlc_retry_preview_denied', workspaceId: string, payload: Record<string, unknown>): Promise<void> {
   try {
     const response = await fetch(`http://127.0.0.1:${process.env.PORT ?? '3030'}/api/wal`, {
       method: 'POST',
@@ -5935,13 +5935,25 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     }
 
     if (!approvedPreviewRaw || !previewIdentity || !verifyRetryPreview(approvedPreviewRaw)) {
+      await postRetryWalEvent('ssdlc_retry_preview_denied', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        reason: 'missing_or_invalid_packet',
+      });
       throw new ConflictError('Dispatch requires the exact self-verifying retry preview packet');
     }
     if (approvedPreviewRaw.previewHash !== previewHash || approvedPreviewRaw.originalRunId !== originalRunId) {
+      await postRetryWalEvent('ssdlc_retry_preview_denied', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        reason: 'mismatched_run_or_hash',
+      });
       throw new ConflictError('Retry preview identity does not match the requested run/hash');
     }
     const identityCheck = verifyRetryPreviewIdentity(previewIdentity, approvedPreviewRaw);
     if (!identityCheck.valid) {
+      await postRetryWalEvent('ssdlc_retry_preview_denied', originalRun.workspace_id, {
+        original_run_id: originalRunId,
+        reason: identityCheck.reason,
+      });
       throw new ConflictError(
         identityCheck.reason === 'expired' ? 'Retry preview has expired; generate a new preview' : 'Retry preview identity is invalid or mismatched',
         { reason: identityCheck.reason },

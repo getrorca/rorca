@@ -9,6 +9,7 @@ import { Router, type Request } from 'express';
 import { ValidationError } from '../lib/errors';
 import { generateLearnCloseoutCandidates } from '../lib/learn-closeout';
 import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
+import { getLifecycleOperationsReport, recordLifecycleEvaluatorError } from '../lib/lifecycle-operations';
 import { parsePaginationParams } from '../lib/paginate';
 import {
   assertLifecyclePortfolioFilters,
@@ -128,6 +129,45 @@ router.get('/', async (req, res, next) => {
     });
     res.json(result);
   } catch (error) {
+    await recordLifecycleEvaluatorError({
+      workspaceId: typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined,
+      operation: 'portfolio',
+      error,
+    });
+    next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/lifecycle/operations:
+ *   get:
+ *     tags: [Lifecycle]
+ *     summary: Read bounded Lifecycle rollout progress and health counters
+ *     operationId: getLifecycleOperations
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Workspace-wide compiler, evidence-adapter, denial, and rollout diagnostics are read-only local operator metadata and never include evidence payloads."
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Bounded plan coverage, backfill progress, blocked phases, retry actions, and redacted 24-hour health counters }
+ *       400: { description: Invalid workspace scope }
+ *       404: { description: Workspace not found }
+ *       409: { description: Workspace exceeds the bounded rollout view }
+ */
+router.get('/operations', async (req, res, next) => {
+  try {
+    const workspaceId = queryText(req, 'workspaceId', true)!;
+    res.json(await getLifecycleOperationsReport({ workspaceId }));
+  } catch (error) {
+    await recordLifecycleEvaluatorError({
+      workspaceId: typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined,
+      operation: 'operations',
+      error,
+    });
     next(error);
   }
 });
@@ -165,6 +205,12 @@ router.get('/specs/:specId', async (req, res, next) => {
     const snapshotId = assertSnapshotId(req.query.snapshotId);
     res.json(await getLifecycleSpec({ workspaceId, specId: req.params.specId, expectedSnapshotId: snapshotId }));
   } catch (error) {
+    await recordLifecycleEvaluatorError({
+      workspaceId: typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined,
+      specId: req.params.specId,
+      operation: 'spec',
+      error,
+    });
     next(error);
   }
 });
@@ -220,6 +266,12 @@ router.get('/specs/:specId/phases/:phaseId', async (req, res, next) => {
       evidencePagination: parsePaginationParams(req, { limit: 25, maxLimit: 100 }),
     }));
   } catch (error) {
+    await recordLifecycleEvaluatorError({
+      workspaceId: typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined,
+      specId: req.params.specId,
+      operation: 'phase',
+      error,
+    });
     next(error);
   }
 });
@@ -313,6 +365,11 @@ router.get('/evidence/:evidenceId', async (req, res, next) => {
     const snapshotId = assertSnapshotId(req.query.snapshotId);
     res.json(await getLifecycleEvidence({ workspaceId, evidenceId: req.params.evidenceId, expectedSnapshotId: snapshotId }));
   } catch (error) {
+    await recordLifecycleEvaluatorError({
+      workspaceId: typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined,
+      operation: 'evidence',
+      error,
+    });
     next(error);
   }
 });

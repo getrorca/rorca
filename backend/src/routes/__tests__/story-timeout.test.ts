@@ -69,10 +69,14 @@ process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
 // Seed workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
+  await execute(`
+    INSERT INTO workspaces (id, label, path)
+    VALUES ('ws-test', 'Test Workspace', $1)
+    ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, path = EXCLUDED.path
+  `, [tmpDir]);
 
   // Create spec file on disk
-  const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');
+  const pendingDir = path.join(tmpDir, 'forge', 'specs', 'pending');
   fs.mkdirSync(pendingDir, { recursive: true });
   fs.writeFileSync(path.join(pendingDir, 'timeout-test.json'), JSON.stringify(spec1));
 
@@ -98,7 +102,7 @@ test('PUT story update accepts timeoutMinutes', async () => {
 
   // Verify persisted to disk
   const raw = JSON.parse(
-    fs.readFileSync(path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending', 'timeout-test.json'), 'utf8')
+    fs.readFileSync(path.join(tmpDir, 'forge', 'specs', 'pending', 'timeout-test.json'), 'utf8')
   );
   const story = raw.userStories.find((s: any) => s.id === 'US-001');
   expect(story.timeoutMinutes).toBe(15);
@@ -114,11 +118,11 @@ test('PUT story update rejects timeoutMinutes below 5', async () => {
   expect(res.body.error).toContain('timeoutMinutes');
 });
 
-test('PUT story update rejects timeoutMinutes above 120', async () => {
+test('PUT story update rejects timeoutMinutes above 240', async () => {
   const res = await request(app)
     .put('/api/specs/timeout-test/stories/US-001')
     .set('Authorization', `Bearer ${authToken}`)
-    .send({ workspaceId: 'ws-test', timeoutMinutes: 200 });
+    .send({ workspaceId: 'ws-test', timeoutMinutes: 241 });
 
   expect(res.status).toBe(400);
   expect(res.body.error).toContain('timeoutMinutes');

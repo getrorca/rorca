@@ -14,6 +14,13 @@ const mockPhase = jest.fn();
 const mockEvidence = jest.fn();
 const mockLearnCloseout = jest.fn();
 const mockLifecycleInvalidation = jest.fn();
+const mockOperations = jest.fn();
+const mockEvaluatorError = jest.fn();
+
+jest.mock('../../lib/lifecycle-operations', () => ({
+  getLifecycleOperationsReport: (...args: unknown[]) => mockOperations(...args),
+  recordLifecycleEvaluatorError: (...args: unknown[]) => mockEvaluatorError(...args),
+}));
 
 jest.mock('../../lib/learn-closeout', () => ({
   generateLearnCloseoutCandidates: (...args: unknown[]) => mockLearnCloseout(...args),
@@ -53,6 +60,8 @@ beforeEach(() => {
   mockEvidence.mockResolvedValue({ id: '7', rawReference: { accessTier: 'auth', rawPayloadIncluded: false } });
   mockLearnCloseout.mockResolvedValue({ status: 'generated', candidateIds: [91] });
   mockLifecycleInvalidation.mockResolvedValue(undefined);
+  mockOperations.mockResolvedValue({ schemaVersion: 'lifecycle-operations.v1', rollout: {}, health: {} });
+  mockEvaluatorError.mockResolvedValue(undefined);
 });
 
 describe('lifecycle aggregate read routes', () => {
@@ -87,6 +96,28 @@ describe('lifecycle aggregate read routes', () => {
     expect(mockEvidence).toHaveBeenCalledWith({ workspaceId: 'ws-a', evidenceId: '7', expectedSnapshotId: snapshotId });
     expect(mockSpec).not.toHaveBeenCalled();
     expect(mockPhase).not.toHaveBeenCalled();
+  });
+
+  test('reports bounded rollout and health through a distinct read-only operational route', async () => {
+    const response = await request(app()).get('/api/lifecycle/operations?workspaceId=ws-a');
+
+    expect(response.status).toBe(200);
+    expect(response.body.schemaVersion).toBe('lifecycle-operations.v1');
+    expect(mockOperations).toHaveBeenCalledWith({ workspaceId: 'ws-a' });
+    expect(mockSpec).not.toHaveBeenCalled();
+  });
+
+  test('audits unexpected evaluator failures without replacing the route error', async () => {
+    mockPortfolio.mockRejectedValueOnce(new Error('database detail that must not enter metrics'));
+
+    const response = await request(app()).get('/api/lifecycle?workspaceId=ws-a');
+
+    expect(response.status).toBe(500);
+    expect(mockEvaluatorError).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-a',
+      operation: 'portfolio',
+      error: expect.any(Error),
+    }));
   });
 
   test('routes spec and phase detail through distinct explicit paths', async () => {
@@ -188,12 +219,13 @@ describe('lifecycle aggregate read routes', () => {
   test('requires workspace scope on every aggregate route', async () => {
     const responses = await Promise.all([
       request(app()).get('/api/lifecycle'),
+      request(app()).get('/api/lifecycle/operations'),
       request(app()).get('/api/lifecycle/specs/safe-spec'),
       request(app()).get('/api/lifecycle/specs/safe-spec/phases/qa'),
       request(app()).get('/api/lifecycle/evidence/7'),
     ]);
 
-    expect(responses.map((response) => response.status)).toEqual([400, 400, 400, 400]);
+    expect(responses.map((response) => response.status)).toEqual([400, 400, 400, 400, 400]);
     expect(mockPortfolio).not.toHaveBeenCalled();
     expect(mockSpec).not.toHaveBeenCalled();
     expect(mockPhase).not.toHaveBeenCalled();

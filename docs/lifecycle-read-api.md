@@ -10,12 +10,14 @@
 | `GET /api/lifecycle/specs/:specId` | Plan, readiness, traceability, run, and snapshot detail | `auth` |
 | `GET /api/lifecycle/specs/:specId/phases/:phaseId` | One phase and paginated evidence | `auth` |
 | `GET /api/lifecycle/evidence/:evidenceId` | Sanitized evidence metadata and raw-reference permission | `auth` |
+| `GET /api/lifecycle/operations` | Bounded rollout/backfill progress and redacted 24-hour health counters | `admin` |
 
-Every request requires `workspaceId`. Detail requests may send the prior `snapshotId`; a mismatch returns `409 CONFLICT` with `details.type = "refresh_required"`, the current snapshot identity, and evidence/decision high-water marks.
+Every request requires `workspaceId`. Detail requests may send the prior `snapshotId`; a mismatch returns `409 CONFLICT` with `details.type = "refresh_required"`, the current snapshot identity, and evidence/decision high-water marks. The operations route is intentionally not a stable public/MCP contract: it exposes workspace-wide operator metadata, performs no mutation, and returns no raw evidence payload.
 
 ## Bounds and ordering
 
 - Portfolio page: default 25, maximum 100 specs; one workspace view is capped at 500 candidates.
+- Operations report: maximum 500 canonical specs, 50 unresolved compile failures/actions, a 100-spec blocked-phase inspection marked `truncated` when incomplete, and a fixed 24-hour event window.
 - Phase evidence page: default 25, maximum 100.
 - Evaluator input: latest 500 evidence and 200 decision records per spec.
 - Traceability collections: maximum 200 entries with `total` and `truncated` metadata.

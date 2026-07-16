@@ -127,9 +127,10 @@ test('POST /api/pipeline/runs/:runId/retry creates new run and retries all faile
     safety: { deploy: false, externalSend: false, allowBackendJest: false },
   });
 
-  // New run should be 'running' with retried_from_run_id
+  // Dispatch persists the new run as queued; only the canonical worker may
+  // transition it to running after validating the approved preview/job.
   const newRun = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
-  expect(newRun.status).toBe('running');
+  expect(newRun.status).toBe('queued');
   expect(newRun.retried_from_run_id).toBe(originalRunId);
 
   // Original run stays as 'failed'

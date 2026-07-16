@@ -111,3 +111,43 @@ This ADR adds contracts and validators, not infrastructure. No lifecycle compone
 - a GitReins repository-policy/guardrail clone.
 
 Use existing Rorca persistence, WAL/SSE boundaries, execution scheduling, retry APIs, worktree handling, and agent adapters. Integrations publish or reference validated evidence through the versioned DTOs. This keeps lifecycle control explainable and KISS: plans say what is required, evidence and decisions say what happened or was governed, and snapshot evaluators derive what the board displays.
+
+## Developer contract guide
+
+### Plane connectors
+
+The five planes above are connected by three explicit execution/closeout contracts, not by shared mutable status:
+
+1. `StoryExecutionManifest` (`story-execution-manifest.v1`) connects lifecycle-safe run preparation to execution. It freezes workspace/spec/run/story/attempt identity, spec/story revisions, execution mode/options, command hashes and validation plan, evidence expectations, repository change policy, worktree/merge boundary, and command-safety profile under `manifestHash`.
+2. `StoryAttemptResult` (`story-attempt-result.v1`) connects the agent process to closeout. It records process outcome, bounded output references, the untrusted proposed completion packet, observed files/commits, host validation observations, known issues, revisions, and manifest identity under `attemptResultId`. It is an observation, not acceptance.
+3. `StoryCloseoutDecision` (`story-closeout-decision.v1`) connects closeout to canonical local story state/evidence normalization. It records `accepted | blocked`, reason codes, criterion-to-host-evidence mappings, normalized evidence references, active subject revision, and one next safe action under `decisionId`. The engine persists this decision before a story may be marked passed.
+
+The authoring/lifecycle-control boundary is the version-1 `LifecycleCompilerInput → LifecyclePlan` contract in `ssdlc-contracts.ts`; the evidence-evaluation boundary is `LifecyclePlan + normalized evidence + governed decisions + run state → LifecycleEvaluation` in `ssdlc-phase-evaluator.ts`. Every contract validates schema and content identity on consumption. `schemaVersion: 1` is a compatibility discriminator only; it does not denote MVP scope, incomplete UX, weaker safety, or permission to omit primary/negative/recovery journeys.
+
+### Compiler profiles and canonical inputs
+
+The compiler deterministically classifies `docs-only`, `code-change`, `data-storage`, `security-sensitive`, `integration`, and `release-operations` from canonical stories, criteria, tags, file hints, risk, and validated annotations. Callers can suggest profile/disposition annotations but cannot force unsupported classification or waive protected gates. Optional sources normalize to explicit empty arrays. Requirement and acceptance-criterion identities, profile order, gate templates, evidence requirements, phase order, compiler version, policy version, and normalized input hash are stable inputs to replay.
+
+The complete client-neutral flow is: skill-first draft/decomposition/preflight → Rorca validation → canonical persistence → durable post-save stages → lifecycle compilation → existing execution engine → attempt result → closeout decision → normalized evidence/governed decisions → snapshot evaluation → human-reviewed Learn candidates. Pi, Hermes, UI, CLI, and API clients can invoke or present these steps but cannot inherit authority from another plane.
+
+### Repositories, APIs, and events
+
+- Contracts/compilation: `ssdlc-contracts.ts`, `ssdlc-plan-compiler.ts`, `ssdlc-plan-service.ts`.
+- Attempt/closeout: `story-execution-packet.ts`, `story-closeout.ts`, canonical `execution-engine.ts`.
+- Evidence/decisions/evaluation: `ssdlc-evidence.ts`, `ssdlc-decisions.ts`, `ssdlc-phase-evaluator.ts`, `ssdlc-lifecycle-read.ts`.
+- Read APIs: `GET /api/lifecycle`, `/specs/:specId`, `/specs/:specId/phases/:phaseId`, `/evidence/:evidenceId`; operations health is the admin-tier `GET /api/lifecycle/operations` projection.
+- Mutations: one-spec/bounded-workspace recompile, evidence ingress, governed decision create/revoke, read-only retry preview, exact retry dispatch, and Learn closeout generation. Mutation replay uses `Idempotency-Key` where specified.
+- SSE: durable writes emit bounded `lifecycle_changed` WAL rows and publish through `sse-hub`. The payload is only `workspaceId`, optional `specId/phaseId/runId`, and `changeKind`. Clients refetch canonical snapshots; SSE is invalidation, not lifecycle truth.
+- Operational WAL: adapter, conflict, evaluator, and retry-denial events contain redacted types/identifiers/countable metadata, never raw evidence payloads.
+
+Swagger annotations and tier rationales are mandatory for every route. Auth-tier lifecycle reads are workspace-owned and not marked stable public. The operations projection is admin-tier and is intentionally excluded from MCP/public-contract generation. Shared contract changes require typecheck, Swagger/tier checks, public-contract stability, license-boundary, and open-core checks.
+
+### Tests and extension points
+
+Contract/compiler fixtures cover every compiler profile and deterministic replay. Repository/migration tests enforce workspace isolation and immutable uniqueness. Evaluator tests cover status precedence, dispositions, wrong-revision evidence, approval expiry/revocation, lineage, and blocked snapshots. Execution regressions cover four agents, implementation/QA/Journey modes, ANSI and PTY waves, cancellation/timeout cleanup, retry option replay/scope, and closeout-before-pass. Frontend tests cover typed API state, matrix/drawer/inspector/actions, accessibility, responsiveness, themes, reduced motion, and explicit operational states; Playwright owns the staging-quality browser journey.
+
+Supported extension points are a versioned compiler profile/gate template, a normalized evidence adapter with server-owned trust, a governed decision policy, or a read-only derived projection. Extensions must preserve canonical phase order, immutable subjects, workspace scoping, snapshot identity, and existing event/scheduler boundaries.
+
+### Explicit non-goals
+
+There is no generic lifecycle designer, arbitrary phase plugin, automatic adapter polling system, lifecycle-owned deploy/merge/send command, second queue/event bus/policy engine, mutable percentage-complete store, agent self-approval, mode-to-phase mapping, or automatic human QA sign-off. Operational health reports implemented counters only; it does not claim provider reachability where no probe exists. See [`../lifecycle-operations-runbook.md`](../lifecycle-operations-runbook.md) for rollout and recovery.
