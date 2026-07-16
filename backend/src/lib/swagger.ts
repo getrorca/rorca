@@ -92,10 +92,46 @@ const options: swaggerJsdoc.Options = {
             passes: { type: 'boolean', example: false },
           },
         },
+        GenesisProvenance: {
+          type: 'object',
+          required: [
+            'packageId',
+            'packageHash',
+            'contentHash',
+            'canonicalStore',
+            'citationSummary',
+            'warningCount',
+            'skippedEvidenceCount',
+            'freshnessTs',
+            'bridgeVersion',
+          ],
+          properties: {
+            packageId: { type: 'string' },
+            packageHash: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+            contentHash: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+            canonicalStore: {
+              type: 'string',
+              enum: [
+                'pglite+genesis-vault',
+                'pglite+pgvector+genesis-vault',
+                'pglite+vault',
+                'genesis-pglite-and-local-vault',
+              ],
+            },
+            citationSummary: { type: 'string', maxLength: 512 },
+            warningCount: { type: 'integer', minimum: 0 },
+            skippedEvidenceCount: { type: 'integer', minimum: 0 },
+            freshnessTs: { type: 'string', format: 'date-time' },
+            bridgeVersion: { type: 'string', maxLength: 64 },
+          },
+          additionalProperties: true,
+        },
         Spec: {
           type: 'object',
           properties: {
-            title: { type: 'string', example: 'my-spec-slug' },
+            id: { type: 'string', example: 'my-spec-slug' },
+            slug: { type: 'string', example: 'my-spec-slug' },
+            title: { type: 'string', example: 'My Spec' },
             userStories: {
               type: 'array',
               items: { $ref: '#/components/schemas/UserStory' },
@@ -103,6 +139,20 @@ const options: swaggerJsdoc.Options = {
             model: {
               type: 'string',
               example: 'claude-sonnet-4-6',
+            },
+            contextUsed: {
+              type: 'object',
+              properties: {
+                genesis: { $ref: '#/components/schemas/GenesisProvenance' },
+              },
+              additionalProperties: true,
+            },
+            contextSummary: {
+              type: 'object',
+              properties: {
+                genesis: { $ref: '#/components/schemas/GenesisProvenance' },
+              },
+              additionalProperties: true,
             },
             generatedAt: { type: 'string', format: 'date-time' },
           },

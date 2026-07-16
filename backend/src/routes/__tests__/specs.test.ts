@@ -889,6 +889,134 @@ describe('POST /api/specs/persist', () => {
     expect(summary.contextUsed).toBeUndefined();
   });
 
+  test('round-trips canonical identity and structured Genesis provenance through explicit-draft readback', async () => {
+    const genesis = {
+      packageId: 'genesis-spec-ready-42',
+      packageHash: `sha256:${'a'.repeat(64)}`,
+      contentHash: `sha256:${'b'.repeat(64)}`,
+      canonicalStore: 'pglite+pgvector+genesis-vault',
+      citationSummary: '4 approved citations; 1 stale item skipped',
+      warningCount: 1,
+      skippedEvidenceCount: 1,
+      freshnessTs: '2026-07-09T00:00:00.000Z',
+      bridgeVersion: '1.0.0',
+      packageRevision: 3,
+    };
+    const payload = {
+      workspaceId: 'ws-test',
+      title: 'Genesis Bridge Contract',
+      slug: 'genesis-bridge-contract',
+      brief: 'Turn an approved Genesis evidence package into a reviewable Rorca draft.',
+      source: 'genesis-explicit-draft',
+      stories: [
+        {
+          id: 'GEN-001',
+          title: 'Preserve evidence lineage',
+          description: 'Keep bounded Genesis package provenance attached to the pending spec.',
+          acceptanceCriteria: [
+            'The canonical spec identity survives persistence and detail readback',
+            'Both Genesis provenance projections survive without flattening',
+          ],
+          dependsOn: [],
+        },
+      ],
+      contextUsed: {
+        text: 'Genesis evidence package genesis-spec-ready-42 informed this caller-owned draft.',
+        meta: {
+          standards: true,
+          conventions: true,
+          project: true,
+          memory: false,
+          schema: false,
+          scopesMatched: ['genesis:approved-evidence'],
+          totalTokens: 384,
+        },
+        genesis,
+      },
+      contextSummary: {
+        directionLayers: {
+          l1: true,
+          l2: { present: true, domain: 'knowledge-management' },
+          l3: true,
+        },
+        estimatedTokens: 384,
+        genesis,
+      },
+      policyPresetId: 'fast_import',
+    };
+
+    const persisted = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(payload);
+
+    expect(persisted.status).toBe(200);
+    expect(persisted.body).toMatchObject({
+      id: payload.slug,
+      slug: payload.slug,
+      status: 'pending',
+      source: payload.source,
+    });
+
+    const saved = JSON.parse(fs.readFileSync(
+      path.join(os.tmpdir(), 'forge', 'specs', 'pending', `${payload.slug}.json`),
+      'utf8',
+    ));
+    expect(saved.id).toBe(payload.slug);
+    expect(saved.slug).toBe(payload.slug);
+    expect(saved.contextUsed.genesis).toEqual(genesis);
+    expect(saved.contextSummary.genesis).toEqual(genesis);
+
+    const readback = await request(app)
+      .get(`/api/specs/${payload.slug}?workspaceId=ws-test`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(readback.status).toBe(200);
+    expect(readback.body.id).toBe(payload.slug);
+    expect(readback.body.slug).toBe(payload.slug);
+    expect(readback.body.contextUsed.genesis).toEqual(genesis);
+    expect(readback.body.contextSummary.genesis).toEqual(genesis);
+  });
+
+  test('rejects malformed structured Genesis provenance at the explicit-draft boundary', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Malformed Genesis Provenance',
+        stories: [{
+          id: 'GEN-001',
+          title: 'Reject malformed lineage',
+          description: 'Do not persist malformed package hashes.',
+          acceptanceCriteria: ['The request fails validation'],
+          dependsOn: [],
+        }],
+        contextUsed: {
+          text: 'Malformed provenance must not survive validation.',
+          meta: {},
+          genesis: {
+            packageId: 'genesis-package',
+            packageHash: 'not-a-sha256-hash',
+            contentHash: `sha256:${'b'.repeat(64)}`,
+            canonicalStore: 'pglite+genesis-vault',
+            citationSummary: 'Approved citations',
+            warningCount: 0,
+            skippedEvidenceCount: 0,
+            freshnessTs: '2026-07-09T00:00:00.000Z',
+            bridgeVersion: '1.0.0',
+          },
+        },
+        policyPresetId: 'fast_import',
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.details).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ['contextUsed', 'genesis', 'packageHash'] }),
+    ]));
+  });
+
   test('accepts policyPresetId on the canonical persist/create path and echoes requestedPolicy', async () => {
     const res = await request(app)
       .post('/api/specs/persist')
@@ -2216,6 +2344,8 @@ describe('GET /api/specs/:specId (detail)', () => {
     const res = await request(app).get('/api/specs/detail-spec?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
+    expect(res.body.id).toBe('detail-spec');
+    expect(res.body.slug).toBe('detail-spec');
     expect(res.body.title).toBe(seeded.title);
     expect(res.body.userStories).toHaveLength(1);
   });
