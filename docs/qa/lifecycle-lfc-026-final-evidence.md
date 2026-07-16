@@ -9,7 +9,9 @@ See LICENSE file in the project root for full license text.
 
 ## Status
 
-**BLOCKED — NOT RELEASE-READY.** Implementation and automated validation do not substitute for the pending Lifecycle Playwright execution and explicit human staging/visual QA bound to the final immutable revision. No merge, deploy, production mutation, external send, or credential transfer is authorized by this report.
+**BLOCKED ONLY ON AUTHORIZED HUMAN SIGN-OFF — AUTOMATED RELEASE GATES COMPLETE.** The integrated candidate at `a359bbf86230f59ccd857bf3998c4ebbd938aec7` passed isolated migrations, focused backend/frontend regressions, real pg-boss cancellation, production build, governance checks, the Lifecycle Playwright golden journey, and the matrix performance budget. No merge, deploy, production mutation, external send, or credential transfer is authorized until an authorized human reviews the retained staging/visual evidence and binds approval to the final published candidate revision.
+
+> Reconciliation update (2026-07-15): this section supersedes the historical command-ledger blockers below. See [`ssdlc-story-reconciliation.md`](./ssdlc-story-reconciliation.md) and the retained [`evidence/ssdlc-lifecycle-golden-journey`](./evidence/ssdlc-lifecycle-golden-journey/) bundle. The historical ledger remains for auditability.
 
 ## References
 
