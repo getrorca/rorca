@@ -22,6 +22,8 @@ describe('RunMetadataPanel enforced options', () => {
           finished_at: '2026-07-15T12:01:00.000Z',
           agent_type: 'pi',
           agent_model: 'openai-codex/gpt-5.6-sol',
+          agentType: 'pi',
+          agentModel: 'openai-codex/gpt-5.6-sol',
           effective_options: {
             model: 'openai-codex/gpt-5.6-sol',
             effort: 'xhigh',

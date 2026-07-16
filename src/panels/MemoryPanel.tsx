@@ -312,6 +312,8 @@ interface MemoryGraphLayout {
   edges: Array<MemoryGraphEdge & { sourceNode: PositionedMemoryGraphNode; targetNode: PositionedMemoryGraphNode }>;
 }
 
+type TokenTone = 'success' | 'warning' | 'error' | 'accent' | 'muted';
+
 const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha', 'Follow-up', 'Run Synthesis'] as const;
 
 const CATEGORY_COLORS: Record<string, string> = {
