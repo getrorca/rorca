@@ -9,6 +9,7 @@
     "dev:worker": "npx tsx src/worker.ts",
     "build": "tsc",
     "test": "node --max-old-space-size=8192 node_modules/.bin/jest",
+    "test:pg-boss-cancel": "jest --config jest.pg-boss.config.ts src/__tests__/pg-boss-cancel.test.ts --runInBand --forceExit",
     "test:golden": "node scripts/run-golden-tests.js",
     "test:golden:update": "node scripts/run-golden-tests.js --update-golden",
     "soak:pty": "tsx scripts/pty-v2-soak.ts",
