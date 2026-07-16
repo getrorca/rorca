@@ -18,6 +18,7 @@
     "reconcile": "npx tsx src/reconcile-daemon-cli.ts",
     "runner:local": "npx tsx src/runner/local-runner.ts",
     "verify:node-pty": "node scripts/verify-node-pty-install.js",
+    "test:install-lifecycle": "node --test scripts/__tests__/install-dependencies.test.js",
     "postinstall": "npm run verify:node-pty"
   },
   "dependencies": {

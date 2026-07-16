@@ -43,6 +43,15 @@ jest.mock('../../lib/pty-manager', () => ({
   PTY_UNAVAILABLE_HINT: 'Run: cd backend && npm rebuild node-pty',
 }));
 
+// Keep the polling fallback deterministic: this suite deliberately attaches
+// without a LISTEN/NOTIFY wakeup so delayed durable commits must be discovered
+// by cursor polling in their committed sequence order.
+jest.mock('../../lib/run-output-listener', () => ({
+  startRunOutputListener: jest.fn(),
+  stopRunOutputListener: jest.fn().mockResolvedValue(undefined),
+  subscribeRunOutput: jest.fn().mockReturnValue(() => {}),
+}));
+
 jest.mock('../../lib/execution-environment-registry', () => ({
   assertExecutionEnvironmentReadyForRun: jest.fn().mockResolvedValue({ ready: true }),
 }));
@@ -64,9 +73,13 @@ let app: Express;
 let authToken: string;
 let tmpDir = '';
 let wsDir = '';
+const originalPtyOutputPollInterval = process.env.RORCA_PTY_OUTPUT_POLL_INTERVAL_MS;
 
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
+  // Minimum supported cadence makes a lost-notification fallback observable
+  // quickly without turning this into an arbitrary long-timeout test.
+  process.env.RORCA_PTY_OUTPUT_POLL_INTERVAL_MS = '250';
   const serverMod = require('../../server');
   app = serverMod.default;
   authToken = await getAuthToken(app);
@@ -103,6 +116,8 @@ afterEach(async () => {
 
 afterAll(() => {
   delete process.env.NODE_ENV;
+  if (originalPtyOutputPollInterval === undefined) delete process.env.RORCA_PTY_OUTPUT_POLL_INTERVAL_MS;
+  else process.env.RORCA_PTY_OUTPUT_POLL_INTERVAL_MS = originalPtyOutputPollInterval;
 });
 
 function seedSpec(slug: string, stories = [
@@ -254,7 +269,7 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(body).not.toContain('event: semantic_step');
   });
 
-  test('PTY live polling streams delayed incremental bytes and replay matches exactly', async () => {
+  test('PTY polling recovers delayed incremental bytes without a notifier and replays them exactly', async () => {
     const runId = await seedRun('running', 'pty');
     const chunks = [
       Buffer.from('delayed fake CLI banner\r\n', 'utf8'),
@@ -315,6 +330,9 @@ describe('PTY attachment trigger and fallback discrimination', () => {
       const expectedPayloads = chunks.map((chunk) => chunk.toString('base64'));
       expect(extractChunkPayloads(liveBody)).toEqual(expectedPayloads);
       expect(liveBody).toContain('"ptyLiveTransport":"postgres-notify+db-replay"');
+      expect(liveBody).toContain('"ptyPollIntervalMs":250');
+      const outputListenerMock = jest.requireMock('../../lib/run-output-listener');
+      expect(outputListenerMock.subscribeRunOutput).toHaveBeenCalledWith(runId, expect.any(Function));
       expect(liveBody).not.toContain('Agent process is still running');
       expect(liveBody).not.toContain('event: semantic_step');
 
