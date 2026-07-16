@@ -1521,7 +1521,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
     const payload: PipelineRetryJobPayloadType = parsed.data;
     const {
-      runId, originalRunId, workspacePath, retrySpecPath, agent, model, worktreePath,
+      runId, originalRunId, storyIds, workspacePath, specPath, retrySpecPath, agent, model, worktreePath,
       sequenceOffset, executionManifestPath, envOverrides, includeGraph,
       terminalMode: payloadTerminalMode, thinkingEnabled, thinkingBudget, effortLevel,
       reasoningEffort, previewHash, approvedPreview: approvedPreviewRaw, generatedPlanHash,

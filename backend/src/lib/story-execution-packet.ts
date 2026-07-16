@@ -7,7 +7,7 @@
 
 import crypto from 'node:crypto';
 import type { AgentType } from './config';
-import type { TerminalMode } from './terminal-mode';
+import { isTerminalMode, type TerminalMode } from './terminal-mode';
 import {
   buildPiDoneChecklist,
   inferPiCandidateTests,
@@ -237,7 +237,7 @@ function normalizeManifestInput(input: StoryExecutionManifestInput): Omit<StoryE
   if (!(['claude', 'opencode', 'codex', 'pi'] as const).includes(input.execution.agent)) {
     throw new TypeError('execution.agent is invalid');
   }
-  if (!(['ansi-html', 'pty'] as const).includes(input.execution.terminal)) {
+  if (!isTerminalMode(input.execution.terminal)) {
     throw new TypeError('execution.terminal is invalid');
   }
   if (!(['direct', 'pr', 'draft-pr', 'branch-only'] as const).includes(input.execution.merge.strategy)) {

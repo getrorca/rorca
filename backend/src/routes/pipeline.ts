@@ -28,7 +28,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
-import { activeAgent, type AgentType } from '../lib/config';
+import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
@@ -127,6 +127,7 @@ import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '..
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
 import { createRunnerJob } from '../lib/execution-runner-jobs';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
+import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -1349,6 +1350,10 @@ interface PipelineRunRow {
   include_graph: boolean;
   terminal_mode: TerminalMode | null;
   effective_options: EffectiveRunOptions | null;
+  idempotency_key?: string | null;
+  task_manifest_id?: string | null;
+  task_manifest_artifacts?: Record<string, unknown> | string | null;
+  trigger_options?: Record<string, unknown> | string | null;
 }
 
 function resolveRequestedTerminalMode(value: string | null | undefined): TerminalMode {
@@ -1819,7 +1824,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       if (dispatchStory.excluded) continue;
       if (resolveStoryAgent(dispatchStory as EngineUserStory, resolvedAgentType) !== 'pi') continue;
       preflightPiSelection(
-        dispatchStory.model ?? resolvedAgentModel,
+        dispatchStory.model ?? executionOptions.resolvedAgentModel,
         dispatchStory.effort ?? resolvedReasoningEffort,
       );
     }

@@ -472,13 +472,13 @@ interface PiRpcServer {
   ready: boolean;
   cwd: string;
   model: string | null;
+  thinkingLevel: string | null;
   skillFiles: string[];
   mcpServersSignature: string;
   detachedProcessGroup: boolean;
 }
-let _piRpcServer: PiRpcServer | null = null;
+const _piRpcServers = new Set<PiRpcServer>();
 let _piRpcExitCleanupRegistered = false;
-let _piRpcStoryQueue: Promise<void> = Promise.resolve();
 
 const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
@@ -1243,11 +1243,6 @@ function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void)
   };
 }
 
-function samePiSkillFiles(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((value, index) => value === b[index]);
-}
-
 function normalizePiMcpServers(mcpServers?: Record<string, string>): string {
   if (!mcpServers || Object.keys(mcpServers).length === 0) return '';
   return JSON.stringify(Object.entries(mcpServers).sort(([a], [b]) => a.localeCompare(b)));
@@ -1258,22 +1253,10 @@ async function startPiRpcServer(
   model: string | null,
   skillFiles: string[] = [],
   mcpServers?: Record<string, string>,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Promise<PiRpcServer> {
+  const thinkingLevel = resolvePiThinkingLevel(model, effortLevel);
   const mcpServersSignature = normalizePiMcpServers(mcpServers);
-  if (
-    _piRpcServer?.ready
-    && _piRpcServer.cwd === cwd
-    && _piRpcServer.model === model
-    && samePiSkillFiles(_piRpcServer.skillFiles, skillFiles)
-    && (mcpServersSignature === '' || _piRpcServer.mcpServersSignature === mcpServersSignature)
-  ) {
-    return _piRpcServer;
-  }
-
-  if (_piRpcServer) {
-    await stopPiRpcServer();
-  }
-
   const piSelection = resolvePiCliSelection(model);
   const explicitExtensions = resolvePiExtensionPaths();
   const args = [
@@ -1284,9 +1267,10 @@ async function startPiRpcServer(
     ...explicitExtensions.flatMap(extensionPath => ['--extension', extensionPath]),
     ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
     ...(piSelection.model ? ['--model', piSelection.model] : []),
+    ...(thinkingLevel ? ['--thinking', thinkingLevel] : []),
     ...skillFiles.flatMap(skillFile => ['--skill', skillFile]),
   ];
-  logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'} mcp=${mcpServersSignature || 'none'}`);
+  logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} thinking=${thinkingLevel ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'} mcp=${mcpServersSignature || 'none'}`);
   const env = buildGuardedAgentEnv(cwd);
   if (mcpServers?.rorca) {
     env.RORCA_PI_MCP_URL = mcpServers.rorca;
@@ -1311,6 +1295,7 @@ async function startPiRpcServer(
     ready: false,
     cwd,
     model,
+    thinkingLevel,
     skillFiles,
     mcpServersSignature,
     detachedProcessGroup,
@@ -1393,9 +1378,7 @@ async function startPiRpcServer(
   child.on('exit', (code, signal) => {
     detachStdoutReader();
     server.ready = false;
-    if (_piRpcServer === server) {
-      _piRpcServer = null;
-    }
+    _piRpcServers.delete(server);
     const exitMessage = `pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
     failPending(exitMessage);
     for (const listener of [...server.eventListeners]) {
@@ -1415,7 +1398,7 @@ async function startPiRpcServer(
   }
 
   server.ready = true;
-  _piRpcServer = server;
+  _piRpcServers.add(server);
 
   if (!_piRpcExitCleanupRegistered) {
     _piRpcExitCleanupRegistered = true;
@@ -1435,16 +1418,22 @@ async function startPiRpcServer(
   return server;
 }
 
-async function stopPiRpcServer(): Promise<void> {
-  const server = _piRpcServer;
-  if (!server) return;
-
-  _piRpcServer = null;
+async function stopSinglePiRpcServer(server: PiRpcServer): Promise<void> {
+  _piRpcServers.delete(server);
   server.ready = false;
   await terminatePiOwnedProcessTree(server.process, {
     detachedProcessGroup: server.detachedProcessGroup,
     graceMs: 10_000,
   });
+}
+
+async function stopPiRpcServer(server?: PiRpcServer): Promise<void> {
+  if (server) {
+    await stopSinglePiRpcServer(server);
+    return;
+  }
+
+  await Promise.all([..._piRpcServers].map(activeServer => stopSinglePiRpcServer(activeServer)));
 }
 
 function sendPiRpcCommand(server: PiRpcServer, command: object): Promise<unknown> {
@@ -2755,7 +2744,7 @@ function runAgent(
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, mcpServers);
     case 'pi':
-      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers);
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers, effortLevel);
   }
 }
 
@@ -3366,21 +3355,20 @@ async function spawnPiRpc(
   piServerSkillFiles: string[] = [],
   _piSessionOptions?: PiSessionOptions,
   mcpServers?: Record<string, string>,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Promise<AgentResult> {
-  const previousStory = _piRpcStoryQueue;
-  let releaseStoryQueue!: () => void;
-  const currentStory = new Promise<void>(resolve => {
-    releaseStoryQueue = resolve;
-  });
-  _piRpcStoryQueue = currentStory;
-
-  await previousStory;
-
   const startTime = Date.now();
-  try {
-    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
-    let server = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers);
+  let serverForCleanup: PiRpcServer | null = null;
+  const launchPiRpcServer = async (): Promise<PiRpcServer> => {
+    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
+    const launchedServer = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers, effortLevel);
+    serverForCleanup = launchedServer;
     logger.info('[pi-rpc] pi RPC server started');
+    return launchedServer;
+  };
+
+  try {
+    let server = await launchPiRpcServer();
 
     let piSessionId: string | undefined;
     try {
@@ -3392,8 +3380,9 @@ async function spawnPiRpc(
       const message = error instanceof Error ? (error.stack || error.message) : String(error);
       logger.warn(`[pi-rpc] Session bootstrap failed on first attempt; restarting RPC server once. ${message}`);
       logger.warn(`[pi-rpc] First-attempt stderr tail:\n${server.stderr.slice(-4096)}`);
-      await stopPiRpcServer();
-      server = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers);
+      await stopPiRpcServer(server);
+      if (serverForCleanup === server) serverForCleanup = null;
+      server = await launchPiRpcServer();
       logger.info('[pi-rpc] pi RPC server restarted after bootstrap failure');
       piSessionId = await preparePiRpcSession(
         (command) => sendPiRpcCommand(server, command),
@@ -3593,7 +3582,9 @@ async function spawnPiRpc(
       };
     }
   } finally {
-    releaseStoryQueue();
+    if (serverForCleanup) {
+      await stopPiRpcServer(serverForCleanup);
+    }
   }
 }
 
@@ -6049,7 +6040,7 @@ async function executeStory(
             story, config, mode, playbook, logDir, workspaceId, retryCounts,
             storyCwd, worktreeInfo, undefined, allStories,
             fallback, fallback === 'opencode' ? config.attachAddr : null,
-            personaRegistry,
+            personaRegistry, waveIndex, spec, pendingIntegratedPasses,
           );
         }
 
@@ -6260,7 +6251,7 @@ async function executeStory(
                 story, config, mode, playbook, logDir, workspaceId, retryCounts,
                 storyCwd, worktreeInfo, undefined, allStories,
                 noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
-                personaRegistry, waveIndex, spec,
+                personaRegistry, waveIndex, spec, pendingIntegratedPasses,
               );
             }
 
@@ -7436,7 +7427,7 @@ async function main(): Promise<void> {
   const resumeCtx = getResumeContext(config.cwd, specId);
 
   if (requiredEngines.has('pi')) {
-    await startPiRpcServer(config.cwd, config.agentModel, piServerSkillBundle?.skillFiles ?? []);
+    logger.info('[pi-rpc] Pi story RPC servers will be started per story for wave-parallel execution');
   }
 
   async function cleanupBrowserServers(): Promise<void> {
@@ -7698,6 +7689,7 @@ async function runParallel(
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
+  const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
@@ -7782,7 +7774,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index, specForBrowserMcp)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index, specForBrowserMcp, pendingIntegratedPasses)
           .then(result => ({ storyId: story.id, result }));
     });
 
