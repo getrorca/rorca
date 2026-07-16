@@ -35,17 +35,17 @@ describe('test database safety', () => {
   test('verifies server-reported database truth and expected target', async () => {
     const matchingClient = {
       query: jest.fn().mockResolvedValue({
-        rows: [{ database: 'rorca_test', user: 'rorca_test_runner' }],
+        rows: [{ database: 'rorca_test', user: 'rorca_test_runner', owner: 'rorca_test_runner' }],
       }),
     };
     await expect(assertConnectedTestDatabase(
       matchingClient,
-      'postgresql://runner:secret@localhost:5433/rorca_test',
-    )).resolves.toEqual({ database: 'rorca_test', user: 'rorca_test_runner' });
+      'postgresql://rorca_test_runner:secret@localhost:5433/rorca_test',
+    )).resolves.toEqual({ database: 'rorca_test', user: 'rorca_test_runner', owner: 'rorca_test_runner' });
 
     const productionClient = {
       query: jest.fn().mockResolvedValue({
-        rows: [{ database: 'rorca', user: 'admin' }],
+        rows: [{ database: 'rorca', user: 'admin', owner: 'admin' }],
       }),
     };
     await expect(assertConnectedTestDatabase(
@@ -55,13 +55,27 @@ describe('test database safety', () => {
 
     const wrongTestClient = {
       query: jest.fn().mockResolvedValue({
-        rows: [{ database: 'other_test', user: 'runner' }],
+        rows: [{ database: 'other_test', user: 'runner', owner: 'runner' }],
       }),
     };
     await expect(assertConnectedTestDatabase(
       wrongTestClient,
       'postgresql://runner:secret@localhost:5433/rorca_test',
     )).rejects.toThrow(/expected "rorca_test"/);
+
+    await expect(assertConnectedTestDatabase({
+      query: jest.fn().mockResolvedValue({
+        rows: [{ database: 'rorca_test', user: 'rorca', owner: 'runner' }],
+      }),
+    }, 'postgresql://runner:secret@localhost:5433/rorca_test'))
+      .rejects.toThrow(/Refusing connected role "rorca"/);
+
+    await expect(assertConnectedTestDatabase({
+      query: jest.fn().mockResolvedValue({
+        rows: [{ database: 'rorca_test', user: 'runner', owner: 'rorca' }],
+      }),
+    }, 'postgresql://runner:secret@localhost:5433/rorca_test'))
+      .rejects.toThrow(/Refusing database owner "rorca"/);
   });
 
   test('incident regression A: leave mutable DATABASE_URL pointing away from test', async () => {

@@ -27,7 +27,7 @@
 import * as fs from 'fs';
 import { Pool, PoolClient, PoolConfig, type QueryConfig, type QueryResultRow } from 'pg';
 import { logger } from '../lib/logger';
-import { assertTestDatabaseName } from '../lib/test-db-safety';
+import { assertConnectedTestDatabase, assertTestDatabaseName } from '../lib/test-db-safety';
 import { runPgMigrations } from './pg-index';
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -340,10 +340,7 @@ const verifiedTestClients = new WeakSet<PoolClient>();
 
 async function assertLiveTestConnection(client: PoolClient): Promise<void> {
   if (process.env.NODE_ENV !== 'test' || verifiedTestClients.has(client)) return;
-  const result = await client.query<{ database: string }>(
-    'SELECT current_database() AS database',
-  );
-  assertTestDatabaseName(result.rows[0]?.database || '', 'connected test database');
+  await assertConnectedTestDatabase(client, process.env.DATABASE_URL!);
   verifiedTestClients.add(client);
 }
 

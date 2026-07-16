@@ -5237,10 +5237,11 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
  */
 router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
   try {
-    const runId = String(req.params.runId);
-    if (!/^[1-9][0-9]*$/.test(runId)) {
+    const runIdText = String(req.params.runId);
+    if (!/^[1-9][0-9]*$/.test(runIdText)) {
       throw new ValidationError('Invalid runId');
     }
+    const runId = normalizeWorkerRunId(runIdText);
 
     const run = await queryOne<{
       id: string;

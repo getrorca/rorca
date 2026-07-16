@@ -233,14 +233,14 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     );
   });
 
-  test('payload preserves the positive BIGINT runId as a decimal string', async () => {
+  test('payload normalizes the positive BIGINT runId to the numeric worker contract', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
     await postRetryMerge(runId);
 
     const payload = mockBossSend.mock.calls[0][1];
-    expect(typeof payload.runId).toBe('string');
-    expect(payload.runId).toBe(runId);
-    expect(payload.runId).toMatch(/^[1-9][0-9]*$/);
+    expect(typeof payload.runId).toBe('number');
+    expect(payload.runId).toBe(Number(runId));
+    expect(Number.isSafeInteger(payload.runId)).toBe(true);
   });
 
   test('payload branch matches run branch_name', async () => {
@@ -780,7 +780,7 @@ describe('performMerge()', () => {
 
     expect(events.length).toBeGreaterThanOrEqual(1);
     const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
-    expect(payload.run_id).toBe(runId);
+    expect(payload.run_id).toBe(Number(runId));
     expect(payload.branchName).toBe('feat/auto-merge-test-branch');
     expect(payload.mergeCommitSha).toBe('wal-test-sha');
   });
@@ -814,7 +814,7 @@ describe('performMerge()', () => {
 
     expect(events.length).toBeGreaterThanOrEqual(1);
     const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
-    expect(payload.run_id).toBe(runId);
+    expect(payload.run_id).toBe(Number(runId));
     expect(payload.conflictFiles).toContain('src/conflict-file.ts');
   });
 

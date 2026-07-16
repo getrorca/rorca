@@ -204,8 +204,8 @@ describe('db-strategy', () => {
     expect(process.env.DATABASE_URL).toBe('postgres://user:pass@db.example.com:5432/rorca?sslmode=require');
   });
 
-  it('preserves a local *_test database name while applying the selected mode host/port', () => {
-    process.env.DATABASE_URL = 'postgres://rorca:rorca@localhost:5433/rorca_test';
+  it('preserves the entire dedicated test credential instead of applying production mode credentials', () => {
+    process.env.DATABASE_URL = 'postgres://rorca_test_runner:dedicated@localhost:5433/rorca_test';
     mockReadFileSync.mockImplementation((target: string) => {
       if (target.endsWith('/db-mode')) return 'docker\n';
       if (String(target).includes('/bin/rorca.ts')) return 'const MANAGED_PG_PORT = 5433;';
@@ -214,10 +214,10 @@ describe('db-strategy', () => {
     const { applySelectedDbModeEnvironment } = require('../db-strategy');
     expect(applySelectedDbModeEnvironment()).toEqual({
       mode: 'docker',
-      databaseUrl: 'postgres://rorca:rorca@localhost:5432/rorca_test',
-      changed: true,
+      databaseUrl: 'postgres://rorca_test_runner:dedicated@localhost:5433/rorca_test',
+      changed: false,
     });
-    expect(process.env.DATABASE_URL).toBe('postgres://rorca:rorca@localhost:5432/rorca_test');
+    expect(process.env.DATABASE_URL).toBe('postgres://rorca_test_runner:dedicated@localhost:5433/rorca_test');
   });
 
   it('redacts credentials from database URLs in the canonical capability model', () => {

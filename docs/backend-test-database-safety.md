@@ -9,11 +9,12 @@ Jest now fails closed unless all of these are true:
 1. A test target is explicitly supplied through `RORCA_TEST_DATABASE_URL`, `DATABASE_URL_TEST`, or `~/.rorca/test-db.env`.
 2. The URL database name ends in `_test`.
 3. PostgreSQL reports the same database from `current_database()` after connecting.
-4. The server-reported name also ends in `_test`.
+4. The connected role exactly matches the URL login and owns the dedicated database.
+5. The server-reported name also ends in `_test`.
 
-Production `DATABASE_URL` is deliberately ignored when selecting the Jest target. The cleanup hook captures one immutable test URL at module load and does not follow later mutations to `process.env.DATABASE_URL`.
+Production `DATABASE_URL` is deliberately ignored when selecting the Jest target. The cleanup hook captures one immutable test URL at module load and does not follow later mutations to `process.env.DATABASE_URL`. Runtime database-mode selection preserves the complete dedicated URL; replacing only its database suffix on production credentials is forbidden.
 
-Jest does not create, drop, or recreate databases during global setup. Provision the test database before running the suite.
+Jest does not create, drop, or recreate databases during global setup. Provision the test database and required extensions (`pgcrypto`, `vector`, and optionally `age`) before running the suite.
 
 ## Local least-privilege setup
 

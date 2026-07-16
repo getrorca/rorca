@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
-import { transaction } from '../db/index';
+import { queryOne, transaction } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { markStoryPassed } from './execution-engine';
 import { ConflictError, NotFoundError, UnprocessableError } from './errors';
@@ -33,6 +33,15 @@ export const checkpointReconciliationSchema = z.object({
   attestationDigest: z.string().regex(DIGEST, 'attestationDigest must be a SHA-256 digest'),
 }).strict();
 export type CheckpointReconciliationInput = z.infer<typeof checkpointReconciliationSchema>;
+
+export const checkpointAttestationLookupSchema = checkpointReconciliationSchema.pick({
+  workspaceId: true,
+  runId: true,
+  storyId: true,
+  branch: true,
+  checkpointSha: true,
+}).strict();
+export type CheckpointAttestationLookupInput = z.infer<typeof checkpointAttestationLookupSchema>;
 
 export const checkpointValidationAttestationSchema = z.object({
   id: z.string().uuid(),
@@ -84,7 +93,38 @@ function attestationHash(attestation: CheckpointValidationAttestation): string {
 }
 export { attestationHash };
 
-/** Called by trusted validation-gate code; there is deliberately no HTTP/MCP route. */
+/** Read-only lookup used by trusted supervisors; it never creates an attestation. */
+export async function getCheckpointAttestationReference(input: CheckpointAttestationLookupInput): Promise<{
+  attestationId: string;
+  attestationDigest: string;
+  validationGate: string;
+  expiresAt: string;
+} | undefined> {
+  const parsed = checkpointAttestationLookupSchema.parse(input);
+  const row = await queryOne<{
+    id: string;
+    evidence_digest: string;
+    validation_gate: string;
+    expires_at: string;
+  }>(
+    `SELECT id, evidence_digest, validation_gate, expires_at
+       FROM checkpoint_validation_attestations
+      WHERE workspace_id = $1 AND run_id = $2 AND story_id = $3
+        AND branch_name = $4 AND checkpoint_sha = $5
+        AND revoked_at IS NULL AND expires_at > NOW()
+      ORDER BY passed_at DESC
+      LIMIT 1`,
+    [parsed.workspaceId, parsed.runId, parsed.storyId, parsed.branch, parsed.checkpointSha.toLowerCase()],
+  );
+  return row ? {
+    attestationId: row.id,
+    attestationDigest: row.evidence_digest,
+    validationGate: row.validation_gate,
+    expiresAt: new Date(row.expires_at).toISOString(),
+  } : undefined;
+}
+
+/** Called by trusted validation-gate code; there is deliberately no write HTTP/MCP route. */
 export async function recordCheckpointValidationAttestation(attestation: CheckpointValidationAttestation): Promise<void> {
   const parsed = checkpointValidationAttestationSchema.parse(attestation);
   if (Date.parse(parsed.expiresAt) <= Date.parse(parsed.passedAt)) {

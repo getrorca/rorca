@@ -1,17 +1,23 @@
 import * as fs from 'fs';
 
-jest.mock('../../db/index', () => ({ transaction: jest.fn() }));
+jest.mock('../../db/index', () => ({ queryOne: jest.fn(), transaction: jest.fn() }));
 jest.mock('fs', () => ({ existsSync: jest.fn(), readFileSync: jest.fn() }));
 jest.mock('../execution-engine', () => ({ markStoryPassed: jest.fn() }));
 jest.mock('../sse-hub', () => ({ broadcastAll: jest.fn() }));
 jest.mock('simple-git', () => jest.fn());
 
-import { transaction } from '../../db/index';
+import { queryOne, transaction } from '../../db/index';
 import { markStoryPassed } from '../execution-engine';
 import { broadcastAll } from '../sse-hub';
 import simpleGit from 'simple-git';
-import { checkpointReconciliationSchema, reconcileCheckpoint, type CheckpointReconciliationInput } from '../checkpoint-reconciliation';
+import {
+  checkpointReconciliationSchema,
+  getCheckpointAttestationReference,
+  reconcileCheckpoint,
+  type CheckpointReconciliationInput,
+} from '../checkpoint-reconciliation';
 
+const mockedQueryOne = queryOne as jest.Mock;
 const mockedTransaction = transaction as jest.Mock;
 const mockedMarkPassed = markStoryPassed as jest.Mock;
 const mockedBroadcast = broadcastAll as jest.Mock;
@@ -55,6 +61,17 @@ describe('checkpoint reconciliation attestation contract', () => {
     mockedGit.mockReturnValue({ raw: jest.fn().mockResolvedValue(`${SHA}\n`) });
     mockedMarkPassed.mockResolvedValue({ changed: true, storyFound: true });
     installTransaction();
+  });
+
+  it('resolves only an existing trusted attestation without creating one', async () => {
+    mockedQueryOne.mockResolvedValueOnce({
+      id: ATTESTATION_ID, evidence_digest: DIGEST, validation_gate: 'ci',
+      expires_at: '2026-07-05T00:00:00.000Z',
+    });
+    await expect(getCheckpointAttestationReference({
+      workspaceId: input.workspaceId, runId: input.runId, storyId: input.storyId,
+      branch: input.branch, checkpointSha: input.checkpointSha,
+    })).resolves.toMatchObject({ attestationId: ATTESTATION_ID, attestationDigest: DIGEST, validationGate: 'ci' });
   });
 
   it('requires an opaque full-head attestation, not caller validation prose', () => {

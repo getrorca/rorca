@@ -2,15 +2,24 @@ import express from 'express';
 import request from 'supertest';
 
 jest.mock('../../lib/checkpoint-reconciliation', () => ({
+  checkpointAttestationLookupSchema: require('zod').z.object({
+    workspaceId: require('zod').z.string(),
+    runId: require('zod').z.number().int().positive(),
+    storyId: require('zod').z.string(),
+    branch: require('zod').z.string(),
+    checkpointSha: require('zod').z.string().length(40),
+  }),
   checkpointReconciliationSchema: require('zod').z.object({
     workspaceId: require('zod').z.string(),
   }).passthrough(),
+  getCheckpointAttestationReference: jest.fn(),
   reconcileCheckpoint: jest.fn(),
 }));
 
 import recoveryRouter from '../recovery';
-import { reconcileCheckpoint } from '../../lib/checkpoint-reconciliation';
+import { getCheckpointAttestationReference, reconcileCheckpoint } from '../../lib/checkpoint-reconciliation';
 
+const mockedLookup = getCheckpointAttestationReference as jest.Mock;
 const mockedReconcile = reconcileCheckpoint as jest.Mock;
 const app = express();
 app.use(express.json());
@@ -35,6 +44,20 @@ describe('admin recovery checkpoint route boundary', () => {
     expect(response.status).toBe(400);
     expect(response.body.code).toBe('VALIDATION_ERROR');
     expect(mockedReconcile).not.toHaveBeenCalled();
+  });
+
+  it('returns only an existing opaque trusted-attestation reference', async () => {
+    mockedLookup.mockResolvedValueOnce({
+      attestationId: '11111111-1111-4111-8111-111111111111',
+      attestationDigest: 'a'.repeat(64),
+      validationGate: 'ci',
+      expiresAt: '2026-07-05T00:00:00.000Z',
+    });
+    const response = await request(app).get('/api/admin/recovery/checkpoints/attestation').query({
+      workspaceId: 'ws', runId: 21, storyId: 'US-002', branch: 'recovery/checkpoint', checkpointSha: '0'.repeat(40),
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.attestationId).toBe('11111111-1111-4111-8111-111111111111');
   });
 
   it('uses 201 for reconciliation and 200 for an idempotent replay', async () => {

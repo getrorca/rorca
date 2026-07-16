@@ -15,6 +15,7 @@ interface Queryable {
 export interface ConnectedTestDatabase {
   database: string;
   user: string;
+  owner: string;
 }
 
 export function databaseNameFromUrl(databaseUrl: string): string {
@@ -110,11 +111,17 @@ export async function assertConnectedTestDatabase(
   expectedUrl: string,
 ): Promise<ConnectedTestDatabase> {
   const expectedDatabase = assertTestDatabaseUrl(expectedUrl);
-  const result = await client.query<{ database: string; user: string }>(
-    'SELECT current_database() AS database, current_user AS user',
+  const expectedUser = decodeURIComponent(new URL(expectedUrl).username);
+  const result = await client.query<{ database: string; user: string; owner: string }>(
+    `SELECT current_database() AS database,
+            current_user AS user,
+            pg_get_userbyid(datdba) AS owner
+       FROM pg_database
+      WHERE datname = current_database()`,
   );
   const database = result.rows[0]?.database || '';
   const user = result.rows[0]?.user || '';
+  const owner = result.rows[0]?.owner || '';
 
   assertTestDatabaseName(database, 'connected database');
   if (database !== expectedDatabase) {
@@ -122,6 +129,16 @@ export async function assertConnectedTestDatabase(
       `[test-db-safety] Refusing connected database "${database}": expected "${expectedDatabase}"`,
     );
   }
+  if (!expectedUser || user !== expectedUser) {
+    throw new Error(
+      `[test-db-safety] Refusing connected role "${user || '(unknown)'}": expected dedicated role "${expectedUser || '(missing)'}"`,
+    );
+  }
+  if (owner !== user) {
+    throw new Error(
+      `[test-db-safety] Refusing database owner "${owner || '(unknown)'}": dedicated role "${user}" must own "${database}"`,
+    );
+  }
 
-  return { database, user };
+  return { database, user, owner };
 }

@@ -8,12 +8,16 @@ test('recovery contracts are discoverable with correct REST/MCP authority', () =
   });
   expect(spec.paths['/api/pipeline/telemetry']?.get.responses['200'].content['application/json'].schema.required)
     .toEqual(expect.arrayContaining(['contractVersion', 'observedAt', 'runs']));
+  expect(spec.paths['/api/admin/recovery/checkpoints/attestation']?.get).toMatchObject({
+    'x-rorca-tier': 'admin', 'x-rorca-mcp': false,
+  });
   expect(spec.paths['/api/admin/recovery/checkpoints/reconcile']?.post).toMatchObject({
     'x-rorca-tier': 'admin', 'x-rorca-mcp': false,
   });
 
   const toolNames = getMcpToolDefinitions(spec).map((definition) => definition.toolName);
   expect(toolNames).toContain('rorca_pipeline_telemetry');
+  expect(toolNames).not.toContain('rorca_admin_recovery_checkpoints_attestation');
   expect(toolNames).not.toContain('rorca_admin_recovery_checkpoints_reconcile');
   expect(toolNames).not.toContain('rorca_repair_checkpoints_reconcile');
 });

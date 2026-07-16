@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `6.0.0`
+Contract version: `7.0.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -56,6 +56,7 @@ Contract version: `6.0.0`
 | GET | `/api/memory/review` | query:workspaceId (required) | `sha256:63b32011fe10f254210b4a0050fd3c7b27f8f94c4fcb454e4b9e4ab46328a181` |
 | POST | `/api/memory/review/{id}/action` | body:action (required), body:workspaceId (required), path:id (required) | `sha256:05178c17f8f5f366c095540d5670dbe112e2d4405f37de5e4009ee4e048154b7` |
 | POST | `/api/operator-chat/query` | body:input (required), body:maxTokens (optional), body:mode (optional), body:model (optional), body:operatorContext (optional), body:source (optional), body:useModel (optional), body:workspaceId (optional) | `sha256:a84a3bbfd814b78c662cb45d2a1bb8a7d123ae4fd8869c2e45158bdeabf1a756` |
+| GET | `/api/pipeline/queue/health` | query:workspaceId (required) | `sha256:d81a5ba973bf8d6eb5ec5a8d1b3431322f0d40bb4dc501f6624db1d7a318ba6d` |
 | GET | `/api/pipeline/runs` | query:workspaceId (required) | `sha256:589fed0adef7b6c4a26a13c733cb3ec514d6b7643a99c82ded0c361a5ab6dfb2` |
 | GET | `/api/pipeline/runs/{runId}` | path:runId (required) | `sha256:30043f8edd511560ee7725204fe083b92c03e29d0f3395c13f6e025e3550dc5e` |
 | POST | `/api/pipeline/runs/{runId}/cancel` | path:runId (required) | `sha256:ad6baae22c0e39dd86fef78bc70d6a748e644f8931b3e666db4e9790150b7da3` |
@@ -67,6 +68,7 @@ Contract version: `6.0.0`
 | GET | `/api/pipeline/runs/{runId}/retrieval-telemetry/{telemetryId}` | path:runId (required), path:telemetryId (required) | `sha256:79a73a02d19c6bedd4af114f4e25cd55bd631d570264d276f3a0b952472e6d1d` |
 | POST | `/api/pipeline/runs/{runId}/retry` | body:forceSequential (optional), body:storyIds (optional), path:runId (required) | `sha256:719233bff39bb836289f4d0b4477bf43690765ca36cb48de49dd9173e75abed9` |
 | POST | `/api/pipeline/task-manifests/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:executionEnvironmentId (optional), body:idempotencyKey (required), body:manifest (required), body:mergeStrategy (optional), body:modelOverride (optional), body:terminalMode (optional), body:terminal_mode (optional), body:workspaceId (required) | `sha256:8beff74c282556146184c8baf891822626022fecfb02d921d3caa877f56c1bab` |
+| GET | `/api/pipeline/telemetry` | query:workspaceId (required) | `sha256:a98ca0732c683b8b2977df8cb1fdf3589cb73658093965c348fe53775f34058a` |
 | POST | `/api/pipeline/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:forceRerun (optional), body:includeGraph (optional), body:mergeStrategy (optional), body:modelOverride (optional), body:readinessOverride (optional), body:rerunFromScratch (optional), body:specPath (required), body:storyId (optional), body:terminal_mode (optional), body:thinkingBudget (optional), body:thinkingEnabled (optional), body:triggerType (optional), body:workspaceId (required) | `sha256:bd48a5ff3dcd07743ba1b2aec432d807e3fc4fd4a361b71eab434f230d642a24` |
 | GET | `/api/pipeline/worker/health` | - | `sha256:f295ae7b4c1388e4533b9b6cddd516951b92cf987e36b62c8c2c2e510a19607c` |
 | GET | `/api/recall` | query:category (optional), query:includeHealth (optional), query:includeRuns (optional), query:query (optional), query:storyText (optional), query:titlesOnly (optional), query:workspaceId (required) | `sha256:9c5672c3fdf5e0ded65c40f03760271c48722f77158c6b46a87c99621e8d5a9a` |
@@ -111,7 +113,7 @@ Contract version: `6.0.0`
 | POST | `/api/specs/persist` | body:brief (optional), body:contextSummary (optional), body:contextUsed (optional), body:overwrite (optional), body:policyPresetId (optional), body:postSave (optional), body:postSavePolicy (optional), body:slug (optional), body:source (optional), body:specBrief (optional), body:stories (required), body:storyPrefix (optional), body:title (required), body:userStories (optional), body:workspaceId (required) | `sha256:a22c0394db4df23994ec939c10f8f83ab1442ee82c468f41992bee2c5ecfe60f` |
 | GET | `/api/specs/repair-candidates` | query:category (optional), query:limit (optional), query:workspaceId (required) | `sha256:370f4bd1f6d1986f822dc51b1575191fee28d0c0b167a894d71db795e8c434db` |
 | GET | `/api/specs/search/stories` | query:q (required), query:workspaceId (required) | `sha256:6292594de8bef5c8eab95de31ebb21a98557ecb8656e31066fa3b4dc2ec522f0` |
-| GET | `/api/version` | - | `sha256:580155644cbfddc9b3efa50861d1c011a29c2930c73dabbf45fdb8265de30f95` |
+| GET | `/api/version` | - | `sha256:4ace065af3de1d868abffc084748b8bcbd6abab61e1b36c85a56c90d70b92527` |
 | GET | `/api/workspaces` | query:cursor (optional), query:limit (optional) | `sha256:17b8dea2ff89bb1d8c7acb63659fe62b73747dbc118c3047bf30ce80e029ef69` |
 | GET | `/api/workspaces/{workspaceId}/capture/last-rorca-run` | path:workspaceId (required) | `sha256:5a8bd7d5e1ea819b1c6ff9ed656465427dead6c6a5d2e98a5505d61c201b7b41` |
 | GET | `/api/workspaces/{workspaceId}/hydration` | path:workspaceId (required) | `sha256:025169be7f2ec0379ff62f09b96e2f682a8b2e4f9efdddc10c298a90709357ed` |

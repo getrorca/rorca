@@ -1,8 +1,13 @@
 /** Admin-only recovery routes. These are intentionally not MCP-generated. */
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { handleRouteError } from '../lib/async-handler';
-import { checkpointReconciliationSchema, reconcileCheckpoint } from '../lib/checkpoint-reconciliation';
-import { AdminRequiredError, ValidationError } from '../lib/errors';
+import {
+  checkpointAttestationLookupSchema,
+  checkpointReconciliationSchema,
+  getCheckpointAttestationReference,
+  reconcileCheckpoint,
+} from '../lib/checkpoint-reconciliation';
+import { AdminRequiredError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -14,6 +19,52 @@ function requireRecoveryAdmin(req: Request, _res: Response, next: NextFunction):
   }
   next();
 }
+
+/**
+ * @swagger
+ * /api/admin/recovery/checkpoints/attestation:
+ *   get:
+ *     tags: [Admin]
+ *     summary: Resolve an existing trusted checkpoint attestation
+ *     operationId: getAdminCheckpointAttestation
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Read-only lookup of opaque trusted evidence for an exact checkpoint; restricted to administrators and excluded from MCP."
+ *     x-rorca-mcp: false
+ *     parameters:
+ *       - { in: query, name: workspaceId, required: true, schema: { type: string } }
+ *       - { in: query, name: runId, required: true, schema: { type: integer } }
+ *       - { in: query, name: storyId, required: true, schema: { type: string } }
+ *       - { in: query, name: branch, required: true, schema: { type: string } }
+ *       - { in: query, name: checkpointSha, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{40}$' } }
+ *     responses:
+ *       200: { description: Existing unexpired attestation reference }
+ *       400: { description: Invalid bounded lookup }
+ *       403: { description: Admin access required }
+ *       404: { description: No trusted attestation exists for this exact checkpoint }
+ */
+router.get('/checkpoints/attestation', requireRecoveryAdmin, async (req: Request, res: Response) => {
+  try {
+    const parsed = checkpointAttestationLookupSchema.safeParse({
+      workspaceId: req.query.workspaceId,
+      runId: Number(req.query.runId),
+      storyId: req.query.storyId,
+      branch: req.query.branch,
+      checkpointSha: req.query.checkpointSha,
+    });
+    if (!parsed.success) {
+      throw new ValidationError('Invalid checkpoint attestation lookup', {
+        issues: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
+      });
+    }
+    const reference = await getCheckpointAttestationReference(parsed.data);
+    if (!reference) {
+      throw new NotFoundError('Trusted checkpoint attestation', parsed.data.checkpointSha);
+    }
+    res.status(200).json(reference);
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Recovery] Checkpoint attestation lookup');
+  }
+});
 
 /**
  * @swagger

@@ -25,6 +25,7 @@
 import * as fs from 'fs';
 import { Pool } from 'pg';
 import { logger } from '../lib/logger';
+import { assertTestDatabaseName } from '../lib/test-db-safety';
 import { runPgMigrations } from './pg-index';
 // ── Configuration ────────────────────────────────────────────────────────
 const SLOW_QUERY_THRESHOLD_MS = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS || '500', 10);
@@ -111,9 +112,7 @@ function assertTestDatabaseSafety(databaseUrl) {
             dbName = '';
         }
     }
-    if (!dbName.endsWith('_test')) {
-        throw new Error(`[db] Refusing to use non-test database "${dbName || '(unknown)'}" while NODE_ENV=test`);
-    }
+    assertTestDatabaseName(dbName, 'configured test database');
 }
 function configuredPoolSizes() {
     const parsed = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
@@ -295,7 +294,16 @@ function logSlowQuery(sql, params, durationMs) {
         logger.warn({ sql: sql.slice(0, 200), params: sanitized, durationMs }, '[db] Slow query');
     }
 }
+const verifiedTestClients = new WeakSet();
+async function assertLiveTestConnection(client) {
+    if (process.env.NODE_ENV !== 'test' || verifiedTestClients.has(client))
+        return;
+    const result = await client.query('SELECT current_database() AS database');
+    assertTestDatabaseName(result.rows[0]?.database || '', 'connected test database');
+    verifiedTestClients.add(client);
+}
 async function resetSessionState(client) {
+    await assertLiveTestConnection(client);
     await client.query('RESET ROLE');
     await client.query('RESET request.jwt.claim.sub');
     await client.query('RESET request.jwt.claims');

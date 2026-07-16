@@ -157,13 +157,6 @@ function isTestDatabaseName(databaseName: string | null): boolean {
   return typeof databaseName === 'string' && databaseName.endsWith('_test');
 }
 
-function preserveDatabaseName(databaseUrl: string, databaseName: string): string {
-  const url = parseDatabaseUrl(databaseUrl);
-  if (!url) return databaseUrl;
-  url.pathname = `/${databaseName}`;
-  return url.toString();
-}
-
 function isRemoteHost(host: string | null): boolean {
   if (!host) return false;
   return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
@@ -605,6 +598,13 @@ export function applySelectedDbModeEnvironment(env: NodeJS.ProcessEnv = process.
   const current = env.DATABASE_URL?.trim() || '';
   const currentDatabaseName = parseDatabaseName(current);
 
+  // Tests are provisioned with a dedicated least-privilege credential. Never
+  // replace its host, port, username, password, or database from persisted
+  // production mode settings; the live test guard verifies the server target.
+  if (isTestDatabaseName(currentDatabaseName)) {
+    return { mode, databaseUrl: current, changed: false };
+  }
+
   if (mode === 'byop') {
     const databaseUrl = readPersistedByopDatabaseUrl() || current;
     const changed = current !== databaseUrl;
@@ -618,10 +618,7 @@ export function applySelectedDbModeEnvironment(env: NodeJS.ProcessEnv = process.
     };
   }
 
-  let databaseUrl = getDbConnectionString(mode);
-  if (isTestDatabaseName(currentDatabaseName)) {
-    databaseUrl = preserveDatabaseName(databaseUrl, currentDatabaseName!);
-  }
+  const databaseUrl = getDbConnectionString(mode);
 
   const changed = current !== databaseUrl;
   env.DATABASE_URL = databaseUrl;
