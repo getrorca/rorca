@@ -268,7 +268,9 @@ describe("managed capture daemon", () => {
     // The diagnostic proves it was detected without persisting the secret.
     expect(queued).not.toContain("super-secret");
     expect(queued).toContain('"commit_subject":null');
-    expect(queued).toContain('"redactionCount":1');
+    // The shared sanitizer may add detectors over time; require redaction
+    // evidence without pinning its internal match count.
+    expect((JSON.parse(queued) as { safety: { redactionCount: number } }).safety.redactionCount).toBeGreaterThanOrEqual(1);
     expect(queued).toContain('"contextSafetyModule":"backend/src/lib/context-safety.ts"');
 
     online = true;

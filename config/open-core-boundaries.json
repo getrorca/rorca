@@ -107,6 +107,42 @@
     {
       "path": "scripts/license-utils.ts",
       "reason": "Shared helper for license validation infrastructure."
+    },
+    {
+      "path": "config/rorca-tier-snapshot.json",
+      "reason": "Tier governance snapshots document the shared public API surface."
+    },
+    {
+      "path": "docs/always-on-context-pr-notes.md",
+      "reason": "Always-on capture release notes describe shared operator behavior."
+    },
+    {
+      "path": "docs/always-on-context-production-readiness.md",
+      "reason": "Always-on capture readiness evidence applies to the shared product surface."
+    },
+    {
+      "path": "docs/release-certification/wave3-postgres16-evidence.txt",
+      "reason": "PostgreSQL certification evidence documents shared database support."
+    },
+    {
+      "path": "docs/run-transport-hardening-review.md",
+      "reason": "Run transport review evidence applies to the shared execution surface."
+    },
+    {
+      "path": "scripts/_compile-target.ts",
+      "reason": "Cross-platform CLI compilation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/_generate-embedded-assets.ts",
+      "reason": "Embedded CLI asset generation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/test-packed-capture-lifecycle.mjs",
+      "reason": "Packed capture lifecycle validation is shared release infrastructure."
+    },
+    {
+      "path": "shared/contracts/__tests__/contracts.test.ts",
+      "reason": "Shared contract regression coverage belongs to the public bridge."
     }
   ],
   "review": [
@@ -285,6 +321,22 @@
     {
       "path": "deploy/",
       "reason": "Deployment manifests often diverge between OSS and OpenCore environments."
+    },
+    {
+      "path": ".npmrc",
+      "reason": "Package-manager policy can diverge between OSS and OpenCore release environments."
+    },
+    {
+      "path": "Dockerfile.backend",
+      "reason": "Backend image build policy is deployment-sensitive and requires OpenCore review."
+    },
+    {
+      "path": "Dockerfile.frontend",
+      "reason": "Frontend image build policy is deployment-sensitive and requires OpenCore review."
+    },
+    {
+      "path": "docker-compose.yml",
+      "reason": "Compose topology and runtime defaults are deployment-sensitive and require OpenCore review."
     }
   ],
   "blocked": [
