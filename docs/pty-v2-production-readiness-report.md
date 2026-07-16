@@ -227,3 +227,22 @@ A final repeat of the Linux clean-install command after the no-cache image build
 1. Review the complete staged diff and create one clean release commit.
 2. Verify `origin/main` remains an ancestor, the worktree is clean, and no canary/provider process or temporary credential remains.
 3. Record the release commit SHA in the operator handoff, then perform a normal non-force push.
+
+## PR #15 frontend CI remediation
+
+The first PR #15 CI run (`29465930614`) failed only its Frontend Tests job (119 failed / 743 passed). This was investigated rather than bypassed.
+
+- 114 failures were caused by five test files replacing all `react-router-dom` exports while their shared renderer requires `MemoryRouter`. The mocks now preserve the actual exports, and `MemoryPanel` no longer nests a second router.
+- The remaining five were real release defects: unavailable PTY telemetry was rendered as zeroes, Pi/Terra provenance was lost in metadata, native interactive PTY did not force sequential execution, and the Always-On Capture panel still called a retired candidate API with a mismatched trust vocabulary.
+- The UI now consumes canonical telemetry formatters, forces sequential execution for `native-pty`, and uses the canonical `/api/context-candidates` list/action/preview contract with its context-candidate trust tiers. Unsupported retired filters/actions were removed rather than silently issuing ineffective requests.
+
+Post-remediation evidence:
+
+| Gate | Result |
+| --- | --- |
+| Focused affected frontend suites | PASS — 155 tests across router isolation, metadata, trigger, capture, and run-view coverage |
+| Full frontend CI command (`npx vitest run`) | PASS — 66 files, 862 tests |
+| `npx tsc --noEmit` | PASS |
+| `npm run build` | PASS — frontend, backend, bin, capture package |
+
+This remediation changes neither deployment state nor branch-protection policy. PR #15 remains unmerged pending a normal push, fresh CI, and any required review.

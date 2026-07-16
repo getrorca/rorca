@@ -1008,8 +1008,13 @@ export default function TriggerPopover({
               </p>
             </div>
             <select
+              aria-label="Terminal stream"
               value={terminalMode}
-              onChange={(event) => setTerminalMode(event.target.value as 'ansi-html' | 'pty' | 'native-pty')}
+              onChange={(event) => {
+                const nextMode = event.target.value as 'ansi-html' | 'pty' | 'native-pty';
+                setTerminalMode(nextMode);
+                if (nextMode === 'native-pty') setForceSequential(true);
+              }}
               className="shrink-0 rounded-md border border-border bg-[var(--bg-elevated)] px-2 py-1 text-[11px] text-[var(--text)]"
             >
               <option value="pty">PTY Print</option>
@@ -1054,7 +1059,7 @@ export default function TriggerPopover({
             const m = agentConfig?.agentModel?.toLowerCase() ?? '';
             const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
             onTrigger(effectiveWorktree, {
-              forceSequential: forceSequential || undefined,
+              forceSequential: forceSequential || terminalMode === 'native-pty' || undefined,
               autoMerge: effectiveWorktree ? autoMerge : undefined,
               mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
@@ -1085,7 +1090,7 @@ export default function TriggerPopover({
               const m = agentConfig?.agentModel?.toLowerCase() ?? '';
               const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
               onAddToQueue(effectiveWorktree, {
-                forceSequential: forceSequential || undefined,
+                forceSequential: forceSequential || terminalMode === 'native-pty' || undefined,
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
                 mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,

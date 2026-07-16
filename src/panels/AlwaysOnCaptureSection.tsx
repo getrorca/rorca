@@ -8,14 +8,14 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { AlertTriangle, Check, Clock, Copy, Eye, GitBranch, Shield } from 'lucide-react';
-import { TRUST_TIERS, type TrustTier } from '../../shared/contracts/trust';
+import { CONTEXT_TRUST_TIERS, type ContextTrustTier } from '../../shared/contracts/trust';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { ApiError, apiFetch, BASE_URL } from '../lib/apiFetch';
 
 type SourceStatus = 'active' | 'healthy' | 'degraded' | 'offline' | 'disabled';
-type CandidateStatus = 'all' | 'pending' | 'review_required' | 'approved' | 'rejected' | 'auto_approved';
-type CandidateAction = 'approve' | 'reject' | 'edit' | 'duplicate' | 'supersede' | 'conflict' | 'defer';
+type CandidateStatus = 'all' | 'pending' | 'approved' | 'rejected' | 'duplicate' | 'superseded' | 'conflict' | 'deferred';
+type CandidateAction = 'approve' | 'reject' | 'edit-and-approve';
 
 type CaptureStatusResponse = {
   ok: boolean;
@@ -47,6 +47,13 @@ type RedactionDiagnostics = {
 };
 
 type EvidenceSnippet = { text: string; sourceField: string; redacted: boolean };
+type CandidatePreview = {
+  workspaceRelativePath: string;
+  byteLength: number;
+  truncated: boolean;
+  content: string;
+  redactionDiagnostics: RedactionDiagnostics;
+};
 type Candidate = {
   id: number;
   created_at: string;
@@ -64,44 +71,46 @@ type Candidate = {
   tool_name: string | null;
   host_application: string | null;
   session_id: string | null;
-  trust_tier: TrustTier | null;
+  trust_tier: ContextTrustTier | null;
   source_session_id: string | null;
   git_branch: string | null;
   git_sha: string | null;
   capture_policy: Record<string, unknown> | null;
 };
 
-type CandidateResponse = { ok: boolean; candidates: Candidate[] };
-type PreviewResponse = {
-  ok: boolean;
-  preview: {
-    workspaceRelativePath: string;
-    byteLength: number;
-    truncated: boolean;
-    content: string;
-    redactionDiagnostics: RedactionDiagnostics;
-  };
+type CanonicalCandidate = {
+  id: string;
+  createdAt: string;
+  reviewStatus: Exclude<CandidateStatus, 'all'>;
+  suggestedCategory: string;
+  title: string;
+  rule: string;
+  context: string;
+  confidence: 'high' | 'medium' | 'low';
+  provenance: Record<string, unknown>;
+  relatedFiles: string[];
+  securitySensitive: boolean;
+  eventType: string | null;
+  sourceSystem: string | null;
+  trustTier: ContextTrustTier;
+  requiresReview: boolean;
 };
+
+type CandidateResponse = { items?: CanonicalCandidate[]; candidates?: Candidate[] };
 
 type Filters = {
   sourceSystem: string;
-  toolName: string;
-  hostApp: string;
   eventType: string;
   trustTier: string;
   confidence: string;
-  regulatedFlag: string;
   status: CandidateStatus;
 };
 
 const FILTER_PARAMS: Record<keyof Filters, string> = {
   sourceSystem: 'uccSourceSystem',
-  toolName: 'uccToolName',
-  hostApp: 'uccHostApp',
   eventType: 'uccEventType',
   trustTier: 'uccTrustTier',
   confidence: 'uccConfidence',
-  regulatedFlag: 'uccRegulated',
   status: 'uccStatus',
 };
 
@@ -128,18 +137,15 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 const EVENT_TYPES = ['agent_cli_session', 'shell_command', 'ide_session', 'editor_activity', 'explicit_memory', 'git_commit', 'ci_pr'];
-const REVIEW_STATUSES: CandidateStatus[] = ['all', 'pending', 'review_required', 'approved', 'rejected', 'auto_approved'];
+const REVIEW_STATUSES: CandidateStatus[] = ['all', 'pending', 'approved', 'rejected', 'duplicate', 'superseded', 'conflict', 'deferred'];
 const CONFIDENCE = ['high', 'medium', 'low'];
 
 function initialFilters(searchParams: URLSearchParams): Filters {
   return {
     sourceSystem: searchParams.get(FILTER_PARAMS.sourceSystem) ?? '',
-    toolName: searchParams.get(FILTER_PARAMS.toolName) ?? '',
-    hostApp: searchParams.get(FILTER_PARAMS.hostApp) ?? '',
     eventType: searchParams.get(FILTER_PARAMS.eventType) ?? '',
     trustTier: searchParams.get(FILTER_PARAMS.trustTier) ?? '',
     confidence: searchParams.get(FILTER_PARAMS.confidence) ?? '',
-    regulatedFlag: searchParams.get(FILTER_PARAMS.regulatedFlag) ?? '',
     status: (searchParams.get(FILTER_PARAMS.status) as CandidateStatus | null) ?? 'all',
   };
 }
@@ -150,6 +156,38 @@ function relatedFilePaths(candidate: Candidate): string[] {
     if (typeof item === 'string') return item ? [item] : [];
     return item?.path ? [item.path] : [];
   });
+}
+
+/**
+ * The Always-On panel used to call a retired capture-distillation response.
+ * Adapt the canonical context-candidates DTO at this boundary so the compact
+ * review view retains its existing presentation without maintaining a second
+ * backend contract.
+ */
+function adaptCandidate(candidate: CanonicalCandidate): Candidate {
+  return {
+    id: Number(candidate.id),
+    created_at: candidate.createdAt,
+    status: candidate.reviewStatus,
+    category: candidate.suggestedCategory,
+    content: candidate.rule,
+    confidence: candidate.confidence,
+    provenance: candidate.provenance,
+    related_files: candidate.relatedFiles.map((path) => ({ path })),
+    evidence_snippets: [],
+    review_reason: candidate.requiresReview ? 'Explicit review required.' : null,
+    security_sensitive: candidate.securitySensitive,
+    event_type: candidate.eventType,
+    source_system: candidate.sourceSystem,
+    tool_name: null,
+    host_application: null,
+    session_id: null,
+    trust_tier: candidate.trustTier,
+    source_session_id: null,
+    git_branch: null,
+    git_sha: null,
+    capture_policy: null,
+  };
 }
 
 function appErrorMessage(error: unknown, fallback: string): string {
@@ -180,7 +218,7 @@ export default function AlwaysOnCaptureSection() {
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
-  const [previewByPath, setPreviewByPath] = useState<Record<string, PreviewResponse['preview']>>({});
+  const [previewByPath, setPreviewByPath] = useState<Record<string, CandidatePreview>>({});
   const [editText, setEditText] = useState('');
 
   useEffect(() => {
@@ -200,18 +238,23 @@ export default function AlwaysOnCaptureSection() {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ limit: '50' });
-      Object.entries(filters).forEach(([key, value]) => {
-        if (!value || (key === 'status' && value === 'all')) return;
-        params.set(key, value);
-      });
+      const params = new URLSearchParams({ limit: '50', status: filters.status });
+      if (filters.sourceSystem) params.set('sourceSystem', filters.sourceSystem);
+      if (filters.eventType) params.set('eventType', filters.eventType);
+      if (filters.trustTier) params.set('trustTier', filters.trustTier);
+      if (filters.confidence) params.set('confidence', filters.confidence);
       const [nextStatus, nextCandidates] = await Promise.all([
         apiFetch<CaptureStatusResponse>(`/api/context-capture/${encodeURIComponent(workspaceId)}/status`),
-        apiFetch<CandidateResponse>(`/api/context-capture/distillation/${encodeURIComponent(workspaceId)}/candidates?${params.toString()}`),
+        apiFetch<CandidateResponse>(`/api/context-candidates?workspaceId=${encodeURIComponent(workspaceId)}&${params.toString()}`),
       ]);
+      const candidateItems = Array.isArray(nextCandidates.items)
+        ? nextCandidates.items.map(adaptCandidate)
+        : Array.isArray(nextCandidates.candidates)
+          ? nextCandidates.candidates
+          : [];
       setStatus(nextStatus);
-      setCandidates(Array.isArray(nextCandidates.candidates) ? nextCandidates.candidates : []);
-      setSelectedCandidateId((current) => current ?? nextCandidates.candidates?.[0]?.id ?? null);
+      setCandidates(candidateItems);
+      setSelectedCandidateId((current) => current ?? candidateItems[0]?.id ?? null);
     } catch (err) {
       const message = appErrorMessage(err, 'Always-on capture status unavailable.');
       setError(message);
@@ -245,20 +288,20 @@ export default function AlwaysOnCaptureSection() {
     if (!workspaceId) return;
     setBusyAction(`${candidate.id}:${action}`);
     try {
-      if (action === 'approve' || action === 'reject') {
-        await apiFetch(`/api/context-capture/distillation/${encodeURIComponent(workspaceId)}/candidates/${candidate.id}/${action}`, { method: 'POST' });
-      } else {
-        await apiFetch(`/api/context-capture/distillation/${encodeURIComponent(workspaceId)}/candidates/${candidate.id}/action`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action, content: action === 'edit' ? editText || candidate.content : undefined, note: action === 'defer' ? 'operator deferred from Memory panel' : undefined }),
-        });
-      }
-      toast.success(`Candidate ${action} succeeded.`);
+      const endpoint = action === 'edit-and-approve' ? 'edit-and-approve' : action;
+      const body = action === 'edit-and-approve'
+        ? { workspaceId, reviewer: 'local-user', edits: { rule: editText || candidate.content || '' } }
+        : { workspaceId, reviewer: 'local-user' };
+      await apiFetch(`/api/context-candidates/${candidate.id}/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      toast.success(`Candidate ${action.replaceAll('-', ' ')} succeeded.`);
       setEditText('');
       await load();
     } catch (err) {
-      toast.error(appErrorMessage(err, `Unable to ${action} candidate.`));
+      toast.error(appErrorMessage(err, `Unable to ${action.replaceAll('-', ' ')} candidate.`));
     } finally {
       setBusyAction(null);
     }
@@ -268,8 +311,26 @@ export default function AlwaysOnCaptureSection() {
     if (!workspaceId) return;
     try {
       const params = new URLSearchParams({ workspaceId, path: filePath });
-      const response = await apiFetch<PreviewResponse>(`/api/context/candidates/${candidate.id}/preview?${params.toString()}`);
-      setPreviewByPath((current) => ({ ...current, [filePath]: response.preview }));
+      const response = await apiFetch<{
+        preview: { path: string; byteLength: number; truncated: boolean; text: string; redactionApplied: boolean; safety: { findings: Array<{ name: string }> } };
+      }>(`/api/context-candidates/${candidate.id}/file-preview?${params.toString()}`);
+      setPreviewByPath((current) => ({
+        ...current,
+        [filePath]: {
+          workspaceRelativePath: response.preview.path,
+          byteLength: response.preview.byteLength,
+          truncated: response.preview.truncated,
+          content: response.preview.text,
+          redactionDiagnostics: {
+            redactionCount: response.preview.redactionApplied ? 1 : 0,
+            ignoredPathCount: 0,
+            redactionTypes: response.preview.safety.findings.map((finding) => finding.name),
+            regulatedSignals: [],
+            regulatedDomainFlags: [],
+            truncated: response.preview.truncated,
+          },
+        },
+      }));
     } catch (err) {
       toast.error(appErrorMessage(err, 'Unable to load safe file preview.'));
     }
@@ -346,12 +407,9 @@ export default function AlwaysOnCaptureSection() {
             <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Candidate review filters</p>
             <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
               <input aria-label="Filter source system" value={filters.sourceSystem} onChange={(e) => updateFilter('sourceSystem', e.target.value)} placeholder="source system" className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]" />
-              <input aria-label="Filter tool name" value={filters.toolName} onChange={(e) => updateFilter('toolName', e.target.value)} placeholder="tool name" className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]" />
-              <input aria-label="Filter host app" value={filters.hostApp} onChange={(e) => updateFilter('hostApp', e.target.value)} placeholder="host app" className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]" />
               <select aria-label="Filter event type" value={filters.eventType} onChange={(e) => updateFilter('eventType', e.target.value)} className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]"><option value="">All event types</option>{EVENT_TYPES.map((item) => <option key={item} value={item}>{item}</option>)}</select>
-              <select aria-label="Filter trust tier" value={filters.trustTier} onChange={(e) => updateFilter('trustTier', e.target.value)} className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]"><option value="">All trust tiers</option>{TRUST_TIERS.map((tier) => <option key={tier} value={tier}>{tier}</option>)}</select>
+              <select aria-label="Filter trust tier" value={filters.trustTier} onChange={(e) => updateFilter('trustTier', e.target.value)} className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]"><option value="">All trust tiers</option>{CONTEXT_TRUST_TIERS.map((tier) => <option key={tier} value={tier}>{tier}</option>)}</select>
               <select aria-label="Filter confidence" value={filters.confidence} onChange={(e) => updateFilter('confidence', e.target.value)} className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]"><option value="">All confidence</option>{CONFIDENCE.map((item) => <option key={item} value={item}>{item}</option>)}</select>
-              <select aria-label="Filter regulated flag" value={filters.regulatedFlag} onChange={(e) => updateFilter('regulatedFlag', e.target.value)} className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]"><option value="">All regulated</option><option value="true">Regulated/security</option><option value="false">Not regulated</option></select>
               <select aria-label="Filter review status" value={filters.status} onChange={(e) => updateFilter('status', e.target.value)} className="rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]">{REVIEW_STATUSES.map((item) => <option key={item} value={item}>{item}</option>)}</select>
             </div>
           </div>
@@ -379,17 +437,17 @@ export default function AlwaysOnCaptureSection() {
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <p className="font-semibold text-[var(--text)]">Candidate #{selected.id}</p>
-                    <p className="mt-0.5">{selected.event_type} · {selected.tool_name ?? 'unknown tool'} · {selected.host_application ?? 'no host app'}</p>
+                    <p className="mt-0.5">{selected.event_type ?? 'unknown event'} · {SOURCE_LABELS[selected.source_system ?? ''] ?? selected.source_system ?? 'unknown source'}</p>
                   </div>
                   <div className="flex flex-wrap gap-1">
-                    {(['approve', 'reject', 'duplicate', 'supersede', 'conflict', 'defer'] as CandidateAction[]).map((action) => (
+                    {(['approve', 'reject'] as CandidateAction[]).map((action) => (
                       <button key={action} type="button" onClick={() => runAction(selected, action)} disabled={busyAction === `${selected.id}:${action}`} className="rounded border border-border bg-surface-100 px-2 py-1 text-[11px] font-medium text-[var(--text)] hover:bg-surface-200 disabled:opacity-60" aria-label={`${action} candidate ${selected.id}`}>{action}</button>
                     ))}
                   </div>
                 </div>
 
                 <textarea aria-label="Edit candidate content" value={editText || selected.content || ''} onChange={(event) => setEditText(event.target.value)} className="mt-3 h-20 w-full rounded border border-border bg-surface-100 px-2 py-1.5 text-xs text-[var(--text)]" />
-                <button type="button" onClick={() => runAction(selected, 'edit')} disabled={busyAction === `${selected.id}:edit`} className="mt-2 rounded border border-accent bg-surface-100 px-2 py-1 text-[11px] font-medium text-[var(--text)] hover:bg-surface-200" aria-label={`edit candidate ${selected.id}`}><Check size={11} className="inline" /> Save edit</button>
+                <button type="button" onClick={() => runAction(selected, 'edit-and-approve')} disabled={busyAction === `${selected.id}:edit-and-approve`} className="mt-2 rounded border border-accent bg-surface-100 px-2 py-1 text-[11px] font-medium text-[var(--text)] hover:bg-surface-200" aria-label={`edit and approve candidate ${selected.id}`}><Check size={11} className="inline" /> Edit and approve</button>
 
                 <div className="mt-3 grid gap-2">
                   <div className="rounded-md border border-border bg-surface-100 p-2">

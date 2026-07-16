@@ -59,30 +59,23 @@ const STATUS_RESPONSE = {
 };
 
 const CANDIDATES_RESPONSE = {
-  ok: true,
-  candidates: [
+  items: [
     {
-      id: 7,
-      created_at: '2026-07-06T10:00:00.000Z',
-      status: 'review_required',
-      category: 'Gotcha',
-      content: 'Never store API keys in logs.',
+      id: '7',
+      createdAt: '2026-07-06T10:00:00.000Z',
+      reviewStatus: 'pending',
+      suggestedCategory: 'Gotcha',
+      title: 'Prevent API-key log exposure',
+      rule: 'Never store API keys in logs.',
+      context: 'Captured shell command evidence was redacted before review.',
       confidence: 'medium',
       provenance: { sourceEventId: 'evt-1', sourceSystem: 'pi' },
-      related_files: [{ path: 'src/secret.ts', role: 'mentioned', hash: null }],
-      evidence_snippets: [{ text: 'token=[REDACTED]', sourceField: 'command_summary', redacted: true }],
-      review_reason: 'security_or_regulated_signal_requires_explicit_review',
-      security_sensitive: true,
-      event_type: 'agent_cli_session',
-      source_system: 'pi',
-      tool_name: 'pi',
-      host_application: 'terminal',
-      session_id: 'session-1',
-      trust_tier: 'local',
-      source_session_id: 'session-1',
-      git_branch: 'main',
-      git_sha: 'abc123',
-      capture_policy: { mode: 'repo-and-command' },
+      relatedFiles: ['src/secret.ts'],
+      securitySensitive: true,
+      eventType: 'agent_cli_session',
+      sourceSystem: 'pi',
+      trustTier: 'agent_observation',
+      requiresReview: true,
     },
   ],
 };
@@ -94,18 +87,18 @@ beforeEach(() => {
   mockApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/workspaces') return { items: [{ id: 'ws-1', label: 'Repo', path: '/repo', domains: [] }], total: 1, hasMore: false };
     if (path.startsWith('/api/context-capture/ws-1/status')) return STATUS_RESPONSE;
-    if (path.startsWith('/api/context-capture/distillation/ws-1/candidates?')) return CANDIDATES_RESPONSE;
-    if (path.startsWith('/api/context/candidates/7/preview?')) return {
-      ok: true,
+    if (path.startsWith('/api/context-candidates?')) return CANDIDATES_RESPONSE;
+    if (path.startsWith('/api/context-candidates/7/file-preview?')) return {
       preview: {
-        workspaceRelativePath: 'src/secret.ts',
+        path: 'src/secret.ts',
         byteLength: 42,
         truncated: false,
-        content: 'const token = "[REDACTED_TOKEN]";',
-        redactionDiagnostics: { redactionCount: 1, ignoredPathCount: 0, redactionTypes: ['long token'], regulatedSignals: [], regulatedDomainFlags: [], truncated: false },
+        text: 'const token = "[REDACTED_TOKEN]";',
+        redactionApplied: true,
+        safety: { findings: [{ name: 'long token' }] },
       },
     };
-    if (path.includes('/candidates/7/approve') || path.includes('/candidates/7/action')) return { ok: true };
+    if (path.includes('/context-candidates/7/approve') || path.includes('/context-candidates/7/edit-and-approve') || path.includes('/context-candidates/7/reject')) return { ok: true };
     return {};
   });
 });
@@ -126,30 +119,33 @@ describe('AlwaysOnCaptureSection', () => {
     renderWithProviders(<AlwaysOnCaptureSection />);
 
     await screen.findAllByText('Never store API keys in logs.');
-    await user.selectOptions(screen.getByLabelText('Filter trust tier'), 'local');
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('trustTier=local')));
+    await user.selectOptions(screen.getByLabelText('Filter trust tier'), 'agent_observation');
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(expect.stringContaining('trustTier=agent_observation')));
 
     const list = screen.getByLabelText('Context memory candidates');
     expect(within(list).getByText('Pi')).toBeTruthy();
-    expect(within(list).getByText('local')).toBeTruthy();
+    expect(within(list).getByText('agent_observation')).toBeTruthy();
     expect(within(list).getByText('redaction')).toBeTruthy();
   });
 
-  it('shows evidence, provenance, redaction diagnostics, safe preview, and review actions via apiFetch', async () => {
+  it('adapts canonical candidate data, safe previews, and review actions via apiFetch', async () => {
     const user = userEvent.setup();
     renderWithProviders(<AlwaysOnCaptureSection />);
 
     expect(await screen.findByLabelText('Candidate detail')).toBeTruthy();
-    expect(screen.getByText(/command_summary:/)).toBeTruthy();
-    expect(screen.getByLabelText('redaction marker')).toBeTruthy();
-    expect(screen.getByText(/source session: session-1/)).toBeTruthy();
+    expect(screen.getByText(/source event: evt-1/)).toBeTruthy();
+    expect(screen.getByText(/Review reason: Explicit review required/)).toBeTruthy();
+    expect(screen.getByText('redaction')).toBeTruthy();
 
     await user.click(screen.getByLabelText('Preview src/secret.ts'));
     expect(await screen.findByText(/REDACTED_TOKEN/)).toBeTruthy();
     expect(screen.getByText(/redactions 1/)).toBeTruthy();
 
     await user.click(screen.getByLabelText('approve candidate 7'));
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith('/api/context-capture/distillation/ws-1/candidates/7/approve', { method: 'POST' }));
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith('/api/context-candidates/7/approve', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ workspaceId: 'ws-1', reviewer: 'local-user' }),
+    })));
   });
 
   it('renders loading and AppError-shaped error states', async () => {

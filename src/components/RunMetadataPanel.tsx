@@ -24,6 +24,11 @@ import {
 import type { WalEvent } from '../hooks/usePipelineSSE';
 import AgentBadge from './AgentBadge';
 import { normalizeAgentType } from '../lib/agent-display';
+import {
+  formatRunCostTelemetry,
+  formatRunTokenTelemetry,
+  type RunTokenTelemetry,
+} from '../lib/run-metadata';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -50,7 +55,7 @@ interface RunMetadataPanelProps {
     agentType?: string | null;
     agentModel?: string | null;
   };
-  tokenSummary: { inputTokens: number | null; outputTokens: number | null };
+  tokenSummary: RunTokenTelemetry;
   specModel: string | null;
   totalStories: number;
   walEvents: WalEvent[];
@@ -224,7 +229,7 @@ export default function RunMetadataPanel({
       {/* Tokens */}
       <MetaRow icon={Cpu} label="Tokens">
         <span className="font-mono">
-          {formatTokens(tokenSummary.inputTokens)} in / {formatTokens(tokenSummary.outputTokens)} out
+          {formatRunTokenTelemetry(tokenSummary, normalizeAgentType(run.agentType))}
         </span>
       </MetaRow>
 
@@ -274,7 +279,12 @@ export default function RunMetadataPanel({
       {/* Engine (agent type) */}
       <MetaRow icon={Zap} label="Engine">
         <div className="flex items-center gap-1.5">
-          <AgentBadge agentType={run.agentType} agentModel={run.agentModel} showModelName={false} />
+          <AgentBadge
+            agentType={run.agentType}
+            agentModel={run.agentModel}
+            showModelName={false}
+            showPiModel={run.agentModel?.toLowerCase().includes('terra') ?? false}
+          />
           {run.agentModel && (
             <span className="text-[10px] text-muted font-mono">{run.agentModel}</span>
           )}
@@ -318,17 +328,9 @@ export default function RunMetadataPanel({
 
       {/* Cost */}
       <MetaRow icon={DollarSign} label="Cost">
-        {(() => {
-          const agent = normalizeAgentType(run.agentType);
-          const label = agent === 'claude'
-            ? '$0.00 (your Claude sub)'
-            : agent === 'codex'
-              ? 'ChatGPT subscription'
-              : agent === 'pi'
-                ? 'Pi-managed billing'
-                : 'API key billing';
-          return <span className="text-[10px] text-muted">{label}</span>;
-        })()}
+        <span className="text-[10px] text-muted">
+          {formatRunCostTelemetry(tokenSummary, normalizeAgentType(run.agentType))}
+        </span>
       </MetaRow>
     </div>
   );
