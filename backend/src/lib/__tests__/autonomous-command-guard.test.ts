@@ -96,8 +96,9 @@ describe('autonomous-command-guard', () => {
       });
 
       expect(routed.status).toBe(0);
-      expect(routed.stdout).toContain(`PGUSER=${new URL(process.env.RORCA_TEST_DATABASE_URL!).username}`);
-      expect(routed.stdout).toContain('PGDATABASE=rorca_test');
+      const expectedTestUrl = new URL(process.env.RORCA_TEST_DATABASE_URL!);
+      expect(routed.stdout).toContain(`PGUSER=${expectedTestUrl.username}`);
+      expect(routed.stdout).toContain(`PGDATABASE=${expectedTestUrl.pathname.slice(1)}`);
       expect(routed.stdout).toContain('NODE_ENV=test');
     } finally {
       process.env.PATH = originalPath;

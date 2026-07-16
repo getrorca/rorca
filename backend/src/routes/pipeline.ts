@@ -40,7 +40,6 @@ import {
   detectRequiredTools,
   findCapableEngine,
   type CapabilityStory,
-  type StoryCapabilityReport,
 } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import {
@@ -87,7 +86,7 @@ import {
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
-import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
+import { sweepOrphanProcesses } from '../worker';
 import { safelyRefreshReusableWorktree, validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 import { PipelineRetryJobPayload } from '../lib/pg-boss-schemas';
 import {
@@ -548,7 +547,7 @@ async function resolveAndPersistDispatchManifests(input: {
         revisionSensitive: true,
         timeoutMs: 300_000,
       })),
-      evidenceExpectations: criteria.map((criterion, index) => ({
+      evidenceExpectations: criteria.map((criterion) => ({
         criterionId: `${story.id}:ac:${deriveStoryContractRevision(criterion)}`,
         description: criterion,
         requiredEvidenceKinds: ['validation', 'revision'],
@@ -634,7 +633,7 @@ function buildExecutionReadinessSummary(
 // (backend down, restart, port mismatch), they write to .rorca-results.jsonl.
 // This function reads that file and replays entries into the DB.
 
-async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
+export async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
   const entries = readFallbackResults(cwd);
   if (entries.length === 0) return 0;
 
@@ -1393,11 +1392,44 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     // Lock initial SSDLC safety before the first mutation. Prose/_notes cannot
     // weaken these values; retries consume the persisted structured options.
-    const autonomousSafety = resolvePiRunSafetyOptions(specPath, specModelJson, {
+    let autonomousSafety = resolvePiRunSafetyOptions(specPath, specModelJson, {
       autoWorktree: Boolean(autoWorktree),
-      autoMerge: Boolean(autoWorktree) && autoMerge !== false,
+      autoMerge: Boolean(autoWorktree) && autoMerge === true,
       mergeStrategy: mergeStrategy ?? 'direct',
     });
+    let frozenQueuedOptions: EffectiveRunOptions | null = null;
+    if (queuedRunId !== undefined) {
+      const queuedId = normalizeWorkerRunId(queuedRunId);
+      const queuedRow = await queryOne<{
+        workspace_id: string;
+        spec_path: string;
+        status: string;
+        effective_options: unknown;
+      }>(
+        `SELECT workspace_id, spec_path, status, effective_options
+           FROM pipeline_runs WHERE id = $1`,
+        [queuedId],
+      );
+      const queuedOptions = parseJsonRecordLike(queuedRow?.effective_options);
+      if (
+        !queuedRow
+        || queuedRow.status !== 'queued'
+        || queuedRow.workspace_id !== String(workspaceId)
+        || queuedRow.spec_path !== specPath
+        || !isEffectiveRunOptions(queuedOptions)
+      ) {
+        throw new ConflictError('Queued run promotion is missing its immutable effective execution options');
+      }
+      frozenQueuedOptions = queuedOptions;
+      autonomousSafety = {
+        autoWorktree: queuedOptions.worktree.enabled,
+        autoMerge: queuedOptions.merge.autoMerge,
+        mergeStrategy: queuedOptions.merge.strategy,
+        deploy: queuedOptions.safety.deploy,
+        externalSend: queuedOptions.safety.externalSend,
+        policyLocked: queuedOptions.safety.policyLocked,
+      };
+    }
 
     // All model/effort/safety preflight has succeeded. Readiness override audit
     // is the first intentional mutation in this trigger path.
@@ -1610,9 +1642,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
     //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
     const { queue } = req.body;
-    const effectiveAutoWorktreeRequest = autonomousSafety.policyLocked
-      ? autonomousSafety.autoWorktree
-      : Boolean(autoWorktree);
+    const effectiveAutoWorktreeRequest = frozenQueuedOptions
+      ? frozenQueuedOptions.worktree.enabled
+      : autonomousSafety.policyLocked
+        ? autonomousSafety.autoWorktree
+        : Boolean(autoWorktree);
     // The locked SSDLC policy must use the canonical in-engine Pi runner; the
     // optional external orchestration mode would bypass its cleanup/closeout seam.
     const useExternalPiOrchestration = resolvedAgentType === 'pi'
@@ -1645,7 +1679,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           : (mergeStrategy ?? 'direct');
         const queuedAutoMerge = autonomousSafety.policyLocked
           ? false
-          : effectiveAutoWorktreeRequest && autoMerge !== false;
+          : effectiveAutoWorktreeRequest && autoMerge === true;
         const queuedEffectiveOptions = buildEffectiveRunOptions({
           model: finalAgentModel,
           effort: resolvedReasoningEffort,
@@ -1985,11 +2019,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // autonomous runs cannot acquire merge authority from request defaults.
     const computedAutoMerge = autonomousSafety.policyLocked
       ? false
-      : needsWorktree && autoMerge === true;
+      : needsWorktree && autonomousSafety.autoMerge === true;
 
-    // Resolve merge strategy: request param > spec JSON > workspace config > 'direct'
+    // Resolve merge strategy: immutable queued options > request > spec JSON >
+    // workspace config > 'direct'. Promotion may not broaden the frozen queue row.
     let resolvedMergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' = 'direct';
-    if (mergeStrategy) {
+    if (frozenQueuedOptions) {
+      resolvedMergeStrategy = frozenQueuedOptions.merge.strategy;
+    } else if (mergeStrategy) {
       resolvedMergeStrategy = mergeStrategy;
     } else {
       // Try spec JSON
@@ -2015,6 +2052,23 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       resolvedMergeStrategy = 'branch-only';
     }
 
+    const effectiveIncludeGraph = frozenQueuedOptions?.graph.enabled ?? includeGraph ?? false;
+    const effectiveTerminalMode = frozenQueuedOptions?.terminal ?? resolvedTerminalMode;
+    const persistedDispatchOptions = frozenQueuedOptions ?? buildEffectiveRunOptions({
+      model: finalAgentModel,
+      effort: resolvedReasoningEffort,
+      autoWorktree: needsWorktree,
+      worktreePath,
+      branchName,
+      mergeStrategy: resolvedMergeStrategy,
+      autoMerge: computedAutoMerge,
+      includeGraph: effectiveIncludeGraph,
+      terminal: effectiveTerminalMode,
+      policyLocked: autonomousSafety.policyLocked,
+      deploy: autonomousSafety.deploy,
+      externalSend: autonomousSafety.externalSend,
+    });
+
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
     let runId: number;
     const requestedTriggerOptions = Object.fromEntries(
@@ -2027,7 +2081,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         agentOverride,
         modelOverride,
         storyId,
-        includeGraph: includeGraph ?? false,
+        includeGraph: effectiveIncludeGraph,
         thinkingEnabled: resolvedThinkingEnabled,
         thinkingBudget,
         effortLevel,
@@ -2037,7 +2091,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         runAnywayOverride,
         overrideReadinessGate,
         orchestration,
-        terminal_mode: resolvedTerminalMode,
+        terminal_mode: effectiveTerminalMode,
         executionEnvironment: resolvedExecutionEnvironment.effective,
       }).filter(([, value]) => value !== undefined)
     );
@@ -2071,27 +2125,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
          branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14,
          idempotency_key = COALESCE($15, idempotency_key), task_manifest_id = COALESCE($16, task_manifest_id), task_manifest_artifacts = COALESCE($17::jsonb, task_manifest_artifacts), trigger_options = $18::jsonb
-         WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, existingRunId, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
-      runId = existingRunId;
+         WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, existingRunId, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      runId = normalizeWorkerRunId(existingRunId);
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
       runId = normalizeWorkerRunId(runResult?.id);
     }
 
-    const effectiveRunOptions = buildEffectiveRunOptions({
-      model: finalAgentModel,
-      effort: resolvedReasoningEffort,
-      autoWorktree: needsWorktree,
-      worktreePath,
-      branchName,
-      mergeStrategy: resolvedMergeStrategy,
-      autoMerge: computedAutoMerge,
-      includeGraph: includeGraph ?? false,
-      terminal: resolvedTerminalMode,
-      policyLocked: autonomousSafety.policyLocked,
-      deploy: autonomousSafety.deploy,
-      externalSend: autonomousSafety.externalSend,
-    });
+    const effectiveRunOptions = persistedDispatchOptions;
     await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
       JSON.stringify(effectiveRunOptions),
       runId,
@@ -2222,8 +2263,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       cwd,
       agent: resolvedAgentType,
       model: finalAgentModel ?? null,
-      effort: resolvedReasoningEffort ?? effortLevel ?? null,
-      terminalMode: resolvedTerminalMode,
+      effort: effectiveRunOptions.effort,
+      terminalMode: effectiveTerminalMode,
       worktreePath,
       branchName,
       autoMerge: computedAutoMerge,
@@ -2234,9 +2275,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // 11. Enqueue the pipeline run via pg-boss.
     //     The worker process picks it up and does the actual spawn / execution.
     //     Job ID = String(runId) for direct lookup by runId.
-    const resolvedJobEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(resolvedReasoningEffort ?? '')
-      ? resolvedReasoningEffort as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
-      : effortLevel;
+    const resolvedJobEffortLevel = ['low', 'medium', 'high', 'max', 'xhigh'].includes(effectiveRunOptions.effort ?? '')
+      ? effectiveRunOptions.effort as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+      : undefined;
 
     const jobPayload = {
       runId,
@@ -2246,7 +2287,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       model: finalAgentModel ?? null,
       worktreePath: worktreePath ?? null,
       branchName: branchName ?? null,
-      terminalMode: resolvedTerminalMode,
+      terminalMode: effectiveTerminalMode,
       executionEnvironment: resolvedExecutionEnvironment.effective,
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
@@ -2262,7 +2303,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
       ...(storyId ? { specificStory: storyId } : {}),
       triggeredVia,
-      includeGraph: includeGraph ?? false,
+      includeGraph: effectiveIncludeGraph,
       ...(agentOverride ? { agentOverride } : {}),
       ...(resolvedThinkingEnabled !== undefined ? { thinkingEnabled: resolvedThinkingEnabled } : {}),
       ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
@@ -2325,8 +2366,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       branchName,
       agentType: resolvedAgentType,
       agentModel: finalAgentModel,
-      terminalMode: resolvedTerminalMode,
-      terminal_mode: resolvedTerminalMode,
+      terminalMode: effectiveTerminalMode,
+      terminal_mode: effectiveTerminalMode,
       effectiveOptions: effectiveRunOptions,
       lifecycleStatus: 'queued',
       lifecycle_status: 'queued',

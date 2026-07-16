@@ -145,20 +145,49 @@ async function seedRun(overrides: Partial<{
   triggered_via: string;
   worktree_path: string | null;
   auto_worktree: boolean;
+  auto_merge: boolean;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
+  include_graph: boolean;
   queue_position: number | null;
 }> = {}) {
+  const autoWorktree = overrides.auto_worktree ?? false;
+  const autoMerge = overrides.auto_merge ?? false;
+  const mergeStrategy = overrides.merge_strategy ?? 'branch-only';
+  const worktreePath = overrides.worktree_path ?? null;
+  const includeGraph = overrides.include_graph ?? false;
+  const effectiveOptions = {
+    model: null,
+    effort: null,
+    worktree: { enabled: autoWorktree, path: worktreePath, branch: null },
+    merge: { strategy: mergeStrategy, autoMerge },
+    graph: { enabled: includeGraph },
+    terminal: 'ansi-html',
+    safety: {
+      guard: 'autonomous-command-guard-v1',
+      allowBackendJest: false,
+      deploy: false,
+      externalSend: false,
+      policyLocked: true,
+    },
+  };
   const result = await queryOne<{ id: number }>(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, pid, triggered_via, worktree_path, auto_worktree, queue_position)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    `INSERT INTO pipeline_runs (
+       spec_path, workspace_id, status, pid, triggered_via, worktree_path,
+       auto_worktree, auto_merge, merge_strategy, include_graph, queue_position, effective_options
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb) RETURNING id`,
     [
       overrides.spec_path ?? 'forge/specs/approved/test-spec.json',
       overrides.workspace_id ?? WS_ID,
       overrides.status ?? 'running',
       overrides.pid ?? null,
       overrides.triggered_via ?? 'run_now',
-      overrides.worktree_path ?? null,
-      overrides.auto_worktree ?? false,
+      worktreePath,
+      autoWorktree,
+      autoMerge,
+      mergeStrategy,
+      includeGraph,
       overrides.queue_position ?? null,
+      JSON.stringify(effectiveOptions),
     ]
   );
   return result!.id;
@@ -555,7 +584,54 @@ describe('triggered_via Routing', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.ok).toBe(true);
-    expect(res.body.runId).toBe(queuedRunId);
+    expect(res.body.runId).toBe(Number(queuedRunId));
+  });
+
+  test('queuedRunId promotion cannot broaden frozen merge or graph authority', async () => {
+    seedSpec('promo-frozen-authority');
+    const queued = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/promo-frozen-authority.json',
+        workspaceId: WS_ID,
+        readinessOverride: true,
+        queue: true,
+        autoWorktree: true,
+        autoMerge: false,
+        mergeStrategy: 'branch-only',
+        includeGraph: false,
+      });
+    expect(queued.status).toBe(202);
+
+    const promoted = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/promo-frozen-authority.json',
+        workspaceId: WS_ID,
+        readinessOverride: true,
+        queuedRunId: queued.body.runId,
+        autoWorktree: true,
+        autoMerge: true,
+        mergeStrategy: 'direct',
+        includeGraph: true,
+      });
+    expect(promoted.status).toBe(201);
+    expect(promoted.body.effectiveOptions).toMatchObject({
+      merge: { strategy: 'branch-only', autoMerge: false },
+      graph: { enabled: false },
+    });
+
+    const row = await queryOne<{ auto_merge: boolean; merge_strategy: string; include_graph: boolean }>(
+      'SELECT auto_merge, merge_strategy, include_graph FROM pipeline_runs WHERE id = $1',
+      [queued.body.runId],
+    );
+    expect(row).toEqual(expect.objectContaining({
+      auto_merge: false,
+      merge_strategy: 'branch-only',
+      include_graph: false,
+    }));
   });
 });
 
