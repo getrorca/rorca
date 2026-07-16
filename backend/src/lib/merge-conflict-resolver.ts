@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Configured semantic merge resolver. It deliberately has no default/fallback
  * agent: a merge must be resolved by the posture which produced its changes.
  */

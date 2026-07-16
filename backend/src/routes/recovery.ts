@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 /** Admin-only recovery routes. These are intentionally not MCP-generated. */
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { handleRouteError } from '../lib/async-handler';

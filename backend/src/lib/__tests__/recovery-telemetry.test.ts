@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
 jest.mock('../../db/index', () => ({ query: jest.fn() }));
 jest.mock('../run-queue', () => ({ getWorkspaceRecoveryQueueSummary: jest.fn() }));
 jest.mock('../worker-heartbeat', () => ({
