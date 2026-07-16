@@ -4,18 +4,25 @@ Date: 2026-07-15
 
 Branch: `release/pty-v2-production-ready`
 
-Merged baseline: `origin/main` at `3b783baa8fceed11bf939bfaaeb2a79ca682ce5d`
+Merged baseline: current `origin/main` at `4ed6a98b5033cc4af2911da1837ef4f814db773a`
 
-Main reconciliation merge: `7483169cf8e263dfc8e76d11500385a89d8391ef`
+Initial main reconciliation merge: `7483169cf8e263dfc8e76d11500385a89d8391ef`
 
-Rollback refs (pre-merge SHA `4e2ef2e`):
+Final main reconciliation merge: `c8133bbde2801cb80adeb21a19966ebc701a9dea`
+
+Rollback refs (preserved pre-merge SHA `4e2ef2e`):
 
 - `safety/pty-v2-before-main-merge-20260715`
 - `pty-v2-before-main-merge-20260715`
 
-Decision: **GO FOR NORMAL RELEASE-BRANCH PUBLICATION — provider certification, code/package gates, and the final staged open-core check pass.**
+Fresh pre-remediation rollback refs (SHA `0e4d569f048c2f4b2c0a25d00e06018f6d0b8b46`):
 
-This decision permits only a normal push of the release branch after creating the clean release commit and verifying a clean worktree. It does not authorize a force-push, direct modification of `main`, production deployment, production database access, or automatic merge.
+- `safety/pty-v2-before-remediation-20260715`
+- `pty-v2-before-remediation-20260715`
+
+Decision: **GO FOR NORMAL RELEASE-BRANCH PUBLICATION AND REQUIRED-CI REVIEW.**
+
+This decision permits only a normal push of the release branch after creating the clean release commit and verifying a clean worktree. It does not authorize a force-push, direct modification of `main`, production deployment, production database access, bypass/override of checks or reviews, or automatic merge.
 
 ## Scope and release fixes
 
@@ -175,6 +182,45 @@ The Dockerfile pins the same provider versions used by the authenticated canarie
 5. Default new runs to `ansi-html` if PTY behavior is suspect, then verify queue health and orphan sweeps before resuming.
 6. Publish this branch only with a normal `git push origin release/pty-v2-production-ready`; never force-push or push directly to `main`.
 7. Merge and deploy only through the repository's required review/CI and the separately authorized production procedure.
+
+## Final remediation update — current main reconciliation
+
+### Root cause and repair
+
+The red GitHub gates were a real release defect. Root `npm ci` invoked the root `postinstall`, which installed backend dependencies using `npm ci --ignore-scripts` and immediately ran the fail-closed verifier. Suppressing lifecycle scripts also suppressed `node-pty`'s own install hook, so Linux had no loadable `pty.node`; the verifier correctly stopped installation rather than accepting a cached or missing native backend.
+
+`backend/scripts/install-dependencies.js` now retains the initial script-suppressed install only to avoid recursive lifecycle invocation, then explicitly runs the lockfile-selected `npm rebuild node-pty --ignore-scripts=false --foreground-scripts` before the existing require/helper/real-spawn verifier. This uses node-pty's native install path for the current OS/architecture; it does not copy a global binary or weaken verification. New node:test coverage asserts the checkout and packed lifecycle ordering and fail-closed behavior.
+
+The delayed PTY attachment timeout was a test-isolation/determinism issue, not a reproduced transport regression. A clean disposable PostgreSQL run passed the original suite. The regression test now deliberately disables the in-process NOTIFY subscriber, sets the supported minimum 250 ms recovery cadence before loading the route, commits delayed PTY chunks, and proves ordered polling delivery plus exact durable replay. The shared Jest cleanup now truncates all PTY session/output/control tables. This replaces an ambient-listener/timing dependency; it does not increase the test timeout.
+
+Two unrelated release-gate defects found during final evidence were repaired rather than ignored:
+
+- Pi-extension tests now clear the operator's `RORCA_PI_WORKSPACE_ID` for chooser coverage and assert sanitizer redaction evidence without pinning an internal detector count; the full Pi extension suite passes under a real operator environment.
+- Reconciliation with current main changed the public persisted-spec schema (optional Genesis provenance and additive canonical response `id`). The OpenAPI snapshot and contract documentation are regenerated at contract `6.0.0`, with an explicit, backward-compatible migration acknowledgement for `POST /api/specs/persist`.
+
+### Final evidence after reconciliation
+
+| Gate | Result |
+| --- | --- |
+| Main ancestry | PASS — `4ed6a98b5033cc4af2911da1837ef4f814db773a` is an ancestor of `c8133bbde` and the later remediation commits. |
+| Clean Linux root lifecycle | PASS — clean Linux/x64 Node 20 Docker checkout ran root `npm ci`, built a real `backend/node_modules/node-pty/build/Release/pty.node`, and passed require/helper/real-spawn verification. Linux/arm64 passed the same path. |
+| Clean macOS lifecycle and packed install | PASS — clean macOS checkout root install, verifier, lifecycle unit test, and isolated `scripts/verify-pack.sh` package smoke passed. |
+| Static/build gates | PASS — root and backend typecheck, root/backend lint (0 errors; pre-existing warnings only), production build, tier lint, license headers/boundaries, diff check. |
+| Open-core boundary preflight | PASS with `--allow-review` — 163 shareable, 28 explicitly review-sensitive, 0 blocked, 0 unknown files. |
+| Contract and migrations | PASS — disposable PostgreSQL migrations plus current-checkout served contract check against `4ed6a98b`; four acknowledged contract changes, including persisted-spec contract `6.0.0`. |
+| Focused PTY/backend | PASS — 12 suites, 75 passed / 1 explicitly skipped: lifecycle, cancellation, manager, native fake spawn, CLI compatibility, detector/version, durable store, attachment/replay, output parity, and golden terminal coverage. |
+| Frontend and packages | PASS — `RunTerminal` 16/16; Pi extension 87/87; capture package 75/75. |
+| Docker image/runtime | PASS — fresh no-cache Node 22 Alpine build verified pinned `claude 2.1.195`, `codex 0.144.4`, `opencode 1.17.10`, `pi 0.80.6`; Linux/arm64 node-pty require/helper/real-spawn passed. |
+| Docker Compose smoke | PASS — isolated ephemeral `pgvector:pg16` + release image started with no provider credentials, applied migrations, returned healthy API and static frontend. Repository compose configuration also validated. |
+
+A final repeat of the Linux clean-install command after the no-cache image build hit Docker VM `ENOSPC` while unpacking the repository's already-tracked historical `backend/backups` payload. This was infrastructure storage exhaustion, not an npm/node-pty failure; the same clean root Linux/x64 command had already passed after the lifecycle repair and main reconciliation, and the final image build/runtime verifier passed. No broad monolithic backend-suite pass is claimed; the documented baseline comparison remains applicable and no focused candidate-only PTY failure remains.
+
+### Publication and merge controls
+
+- These fresh rollback refs are local by design; only the release branch is eligible for normal publication. Existing safety refs/tags remain untouched.
+- Push only `release/pty-v2-production-ready` with a normal non-force push, then wait for every required GitHub check and any mandatory approval.
+- Merge only with `gh pr merge` after GitHub reports green required checks and policy permits a normal protected merge. Do not delete the release branch.
+- No production deployment, production service/database operation, or direct push to `main` was performed during remediation.
 
 ## Final publication procedure
 
