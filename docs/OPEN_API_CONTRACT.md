@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `5.0.0`
+Contract version: `6.0.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -108,7 +108,7 @@ Contract version: `5.0.0`
 | POST | `/api/specs/generate` | body:agentOverride (optional), body:brief (required), body:diagramTypes (optional), body:domain (optional), body:model (optional), body:multiPass (optional), body:postSave (optional), body:specBrief (optional), body:specName (optional), body:storyAnnotations (optional), body:storyCount (optional), body:storyPrefix (optional), body:templateId (optional), body:title (optional), body:workspaceId (optional) | `sha256:20faeb7bc10b77ff74cf47c4e234ceddc0847320c459f694932480f74e7d47b9` |
 | POST | `/api/specs/generation-context` | body:agentOverride (optional), body:brief (required), body:diagramTypes (optional), body:domain (optional), body:model (optional), body:reasoning (optional), body:specBrief (optional), body:specName (optional), body:storyAnnotations (optional), body:storyCount (optional), body:storyPrefix (optional), body:templateId (optional), body:thinkingBudget (optional), body:thinkingEnabled (optional), body:title (optional), body:workspaceId (required) | `sha256:a4554a6475d69149a6952071fc2a0dc3fa942c2be3153245bae5eabaebb9d765` |
 | GET | `/api/specs/kanban` | query:workspaceId (required) | `sha256:9f84bb5a68775b52dee3aed8df2624e7adb5867f4451f3593d3600055ea6f781` |
-| POST | `/api/specs/persist` | body:brief (optional), body:contextSummary (optional), body:contextUsed (optional), body:overwrite (optional), body:policyPresetId (optional), body:postSave (optional), body:postSavePolicy (optional), body:slug (optional), body:source (optional), body:specBrief (optional), body:stories (required), body:storyPrefix (optional), body:title (required), body:userStories (optional), body:workspaceId (required) | `sha256:b88fae37b212d8c85626d8d138e8bcfdb9855ec922c4ce2a2e94b2b39a8f4870` |
+| POST | `/api/specs/persist` | body:brief (optional), body:contextSummary (optional), body:contextUsed (optional), body:overwrite (optional), body:policyPresetId (optional), body:postSave (optional), body:postSavePolicy (optional), body:slug (optional), body:source (optional), body:specBrief (optional), body:stories (required), body:storyPrefix (optional), body:title (required), body:userStories (optional), body:workspaceId (required) | `sha256:a22c0394db4df23994ec939c10f8f83ab1442ee82c468f41992bee2c5ecfe60f` |
 | GET | `/api/specs/repair-candidates` | query:category (optional), query:limit (optional), query:workspaceId (required) | `sha256:370f4bd1f6d1986f822dc51b1575191fee28d0c0b167a894d71db795e8c434db` |
 | GET | `/api/specs/search/stories` | query:q (required), query:workspaceId (required) | `sha256:6292594de8bef5c8eab95de31ebb21a98557ecb8656e31066fa3b4dc2ec522f0` |
 | GET | `/api/version` | - | `sha256:580155644cbfddc9b3efa50861d1c011a29c2930c73dabbf45fdb8265de30f95` |

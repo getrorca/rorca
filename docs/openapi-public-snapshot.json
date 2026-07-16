@@ -1,6 +1,6 @@
 {
-  "contractVersion": "5.0.0",
-  "generatedAt": "2026-07-15T18:13:37.450Z",
+  "contractVersion": "6.0.0",
+  "generatedAt": "2026-07-16T02:03:58.297Z",
   "routes": [
     {
       "method": "GET",
@@ -7826,11 +7826,19 @@
                   "contextSummary": {
                     "additionalProperties": true,
                     "description": "Optional canonical context summary used by the Spec Detail Context tab (direction layers, retrieval metrics, token estimates, etc.).",
+                    "properties": {
+                      "genesis": {
+                        "$ref": "#/components/schemas/GenesisProvenance"
+                      }
+                    },
                     "type": "object"
                   },
                   "contextUsed": {
                     "description": "Optional synthesized context text + metadata captured by a skill-first caller.",
                     "properties": {
+                      "genesis": {
+                        "$ref": "#/components/schemas/GenesisProvenance"
+                      },
                       "meta": {
                         "additionalProperties": true,
                         "type": "object"
@@ -7954,6 +7962,10 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "id": {
+                    "description": "Canonical filename identity; always equal to slug",
+                    "type": "string"
+                  },
                   "postSave": {
                     "properties": {
                       "enrich": {
@@ -8058,7 +8070,7 @@
         "404": {},
         "409": {}
       },
-      "hash": "sha256:b88fae37b212d8c85626d8d138e8bcfdb9855ec922c4ce2a2e94b2b39a8f4870"
+      "hash": "sha256:a22c0394db4df23994ec939c10f8f83ab1442ee82c468f41992bee2c5ecfe60f"
     },
     {
       "method": "GET",

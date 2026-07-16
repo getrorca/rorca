@@ -142,3 +142,12 @@ Justification: the merged mainline terminal contract retains `native-pty` as a c
 Migration path:
 - Existing `ansi-html` and `pty` requests remain valid.
 - New callers should prefer canonical `pty`; `native-pty` remains accepted for mainline compatibility.
+
+<!-- contract-break: 2026-07-15 POST /api/specs/persist -->
+## 2026-07-15 `POST /api/specs/persist`
+
+Justification: reconciliation with current `main` adds optional Genesis provenance to persisted context and returns the canonical persisted `id`. The contract snapshot treats this response/schema shape change as a major revision even though the added fields are backward-compatible for tolerant clients.
+
+Migration path:
+- Existing request bodies remain valid; Genesis provenance is optional.
+- Existing clients may ignore the additive response `id`; clients that need canonical identity may adopt it instead of deriving it from the slug.
