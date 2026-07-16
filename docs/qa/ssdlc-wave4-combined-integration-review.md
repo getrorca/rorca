@@ -30,6 +30,7 @@ Do not merge or update PR 16 from this review without explicit authorization. Th
 | License correction | local commit | `5cbfb5a66` |
 | Generated DB safety parity | local commit | `b312ad1cd` |
 | Git-provenance test fixtures | local commit | `beca2fea99344ddf11fe810c283853cc1afd439b` |
+| Bound QA report and retained browser evidence | local evidence commit | `abba72d28deaf29e7131066f3eae9f43c66f358c` |
 
 Combined branch: `integration/ssdlc-wave4-combined-review`
 
@@ -291,6 +292,8 @@ No unresolved P0/P1 security or lifecycle-truth defect was found in the combined
 - No source worktree or source branch was rewritten.
 - No push, force-push, PR update, merge, auto-merge, deployment, canary, external send, or human sign-off occurred.
 - Test execution used only newly created databases ending in `_test` and the restricted `rorca_test_runner` login/owner.
+- Both review-created databases (`rorca_ssdlc_wave4_review_20260716_test` and `rorca_ssdlc_wave4_broad_20260716_test`) were identity-checked and removed after validation. Their temporary credential files were removed.
+- A final read-only catalog check found the pre-existing `rorca_test` database owned by `rorca`, not `rorca_test_runner`; this review did not alter it. The candidate's owner check will therefore fail closed until that external test-fixture drift is corrected through the approved provisioning path.
 - The isolated Vite process, Playwright browser, Jest processes, and other task-owned validation processes exited.
 
 ## Final recommendation and PR 16 action
