@@ -49,7 +49,6 @@ function createLogger() {
     return pino({
         level,
         timestamp: pino.stdTimeFunctions.isoTime,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }, dest);
 }
 export const logger = createLogger();

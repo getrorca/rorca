@@ -20,6 +20,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # The image's CLI entrypoint also starts an embedded worker. Compose owns a
+    # dedicated worker service below, so run only the HTTP server here.
+    command: node backend/dist/server.js
     environment:
       DATABASE_URL: postgres://rorca:rorca@db:5432/rorca
       RORCA_SERVE_STATIC: "1"

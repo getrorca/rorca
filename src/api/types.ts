@@ -132,6 +132,10 @@ export interface PipelineRun {
     terminal: 'ansi-html' | 'pty' | 'native-pty';
     safety: { guard: string; allowBackendJest: boolean; deploy: boolean; externalSend: boolean; policyLocked: boolean };
   } | null;
+  lifecycleStatus?: string | null;
+  lifecycle_status?: string | null;
+  lifecyclePhase?: string | null;
+  lifecycle_phase?: string | null;
 }
 
 export interface StoryResult {

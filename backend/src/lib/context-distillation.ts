@@ -32,6 +32,7 @@ export const CONTEXT_CAPTURE_QUEUE = 'context:capture';
 export const CONTEXT_DISTILL_QUEUE = 'context:distill';
 
 export type MemoryDistillationMode = 'off' | 'explicit-only' | 'conservative-auto-candidates' | 'trusted-auto-approve';
+/** Legacy candidate lifecycle names retained for cross-client compatibility. */
 export type MemoryCandidateStatus = 'pending' | 'review_required' | 'approved' | 'rejected' | 'auto_approved';
 export type MemoryCandidateCategory = 'Architecture' | 'Convention' | 'Bug Fix' | 'Decision' | 'Pattern' | 'Gotcha' | 'Follow-up';
 

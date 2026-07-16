@@ -5,7 +5,13 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { createRequire } from 'module';
+import * as path from 'path';
 import { logger } from './logger';
+
+const runtimeRequire = createRequire(
+  typeof __filename === 'string' ? __filename : path.resolve(process.argv[1] ?? process.cwd()),
+);
 
 export const PTY_UNAVAILABLE_HINT = 'Run: cd backend && npm rebuild node-pty';
 
@@ -29,7 +35,7 @@ const activePtyCleanupTasks = new Map<string, PtyCleanupTask>();
 let ptyAvailable = false;
 
 try {
-  require('node-pty');
+  runtimeRequire('node-pty');
   ptyAvailable = true;
 } catch (err) {
   logger.warn({ err }, `[pty-manager] node-pty unavailable — PTY mode disabled. ${PTY_UNAVAILABLE_HINT}`);

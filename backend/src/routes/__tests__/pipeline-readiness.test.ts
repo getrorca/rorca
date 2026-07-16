@@ -34,6 +34,10 @@ jest.mock('../../lib/pg-boss', () => ({
   }),
 }));
 
+jest.mock('../../lib/execution-environment-registry', () => ({
+  assertExecutionEnvironmentReadyForRun: jest.fn().mockResolvedValue({ ready: true }),
+}));
+
 let app: Express;
 let tmpDir: string;
 let wsDir: string;

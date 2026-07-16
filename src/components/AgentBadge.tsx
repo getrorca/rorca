@@ -23,11 +23,16 @@ interface AgentBadgeProps {
   size?: 'sm' | 'md';
   /** When false, OpenCode shows the engine label instead of the model short name. */
   showModelName?: boolean;
+  /** When true, Pi badges preserve the persisted model family (for example Pi/Terra). */
+  showPiModel?: boolean;
 }
 
-export default function AgentBadge({ agentType, agentModel, size = 'sm', showModelName = true }: AgentBadgeProps) {
+export default function AgentBadge({ agentType, agentModel, size = 'sm', showModelName = true, showPiModel = false }: AgentBadgeProps) {
   const resolvedType = normalizeAgentType(agentType);
-  const label = getAgentBadgeLabel(resolvedType, agentModel ?? null, { showOpenCodeModel: showModelName });
+  const label = getAgentBadgeLabel(resolvedType, agentModel ?? null, {
+    showOpenCodeModel: showModelName,
+    showPiModel,
+  });
 
   const sizeClass = size === 'md' ? 'px-2 py-0.5 text-[11px]' : 'px-1.5 py-0.5 text-[10px]';
 

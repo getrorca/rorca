@@ -13,7 +13,7 @@ Update them with:
 npm run build:contract
 ```
 
-The contract check runs in PR CI and compares live OpenAPI output against the committed snapshot.
+The contract check runs in PR CI and compares live OpenAPI output against the committed snapshot. Local commands load Swagger from the current checkout so another Rorca process on port 3030 cannot contaminate the result; set `RORCA_CONTRACT_BASE_URL` when explicitly validating a served document.
 
 Breaking public API changes require all of the following:
 1. Add an entry to `docs/contract-breaking-changes.md` with a fresh `<!-- contract-break: YYYY-MM-DD METHOD /path -->` marker.

@@ -7,7 +7,7 @@
 
 import { EventEmitter } from 'events';
 import { ChildProcess } from 'child_process';
-import { createIdleWatchdog, IdleWatchdog } from '../execution-engine';
+import { createIdleWatchdog } from '../execution-engine';
 
 /** Minimal mock that satisfies ChildProcess.kill() for the watchdog. */
 function mockChild(): ChildProcess & { killCalls: Array<NodeJS.Signals | number> } {

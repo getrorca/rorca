@@ -33,7 +33,7 @@ FRESH INSTALL
 canonical migrations=150
 skipped migrations=0
 050_knowledge_graph.sql=applied
-20260714150000_always_on_context_mainline_reconciliation.sql=applied
+20260715130000_always_on_context_mainline_reconciliation.sql=applied
 AGE graph=rorca
 AGE labels=18
 installed extension schemas:

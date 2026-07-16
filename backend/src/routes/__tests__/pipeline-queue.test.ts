@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -69,8 +70,10 @@ beforeEach(async () => {
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'pending'), { recursive: true });
-  // Git init so worktree creation doesn't fail
-  fs.mkdirSync(path.join(wsDir, '.git'), { recursive: true });
+  // Use a real repository so worktree/branch discovery exercises the production path.
+  execFileSync('git', ['init', '-q', wsDir]);
+  execFileSync('git', ['-C', wsDir, 'add', '-A']);
+  execFileSync('git', ['-C', wsDir, '-c', 'user.name=Rorca Tests', '-c', 'user.email=tests@rorca.local', 'commit', '--allow-empty', '-qm', 'test baseline']);
 
   // Clean up DB state
   await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
@@ -176,6 +179,7 @@ describe('Queue Semantics', () => {
       .send({
         specPath: 'forge/specs/approved/queue-test-1.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
       });
 
@@ -205,6 +209,7 @@ describe('Queue Semantics', () => {
       .send({
         specPath: 'forge/specs/approved/queue-no-active.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
       });
 
@@ -229,6 +234,7 @@ describe('Queue Semantics', () => {
         .send({
           specPath: 'forge/specs/approved/queue-seq.json',
           workspaceId: WS_ID,
+          readinessOverride: true,
           queue: true,
         });
 
@@ -254,6 +260,7 @@ describe('Queue Semantics', () => {
       .send({
         specPath: 'forge/specs/approved/queue-full.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
       });
 
@@ -277,6 +284,7 @@ describe('Queue Semantics', () => {
       .send({
         specPath: 'forge/specs/approved/queue-boundary.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
       });
 
@@ -297,6 +305,7 @@ describe('Queue Semantics', () => {
       .send({
         specPath: 'forge/specs/approved/queue-under.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
       });
 
@@ -321,6 +330,7 @@ describe('Conflict Detection', () => {
       .send({
         specPath: 'forge/specs/approved/conflict-no-wt.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         autoWorktree: false,
       });
 
@@ -338,6 +348,7 @@ describe('Conflict Detection', () => {
       .send({
         specPath: 'forge/specs/approved/no-conflict.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
@@ -363,6 +374,7 @@ describe('Conflict Detection', () => {
       .send({
         specPath: 'forge/specs/approved/wt-conflict.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         autoWorktree: true,
       });
 
@@ -389,6 +401,7 @@ describe('Conflict Detection', () => {
       .send({
         specPath: 'forge/specs/approved/wt-ok.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         autoWorktree: true,
       });
 
@@ -409,6 +422,7 @@ describe('Conflict Detection', () => {
       .send({
         specPath: 'forge/specs/approved/paused-conflict.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(200);
@@ -428,6 +442,7 @@ describe('Conflict Detection', () => {
       .send({
         specPath: 'forge/specs/approved/no-stale-conflict.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
@@ -447,6 +462,7 @@ describe('triggered_via Routing', () => {
       .send({
         specPath: 'forge/specs/approved/via-run-now.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
@@ -467,6 +483,7 @@ describe('triggered_via Routing', () => {
       .send({
         specPath: 'forge/specs/approved/via-queue.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
       });
 
@@ -498,6 +515,7 @@ describe('triggered_via Routing', () => {
       .send({
         specPath: 'forge/specs/approved/via-promoted.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queuedRunId,
       });
 
@@ -531,6 +549,7 @@ describe('triggered_via Routing', () => {
       .send({
         specPath: 'forge/specs/approved/promo-no-conflict.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queuedRunId,
       });
 
@@ -552,6 +571,7 @@ describe('autoWorktree on Runs', () => {
       .send({
         specPath: 'forge/specs/approved/queue-wt.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
         autoWorktree: true,
       });
@@ -574,6 +594,7 @@ describe('autoWorktree on Runs', () => {
       .send({
         specPath: 'forge/specs/approved/queue-no-wt.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         queue: true,
       });
 
@@ -595,6 +616,7 @@ describe('autoWorktree on Runs', () => {
       .send({
         specPath: 'forge/specs/approved/wt-response.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         autoWorktree: true,
       });
 
@@ -615,6 +637,7 @@ describe('autoWorktree on Runs', () => {
       .send({
         specPath: 'forge/specs/approved/no-wt-response.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
       });
 
     expect(res.status).toBe(201);
@@ -632,6 +655,7 @@ describe('autoWorktree on Runs', () => {
       .send({
         specPath: 'forge/specs/approved/wt-payload.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
         autoWorktree: true,
       });
 
@@ -659,6 +683,7 @@ describe('autoWorktree on Runs', () => {
       .send({
         specPath: 'forge/specs/approved/no-wt-payload.json',
         workspaceId: WS_ID,
+        readinessOverride: true,
       });
 
     const sendMock = getBoss().send as jest.Mock;
@@ -728,7 +753,9 @@ describe('advanceQueue()', () => {
       [WS_ID]
     );
     expect(walEvents.length).toBe(1);
-    const walPayload = JSON.parse(walEvents[0].payload);
+    const walPayload = typeof walEvents[0].payload === 'string'
+      ? JSON.parse(walEvents[0].payload)
+      : walEvents[0].payload;
     expect(walPayload.runId).toBe(queuedIds[0]);
 
     fetchSpy.mockRestore();

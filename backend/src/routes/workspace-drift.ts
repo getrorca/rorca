@@ -17,7 +17,6 @@ import { queryOne, execute } from '../db/index';
 import { detectDrift } from '../lib/graph-drift-detector';
 import type { GraphDriftReport } from '../lib/graph-drift-detector';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
-import { logger } from '../lib/logger';
 import { NotFoundError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { requireAge } from '../lib/age-guard';

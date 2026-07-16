@@ -58,6 +58,10 @@ const TRUNCATE_SQL = `
     api_key_vault,
     provider_defaults,
     run_output_chunks,
+    run_pty_sessions,
+    run_pty_output_chunks,
+    run_pty_input_requests,
+    run_pty_resize_requests,
     worker_heartbeat,
     memories
   CASCADE

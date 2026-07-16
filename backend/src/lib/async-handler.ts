@@ -23,7 +23,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { AppError } from './errors';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const Layer = require('express/lib/router/layer');
 
 // Idempotency guard — prevent double-patching when jest.resetModules() re-requires this file

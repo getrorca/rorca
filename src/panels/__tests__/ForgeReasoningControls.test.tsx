@@ -24,7 +24,8 @@ import type { ModelOption } from '../../components/ModelSearchSelect';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-router-dom')>(),
   useNavigate: vi.fn(() => vi.fn()),
   useLocation: vi.fn(() => ({ pathname: '/specs', search: '', hash: '', state: null })),
   useParams: vi.fn(() => ({})),

@@ -11,7 +11,6 @@
 
 class PDFParse {
   constructor() {}
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async loadDocument(_data) {
     return { pages: [] };
   }

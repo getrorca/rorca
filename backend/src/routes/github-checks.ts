@@ -10,7 +10,6 @@ import { queryOne } from '../db/index';
 import { postCommitStatus, CHECK_NAME, type CheckState } from '../lib/github-checks';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { handleRouteError } from '../lib/async-handler';
-import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();

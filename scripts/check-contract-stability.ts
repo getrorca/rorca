@@ -6,11 +6,11 @@
  */
 
 import path from 'path';
+import { execFileSync } from 'child_process';
 import {
   buildSnapshotFromOpenApi,
   compareSnapshots,
   determineBumpType,
-  fetchOpenApiFromServer,
   formatDiff,
   getReferenceDate,
   isMajorVersionBump,
@@ -24,14 +24,24 @@ import {
   resolveMarkersForChanges,
   snapshotRoutesEqual,
 } from '../packages/rorca-public-contract/src/index';
+import { loadOpenApiDocument } from './openapi-source';
 
 const cwd = process.cwd();
 const snapshotFile = 'docs/openapi-public-snapshot.json';
 const breakingChangesFile = 'docs/contract-breaking-changes.md';
 const snapshotPath = path.join(cwd, snapshotFile);
 const breakMarkdownPath = path.join(cwd, breakingChangesFile);
-const baseUrl = process.env.RORCA_CONTRACT_BASE_URL || 'http://127.0.0.1:3030';
-const baseRef = process.env.GITHUB_BASE_REF ? `origin/${process.env.GITHUB_BASE_REF}` : null;
+function resolveBaseRef(): string | null {
+  if (process.env.GITHUB_BASE_REF) return `origin/${process.env.GITHUB_BASE_REF}`;
+  try {
+    const branch = execFileSync('git', ['branch', '--show-current'], { cwd, encoding: 'utf8' }).trim();
+    if (!branch || branch === 'main') return null;
+    return execFileSync('git', ['rev-parse', '--verify', 'origin/main'], { cwd, encoding: 'utf8' }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+const baseRef = resolveBaseRef();
 
 async function main(): Promise<void> {
   const committedSnapshot = await readSnapshot(snapshotPath);
@@ -39,7 +49,7 @@ async function main(): Promise<void> {
     throw new Error(`Missing committed baseline at ${snapshotFile}. Run npm run build:contract and commit the result.`);
   }
 
-  const openApi = await fetchOpenApiFromServer(baseUrl);
+  const openApi = await loadOpenApiDocument();
   const freshSnapshot = buildSnapshotFromOpenApi(openApi, committedSnapshot.contractVersion);
 
   if (!snapshotRoutesEqual(committedSnapshot, freshSnapshot)) {

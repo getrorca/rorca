@@ -11,8 +11,9 @@ ALTER TABLE run_pty_sessions
 ALTER TABLE run_pty_sessions
   ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
 
--- last_output_at means that raw PTY bytes were observed, not merely that the
--- process was spawned and remains alive.
+-- last_output_at should mean "raw PTY bytes have been observed". Older schema
+-- initialized it at session start, which made "alive but no terminal bytes yet"
+-- indistinguishable from active output.
 ALTER TABLE run_pty_sessions
   ALTER COLUMN last_output_at DROP NOT NULL;
 

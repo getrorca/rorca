@@ -10,7 +10,6 @@ import { randomUUID } from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
-import { logger } from '../lib/logger';
 import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 

@@ -23,7 +23,7 @@ import { execSync } from 'child_process';
 import { queryOne, query } from '../db/index';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { markWriting } from '../lib/file-watcher';
-import { AuthError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
 

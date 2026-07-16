@@ -10,7 +10,6 @@ import crypto from 'crypto';
 import app from '../../server';
 import { createNotification } from '../notifications';
 import { execute } from '../../db/index';
-import { LOCAL_ADMIN } from '../../lib/auth-utils';
 
 async function createUser(overrides: { email?: string } = {}) {
   const id = crypto.randomUUID();

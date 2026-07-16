@@ -6,10 +6,9 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { queryOne, execute } from '../db/index';
+import { queryOne } from '../db/index';
 import { withUserClient } from '../db/user-client';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
-import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';

@@ -390,12 +390,13 @@ export default function SpecRelevanceGraph({
   const focusedNode = focusedNodeId
     ? layout.nodes.find((n) => n.id === focusedNodeId) ?? null
     : null;
+  const runtime = data.runtime ?? { graphMode: 'full' as const, provider: 'none' as const, ageAvailable: true, hint: '', message: '' };
 
   return (
     <div className="srg-container flex flex-col gap-3" data-testid="srg-container">
-      {data.runtime.graphMode !== 'full' && (
+      {runtime.graphMode !== 'full' && (
         <GraphCapabilityNotice
-          {...(runtimeToNoticeProps(data.runtime) ?? { graphMode: data.runtime.graphMode })}
+          {...(runtimeToNoticeProps(runtime) ?? { graphMode: runtime.graphMode })}
           compact
         />
       )}
@@ -412,7 +413,7 @@ export default function SpecRelevanceGraph({
         <span>{data.summary.edgeCount} edges</span>
         <span>{data.summary.selectedCount} selected</span>
         <span>{data.summary.droppedCount} dropped</span>
-        {data.runtime.graphMode !== 'full' && <span>{data.runtime.graphMode} / {data.runtime.provider}</span>}
+        {runtime.graphMode !== 'full' && <span>{runtime.graphMode} / {runtime.provider}</span>}
         {data.summary.avgRelevanceScore != null && (
           <span>Avg score: {data.summary.avgRelevanceScore.toFixed(3)}</span>
         )}
@@ -474,7 +475,7 @@ export default function SpecRelevanceGraph({
         <NodeDetailPopover node={focusedNode} />
       )}
 
-      {data.runtime.graphMode !== 'full' && data.fallback.missingReasons.length > 0 && (
+      {runtime.graphMode !== 'full' && data.fallback.missingReasons.length > 0 && (
         <div
           className="px-2 py-1 text-xs rounded"
           style={{ color: 'var(--text-muted)', background: 'var(--surface-200)' }}

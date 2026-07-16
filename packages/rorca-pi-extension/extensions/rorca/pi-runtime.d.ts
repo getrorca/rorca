@@ -5,10 +5,19 @@ declare module "@earendil-works/pi-coding-agent" {
     setWidget(key: string, value?: string[]): void;
     select(title: string, options: string[], config?: Record<string, unknown>): Promise<string | undefined>;
     confirm(title: string, message: string): Promise<boolean>;
+    custom<T>(
+      factory: (tui: any, theme: Theme, keybindings: any, done: (value: T) => void) => any,
+      options?: Record<string, unknown>,
+    ): Promise<T>;
     theme: {
       fg(kind: string, value: string): string;
       strikethrough(value: string): string;
     };
+  }
+
+  export interface Theme {
+    fg(kind: string, value: string): string;
+    strikethrough(value: string): string;
   }
 
   export interface ExtensionContext {

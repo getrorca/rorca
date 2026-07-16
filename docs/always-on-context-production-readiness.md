@@ -191,7 +191,7 @@ without operator approval.
 
 ## Mainline/brownfield candidate compatibility
 
-Migration `20260714150000_always_on_context_mainline_reconciliation.sql` extends
+Migration `20260715130000_always_on_context_mainline_reconciliation.sql` extends
 the canonical CCS `context_events` and `memory_candidates` ledgers additively.
 It does **not** add a second `status`, `category`, `content`, or candidate
 `payload` model. Distillation/import writes populate canonical

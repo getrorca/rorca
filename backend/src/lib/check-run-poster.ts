@@ -228,7 +228,6 @@ function buildOutputText(stories: Map<string, StoryProgress>, runId: number): st
  */
 function extractAnnotations(
   stories: Map<string, StoryProgress>,
-  runId: number,
 ): CheckAnnotation[] {
   const annotations: CheckAnnotation[] = [];
   const fileLineRegex = /(?:^|\s|at\s+)([a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}):(\d+)/gm;
@@ -541,7 +540,7 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
   }
 
   // Build annotations for failed stories
-  const annotations = extractAnnotations(state.stories, runId);
+  const annotations = extractAnnotations(state.stories);
 
   // Final PATCH with conclusion
   await updateCheckRun(state.owner, state.repo, state.checkRunId, state.workspaceId, {

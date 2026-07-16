@@ -41,7 +41,8 @@ vi.mock('../../lib/apiFetch', () => ({
   },
 }));
 
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-router-dom')>(),
   useNavigate: () => vi.fn(),
   useLocation: () => ({ pathname: '/specs', search: '', hash: '' }),
   useParams: () => ({}),

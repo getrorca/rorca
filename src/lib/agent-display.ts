@@ -40,10 +40,11 @@ export function getAgentModelDisplayName(agentModel?: string | null): string | n
 export function getAgentBadgeLabel(
   agentType?: string | null,
   agentModel?: string | null,
-  options: { showOpenCodeModel?: boolean } = {},
+  options: { showOpenCodeModel?: boolean; showPiModel?: boolean } = {},
 ): string {
   const resolvedType = normalizeAgentType(agentType);
   const showOpenCodeModel = options.showOpenCodeModel ?? true;
+  const showPiModel = options.showPiModel ?? false;
 
   switch (resolvedType) {
     case 'claude':
@@ -52,8 +53,11 @@ export function getAgentBadgeLabel(
       return showOpenCodeModel ? (shortModelName(agentModel) ?? 'OpenCode') : 'OpenCode';
     case 'codex':
       return 'Codex';
-    case 'pi':
-      return 'Pi';
+    case 'pi': {
+      const model = shortModelName(agentModel);
+      if (!showPiModel || !model) return 'Pi';
+      return `Pi/${model.toLowerCase().includes('terra') ? 'Terra' : model}`;
+    }
     default:
       return 'Unknown';
   }

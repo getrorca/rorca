@@ -61,11 +61,11 @@
   --color-warning: var(--warning);
   --color-error: var(--error);
   --status-healthy: var(--success);
-  --status-healthy-bg: rgba(16, 185, 129, 0.1);
+  --status-healthy-bg: rgba(16, 185, 129, 0.12);
   --status-degraded: var(--warning);
-  --status-degraded-bg: rgba(245, 158, 11, 0.1);
+  --status-degraded-bg: rgba(245, 158, 11, 0.12);
   --status-offline: var(--error);
-  --status-offline-bg: rgba(239, 68, 68, 0.1);
+  --status-offline-bg: rgba(239, 68, 68, 0.12);
   --skeleton: #2d2d4a;
   --skeleton-shimmer: #3d3d5c;
   --terminal-bg: #0d0d1a;

@@ -29,7 +29,8 @@ vi.mock('../../lib/apiFetch', () => ({
   getRefreshToken: vi.fn(() => null),
 }));
 
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-router-dom')>(),
   useNavigate: vi.fn(() => vi.fn()),
   useLocation: vi.fn(() => ({ pathname: '/settings/providers', search: '', hash: '', state: null })),
   useParams: vi.fn(() => ({})),

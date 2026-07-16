@@ -22,7 +22,7 @@
  *   await router.dispatch('github', 'push', payload, meta);
  */
 
-import { queryOne, execute, transaction } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { logger } from './logger';
 
 // ─── Types ────────────────────────────────────────────────────────────────

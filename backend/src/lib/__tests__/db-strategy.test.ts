@@ -61,6 +61,20 @@ describe('db-strategy', () => {
     mockPoolEnd.mockReset().mockResolvedValue(undefined);
     mockPoolCtor.mockClear();
     delete process.env.DATABASE_URL;
+    delete process.env.RORCA_DB_MODE;
+  });
+
+  it('honors an explicit process mode over persisted local configuration', () => {
+    process.env.RORCA_DB_MODE = 'byop';
+    process.env.DATABASE_URL = 'postgres://user:pass@127.0.0.1:55493/rorca_canary_test';
+    mockReadFileSync.mockImplementation((target: string) => {
+      if (target.endsWith('/db-mode')) return 'native\n';
+      if (target.endsWith('/database-url')) return 'postgres://localhost:5433/rorca';
+      throw new Error('missing');
+    });
+    const { detectDbMode, buildDatabaseCapability } = require('../db-strategy');
+    expect(detectDbMode()).toBe('byop');
+    expect(buildDatabaseCapability({ connected: true }).connection.port).toBe(55493);
   });
 
   it('returns byop when DATABASE_URL points to a non-local host and no explicit mode is persisted', () => {

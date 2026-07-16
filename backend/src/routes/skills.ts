@@ -24,7 +24,6 @@ import { query, queryOne } from '../db/index';
 import { SkillRegistry, inferCategory } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
-import { logger } from '../lib/logger';
 import { NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
