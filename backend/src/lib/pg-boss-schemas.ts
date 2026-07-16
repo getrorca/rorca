@@ -20,6 +20,7 @@
 import { z } from 'zod';
 import { TerminalModeSchema } from './terminal-mode';
 import { ExecutionEnvironmentSchema } from './execution-environment';
+export type { UnifiedContextEventPayloadType } from './context-capture-contracts';
 
 // ── pipeline:run ─────────────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ export const PipelineRunJobPayload = z.object({
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
   taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  triggerOptions: z.record(z.string(), z.unknown()).optional(),
   executionEnvironmentId: z.string().optional(),
 }).strict();
 
@@ -97,7 +99,6 @@ export const PipelineRetryJobPayload = z.object({
   model: z.string().nullable(),
   worktreePath: z.string().nullable(),
   branchName: z.string().nullable(),
-  terminalMode: TerminalModeSchema,
   sequenceOffset: z.number().int().min(0),
   /** Host-resolved immutable retry manifests. Optional only for audited legacy jobs. */
   executionManifestPath: z.string().min(1).optional(),

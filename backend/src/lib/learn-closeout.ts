@@ -597,6 +597,7 @@ export function toMemoryDraft(facts: LearnCloseoutFacts, input: LearnCandidateIn
     status: 'review_required',
     reviewReason: input.reviewReason,
     securitySensitive: input.securitySensitive,
+    regulatedDomain: false,
     defaultRetrievalEligible: false,
     relatedFiles: [],
     evidenceSnippets: input.sourceEvidenceIds.map((id) => ({ text: `Verified lifecycle evidence ${id}`, sourceField: 'sourceEvidenceIds', redacted: false })),

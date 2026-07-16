@@ -22,6 +22,7 @@ import {
 } from './context-capture-contracts';
 import { getContextCaptureControlState } from './context-capture-controls';
 import { hashCaptureContent, sanitizeCapturePayload } from './context-safety';
+import { embedText, prepareText } from './embedding-pipeline';
 import { logger } from './logger';
 import { chatComplete, type ChatMessage } from './llm-client';
 import { promoteMemory } from './memory-promotion';
@@ -54,6 +55,9 @@ export interface MemoryCandidateDraft {
   category: MemoryCandidateCategory;
   content: string;
   confidence: 'high' | 'medium' | 'low';
+  status: Extract<MemoryCandidateStatus, 'pending' | 'review_required'>;
+  reviewReason: string | null;
+  defaultRetrievalEligible: false;
   securitySensitive: boolean;
   regulatedDomain: boolean;
   relatedFiles: string[];
@@ -110,6 +114,11 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function parseJsonish(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
 function normalizeSettings(row?: { mode: string; operator_auto_approve: boolean; llm_summarization: boolean; max_events_per_job: number } | null): MemoryDistillationSettings {
   const mode = row?.mode === 'off' || row?.mode === 'explicit-only' || row?.mode === 'trusted-auto-approve' || row?.mode === 'conservative-auto-candidates'
     ? row.mode
@@ -129,6 +138,10 @@ export async function getMemoryDistillationSettings(workspaceId: string): Promis
     [workspaceId],
   );
   return normalizeSettings(row);
+}
+
+export function isCandidateVisibleInDefaultRetrieval(status: MemoryCandidateStatus): boolean {
+  return status === 'approved' || status === 'auto_approved';
 }
 
 export async function upsertMemoryDistillationSettings(workspaceId: string, patch: Partial<MemoryDistillationSettings>): Promise<MemoryDistillationSettings> {
@@ -216,6 +229,9 @@ export function distillContextEventToCandidate(input: {
     category,
     content,
     confidence: payload.eventType === 'explicit_memory' ? 'high' : 'medium',
+    status: securitySensitive ? 'review_required' : 'pending',
+    reviewReason: securitySensitive ? 'security_or_regulated_signal_requires_explicit_review' : null,
+    defaultRetrievalEligible: false,
     securitySensitive,
     regulatedDomain,
     relatedFiles,
@@ -257,6 +273,37 @@ function canonicalTrustTier(trust: UnifiedContextEventPayloadType['trust_tier'])
   if (trust === 'verified') return 'verified_fact';
   if (trust === 'local') return 'working_note';
   return 'agent_observation';
+}
+
+async function autoApproveCandidateIfAllowed(candidate: MemoryCandidateDraft, settings: MemoryDistillationSettings): Promise<{
+  status: MemoryCandidateStatus;
+  memoryId: number | null;
+}> {
+  if (settings.mode !== 'trusted-auto-approve' || !settings.operatorAutoApprove || candidate.securitySensitive || candidate.regulatedDomain) {
+    return { status: candidate.status, memoryId: null };
+  }
+
+  let embedding: number[] | null = null;
+  try {
+    embedding = await embedText(prepareText('memory', candidate.content));
+  } catch (err) {
+    logger.warn({ err }, '[context-distillation] embedding failed for auto-approved candidate; saving memory without vector');
+  }
+
+  const inserted = await queryOne<{ id: number }>(
+    `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type, source)
+     VALUES ($1, $2, $3, $4, $5, $6::vector, 'auto-extracted', 'context-distillation')
+     RETURNING id`,
+    [
+      candidate.workspaceId,
+      candidate.category,
+      candidate.content,
+      candidate.confidence,
+      JSON.stringify(candidate.relatedFiles),
+      embedding ? `[${embedding.join(',')}]` : null,
+    ],
+  );
+  return { status: 'auto_approved', memoryId: inserted?.id ?? null };
 }
 
 async function insertMemoryCandidate(candidate: MemoryCandidateDraft, settings: MemoryDistillationSettings): Promise<{ candidateId: number | null; status: MemoryCandidateStatus; memoryId: number | null; inserted: boolean }> {

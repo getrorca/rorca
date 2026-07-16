@@ -66,6 +66,11 @@ function requiredString(value: unknown, name: string): string {
   return value.trim();
 }
 
+// Compatibility alias for the SSDLC candidate-review routes; retain mainline trimming semantics.
+function assertString(value: unknown, name: string): string {
+  return requiredString(value, name);
+}
+
 async function loadWorkspace(workspaceId: string): Promise<WorkspaceRow> {
   const workspace = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
   if (!workspace) throw new NotFoundError('Workspace', workspaceId);
@@ -178,13 +183,6 @@ async function emitCandidateReviewInvalidation(input: {
   }
 }
 
-function parsePositiveInt(value: unknown, fieldName: string, fallback: number, max: number): number {
-  if (value === undefined || value === null || value === '') return fallback;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) throw new ValidationError(`${fieldName} must be an integer between 1 and ${max}`);
-  return parsed;
-}
-
 function parseCandidateId(value: unknown): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new ValidationError('candidateId must be a positive integer');
@@ -218,23 +216,6 @@ function isCliCapturePayload(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false;
   const eventType = (payload as Record<string, unknown>).eventType;
   return eventType === 'cli_command' || eventType === 'shell_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
-}
-
-function assertAgentMetadata(payload: unknown): void {
-  if (!payload || typeof payload !== 'object') return;
-  const obj = payload as Record<string, unknown>;
-  if (obj.eventType !== 'agent_memory' && obj.eventType !== 'adapter_context' && obj.eventType !== 'explicit_memory') return;
-  for (const key of ['source_system', 'tool_name', 'session_id']) {
-    const sourceIdentity = obj.source_identity && typeof obj.source_identity === 'object' ? obj.source_identity as Record<string, unknown> : undefined;
-    const value = obj[key] ?? sourceIdentity?.[key];
-    if (typeof value !== 'string' || !String(value).trim()) {
-      throw new ValidationError(`Adapter payload requires ${key} metadata`);
-    }
-  }
-}
-
-function sha256(value: string): string {
-  return `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
 }
 
 function stringValue(value: unknown): string | null {
