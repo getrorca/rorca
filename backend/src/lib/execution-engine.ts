@@ -37,7 +37,7 @@
  */
 
 import { spawn, execSync, type ChildProcess } from 'child_process';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -4412,11 +4412,64 @@ function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegration
   return { ok: true, files: [] };
 }
 
+async function recordIntegratedCheckpointAttestation(
+  config: EngineConfig,
+  workspaceId: string,
+  pending: PendingIntegratedPass,
+): Promise<void> {
+  if (config.dryRun) return;
+  try {
+    const checkpointSha = getGitHead(config.cwd);
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: config.cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    if (typeof checkpointSha !== 'string' || !/^[0-9a-f]{40}$/i.test(checkpointSha) || !/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(branch)) {
+      throw new Error('integrated branch identity is unavailable');
+    }
+    const passedAt = new Date();
+    const evidenceDigest = createHash('sha256').update(JSON.stringify({
+      contractVersion: 'checkpoint-validation-v1',
+      gate: 'execution-engine',
+      outcome: 'passed',
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      branch,
+      checkpointSha,
+      agentType: pending.agentType,
+    })).digest('hex');
+    const { recordCheckpointValidationAttestation } = await import('./checkpoint-reconciliation');
+    await recordCheckpointValidationAttestation({
+      id: randomUUID(),
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      branch,
+      checkpointSha,
+      validationGate: 'execution-engine',
+      evidenceDigest,
+      passedAt: passedAt.toISOString(),
+      expiresAt: new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  } catch (error: unknown) {
+    // The current story can still complete normally; the missing attestation only
+    // removes the crash-recovery shortcut and therefore fails closed on recovery.
+    logger.warn({ err: error, runId: config.runId, storyId: pending.story.id }, '[checkpoint] Failed to persist trusted integrated-worktree attestation');
+  }
+}
+
 async function finalizeIntegratedStoryPass(
   config: EngineConfig,
   workspaceId: string | null,
   pending: PendingIntegratedPass,
 ): Promise<void> {
+  // Persist trusted crash-recovery evidence after run-branch integration but
+  // before canonical pass mutation. If the process dies between these steps,
+  // reconciliation can later prove the exact integrated branch head.
+  if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending);
   await markStoryPassed(config.jsonPath, pending.story.id);
 
   if (!workspaceId) return;

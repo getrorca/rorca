@@ -134,7 +134,8 @@ export async function recordCheckpointValidationAttestation(attestation: Checkpo
     await client.query(
       `INSERT INTO checkpoint_validation_attestations
        (id, workspace_id, run_id, story_id, branch_name, checkpoint_sha, validation_gate, evidence_digest, passed_at, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT (workspace_id, run_id, story_id, branch_name, checkpoint_sha, validation_gate) DO NOTHING`,
       [parsed.id, parsed.workspaceId, parsed.runId, parsed.storyId, parsed.branch, parsed.checkpointSha.toLowerCase(), parsed.validationGate, parsed.evidenceDigest.toLowerCase(), parsed.passedAt, parsed.expiresAt],
     );
   });

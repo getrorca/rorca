@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { swaggerSpec } from '../swagger';
 import { getMcpToolDefinitions } from '../mcp-http';
 
@@ -20,4 +22,22 @@ test('recovery contracts are discoverable with correct REST/MCP authority', () =
   expect(toolNames).not.toContain('rorca_admin_recovery_checkpoints_attestation');
   expect(toolNames).not.toContain('rorca_admin_recovery_checkpoints_reconcile');
   expect(toolNames).not.toContain('rorca_repair_checkpoints_reconcile');
+});
+
+test('trusted checkpoint evidence is produced before pass and immutable in PostgreSQL', () => {
+  const engine = fs.readFileSync(path.join(process.cwd(), 'src/lib/execution-engine.ts'), 'utf8');
+  const finalize = engine.slice(
+    engine.indexOf('async function finalizeIntegratedStoryPass'),
+    engine.indexOf('async function recordStoryMergeConflict'),
+  );
+  expect(finalize).toContain('recordIntegratedCheckpointAttestation(config, workspaceId, pending)');
+  expect(finalize.indexOf('recordIntegratedCheckpointAttestation')).toBeLessThan(finalize.indexOf('markStoryPassed'));
+
+  const migration = fs.readFileSync(
+    path.join(process.cwd(), 'src/db/pg-migrations/20260715141000_checkpoint_attestation_immutability.sql'),
+    'utf8',
+  );
+  expect(migration).toContain('uq_checkpoint_attestation_identity');
+  expect(migration).toContain('BEFORE UPDATE OR DELETE ON checkpoint_validation_attestations');
+  expect(migration).toContain('only one-way revocation is permitted');
 });
