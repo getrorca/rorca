@@ -1,0 +1,314 @@
+{
+  "schemaVersion": "rorca.lifecycle-golden-journey-evidence.v1",
+  "fixtureId": "lfc-024-billing-anomaly-alerts-v1",
+  "deterministicSeed": "LFC-024",
+  "intent": "Alert each organization when its billing changes unexpectedly without exposing another tenant’s data.",
+  "governedScopeDecision": {
+    "decisionId": "scope-decision-lfc-024",
+    "specCount": 1,
+    "boundaries": [
+      "alert evaluation",
+      "tenant-scoped delivery",
+      "operability",
+      "validation"
+    ],
+    "rationale": "One cohesive deployable capability owns all requirements; splitting delivery would leave tenant isolation unowned."
+  },
+  "referenceDiagrams": {
+    "uiJourney": "docs/diagrams/rorca-ssdlc-lifecycle-board-wireframe.png",
+    "runtimeEvidence": "docs/diagrams/hermes-rorca-ssdlc-skill-sequence-clean.png",
+    "authorityRule": "Validated canonical contracts override stale visual details."
+  },
+  "ids": {
+    "workspaceId": "lfc-024-staging-workspace",
+    "specId": "billing-anomaly-alerts",
+    "runIds": [
+      913,
+      914,
+      915
+    ],
+    "storyIds": [
+      "BAA-001",
+      "BAA-002",
+      "BAA-003",
+      "BAA-004",
+      "BAA-005",
+      "BAA-006"
+    ]
+  },
+  "storyExecution": [
+    {
+      "storyId": "BAA-001",
+      "attemptPacketId": "attempt:913:BAA-001",
+      "completionPacketId": "completion:913:BAA-001",
+      "commitSha": "1111111111111111111111111111111111111111",
+      "attemptState": "completed",
+      "closeoutState": "accepted",
+      "lifecycleStateSource": "canonical_phase_evaluator"
+    },
+    {
+      "storyId": "BAA-002",
+      "attemptPacketId": "attempt:913:BAA-002",
+      "completionPacketId": "completion:913:BAA-002",
+      "commitSha": "2222222222222222222222222222222222222222",
+      "attemptState": "completed",
+      "closeoutState": "accepted",
+      "lifecycleStateSource": "canonical_phase_evaluator"
+    },
+    {
+      "storyId": "BAA-003",
+      "attemptPacketId": "attempt:913:BAA-003",
+      "completionPacketId": "completion:913:BAA-003",
+      "commitSha": "3333333333333333333333333333333333333333",
+      "attemptState": "completed",
+      "closeoutState": "accepted",
+      "lifecycleStateSource": "canonical_phase_evaluator"
+    },
+    {
+      "storyId": "BAA-004",
+      "attemptPacketId": "attempt:913:BAA-004",
+      "completionPacketId": "completion:913:BAA-004",
+      "commitSha": "4444444444444444444444444444444444444444",
+      "attemptState": "completed",
+      "closeoutState": "accepted",
+      "lifecycleStateSource": "canonical_phase_evaluator"
+    },
+    {
+      "storyId": "BAA-005",
+      "attemptPacketId": "attempt:913:BAA-005",
+      "completionPacketId": "completion:914:BAA-005",
+      "commitSha": "5555555555555555555555555555555555555555",
+      "attemptState": "completed",
+      "closeoutState": "accepted_after_retry",
+      "lifecycleStateSource": "canonical_phase_evaluator"
+    },
+    {
+      "storyId": "BAA-006",
+      "attemptPacketId": "attempt:913:BAA-006",
+      "completionPacketId": "completion:913:BAA-006",
+      "commitSha": "8f32a1d7ef78d49e6f74bf482531e18553f00f6c",
+      "attemptState": "completed",
+      "closeoutState": "accepted",
+      "lifecycleStateSource": "canonical_phase_evaluator"
+    }
+  ],
+  "lineage": {
+    "specVersion": "7",
+    "inputHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "planVersion": 3,
+    "sourceCommit": "8f32a1d7ef78d49e6f74bf482531e18553f00f6c",
+    "stagedArtifactDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "testDeploymentId": "staging-billing-alerts-20260715-01"
+  },
+  "explicitMappings": {
+    "journeyModeEvidence": [
+      "validation-broad",
+      "staging-gate",
+      "qa-gate"
+    ],
+    "qaModeEvidence": [
+      "validation-broad",
+      "qa-gate"
+    ],
+    "evaluatorOnlyPhaseAuthority": true,
+    "qaApprovalIndependent": true
+  },
+  "externalBoundaryAdapters": [
+    "GitHub test adapter",
+    "Hermes test adapter",
+    "GitReins test adapter",
+    "approval-gated staging test adapter"
+  ],
+  "commands": [
+    {
+      "command": "npm run test:tenant-isolation",
+      "expectedResult": "fails before BAA-005 fix; passes after targeted retry",
+      "evidenceTrust": "host_observed",
+      "result": "asserted_by_playwright"
+    },
+    {
+      "command": "npm run typecheck",
+      "expectedResult": "passes after recovery",
+      "evidenceTrust": "host_observed",
+      "result": "asserted_by_playwright"
+    },
+    {
+      "command": "npx playwright test tests/lifecycle-golden-journey.spec.ts",
+      "expectedResult": "passes",
+      "evidenceTrust": "host_observed",
+      "result": "asserted_by_playwright"
+    }
+  ],
+  "mutations": [
+    "recompile",
+    "evidence_ingest",
+    "decision",
+    "revocation",
+    "retry_preview",
+    "retry_dispatch",
+    "qa_approval"
+  ],
+  "approvals": [
+    {
+      "id": "decision-qa-lfc-024",
+      "type": "qa_approval",
+      "subject": "8f32a1d7ef78d49e6f74bf482531e18553f00f6c",
+      "actor": "authorized test approver",
+      "result": "recorded_then_governedly_revoked_and_reapplied"
+    }
+  ],
+  "screenshots": [
+    {
+      "name": "blocked-1440x900-light.png",
+      "width": 1440,
+      "height": 900,
+      "theme": "light"
+    },
+    {
+      "name": "recovery-1440x900-light.png",
+      "width": 1440,
+      "height": 900,
+      "theme": "light"
+    },
+    {
+      "name": "blocked-1024x768-light.png",
+      "width": 1024,
+      "height": 768,
+      "theme": "light"
+    },
+    {
+      "name": "recovery-1024x768-light.png",
+      "width": 1024,
+      "height": 768,
+      "theme": "light"
+    },
+    {
+      "name": "blocked-390x844-light.png",
+      "width": 390,
+      "height": 844,
+      "theme": "light"
+    },
+    {
+      "name": "recovery-390x844-light.png",
+      "width": 390,
+      "height": 844,
+      "theme": "light"
+    },
+    {
+      "name": "approval-1440x900-light.png",
+      "width": 1440,
+      "height": 900,
+      "theme": "light"
+    },
+    {
+      "name": "stale-1024x768-light.png",
+      "width": 1024,
+      "height": 768,
+      "theme": "light"
+    },
+    {
+      "name": "empty-390x844-light.png",
+      "width": 390,
+      "height": 844,
+      "theme": "light"
+    },
+    {
+      "name": "loading-390x844-light.png",
+      "width": 390,
+      "height": 844,
+      "theme": "light"
+    },
+    {
+      "name": "error-390x844-light.png",
+      "width": 390,
+      "height": 844,
+      "theme": "light"
+    }
+  ],
+  "remainingRisks": [
+    "Production deployment evidence intentionally absent.",
+    "Slack, merge, deploy, and production mutation are policy-locked."
+  ],
+  "cleanup": {
+    "browser": "closed_by_playwright_fixture",
+    "server": "not_started_by_test",
+    "runner": "no_external_runner_started",
+    "fixtureWorkspace": "transport fixture discarded with browser context",
+    "externalSideEffects": {
+      "slack": false,
+      "merge": false,
+      "deploy": false,
+      "productionMutation": false
+    },
+    "confirmed": true
+  },
+  "generatedBy": "tests/lifecycle-golden-journey.spec.ts",
+  "checkpoints": [
+    {
+      "segment": "intent-spec-plan",
+      "result": "passed",
+      "detail": "One governed spec, six owned stories, eleven phases, and four Validation gates are represented by canonical response types."
+    },
+    {
+      "segment": "blocked-observation",
+      "result": "passed",
+      "detail": "Agent attempt completion, blocked accepted closeout, and Validation 2/4 evaluation are separately visible; BAA-006 is unscheduled."
+    },
+    {
+      "segment": "recompile",
+      "result": "passed",
+      "detail": "Stale generation denied; current compile succeeded; same canonical revision skipped idempotently."
+    },
+    {
+      "segment": "override-packet",
+      "result": "passed",
+      "detail": "Policy packet exposed rule, missing evidence, actor policy, scope, expiry, revision, and non-bypassable controls without changing state."
+    },
+    {
+      "segment": "smallest-safe-retry",
+      "result": "passed",
+      "detail": "Only BAA-005 dispatched after an exact current preview; BAA-006 became eligible only after accepted closeout."
+    },
+    {
+      "segment": "evidence-recovery",
+      "result": "passed",
+      "detail": "Focused and broad evidence is revision-bound, lineage-coherent, and idempotent; Validation reaches 4/4 only after evaluator refresh."
+    },
+    {
+      "segment": "explicit-qa-approval",
+      "result": "passed",
+      "detail": "QA-mode evidence remained insufficient until an authorized decision bound to the source commit was recorded; no merge/deploy/send occurred."
+    },
+    {
+      "segment": "decision-revocation",
+      "result": "passed",
+      "detail": "Revocation was governed and idempotent; successful QA-mode evidence remained while QA approval returned to awaiting approval."
+    },
+    {
+      "segment": "lineage-invalidation",
+      "result": "passed",
+      "detail": "Replacing the artifact preserved source-bound Validation and invalidated only dependent QA, merge, and production proof."
+    },
+    {
+      "segment": "learn-closeout",
+      "result": "passed",
+      "detail": "Run closeout produced a provenance-linked review candidate without promoting sensitive content."
+    },
+    {
+      "segment": "responsive-exceptional-states",
+      "result": "passed",
+      "detail": "Required light-theme dimensions captured blocked, recovery, approval, stale, empty, loading, and recoverable error without fake success UI."
+    }
+  ],
+  "mutationResults": {
+    "recompile": 3,
+    "evidenceIngest": 3,
+    "decision": 2,
+    "revocation": 3,
+    "preview": 3,
+    "dispatch": 2
+  },
+  "externalTestAdapters": [
+    "Hermes test adapter"
+  ]
+}
