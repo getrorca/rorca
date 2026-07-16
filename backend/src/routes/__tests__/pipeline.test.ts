@@ -1955,7 +1955,7 @@ describe('POST /api/pipeline/queue', () => {
 // ─── Auto-merge functionality tests ────────────────────────────────
 
 describe('auto_merge column in pipeline_runs', () => {
-  test('defaults auto_merge to true when autoWorktree=true', async () => {
+  test('preserves the worktree branch by default when autoMerge is omitted', async () => {
     createRunLoopStub();
     await seedRunnableSpec('auto-merge-default');
 
@@ -1971,14 +1971,22 @@ describe('auto_merge column in pipeline_runs', () => {
     expect(res.status).toBe(201);
     const runId = res.body.runId;
 
-    // Fetch the run and verify auto_merge = true
+    // Worktree isolation does not imply permission to merge into the base branch.
     const run = await queryOne(
       `SELECT auto_merge FROM pipeline_runs WHERE id = $1`,
       [runId]
     ) as { auto_merge: boolean } | undefined;
 
     expect(run).toBeDefined();
-    expect(run!.auto_merge).toBe(true);
+    expect(run!.auto_merge).toBe(false);
+
+    // The persisted policy and the worker-bound pg-boss payload agree, so the
+    // worker cannot infer final-merge permission from worktree isolation.
+    const { getBoss } = require('../../lib/pg-boss');
+    const jobPayload = getBoss().send.mock.calls[0][1];
+    expect(jobPayload).toMatchObject({ autoWorktree: true, autoMerge: false, mergeStrategy: 'direct' });
+    const { PipelineRunJobPayload } = require('../../lib/pg-boss-schemas');
+    expect(PipelineRunJobPayload.safeParse(jobPayload).success).toBe(true);
   });
 
   test('forces auto_merge to false when autoWorktree=false', async () => {

@@ -1505,8 +1505,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     //    If queuedRunId is provided, promote the existing queued row instead of inserting
-    // Enforce constraint: auto_merge is only true when autoWorktree is true
-    const computedAutoMerge = needsWorktree && (autoMerge !== false);
+    // A base-branch merge is opt-in. Worktree isolation alone must never imply
+    // permission to merge its branch back into the workspace.
+    const computedAutoMerge = needsWorktree && autoMerge === true;
 
     // Resolve merge strategy: request param > spec JSON > workspace config > 'direct'
     let resolvedMergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' = 'direct';

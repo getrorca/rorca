@@ -1,4 +1,6 @@
 import * as childProcess from 'child_process';
+import { EventEmitter } from 'events';
+import { PassThrough } from 'stream';
 
 jest.mock('child_process', () => ({
   ...jest.requireActual('child_process'),
@@ -22,6 +24,16 @@ import {
 } from '../merge-conflict-resolver';
 
 const posture = (agent: MergeResolutionPosture['agent'], model: string | null = 'model'): MergeResolutionPosture => ({ agent, model, source: 'story' });
+
+function fakeChild(exitCode: number): any {
+  const child = new EventEmitter() as any;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = jest.fn();
+  process.nextTick(() => child.emit('close', exitCode));
+  return child;
+}
 
 describe('configured merge conflict resolver', () => {
   afterEach(() => jest.clearAllMocks());
@@ -73,5 +85,31 @@ describe('configured merge conflict resolver', () => {
     const command = buildMergeResolverCommand(posture('codex', 'gpt-5.6'));
     expect(command.command).toContain('codex');
     expect(command.command).not.toContain('claude');
+  });
+
+  test('classifies configured resolver spawn and agent-exit failures without fallback', async () => {
+    (childProcess.spawn as jest.Mock).mockImplementationOnce(() => { throw new Error('unavailable'); });
+    const spawnFailure = await resolveMergeConflict({
+      runId: 10, workspaceId: 'w', cwd: process.cwd(), branchName: 'feat/x', conflictFiles: ['a.ts'],
+      logPath: '/tmp/rorca-merge-resolver-spawn-error.log', posture: posture('codex'),
+    });
+    expect(spawnFailure).toMatchObject({ ok: false, reason: 'spawn_error', agent: 'codex' });
+
+    (childProcess.spawn as jest.Mock).mockImplementationOnce(() => fakeChild(1));
+    const exitFailure = await resolveMergeConflict({
+      runId: 11, workspaceId: 'w', cwd: process.cwd(), branchName: 'feat/x', conflictFiles: ['a.ts'],
+      logPath: '/tmp/rorca-merge-resolver-agent-exit.log', posture: posture('pi', 'openai-codex/gpt-5.6-sol'),
+    });
+    expect(exitFailure).toMatchObject({ ok: false, reason: 'agent_exit', agent: 'pi' });
+  });
+
+  test('classifies a successful agent process with incomplete staged conflict resolution as validation_failed', async () => {
+    (childProcess.spawn as jest.Mock).mockImplementationOnce(() => fakeChild(0));
+    const result = await resolveMergeConflict({
+      runId: 12, workspaceId: 'w', cwd: process.cwd(), branchName: 'feat/x', conflictFiles: ['a.ts'],
+      logPath: '/tmp/rorca-merge-resolver-validation-failed.log', posture: posture('opencode'),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'validation_failed', agent: 'opencode' });
+    expect(childProcess.spawn).not.toHaveBeenCalledWith(expect.stringContaining('claude'), expect.anything(), expect.anything());
   });
 });

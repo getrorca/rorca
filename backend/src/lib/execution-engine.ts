@@ -4864,37 +4864,6 @@ function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
   logger.info(`  [worktree] Removed ${wt.worktreePath}`);
 }
 
-// ─── Auto-merge run-level worktree ───────────────────────────────────────────
-// Called at the end of a successful run when the entire spec was executed inside
-// a git worktree (autoWorktree: true). Merges the worktree branch back into the
-// main workspace branch and removes the worktree directory.
-//
-// Runs synchronously so the log output appears before process.exit().
-function autoMergeRunWorktree(workspacePath: string, worktreePath: string, branchName: string): void {
-  try {
-    execSync(
-      `git -C "${workspacePath}" merge "${branchName}" --no-edit -m "merge: ${branchName} (auto)"`,
-      { stdio: 'pipe', timeout: 120_000 },
-    );
-    logger.info(`[auto-merge] merged ${branchName} to main successfully`);
-  } catch (mergeErr: unknown) {
-    const msg = (mergeErr as Error).message ?? String(mergeErr);
-    logger.warn(`[auto-merge] merge failed for ${branchName}, leaving worktree intact for manual resolution: ${msg}`);
-    return;
-  }
-
-  try {
-    execSync(
-      `git -C "${workspacePath}" worktree remove "${worktreePath}" --force`,
-      { stdio: 'pipe', timeout: 30_000 },
-    );
-    logger.info(`[auto-merge] worktree removed: ${worktreePath}`);
-  } catch (rmErr: unknown) {
-    const msg = (rmErr as Error).message ?? String(rmErr);
-    logger.warn(`[auto-merge] worktree removal failed (non-fatal): ${msg}`);
-  }
-}
-
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
 
 interface ReviewIssue {
@@ -6968,19 +6937,10 @@ async function main(): Promise<void> {
       writeProgressTxt(config.cwd);
       archiveRunState(config.cwd, config.runId);
 
-      // Auto-merge run-level worktree back into the workspace main branch.
-      // Only fires as a standalone fallback — when spawned by the worker
-      // (RORCA_PROCESS_ROLE=engine), the worker handles the more sophisticated
-      // autoMergeAfterRun() with agentic conflict resolution, WAL events, and
-      // merge_status tracking. Running both would cause a double-merge race.
-      if (config.worktreePath && config.branchName && config.workspacePath && process.env.RORCA_PROCESS_ROLE !== 'engine') {
-        const allPassed = executableStories.every(s => s.excluded || isPassed(s));
-        if (allPassed) {
-          autoMergeRunWorktree(config.workspacePath, config.worktreePath, config.branchName);
-        } else {
-          logger.warn(`[auto-merge] Skipping merge — not all stories passed for ${config.branchName}`);
-        }
-      }
+      // The worker is the sole final-base-merge authority. A direct engine
+      // invocation lacks the persisted run policy needed to prove
+      // autoMerge=true and mergeStrategy=direct, so it always preserves the
+      // run worktree. Internal wave merges still assemble the isolated branch.
 
       process.exitCode = 0;
       return;

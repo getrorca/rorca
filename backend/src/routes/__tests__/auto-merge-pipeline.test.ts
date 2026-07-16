@@ -60,10 +60,12 @@ async function seedRun(overrides: {
   merge_status?: string | null;
   branch_name?: string | null;
   worktree_path?: string | null;
+  auto_merge?: boolean;
+  merge_strategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
 } = {}): Promise<number> {
   const result = await queryOne<{ id: number }>(
     `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name, worktree_path, merge_status, auto_merge, merge_strategy, agent_type, agent_model)
-     VALUES ($1, $2, $3, $4, $5, $6, TRUE, 'direct', 'pi', 'openai-codex/gpt-5.6-sol') RETURNING id`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pi', 'openai-codex/gpt-5.6-sol') RETURNING id`,
     [
       'forge/specs/approved/test-spec.json',
       WS_ID,
@@ -71,6 +73,8 @@ async function seedRun(overrides: {
       'branch_name' in overrides ? overrides.branch_name : 'feat/auto-merge-test-branch',
       'worktree_path' in overrides ? overrides.worktree_path : '/tmp/worktree-auto-merge-test',
       'merge_status' in overrides ? overrides.merge_status : null,
+      overrides.auto_merge ?? true,
+      overrides.merge_strategy ?? 'direct',
     ],
   );
   return result!.id;
@@ -569,6 +573,24 @@ describe('performMerge()', () => {
     const result = await performMerge(999999, 'feat/nonexistent', '/tmp/ws');
     expect(result.success).toBe(false);
     expect(result.error).toContain('not found');
+  });
+
+  test('refuses a final base merge for branch-only/no-auto-merge runs and preserves their worktree', async () => {
+    const worktreeDir = path.join(tmpDir, 'branch-only-worktree');
+    fs.mkdirSync(worktreeDir, { recursive: true });
+    const runId = await seedRun({
+      merge_status: 'failed',
+      worktree_path: worktreeDir,
+      auto_merge: false,
+      merge_strategy: 'branch-only',
+    });
+
+    const result = await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('autoMerge=true') });
+    expect(mockGitInstance.merge).not.toHaveBeenCalled();
+    expect(mockGitInstance.raw).not.toHaveBeenCalledWith(['worktree', 'remove', '--force', worktreeDir]);
+    expect(fs.existsSync(worktreeDir)).toBe(true);
   });
 
   test('returns { success: false } when no branch name available', async () => {

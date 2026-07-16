@@ -65,8 +65,11 @@ export async function performMerge(
     workspace_id: string;
     worktree_path: string | null;
     branch_name: string | null;
+    auto_merge: boolean | null;
+    merge_strategy: string | null;
   }>(
-    'SELECT workspace_id, worktree_path, branch_name FROM pipeline_runs WHERE id = $1',
+    `SELECT workspace_id, worktree_path, branch_name, auto_merge, merge_strategy
+     FROM pipeline_runs WHERE id = $1`,
     [runId],
   );
 
@@ -77,6 +80,13 @@ export async function performMerge(
   const worktreePath = run.worktree_path;
   const workspaceId = run.workspace_id;
   const effectiveBranch = branchName || run.branch_name;
+
+  // This service is the final base-branch merge boundary. Do not rely solely
+  // on route/worker callers: branch-only and PR runs must retain their branch
+  // and worktree even if an internal caller reaches this function directly.
+  if (run.auto_merge !== true || run.merge_strategy !== 'direct') {
+    return { success: false, error: 'Final base merge requires autoMerge=true and mergeStrategy=direct' };
+  }
 
   if (!effectiveBranch) {
     await execute(
