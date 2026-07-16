@@ -37,7 +37,7 @@
  */
 
 import { spawn, execSync, type ChildProcess } from 'child_process';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -111,6 +111,8 @@ import {
 } from './complexity-scorer';
 import { parseClaudeLogTokens } from './claude-token-parser';
 import { parseOpenCodeEvent, parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
+import { normalizeOpenCodeModel, shouldResolvePiRpcStory } from './agent-completion-protocol';
+export { shouldResolvePiRpcStory } from './agent-completion-protocol';
 import { calculateCost } from './model-pricing';
 import {
   CoalescingPostQueue,
@@ -169,6 +171,7 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { resolveMergeConflict, resolvePostureConsensus, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
@@ -522,6 +525,16 @@ const CODEX_BIN = process.env.CODEX_BIN ||
 const PI_BIN = process.env.PI_BIN || (() => {
   try { return execSync('which pi', { encoding: 'utf8' }).trim(); } catch { return 'pi'; }
 })();
+
+function terminateChildProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (process.platform !== 'win32' && child.pid) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch { /* direct-child fallback below */ }
+  try { child.kill(signal); } catch { /* already exited */ }
+}
 
 interface PiCliSelection {
   provider: string | null;
@@ -1194,39 +1207,6 @@ async function postStoryResult(
   }
 }
 
-/**
- * Translate any model ID to the format OpenCode expects: "provider/org/model".
- * OpenCode requires the full triple format, e.g. "openrouter/z-ai/glm-5".
- *
- * Two-phase normalization:
- *   Phase 1 — Fix Claude version separators ANYWHERE in the string.
- *             Rorca uses hyphens (claude-sonnet-4-6), OpenRouter uses dots (claude-sonnet-4.6).
- *             This runs first so IDs like "openrouter/anthropic/claude-sonnet-4-6"
- *             are fixed BEFORE the prefix check (which would otherwise pass them through broken).
- *   Phase 2 — Add provider prefix if missing.
- *             "claude-sonnet-4.6" → "openrouter/anthropic/claude-sonnet-4.6"
- *             "z-ai/glm-5" → "openrouter/z-ai/glm-5"
- */
-function normalizeOpenCodeModel(model: string): string {
-  // Phase 1: Normalize Claude version separators (hyphens→dots, strip date suffixes).
-  // "openrouter/anthropic/claude-sonnet-4-6" → "openrouter/anthropic/claude-sonnet-4.6"
-  let m = model.replace(/(claude-[a-z]+-\d+)-(\d+)(?:-\d{8})?/, '$1.$2');
-
-  // Phase 2: Ensure correct provider prefix
-  const KNOWN_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/', 'opencode/'];
-  if (KNOWN_PREFIXES.some(p => m.startsWith(p))) return m;
-
-  // Bare Claude ID → needs openrouter/anthropic/ prefix
-  if (/^claude-/.test(m)) return `openrouter/anthropic/${m}`;
-
-  // anthropic/claude-* without outer prefix → needs openrouter/ prefix
-  if (/^anthropic\/claude-/.test(m)) return `openrouter/${m}`;
-
-  // Other bare catalog IDs (z-ai/glm-5) → needs openrouter/ prefix
-  if (m.includes('/')) return `openrouter/${m}`;
-  return m;
-}
-
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -1243,10 +1223,6 @@ function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = bui
 
 function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
-}
-
-export function shouldResolvePiRpcStory(eventType: string): boolean {
-  return eventType === 'agent_end';
 }
 
 function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
@@ -1321,6 +1297,7 @@ async function startPiRpcServer(
     cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
   });
 
   const server: PiRpcServer = {
@@ -1440,7 +1417,7 @@ async function startPiRpcServer(
     _piRpcExitCleanupRegistered = true;
     process.on('exit', () => {
       for (const activeServer of _piRpcServers) {
-        try { activeServer.process.kill('SIGTERM'); } catch { /* already gone */ }
+        terminateChildProcessGroup(activeServer.process, 'SIGTERM');
       }
     });
   }
@@ -1461,7 +1438,7 @@ async function stopSinglePiRpcServer(server: PiRpcServer): Promise<void> {
   });
 
   try {
-    server.process.kill('SIGTERM');
+    terminateChildProcessGroup(server.process, 'SIGTERM');
   } catch {
     return;
   }
@@ -1472,7 +1449,7 @@ async function stopSinglePiRpcServer(server: PiRpcServer): Promise<void> {
   ]);
 
   if (!finished) {
-    try { server.process.kill('SIGKILL'); } catch { /* already gone */ }
+    terminateChildProcessGroup(server.process, 'SIGKILL');
     await exitPromise.catch(() => {});
   }
 }
@@ -3951,27 +3928,47 @@ async function withSpecLock(jsonPath: string, fn: () => void): Promise<void> {
   try { fn(); } finally { release(); }
 }
 
-async function markStoryPassed(jsonPath: string, storyId: string): Promise<void> {
+export interface MarkStoryPassedResult {
+  changed: boolean;
+  storyFound: boolean;
+}
+
+/**
+ * Canonical spec lifecycle mutation shared by engine completion and governed
+ * recovery reconciliation. The path-level lock makes repeated completion
+ * reports idempotent and prevents concurrent story writes from clobbering one
+ * another.
+ */
+export async function markStoryPassed(jsonPath: string, storyId: string): Promise<MarkStoryPassedResult> {
+  let result: MarkStoryPassedResult = { changed: false, storyFound: false };
   await withSpecLock(jsonPath, () => {
     const raw = fs.readFileSync(jsonPath, 'utf8');
     const spec: SpecJson = JSON.parse(raw);
     const stories = getStories(spec);
 
     for (const s of stories) {
-      if (s.id === storyId) {
-        if (spec.userStories || s.passes !== undefined) {
-          s.passes = true;
-          s.notes = 'Completed by Rorca engine';
-        } else {
-          s.status = 'passed';
-        }
-        break;
+      if (s.id !== storyId) continue;
+      result.storyFound = true;
+      const alreadyPassed = spec.userStories || s.passes !== undefined
+        ? s.passes === true
+        : s.status === 'passed';
+      if (alreadyPassed) break;
+      if (spec.userStories || s.passes !== undefined) {
+        s.passes = true;
+        s.notes = 'Completed by Rorca engine';
+      } else {
+        s.status = 'passed';
       }
+      result.changed = true;
+      break;
     }
 
-    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-    logger.info(`Marked ${storyId} as passed`);
+    if (result.changed) {
+      fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+      logger.info(`Marked ${storyId} as passed`);
+    }
   });
+  return result;
 }
 
 async function markStorySkipped(jsonPath: string, storyId: string): Promise<void> {
@@ -4313,6 +4310,8 @@ interface StoryWorktree {
   storyId: string;
   worktreePath: string;
   branchName: string;
+  /** Immutable effective posture captured when this story actually executed. */
+  resolverPosture?: MergeResolutionPosture;
 }
 
 interface PendingIntegratedPass {
@@ -4413,11 +4412,64 @@ function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegration
   return { ok: true, files: [] };
 }
 
+async function recordIntegratedCheckpointAttestation(
+  config: EngineConfig,
+  workspaceId: string,
+  pending: PendingIntegratedPass,
+): Promise<void> {
+  if (config.dryRun) return;
+  try {
+    const checkpointSha = getGitHead(config.cwd);
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: config.cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    if (typeof checkpointSha !== 'string' || !/^[0-9a-f]{40}$/i.test(checkpointSha) || !/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(branch)) {
+      throw new Error('integrated branch identity is unavailable');
+    }
+    const passedAt = new Date();
+    const evidenceDigest = createHash('sha256').update(JSON.stringify({
+      contractVersion: 'checkpoint-validation-v1',
+      gate: 'execution-engine',
+      outcome: 'passed',
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      branch,
+      checkpointSha,
+      agentType: pending.agentType,
+    })).digest('hex');
+    const { recordCheckpointValidationAttestation } = await import('./checkpoint-reconciliation');
+    await recordCheckpointValidationAttestation({
+      id: randomUUID(),
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      branch,
+      checkpointSha,
+      validationGate: 'execution-engine',
+      evidenceDigest,
+      passedAt: passedAt.toISOString(),
+      expiresAt: new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  } catch (error: unknown) {
+    // The current story can still complete normally; the missing attestation only
+    // removes the crash-recovery shortcut and therefore fails closed on recovery.
+    logger.warn({ err: error, runId: config.runId, storyId: pending.story.id }, '[checkpoint] Failed to persist trusted integrated-worktree attestation');
+  }
+}
+
 async function finalizeIntegratedStoryPass(
   config: EngineConfig,
   workspaceId: string | null,
   pending: PendingIntegratedPass,
 ): Promise<void> {
+  // Persist trusted crash-recovery evidence after run-branch integration but
+  // before canonical pass mutation. If the process dies between these steps,
+  // reconciliation can later prove the exact integrated branch head.
+  if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending);
   await markStoryPassed(config.jsonPath, pending.story.id);
 
   if (!workspaceId) return;
@@ -4578,7 +4630,7 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
         logger.warn(`  [worktree] Runtime-only merge conflicts — auto-resolving (--ours): ${conflicted.join(', ')}`);
         const quotedFiles = conflicted.map(f => `"${f}"`).join(' ');
         execSync(`git checkout --ours -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
-        execSync('git add -A', { cwd: workspaceCwd, env, stdio: 'pipe' });
+        execSync(`git add -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
 
         const validation = validateIntegratedWorktree(workspaceCwd, getIntegrationCandidateFiles(workspaceCwd));
         if (!validation.ok) {
@@ -4616,9 +4668,13 @@ interface WaveMergeResult {
 
 async function autoResolveConflicts(
   cwd: string,
-  storyId: string,
+  wt: StoryWorktree,
   logDir: string,
+  config: EngineConfig,
+  workspaceId: string,
+  contributingPostures: MergeResolutionPosture[],
 ): Promise<{ resolved: boolean; resolvedFiles: string[] }> {
+  const storyId = wt.storyId;
   const env = buildCleanEnv();
   const resolvedFiles: string[] = [];
 
@@ -4663,69 +4719,31 @@ async function autoResolveConflicts(
     return { resolved: true, resolvedFiles };
   }
 
-  // LLM resolution for real code conflicts.
-  conflictingFiles = realConflicts;
-
-  for (const file of conflictingFiles) {
-    const absFile = path.join(cwd, file);
-    let conflictContent: string;
-    try {
-      conflictContent = fs.readFileSync(absFile, 'utf8');
-    } catch {
-      logger.error(`  [merge] Cannot read conflicting file: ${file}`);
-      return { resolved: false, resolvedFiles };
-    }
-
-    const prompt = [
-      'Resolve this git merge conflict. Output ONLY the resolved file content with no explanation,',
-      'no markdown fences, no commentary. Choose the correct combination of both sides.',
-      '', `File: ${file}`, '', conflictContent,
-    ].join('\n');
-
-    const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(file)}.log`);
-    const resolvedContent = await new Promise<string | null>((resolve) => {
-      const args = ['--dangerously-skip-permissions', '--print', prompt];
-      let stdout = '';
-      const child = spawn(CLAUDE_BIN, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-
-      const logFd = fs.openSync(resolveLogFile, 'a');
-      child.stderr.on('data', (chunk: Buffer) => { fs.writeSync(logFd, chunk); });
-
-      const timer = setTimeout(() => {
-        try { child.kill('SIGTERM'); } catch { /* already dead */ }
-      }, 120_000);
-
-      child.on('exit', (code) => {
-        clearTimeout(timer);
-        try { fs.closeSync(logFd); } catch { /* already closed */ }
-        if (code === 0 && stdout.trim().length > 0) resolve(stdout);
-        else resolve(null);
-      });
-      child.on('error', () => {
-        clearTimeout(timer);
-        try { fs.closeSync(logFd); } catch { /* already closed */ }
-        resolve(null);
-      });
-    });
-
-    if (resolvedContent === null) {
-      logger.error(`  [merge] Auto-resolution FAILED for ${file}`);
-      return { resolved: false, resolvedFiles };
-    }
-
-    try {
-      fs.writeFileSync(absFile, resolvedContent);
-      execSync(`git add "${file}"`, { cwd, env, stdio: 'pipe' });
-      resolvedFiles.push(file);
-      logger.info(`  [merge] Resolved ${file}`);
-    } catch (err: unknown) {
-      logger.error(`  [merge] Failed to write/stage resolved ${file}: ${(err as Error).message}`);
-      return { resolved: false, resolvedFiles };
-    }
+  // Real code conflicts are resolved by the exact posture that executed this
+  // story. There is intentionally no Claude fallback for a missing posture.
+  const posture = resolvePostureConsensus([...contributingPostures, wt.resolverPosture]);
+  if (!posture || !workspaceId) {
+    logger.error(`  [merge] ${storyId} has mixed/missing contribution posture or workspace identity; explicit operator posture required`);
+    return { resolved: false, resolvedFiles };
   }
-
-  return { resolved: true, resolvedFiles };
+  const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(realConflicts[0])}.log`);
+  const resolution = await resolveMergeConflict({
+    runId: config.runId,
+    storyId,
+    workspaceId,
+    cwd,
+    branchName: wt.branchName,
+    conflictFiles: realConflicts,
+    logPath: resolveLogFile,
+    posture,
+    validate: () => runGate(cwd).passed,
+    attachAddr: config.attachAddr,
+  });
+  if (!resolution.ok) {
+    logger.error(`  [merge] semantic resolution failed for ${storyId}: ${resolution.reason}`);
+    return { resolved: false, resolvedFiles };
+  }
+  return { resolved: true, resolvedFiles: [...resolvedFiles, ...resolution.resolvedFiles] };
 }
 
 async function mergeWave(
@@ -4733,6 +4751,9 @@ async function mergeWave(
   waveIndex: number,
   cwd: string,
   logDir: string,
+  config: EngineConfig,
+  workspaceId: string,
+  integratedPostures: MergeResolutionPosture[],
 ): Promise<WaveMergeResult> {
   const env = buildCleanEnv();
   const sorted = [...waveBranches].sort((a, b) => a.storyId.localeCompare(b.storyId));
@@ -4783,6 +4804,7 @@ async function mergeWave(
       try {
         execSync(`git commit -m "merge: ${wt.storyId}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
         logger.info(`  [merge] ${wt.storyId} merged cleanly`);
+        if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch {
         logger.info(`  [merge] ${wt.storyId} merged (no changes to commit)`);
       }
@@ -4790,7 +4812,7 @@ async function mergeWave(
     }
 
     logger.info(`  [merge] Conflict detected for ${wt.storyId}, attempting auto-resolution...`);
-    const resolution = await autoResolveConflicts(cwd, wt.storyId, logDir);
+    const resolution = await autoResolveConflicts(cwd, wt, logDir, config, workspaceId, integratedPostures);
 
     if (resolution.resolved) {
       const filesList = resolution.resolvedFiles.join(', ');
@@ -4798,8 +4820,8 @@ async function mergeWave(
         ? `merge(wave-${waveIndex}): resolved conflicts in ${filesList}`
         : `merge(wave-${waveIndex}): auto-resolved conflicts`;
       try {
-        // Try normal commit first
-        execSync(`git add -A`, { cwd, env, stdio: 'pipe' });
+        // The resolver validates/stages exactly the declared conflict paths.
+        // Never widen its containment boundary with `git add -A` here.
         const validation = validateIntegratedWorktree(cwd, getIntegrationCandidateFiles(cwd));
         if (!validation.ok) {
           logger.error(`  [merge] ${wt.storyId} failed post-resolution integration validation: ${validation.reason} ${validation.files.join(', ')}`);
@@ -4814,6 +4836,7 @@ async function mergeWave(
         );
         totalConflictsResolved += resolution.resolvedFiles.length;
         logger.info(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+        if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch (commitErr: unknown) {
         // Fallback: try git merge --continue
         logger.warn(`  [merge] git commit failed, trying merge --continue: ${(commitErr as Error).message}`);
@@ -4821,6 +4844,7 @@ async function mergeWave(
           execSync('git -c core.editor=true merge --continue', { cwd, env, stdio: 'pipe', timeout: 30_000 });
           totalConflictsResolved += resolution.resolvedFiles.length;
           logger.info(`  [merge] ${wt.storyId} merged via --continue with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+          if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
         } catch (contErr: unknown) {
           logger.error(`  [merge] Commit after resolution failed for ${wt.storyId}: ${(contErr as Error).message}`);
           try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
@@ -4875,37 +4899,6 @@ function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
     execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
   } catch { /* branch may already be gone */ }
   logger.info(`  [worktree] Removed ${wt.worktreePath}`);
-}
-
-// ─── Auto-merge run-level worktree ───────────────────────────────────────────
-// Called at the end of a successful run when the entire spec was executed inside
-// a git worktree (autoWorktree: true). Merges the worktree branch back into the
-// main workspace branch and removes the worktree directory.
-//
-// Runs synchronously so the log output appears before process.exit().
-function autoMergeRunWorktree(workspacePath: string, worktreePath: string, branchName: string): void {
-  try {
-    execSync(
-      `git -C "${workspacePath}" merge "${branchName}" --no-edit -m "merge: ${branchName} (auto)"`,
-      { stdio: 'pipe', timeout: 120_000 },
-    );
-    logger.info(`[auto-merge] merged ${branchName} to main successfully`);
-  } catch (mergeErr: unknown) {
-    const msg = (mergeErr as Error).message ?? String(mergeErr);
-    logger.warn(`[auto-merge] merge failed for ${branchName}, leaving worktree intact for manual resolution: ${msg}`);
-    return;
-  }
-
-  try {
-    execSync(
-      `git -C "${workspacePath}" worktree remove "${worktreePath}" --force`,
-      { stdio: 'pipe', timeout: 30_000 },
-    );
-    logger.info(`[auto-merge] worktree removed: ${worktreePath}`);
-  } catch (rmErr: unknown) {
-    const msg = (rmErr as Error).message ?? String(rmErr);
-    logger.warn(`[auto-merge] worktree removal failed (non-fatal): ${msg}`);
-  }
 }
 
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
@@ -5280,6 +5273,18 @@ async function executeStory(
 
   // Per-story model override takes precedence over run-level model.
   let currentModel = story.model ?? config.agentModel;
+  // Preserve the resolved posture now, before later execution machinery can
+  // mutate/retry/reroute anything. Wave merging happens after the story exits.
+  if (worktreeInfo) {
+    worktreeInfo.resolverPosture = {
+      agent: effectiveAgent,
+      model: currentModel,
+      thinkingEnabled: config.thinkingEnabled,
+      thinkingBudget: config.thinkingBudget,
+      effortLevel: config.effortLevel,
+      source: 'story',
+    };
+  }
 
   logger.info(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
   if (worktreeInfo) logger.info(`  Worktree: ${worktreeInfo.worktreePath}`);
@@ -5566,6 +5571,18 @@ async function executeStory(
       ...(graphHits != null ? { graph_hits: graphHits } : {}),
     }, story.id);
   };
+
+  if (worktreeInfo && workspaceId && worktreeInfo.resolverPosture) {
+    // Append-only WAL provenance is immutable once the effective posture is
+    // known. Later retries/reroutes must create a new contribution record.
+    await emitWalEvent(config.port, 'story_contribution_started', workspaceId, {
+      run_id: config.runId,
+      story_id: story.id,
+      completion_scope: 'story_worktree',
+      worktree_branch: worktreeInfo.branchName,
+      posture: worktreeInfo.resolverPosture,
+    }, story.id);
+  }
 
   if (effectiveAgent !== 'pi' || isPtyTerminalMode(config.terminalMode)) {
     await emitStoryStarted();
@@ -6969,19 +6986,10 @@ async function main(): Promise<void> {
       writeProgressTxt(config.cwd);
       archiveRunState(config.cwd, config.runId);
 
-      // Auto-merge run-level worktree back into the workspace main branch.
-      // Only fires as a standalone fallback — when spawned by the worker
-      // (RORCA_PROCESS_ROLE=engine), the worker handles the more sophisticated
-      // autoMergeAfterRun() with agentic conflict resolution, WAL events, and
-      // merge_status tracking. Running both would cause a double-merge race.
-      if (config.worktreePath && config.branchName && config.workspacePath && process.env.RORCA_PROCESS_ROLE !== 'engine') {
-        const allPassed = executableStories.every(s => s.excluded || isPassed(s));
-        if (allPassed) {
-          autoMergeRunWorktree(config.workspacePath, config.worktreePath, config.branchName);
-        } else {
-          logger.warn(`[auto-merge] Skipping merge — not all stories passed for ${config.branchName}`);
-        }
-      }
+      // The worker is the sole final-base-merge authority. A direct engine
+      // invocation lacks the persisted run policy needed to prove
+      // autoMerge=true and mergeStrategy=direct, so it always preserves the
+      // run worktree. Internal wave merges still assemble the isolated branch.
 
       process.exitCode = 0;
       return;
@@ -7081,6 +7089,7 @@ async function runParallel(
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
+  const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
@@ -7208,7 +7217,7 @@ async function runParallel(
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
-        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir);
+        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir, config, workspaceId ?? '', integratedPostures);
 
         if (mergeResult.success) {
           if (workspaceId) {
@@ -7218,6 +7227,7 @@ async function runParallel(
             });
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
+          // Advance each story only after its contribution reached the run branch.
           for (const wt of passedInWave) {
             const pendingPass = pendingIntegratedPasses.get(wt.storyId);
             if (pendingPass) {

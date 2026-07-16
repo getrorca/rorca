@@ -27,6 +27,7 @@
 import * as fs from 'fs';
 import { Pool, PoolClient, PoolConfig, type QueryConfig, type QueryResultRow } from 'pg';
 import { logger } from '../lib/logger';
+import { assertConnectedTestDatabase, assertTestDatabaseName } from '../lib/test-db-safety';
 import { runPgMigrations } from './pg-index';
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -129,9 +130,7 @@ function assertTestDatabaseSafety(databaseUrl?: string): void {
     }
   }
 
-  if (!dbName.endsWith('_test')) {
-    throw new Error(`[db] Refusing to use non-test database "${dbName || '(unknown)'}" while NODE_ENV=test`);
-  }
+  assertTestDatabaseName(dbName, 'configured test database');
 }
 
 function configuredPoolSizes(): { application: number; operational: number; total: number } {
@@ -337,7 +336,16 @@ function logSlowQuery(sql: string, params: unknown[] | undefined, durationMs: nu
   }
 }
 
+const verifiedTestClients = new WeakSet<PoolClient>();
+
+async function assertLiveTestConnection(client: PoolClient): Promise<void> {
+  if (process.env.NODE_ENV !== 'test' || verifiedTestClients.has(client)) return;
+  await assertConnectedTestDatabase(client, process.env.DATABASE_URL!);
+  verifiedTestClients.add(client);
+}
+
 async function resetSessionState(client: PoolClient): Promise<void> {
+  await assertLiveTestConnection(client);
   await client.query('RESET ROLE');
   await client.query('RESET request.jwt.claim.sub');
   await client.query('RESET request.jwt.claims');

@@ -35,6 +35,7 @@ import contextCandidatesRouter from './routes/context-candidates';
 import contextCaptureRouter from './routes/context-capture';
 import captureIngestRouter from './routes/capture-ingest';
 import pipelineRouter, { cleanupOldLogs, cleanupOrphanRuns } from './routes/pipeline';
+import recoveryRouter from './routes/recovery';
 import hooksRouter from './routes/hooks';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
@@ -416,6 +417,8 @@ app.use('/api/context-candidates', contextCandidatesRouter);
 app.use('/api/context-capture', contextCaptureRouter);
 app.use('/api/workspaces', captureIngestRouter);
 app.use('/api/pipeline', pipelineRouter);
+// Admin-only and deliberately absent from MCP/OpenAPI tool generation.
+app.use('/api/admin/recovery', recoveryRouter);
 app.use('/api/execution-environments', executionEnvironmentsRouter);
 app.use('/api/pipeline/hooks', hooksRouter);
 app.use('/api/pipeline/schedules', schedulesRouter);

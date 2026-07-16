@@ -109,6 +109,30 @@ function hasDockerSidecar(dbMode: 'native' | 'docker' | 'byop'): boolean {
  *                       type: boolean
  *                     vector:
  *                       type: boolean
+ *                     recoveryTelemetry:
+ *                       type: object
+ *                       required: [available, contractVersion, endpoint, auth]
+ *                       properties:
+ *                         available: { type: boolean }
+ *                         contractVersion: { type: string, enum: [v1] }
+ *                         endpoint: { type: string }
+ *                         auth: { type: string, enum: [authenticated] }
+ *                     checkpointReconciliation:
+ *                       type: object
+ *                       required: [available, contractVersion, endpoint, auth, mcpCallable]
+ *                       properties:
+ *                         available: { type: boolean }
+ *                         contractVersion: { type: string, enum: [v1] }
+ *                         endpoint: { type: string }
+ *                         auth: { type: string, enum: [admin] }
+ *                         mcpCallable: { type: boolean, enum: [false] }
+ *                     taskManifestExecution:
+ *                       type: object
+ *                       required: [available, endpoint, idempotency]
+ *                       properties:
+ *                         available: { type: boolean }
+ *                         endpoint: { type: string }
+ *                         idempotency: { type: string, enum: [stable-uuid] }
  *                 databaseCapability:
  *                   type: object
  *                   description: Canonical database runtime capability model used by frontend and operators.
@@ -132,6 +156,24 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         docker: hasDockerSidecar(databaseCapability.dbMode),
         age: databaseCapability.extensions.age,
         vector: databaseCapability.extensions.vector || vector,
+        recoveryTelemetry: {
+          available: true,
+          contractVersion: 'v1',
+          endpoint: '/api/pipeline/telemetry',
+          auth: 'authenticated',
+        },
+        checkpointReconciliation: {
+          available: true,
+          contractVersion: 'v1',
+          endpoint: '/api/admin/recovery/checkpoints/reconcile',
+          auth: 'admin',
+          mcpCallable: false,
+        },
+        taskManifestExecution: {
+          available: true,
+          endpoint: '/api/pipeline/task-manifests/trigger',
+          idempotency: 'stable-uuid',
+        },
       },
       databaseCapability,
     });

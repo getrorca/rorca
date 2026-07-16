@@ -201,7 +201,10 @@ jest.mock('../../lib/worker-heartbeat', () => ({
 }));
 
 jest.mock('../../lib/run-pty-store', () => ({
+  getRunPtySessionHealth: jest.fn().mockResolvedValue(null),
   getRunPtySessionStatus: jest.fn().mockResolvedValue(null),
+  getRunPtyOutputLimits: jest.fn().mockReturnValue({ replayBatchChunks: 256 }),
+  listRecentRunPtyChunks: jest.fn().mockResolvedValue([]),
   listRunPtyChunks: jest.fn().mockResolvedValue([]),
   requestRunPtyInput: jest.fn().mockResolvedValue(undefined),
   requestRunPtyResize: jest.fn().mockResolvedValue(undefined),

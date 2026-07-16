@@ -60,10 +60,12 @@ async function seedRun(overrides: {
   merge_status?: string | null;
   branch_name?: string | null;
   worktree_path?: string | null;
+  auto_merge?: boolean;
+  merge_strategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
 } = {}): Promise<number> {
   const result = await queryOne<{ id: number }>(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name, worktree_path, merge_status)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name, worktree_path, merge_status, auto_merge, merge_strategy, agent_type, agent_model)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pi', 'openai-codex/gpt-5.6-sol') RETURNING id`,
     [
       'forge/specs/approved/test-spec.json',
       WS_ID,
@@ -71,6 +73,8 @@ async function seedRun(overrides: {
       'branch_name' in overrides ? overrides.branch_name : 'feat/auto-merge-test-branch',
       'worktree_path' in overrides ? overrides.worktree_path : '/tmp/worktree-auto-merge-test',
       'merge_status' in overrides ? overrides.merge_status : null,
+      overrides.auto_merge ?? true,
+      overrides.merge_strategy ?? 'direct',
     ],
   );
   return result!.id;
@@ -184,7 +188,7 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     const res = await postRetryMerge(runId);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, runId, queued: true });
+    expect(res.body).toEqual({ ok: true, runId: Number(runId), queued: true });
   });
 
   // ── merge_status transition via endpoint ──
@@ -217,9 +221,10 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     expect(mockBossSend).toHaveBeenCalledWith(
       'pipeline:merge',
       {
-        runId,
+        runId: Number(runId),
         branch: 'feat/auto-merge-test-branch',
         workspaceId: WS_ID,
+        posture: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', source: 'manual-retry' },
       },
       expect.objectContaining({
         retryLimit: 0,
@@ -228,14 +233,14 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     );
   });
 
-  test('payload preserves the positive BIGINT runId as a decimal string', async () => {
+  test('payload normalizes the positive BIGINT runId to the numeric worker contract', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
     await postRetryMerge(runId);
 
     const payload = mockBossSend.mock.calls[0][1];
-    expect(typeof payload.runId).toBe('string');
-    expect(payload.runId).toBe(runId);
-    expect(payload.runId).toMatch(/^[1-9][0-9]*$/);
+    expect(typeof payload.runId).toBe('number');
+    expect(payload.runId).toBe(Number(runId));
+    expect(Number.isSafeInteger(payload.runId)).toBe(true);
   });
 
   test('payload branch matches run branch_name', async () => {
@@ -570,6 +575,24 @@ describe('performMerge()', () => {
     expect(result.error).toContain('not found');
   });
 
+  test('refuses a final base merge for branch-only/no-auto-merge runs and preserves their worktree', async () => {
+    const worktreeDir = path.join(tmpDir, 'branch-only-worktree');
+    fs.mkdirSync(worktreeDir, { recursive: true });
+    const runId = await seedRun({
+      merge_status: 'failed',
+      worktree_path: worktreeDir,
+      auto_merge: false,
+      merge_strategy: 'branch-only',
+    });
+
+    const result = await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('autoMerge=true') });
+    expect(mockGitInstance.merge).not.toHaveBeenCalled();
+    expect(mockGitInstance.raw).not.toHaveBeenCalledWith(['worktree', 'remove', '--force', worktreeDir]);
+    expect(fs.existsSync(worktreeDir)).toBe(true);
+  });
+
   test('returns { success: false } when no branch name available', async () => {
     const runId = await seedRun({ branch_name: null, merge_status: null });
 
@@ -757,7 +780,7 @@ describe('performMerge()', () => {
 
     expect(events.length).toBeGreaterThanOrEqual(1);
     const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
-    expect(payload.run_id).toBe(runId);
+    expect(payload.run_id).toBe(Number(runId));
     expect(payload.branchName).toBe('feat/auto-merge-test-branch');
     expect(payload.mergeCommitSha).toBe('wal-test-sha');
   });
@@ -791,7 +814,7 @@ describe('performMerge()', () => {
 
     expect(events.length).toBeGreaterThanOrEqual(1);
     const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
-    expect(payload.run_id).toBe(runId);
+    expect(payload.run_id).toBe(Number(runId));
     expect(payload.conflictFiles).toContain('src/conflict-file.ts');
   });
 

@@ -21,6 +21,46 @@ interface QueuedRunRow {
 const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
 
 /**
+ * Bounded, canonical queue view for recovery clients. This intentionally reads
+ * pipeline_runs rather than exposing pg-boss jobs or their data payloads.
+ */
+export interface WorkspaceRecoveryQueueSummary {
+  queued: number;
+  active: number;
+  oldestQueuedAgeSeconds: number | null;
+  staleActive: number;
+}
+
+export async function getWorkspaceRecoveryQueueSummary(workspaceId: string): Promise<WorkspaceRecoveryQueueSummary> {
+  const row = await queryOne<{
+    queued: string;
+    active: string;
+    oldest_queued_age_seconds: number | null;
+    stale_active: string;
+  }>(
+    `SELECT
+       COUNT(*) FILTER (WHERE status = 'queued')::text AS queued,
+       COUNT(*) FILTER (WHERE status IN ('running', 'paused'))::text AS active,
+       EXTRACT(EPOCH FROM (NOW() - MIN(queued_at)))::integer
+         FILTER (WHERE status = 'queued') AS oldest_queued_age_seconds,
+       COUNT(*) FILTER (
+         WHERE status = 'running'
+           AND COALESCE(last_heartbeat, started_at, queued_at) < NOW() - INTERVAL '5 minutes'
+       )::text AS stale_active
+     FROM pipeline_runs
+     WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+
+  return {
+    queued: Number(row?.queued ?? 0),
+    active: Number(row?.active ?? 0),
+    oldestQueuedAgeSeconds: row?.oldest_queued_age_seconds ?? null,
+    staleActive: Number(row?.stale_active ?? 0),
+  };
+}
+
+/**
  * Read queue_max_concurrent from worker_settings.
  * Returns the configured limit or DEFAULT_QUEUE_MAX_CONCURRENT.
  */
