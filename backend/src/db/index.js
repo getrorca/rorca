@@ -25,7 +25,7 @@
 import * as fs from 'fs';
 import { Pool } from 'pg';
 import { logger } from '../lib/logger';
-import { assertTestDatabaseName } from '../lib/test-db-safety';
+import { assertConnectedTestDatabase, assertTestDatabaseName } from '../lib/test-db-safety';
 import { runPgMigrations } from './pg-index';
 // ── Configuration ────────────────────────────────────────────────────────
 const SLOW_QUERY_THRESHOLD_MS = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS || '500', 10);
@@ -298,8 +298,7 @@ const verifiedTestClients = new WeakSet();
 async function assertLiveTestConnection(client) {
     if (process.env.NODE_ENV !== 'test' || verifiedTestClients.has(client))
         return;
-    const result = await client.query('SELECT current_database() AS database');
-    assertTestDatabaseName(result.rows[0]?.database || '', 'connected test database');
+    await assertConnectedTestDatabase(client, process.env.DATABASE_URL);
     verifiedTestClients.add(client);
 }
 async function resetSessionState(client) {
