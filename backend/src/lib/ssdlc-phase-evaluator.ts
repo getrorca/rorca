@@ -744,6 +744,36 @@ function nextAction(gate: LifecyclePlan['gates'][number], subject: ReleaseSubjec
   return `Collect new ${gate.evidenceKind} evidence for gate ${gate.gateId} on ${target}, then re-evaluate.`;
 }
 
+function laterEvidence(left: PhaseEvidence, right: PhaseEvidence): boolean {
+  const leftTime = new Date(left.collectedAt).getTime();
+  const rightTime = new Date(right.collectedAt).getTime();
+  if (leftTime !== rightTime) return leftTime > rightTime;
+  const leftSequence = String(left.sequence ?? '0');
+  const rightSequence = String(right.sequence ?? '0');
+  try { return BigInt(leftSequence) > BigInt(rightSequence); } catch { return leftSequence.localeCompare(rightSequence) > 0; }
+}
+
+/** Latest observation from one source for one gate/subject supersedes its old fact. */
+function effectiveGateEvidence(records: EvaluatedEvidence[]): EvaluatedEvidence[] {
+  const effective = new Map<string, EvaluatedEvidence>();
+  const unparsed: EvaluatedEvidence[] = [];
+  for (const record of records) {
+    const evidence = parsedEvidence(record);
+    if (!evidence) {
+      unparsed.push(record);
+      continue;
+    }
+    const supersedingSource = evidence.source === 'github_check:github-pr-delivery';
+    const key = supersedingSource
+      ? `${evidence.source}|${evidence.subjectRevision.type}:${evidence.subjectRevision.value}`
+      : `${evidence.source}|${evidence.subjectRevision.type}:${evidence.subjectRevision.value}|${evidence.evidenceId}`;
+    const current = effective.get(key);
+    const currentEvidence = current && parsedEvidence(current);
+    if (!currentEvidence || laterEvidence(evidence, currentEvidence)) effective.set(key, record);
+  }
+  return [...effective.values(), ...unparsed];
+}
+
 function evaluateGates(
   plan: LifecyclePlan,
   runState: PhaseEvaluationRunState,
@@ -754,12 +784,13 @@ function evaluateGates(
   const results = new Map<string, GateStatusEvaluation>();
 
   for (const gate of plan.gates) {
-    const gateEvidence = evidence.filter((candidate) => candidate.gateId === gate.gateId);
+    const allGateEvidence = evidence.filter((candidate) => candidate.gateId === gate.gateId);
+    const gateEvidence = effectiveGateEvidence(allGateEvidence);
     const gateDecisions = decisions.filter((candidate) => candidate.gateId === gate.gateId);
     const validEvidence = gateEvidence.filter((candidate) => candidate.valid);
     const passedEvidence = validEvidence.filter((candidate) => candidate.normalizedOutcome === 'passed');
     const failedEvidence = validEvidence.find((candidate) => candidate.normalizedOutcome === 'failed');
-    const staleHistory = gateEvidence.some((candidate) =>
+    const staleHistory = allGateEvidence.some((candidate) =>
       !candidate.valid && candidate.invalidReasons.some((reason) => STALE_EVIDENCE_REASONS.has(reason)));
     const expected = expectedSubject(plan, gate.gateId, subjects);
     const requirementIds = new Set(gate.evidenceRequirementIds);
@@ -781,9 +812,12 @@ function evaluateGates(
     const approvalTypeMatches = (decision: PhaseDecision): boolean => {
       if (!APPROVAL_DECISIONS.has(decision.decisionType)) return false;
       if (decision.decisionType === 'approve' || decision.decisionType === 'gate_override') return true;
-      return gate.approvalRequirement === 'human'
-        ? ['human_approval', 'qa_approval', 'merge_approval'].includes(decision.decisionType)
-        : ['policy_approval', 'production_approval'].includes(decision.decisionType);
+      // Explicit authenticated approval is always sufficient for a policy gate;
+      // policy approval never satisfies a human gate. This preserves the
+      // high-risk stop while allowing low/medium standing-policy plans.
+      if (['human_approval', 'qa_approval', 'merge_approval'].includes(decision.decisionType)) return true;
+      return gate.approvalRequirement === 'policy'
+        && ['policy_approval', 'production_approval'].includes(decision.decisionType);
     };
     const activeRejected = gateDecisions.find((candidate) => {
       const decision = parsedDecision(candidate);

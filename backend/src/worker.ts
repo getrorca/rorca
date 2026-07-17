@@ -71,6 +71,12 @@ import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
+import {
+  queueAutonomousPrDeliveryForRun,
+  reconcilePendingAutonomousPrDeliveryMerges,
+  registerAutonomousPrDeliveryWorker,
+  resumeAutonomousDeliveryAfterRecoveryRun,
+} from './lib/autonomous-pr-delivery';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -998,6 +1004,25 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     mergeLog('[merge-strategy:pr] Falling back to branch-only — branch is on remote for manual PR creation');
                   }
                 }
+                const readyPrNumber = await getRunPrNumber(runId);
+                if (readyPrNumber) {
+                  // `pr` means ready-for-review. Draft strategies remain a
+                  // separate, explicitly human-controlled mode.
+                  await finalizeDraftPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                    status: 'done',
+                  });
+                  const delivery = await queueAutonomousPrDeliveryForRun({
+                    workspaceId: String(workspaceId),
+                    runId,
+                  });
+                  mergeLog(delivery.queued
+                    ? `[merge-strategy:pr] Autonomous reviewed delivery queued (${delivery.deliveryId})`
+                    : `[merge-strategy:pr] Autonomous reviewed delivery not queued: ${delivery.reason ?? 'not eligible'}`);
+                }
                 break;
               }
 
@@ -1122,6 +1147,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             merge_strategy: effectiveMergeStrategy,
             merge_status: mergeStatusAtCloseout,
           });
+
+          // A bounded CI-recovery child resumes the original reviewed-delivery
+          // state machine only after its branch push/closeout is durable.
+          await resumeAutonomousDeliveryAfterRecoveryRun(runId, status);
 
           // Workflow dispatch (US-026)
           if (status === 'done' && payload.safetyOptions.deploy && payload.safetyOptions.externalSend) {
@@ -2855,6 +2884,12 @@ async function start(): Promise<void> {
   // 3b. Reconcile state between pipeline_runs and pgboss.job.
   // Runs once at startup, then every 60s during normal operation.
   await reconcileState();
+  try {
+    const reconciledMerges = await reconcilePendingAutonomousPrDeliveryMerges();
+    if (reconciledMerges > 0) logger.info({ reconciledMerges }, '[worker] reconciled autonomous PR merges after restart');
+  } catch (error) {
+    logger.warn({ err: error }, '[worker] autonomous PR merge reconciliation deferred');
+  }
   reconcileIntervalHandle = setInterval(() => { void reconcileState(); }, RECONCILE_INTERVAL_MS);
 
   // 4. Register job queue handlers.
@@ -2875,6 +2910,7 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+  await registerAutonomousPrDeliveryWorker(boss);
   await registerSpecJobHandlers(boss);
   await registerHydrationWorker(boss);
   await registerContextCaptureHandlers(boss);

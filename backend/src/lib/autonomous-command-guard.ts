@@ -21,6 +21,7 @@ const AUTONOMOUS_SECRET_ENV_KEYS = new Set([
 export interface AutonomousCommandGuardOptions {
   cwd: string;
   env: Record<string, string>;
+  profile?: 'general' | 'conflict-resolution';
 }
 
 export interface AutonomousCommandGuardResult {
@@ -94,7 +95,7 @@ function writeExecutable(filePath: string, content: string): void {
   fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o755 });
 }
 
-function buildWrapper(command: string, realCommand: string | null): string {
+function buildWrapper(command: string, realCommand: string | null, profile: 'general' | 'conflict-resolution'): string {
   const execTarget = realCommand ? shellQuote(realCommand) : command;
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -106,6 +107,24 @@ database_url="\${DATABASE_URL:-}"
 autonomous_jest_db_url="\${RORCA_AUTONOMOUS_BACKEND_JEST_DATABASE_URL:-}"
 pwd_now="$(pwd -P)"
 args_joined=" $* "
+profile=${shellQuote(profile)}
+
+if [[ "$profile" == "conflict-resolution" ]]; then
+  case "$cmd_name" in
+    gh|curl|wget|ssh|scp|rsync)
+      echo "[Rorca autonomous command guard] External/network command blocked during conflict resolution." >&2
+      exit 126
+      ;;
+    git)
+      case "\${1:-}" in
+        push|fetch|pull|remote|commit|merge|rebase|checkout|switch|reset|clean|worktree|tag)
+          echo "[Rorca autonomous command guard] Host-owned git operation blocked during conflict resolution." >&2
+          exit 126
+          ;;
+      esac
+      ;;
+  esac
+fi
 
 is_backend_dir=0
 if [[ -n "$workspace_root" ]]; then
@@ -173,10 +192,13 @@ export function sanitizeAutonomousAgentEnv(env: Record<string, string>): Record<
 
 export function createAutonomousCommandGuard(options: AutonomousCommandGuardOptions): AutonomousCommandGuardResult {
   const guardBinDir = fs.mkdtempSync(path.join(os.tmpdir(), GUARD_DIR_PREFIX));
-  const commands = ['npm', 'npx', 'jest', 'yarn', 'pnpm'];
+  const profile = options.profile ?? 'general';
+  const commands = profile === 'conflict-resolution'
+    ? ['npm', 'npx', 'jest', 'yarn', 'pnpm', 'git', 'gh', 'curl', 'wget', 'ssh', 'scp', 'rsync']
+    : ['npm', 'npx', 'jest', 'yarn', 'pnpm'];
 
   for (const command of commands) {
-    writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command)));
+    writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command), profile));
   }
 
   const autonomousBackendJestEnv = deriveAutonomousBackendJestEnv(options.env);

@@ -92,6 +92,21 @@ describe('lifecycle decision route authority boundary', () => {
     },
   );
 
+  test('rejects the internal policy_approval type at the public decision boundary', async () => {
+    const response = await request(appWithUser({
+      id: 'local-admin',
+      email: 'admin@rorca.local',
+      supabaseId: 'local-auth',
+      role: 'admin',
+    }))
+      .post('/api/lifecycle/decisions')
+      .set('Idempotency-Key', 'decision-policy-forgery-1')
+      .send(body({ decisionType: 'policy_approval' }));
+
+    expect(response.status).toBe(400);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
   test('derives local-admin provenance and request id from server context/headers', async () => {
     const response = await request(appWithUser({
       id: 'local-admin',

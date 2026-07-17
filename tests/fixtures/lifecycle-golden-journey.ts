@@ -238,7 +238,7 @@ export function goldenSpec(state: GoldenJourneyState): LifecycleSpecResponse {
     plan: {
       id: 'plan:billing-anomaly-alerts:v3', databaseId: '24024', version: 3,
       specVersion: GOLDEN.revision.specVersion, schemaVersion: 1,
-      compilerVersion: 'ssdlc-plan-compiler-1', policyVersion: 'lifecycle-policy-1',
+      compilerVersion: 'ssdlc-plan-compiler-2', policyVersion: 'lifecycle-policy-1',
       inputHash: GOLDEN.revision.inputHash, compiledAt: '2026-07-15T11:45:00.000Z',
     },
     provenance: {
@@ -322,7 +322,7 @@ export function goldenSpec(state: GoldenJourneyState): LifecycleSpecResponse {
     evaluationSnapshot: {
       ...SNAPSHOT, planId: 'plan:billing-anomaly-alerts:v3', planVersion: 3, inputHash: GOLDEN.revision.inputHash,
       activeReleaseSubject: { type: 'commit_sha', value: GOLDEN.revision.sourceCommit }, policyVersion: 'lifecycle-policy-1',
-      compilerVersion: 'ssdlc-plan-compiler-1', evaluatedAt: '2026-07-15T12:11:00.000Z',
+      compilerVersion: 'ssdlc-plan-compiler-2', evaluatedAt: '2026-07-15T12:11:00.000Z',
     },
     ...SNAPSHOT,
   };

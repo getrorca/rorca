@@ -99,7 +99,7 @@ async function installGoldenTransport(page: Page): Promise<GoldenTransport> {
       return json(route, {
         status: transport.calls.recompile === 2 ? 'compiled' : 'skipped', specSlug: GOLDEN.specId,
         specVersion: GOLDEN.revision.specVersion, specHash: GOLDEN.revision.inputHash, inputHash: GOLDEN.revision.inputHash,
-        planId: 'plan:billing-anomaly-alerts:v3', planVersion: 3, compilerVersion: 'ssdlc-plan-compiler-1',
+        planId: 'plan:billing-anomaly-alerts:v3', planVersion: 3, compilerVersion: 'ssdlc-plan-compiler-2',
         profiles: ['code-change', 'integration'], riskLevel: 'medium', generatedAt: '2026-07-15T11:45:00.000Z',
         saveGeneration: 7, replayed: transport.calls.recompile > 2,
       });

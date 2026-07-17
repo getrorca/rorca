@@ -22,7 +22,7 @@ import { normalizeOpenCodeModel, shouldResolvePiRpcStory } from './agent-complet
 
 export type ResolverAgent = 'claude' | 'opencode' | 'codex' | 'pi';
 export type ResolverReason = 'not_ready' | 'timeout' | 'agent_exit' | 'validation_failed' | 'spawn_error';
-export type ResolverPostureSource = 'story' | 'run' | 'manual-retry';
+export type ResolverPostureSource = 'story' | 'run' | 'manual-retry' | 'autonomous-delivery';
 
 export interface MergeResolutionPosture {
   agent: ResolverAgent;
@@ -192,7 +192,7 @@ function promptFor(request: MergeResolutionRequest): string {
     'Resolve the existing git merge conflict in-place.',
     `Only edit these unmerged files: ${request.conflictFiles.join(', ')}.`,
     'Use read/edit/bash tools. Preserve both sides where appropriate.',
-    'Do not commit, abort the merge, create a worktree, change branches, or edit files outside that list.',
+    'Do not commit, abort the merge, create a worktree, change branches, push, fetch, use network tools, or edit files outside that list.',
     'After editing, stage every listed file with git add. Finish only after git ls-files -u is empty and git diff --cached --check passes.',
   ].join('\n');
 }
@@ -211,7 +211,11 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
   }
 
   fs.mkdirSync(path.dirname(request.logPath), { recursive: true });
-  const env = createAutonomousCommandGuard({ cwd: request.cwd, env: buildCleanResolverEnv(request.env) }).env;
+  const env = createAutonomousCommandGuard({
+    cwd: request.cwd,
+    env: buildCleanResolverEnv(request.env),
+    profile: 'conflict-resolution',
+  }).env;
   const command = buildMergeResolverCommand(posture);
   if (posture.agent === 'opencode' && request.attachAddr) {
     command.args.splice(3, 0, '--attach', request.attachAddr);

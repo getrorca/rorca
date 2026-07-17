@@ -11,6 +11,7 @@ import { requireLifecycleIdempotencyKey } from '../lib/lifecycle-mutations';
 import {
   deriveDecisionPrincipal,
   getSsdlcDecisionState,
+  SSDLC_DECISION_TYPES,
   recordSsdlcDecision,
   revokeSsdlcDecision,
   type DecisionSubject,
@@ -129,6 +130,10 @@ router.post('/decisions', async (req, res, next) => {
     const body = bodyObject(req);
     rejectActorClaims(body);
     const principal = requestPrincipal(req, body);
+    if (typeof body.decisionType !== 'string'
+      || !SSDLC_DECISION_TYPES.includes(body.decisionType as (typeof SSDLC_DECISION_TYPES)[number])) {
+      throw new ValidationError('decisionType is not a caller-authorized lifecycle decision type', { field: 'decisionType' });
+    }
     const input: RecordSsdlcDecisionInput = {
       workspaceId: optionalString(body.workspaceId) ?? '',
       specSlug: optionalString(body.specSlug) ?? '',

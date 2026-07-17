@@ -28,12 +28,14 @@ function policy(status: 'disabled' | 'active' | 'revoked' = 'disabled') {
   };
 }
 
-function installLoads(policies: ReturnType<typeof policy>[] = [], evidence: unknown[] = []) {
+function installLoads(policies: ReturnType<typeof policy>[] = [], evidence: unknown[] = [], deliveries: unknown[] = []) {
   mockApiFetch.mockImplementation(async (url, init) => {
     if (!init && url.includes('/delivery-policies')) {
       return { active: policies.find((item) => item.status === 'active') ?? null, policies } as any;
     }
     if (!init && url.includes('/delivery-evidence')) return { items: evidence } as any;
+    if (!init && url.includes('/autonomous-deliveries')) return { items: deliveries } as any;
+    if (init?.method === 'POST' && url.includes('/autonomous-deliveries')) return { queued: true, deliveryId: 'delivery-1', reason: null } as any;
     return { policy: policies[0] ?? policy(), replayed: false } as any;
   });
 }
@@ -89,6 +91,21 @@ describe('AutonomousDeliverySettings', () => {
         expectedPolicyDigest: policyDigest,
         confirmation: 'ENABLE_AUTONOMOUS_PR_DELIVERY',
       });
+    });
+  });
+
+  it('starts only a run-derived worker delivery with an idempotency key', async () => {
+    const user = userEvent.setup();
+    installLoads([policy('active')]);
+    render(<AutonomousDeliverySettings workspaceId="ws-1" connected showToast={vi.fn()} />);
+    await screen.findByText(/Enabled for getrorca\/rorca:main/);
+    await user.type(screen.getByLabelText('Delivery evidence run ID'), '20260316000001');
+    await user.click(screen.getByRole('button', { name: /Start\/recheck delivery/ }));
+    await waitFor(() => {
+      const start = mockApiFetch.mock.calls.find(([url, init]) => url.endsWith('/autonomous-deliveries') && init?.method === 'POST');
+      expect(start).toBeDefined();
+      expect(JSON.parse(String(start?.[1]?.body))).toEqual({ runId: 20260316000001 });
+      expect(start?.[1]?.headers).toMatchObject({ 'Idempotency-Key': expect.stringMatching(/^autonomous-delivery-start-/) });
     });
   });
 

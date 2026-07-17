@@ -68,6 +68,7 @@ export const EVIDENCE_CLASSIFICATIONS = [
   'staging',
   'deployment',
   'memory_closeout',
+  'approval',
 ] as const;
 
 export type EvidenceStatus = typeof EVIDENCE_STATUSES[number];
@@ -713,6 +714,17 @@ export async function persistCanonicalEvidence(
   db: EvidenceDb = DEFAULT_DB,
 ): Promise<EvidencePersistenceResult> {
   const evidence = sanitizeEvidenceForRendering(evidenceInput);
+  const providerEvidenceId = typeof evidence.details.githubPrDeliveryEvidenceId === 'string'
+    ? evidence.details.githubPrDeliveryEvidenceId : null;
+  const compiledPlanId = typeof evidence.details.compiledPlanId === 'string'
+    ? evidence.details.compiledPlanId : null;
+  const deliveryProjectionKind = evidence.details.deliveryProjectionKind === 'validation'
+    || evidence.details.deliveryProjectionKind === 'merge'
+    ? evidence.details.deliveryProjectionKind : null;
+  if ([providerEvidenceId, compiledPlanId, deliveryProjectionKind].filter(Boolean).length !== 0
+    && [providerEvidenceId, compiledPlanId, deliveryProjectionKind].filter(Boolean).length !== 3) {
+    throw new ValidationError('Delivery evidence projection requires provider evidence, compiled plan, and projection kind');
+  }
   const row = await db.queryOne<EvidenceRow>(`
     INSERT INTO ssdlc_lifecycle_evidence (
       workspace_id, spec_slug, revision, run_id, story_id, phase_id, gate_id,
@@ -720,11 +732,12 @@ export async function persistCanonicalEvidence(
       payload_hash, metadata, provenance, source_ref, observed_at,
       source_type, classification, evidence_status, trust_level, confidence, excerpt,
       release_identity, phase_subject_type, phase_subject_value, revision_mismatch,
-      lineage_verified, actor, rationale
+      lineage_verified, actor, rationale, github_pr_delivery_evidence_id,
+      compiled_plan_id, delivery_projection_kind
     )
     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
            $13, $14::jsonb, $15::jsonb, $16, $17, $18, $19, $20, $21, $22,
-           $23, $24::jsonb, $25, $26, $27, $28, $29, $30
+           $23, $24::jsonb, $25, $26, $27, $28, $29, $30, $31, $32::bigint, $33
     FROM workspaces w
     WHERE w.id = $1
       AND ($4::bigint IS NULL OR EXISTS (
@@ -767,6 +780,9 @@ export async function persistCanonicalEvidence(
     evidence.lineageVerified,
     evidence.actor,
     evidence.rationale,
+    providerEvidenceId,
+    compiledPlanId,
+    deliveryProjectionKind,
   ]);
 
   if (row) return { evidence: sanitizeEvidenceForRendering(rowToEvidence(row)), replayed: false };

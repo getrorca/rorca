@@ -90,6 +90,46 @@ describe('deterministic SSDLC plan compiler fixtures', () => {
     expect(serializedPlan).not.toContain('observedAt');
   });
 
+  test('versions Merge authority by explicit risk and protected compiler profile', () => {
+    const low = fixture('frontend-only code change').input;
+    low.riskAssignments = [{
+      workspaceId: low.workspaceId,
+      assignmentId: 'risk-low-reviewed-delivery',
+      scopeReference: low.canonicalSpec.json.userStories[0].id,
+      risk: 'low',
+      rationale: 'Explicit operator-reviewed low-risk assignment.',
+    }];
+    expect(compileLifecyclePlan(low).plan.gates.find((gate) => gate.phaseId === 'merge')?.approvalRequirement)
+      .toBe('policy');
+
+    const high = structuredClone(low);
+    high.riskAssignments = [{
+      workspaceId: high.workspaceId,
+      assignmentId: 'risk-high-reviewed-delivery',
+      scopeReference: high.canonicalSpec.json.userStories[0].id,
+      risk: 'high',
+      rationale: 'Explicit operator-reviewed high-risk assignment.',
+    }];
+    expect(compileLifecyclePlan(high).plan.gates.find((gate) => gate.phaseId === 'merge')?.approvalRequirement)
+      .toBe('human');
+
+    const unknown = fixture('frontend-only code change').input;
+    unknown.riskAssignments = [];
+    expect(compileLifecyclePlan(unknown).plan.gates.find((gate) => gate.phaseId === 'merge')?.approvalRequirement)
+      .toBe('human');
+
+    const sensitive = fixture('security-sensitive backend change').input;
+    sensitive.riskAssignments = [{
+      workspaceId: sensitive.workspaceId,
+      assignmentId: 'risk-low-but-sensitive',
+      scopeReference: sensitive.canonicalSpec.json.userStories[0].id,
+      risk: 'low',
+      rationale: 'Explicit low label cannot override a security-sensitive profile.',
+    }];
+    expect(compileLifecyclePlan(sensitive).plan.gates.find((gate) => gate.phaseId === 'merge')?.approvalRequirement)
+      .toBe('human');
+  });
+
   test('maps every requirement to a story or ADR and to required gate evidence', () => {
     for (const anchor of fixtures) {
       const { plan } = compileLifecyclePlan(anchor.input);

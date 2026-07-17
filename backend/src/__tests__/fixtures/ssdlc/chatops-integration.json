@@ -26,7 +26,7 @@
     "ownerAssignments": [{ "workspaceId": "workspace-chatops", "assignmentId": "owner-chatops", "scopeReference": "FIX-CHATOPS-001", "ownerReference": "owner-integrations" }],
     "policyAnnotations": [],
     "compilerAnnotations": [{ "annotationId": "pi-mode-chatops", "source": "pi", "payload": { "type": "execution_mode", "mode": "journey" } }],
-    "compilerVersion": "ssdlc-plan-compiler-1",
+    "compilerVersion": "ssdlc-plan-compiler-2",
     "policyVersion": "fixture-policy-1",
     "compiledAt": "2026-06-15T12:00:00.000Z"
   },

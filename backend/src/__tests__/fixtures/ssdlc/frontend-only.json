@@ -27,7 +27,7 @@
     "ownerAssignments": [{ "workspaceId": "workspace-frontend", "assignmentId": "owner-frontend", "scopeReference": "FIX-FRONTEND-001", "ownerReference": "owner-frontend" }],
     "policyAnnotations": [],
     "compilerAnnotations": [],
-    "compilerVersion": "ssdlc-plan-compiler-1",
+    "compilerVersion": "ssdlc-plan-compiler-2",
     "policyVersion": "fixture-policy-1",
     "compiledAt": "2026-06-15T12:00:00.000Z"
   },

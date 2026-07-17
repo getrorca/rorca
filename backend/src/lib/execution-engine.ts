@@ -1239,7 +1239,10 @@ function buildCleanEnv(): Record<string, string> {
 }
 
 function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = buildCleanEnv()): Record<string, string> {
-  return createAutonomousCommandGuard({ cwd, env: baseEnv }).env;
+  const profile = baseEnv.RORCA_AUTONOMOUS_GUARD_PROFILE === 'conflict-resolution'
+    ? 'conflict-resolution' as const
+    : 'general' as const;
+  return createAutonomousCommandGuard({ cwd, env: baseEnv, profile }).env;
 }
 
 function serializeJsonLine(value: unknown): string {

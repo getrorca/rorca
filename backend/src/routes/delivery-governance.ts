@@ -24,6 +24,10 @@ import {
   type DeliveryEvidencePrincipal,
 } from '../lib/github-pr-delivery-evidence';
 import { parsePaginationParams } from '../lib/paginate';
+import {
+  listAutonomousPrDeliveries,
+  queueAutonomousPrDeliveryForRun,
+} from '../lib/autonomous-pr-delivery';
 
 const router = Router();
 
@@ -313,6 +317,87 @@ router.get('/:id/github/delivery-evidence', requireWorkspaceAdmin(), async (req,
       runId,
       pagination,
     }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/autonomous-deliveries:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Queue the existing worker to steward one policy-governed reviewed PR
+ *     operationId: queueAutonomousPrDelivery
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Reviewed PR delivery may ultimately merge code and is restricted to workspace administrators outside MCP/public automation."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema: { type: string, minLength: 8, maxLength: 200 }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [runId]
+ *             properties:
+ *               runId: { type: integer }
+ *     responses:
+ *       202: { description: Existing worker queue accepted the reviewed delivery }
+ *       200: { description: Run is ineligible or an exact delivery already exists }
+ *       409: { description: Existing immutable delivery policy or run binding conflicts }
+ */
+router.post('/:id/github/autonomous-deliveries', requireWorkspaceAdmin(), async (req, res, next) => {
+  try {
+    const body = bodyObject(req);
+    rejectAuthorityClaims(body);
+    principal(req);
+    const result = await queueAutonomousPrDeliveryForRun({
+      workspaceId: String(req.params.id),
+      runId: Number(body.runId),
+      sourceRequestId: requestId(req),
+    });
+    res.status(result.queued ? 202 : 200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/autonomous-deliveries:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: List bounded autonomous reviewed-PR delivery state
+ *     operationId: listAutonomousPrDeliveries
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Delivery authority, recovery, review, and merged-SHA state is operator-only release metadata."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Paginated reviewed-delivery state }
+ */
+router.get('/:id/github/autonomous-deliveries', requireWorkspaceAdmin(), async (req, res, next) => {
+  try {
+    principal(req);
+    const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 100 });
+    res.json(await listAutonomousPrDeliveries(String(req.params.id), pagination));
   } catch (error) {
     next(error);
   }

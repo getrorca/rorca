@@ -566,7 +566,10 @@ async function activatePlan(input: {
        LIMIT 1`,
       [input.workspaceId, input.specSlug],
     );
-    if (existingCurrent.rows[0]?.normalized_input_hash === input.inputHash) return existingCurrent.rows[0];
+    if (existingCurrent.rows[0]?.normalized_input_hash === input.inputHash
+      && existingCurrent.rows[0]?.compiler_version === SSDLC_PLAN_COMPILER_VERSION) {
+      return existingCurrent.rows[0];
+    }
 
     const versionResult = await client.query<{ next_version: number }>(
       `SELECT COALESCE(MAX((plan_json->>'planVersion')::integer), 0) + 1 AS next_version
@@ -669,7 +672,8 @@ export async function compileSpecPlan(input: CompileSpecPlanInput): Promise<Comp
     materialHash = computeSsdlcPlanInputHash(initialContent, tags);
     const authoringIdentity = acceptedAuthoringIdentity(initialContent);
     const existing = await currentPlan(input.workspaceId, input.specSlug);
-    if (existing?.normalized_input_hash === materialHash) {
+    if (existing?.normalized_input_hash === materialHash
+      && existing.compiler_version === SSDLC_PLAN_COMPILER_VERSION) {
       await execute(
         `UPDATE ssdlc_plan_readiness_reasons
          SET resolved_at = NOW()
@@ -725,6 +729,7 @@ export async function compileSpecPlan(input: CompileSpecPlanInput): Promise<Comp
       source: input.source ?? 'lazy-compile',
       profiles: compilation.profiles,
       riskLevel: compilation.riskLevel,
+      riskAssignmentCount: annotations.riskAssignments.length,
       ...(authoringIdentity ? {
         acceptedAuthoringPlanHash: authoringIdentity.acceptedPlanHash,
         acceptedPreflightHash: authoringIdentity.acceptedPreflightHash,

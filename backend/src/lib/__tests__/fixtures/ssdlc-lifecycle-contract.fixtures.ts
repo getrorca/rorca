@@ -98,7 +98,7 @@ export function compilerInput(fixture: CompilerProfileFixture = COMPILER_PROFILE
     ownerAssignments: [],
     policyAnnotations: [],
     compilerAnnotations: [],
-    compilerVersion: 'ssdlc-plan-compiler-1',
+    compilerVersion: 'ssdlc-plan-compiler-2',
     policyVersion: 'lifecycle-policy-1',
     compiledAt: CONTRACT_TIME,
   };

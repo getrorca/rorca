@@ -14,6 +14,8 @@ const mockRevokePolicy = jest.fn();
 const mockListPolicies = jest.fn();
 const mockObserveEvidence = jest.fn();
 const mockListEvidence = jest.fn();
+const mockQueueDelivery = jest.fn();
+const mockListDeliveries = jest.fn();
 
 jest.mock('../../lib/autonomous-delivery-policy', () => ({
   ...jest.requireActual('../../lib/autonomous-delivery-policy'),
@@ -26,6 +28,11 @@ jest.mock('../../lib/autonomous-delivery-policy', () => ({
 jest.mock('../../lib/github-pr-delivery-evidence', () => ({
   observeGithubPrDeliveryEvidence: (...args: unknown[]) => mockObserveEvidence(...args),
   listGithubPrDeliveryEvidence: (...args: unknown[]) => mockListEvidence(...args),
+}));
+
+jest.mock('../../lib/autonomous-pr-delivery', () => ({
+  queueAutonomousPrDeliveryForRun: (...args: unknown[]) => mockQueueDelivery(...args),
+  listAutonomousPrDeliveries: (...args: unknown[]) => mockListDeliveries(...args),
 }));
 
 import deliveryGovernanceRouter from '../delivery-governance';
@@ -73,6 +80,8 @@ beforeEach(() => {
   mockListPolicies.mockResolvedValue({ active: null, policies: [] });
   mockObserveEvidence.mockResolvedValue({ evidence: { id: 'evidence-1', pullRequest: { headSha: 'a'.repeat(40) } }, replayed: false });
   mockListEvidence.mockResolvedValue({ items: [] });
+  mockQueueDelivery.mockResolvedValue({ queued: true, deliveryId: 'delivery-1', reason: null, replayed: false });
+  mockListDeliveries.mockResolvedValue([]);
 });
 
 describe('autonomous delivery governance routes', () => {
@@ -154,5 +163,25 @@ describe('autonomous delivery governance routes', () => {
       expectedHeadSha: 'a'.repeat(40),
       principal: { principalId: 'operator-1', displayLabel: 'operator@example.test' },
     });
+  });
+
+  test('queues the existing worker using only the canonical run and idempotency key', async () => {
+    const response = await request(app(admin))
+      .post('/api/workspaces/ws-1/github/autonomous-deliveries')
+      .set('Idempotency-Key', 'delivery-start-001')
+      .send({ runId: 20260316000001 });
+    expect(response.status).toBe(202);
+    expect(mockQueueDelivery).toHaveBeenCalledWith({
+      workspaceId: 'ws-1', runId: 20260316000001, sourceRequestId: 'delivery-start-001',
+    });
+  });
+
+  test('does not accept caller authority when starting reviewed delivery', async () => {
+    const response = await request(app(admin))
+      .post('/api/workspaces/ws-1/github/autonomous-deliveries')
+      .set('Idempotency-Key', 'delivery-start-002')
+      .send({ runId: 20260316000001, deploymentAllowed: true });
+    expect(response.status).toBe(400);
+    expect(mockQueueDelivery).not.toHaveBeenCalled();
   });
 });

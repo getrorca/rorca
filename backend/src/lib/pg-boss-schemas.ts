@@ -161,6 +161,16 @@ export const PipelineMergeJobPayload = z.object({
 
 export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload>;
 
+// ── pipeline:pr-delivery ─────────────────────────────────────────────────────
+
+/** One bounded observation/actuation step for an existing reviewed PR. */
+export const AutonomousPrDeliveryJobPayload = z.object({
+  deliveryId: z.string().uuid(),
+  expectedHeadSha: z.string().regex(/^[0-9a-f]{40,64}$/),
+}).strict();
+
+export type AutonomousPrDeliveryJobPayloadType = z.infer<typeof AutonomousPrDeliveryJobPayload>;
+
 // ── spec jobs ────────────────────────────────────────────────────────────────
 
 export const SpecJobPayload = z.object({

@@ -110,6 +110,30 @@ describe('autonomous-command-guard', () => {
     }
   });
 
+  test('conflict-resolution profile blocks agent-owned network and remote git operations', () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-conflict-guard-ws-'));
+    const guarded = createAutonomousCommandGuard({
+      cwd: workspace,
+      env: process.env as Record<string, string>,
+      profile: 'conflict-resolution',
+    });
+    try {
+      for (const [command, args] of [
+        ['git', ['push', 'origin', 'HEAD']],
+        ['git', ['fetch', 'origin']],
+        ['gh', ['pr', 'merge', '1']],
+        ['curl', ['https://example.com']],
+      ] as Array<[string, string[]]>) {
+        const result = spawnSync(command, args, { cwd: workspace, env: guarded.env, encoding: 'utf8' });
+        expect(result.status).toBe(126);
+        expect(result.stderr).toMatch(/blocked/i);
+      }
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      fs.rmSync(guarded.guardBinDir, { recursive: true, force: true });
+    }
+  });
+
   test('still blocks backend Jest commands when no safe test database can be derived', () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-guard-ws-'));
     const backend = path.join(workspace, 'backend');

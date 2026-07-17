@@ -87,8 +87,15 @@ function insertedRow(params: unknown[]) {
   };
 }
 
-function harness(options: { pull?: Record<string, unknown>; reviews?: unknown[]; policy?: typeof activePolicy | null } = {}) {
+function harness(options: {
+  pull?: Record<string, unknown>;
+  finalPull?: Record<string, unknown>;
+  reviews?: unknown[];
+  checkRuns?: unknown[];
+  policy?: typeof activePolicy | null;
+} = {}) {
   const urls: string[] = [];
+  let pullCalls = 0;
   const inserted: unknown[][] = [];
   const wal: unknown[][] = [];
   const client = {
@@ -107,18 +114,19 @@ function harness(options: { pull?: Record<string, unknown>; reviews?: unknown[];
   };
   const fetchJson = jest.fn(async (url: string) => {
     urls.push(url);
-    if (/\/pulls\/42$/.test(url)) return pull(options.pull);
-    if (url.includes('/check-runs')) {
-      return {
-        total_count: 1,
-        check_runs: [{
-          id: 501, name: 'Backend Tests', status: 'completed', conclusion: 'success',
-          details_url: 'https://github.com/getrorca/rorca/actions/runs/1', completed_at: now.toISOString(),
-          app: { slug: 'github-actions' },
-        }],
-      };
+    if (/\/pulls\/42$/.test(url)) {
+      pullCalls += 1;
+      return pull(pullCalls > 1 && options.finalPull ? options.finalPull : options.pull);
     }
-    if (url.endsWith(`/commits/${headSha}/status`)) return { statuses: [] };
+    if (url.includes('/check-runs')) {
+      const checkRuns = options.checkRuns ?? [{
+        id: 501, name: 'Backend Tests', status: 'completed', conclusion: 'success',
+        details_url: 'https://github.com/getrorca/rorca/actions/runs/1', completed_at: now.toISOString(),
+        app: { slug: 'github-actions' },
+      }];
+      return { total_count: checkRuns.length, check_runs: checkRuns };
+    }
+    if (url.includes(`/commits/${headSha}/statuses?`)) return [];
     if (url.includes('/pulls/42/reviews')) {
       return options.reviews ?? [{
         id: 601, state: 'APPROVED', commit_id: headSha, submitted_at: now.toISOString(),
@@ -198,6 +206,45 @@ describe('exact-SHA GitHub PR delivery evidence', () => {
     expect(result.evidence.checkSummary).toMatchObject({ allRequiredPassed: false, policyScopeMatches: false });
     expect(result.evidence.reviewSummary).toMatchObject({
       reviewSatisfied: false, currentApprovals: 0, missingRequiredReviewers: ['release-owner'], policyScopeMatches: false,
+    });
+  });
+
+  test('fails closed when the PR changes during the observation window', async () => {
+    const test = harness({ finalPull: {
+      head: { ref: 'run/safe-delivery', sha: 'd'.repeat(40), repo: { full_name: 'getrorca/rorca' } },
+    } });
+    await expect(observeGithubPrDeliveryEvidence({
+      workspaceId: 'ws-1', runId: 20260316000001, expectedHeadSha: headSha,
+      principal: { principalId: 'operator', displayLabel: 'operator@example.test' },
+    }, test.overrides as any)).rejects.toThrow('changed while');
+    expect(test.inserted).toHaveLength(0);
+  });
+
+  test('a latest failing duplicate check identity dominates historical success', async () => {
+    const test = harness({ checkRuns: [
+      { id: 500, name: 'Backend Tests', status: 'completed', conclusion: 'success', completed_at: '2026-07-16T11:00:00.000Z', app: { slug: 'github-actions' } },
+      { id: 501, name: 'Backend Tests', status: 'completed', conclusion: 'failure', completed_at: now.toISOString(), app: { slug: 'github-actions' } },
+      { id: 700, name: 'Backend Tests', status: 'completed', conclusion: 'success', completed_at: now.toISOString(), app: { slug: 'untrusted-app' } },
+    ] });
+    const result = await observeGithubPrDeliveryEvidence({
+      workspaceId: 'ws-1', runId: 20260316000001, expectedHeadSha: headSha,
+      principal: { principalId: 'operator', displayLabel: 'operator@example.test' },
+    }, test.overrides as any);
+    expect(result.evidence.checkSummary).toMatchObject({ allRequiredPassed: false, failing: ['Backend Tests'] });
+  });
+
+  test('an unresolved old-SHA change request remains blocking after a push', async () => {
+    const test = harness({ reviews: [{
+      id: '90071992547409930001', state: 'CHANGES_REQUESTED', commit_id: 'e'.repeat(40), submitted_at: now.toISOString(),
+      user: { login: 'release-owner' }, author_association: 'MEMBER',
+    }] });
+    const result = await observeGithubPrDeliveryEvidence({
+      workspaceId: 'ws-1', runId: 20260316000001, expectedHeadSha: headSha,
+      principal: { principalId: 'operator', displayLabel: 'operator@example.test' },
+    }, test.overrides as any);
+    expect(result.evidence.reviewSummary).toMatchObject({
+      reviewSatisfied: false,
+      changesRequestedBy: ['release-owner'],
     });
   });
 

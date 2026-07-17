@@ -16,7 +16,8 @@ import { getWorkspaceEnvVars } from '../routes/env-vars';
 import { getVaultKey } from '../routes/vault';
 
 export const EXECUTION_SECRET_REFERENCE_VERSION = 'v1' as const;
-export const PROVIDER_ENV: Record<string, { key: string; baseUrlKey?: string }> = {
+export type ExecutionProviderCredential = 'anthropic' | 'openrouter' | 'openai-compat';
+export const PROVIDER_ENV: Record<ExecutionProviderCredential, { key: string; baseUrlKey?: string }> = {
   anthropic: { key: 'ANTHROPIC_API_KEY' },
   openrouter: { key: 'OPENROUTER_API_KEY' },
   'openai-compat': { key: 'OPENAI_API_KEY', baseUrlKey: 'OPENAI_BASE_URL' },
@@ -27,20 +28,20 @@ export interface ExecutionSecretReferences {
   workspaceId: string;
   /** Identity reference only; this is not a credential. */
   vaultUserId?: string;
-  providers: Array<keyof typeof PROVIDER_ENV>;
+  providers: ExecutionProviderCredential[];
   includeWorkspaceEnv: true;
 }
 
 export function createExecutionSecretReferences(input: {
   workspaceId: string | number;
   vaultUserId?: string;
-  providers?: Array<keyof typeof PROVIDER_ENV>;
+  providers?: ExecutionProviderCredential[];
 }): ExecutionSecretReferences {
   return {
     version: EXECUTION_SECRET_REFERENCE_VERSION,
     workspaceId: String(input.workspaceId),
     ...(input.vaultUserId ? { vaultUserId: input.vaultUserId } : {}),
-    providers: [...new Set(input.providers ?? Object.keys(PROVIDER_ENV) as Array<keyof typeof PROVIDER_ENV>)],
+    providers: [...new Set(input.providers ?? Object.keys(PROVIDER_ENV) as ExecutionProviderCredential[])],
     includeWorkspaceEnv: true,
   };
 }

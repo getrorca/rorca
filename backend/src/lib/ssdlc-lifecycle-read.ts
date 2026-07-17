@@ -397,7 +397,9 @@ async function loadDecisions(specSlugs: string[], workspaceId: string, db: Lifec
              d.decision_type, d.rationale, d.evidence_gap, d.subject_type, d.subject_value,
              d.policy_version, d.principal_type, d.principal_id, d.principal_display_label,
              d.created_at, d.expires_at, d.revoked_at,
-             MAX(d.id) OVER (PARTITION BY d.spec_slug)::text AS high_water_mark,
+             (MAX(d.id) OVER (PARTITION BY d.spec_slug))::text || ':' ||
+             (EXTRACT(EPOCH FROM MAX(COALESCE(d.revoked_at, d.created_at)) OVER (PARTITION BY d.spec_slug)) * 1000)::bigint::text
+               AS high_water_mark,
              ROW_NUMBER() OVER (PARTITION BY d.spec_slug ORDER BY d.created_at DESC, d.id DESC) AS bounded_rank
       FROM ssdlc_decisions d
       WHERE d.workspace_id = $1 AND d.spec_slug = ANY($2::text[])

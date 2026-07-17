@@ -171,6 +171,32 @@ describe('blocking evidence, precedence, and invalid history', () => {
       .toEqual([expect.objectContaining({ valid: true, satisfiesGate: false })]);
   });
 
+  test('a newer same-source same-SHA observation supersedes an older pass without deleting history', () => {
+    const oldPass = passingEvidence('validation', {
+      evidenceId: 'github-pr-old-pass',
+      source: 'github_check:github-pr-delivery',
+      collectedAt: '2026-07-15T10:00:00.000Z',
+      sequence: '100',
+    });
+    const regression = passingEvidence('validation', {
+      evidenceId: 'github-pr-current-regression',
+      source: 'github_check:github-pr-delivery',
+      collectedAt: '2026-07-15T10:05:00.000Z',
+      sequence: '101',
+      status: 'unknown',
+    });
+    const result = evaluatePhase(
+      EVALUATOR_PLAN,
+      [oldPass, regression],
+      [],
+      evaluatorRunState('validation'),
+      EVALUATION_TIME,
+    );
+    expect(result.status).toBe('in_progress');
+    expect(result.evidence).toHaveLength(2);
+    expect(result.gates[0].evidenceIds).toEqual(['github-pr-current-regression']);
+  });
+
   test('stales evidence collected under a superseded gate policy without deleting it', () => {
     const result = evaluatePhase(
       EVALUATOR_PLAN,

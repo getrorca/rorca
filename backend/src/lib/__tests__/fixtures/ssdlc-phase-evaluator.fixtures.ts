@@ -59,7 +59,7 @@ export const EVALUATOR_PLAN: LifecyclePlan = compileLifecyclePlan({
   ownerAssignments: [],
   policyAnnotations: [],
   compilerAnnotations: [],
-  compilerVersion: 'ssdlc-plan-compiler-1',
+  compilerVersion: 'ssdlc-plan-compiler-2',
   policyVersion: 'fixture-policy-1',
   compiledAt: '2026-07-14T12:00:00.000Z',
 }).plan;

@@ -36,6 +36,7 @@ export const SSDLC_DECISION_TYPES = [
 ] as const;
 
 export type SsdlcDecisionType = typeof SSDLC_DECISION_TYPES[number];
+export type StoredSsdlcDecisionType = SsdlcDecisionType | 'policy_approval';
 export type DecisionPrincipalType = 'local_admin' | 'authenticated_user' | 'hermes' | 'internal_service';
 export type DecisionSourceChannel = 'local' | 'api' | 'hermes' | 'internal';
 export type DecisionSubjectType = 'commit_sha' | 'artifact_digest';
@@ -103,7 +104,7 @@ interface SsdlcDecisionRow {
   story_id: string | null;
   phase_id: string;
   gate_id: string | null;
-  decision_type: SsdlcDecisionType;
+  decision_type: StoredSsdlcDecisionType;
   rationale: string;
   evidence_gap: string | null;
   subject_type: DecisionSubjectType | null;
@@ -140,7 +141,7 @@ export interface SsdlcDecision {
   storyId: string | null;
   phaseId: string;
   gateId: string | null;
-  decisionType: SsdlcDecisionType;
+  decisionType: StoredSsdlcDecisionType;
   rationale: string;
   evidenceGap: string | null;
   subject: DecisionSubject | null;
@@ -210,7 +211,7 @@ interface PersistResult {
 
 interface DecisionStore {
   loadPolicyContext(workspaceId: string, specSlug: string): Promise<PolicyContext>;
-  resolveCurrentIdentity(context: PolicyContext, candidate: Pick<PersistCandidate, 'workspaceId' | 'specSlug' | 'subject'>): Promise<string>;
+  resolveCurrentIdentity(context: PolicyContext, candidate: Pick<PersistCandidate, 'workspaceId' | 'specSlug' | 'runId' | 'subject'>): Promise<string>;
   persist(candidate: PersistCandidate): Promise<PersistResult>;
   revoke(input: RevokeSsdlcDecisionInput, principal: DecisionPrincipal): Promise<PersistResult>;
   list(workspaceId: string, specSlug: string, phaseId: string, gateId: string | null, activeOnly: boolean): Promise<SsdlcDecisionRow[]>;
@@ -584,6 +585,22 @@ const pgStore: DecisionStore = {
     const subject = candidate.subject;
     if (!subject) throw new ValidationError('An immutable approval subject is required');
     if (subject.type === 'commit_sha') {
+      if (candidate.runId !== null) {
+        const observed = await queryOne<{ head_sha: string }>(`
+          SELECT head_sha
+          FROM github_pr_delivery_evidence
+          WHERE workspace_id = $1 AND run_id = $2
+          ORDER BY provider_observed_at DESC, created_at DESC
+          LIMIT 1
+        `, [candidate.workspaceId, candidate.runId]);
+        if (!observed) {
+          throw new UnprocessableError(
+            'No exact-SHA GitHub delivery evidence is available for this run approval',
+            'REVISION_UNAVAILABLE',
+          );
+        }
+        return observed.head_sha.toLowerCase();
+      }
       try {
         return (await simpleGit(context.workspacePath).revparse(['HEAD'])).trim().toLowerCase();
       } catch {
@@ -818,6 +835,7 @@ export async function recordSsdlcDecision(
     const currentIdentity = (await deps.store.resolveCurrentIdentity(context, {
       workspaceId,
       specSlug,
+      runId,
       subject,
     })).toLowerCase();
     if (subject?.value !== currentIdentity) {
@@ -912,6 +930,7 @@ async function evaluateActivity(
     const currentIdentity = (await store.resolveCurrentIdentity(context, {
       workspaceId: decision.workspaceId,
       specSlug: decision.specSlug,
+      runId: decision.runId,
       subject: decision.subject,
     })).toLowerCase();
     if (decision.subject.value !== currentIdentity) {
@@ -958,6 +977,7 @@ export async function getSsdlcDecisionState(
       : types.has('gate_override')
         || types.has('qa_approval')
         || types.has('merge_approval')
+        || types.has('policy_approval')
         || types.has('production_approval')
         ? 'approved'
         : 'pending';

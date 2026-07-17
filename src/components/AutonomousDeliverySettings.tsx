@@ -76,6 +76,20 @@ interface DeliveryEvidence {
   payloadHash: string;
 }
 
+interface AutonomousDelivery {
+  id: string;
+  runId: number;
+  specSlug: string;
+  riskLevel: string;
+  pullRequest: { number: number; baseBranch: string; branchName: string };
+  currentHeadSha: string;
+  status: string;
+  recoveryAttempts: number;
+  deadlineAt: string;
+  mergedSha: string | null;
+  terminalReason: string | null;
+}
+
 interface Props {
   workspaceId: string;
   connected: boolean;
@@ -106,6 +120,7 @@ function shortDigest(value: string): string {
 export default function AutonomousDeliverySettings({ workspaceId, connected, showToast }: Props) {
   const [policies, setPolicies] = useState<PolicyResponse>({ active: null, policies: [] });
   const [evidence, setEvidence] = useState<DeliveryEvidence[]>([]);
+  const [deliveries, setDeliveries] = useState<AutonomousDelivery[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showDraft, setShowDraft] = useState(false);
@@ -131,12 +146,14 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
     }
     setLoading(true);
     try {
-      const [policyData, evidenceData] = await Promise.all([
+      const [policyData, evidenceData, deliveryData] = await Promise.all([
         apiFetch<PolicyResponse>(`/api/workspaces/${workspaceId}/github/delivery-policies`),
         apiFetch<{ items: DeliveryEvidence[] }>(`/api/workspaces/${workspaceId}/github/delivery-evidence?limit=10`),
+        apiFetch<{ items: AutonomousDelivery[] }>(`/api/workspaces/${workspaceId}/github/autonomous-deliveries?limit=10`),
       ]);
       setPolicies(policyData);
       setEvidence(evidenceData.items ?? []);
+      setDeliveries(deliveryData.items ?? []);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Failed to load autonomous delivery governance', 'error');
     } finally {
@@ -232,6 +249,31 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
       showToast(error instanceof Error ? error.message : 'Failed to revoke policy', 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const startDelivery = async () => {
+    const numericRunId = Number(runId);
+    if (!Number.isSafeInteger(numericRunId) || numericRunId <= 0) {
+      showToast('Enter a valid Rorca run ID', 'error');
+      return;
+    }
+    setObserving(true);
+    try {
+      const result = await apiFetch<{ queued: boolean; reason: string | null }>(
+        `/api/workspaces/${workspaceId}/github/autonomous-deliveries`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newRequestId('autonomous-delivery-start') },
+          body: JSON.stringify({ runId: numericRunId }),
+        },
+      );
+      showToast(result.queued ? 'Autonomous reviewed delivery queued' : `Delivery did not queue: ${result.reason ?? 'not eligible'}`, result.queued ? 'success' : 'warning');
+      await load();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to queue reviewed delivery', 'error');
+    } finally {
+      setObserving(false);
     }
   };
 
@@ -348,11 +390,28 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
           <h3 className="text-xs font-semibold text-[var(--text)]">Exact-SHA PR evidence</h3>
           <p className="mt-1 text-xs text-muted">Observe GitHub state for a Rorca run already bound to a PR. Observation never changes the PR.</p>
         </div>
-        <div className="grid grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)_auto] gap-2">
+        <div className="grid grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)_auto_auto] gap-2">
           <input value={runId} onChange={(event) => setRunId(event.target.value)} placeholder="Run ID" aria-label="Delivery evidence run ID" className="rounded border border-border bg-bg px-2 py-1.5 text-xs" />
           <input value={expectedHeadSha} onChange={(event) => setExpectedHeadSha(event.target.value)} placeholder="Full expected PR head SHA" aria-label="Expected PR head SHA" className="rounded border border-border bg-bg px-2 py-1.5 font-mono text-xs" />
           <button type="button" disabled={observing} onClick={() => void observeEvidence()} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1.5 text-xs hover:bg-bg disabled:opacity-50">{observing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Observe</button>
+          <button type="button" disabled={observing || !active} onClick={() => void startDelivery()} className="inline-flex items-center gap-1 rounded bg-accent px-2 py-1.5 text-xs text-white disabled:opacity-50"><ShieldCheck size={13} /> Start/recheck delivery</button>
         </div>
+
+        {deliveries.length > 0 && (
+          <div className="space-y-2" aria-label="Autonomous reviewed delivery state">
+            {deliveries.map((delivery) => (
+              <div key={delivery.id} className="rounded border border-border bg-bg p-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium text-[var(--text)]">PR #{delivery.pullRequest.number} · run {delivery.runId}</span>
+                  <span className={delivery.status === 'merged' ? 'text-success' : ['blocked', 'budget_exhausted'].includes(delivery.status) ? 'text-error' : 'text-warning'}>{delivery.status.replace(/_/g, ' ')}</span>
+                </div>
+                <p className="mt-1 font-mono text-[10px] text-muted break-all">{delivery.currentHeadSha}</p>
+                <p className="mt-1 text-muted">risk={delivery.riskLevel} · recovery attempts={delivery.recoveryAttempts}{delivery.mergedSha ? ` · merged ${delivery.mergedSha.slice(0, 12)}` : ''}</p>
+                {delivery.terminalReason && <p className="mt-1 text-error">{delivery.terminalReason}</p>}
+              </div>
+            ))}
+          </div>
+        )}
 
         {evidence.length === 0 ? (
           <p className="text-xs text-muted">No PR evidence observed yet.</p>

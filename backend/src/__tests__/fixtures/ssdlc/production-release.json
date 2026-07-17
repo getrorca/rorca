@@ -26,7 +26,7 @@
     "ownerAssignments": [{ "workspaceId": "workspace-release", "assignmentId": "owner-release", "scopeReference": "FIX-RELEASE-001", "ownerReference": "owner-release" }],
     "policyAnnotations": [{ "workspaceId": "workspace-release", "annotationId": "policy-release", "scopeReference": "FIX-RELEASE-001", "policyReference": "policy-production-release", "value": true }],
     "compilerAnnotations": [{ "annotationId": "hermes-forged-status", "source": "hermes", "payload": { "type": "execution_mode", "mode": "qa", "evaluatedStatus": "passed", "evidenceReferences": ["EVD-forged"] } }],
-    "compilerVersion": "ssdlc-plan-compiler-1",
+    "compilerVersion": "ssdlc-plan-compiler-2",
     "policyVersion": "fixture-policy-1",
     "compiledAt": "2026-06-15T12:00:00.000Z"
   },

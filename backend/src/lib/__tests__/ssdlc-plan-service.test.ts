@@ -81,13 +81,13 @@ function planRow(inputHash: string, planVersion = 1): any {
     id: String(planVersion),
     spec_version: String(versionRow?.version ?? saveGeneration ?? 1),
     normalized_input_hash: inputHash,
-    compiler_version: 'ssdlc-plan-compiler-1',
+    compiler_version: 'ssdlc-plan-compiler-2',
     plan_json: {
       planId: `plan-${inputHash.slice('sha256:'.length)}`,
       planVersion,
       inputHash,
       specId: specSlug,
-      compilerVersion: 'ssdlc-plan-compiler-1',
+      compilerVersion: 'ssdlc-plan-compiler-2',
       compiledAt: '2026-07-15T00:00:00.000Z',
     },
     provenance_json: {
@@ -214,6 +214,21 @@ test.each(['pending', 'approved'] as const)('compiles a complete current plan fo
   const second = await compileSpecPlan({ workspaceId, workspacePath, specSlug, expectedSaveGeneration: 41 });
   expect(second).toMatchObject({ status: 'skipped', planId: first.planId, planVersion: 1 });
   expect(mockTransaction).toHaveBeenCalledTimes(1);
+});
+
+test('a compiler-version change recompiles identical material instead of reusing stale gate semantics', async () => {
+  writeSpec(canonicalSpec());
+  const first = await compileSpecPlan({ workspaceId, workspacePath, specSlug });
+  currentPlan.compiler_version = 'ssdlc-plan-compiler-1';
+  currentPlan.plan_json.compilerVersion = 'ssdlc-plan-compiler-1';
+
+  const upgraded = await compileSpecPlan({ workspaceId, workspacePath, specSlug });
+  expect(first.compilerVersion).toBe('ssdlc-plan-compiler-2');
+  expect(upgraded).toMatchObject({
+    status: 'compiled',
+    compilerVersion: 'ssdlc-plan-compiler-2',
+    planVersion: 2,
+  });
 });
 
 test('a material version edit creates plan version 2 while cosmetic edits reuse version 1', async () => {

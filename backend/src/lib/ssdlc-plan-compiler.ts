@@ -41,7 +41,7 @@ import {
   type RequirementReference,
 } from './ssdlc-contracts';
 
-export const SSDLC_PLAN_COMPILER_VERSION = 'ssdlc-plan-compiler-1' as const;
+export const SSDLC_PLAN_COMPILER_VERSION = 'ssdlc-plan-compiler-2' as const;
 
 export type AssembledLifecycleCompileInput = z.input<typeof LifecycleCompilerInputSchema>;
 export type AnnotationReviewStatus = 'accepted' | 'rejected';
@@ -621,7 +621,15 @@ function evidenceClassification(
   return 'runtime_observation';
 }
 
-function buildGates(profiles: CompilerProfile[]) {
+function buildGates(
+  profiles: CompilerProfile[],
+  riskLevel: LifecycleCompilationResult['riskLevel'],
+  hasExplicitRisk: boolean,
+) {
+  const standingPolicyEligible = hasExplicitRisk
+    && !['high', 'critical'].includes(riskLevel)
+    && !profiles.includes('security-sensitive')
+    && !profiles.includes('release-operations');
   const gates = CANONICAL_PHASE_IDS.map((phaseId) => {
     const template = GATE_TEMPLATES[phaseId];
     return {
@@ -630,7 +638,9 @@ function buildGates(profiles: CompilerProfile[]) {
       title: template.title,
       evidenceKind: template.evidenceKind,
       subjectRevisionRequirement: template.subjectRevisionRequirement,
-      approvalRequirement: template.approvalRequirement,
+      approvalRequirement: phaseId === 'merge' && standingPolicyEligible
+        ? 'policy' as const
+        : template.approvalRequirement,
       expirationPolicy: template.expirationPolicy,
       blockingSeverity: template.blockingSeverity,
       evidenceRequirementIds: [`evidence-requirement-${phaseId}`],
@@ -736,7 +746,7 @@ export function compileLifecyclePlan(input: AssembledLifecycleCompileInput): Lif
   const dispositions = initialDispositions(profiles, riskLevel);
   const annotationReview = reviewAnnotations(parsed, profiles, riskLevel, dispositions);
   const inputHash = hashStableValue(normalizedInputIdentity(parsed));
-  const { gates, evidenceRequirements } = buildGates(profiles);
+  const { gates, evidenceRequirements } = buildGates(profiles, riskLevel, parsed.riskAssignments.length > 0);
   const requirementEntries = buildRequirementEntries(parsed);
   const mappingGateIds = ['gate-requirements', 'gate-validation'];
   const mappingEvidenceIds = ['evidence-requirement-requirements', 'evidence-requirement-validation'];

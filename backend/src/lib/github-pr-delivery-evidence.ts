@@ -277,7 +277,31 @@ function githubApi(owner: string, repo: string, suffix: string): string {
 }
 
 function checkConclusionPass(value: string | null): boolean {
-  return value === 'success' || value === 'neutral' || value === 'skipped';
+  // Neutral/skipped are not success unless a future immutable policy schema
+  // explicitly opts into them.
+  return value === 'success';
+}
+
+function newerProviderItem(
+  candidate: { id: string; observedAt?: string | null; submittedAt?: string | null },
+  current: { id: string; observedAt?: string | null; submittedAt?: string | null },
+): boolean {
+  const candidateObservedAt = candidate.observedAt ?? candidate.submittedAt;
+  const currentObservedAt = current.observedAt ?? current.submittedAt;
+  const candidateTime = candidateObservedAt ? new Date(candidateObservedAt).getTime() : 0;
+  const currentTime = currentObservedAt ? new Date(currentObservedAt).getTime() : 0;
+  if (candidateTime !== currentTime) return candidateTime > currentTime;
+  try { return BigInt(candidate.id) > BigInt(current.id); } catch { return candidate.id.localeCompare(current.id) > 0; }
+}
+
+function latestCheckIdentities(checks: NormalizedGithubCheck[]): NormalizedGithubCheck[] {
+  const latest = new Map<string, NormalizedGithubCheck>();
+  for (const check of checks) {
+    const key = `${check.source}:${check.name.toLowerCase()}:${(check.app ?? 'unknown').toLowerCase()}`;
+    const current = latest.get(key);
+    if (!current || newerProviderItem(check, current)) latest.set(key, check);
+  }
+  return [...latest.values()];
 }
 
 function checkIsPending(check: NormalizedGithubCheck): boolean {
@@ -297,13 +321,15 @@ function summarizeChecks(
   const missing: string[] = [];
 
   for (const name of required) {
-    const matches = checks.filter((check) => check.name === name);
+    const matches = latestCheckIdentities(checks.filter((check) => check.name === name));
     if (matches.length === 0) {
       missing.push(name);
       continue;
     }
-    if (matches.some((check) => check.completed && checkConclusionPass(check.conclusion))) passing.push(name);
-    else if (matches.some(checkIsPending)) pending.push(name);
+    // Every latest provider identity sharing the required context must pass.
+    // A spoofed success cannot mask the real app's pending/failing result.
+    if (matches.some(checkIsPending)) pending.push(name);
+    else if (matches.every((check) => check.completed && checkConclusionPass(check.conclusion))) passing.push(name);
     else failing.push(name);
   }
   return {
@@ -329,7 +355,7 @@ function summarizeReviews(
   for (const review of reviews) {
     const key = review.reviewer.toLowerCase();
     const current = latestByReviewer.get(key);
-    if (!current || Number(review.id) > Number(current.id)) latestByReviewer.set(key, review);
+    if (!current || newerProviderItem(review, current)) latestByReviewer.set(key, review);
   }
   const latest = [...latestByReviewer.values()];
   const approvedReviewers = latest
@@ -337,7 +363,9 @@ function summarizeReviews(
     .map((review) => review.reviewer)
     .sort((left, right) => left.localeCompare(right));
   const changesRequestedBy = latest
-    .filter((review) => review.currentHead && review.state === 'changes_requested')
+    // A push does not erase an unresolved change request. Only a later
+    // provider-authoritative review state by that reviewer supersedes it.
+    .filter((review) => review.state === 'changes_requested')
     .map((review) => review.reviewer)
     .sort((left, right) => left.localeCompare(right));
   const requiredReviewers = policy?.reviewRules.requiredReviewers ?? [];
@@ -493,6 +521,7 @@ export async function observeGithubPrDeliveryEvidence(
   if (pr.html_url !== expectedPrUrl) throw new ConflictError('GitHub returned an unexpected pull request URL');
   if (pr.number !== prNumber) throw new ConflictError('GitHub returned a different pull request identity');
   if (pr.head.ref !== run.branch_name) throw new ConflictError('Pull request head branch does not match the canonical run branch');
+  if (pr.base.ref !== run.auto_pr_target_branch) throw new ConflictError('Pull request base branch does not match the canonical workspace target branch');
   if (headSha !== expectedHeadSha) {
     throw new ConflictError('Pull request head SHA changed; observe again using the current immutable SHA', {
       expectedHeadSha,
@@ -500,12 +529,14 @@ export async function observeGithubPrDeliveryEvidence(
     });
   }
 
-  const [checkRunsPage, statusResponse, reviewPage, comparison, policy] = await Promise.all([
+  const [checkRunsPage, statusPage, reviewPage, comparison, policy] = await Promise.all([
     paginatedCheckRuns<{ id: number; name: string; status: string; conclusion?: string | null; details_url?: string | null; completed_at?: string | null; started_at?: string | null; app?: { slug?: string | null } | null }>(
       deps, owner, repo, headSha, token.token,
     ),
-    deps.fetchJson<{ statuses?: Array<{ id: number; context: string; state: string; target_url?: string | null; updated_at?: string | null; creator?: { login?: string | null } | null }> }>(
-      githubApi(owner, repo, `/commits/${headSha}/status`), token.token,
+    paginated<{ id: number; context: string; state: string; target_url?: string | null; updated_at?: string | null; creator?: { login?: string | null } | null }>(
+      deps,
+      (page) => githubApi(owner, repo, `/commits/${headSha}/statuses?per_page=${PER_PAGE}&page=${page}`),
+      token.token,
     ),
     paginated<{ id: number; state: string; commit_id?: string | null; submitted_at?: string | null; user?: { login?: string | null } | null; author_association?: string | null }>(
       deps,
@@ -518,6 +549,26 @@ export async function observeGithubPrDeliveryEvidence(
     deps.getActivePolicy(input.workspaceId, deps.now()),
   ]);
 
+  // Close the observation window: provider head/base/branch/state and policy
+  // must be identical before and after checks/reviews/comparison collection.
+  const [finalPr, finalPolicy] = await Promise.all([
+    deps.fetchJson<GithubPullResponse>(githubApi(owner, repo, `/pulls/${prNumber}`), token.token),
+    deps.getActivePolicy(input.workspaceId, deps.now()),
+  ]);
+  const finalHeadSha = normalizedSha(finalPr.head?.sha, 'finalPullRequest.head.sha');
+  const finalBaseSha = normalizedSha(finalPr.base?.sha, 'finalPullRequest.base.sha');
+  if (finalPr.number !== pr.number || finalPr.html_url !== pr.html_url
+    || finalPr.head.ref !== pr.head.ref || finalPr.base.ref !== pr.base.ref
+    || finalHeadSha !== headSha || finalBaseSha !== baseSha
+    || finalPr.state !== pr.state || Boolean(finalPr.draft) !== Boolean(pr.draft)
+    || Boolean(finalPr.merged) !== Boolean(pr.merged)) {
+    throw new ConflictError('Pull request changed while exact-SHA evidence was being observed');
+  }
+  if ((policy?.id ?? null) !== (finalPolicy?.id ?? null)
+    || (policy?.policyDigest ?? null) !== (finalPolicy?.policyDigest ?? null)) {
+    throw new ConflictError('Standing delivery policy changed while exact-SHA evidence was being observed');
+  }
+
   const checkRuns = checkRunsPage.items.map<NormalizedGithubCheck>((check) => ({
     source: 'check_run',
     id: String(check.id),
@@ -529,7 +580,7 @@ export async function observeGithubPrDeliveryEvidence(
     observedAt: iso(check.completed_at ?? check.started_at),
     app: check.app?.slug ? boundedText(check.app.slug, 100) : null,
   }));
-  const statuses = (statusResponse.statuses ?? []).slice(0, MAX_PROVIDER_ITEMS).map<NormalizedGithubCheck>((status) => ({
+  const statuses = statusPage.items.map<NormalizedGithubCheck>((status) => ({
     source: 'commit_status',
     id: String(status.id),
     name: boundedText(status.context, 200),
@@ -544,7 +595,7 @@ export async function observeGithubPrDeliveryEvidence(
     .filter((check) => check.name.length > 0)
     .sort((left, right) => `${left.name}:${left.source}:${left.id}`.localeCompare(`${right.name}:${right.source}:${right.id}`))
     .slice(0, MAX_PROVIDER_ITEMS);
-  const checksTruncated = checkRunsPage.truncated || (statusResponse.statuses?.length ?? 0) > MAX_PROVIDER_ITEMS
+  const checksTruncated = checkRunsPage.truncated || statusPage.truncated
     || checkRuns.length + statuses.length > MAX_PROVIDER_ITEMS;
 
   const reviews = reviewPage.items
@@ -587,9 +638,9 @@ export async function observeGithubPrDeliveryEvidence(
     pullRequest: {
       number: prNumber, url: pr.html_url, state: pr.state, draft: Boolean(pr.draft), merged: Boolean(pr.merged),
       headRef: pr.head.ref, baseRef: pr.base.ref, headSha, baseSha,
-      mergeCommitSha: pr.merge_commit_sha && FULL_SHA.test(pr.merge_commit_sha.toLowerCase()) ? pr.merge_commit_sha.toLowerCase() : null,
-      mergeable: typeof pr.mergeable === 'boolean' ? pr.mergeable : null,
-      mergeableState: boundedText(pr.mergeable_state || 'unknown', 64),
+      mergeCommitSha: finalPr.merge_commit_sha && FULL_SHA.test(finalPr.merge_commit_sha.toLowerCase()) ? finalPr.merge_commit_sha.toLowerCase() : null,
+      mergeable: typeof finalPr.mergeable === 'boolean' ? finalPr.mergeable : null,
+      mergeableState: boundedText(finalPr.mergeable_state || 'unknown', 64),
     },
     freshness: { comparisonStatus, aheadBy, behindBy, branchFresh },
     checks, checksTruncated, reviews, reviewsTruncated: reviewPage.truncated,
@@ -655,6 +706,19 @@ export async function observeGithubPrDeliveryEvidence(
     );
     return { evidence: mapEvidence({ ...inserted.rows[0], spec_slug: specSlug(run.spec_path) }, specSlug(run.spec_path)), replayed: false };
   });
+}
+
+export async function getGithubPrDeliveryEvidenceById(
+  workspaceId: string,
+  evidenceId: string,
+): Promise<GithubPrDeliveryEvidence | null> {
+  const row = await queryOne<EvidenceRow>(`
+    SELECT e.*, regexp_replace(r.spec_path, '^.*/|\\.json$', '', 'g') AS spec_slug
+    FROM github_pr_delivery_evidence e
+    JOIN pipeline_runs r ON r.id = e.run_id
+    WHERE e.workspace_id = $1 AND e.id = $2
+  `, [workspaceId, evidenceId]);
+  return row ? mapEvidence(row, row.spec_slug ?? '') : null;
 }
 
 export async function listGithubPrDeliveryEvidence(input: {

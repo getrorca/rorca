@@ -26,7 +26,7 @@
     "ownerAssignments": [{ "workspaceId": "workspace-security", "assignmentId": "owner-security", "scopeReference": "FIX-SECURITY-001", "ownerReference": "owner-security" }],
     "policyAnnotations": [{ "workspaceId": "workspace-security", "annotationId": "policy-security", "scopeReference": "FIX-SECURITY-001", "policyReference": "policy-security-review", "value": true }],
     "compilerAnnotations": [],
-    "compilerVersion": "ssdlc-plan-compiler-1",
+    "compilerVersion": "ssdlc-plan-compiler-2",
     "policyVersion": "fixture-policy-1",
     "compiledAt": "2026-06-15T12:00:00.000Z"
   },

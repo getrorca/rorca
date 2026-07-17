@@ -310,6 +310,54 @@ async function insertWal(
   );
 }
 
+async function revokeDerivedPolicyAuthority(
+  client: PoolClient,
+  input: {
+    workspaceId: string;
+    policyId: string;
+    policyDigest: string;
+    principal: DeliveryPolicyPrincipal;
+    sourceRequestId: string;
+    reason: string;
+    now: Date;
+  },
+): Promise<void> {
+  await client.query(`
+    UPDATE ssdlc_decisions
+    SET revoked_at = $1, revoked_by_principal_type = 'internal_service',
+        revoked_by_principal_id = 'autonomous-delivery-steward',
+        revoked_by_display_label = 'Autonomous Delivery Steward',
+        revocation_rationale = $2, revocation_source_request_id = $3
+    WHERE workspace_id = $4 AND decision_type = 'policy_approval'
+      AND policy_reference = $5 AND revoked_at IS NULL
+  `, [
+    input.now.toISOString(),
+    `Standing policy authority revoked: ${input.reason}`.slice(0, 2_000),
+    `policy-revoked:${input.sourceRequestId}`,
+    input.workspaceId,
+    `autonomous-delivery:${input.policyId}:${input.policyDigest}`,
+  ]);
+
+  const blocked = await client.query<{ id: string; run_id: string; current_head_sha: string }>(`
+    UPDATE autonomous_pr_deliveries
+    SET status = 'blocked', terminal_reason = 'standing_policy_revoked',
+        completed_at = $1, updated_at = $1
+    WHERE workspace_id = $2 AND policy_id = $3 AND policy_digest = $4
+      AND status NOT IN ('merged', 'blocked', 'budget_exhausted', 'authorized', 'merging')
+    RETURNING id, run_id::text, current_head_sha
+  `, [input.now.toISOString(), input.workspaceId, input.policyId, input.policyDigest]);
+  for (const delivery of blocked.rows) {
+    await client.query(`
+      INSERT INTO autonomous_pr_delivery_events (
+        delivery_id, workspace_id, event_type, head_sha, detail
+      ) VALUES ($1, $2, 'blocked', $3, $4::jsonb)
+    `, [delivery.id, input.workspaceId, delivery.current_head_sha, JSON.stringify({
+      reason: 'standing_policy_revoked',
+      policyId: input.policyId,
+    })]);
+  }
+}
+
 export async function createAutonomousDeliveryPolicy(input: {
   workspaceId: string;
   draft: AutonomousDeliveryPolicyDraft;
@@ -423,6 +471,15 @@ export async function activateAutonomousDeliveryPolicy(input: {
         sourceRequestId: supersedeRequestId, policyDigest: active.policy_digest,
         reason: `Superseded by reviewed policy ${input.policyId}`,
       });
+      await revokeDerivedPolicyAuthority(client, {
+        workspaceId: input.workspaceId,
+        policyId: active.id,
+        policyDigest: active.policy_digest,
+        principal: input.principal,
+        sourceRequestId: supersedeRequestId,
+        reason: `Superseded by reviewed policy ${input.policyId}`,
+        now,
+      });
     }
 
     const activated = await client.query<PolicyRow>(
@@ -485,6 +542,15 @@ export async function revokeAutonomousDeliveryPolicy(input: {
     await insertEvent(client, {
       policyId: input.policyId, workspaceId: input.workspaceId, eventType: 'revoked', principal: input.principal,
       sourceRequestId: requestId, policyDigest: row.policy_digest, reason,
+    });
+    await revokeDerivedPolicyAuthority(client, {
+      workspaceId: input.workspaceId,
+      policyId: input.policyId,
+      policyDigest: row.policy_digest,
+      principal: input.principal,
+      sourceRequestId: requestId,
+      reason,
+      now,
     });
     await insertWal(client, 'autonomous_delivery_policy_revoked', input.workspaceId, input.principal, {
       policyId: input.policyId,
