@@ -14,7 +14,9 @@ import {
 } from 'lucide-react';
 import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
+import AutonomousDeliverySettings from '../components/AutonomousDeliverySettings';
 
 // ─── PR Template (duplicated from backend/src/lib/github/pr-template.ts) ──────
 
@@ -232,6 +234,7 @@ function LockedPanel({ title, message }: { title: string; message: string }) {
 
 export default function GitHubSettingsPanel() {
   const { workspaceId } = useWorkspace();
+  const { show: showToast } = useGlobalToast();
 
   // Workspace repo connection
   const [status, setStatus] = useState<GithubStatus | null>(null);
@@ -711,6 +714,12 @@ export default function GitHubSettingsPanel() {
           })}
         </div>
       </section>
+
+      <AutonomousDeliverySettings
+        workspaceId={workspaceId}
+        connected={Boolean(account?.connected && status?.connected)}
+        showToast={showToast}
+      />
 
       {/* ─── Section 1: Workspace GitHub Credential ───────────────────── */}
       <section className="rounded-lg border border-border bg-panel px-4 py-3">

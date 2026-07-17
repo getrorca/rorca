@@ -14,6 +14,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { PanelId } from './Sidebar';
+import { Github } from './icons/GithubIcon';
 import type { SettingsTab } from '../panels/SettingsPanel';
 
 interface SettingsSidebarProps {
@@ -43,6 +44,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'hooks',     label: 'Pipeline Hooks',  icon: Webhook   },
       { id: 'agents',    label: 'Agent Profiles',  icon: Users     },
       { id: 'context',   label: 'Context Library', icon: Route     },
+      { id: 'github',    label: 'GitHub',          icon: Github    },
     ],
   },
   {
