@@ -9,7 +9,9 @@ See LICENSE file in the project root for full license text.
 
 Date: 2026-07-17
 
-Implementation commit: `ad7a52880e80c6a1f849832d3803df1f99dad6d1`
+Core implementation commit: `ad7a52880e80c6a1f849832d3803df1f99dad6d1`
+
+Recovery secret-scope hardening: `e32e2b2d70c81c2c10c4bf7f0d726d7e433f3512`
 
 Policy/evidence foundation: `9c406033d45d58ac7e82896bc89f45ce8226e51f`
 
@@ -132,13 +134,14 @@ Fresh disposable PostgreSQL verification:
 - all four reviewed-delivery tables exist; and
 - no migration touched `pgboss.*`.
 
-Both task-owned disposable databases were identity-checked as owned by `rorca_test_runner`, had their task connections terminated, and were removed. The pre-existing `rorca_test` and production `rorca` databases were not changed.
+All three task-owned disposable databases were identity-checked as owned by `rorca_test_runner`, had their task connections terminated, and were removed. The pre-existing `rorca_test` and production `rorca` databases were not changed.
 
 ## Validation evidence
 
 ### Task-focused backend
 
 - Reviewed-delivery policy/provider/Lifecycle/compiler/evaluator/route/migration/state-machine matrix: **15 suites, 144/144 passed**.
+- Contained recovery secret/guard/state-machine matrix: **4 suites, 23/23 passed**.
 - Existing Recovery Wave compatibility matrix: **14 suites, 136/136 passed**.
 - Explicit SSDLC Lifecycle/retry/closeout/Learn matrix: **35 suites, 353/353 passed**.
 - Pipeline queue/readiness/Hermes/recovery/graph/delivery matrix: **8 suites, 78/78 passed**.
