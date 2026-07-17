@@ -13,6 +13,8 @@ Validated implementation commit: `67a53f6d9241e08cdf53a55ee196409f95aa2dc1`
 
 Combined candidate base: `363cf0ef89347fb958530b37970f44d6750aa568`
 
+> Historical foundation report: items 3–7 were subsequently implemented and validated in [`autonomous-reviewed-delivery-closeout.md`](./autonomous-reviewed-delivery-closeout.md).
+
 ## Scope and result
 
 The first two remaining autonomous reviewed-delivery seams are implemented:
