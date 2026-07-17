@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "rorca.autonomous-delivery-provider-verification.v1",
+  "validatedImplementationCommit": "67a53f6d9241e08cdf53a55ee196409f95aa2dc1",
+  "observationMode": "read-only GitHub API with disposable Rorca database binding",
+  "repository": "getrorca/rorca",
+  "pullRequest": 16,
+  "headSha": "9f899df5cb044ea3eb6f90ce84a3a10e25942862",
+  "baseSha": "6f87e79b0035985463739b05245cdd6e34969717",
+  "state": "open",
+  "draft": true,
+  "mergeable": true,
+  "mergeableState": "unstable",
+  "comparisonStatus": "ahead",
+  "behindBy": 0,
+  "checkCount": 23,
+  "reviewCount": 0,
+  "policyAvailable": false,
+  "allRequiredChecksPassed": false,
+  "reviewSatisfied": false,
+  "payloadHash": "sha256:7169d9e2606e3e1d36df2e80843537fe82849d4d2bdc64b23ea86ad7415a5f26",
+  "externalMutations": {
+    "pullRequest": false,
+    "repository": false,
+    "deployment": false,
+    "productionDatabase": false,
+    "policyActivation": false
+  }
+}
