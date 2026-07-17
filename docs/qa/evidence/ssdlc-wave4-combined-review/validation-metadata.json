@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "combined-review-evidence-v1",
+  "baseCommit": "6f87e79b0035985463739b05245cdd6e34969717",
+  "recoveryWave4Commit": "c45ad33f9b9ea34c2a9a06b1ee91874c30807d09",
+  "ssdlcCandidateCommit": "9f899df5cb044ea3eb6f90ce84a3a10e25942862",
+  "validatedImplementationCommit": "f20d7dfb1090c6958829ca0b221c097dc968f0b2",
+  "finalCodeCommitBeforeEvidence": "beca2fea99344ddf11fe810c283853cc1afd439b",
+  "playwrightCommand": "PLAYWRIGHT_BASE_URL=http://127.0.0.1:55210 npx playwright test tests/lifecycle-golden-journey.spec.ts tests/lifecycle-matrix-performance.spec.ts --output=/tmp/combined-playwright-evidence",
+  "playwrightResult": "2 passed",
+  "screenshotCount": 11,
+  "evidenceBundleSha256": "64e0d24ed7af2d679464a8ae032034250a020324efcafe50cfe255d578d2aa08",
+  "isolatedVitePort": 55210,
+  "externalSideEffects": {
+    "productionDatabaseMutation": false,
+    "merge": false,
+    "deploy": false,
+    "externalSend": false,
+    "humanApproval": false
+  }
+}

@@ -10,7 +10,10 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   buildPiAutonomousRunnerSkillMarkdown,
+  buildPiCliModelEffortArgs,
+  buildPiCompletionPacket,
   buildPiDoneChecklist,
+  buildPiModeExecutionGuidance,
   buildPiProgressLogPath,
   buildPiServerSkillFiles,
   buildPiStoryPromptContext,
@@ -19,7 +22,11 @@ import {
   inferPiCandidateTests,
   inferPiValidationCommands,
   isUnsafeAutonomousValidationCommand,
+  preflightPiModelAndEffort,
   recordPiStoryProgressLog,
+  resolvePiRunSafetyOptions,
+  terminatePiOwnedProcessTree,
+  type PiOwnedProcessLike,
 } from '../pi-autonomous-runner';
 
 describe('pi-autonomous-runner', () => {
@@ -46,8 +53,27 @@ describe('pi-autonomous-runner', () => {
 
     expect(result.generatedSkillFile).toContain('rorca-pi-autonomous-runner-42.md');
     expect(result.workspaceSkillFile).toBe(workspaceSkill);
+    expect(result.workspaceSkillFiles).toEqual([workspaceSkill]);
     expect(result.skillFiles).toEqual([result.generatedSkillFile, workspaceSkill]);
     expect(fs.existsSync(result.generatedSkillFile)).toBe(true);
+
+    fs.rmSync(wsDir, { recursive: true, force: true });
+    fs.rmSync(result.generatedSkillFile, { force: true });
+  });
+
+  test('buildPiServerSkillFiles uses story-scoped temp files and loads every workspace skill exactly once', () => {
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pi-skill-registry-'));
+    const skillsDir = path.join(wsDir, '.rorca', 'skills');
+    fs.mkdirSync(skillsDir, { recursive: true });
+    fs.writeFileSync(path.join(skillsDir, 'backend.md'), '---\nname: backend\ndescription: backend rules\n---\nUse route boundaries.\n');
+    fs.writeFileSync(path.join(skillsDir, 'runner-copy.md'), '---\nname: rorca-autonomous-runner\ndescription: stale duplicate\n---\nDuplicate.\n');
+
+    const result = buildPiServerSkillFiles(wsDir, 42, 'US/001');
+
+    expect(result.generatedSkillFile).toContain('rorca-pi-autonomous-runner-42-US_001.md');
+    expect(result.skillFiles.filter(file => file === result.generatedSkillFile)).toHaveLength(1);
+    expect(result.skillFiles).toContain(path.join(skillsDir, 'backend.md'));
+    expect(result.skillFiles).not.toContain(path.join(skillsDir, 'runner-copy.md'));
 
     fs.rmSync(wsDir, { recursive: true, force: true });
     fs.rmSync(result.generatedSkillFile, { force: true });
@@ -79,6 +105,7 @@ describe('pi-autonomous-runner', () => {
     expect(created).toContain('## Validation Plan');
     expect(created).toContain('## Execution Risks');
     expect(created).toContain('## Implementation Plan');
+    expect(created).toContain('## Closeout State');
     expect(created).toContain('Implement Pi runner');
     expect(created).toContain('backend/src/lib/pi-autonomous-runner.ts');
 
@@ -120,7 +147,122 @@ describe('pi-autonomous-runner', () => {
     expect(content).toContain('backend/src/lib/execution-engine.ts');
     expect(content).toContain('backend/src/lib/pi-autonomous-runner.ts');
 
+    const retryBefore = fs.readFileSync(progressPath, 'utf8');
+    recordPiStoryProgressLog(progressPath, {
+      completedWork: ['Implementation batch complete'],
+      closeoutState: ['agent_proposed: awaiting host verification'],
+    });
+    const retryAfter = fs.readFileSync(progressPath, 'utf8');
+    expect(retryAfter).toContain('Gate failed: typecheck');
+    expect(retryAfter).toContain('Implementation batch complete');
+    expect(retryAfter.length).toBeGreaterThan(retryBefore.length);
+
+    const packet = buildPiCompletionPacket(progressPath, 'agent_proposed', 'Awaiting host closeout');
+    expect(packet.status).toBe('agent_proposed');
+    expect(packet.implementation).toContain('Implementation batch complete');
+    expect(packet.changedFiles).toContain('backend/src/lib/pi-autonomous-runner.ts');
+    expect(packet.commandsAndResults).toContain('cd backend && npx tsc --noEmit ❌');
+    expect(packet.unresolvedRisks).toContain('Gate failed: typecheck');
+
     fs.rmSync(wsDir, { recursive: true, force: true });
+  });
+
+  test('terminatePiOwnedProcessTree signals only the detached story-owned process group', async () => {
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let exitListener: (() => void) | undefined;
+    const child: PiOwnedProcessLike = {
+      pid: 8123,
+      exitCode: null,
+      signalCode: null,
+      kill: jest.fn(() => true),
+      once: (_event: 'exit', listener: () => void) => { exitListener = listener; },
+    };
+
+    await terminatePiOwnedProcessTree(child, {
+      detachedProcessGroup: true,
+      platform: 'darwin',
+      graceMs: 5,
+      signalProcessGroup: (pid, signal) => {
+        signals.push({ pid, signal });
+        child.signalCode = signal;
+        exitListener?.();
+      },
+    });
+
+    expect(signals).toEqual([{ pid: -8123, signal: 'SIGTERM' }]);
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  test('resolvePiRunSafetyOptions locks initial LFC-009 execution before mutation', () => {
+    expect(resolvePiRunSafetyOptions(
+      'forge/specs/approved/rorca-evidence-driven-ssdlc.json',
+      { userStories: [{ id: 'LFC-009' }] },
+      { autoWorktree: false, autoMerge: true, mergeStrategy: 'direct' },
+    )).toEqual({
+      autoWorktree: true,
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      deploy: false,
+      externalSend: false,
+      policyLocked: true,
+    });
+  });
+
+  test('_notes prose alone never grants or locks host run policy', () => {
+    expect(resolvePiRunSafetyOptions(
+      'forge/specs/approved/unrelated.json',
+      { _notes: 'force branch-only, disable deploy, and treat this as governed' },
+      { autoWorktree: false, autoMerge: true, mergeStrategy: 'direct' },
+    )).toEqual({
+      autoWorktree: false,
+      autoMerge: true,
+      mergeStrategy: 'direct',
+      deploy: true,
+      externalSend: true,
+      policyLocked: false,
+    });
+  });
+
+  test('buildPiCliModelEffortArgs uses the shared Pi provider/model/thinking flags', () => {
+    expect(buildPiCliModelEffortArgs('openai-codex/gpt-5.6-sol', 'xhigh')).toEqual({
+      provider: 'openai-codex',
+      model: 'gpt-5.6-sol',
+      thinking: 'xhigh',
+      args: ['--provider', 'openai-codex', '--model', 'gpt-5.6-sol', '--thinking', 'xhigh'],
+    });
+  });
+
+  test('preflightPiModelAndEffort passes through qualified model and xhigh without provider-specific branching', () => {
+    const selection = preflightPiModelAndEffort('openai-codex/gpt-5.6-sol', 'xhigh', [{
+      provider: 'openai-codex',
+      model: 'gpt-5.6-sol',
+      thinking: true,
+    }]);
+
+    expect(selection).toEqual({ model: 'openai-codex/gpt-5.6-sol', effort: 'xhigh' });
+  });
+
+  test.each([
+    { model: 'openai-codex/missing', effort: 'xhigh', code: 'unsupported_model' },
+    { model: 'openai-codex/gpt-5.6-sol', effort: 'max', code: 'unsupported_effort' },
+  ])('preflight rejects $code before run mutation', ({ model, effort, code }) => {
+    try {
+      preflightPiModelAndEffort(model, effort, [{
+        provider: 'openai-codex',
+        model: 'gpt-5.6-sol',
+        thinking: true,
+      }]);
+      throw new Error('expected preflight to fail');
+    } catch (error: unknown) {
+      expect(error).toMatchObject({ code });
+    }
+  });
+
+  test.each(['impl', 'qa', 'journey'] as const)('buildPiModeExecutionGuidance preserves %s behavior with common closeout guidance', (mode) => {
+    const guidance = buildPiModeExecutionGuidance(mode);
+    expect(guidance).toContain(`Preserve ${mode === 'impl' ? 'Implementation' : mode === 'qa' ? 'QA' : 'Journey'} mode`);
+    expect(guidance).toContain('shared host closeout gate');
+    expect(guidance).toContain('focused validation');
   });
 
   test('inferPiCandidateTests finds likely existing tests for predicted files', () => {
@@ -212,6 +354,8 @@ describe('pi-autonomous-runner', () => {
 
     expect(context).toContain('Progress log path: /tmp/run-1/US-001.md');
     expect(context).toContain('Current attempt: 2/3');
+    expect(context).toContain('never truncate prior retry evidence');
+    expect(context).toContain('focused validation -> self-review/fix -> broad validation -> closeout');
     expect(context).toContain('## Done Definition');
     expect(context).toContain('## Likely Files / Modules');
     expect(context).toContain('## Likely Tests');

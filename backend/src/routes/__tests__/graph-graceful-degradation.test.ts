@@ -13,6 +13,7 @@
  * installed, we mock isGraphAvailable() to simulate the unavailable case.
  * The pipeline trigger tests verify includeGraph flag persistence.
  */
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -66,6 +67,8 @@ beforeAll(async () => {
   fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'pending'), { recursive: true });
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
+  execFileSync('git', ['init', '-q', workspacePath]);
+  execFileSync('git', ['-C', workspacePath, '-c', 'user.name=Rorca Tests', '-c', 'user.email=tests@rorca.local', 'commit', '--allow-empty', '-qm', 'test baseline']);
 });
 
 // Re-seed data after each global truncation (jest.pool-cleanup.ts truncates tables beforeEach)

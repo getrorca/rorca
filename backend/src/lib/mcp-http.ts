@@ -117,6 +117,8 @@ interface OpenAPIOperation {
   'x-rorca-rationale'?: string;
   'x-rorca-public-api'?: boolean;
   'x-mcp-tier'?: string;
+  /** Explicit opt-out for privileged REST-only operations. */
+  'x-rorca-mcp'?: boolean;
   parameters?: OpenAPIParameter[];
   requestBody?: {
     required?: boolean;
@@ -269,7 +271,12 @@ function isPublicTool(definition: Pick<McpToolDefinition, 'capturedMethod' | 'ca
     rule.method === definition.capturedMethod && rule.pattern.test(definition.capturedPath));
 }
 
-export function getMcpToolTier(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath'>): McpTier {
+export function getMcpToolTier(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath' | 'capturedOperation'>): McpTier {
+  // OpenAPI is the authority for auth/public MCP eligibility. Preserve the
+  // legacy public allowlist for unannotated historic endpoints, but do not turn
+  // a governed auth-tier route into an accidental admin-only dead end.
+  const declaredTier = getRorcaTier(definition.capturedOperation).tier;
+  if (declaredTier === 'public' || declaredTier === 'auth') return 'public';
   return isPublicTool(definition) ? 'public' : 'admin';
 }
 
@@ -905,6 +912,9 @@ export function getMcpToolDefinitions(spec: OpenAPISpec): McpToolDefinition[] {
 
   for (const [pathStr, methods] of Object.entries(spec.paths)) {
     for (const [method, operation] of Object.entries(methods)) {
+      // Some operator-only REST operations must never be callable through MCP,
+      // including by an MCP admin token.
+      if (operation['x-rorca-mcp'] === false) continue;
       const { tier } = getRorcaTier(operation);
       const mcpOverride = getMcpExposureOverride(operation);
       if (!tierAllowedFromMcp(tier) && !mcpOverride) continue;

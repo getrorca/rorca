@@ -201,12 +201,17 @@ export class RorcaApiClient {
   }
 
   async retryRun(runId: number, storyIds: string[] = [], options?: { forceSequential?: boolean }): Promise<RetryRunResponse> {
-    const body: Record<string, unknown> = {};
+    const body: Record<string, unknown> = { safeMode: true };
     if (storyIds.length > 0) body.storyIds = storyIds;
     if (options?.forceSequential) body.forceSequential = true;
-    return this.fetchJson<RetryRunResponse>(`/api/pipeline/runs/${runId}/retry`, {
+    const preview = await this.fetchJson<{ preview: { previewHash: string; requiresApproval: boolean; forceSequential: boolean } }>(`/api/pipeline/runs/${runId}/retry`, {
       method: "POST",
       body: JSON.stringify(body),
+    }, 60_000);
+    if (preview.preview.requiresApproval) throw new Error("Retry requires explicit operator approval");
+    return this.fetchJson<RetryRunResponse>(`/api/pipeline/runs/${runId}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, forceSequential: preview.preview.forceSequential, previewHash: preview.preview.previewHash }),
     }, 60_000);
   }
 

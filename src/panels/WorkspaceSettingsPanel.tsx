@@ -20,6 +20,7 @@ import AgentsEditorSection from '../components/AgentsEditorSection';
 import ContextRoutingSettings from '../components/ContextRoutingSettings';
 import ContextFilesEditor from '../components/ContextFilesEditor';
 import SkillsManager from '../components/SkillsManager';
+import AutonomousDeliverySettings from '../components/AutonomousDeliverySettings';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -872,6 +873,12 @@ export function WsGithubSection({ workspaceId, showToast }: WsSectionProps) {
           </div>
         )}
       </div>
+
+      <AutonomousDeliverySettings
+        workspaceId={workspaceId}
+        connected={Boolean(status?.connected)}
+        showToast={showToast}
+      />
 
       <div className="border-t border-border pt-6">
         <h2 className="text-sm font-semibold text-[var(--text)] mb-2">PR Template</h2>

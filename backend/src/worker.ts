@@ -66,9 +66,17 @@ import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import { replayFallbackResults } from './lib/fallback-replay';
+import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
+import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { isPtyTerminalMode } from './lib/terminal-mode';
-import { prepareRunSpecSnapshot } from './lib/run-spec-snapshot';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
+import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
+import {
+  queueAutonomousPrDeliveryForRun,
+  reconcilePendingAutonomousPrDeliveryMerges,
+  registerAutonomousPrDeliveryWorker,
+  resumeAutonomousDeliveryAfterRecoveryRun,
+} from './lib/autonomous-pr-delivery';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -106,7 +114,7 @@ function resolveExecutionEngineLauncher(entrypoint: { path: string; extension: '
  * Catches bugs introduced by merged code (e.g. search_path poisoning,
  * broken migrations) before the merge is marked as complete.
  */
-async function runPostMergeSmokeTest(workspaceId: string | number): Promise<{ ok: boolean; failures: string[] }> {
+async function _runPostMergeSmokeTest(workspaceId: string | number): Promise<{ ok: boolean; failures: string[] }> {
   const port = process.env.PORT || 3030;
   const base = `http://localhost:${port}`;
   const endpoints = [
@@ -237,33 +245,6 @@ async function dispatchWorkflowIfConfigured(
   }
 }
 
-// ── Claude binary + env-var stripping for agentic conflict resolution ────────
-
-const CLAUDE_BIN = process.env.CLAUDE_BIN ||
-  (() => {
-    try { return execSync('which claude', { encoding: 'utf8' }).trim(); } catch { return 'claude'; }
-  })();
-
-const CLAUDE_ENV_VARS_TO_REMOVE = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_AGENT_SDK_VERSION',
-  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
-];
-
-function buildCleanEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-      env[k] = v;
-    }
-  }
-  return env;
-}
-
-const AGENTIC_RESOLVE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const AGENTIC_RESOLVE_SIGKILL_DELAY_MS = 10_000;   // 10s after SIGTERM
-
 // ── Worker identity (stable for the lifetime of this process) ────────────────
 
 const WORKER_ID: string = crypto.randomUUID();
@@ -284,6 +265,11 @@ const activeProcesses = new Map<number, ChildProcess>();
 // writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
 
 const cancellingRuns = new Set<number>();
+
+// ── Reconciliation error counter (updated by reconcileState) ─────────────────
+// Reserved for worker health diagnostics.
+
+let _lastReconciliationErrors = 0;
 
 // ── pg-boss self-check (consecutive failure counter) ─────────────────────────
 // If boss.getQueueSize throws 3 consecutive times the pg-boss connection is
@@ -409,7 +395,7 @@ async function emitWalEvent(
       });
     }
   } catch (err) {
-    logger.warn({ err, eventType }, '[worker] Failed to emit WAL event');
+    logger.warn({ err, eventType }, '[worker] Failed to emit WAL event through /api/wal');
   }
 }
 
@@ -515,303 +501,7 @@ async function persistGhCliPrMetadata(
   }
 }
 
-// ── Agentic conflict resolution (US-005) ─────────────────────────────────
-// Spawns claude --print to resolve git merge conflicts.
-// Returns true if all conflicts were resolved and committed, false otherwise.
-
-async function attemptAgenticConflictResolution(
-  workspacePath: string,
-  branchName: string,
-  runId: number,
-  appendLog: (msg: string) => void,
-): Promise<boolean> {
-  const git = simpleGit(workspacePath);
-
-  // Enter conflicted merge state (--no-ff --no-commit)
-  appendLog(`[auto-merge] Starting merge of ${branchName} for agentic resolution...`);
-  try {
-    await git.merge([branchName, '--no-ff', '--no-commit']);
-    // Clean merge — commit directly
-    await git.commit(`merge: ${branchName} (auto)`);
-    appendLog('[auto-merge] Merged cleanly without conflicts.');
-    return true;
-  } catch (mergeErr: any) {
-    const msg: string = mergeErr?.message ?? String(mergeErr);
-    if (!msg.includes('CONFLICT') && !msg.includes('Automatic merge failed') && !msg.includes('fix conflicts')) {
-      appendLog(`[auto-merge] Unexpected merge error: ${msg}`);
-      try { await git.merge(['--abort']); } catch { /* best-effort */ }
-      return false;
-    }
-    // We're in conflicted state — proceed with agentic resolution
-  }
-
-  // Capture conflict diff (working tree)
-  let conflictDiff = '';
-  try { conflictDiff = await git.raw(['diff']); } catch { /* non-fatal */ }
-  if (conflictDiff.length > 50_000) {
-    conflictDiff = conflictDiff.slice(0, 50_000) + '\n... (diff truncated at 50KB)';
-  }
-
-  const prompt = [
-    `You are resolving git merge conflicts. The feature branch "${branchName}" is being merged into main for run #${runId}.`,
-    '',
-    'Here is the current conflict diff (conflict markers in working tree):',
-    '```diff',
-    conflictDiff || '(no diff output available)',
-    '```',
-    '',
-    'Your task:',
-    '1. Examine the conflicted files using the bash and read tools.',
-    '2. Resolve each conflict intelligently — understand the intent of both sides. Do NOT blindly take one side.',
-    '3. After resolving ALL conflicts, stage all files with: git add -A',
-    '4. Commit the merge with: git commit --no-edit',
-    '   (The merge commit message is already staged — --no-edit preserves it.)',
-    '',
-    `Working directory: ${workspacePath}`,
-    '',
-    'Critical: Do not exit until all conflict markers (<<<<<<<, =======, >>>>>>>) have been removed from ALL files and the merge has been committed.',
-  ].join('\n');
-
-  appendLog('[auto-merge] Spawning claude to resolve conflicts...');
-  const env = buildCleanEnv();
-
-  return new Promise<boolean>((resolve) => {
-    const child = spawn(
-      CLAUDE_BIN,
-      ['--print', '--dangerously-skip-permissions', '--output-format', 'stream-json'],
-      { cwd: workspacePath, env, stdio: ['pipe', 'pipe', 'pipe'] },
-    );
-
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-
-    let timedOut = false;
-    let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const sigtermTimer = setTimeout(() => {
-      timedOut = true;
-      appendLog('[auto-merge] Agentic resolution timed out (5 min) — sending SIGTERM');
-      child.kill('SIGTERM');
-      sigkillTimer = setTimeout(() => {
-        appendLog('[auto-merge] Claude did not exit — sending SIGKILL');
-        child.kill('SIGKILL');
-      }, AGENTIC_RESOLVE_SIGKILL_DELAY_MS);
-    }, AGENTIC_RESOLVE_TIMEOUT_MS);
-
-    child.on('exit', async (code) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-
-      if (timedOut) {
-        appendLog('[auto-merge] Agentic resolution timed out — aborting merge');
-        try { await git.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      if (code !== 0) {
-        appendLog(`[auto-merge] Claude exited with code ${code} — aborting merge`);
-        try { await git.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-        return;
-      }
-
-      // Verify no conflict markers remain
-      try {
-        await git.raw(['diff', '--check']);
-        appendLog('[auto-merge] Agentic resolution succeeded — no conflict markers remain');
-        resolve(true);
-      } catch {
-        appendLog('[auto-merge] Conflict markers still present after claude resolution — aborting');
-        try { await git.merge(['--abort']); } catch { /* best-effort */ }
-        resolve(false);
-      }
-    });
-
-    child.on('error', async (err) => {
-      clearTimeout(sigtermTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
-      appendLog(`[auto-merge] Claude spawn error: ${err.message} — aborting merge`);
-      try { await git.merge(['--abort']); } catch { /* best-effort */ }
-      resolve(false);
-    });
-  });
-}
-
-// ── Auto-merge worktree after run completion (US-004 + US-005) ───────────────
-// Called from handlePipelineRun exit handler when worktreePath is set.
-// Strategy: try ff-only → fall back to --no-ff → if conflicts: agentic resolution.
-
-const TRACKING_PATTERNS = ['.rorca/run-state.json', 'progress.txt', '.rorca/memory/runs/'];
-
-async function autoMergeAfterRun(
-  workspacePath: string,
-  worktreePath: string,
-  branchName: string,
-  workspaceId: number | string,
-  runId: number,
-  appendLog: (msg: string) => void,
-): Promise<void> {
-  if (!fs.existsSync(worktreePath)) {
-    appendLog('[auto-merge] Worktree already removed — skipping auto-merge');
-    return;
-  }
-
-  // Emit merge-started event + set merge_status
-  await emitWalEvent('worktree_merge_started', workspaceId, { run_id: runId, branchName });
-  try { await execute(`UPDATE pipeline_runs SET merge_status = 'merging' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-
-  const git = simpleGit(workspacePath);
-
-  // Stash uncommitted changes
-  let stashed = false;
-  try {
-    const status = await git.status();
-    if (status.files.length > 0) {
-      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
-      stashed = true;
-      appendLog('[auto-merge] Stashed uncommitted workspace changes');
-    }
-  } catch (err: any) {
-    appendLog(`[auto-merge] Stash failed — proceeding without stash: ${err.message}`);
-  }
-
-  let mergeSuccess = false;
-  let resolvedByAgentic = false;
-  let conflictDiff = '';
-  let conflictFiles: string[] = [];
-
-  try {
-    appendLog(`[auto-merge] Merging ${branchName} into workspace...`);
-
-    // Try fast-forward first (cleanest)
-    try {
-      await git.merge([branchName, '--ff-only']);
-      appendLog('[auto-merge] Merged via fast-forward — no conflicts');
-      mergeSuccess = true;
-    } catch {
-      // ff-only failed — try no-ff
-      try {
-        await git.merge([branchName, '--no-ff', '--no-commit']);
-        // Clean no-ff merge
-        await git.commit(`merge: ${branchName} (auto)`);
-        appendLog('[auto-merge] Merged (no-ff) — no conflicts');
-        mergeSuccess = true;
-      } catch (noFfErr: any) {
-        const noFfMsg: string = noFfErr?.message ?? String(noFfErr);
-
-        if (noFfMsg.includes('CONFLICT') || noFfMsg.includes('Automatic merge failed') || noFfMsg.includes('fix conflicts')) {
-          // Collect conflicting files
-          try {
-            const diffOut = await git.raw(['diff', '--name-only', '--diff-filter=U']);
-            conflictFiles = diffOut.trim().split('\n').filter(Boolean);
-          } catch { /* continue */ }
-
-          const realConflicts = conflictFiles.filter(f => !TRACKING_PATTERNS.some(tp => f.includes(tp)));
-
-          if (realConflicts.length === 0) {
-            // Only tracking files — auto-resolve with --theirs
-            for (const file of conflictFiles) {
-              try {
-                await git.raw(['checkout', '--theirs', '--', file]);
-                await git.add(file);
-                appendLog(`[auto-merge] Auto-resolved tracking file: ${file}`);
-              } catch { /* best-effort */ }
-            }
-            try {
-              await git.commit(`merge: ${branchName} (auto)`);
-              appendLog('[auto-merge] Merged with tracking-file auto-resolution');
-              mergeSuccess = true;
-            } catch (commitErr: any) {
-              if (commitErr.message?.includes('nothing to commit') || commitErr.message?.includes('nothing added')) {
-                mergeSuccess = true;
-              } else {
-                try { await git.merge(['--abort']); } catch { /* best-effort */ }
-              }
-            }
-          } else {
-            // Real code conflicts — abort and try agentic resolution
-            try { await git.merge(['--abort']); } catch { /* best-effort */ }
-            appendLog(`[auto-merge] Code conflicts in: ${realConflicts.join(', ')} — attempting agentic resolution`);
-
-            const resolved = await attemptAgenticConflictResolution(workspacePath, branchName, runId, appendLog);
-            if (resolved) {
-              mergeSuccess = true;
-              resolvedByAgentic = true;
-            } else {
-              // Capture conflict diff for WAL event payload
-              try { conflictDiff = (await git.raw(['diff'])).slice(0, 2048); } catch { /* non-fatal */ }
-            }
-          }
-        } else if (noFfMsg.includes('Already up to date')) {
-          appendLog('[auto-merge] Already up to date — nothing to merge');
-          mergeSuccess = true;
-        } else {
-          try { await git.merge(['--abort']); } catch { /* best-effort */ }
-          appendLog(`[auto-merge] Unexpected merge error: ${noFfMsg}`);
-        }
-      }
-    }
-  } catch (unexpectedErr: any) {
-    try { await git.merge(['--abort']); } catch { /* best-effort */ }
-    appendLog(`[auto-merge] Unexpected error: ${unexpectedErr.message}`);
-  } finally {
-    if (stashed) {
-      try {
-        await git.stash(['pop']);
-        appendLog('[auto-merge] Restored stashed workspace changes');
-      } catch (popErr: any) {
-        appendLog(`[auto-merge] Stash pop conflict — run 'git stash pop' manually: ${popErr.message}`);
-      }
-    }
-  }
-
-  if (mergeSuccess) {
-    let sha = '';
-    try { sha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
-
-    await emitWalEvent('worktree_merged', workspaceId, {
-      run_id: runId,
-      branchName,
-      mergeCommitSha: sha,
-      ...(resolvedByAgentic ? { resolvedBy: 'agentic' } : {}),
-    });
-
-    // Remove worktree directory
-    try {
-      await git.raw(['worktree', 'remove', '--force', worktreePath]);
-      appendLog(`[auto-merge] Worktree removed: ${path.basename(worktreePath)}`);
-    } catch (rmErr: any) {
-      appendLog(`[auto-merge] Worktree removal skipped: ${rmErr.message}`);
-    }
-
-    // Update merge_status + clear worktree_path
-    try { await execute(`UPDATE pipeline_runs SET worktree_path = NULL, merge_status = 'merged', merge_commit_sha = $2 WHERE id = $1`, [runId, sha]); } catch { /* non-fatal */ }
-
-    // Post-merge smoke test — verify core endpoints still return 200
-    const smoke = await runPostMergeSmokeTest(workspaceId);
-    if (!smoke.ok) {
-      appendLog(`[auto-merge] ⚠ Post-merge smoke test FAILED: ${smoke.failures.join(', ')}`);
-      logger.warn({ runId, failures: smoke.failures }, '[auto-merge] Post-merge smoke test failed — merged code may have introduced regressions');
-    } else {
-      appendLog('[auto-merge] Post-merge smoke test passed — all core endpoints healthy');
-    }
-  } else {
-    const mergeErrorMsg = conflictFiles.length > 0
-      ? 'Agentic merge resolution failed — resolve conflicts manually via the Worktrees panel.'
-      : 'Auto-merge failed — resolve manually via the Worktrees panel.';
-    await emitWalEvent('worktree_merge_failed', workspaceId, {
-      run_id: runId,
-      branchName,
-      worktreePath,
-      conflictFiles,
-      conflictSummary: conflictDiff,
-      message: mergeErrorMsg,
-    });
-    try { await execute(`UPDATE pipeline_runs SET merge_status = 'failed', merge_error = $2 WHERE id = $1`, [runId, conflictDiff.slice(0, 2000) || mergeErrorMsg]); } catch { /* non-fatal */ }
-    appendLog('[auto-merge] Auto-merge failed — worktree preserved for manual resolution');
-  }
-}
+// Final base integration is delegated to merge-handler.performMerge.
 
 // ── Job handler: pipeline:run ─────────────────────────────────────────────
 
@@ -820,7 +510,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
   // but each spawns an independent child process that should run in parallel.
   await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
-    logger.info({ jobId, data: job.data }, '[worker] pipeline:run received');
+    logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:run received');
 
     // 1. Validate payload via Zod
     const parsed = PipelineRunJobPayload.safeParse(job.data);
@@ -830,7 +520,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -968,11 +658,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     const engineLauncher = resolveExecutionEngineLauncher(executionEngineEntrypoint);
     const backendPort = process.env.PORT ?? '3030';
-    const engineSpecPath = prepareRunSpecSnapshot({
-      runId,
-      sourceSpecPath: path.join(workspacePath, specPath),
-      worktreePath,
-    });
+    // A worktree run owns its lifecycle state on its run branch. Never point
+    // the engine at the approved/base spec before final integration.
+    const engineSpecPath = path.join(cwd, specPath);
 
     const engineArgs = [
       ...engineLauncher.args,
@@ -1007,6 +695,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     if (includeGraph) {
       engineArgs.push('--include-graph');
     }
+    if (executionManifestPath) {
+      engineArgs.push('--execution-manifests', executionManifestPath);
+    }
     // agentOverride is already incorporated into the `agent` field via pipeline.ts resolution;
     // the --agent flag above uses payload.agent which already reflects the override.
     if (thinkingEnabled !== undefined) {
@@ -1025,13 +716,19 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
     // Then strip the 4 Claude vars that must not propagate to nested invocations.
+    const resolvedSecrets = await resolveExecutionSecrets(secretReferences);
     const env: Record<string, string> = {
-      ...buildCleanEnv(),
+      ...(process.env as Record<string, string>),
+      ...resolvedSecrets,
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
       RORCA_WORKSPACE_ID: workspaceId,
       RORCA_TERMINAL_MODE: terminalMode,
     };
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+    delete env.CLAUDE_AGENT_SDK_VERSION;
+    delete env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
 
     logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Spawning execution-engine');
 
@@ -1187,11 +884,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           // actually passed across multiple incremental runs on the same worktree.
           if (worktreePath && payload.branchName) {
             try {
+              // Completion is first established on the isolated run branch.
+              // Reading the base spec here would promote stale canonical state.
               const specJson = JSON.parse(fs.readFileSync(engineSpecPath, 'utf-8'));
               const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
               allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
               if (allSpecStoriesPassed && status !== 'done') {
-                logger.info({ runId, specPath }, '[worker] All stories passed in spec JSON despite exit status=%s — promoting to done', status);
+                logger.info({ runId, specPath, completionScope: 'run_branch' }, '[worker] All stories passed on the run branch despite exit status=%s — promoting execution closeout to done', status);
                 try { await execute(`UPDATE pipeline_runs SET status = 'done' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
                 status = 'done';
               }
@@ -1219,17 +918,31 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
             switch (effectiveMergeStrategy) {
               case 'direct': {
-                // Merge worktree branch into main + push to remote
+                // Final base merges are opt-in. Internal wave merges have already
+                // assembled the isolated run branch and are intentionally separate.
+                if (payload.autoMerge !== true) {
+                  mergeLog('[merge-strategy:direct] autoMerge=false — preserving worktree branch');
+                  try { await execute(`UPDATE pipeline_runs SET merge_status = 'not_requested' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                  break;
+                }
                 try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
                 try {
-                  await autoMergeAfterRun(
-                    workspacePath,
-                    worktreePath,
-                    payload.branchName,
-                    workspaceId,
+                  // Reuse the canonical merge lifecycle service. It owns merge
+                  // state, containment and failure evidence for both auto and retry.
+                  const mergeResult = await performMerge(
                     runId,
-                    mergeLog,
+                    payload.branchName,
+                    workspacePath,
+                    { agent: payload.agent, model: payload.model, thinkingEnabled: payload.thinkingEnabled, thinkingBudget: payload.thinkingBudget, effortLevel: payload.effortLevel, source: 'run' },
+                    { ...resolvedSecrets, ...payload.envOverrides },
                   );
+                  mergeLog(mergeResult.success
+                    ? '[merge-strategy:direct] Final base integration completed'
+                    : `[merge-strategy:direct] Final base integration failed: ${mergeResult.error ?? 'unknown'}`);
+                  if (mergeResult.success) {
+                    const smoke = await _runPostMergeSmokeTest(workspaceId);
+                    if (!smoke.ok) mergeLog(`[merge-strategy:direct] Post-merge smoke failures: ${smoke.failures.join(', ')}`);
+                  }
                   // Push main to remote after successful merge
                   const mergeStatus = await queryOne<{ merge_status: string }>('SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId]);
                   if (mergeStatus?.merge_status === 'merged') {
@@ -1242,7 +955,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     }
                   }
                 } catch (mergeErr: any) {
-                  logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
+                  logger.error({ err: mergeErr, runId }, '[worker] performMerge threw unexpectedly');
                 }
                 break;
               }
@@ -1290,6 +1003,25 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     // Graceful degradation to branch-only
                     mergeLog('[merge-strategy:pr] Falling back to branch-only — branch is on remote for manual PR creation');
                   }
+                }
+                const readyPrNumber = await getRunPrNumber(runId);
+                if (readyPrNumber) {
+                  // `pr` means ready-for-review. Draft strategies remain a
+                  // separate, explicitly human-controlled mode.
+                  await finalizeDraftPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                    status: 'done',
+                  });
+                  const delivery = await queueAutonomousPrDeliveryForRun({
+                    workspaceId: String(workspaceId),
+                    runId,
+                  });
+                  mergeLog(delivery.queued
+                    ? `[merge-strategy:pr] Autonomous reviewed delivery queued (${delivery.deliveryId})`
+                    : `[merge-strategy:pr] Autonomous reviewed delivery not queued: ${delivery.reason ?? 'not eligible'}`);
                 }
                 break;
               }
@@ -1351,8 +1083,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               }
 
               case 'branch-only': {
-                // Just ensure branch is on remote — no PR, no merge
+                // Locked autonomous safety retains the branch locally. It cannot
+                // push or create any other external-send side effect.
                 try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                if (!payload.safetyOptions.externalSend) {
+                  mergeLog(`[merge-strategy:branch-only] Branch retained locally: ${payload.branchName}. External send is disabled by enforced run policy.`);
+                  break;
+                }
                 try {
                   const git = simpleGit(worktreePath);
                   await git.push('origin', payload.branchName, ['--set-upstream']);
@@ -1366,7 +1103,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           }
 
           // US-034: Finalize existing draft PR on run completion (for runs that started with a draft PR).
-          if (payload.branchName && effectiveMergeStrategy === 'direct') {
+          if (payload.safetyOptions.externalSend && payload.branchName && effectiveMergeStrategy === 'direct') {
             try {
               const prRow = await queryOne<{ pr_number: number | null }>(
                 'SELECT pr_number FROM pipeline_runs WHERE id = $1',
@@ -1387,22 +1124,56 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           }
 
           // A direct merge is a final gate, not optional presentation metadata.
-          // Do not expose a finished run when its required merge failed.
-          if (status === 'done' && worktreePath && effectiveMergeStrategy === 'direct') {
-            const merge = await queryOne<{ merge_status: string | null }>(
-              'SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId],
-            );
-            if (merge?.merge_status === 'failed') {
-              status = 'failed';
-              await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]);
-              logger.error({ runId }, '[worker] required direct merge failed; run outcome changed to failed');
-            }
+          // Closeout distinguishes successful branch work from base integration.
+          let mergeStatusAtCloseout: string | null = null;
+          if (worktreePath) {
+            try {
+              mergeStatusAtCloseout = (await queryOne<{ merge_status: string | null }>(
+                'SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId],
+              ))?.merge_status ?? null;
+            } catch { /* closeout evidence remains best effort */ }
           }
+          if (status === 'done' && worktreePath && effectiveMergeStrategy === 'direct' && mergeStatusAtCloseout === 'failed') {
+            status = 'failed';
+            await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]);
+            logger.error({ runId }, '[worker] required direct merge failed; run outcome changed to failed');
+          }
+          await emitWalEvent('run_closeout', workspaceId, {
+            run_id: runId,
+            status,
+            completion_scope: worktreePath ? (mergeStatusAtCloseout === 'merged' ? 'base_integrated' : 'run_branch') : 'base_integrated',
+            base_integrated: !worktreePath || mergeStatusAtCloseout === 'merged',
+            branch_name: payload.branchName ?? null,
+            merge_strategy: effectiveMergeStrategy,
+            merge_status: mergeStatusAtCloseout,
+          });
+
+          // A bounded CI-recovery child resumes the original reviewed-delivery
+          // state machine only after its branch push/closeout is durable.
+          await resumeAutonomousDeliveryAfterRecoveryRun(runId, status);
 
           // Workflow dispatch (US-026)
-          if (status === 'done') {
+          if (status === 'done' && payload.safetyOptions.deploy && payload.safetyOptions.externalSend) {
             await dispatchWorkflowIfConfigured(workspaceId, runId);
+          } else if (status === 'done' && (!payload.safetyOptions.deploy || !payload.safetyOptions.externalSend)) {
+            logger.info({ runId, safetyOptions: payload.safetyOptions }, '[worker] workflow dispatch skipped by enforced run safety policy');
           }
+
+          // Learn closeout is non-authoritative for delivery status. It runs only
+          // after release routing has persisted its final lineage/outcome fields.
+          const learnCloseout = await tryGenerateLearnCloseoutCandidates({
+            workspaceId: String(workspaceId),
+            runId,
+            specId: path.basename(specPath, '.json'),
+          });
+          await emitWalEvent('lifecycle_changed', workspaceId, {
+            workspaceId: String(workspaceId),
+            specId: path.basename(specPath, '.json'),
+            phaseId: 'learn',
+            runId,
+            changeKind: 'evidence_persisted',
+            learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
+          });
         }
 
         await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (status === 'done' ? 'finished' : 'failed'), {
@@ -1501,7 +1272,7 @@ function syncRetrySpecPassesToOriginalSpec(params: {
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
-    logger.info({ jobId, data: job.data }, '[worker] pipeline:retry received');
+    logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:retry received');
 
     // 1. Validate payload via Zod
     const parsed = PipelineRetryJobPayload.safeParse(job.data);
@@ -1522,21 +1293,27 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       model,
       worktreePath,
       sequenceOffset,
+      executionManifestPath,
       envOverrides,
+      secretReferences,
       includeGraph,
       terminalMode: payloadTerminalMode,
       thinkingEnabled,
       thinkingBudget,
       effortLevel,
       reasoningEffort,
+      previewHash,
+      approvedPreview: approvedPreviewRaw,
+      generatedPlanHash,
     } = payload;
+    const approvedPreview = approvedPreviewRaw as unknown as RetryPreviewPacket;
 
     // Effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
 
     // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null }>(
-      'SELECT workspace_id, parallelism, terminal_mode, branch_name FROM pipeline_runs WHERE id = $1',
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string; spec_path: string }>(
+      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
@@ -1545,12 +1322,26 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
     const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
+    if (runRow.status === 'cancelled') {
+      logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
+      return;
+    }
+    const previewRow = await queryOne<{ status: string }>(
+      `SELECT status FROM pipeline_retry_previews WHERE preview_hash = $1 AND retry_run_id = $2`,
+      [previewHash, runId],
+    );
+    if (previewRow?.status !== 'dispatched' || !verifyRetryPreview(approvedPreview)) {
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_preview_not_authorized' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'preview_not_authorized' });
+      return;
+    }
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
         workspacePath,
         worktreePath,
         expectedBranchName: branchName,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
       });
       if (!worktreeValidation.ok) {
         logger.error(
@@ -1576,12 +1367,38 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       }
     }
 
-    // 3. Retry runs use the same authoritative lifecycle as fresh runs.
+    // Re-read the generated retry spec after queue handoff and compare its
+    // executable plan before marking the run started. A prompt/model cannot
+    // authorize work absent from this frozen preview.
+    if (!fs.existsSync(retrySpecPath)) {
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_spec_missing' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'retry_spec_missing' });
+      return;
+    }
+    const actualRetrySpec = JSON.parse(fs.readFileSync(retrySpecPath, 'utf8')) as Record<string, unknown>;
+    const planComparison = compareRetryPlanToPreview(actualRetrySpec, approvedPreview);
+    if (!planComparison.matches || planComparison.scopeHash !== generatedPlanHash || retryHash(approvedPreview.scope.executable.map((entry) => entry.storyId)) !== payload.scopeHash) {
+      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'worker_scope_mismatch' WHERE preview_hash = $1`, [previewHash]);
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_scope_mismatch' WHERE id = $1`, [runId]);
+      await emitWalEvent('retry_scope_mismatch', workspaceId, {
+        run_id: runId,
+        original_run_id: originalRunId,
+        preview_hash: previewHash,
+        approved_scope: planComparison.approved,
+        actual_scope: planComparison.actual,
+        reason: 'worker_scope_mismatch',
+      });
+      return;
+    }
+
+    // Retry runs use the same authoritative lifecycle as fresh runs.
     await transitionRunLifecycle(runId, 'starting', {
       owner: 'worker_retry',
       transport: isPtyTerminalMode(effectiveTerminalMode) ? 'pty_pending' : 'pipe',
       process: 'launching',
     });
+
+    // Mark the new run as running — set worker_id so orphan sweep knows this run belongs to us.
     await execute(
       `UPDATE pipeline_runs SET status = 'running', started_at = NOW(), worker_id = $2 WHERE id = $1`,
       [runId, WORKER_ID],
@@ -1644,13 +1461,18 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     if (reasoningEffort) {
       engineArgs.push('--reasoning-effort', reasoningEffort);
     }
+    if (executionManifestPath) {
+      engineArgs.push('--execution-manifests', executionManifestPath);
+    }
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
     // Strip the 4 Claude vars that must not propagate to nested invocations.
     const { CLAUDECODE: _a, CLAUDE_CODE_ENTRYPOINT: _b, CLAUDE_AGENT_SDK_VERSION: _c, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: _d, ...inheritedEnvRetry } = process.env as Record<string, string>;
+    const resolvedSecrets = await resolveExecutionSecrets(secretReferences);
     const env = {
       ...inheritedEnvRetry,
+      ...resolvedSecrets,
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
       RORCA_WORKSPACE_ID: workspaceId,
@@ -1816,6 +1638,19 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
               ...(retrySummary ? { summary: retrySummary } : {}),
             });
           }
+          const learnCloseout = await tryGenerateLearnCloseoutCandidates({
+            workspaceId,
+            runId,
+            specId: path.basename(runRow.spec_path, '.json'),
+          });
+          await emitWalEvent('lifecycle_changed', workspaceId, {
+            workspaceId,
+            specId: path.basename(runRow.spec_path, '.json'),
+            phaseId: 'learn',
+            runId,
+            changeKind: 'evidence_persisted',
+            learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
+          });
         } catch (err) {
           logger.error({ err, runId }, '[worker] Failed to update retry run status on exit');
         }
@@ -2028,9 +1863,26 @@ async function handlePipelineMerge(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
 
-    logger.info({ runId, branch, workspacePath: workspace.path }, '[worker] Executing performMerge');
+    const persisted = await queryOne<{ auto_merge: boolean | null; merge_strategy: string | null; agent_type: string | null; agent_model: string | null }>(
+      'SELECT auto_merge, merge_strategy, agent_type, agent_model FROM pipeline_runs WHERE id = $1', [runId],
+    );
+    const manualPosture = parsed.data.posture;
+    if (
+      !persisted || persisted.auto_merge !== true || persisted.merge_strategy !== 'direct' ||
+      !manualPosture || persisted.agent_type !== manualPosture.agent || persisted.agent_model !== manualPosture.model
+    ) {
+      logger.warn({ runId }, '[worker] pipeline:merge refused: persisted direct-merge posture is unavailable or changed');
+      await execute(`UPDATE pipeline_runs SET merge_status = 'failed' WHERE id = $1`, [runId]);
+      return;
+    }
 
-    const result = await performMerge(runId, branch, workspace.path);
+    logger.info({ runId, branch, workspacePath: workspace.path, agent: manualPosture.agent, source: manualPosture.source }, '[worker] Executing performMerge');
+
+    const result = await performMerge(runId, branch, workspace.path, {
+      agent: manualPosture.agent,
+      model: manualPosture.model,
+      source: 'manual-retry',
+    });
 
     if (result.success) {
       logger.info({ runId, mergeCommitSha: result.mergeCommitSha }, '[worker] pipeline:merge completed successfully');
@@ -2550,6 +2402,7 @@ async function reconcileState(): Promise<void> {
   }
 
   const totalFixed = stuckRuns.length + orphanJobs.length;
+  _lastReconciliationErrors = totalFixed;
 
   if (totalFixed > 0) {
     logger.warn({ caseA: stuckRuns.length, caseB: orphanJobs.length }, '[worker] reconcileState — mismatches resolved');
@@ -2644,8 +2497,8 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  // 2. Wait up to 15s for child processes to exit (poll every 500ms)
-  const DRAIN_TIMEOUT_MS = 15_000;
+  // 2. Wait up to 30s for child processes to flush closeout state and exit (poll every 500ms)
+  const DRAIN_TIMEOUT_MS = 30_000;
   const DRAIN_POLL_MS = 500;
   const drainDeadline = Date.now() + DRAIN_TIMEOUT_MS;
 
@@ -2656,7 +2509,7 @@ async function shutdown(signal: string): Promise<void> {
   // 3. SIGKILL any remaining child processes that did not exit in time
   if (activeProcesses.size > 0) {
     const remaining = Array.from(activeProcesses.keys());
-    logger.warn({ remaining }, '[worker] shutdown — children did not exit in 15s, sending SIGKILL');
+    logger.warn({ remaining }, '[worker] shutdown — children did not exit in 30s, sending SIGKILL');
     for (const [runId, child] of activeProcesses) {
       try { child.kill('SIGKILL'); } catch { /* best-effort */ }
       try { await signalDurableRunPty(runId, 'SIGKILL'); } catch { /* best-effort */ }
@@ -3031,6 +2884,12 @@ async function start(): Promise<void> {
   // 3b. Reconcile state between pipeline_runs and pgboss.job.
   // Runs once at startup, then every 60s during normal operation.
   await reconcileState();
+  try {
+    const reconciledMerges = await reconcilePendingAutonomousPrDeliveryMerges();
+    if (reconciledMerges > 0) logger.info({ reconciledMerges }, '[worker] reconciled autonomous PR merges after restart');
+  } catch (error) {
+    logger.warn({ err: error }, '[worker] autonomous PR merge reconciliation deferred');
+  }
   reconcileIntervalHandle = setInterval(() => { void reconcileState(); }, RECONCILE_INTERVAL_MS);
 
   // 4. Register job queue handlers.
@@ -3051,6 +2910,7 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+  await registerAutonomousPrDeliveryWorker(boss);
   await registerSpecJobHandlers(boss);
   await registerHydrationWorker(boss);
   await registerContextCaptureHandlers(boss);

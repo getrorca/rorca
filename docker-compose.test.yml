@@ -3,7 +3,7 @@
 #
 # Usage:
 #   docker compose -f docker-compose.test.yml up -d db-test
-#   cd backend && npm test
+#   cd backend && DATABASE_URL_TEST=postgres://rorca:rorca@localhost:5432/rorca_test npm test
 #   docker compose -f docker-compose.test.yml down
 #
 # CI usage:

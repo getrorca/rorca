@@ -1,0 +1,41 @@
+{
+  "name": "ChatOps integration",
+  "input": {
+    "schemaVersion": 1,
+    "workspaceId": "workspace-chatops",
+    "canonicalSpec": {
+      "specId": "fixture-chatops-integration",
+      "version": "5",
+      "contentHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "json": {
+        "title": "Deliver Slack ChatOps lifecycle notifications",
+        "tags": ["chatops", "integration"],
+        "contextSummary": { "predictedFiles": ["backend/src/routes/webhook-handlers.ts"] },
+        "userStories": [{
+          "id": "FIX-CHATOPS-001",
+          "title": "Post governed Slack notifications",
+          "description": "Integrate lifecycle events with the external Slack webhook API.",
+          "acceptanceCriteria": ["Webhook retries are idempotent and failed Slack deliveries remain observable."],
+          "tags": ["slack", "webhook"],
+          "fileHints": ["backend/src/lib/slack-adapter.ts"]
+        }]
+      }
+    },
+    "workspaceTags": [{ "workspaceId": "workspace-chatops", "tag": "integration" }],
+    "riskAssignments": [{ "workspaceId": "workspace-chatops", "assignmentId": "risk-chatops", "scopeReference": "FIX-CHATOPS-001", "risk": "medium", "rationale": "External side effects need retry evidence." }],
+    "ownerAssignments": [{ "workspaceId": "workspace-chatops", "assignmentId": "owner-chatops", "scopeReference": "FIX-CHATOPS-001", "ownerReference": "owner-integrations" }],
+    "policyAnnotations": [],
+    "compilerAnnotations": [{ "annotationId": "pi-mode-chatops", "source": "pi", "payload": { "type": "execution_mode", "mode": "journey" } }],
+    "compilerVersion": "ssdlc-plan-compiler-2",
+    "policyVersion": "fixture-policy-1",
+    "compiledAt": "2026-06-15T12:00:00.000Z"
+  },
+  "expected": {
+    "profiles": ["code-change", "integration"],
+    "notApplicablePhases": [],
+    "capabilityHint": "journey",
+    "acceptedAnnotations": ["pi-mode-chatops"],
+    "rejectedAnnotations": [],
+    "defaultedInputs": []
+  }
+}

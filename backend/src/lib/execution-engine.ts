@@ -37,7 +37,7 @@
  */
 
 import { spawn, execSync, type ChildProcess } from 'child_process';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -92,17 +92,30 @@ import {
   type PtyCliCompatibility,
 } from './pty-cli-compat';
 import {
+  buildPiCompletionPacket,
+  buildPiModeExecutionGuidance,
   buildPiProgressLogPath,
   buildPiServerSkillFiles,
   buildPiStoryPromptContext,
+  cleanupPiRunTempArtifacts,
+  deletePiGeneratedSkillFile,
   ensurePiStoryProgressLog,
+  flushActivePiStoryProgressLogs,
   recordPiStoryProgressLog,
+  registerPiStoryProgressLog,
+  terminatePiOwnedProcessTree,
+  type PiCompletionPacket,
 } from './pi-autonomous-runner';
 import {
   buildExecutionPacketPromptSection,
   buildNoopRecoveryPromptSection,
+  buildStoryExecutionManifestPromptSection,
   buildStoryExecutionPacket,
+  deriveRetryStoryExecutionManifest,
+  verifyStoryExecutionManifest,
+  type StoryExecutionManifest,
   type StoryExecutionPacket,
+  type StoryManifestWorktreeOptions,
 } from './story-execution-packet';
 import { isPiExternalOrchestrationEnabled } from './pi-execution-mode';
 import { detectCapability } from './reasoning-detector';
@@ -111,6 +124,8 @@ import {
 } from './complexity-scorer';
 import { parseClaudeLogTokens } from './claude-token-parser';
 import { parseOpenCodeEvent, parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
+import { normalizeOpenCodeModel, shouldResolvePiRpcStory } from './agent-completion-protocol';
+export { shouldResolvePiRpcStory } from './agent-completion-protocol';
 import { calculateCost } from './model-pricing';
 import {
   CoalescingPostQueue,
@@ -169,9 +184,25 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { resolveMergeConflict, resolvePostureConsensus, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
+import { sanitizeCapturePayload } from './context-safety';
+import { runHostValidationRequirement } from './story-host-validation';
+import {
+  adaptStoryCloseoutEvidence,
+  createStoryAttemptResult,
+  evaluateStoryCloseout as StoryCloseoutGate,
+  listStoryAttempts,
+  persistStoryCloseoutBundle,
+  type HostValidationObservation,
+  type ObservedStoryCommit,
+  type StoryAttemptResult,
+  type StoryCloseoutDecision,
+  type StoryCloseoutHostFacts,
+  type StoryManifest,
+} from './story-closeout';
 
 // tsx 4.23 executes direct TypeScript entrypoints as ESM. Keep the few
 // runtime-only CommonJS dependencies available without relying on a global
@@ -291,6 +322,8 @@ interface EngineConfig {
   thinkingBudget?: number;
   /** Effort level hint for models that support it (e.g. 'low'|'medium'|'high'|'xhigh'). */
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+  /** Immutable host-resolved manifests keyed by story ID; absent only for audited legacy invocations. */
+  executionManifests: ReadonlyMap<string, StoryExecutionManifest>;
 }
 
 // ─── Browser MCP Auto-Detection ─────────────────────────────────────────────
@@ -485,6 +518,7 @@ interface PiRpcServer {
   thinkingLevel: string | null;
   skillFiles: string[];
   mcpServersSignature: string;
+  detachedProcessGroup: boolean;
 }
 const _piRpcServers = new Set<PiRpcServer>();
 let _piRpcExitCleanupRegistered = false;
@@ -523,7 +557,7 @@ const PI_BIN = process.env.PI_BIN || (() => {
   try { return execSync('which pi', { encoding: 'utf8' }).trim(); } catch { return 'pi'; }
 })();
 
-interface PiCliSelection {
+export interface PiCliSelection {
   provider: string | null;
   model: string | null;
 }
@@ -1194,39 +1228,6 @@ async function postStoryResult(
   }
 }
 
-/**
- * Translate any model ID to the format OpenCode expects: "provider/org/model".
- * OpenCode requires the full triple format, e.g. "openrouter/z-ai/glm-5".
- *
- * Two-phase normalization:
- *   Phase 1 — Fix Claude version separators ANYWHERE in the string.
- *             Rorca uses hyphens (claude-sonnet-4-6), OpenRouter uses dots (claude-sonnet-4.6).
- *             This runs first so IDs like "openrouter/anthropic/claude-sonnet-4-6"
- *             are fixed BEFORE the prefix check (which would otherwise pass them through broken).
- *   Phase 2 — Add provider prefix if missing.
- *             "claude-sonnet-4.6" → "openrouter/anthropic/claude-sonnet-4.6"
- *             "z-ai/glm-5" → "openrouter/z-ai/glm-5"
- */
-function normalizeOpenCodeModel(model: string): string {
-  // Phase 1: Normalize Claude version separators (hyphens→dots, strip date suffixes).
-  // "openrouter/anthropic/claude-sonnet-4-6" → "openrouter/anthropic/claude-sonnet-4.6"
-  let m = model.replace(/(claude-[a-z]+-\d+)-(\d+)(?:-\d{8})?/, '$1.$2');
-
-  // Phase 2: Ensure correct provider prefix
-  const KNOWN_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/', 'opencode/'];
-  if (KNOWN_PREFIXES.some(p => m.startsWith(p))) return m;
-
-  // Bare Claude ID → needs openrouter/anthropic/ prefix
-  if (/^claude-/.test(m)) return `openrouter/anthropic/${m}`;
-
-  // anthropic/claude-* without outer prefix → needs openrouter/ prefix
-  if (/^anthropic\/claude-/.test(m)) return `openrouter/${m}`;
-
-  // Other bare catalog IDs (z-ai/glm-5) → needs openrouter/ prefix
-  if (m.includes('/')) return `openrouter/${m}`;
-  return m;
-}
-
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -1238,15 +1239,14 @@ function buildCleanEnv(): Record<string, string> {
 }
 
 function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = buildCleanEnv()): Record<string, string> {
-  return createAutonomousCommandGuard({ cwd, env: baseEnv }).env;
+  const profile = baseEnv.RORCA_AUTONOMOUS_GUARD_PROFILE === 'conflict-resolution'
+    ? 'conflict-resolution' as const
+    : 'general' as const;
+  return createAutonomousCommandGuard({ cwd, env: baseEnv, profile }).env;
 }
 
 function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
-}
-
-export function shouldResolvePiRpcStory(eventType: string): boolean {
-  return eventType === 'agent_end';
 }
 
 function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
@@ -1317,10 +1317,12 @@ async function startPiRpcServer(
   }
   if (mcpServers?.playwright) env.RORCA_PI_PLAYWRIGHT_MCP_URL = mcpServers.playwright;
   if (mcpServers?.['chrome-devtools']) env.RORCA_PI_CHROME_MCP_URL = mcpServers['chrome-devtools'];
+  const detachedProcessGroup = process.platform !== 'win32';
   const child = spawn(PI_BIN, args, {
     cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: detachedProcessGroup,
   });
 
   const server: PiRpcServer = {
@@ -1335,6 +1337,7 @@ async function startPiRpcServer(
     thinkingLevel,
     skillFiles,
     mcpServersSignature,
+    detachedProcessGroup,
   };
 
   child.stderr?.on('data', (chunk: Buffer | string) => {
@@ -1440,7 +1443,13 @@ async function startPiRpcServer(
     _piRpcExitCleanupRegistered = true;
     process.on('exit', () => {
       for (const activeServer of _piRpcServers) {
-        try { activeServer.process.kill('SIGTERM'); } catch { /* already gone */ }
+        try {
+          if (activeServer.detachedProcessGroup && process.platform !== 'win32' && activeServer.process.pid) {
+            process.kill(-activeServer.process.pid, 'SIGTERM');
+          } else {
+            activeServer.process.kill('SIGTERM');
+          }
+        } catch { /* already gone */ }
       }
     });
   }
@@ -1451,30 +1460,10 @@ async function startPiRpcServer(
 async function stopSinglePiRpcServer(server: PiRpcServer): Promise<void> {
   _piRpcServers.delete(server);
   server.ready = false;
-
-  const exitPromise = new Promise<void>((resolve) => {
-    if (server.process.exitCode !== null) {
-      resolve();
-      return;
-    }
-    server.process.once('exit', () => resolve());
+  await terminatePiOwnedProcessTree(server.process, {
+    detachedProcessGroup: server.detachedProcessGroup,
+    graceMs: 10_000,
   });
-
-  try {
-    server.process.kill('SIGTERM');
-  } catch {
-    return;
-  }
-
-  const finished = await Promise.race([
-    exitPromise.then(() => true),
-    new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000)),
-  ]);
-
-  if (!finished) {
-    try { server.process.kill('SIGKILL'); } catch { /* already gone */ }
-    await exitPromise.catch(() => {});
-  }
 }
 
 async function stopPiRpcServer(server?: PiRpcServer): Promise<void> {
@@ -1566,24 +1555,28 @@ async function buildPiSessionOptions(
   mode: 'impl' | 'qa' | 'journey',
   packet: StoryExecutionPacket,
   spec?: SpecJson,
-): Promise<PiSessionOptions | undefined> {
-  if (!workspaceId) return undefined;
+  progressCwd: string = cwd,
+): Promise<PiSessionOptions> {
+  let directionText = '';
+  if (workspaceId) {
+    logger.info(`[pi] Building session options for ${story.id} in workspace ${workspaceId}`);
+    const layers = await getDirectionLayers(workspaceId);
+    logger.info(`[pi] Loaded direction layers for ${story.id}`);
+    directionText = synthesize({
+      l1: layers.l1,
+      l2: layers.l2,
+      l3: layers.l3,
+      teamL1: layers.teamL1,
+      teamL2: layers.teamL2,
+      schemaSnapshot: layers.schemaSnapshot,
+      specBrief: spec?.brief ?? spec?.title ?? story.title,
+      storyAnnotations: getStoryAnnotationText(spec, story),
+    });
+  } else {
+    logger.warn(`[pi] Workspace id unavailable for ${story.id}; continuing with the canonical progress log and no direction-stack overlay.`);
+  }
 
-  logger.info(`[pi] Building session options for ${story.id} in workspace ${workspaceId}`);
-  const layers = await getDirectionLayers(workspaceId);
-  logger.info(`[pi] Loaded direction layers for ${story.id}`);
-  const directionText = synthesize({
-    l1: layers.l1,
-    l2: layers.l2,
-    l3: layers.l3,
-    teamL1: layers.teamL1,
-    teamL2: layers.teamL2,
-    schemaSnapshot: layers.schemaSnapshot,
-    specBrief: spec?.brief ?? spec?.title ?? story.title,
-    storyAnnotations: getStoryAnnotationText(spec, story),
-  });
-
-  const progressLogPath = buildPiProgressLogPath(cwd, runId, story.id);
+  const progressLogPath = buildPiProgressLogPath(progressCwd, runId, story.id);
 
   ensurePiStoryProgressLog(progressLogPath, {
     runId,
@@ -1611,18 +1604,6 @@ async function buildPiSessionOptions(
   };
 }
 
-
-async function deleteFileIfExists(filePath?: string): Promise<void> {
-  if (!filePath) return;
-  try {
-    await fs.promises.unlink(filePath);
-  } catch (error: unknown) {
-    const code = typeof error === 'object' && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
-    if (code !== 'ENOENT') {
-      logger.warn(`  [pi] Failed to delete temp skill file ${filePath}: ${String(error)}`);
-    }
-  }
-}
 
 // ─── SK-003: Skill Loading & Injection ──────────────────────────────────────
 
@@ -1831,6 +1812,10 @@ function buildPrompt(
     ? `\n=== RELATED HISTORY (from knowledge graph) ===\n${graphSection}\n=== END RELATED HISTORY ===\n`
     : '';
 
+  const piAutonomyInstruction = agentType === 'pi'
+    ? buildPiModeExecutionGuidance(mode)
+    : '';
+
   if (mode === 'qa') {
     const playbookInstruction = playbook && fs.existsSync(path.join(cwd, playbook))
       ? `IMPORTANT: Read ${playbook} first for test patterns, conventions, and section references mentioned in the description.`
@@ -1844,6 +1829,7 @@ function buildPrompt(
       matchedSkills,
       memoryBlock,
       graphBlock,
+      piAutonomyInstruction,
       '', playbookInstruction, '',
       '## Workflow',
       '1. Read the relevant AGENTS.md in each directory you\'ll modify',
@@ -1864,20 +1850,12 @@ function buildPrompt(
     ].filter(Boolean).join('\n');
   }
 
-  const piAutonomyInstruction = agentType === 'pi'
-    ? [
-      '## Pi Execution Requirements',
-      '- You are running inside a non-interactive autonomous pipeline.',
-      '- Do not stop after only reading files or planning.',
-      '- If the task is feasible, make the required file edits in this turn before ending.',
-      '- Ending the turn with zero code changes will be treated as a failed run unless you are concretely blocked.',
-      '- If blocked, say exactly what blocked you and cite the file or command that proved it.',
-    ].join('\n')
-    : '';
-
   if (agentType === 'pi') {
+    const modeOpening = mode === 'journey'
+      ? 'Execute this user journey now. This is an autonomous verification and repair run, not a planning pass.'
+      : 'Implement this task now. This is an autonomous coding run, not a planning pass.';
     return [
-      'Implement this task now. This is an autonomous coding run, not a planning pass.',
+      modeOpening,
       piAutonomyInstruction,
       '## Required execution behavior',
       '- Start by reading the primary files listed below, not generic project docs.',
@@ -1886,7 +1864,7 @@ function buildPrompt(
       '- Do not stop after reading AGENTS.md/CLAUDE.md unless a concrete blocker forces you to.',
       '- Prefer direct file edits over long explanations.',
       '- If a target file does not need changes, move to the next listed file.',
-      '- Before ending, run a minimal validation command if you changed code.',
+      '- Before ending, run focused validation, self-review/fix, and then the broad safe validation required by the external manifest.',
       personaSection,
       memoryInstruction,
       '', '---', '',
@@ -3617,13 +3595,18 @@ async function spawnPiRpc(
       boundListener = null;
     };
 
+    let rejectStory: ((error: Error) => void) | undefined;
     const storyDone = new Promise<void>((resolve, reject) => {
+      rejectStory = reject;
       boundListener = (event: unknown): void => listener(event, resolve, reject);
       server.eventListeners.push(boundListener);
     });
 
     const timeout = setTimeout(() => {
+      if (settled) return;
       storyTimedOut = true;
+      settled = true;
+      rejectStory?.(new Error(`pi RPC story timed out after ${timeoutMs}ms`));
       void sendPiRpcCommand(server, { type: 'abort' }).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         writeOutput(`[System] Failed to abort pi RPC story cleanly: ${message}\n`);
@@ -3951,27 +3934,44 @@ async function withSpecLock(jsonPath: string, fn: () => void): Promise<void> {
   try { fn(); } finally { release(); }
 }
 
-async function markStoryPassed(jsonPath: string, storyId: string): Promise<void> {
+export interface MarkStoryPassedResult {
+  changed: boolean;
+  storyFound: boolean;
+}
+
+/**
+ * Canonical spec lifecycle mutation shared by engine completion and governed
+ * recovery reconciliation. The path-level lock makes repeated completion
+ * reports idempotent and prevents concurrent story writes from clobbering one
+ * another.
+ */
+export async function markStoryPassed(jsonPath: string, storyId: string): Promise<MarkStoryPassedResult> {
+  const result: MarkStoryPassedResult = { changed: false, storyFound: false };
   await withSpecLock(jsonPath, () => {
     const raw = fs.readFileSync(jsonPath, 'utf8');
     const spec: SpecJson = JSON.parse(raw);
     const stories = getStories(spec);
 
     for (const s of stories) {
-      if (s.id === storyId) {
-        if (spec.userStories || s.passes !== undefined) {
-          s.passes = true;
-          s.notes = 'Completed by Rorca engine';
-        } else {
-          s.status = 'passed';
-        }
-        break;
+      if (s.id !== storyId) continue;
+      result.storyFound = true;
+      if (isPassed(s)) break;
+      if (spec.userStories || s.passes !== undefined) {
+        s.passes = true;
+        s.notes = 'Completed by Rorca engine';
+      } else {
+        s.status = 'passed';
       }
+      result.changed = true;
+      break;
     }
 
-    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-    logger.info(`Marked ${storyId} as passed`);
+    if (result.changed) {
+      fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+      logger.info(`Marked ${storyId} as passed`);
+    }
   });
+  return result;
 }
 
 async function markStorySkipped(jsonPath: string, storyId: string): Promise<void> {
@@ -4135,6 +4135,19 @@ function getGitHead(cwd: string): string | null {
   }
 }
 
+function getGitBranch(cwd: string): string | null {
+  try {
+    return execSync('git branch --show-current', {
+      cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function getCommittedStoryChangesSince(cwd: string, baseHead: string | null): StoryWorkingTreeChanges {
   if (!baseHead || !/^[0-9a-f]{40}$/i.test(baseHead)) {
     return { meaningfulFiles: [], metadataFiles: [] };
@@ -4265,11 +4278,26 @@ const GATE_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface GateResult {
   passed: boolean;
-  reason?: 'typecheck';
+  reason?: 'typecheck' | 'manifest_validation';
   output?: string;
+  observations?: HostValidationObservation[];
 }
 
-function runGate(cwd: string): GateResult {
+function runGate(
+  cwd: string,
+  manifest?: StoryExecutionManifest,
+): GateResult {
+  if (manifest) {
+    const observations = manifest.validationPlan
+      .filter((requirement) => requirement.required)
+      .map((requirement) => runHostValidationRequirement(manifest, requirement));
+    const failed = observations.find((observation) => observation.classification !== 'passed');
+    return {
+      passed: !failed,
+      ...(failed ? { reason: 'manifest_validation' as const, output: failed.output.redactedExcerpt ?? failed.remediation ?? undefined } : {}),
+      observations,
+    };
+  }
   const env = buildCleanEnv();
   const rorcaConfig = loadRorcaConfig(cwd);
   const gates = rorcaConfig.execution.gates;
@@ -4307,12 +4335,243 @@ function runGate(cwd: string): GateResult {
   return { passed: true };
 }
 
+// ─── Story Closeout Enforcement ──────────────────────────────────────────────
+
+interface StoryCloseoutEnforcementInput {
+  manifest: StoryExecutionManifest;
+  cwd: string;
+  storyStartHead: string | null;
+  storyLogFile: string;
+  agentType: AgentType;
+  model: string | null;
+  effort: string | null;
+  piSessionId?: string;
+  attemptStartedAt: number;
+  attemptElapsedMs: number;
+  requestedAttempt: number;
+  validations: HostValidationObservation[];
+  completionPacket?: PiCompletionPacket;
+}
+
+export interface StoryCloseoutEnforcementResult {
+  manifest: StoryManifest;
+  attempt: StoryAttemptResult;
+  decision: StoryCloseoutDecision;
+}
+
+function observeCurrentStoryCommit(
+  manifest: StoryManifest,
+  cwd: string,
+  storyStartHead: string | null,
+  meaningfulFiles: readonly string[],
+): ObservedStoryCommit[] {
+  const sha = getGitHead(cwd);
+  if (!sha || sha === storyStartHead || meaningfulFiles.length === 0) return [];
+
+  const branch = getGitBranch(cwd) ?? manifest.execution.worktree.branch ?? 'detached';
+  let message = `story(${manifest.identity.storyId}): host-observed output`;
+  let author = 'rorca-execution-engine';
+  let committedAt = new Date(0).toISOString();
+  try {
+    const raw = execSync(`git show -s --format=%s%x00%an%x00%aI ${sha}`, {
+      cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    const [observedMessage, observedAuthor, observedAt] = raw.split('\u0000');
+    if (observedMessage?.trim()) message = observedMessage.trim();
+    if (observedAuthor?.trim()) author = observedAuthor.trim();
+    if (observedAt && !Number.isNaN(new Date(observedAt).getTime())) committedAt = new Date(observedAt).toISOString();
+  } catch {
+    // A valid host-observed SHA is still useful evidence. Deterministic fallbacks
+    // keep duplicate finalization idempotent even if commit metadata is unavailable.
+  }
+
+  return [{
+    workspaceId: manifest.identity.workspaceId,
+    specId: manifest.identity.specId,
+    runId: manifest.identity.runId,
+    storyId: manifest.identity.storyId,
+    sha,
+    branch,
+    message,
+    author,
+    committedAt,
+    observedBy: 'worktree_branch',
+  }];
+}
+
+function buildStoryCloseoutBundleInput(
+  input: StoryCloseoutEnforcementInput,
+  manifest: StoryManifest,
+): {
+  attempt: StoryAttemptResult;
+  host: StoryCloseoutHostFacts;
+  evidence: ReturnType<typeof adaptStoryCloseoutEvidence>;
+} {
+  const pendingChanges = getStoryWorkingTreeChanges(input.cwd);
+  const committedChanges = getCommittedStoryChangesSince(input.cwd, input.storyStartHead);
+  const meaningfulFiles = [...new Set([...committedChanges.meaningfulFiles, ...pendingChanges.meaningfulFiles])].sort();
+  const runtimeMetadataFiles = [...new Set([...committedChanges.metadataFiles, ...pendingChanges.metadataFiles])].sort();
+  const changedFiles = [...new Set([...meaningfulFiles, ...runtimeMetadataFiles])].sort();
+  const activeCommitSha = getGitHead(input.cwd) ?? manifest.execution.worktree.baseRevision;
+  const activeBranch = getGitBranch(input.cwd) ?? manifest.execution.worktree.branch ?? 'detached';
+  const activeSubjectRevision = {
+    commitSha: activeCommitSha,
+    worktreePath: input.cwd,
+    branch: activeBranch,
+  };
+  const storyCommits = observeCurrentStoryCommit(manifest, input.cwd, input.storyStartHead, meaningfulFiles);
+  const firstValidation = input.validations[0];
+  const lastValidation = input.validations[input.validations.length - 1];
+
+  const host: StoryCloseoutHostFacts = {
+    identity: { ...manifest.identity },
+    activeSubjectRevision,
+    repository: {
+      // Runtime progress/evidence files are intentionally preserved and do not
+      // make an otherwise clean story output dirty at this enforcement seam.
+      worktreeClean: pendingChanges.meaningfulFiles.length === 0,
+      changedFiles,
+      runtimeMetadataFiles,
+      headBeforeValidation: firstValidation?.repositoryRevisionBefore ?? activeCommitSha,
+      headAfterValidation: lastValidation?.repositoryRevisionAfter ?? activeCommitSha,
+    },
+    validations: [...input.validations],
+    criterionEvidence: [],
+    storyCommits,
+    // The gate runs before these pass projections by design. Their absence is
+    // not evidence of failure; contradictory pre-existing projections would be.
+    progress: null,
+    storyResult: null,
+  };
+
+  const evidence = adaptStoryCloseoutEvidence(manifest, host);
+  const hostEvidenceReferences = evidence.map((item) => `EVD-sha256:${item.payloadHash}`);
+  host.criterionEvidence = manifest.evidenceExpectations.map((expectation) => ({
+    criterionId: expectation.criterionId,
+    evidenceReferences: hostEvidenceReferences,
+    subjectRevision: activeCommitSha,
+    observedBy: 'rorca_host',
+  }));
+
+  let logByteLength = 0;
+  try { logByteLength = fs.statSync(input.storyLogFile).size; } catch { /* typed by missing output below */ }
+  const rawOutputExcerpt = readLogTail(input.storyLogFile, 7_000).trim();
+  const sanitizedOutput = rawOutputExcerpt
+    ? sanitizeCapturePayload({ value: rawOutputExcerpt }).payload
+    : null;
+  const outputExcerpt = sanitizedOutput
+    && typeof sanitizedOutput === 'object'
+    && typeof (sanitizedOutput as { value?: unknown }).value === 'string'
+    ? (sanitizedOutput as { value: string }).value
+    : null;
+  const startedAt = new Date(input.attemptStartedAt).toISOString();
+  const finishedAt = new Date(input.attemptStartedAt + Math.max(0, input.attemptElapsedMs)).toISOString();
+  const proposedSummary = input.completionPacket
+    ? [
+        input.completionPacket.summary,
+        `Implementation: ${input.completionPacket.implementation.join('; ') || 'not reported'}`,
+        `Changed files: ${input.completionPacket.changedFiles.join(', ') || 'none reported'}`,
+        `Commands/results: ${input.completionPacket.commandsAndResults.join('; ') || 'not reported'}`,
+        `Unresolved risks: ${input.completionPacket.unresolvedRisks.join('; ') || 'none reported'}`,
+      ].join('\n').slice(0, 3_900)
+    : 'Agent process exited successfully and proposed story completion.';
+  const attempt = createStoryAttemptResult({
+    identity: { ...manifest.identity },
+    revisions: { ...manifest.revisions },
+    manifestHash: manifest.manifestHash,
+    agentProcess: {
+      agent: input.agentType,
+      model: input.model,
+      effort: input.effort,
+      processId: null,
+      sessionId: input.piSessionId ?? null,
+    },
+    startedAt,
+    finishedAt,
+    termination: { kind: 'exited', exitCode: 0 },
+    outputReferences: [{
+      kind: 'story_log',
+      reference: input.storyLogFile,
+      byteLength: logByteLength,
+      sha256: null,
+      redactedExcerpt: outputExcerpt,
+      truncated: logByteLength > 7_000,
+    }],
+    // Preserve existing prompts and provider output contracts. This packet only
+    // records that the successful process proposed completion; it contributes
+    // no authority or evidence to the host gate.
+    proposedCompletionPacket: {
+      manifestHash: manifest.manifestHash,
+      identity: { ...manifest.identity },
+      revisions: { ...manifest.revisions },
+      proposal: 'complete',
+      summary: proposedSummary,
+      criterionEvidence: manifest.evidenceExpectations.map((expectation) => ({
+        criterionId: expectation.criterionId,
+        evidenceReferences: [],
+      })),
+    },
+    observedFiles: changedFiles.map((file) => ({
+      path: file,
+      changeType: 'modified',
+      runtimeMetadata: runtimeMetadataFiles.includes(file),
+      observer: 'host',
+    })),
+    observedCommits: storyCommits,
+    hostValidationObservations: [...input.validations],
+    knownIssues: input.completionPacket?.unresolvedRisks ?? [],
+  });
+
+  return { attempt, host, evidence };
+}
+
+/**
+ * The sole mode/provider-agnostic pre-pass enforcement seam. It consumes only
+ * the frozen dispatch manifest and bounded host observations, persists the
+ * idempotent LFC-008 contracts, and returns no alternate success state.
+ */
+export async function enforceStoryCloseout(
+  input: StoryCloseoutEnforcementInput,
+): Promise<StoryCloseoutEnforcementResult> {
+  const persistedAttempts = await listStoryAttempts(input.manifest.identity);
+  const requestedAttempt = Math.max(input.manifest.identity.attempt, input.requestedAttempt);
+  let manifest: StoryManifest = requestedAttempt === input.manifest.identity.attempt
+    ? input.manifest
+    : deriveRetryStoryExecutionManifest(input.manifest, requestedAttempt);
+  let bundleInput = buildStoryCloseoutBundleInput(input, manifest);
+
+  const sameAttempt = persistedAttempts.find((item) => item.identity.attempt === requestedAttempt);
+  if (sameAttempt && sameAttempt.attemptResultId !== bundleInput.attempt.attemptResultId) {
+    const nextAttempt = Math.max(requestedAttempt, ...persistedAttempts.map((item) => item.identity.attempt)) + 1;
+    manifest = deriveRetryStoryExecutionManifest(input.manifest, nextAttempt);
+    bundleInput = buildStoryCloseoutBundleInput(input, manifest);
+  }
+
+  const decision = StoryCloseoutGate({
+    manifest,
+    attempt: bundleInput.attempt,
+    host: bundleInput.host,
+  });
+  await persistStoryCloseoutBundle({
+    manifest,
+    attempt: bundleInput.attempt,
+    decision,
+    evidence: bundleInput.evidence,
+  });
+  return { manifest, attempt: bundleInput.attempt, decision };
+}
+
 // ─── Worktree Helpers ───────────────────────────────────────────────────────
 
 interface StoryWorktree {
   storyId: string;
   worktreePath: string;
   branchName: string;
+  /** Immutable effective posture captured when this story actually executed. */
+  resolverPosture?: MergeResolutionPosture;
 }
 
 interface PendingIntegratedPass {
@@ -4328,6 +4587,9 @@ interface PendingIntegratedPass {
     costUsd: number;
   };
   graphHits?: number;
+  commitSha: string | null;
+  commitBranch: string | null;
+  completionPacket?: PiCompletionPacket;
 }
 
 interface IntegrationValidationResult {
@@ -4413,12 +4675,69 @@ function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegration
   return { ok: true, files: [] };
 }
 
+async function recordIntegratedCheckpointAttestation(
+  config: EngineConfig,
+  workspaceId: string,
+  pending: PendingIntegratedPass,
+): Promise<void> {
+  if (config.dryRun) return;
+  try {
+    const checkpointSha = getGitHead(config.cwd);
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: config.cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    if (typeof checkpointSha !== 'string' || !/^[0-9a-f]{40}$/i.test(checkpointSha) || !/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(branch)) {
+      throw new Error('integrated branch identity is unavailable');
+    }
+    const passedAt = new Date();
+    const evidenceDigest = createHash('sha256').update(JSON.stringify({
+      contractVersion: 'checkpoint-validation-v1',
+      gate: 'execution-engine',
+      outcome: 'passed',
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      branch,
+      checkpointSha,
+      agentType: pending.agentType,
+    })).digest('hex');
+    const { recordCheckpointValidationAttestation } = await import('./checkpoint-reconciliation');
+    await recordCheckpointValidationAttestation({
+      id: randomUUID(),
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      branch,
+      checkpointSha,
+      validationGate: 'execution-engine',
+      evidenceDigest,
+      passedAt: passedAt.toISOString(),
+      expiresAt: new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  } catch (error: unknown) {
+    // The current story can still complete normally; the missing attestation only
+    // removes the crash-recovery shortcut and therefore fails closed on recovery.
+    logger.warn({ err: error, runId: config.runId, storyId: pending.story.id }, '[checkpoint] Failed to persist trusted integrated-worktree attestation');
+  }
+}
+
 async function finalizeIntegratedStoryPass(
   config: EngineConfig,
   workspaceId: string | null,
   pending: PendingIntegratedPass,
 ): Promise<void> {
-  await markStoryPassed(config.jsonPath, pending.story.id);
+  // Persist trusted crash-recovery evidence after run-branch integration but
+  // before canonical pass mutation. If the process dies between these steps,
+  // reconciliation can later prove the exact integrated branch head.
+  if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending);
+  const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
+  if (!lifecycle.changed) {
+    logger.info(`Ignored duplicate pass finalization for ${pending.story.id}`);
+    return;
+  }
 
   if (!workspaceId) return;
 
@@ -4432,15 +4751,20 @@ async function finalizeIntegratedStoryPass(
     cost_usd: pending.tokenPayload.costUsd,
     integrated: true,
     ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
+    ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
   }, pending.story.id);
   await postStoryResult(config.port, {
     runId: config.runId,
     storyId: pending.story.id,
     status: 'pass',
     logPath: pending.logPath,
+    commitSha: pending.commitSha,
+    commitMessage: `story(${pending.story.id}): ${pending.story.title}`,
+    worktreeBranch: pending.commitBranch,
     ...pending.storyResultExtra,
     ...pending.activeSkillsExtra,
     ...pending.tokenPayload,
+    ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
   });
 
   await autoSynthesizeMemory(
@@ -4492,15 +4816,25 @@ function createStoryWorktree(
   workspaceCwd: string,
   specSlug: string,
   storyId: string,
+  resolved?: StoryManifestWorktreeOptions,
 ): StoryWorktree | null {
   const ts = Date.now();
-  const branchName = `feat/${specSlug}-${storyId}-${ts}`;
+  const branchName = resolved?.branch ?? `feat/${specSlug}-${storyId}-${ts}`;
   const repoName = path.basename(workspaceCwd);
-  const worktreePath = path.resolve(workspaceCwd, '..', `${repoName}-${storyId}-${ts}`);
+  const worktreePath = resolved?.path ?? path.resolve(workspaceCwd, '..', `${repoName}-${storyId}-${ts}`);
 
   try {
+    if (fs.existsSync(worktreePath)) {
+      const existingBranch = execSync('git branch --show-current', {
+        cwd: worktreePath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      if (existingBranch !== branchName) throw new Error(`existing worktree branch ${existingBranch} does not match ${branchName}`);
+      return { storyId, worktreePath, branchName };
+    }
     execSync(
-      `git worktree add -b "${branchName}" "${worktreePath}" HEAD`,
+      `git worktree add -b "${branchName}" "${worktreePath}" "${resolved?.baseRevision ?? 'HEAD'}"`,
       { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
     );
 
@@ -4578,7 +4912,7 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
         logger.warn(`  [worktree] Runtime-only merge conflicts — auto-resolving (--ours): ${conflicted.join(', ')}`);
         const quotedFiles = conflicted.map(f => `"${f}"`).join(' ');
         execSync(`git checkout --ours -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
-        execSync('git add -A', { cwd: workspaceCwd, env, stdio: 'pipe' });
+        execSync(`git add -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
 
         const validation = validateIntegratedWorktree(workspaceCwd, getIntegrationCandidateFiles(workspaceCwd));
         if (!validation.ok) {
@@ -4616,9 +4950,13 @@ interface WaveMergeResult {
 
 async function autoResolveConflicts(
   cwd: string,
-  storyId: string,
+  wt: StoryWorktree,
   logDir: string,
+  config: EngineConfig,
+  workspaceId: string,
+  contributingPostures: MergeResolutionPosture[],
 ): Promise<{ resolved: boolean; resolvedFiles: string[] }> {
+  const storyId = wt.storyId;
   const env = buildCleanEnv();
   const resolvedFiles: string[] = [];
 
@@ -4663,69 +5001,31 @@ async function autoResolveConflicts(
     return { resolved: true, resolvedFiles };
   }
 
-  // LLM resolution for real code conflicts.
-  conflictingFiles = realConflicts;
-
-  for (const file of conflictingFiles) {
-    const absFile = path.join(cwd, file);
-    let conflictContent: string;
-    try {
-      conflictContent = fs.readFileSync(absFile, 'utf8');
-    } catch {
-      logger.error(`  [merge] Cannot read conflicting file: ${file}`);
-      return { resolved: false, resolvedFiles };
-    }
-
-    const prompt = [
-      'Resolve this git merge conflict. Output ONLY the resolved file content with no explanation,',
-      'no markdown fences, no commentary. Choose the correct combination of both sides.',
-      '', `File: ${file}`, '', conflictContent,
-    ].join('\n');
-
-    const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(file)}.log`);
-    const resolvedContent = await new Promise<string | null>((resolve) => {
-      const args = ['--dangerously-skip-permissions', '--print', prompt];
-      let stdout = '';
-      const child = spawn(CLAUDE_BIN, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-
-      const logFd = fs.openSync(resolveLogFile, 'a');
-      child.stderr.on('data', (chunk: Buffer) => { fs.writeSync(logFd, chunk); });
-
-      const timer = setTimeout(() => {
-        try { child.kill('SIGTERM'); } catch { /* already dead */ }
-      }, 120_000);
-
-      child.on('exit', (code) => {
-        clearTimeout(timer);
-        try { fs.closeSync(logFd); } catch { /* already closed */ }
-        if (code === 0 && stdout.trim().length > 0) resolve(stdout);
-        else resolve(null);
-      });
-      child.on('error', () => {
-        clearTimeout(timer);
-        try { fs.closeSync(logFd); } catch { /* already closed */ }
-        resolve(null);
-      });
-    });
-
-    if (resolvedContent === null) {
-      logger.error(`  [merge] Auto-resolution FAILED for ${file}`);
-      return { resolved: false, resolvedFiles };
-    }
-
-    try {
-      fs.writeFileSync(absFile, resolvedContent);
-      execSync(`git add "${file}"`, { cwd, env, stdio: 'pipe' });
-      resolvedFiles.push(file);
-      logger.info(`  [merge] Resolved ${file}`);
-    } catch (err: unknown) {
-      logger.error(`  [merge] Failed to write/stage resolved ${file}: ${(err as Error).message}`);
-      return { resolved: false, resolvedFiles };
-    }
+  // Real code conflicts are resolved by the exact posture that executed this
+  // story. There is intentionally no Claude fallback for a missing posture.
+  const posture = resolvePostureConsensus([...contributingPostures, wt.resolverPosture]);
+  if (!posture || !workspaceId) {
+    logger.error(`  [merge] ${storyId} has mixed/missing contribution posture or workspace identity; explicit operator posture required`);
+    return { resolved: false, resolvedFiles };
   }
-
-  return { resolved: true, resolvedFiles };
+  const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(realConflicts[0])}.log`);
+  const resolution = await resolveMergeConflict({
+    runId: config.runId,
+    storyId,
+    workspaceId,
+    cwd,
+    branchName: wt.branchName,
+    conflictFiles: realConflicts,
+    logPath: resolveLogFile,
+    posture,
+    validate: () => runGate(cwd).passed,
+    attachAddr: config.attachAddr,
+  });
+  if (!resolution.ok) {
+    logger.error(`  [merge] semantic resolution failed for ${storyId}: ${resolution.reason}`);
+    return { resolved: false, resolvedFiles };
+  }
+  return { resolved: true, resolvedFiles: [...resolvedFiles, ...resolution.resolvedFiles] };
 }
 
 async function mergeWave(
@@ -4733,6 +5033,9 @@ async function mergeWave(
   waveIndex: number,
   cwd: string,
   logDir: string,
+  config: EngineConfig,
+  workspaceId: string,
+  integratedPostures: MergeResolutionPosture[],
 ): Promise<WaveMergeResult> {
   const env = buildCleanEnv();
   const sorted = [...waveBranches].sort((a, b) => a.storyId.localeCompare(b.storyId));
@@ -4783,6 +5086,7 @@ async function mergeWave(
       try {
         execSync(`git commit -m "merge: ${wt.storyId}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
         logger.info(`  [merge] ${wt.storyId} merged cleanly`);
+        if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch {
         logger.info(`  [merge] ${wt.storyId} merged (no changes to commit)`);
       }
@@ -4790,7 +5094,7 @@ async function mergeWave(
     }
 
     logger.info(`  [merge] Conflict detected for ${wt.storyId}, attempting auto-resolution...`);
-    const resolution = await autoResolveConflicts(cwd, wt.storyId, logDir);
+    const resolution = await autoResolveConflicts(cwd, wt, logDir, config, workspaceId, integratedPostures);
 
     if (resolution.resolved) {
       const filesList = resolution.resolvedFiles.join(', ');
@@ -4798,8 +5102,8 @@ async function mergeWave(
         ? `merge(wave-${waveIndex}): resolved conflicts in ${filesList}`
         : `merge(wave-${waveIndex}): auto-resolved conflicts`;
       try {
-        // Try normal commit first
-        execSync(`git add -A`, { cwd, env, stdio: 'pipe' });
+        // The resolver validates/stages exactly the declared conflict paths.
+        // Never widen its containment boundary with `git add -A` here.
         const validation = validateIntegratedWorktree(cwd, getIntegrationCandidateFiles(cwd));
         if (!validation.ok) {
           logger.error(`  [merge] ${wt.storyId} failed post-resolution integration validation: ${validation.reason} ${validation.files.join(', ')}`);
@@ -4814,6 +5118,7 @@ async function mergeWave(
         );
         totalConflictsResolved += resolution.resolvedFiles.length;
         logger.info(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+        if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch (commitErr: unknown) {
         // Fallback: try git merge --continue
         logger.warn(`  [merge] git commit failed, trying merge --continue: ${(commitErr as Error).message}`);
@@ -4821,6 +5126,7 @@ async function mergeWave(
           execSync('git -c core.editor=true merge --continue', { cwd, env, stdio: 'pipe', timeout: 30_000 });
           totalConflictsResolved += resolution.resolvedFiles.length;
           logger.info(`  [merge] ${wt.storyId} merged via --continue with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+          if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
         } catch (contErr: unknown) {
           logger.error(`  [merge] Commit after resolution failed for ${wt.storyId}: ${(contErr as Error).message}`);
           try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
@@ -4875,37 +5181,6 @@ function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
     execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
   } catch { /* branch may already be gone */ }
   logger.info(`  [worktree] Removed ${wt.worktreePath}`);
-}
-
-// ─── Auto-merge run-level worktree ───────────────────────────────────────────
-// Called at the end of a successful run when the entire spec was executed inside
-// a git worktree (autoWorktree: true). Merges the worktree branch back into the
-// main workspace branch and removes the worktree directory.
-//
-// Runs synchronously so the log output appears before process.exit().
-function autoMergeRunWorktree(workspacePath: string, worktreePath: string, branchName: string): void {
-  try {
-    execSync(
-      `git -C "${workspacePath}" merge "${branchName}" --no-edit -m "merge: ${branchName} (auto)"`,
-      { stdio: 'pipe', timeout: 120_000 },
-    );
-    logger.info(`[auto-merge] merged ${branchName} to main successfully`);
-  } catch (mergeErr: unknown) {
-    const msg = (mergeErr as Error).message ?? String(mergeErr);
-    logger.warn(`[auto-merge] merge failed for ${branchName}, leaving worktree intact for manual resolution: ${msg}`);
-    return;
-  }
-
-  try {
-    execSync(
-      `git -C "${workspacePath}" worktree remove "${worktreePath}" --force`,
-      { stdio: 'pipe', timeout: 30_000 },
-    );
-    logger.info(`[auto-merge] worktree removed: ${worktreePath}`);
-  } catch (rmErr: unknown) {
-    const msg = (rmErr as Error).message ?? String(rmErr);
-    logger.warn(`[auto-merge] worktree removal failed (non-fatal): ${msg}`);
-  }
 }
 
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
@@ -5194,6 +5469,8 @@ async function runAdversarialReview(
 
 // ─── Story Execution ────────────────────────────────────────────────────────
 
+type StoryExecutionOutcome = 'passed' | 'failed' | 'skipped' | 'closeout_blocked';
+
 async function executeStory(
   story: UserStory,
   config: EngineConfig,
@@ -5212,10 +5489,30 @@ async function executeStory(
   waveIndex?: number,
   spec?: SpecJson,
   pendingIntegratedPasses?: Map<string, PendingIntegratedPass>,
-): Promise<'passed' | 'failed' | 'skipped'> {
+): Promise<StoryExecutionOutcome> {
   const effectiveCwd = storyCwd ?? config.cwd;
+  const executionManifest = config.executionManifests.get(story.id);
+  if (config.executionManifests.size > 0 && !executionManifest) {
+    throw new Error(`Missing pre-dispatch execution manifest for ${story.id}`);
+  }
+  if (executionManifest) {
+    if (!verifyStoryExecutionManifest(executionManifest)) throw new Error(`Invalid execution manifest hash for ${story.id}`);
+    if (executionManifest.identity.runId !== config.runId || executionManifest.identity.storyId !== story.id) {
+      throw new Error(`Execution manifest identity mismatch for ${story.id}`);
+    }
+    if (executionManifest.executionMode !== mode) throw new Error(`Execution manifest mode mismatch for ${story.id}`);
+    if (executionManifest.commandSafety.guardedWorkingDirectory !== effectiveCwd) {
+      throw new Error(`Execution manifest working directory mismatch for ${story.id}`);
+    }
+  }
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
   const storyStartHead = getGitHead(effectiveCwd);
+  const allowsNoCodeChanges = executionManifest
+    ? executionManifest.repositoryProfile.changePolicy === 'no_code_allowed'
+    : storyAllowsNoCodeChanges(story, mode);
+
+  // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
+  setFallbackContext(effectiveCwd, config.runId);
 
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
   // stable workspace/run artifact root, not ephemeral story worktrees, so the
@@ -5227,11 +5524,15 @@ async function executeStory(
   const traceWriter = createContextTraceWriter(traceArtifactCwd, config.runId);
 
   // Per-story agent resolution: explicit override > story.agent field > run-level config
-  let effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
+  let effectiveAgent: AgentType = executionManifest?.execution.agent
+    ?? storyAgentOverride
+    ?? resolveStoryAgent(story, config.agentType);
 
   // ── OC-031: Tool capability reroute ────────────────────────────────
+  // New runs resolve this before dispatch. Legacy runs without a manifest keep
+  // the historical engine-side behavior for bounded compatibility.
   const orchConfigForCap = loadOrchestrationConfig(config.cwd);
-  if (orchConfigForCap.capabilityMismatch === 'reroute') {
+  if (!executionManifest && orchConfigForCap.capabilityMismatch === 'reroute') {
     const capStory: CapabilityStory = {
       id: story.id,
       title: story.title,
@@ -5278,8 +5579,21 @@ async function executeStory(
 
   const effectiveAttach = effectiveAgent === 'opencode' ? (storyAttachAddr ?? config.attachAddr) : null;
 
-  // Per-story model override takes precedence over run-level model.
-  let currentModel = story.model ?? config.agentModel;
+  // Host-resolved manifests are authoritative; story overrides are legacy fallback only.
+  let currentModel = executionManifest?.execution.model ?? story.model ?? config.agentModel;
+  const currentEffort = (executionManifest?.execution.effort ?? config.effortLevel) as EngineConfig['effortLevel'];
+  // Preserve the resolved posture now, before later execution machinery can
+  // mutate/retry/reroute anything. Wave merging happens after the story exits.
+  if (worktreeInfo) {
+    worktreeInfo.resolverPosture = {
+      agent: effectiveAgent,
+      model: currentModel,
+      thinkingEnabled: config.thinkingEnabled,
+      thinkingBudget: config.thinkingBudget,
+      effortLevel: currentEffort,
+      source: 'story',
+    };
+  }
 
   logger.info(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
   if (worktreeInfo) logger.info(`  Worktree: ${worktreeInfo.worktreePath}`);
@@ -5342,7 +5656,7 @@ async function executeStory(
   const SKILL_TOKEN_BUDGET = 4000; // ~16KB of skill content max
   let resolvedSkills: ResolvedSkill[] = [];
   let skillsSection = '';
-  if (story.suggestedSkills && story.suggestedSkills.length > 0) {
+  if (effectiveAgent !== 'pi' && story.suggestedSkills && story.suggestedSkills.length > 0) {
     resolvedSkills = loadMatchedSkills(effectiveCwd, story.suggestedSkills, effectiveAgent, SKILL_TOKEN_BUDGET);
     skillsSection = formatSkillsSection(resolvedSkills);
     if (resolvedSkills.length > 0) {
@@ -5350,9 +5664,17 @@ async function executeStory(
       logger.info(`  [skills] Injected ${resolvedSkills.length} skill(s): ${resolvedSkills.map(s => `${s.name}(${s.relevance})`).join(', ')} (${totalSkillTokens} tokens)`);
     }
   }
-  const activeSkillNames = resolvedSkills.map(s => s.name);
+  let activeSkillNames = resolvedSkills.map(s => s.name);
 
-  const executionPacket = buildStoryExecutionPacket(effectiveCwd, story, mode);
+  const inferredExecutionPacket = buildStoryExecutionPacket(effectiveCwd, story, mode);
+  const executionPacket: StoryExecutionPacket = executionManifest
+    ? {
+      ...inferredExecutionPacket,
+      validationCommands: executionManifest.validationPlan.map((requirement) => (
+        [requirement.command, ...requirement.args].join(' ')
+      )),
+    }
+    : inferredExecutionPacket;
 
   // PG-023: Unified retrieval for execution-time memory context + graph context + feedback binding
   const predictedPaths = executionPacket.candidateFiles;
@@ -5442,11 +5764,22 @@ async function executeStory(
   }
 
   const piSessionOptions = effectiveAgent === 'pi'
-    ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, executionPacket, spec)
+    ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, executionPacket, spec, traceArtifactCwd)
     : undefined;
-  const piServerSkillFiles = effectiveAgent === 'pi'
-    ? buildPiServerSkillFiles(effectiveCwd, config.runId).skillFiles
-    : [];
+  const piSkillBundle = effectiveAgent === 'pi'
+    ? buildPiServerSkillFiles(effectiveCwd, config.runId, story.id)
+    : undefined;
+  const piServerSkillFiles = piSkillBundle?.skillFiles ?? [];
+  if (piSkillBundle) {
+    activeSkillNames.push(
+      'rorca-autonomous-runner',
+      ...piSkillBundle.workspaceSkillFiles.map(file => path.basename(file, path.extname(file))),
+    );
+    activeSkillNames = [...new Set(activeSkillNames)];
+  }
+  const unregisterPiProgressLog = piSessionOptions?.progressLogPath
+    ? registerPiStoryProgressLog(`${config.runId}:${story.id}`, piSessionOptions.progressLogPath)
+    : () => {};
 
   // CTM-002: arbiter trace point — the synthesized L1→L5 direction stack. Only
   // produced for the pi agent (buildPiSessionOptions runs synthesize()).
@@ -5476,6 +5809,9 @@ async function executeStory(
     graphSection,
   );
   promptBody += `\n\n${buildExecutionPacketPromptSection(executionPacket)}`;
+  if (executionManifest) {
+    promptBody += `\n\n${buildStoryExecutionManifestPromptSection(executionManifest)}`;
+  }
 
   if (wantsBrowser && browserMcpUrl) {
     promptBody += [
@@ -5536,6 +5872,7 @@ async function executeStory(
     modifiedFiles?: string[];
     knownIssues?: string[];
     validationResults?: string[];
+    closeoutState?: string[];
   }): void => {
     if (!piSessionOptions?.progressLogPath) return;
     recordPiStoryProgressLog(piSessionOptions.progressLogPath, update);
@@ -5554,6 +5891,16 @@ async function executeStory(
       log_file: storyLogFile,
       browser_mcp: wantsBrowser,
       piSessionId: piSessionId ?? null,
+      effective_model: currentModel,
+      effective_effort: currentEffort ?? null,
+      effective_terminal: executionManifest?.execution.terminal ?? config.terminalMode,
+      effective_graph: config.includeGraph,
+      effective_worktree: executionManifest?.execution.worktree ?? (worktreeInfo ? {
+        enabled: true,
+        path: worktreeInfo.worktreePath,
+        branch: worktreeInfo.branchName,
+      } : { enabled: false, path: null, branch: null }),
+      effective_merge: executionManifest?.execution.merge ?? null,
       ...(waveIndex != null ? { wave_index: waveIndex } : {}),
       ...(currentModel !== config.agentModel ? { model_override: currentModel } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
@@ -5566,6 +5913,18 @@ async function executeStory(
       ...(graphHits != null ? { graph_hits: graphHits } : {}),
     }, story.id);
   };
+
+  if (worktreeInfo && workspaceId && worktreeInfo.resolverPosture) {
+    // Append-only WAL provenance is immutable once the effective posture is
+    // known. Later retries/reroutes must create a new contribution record.
+    await emitWalEvent(config.port, 'story_contribution_started', workspaceId, {
+      run_id: config.runId,
+      story_id: story.id,
+      completion_scope: 'story_worktree',
+      worktree_branch: worktreeInfo.branchName,
+      posture: worktreeInfo.resolverPosture,
+    }, story.id);
+  }
 
   if (effectiveAgent !== 'pi' || isPtyTerminalMode(config.terminalMode)) {
     await emitStoryStarted();
@@ -5582,6 +5941,11 @@ async function executeStory(
 
   // CIE-007: Mark story started in run-state.json
   rsMarkStoryStarted(effectiveCwd, story.id);
+
+  const currentPiCompletionPacket = (status: Parameters<typeof buildPiCompletionPacket>[1], summary: string): PiCompletionPacket | undefined =>
+    piSessionOptions?.progressLogPath
+      ? buildPiCompletionPacket(piSessionOptions.progressLogPath, status, summary)
+      : undefined;
 
   const storyResultExtra: Record<string, unknown> = worktreeInfo
     ? { worktreePath: worktreeInfo.worktreePath, worktreeBranch: worktreeInfo.branchName }
@@ -5731,7 +6095,7 @@ async function executeStory(
         tokenUpdateCallback,
         config.thinkingEnabled,
         config.thinkingBudget,
-        config.effortLevel,
+        currentEffort,
         Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
         piRetryContext,
         effectiveAgent === 'pi' ? emitStoryStarted : undefined,
@@ -5883,7 +6247,22 @@ async function executeStory(
       logger.info(`${story.id} completed (exit 0)`);
 
       const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
-      const gate = skipGate ? { passed: true } as GateResult : runGate(effectiveCwd);
+      let hostValidationObservations: HostValidationObservation[] = [];
+      // Manifest validations bind to the committed story revision below. Legacy
+      // runs retain the historical pre-commit typecheck gate.
+      const gate = skipGate || executionManifest
+        ? { passed: true } as GateResult
+        : runGate(effectiveCwd);
+      if (workspaceId && gate.observations) {
+        for (const observation of gate.observations) {
+          await emitWalEvent(config.port, 'validation_result', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            manifest_hash: executionManifest?.manifestHash,
+            ...observation,
+          }, story.id);
+        }
+      }
 
       if (!gate.passed) {
         logger.info(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
@@ -5908,14 +6287,25 @@ async function executeStory(
           writeProgressTxt(effectiveCwd);
         }
 
-        if (workspaceId) {
+        if (workspaceId && currentRetries >= MAX_RETRIES) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id, reason: gate.reason,
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'max_retries',
+            blocker_reason: gate.reason,
             ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
           await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        } else if (workspaceId) {
+          await emitWalEvent(config.port, 'story_retry', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            attempt: currentRetries + 1,
+            max_attempts: MAX_RETRIES,
+            reason: gate.reason,
+          }, story.id);
         }
 
         if (currentRetries >= MAX_RETRIES) {
@@ -5930,6 +6320,7 @@ async function executeStory(
           }
         }
         await persistRetrievalOutcome(false);
+        if (currentRetries < MAX_RETRIES) continue;
         return 'failed';
       }
 
@@ -5947,7 +6338,7 @@ async function executeStory(
           : getCommittedStoryChangesSince(effectiveCwd, storyStartHead).meaningfulFiles;
 
         if (mode !== 'journey' && meaningfulFiles.length === 0 && committedMeaningfulFiles.length === 0) {
-          if (storyAllowsNoCodeChanges(story, mode)) {
+          if (allowsNoCodeChanges) {
             logger.info(`${story.id}: No meaningful file changes detected, but the story is validation/documentation-only — allowing pass`);
           } else {
             const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
@@ -6000,15 +6391,31 @@ async function executeStory(
             }
 
             logger.warn(`${story.id}: Agent exited 0 but only changed runtime metadata — treating as failure`);
+            recordPiProgress({ closeoutState: ['blocked: max_retries after no_code_changes'] });
+            const noCodeCompletionPacket = currentPiCompletionPacket(
+              'blocked',
+              'Maximum repair attempts produced no meaningful implementation change.',
+            );
             if (workspaceId) {
               await emitWalEvent(config.port, 'story_failed', workspaceId, {
                 run_id: config.runId,
                 story_id: story.id,
-                reason: 'no_code_changes',
+                reason: 'max_retries',
+                blocker_reason: 'no_code_changes',
                 summary: 'Agent subprocess exited successfully but only changed runtime/metadata files.',
                 log_file: storyLogFile,
+                ...(noCodeCompletionPacket ? { completion_packet: noCodeCompletionPacket } : {}),
               }, story.id);
-              await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+              await postStoryResult(config.port, {
+                runId: config.runId,
+                storyId: story.id,
+                status: 'fail',
+                logPath: storyLogFile,
+                ...storyResultExtra,
+                ...activeSkillsExtra,
+                ...tokenPayload,
+                ...(noCodeCompletionPacket ? { completionPacket: noCodeCompletionPacket } : {}),
+              });
             }
             markStorySkipped(config.jsonPath, story.id);
             rsMarkStoryFailed(effectiveCwd, {
@@ -6100,6 +6507,8 @@ async function executeStory(
         const committedChanges = getCommittedStoryChangesSince(effectiveCwd, storyStartHead);
         if (committedChanges.meaningfulFiles.length > 0) {
           logger.info(`${story.id}: Agent already committed meaningful story changes (${committedChanges.meaningfulFiles.join(', ')})`);
+        } else if (allowsNoCodeChanges) {
+          logger.info(`${story.id}: No commit required by the frozen validation/no-code profile`);
         } else {
           const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
           retryCounts.set(story.id, noChangeRetries);
@@ -6149,15 +6558,31 @@ async function executeStory(
           }
 
           logger.warn(`${story.id}: ${failureSummary} — treating as failure`);
+          recordPiProgress({
+            knownIssues: [failureSummary],
+            closeoutState: [`blocked: max_retries after ${failureReason}`],
+          });
+          const commitFailurePacket = currentPiCompletionPacket('blocked', failureSummary);
           if (workspaceId) {
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
-              reason: failureReason,
+              reason: effectiveAgent === 'pi' ? 'max_retries' : failureReason,
+              blocker_reason: failureReason,
               summary: failureSummary,
               log_file: storyLogFile,
+              ...(commitFailurePacket ? { completion_packet: commitFailurePacket } : {}),
             }, story.id);
-            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+              ...(commitFailurePacket ? { completionPacket: commitFailurePacket } : {}),
+            });
           }
           markStorySkipped(config.jsonPath, story.id);
           rsMarkStoryFailed(effectiveCwd, {
@@ -6172,6 +6597,78 @@ async function executeStory(
           });
           writeProgressTxt(effectiveCwd);
           await persistRetrievalOutcome(false);
+          return 'failed';
+        }
+      }
+
+      // Manifest-backed host validation runs after commit so revision-sensitive
+      // evidence binds to the actual story branch commit, never the superseded
+      // pre-commit HEAD. Any commit made by a validation command is recorded in
+      // before/after revisions and will be blocked by closeout until rerun.
+      if (executionManifest && !skipGate) {
+        const manifestGate = runGate(effectiveCwd, executionManifest);
+        hostValidationObservations = manifestGate.observations ?? [];
+        if (workspaceId && manifestGate.observations) {
+          for (const observation of manifestGate.observations) {
+            await emitWalEvent(config.port, 'validation_result', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              manifest_hash: executionManifest.manifestHash,
+              ...observation,
+            }, story.id);
+          }
+        }
+        if (!manifestGate.passed) {
+          const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, currentRetries);
+          recordPiProgress({
+            knownIssues: [`Host manifest validation failed: ${manifestGate.reason}.`],
+            validationResults: [`Host validation failure: ${manifestGate.output ?? manifestGate.reason}`],
+            remainingWork: ['Remediate the typed host validation blocker and rerun against the active revision.'],
+          });
+          if (currentRetries >= MAX_RETRIES) {
+            markStorySkipped(config.jsonPath, story.id);
+            rsMarkStoryFailed(effectiveCwd, {
+              storyId: story.id,
+              title: story.title,
+              status: 'failed',
+              startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+              finishedAt: new Date().toISOString(),
+              agentType: effectiveAgent,
+              failReason: 'gate_manifest_validation',
+              retries: currentRetries,
+            });
+            writeProgressTxt(effectiveCwd);
+          }
+          if (workspaceId && currentRetries >= MAX_RETRIES) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              reason: 'max_retries',
+              blocker_reason: 'manifest_validation',
+              summary: manifestGate.output,
+              log_file: storyLogFile,
+            }, story.id);
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+            });
+          } else if (workspaceId) {
+            await emitWalEvent(config.port, 'story_retry', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              attempt: currentRetries + 1,
+              max_attempts: MAX_RETRIES,
+              reason: 'manifest_validation',
+            }, story.id);
+          }
+          await persistRetrievalOutcome(false);
+          if (currentRetries < MAX_RETRIES) continue;
           return 'failed';
         }
       }
@@ -6371,6 +6868,179 @@ async function executeStory(
         return 'failed';
       }
 
+
+      // LFC-031: one common closeout seam for every mode and provider. This is
+      // deliberately after agent/host observations and before the first local or
+      // canonical pass projection. Legacy pre-manifest runs retain their bounded
+      // compatibility path; every manifest-backed run is fail-closed here.
+      if (executionManifest) {
+        let closeout: StoryCloseoutEnforcementResult | null = null;
+        let closeoutException: string | null = null;
+        try {
+          const proposedCompletionPacket = currentPiCompletionPacket(
+            'agent_proposed',
+            'Agent completed its execution turn; host validation and reconciliation are pending.',
+          );
+          closeout = await enforceStoryCloseout({
+            manifest: executionManifest,
+            cwd: effectiveCwd,
+            storyStartHead,
+            storyLogFile,
+            agentType: effectiveAgent,
+            model: currentModel,
+            effort: currentEffort ?? null,
+            piSessionId: result.piSessionId,
+            attemptStartedAt: agentAttemptStartedAt,
+            attemptElapsedMs: result.elapsedMs,
+            requestedAttempt: executionManifest.identity.attempt + (retryCounts.get(story.id) ?? 0),
+            validations: hostValidationObservations,
+            completionPacket: proposedCompletionPacket,
+          });
+        } catch (error: unknown) {
+          closeoutException = error instanceof Error ? error.message : String(error);
+        }
+
+        if (!closeout || closeout.decision.status !== 'accepted') {
+          const reason = closeout ? 'closeout_blocked' : 'closeout_exception';
+          const reasonCodes = closeout?.decision.reasonCodes ?? ['CLOSEOUT_EXCEPTION'];
+          const remediation = closeout?.decision.nextSafeAction.remediation
+            ?? 'Inspect closeout persistence/evaluation diagnostics and retry without changing the frozen manifest.';
+          const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, currentRetries);
+          logger.warn(`${story.id} ${reason}: ${reasonCodes.join(', ')}${closeoutException ? ` — ${closeoutException}` : ''}`);
+          recordPiProgress({
+            knownIssues: [`Story closeout blocked: ${reasonCodes.join(', ')}${closeoutException ? ` — ${closeoutException}` : ''}`],
+            validationResults: [`Closeout decision: ${reason}; no pass state was written.`],
+            remainingWork: [remediation],
+            closeoutState: [`blocked: ${reasonCodes.join(', ')}`],
+          });
+          const blockedCompletionPacket = currentPiCompletionPacket('blocked', remediation);
+
+          if (currentRetries >= MAX_RETRIES) {
+            await markStorySkipped(config.jsonPath, story.id);
+            rsMarkStoryFailed(effectiveCwd, {
+              storyId: story.id,
+              title: story.title,
+              status: 'failed',
+              startedAt: new Date(agentAttemptStartedAt).toISOString(),
+              finishedAt: new Date(agentAttemptStartedAt + result.elapsedMs).toISOString(),
+              agentType: effectiveAgent,
+              failReason: reason,
+              retries: currentRetries,
+              elapsedMs: result.elapsedMs,
+            });
+            writeProgressTxt(effectiveCwd);
+          }
+
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              reason: effectiveAgent === 'pi'
+                ? (currentRetries >= MAX_RETRIES ? 'max_retries' : 'blocked')
+                : reason,
+              blocker_reason: reason,
+              closeout_reason_codes: reasonCodes,
+              closeout_decision_id: closeout?.decision.decisionId ?? null,
+              attempt_result_id: closeout?.attempt.attemptResultId ?? null,
+              manifest_hash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
+              remediation,
+              error_message: closeoutException,
+              retries: currentRetries,
+              log_file: storyLogFile,
+              ...(worktreeInfo ? {
+                worktree_path: worktreeInfo.worktreePath,
+                worktree_branch: worktreeInfo.branchName,
+                worktree_preserved: true,
+              } : {}),
+              ...(graphHits != null ? { graph_hits: graphHits } : {}),
+              ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
+            }, story.id);
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason,
+              closeoutReasonCodes: reasonCodes,
+              closeoutDecisionId: closeout?.decision.decisionId ?? null,
+              attemptResultId: closeout?.attempt.attemptResultId ?? null,
+              manifestHash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+              ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+            });
+          }
+          if (currentRetries >= MAX_RETRIES && workspaceId) {
+            await autoSynthesizeMemory(
+              story.id,
+              workspaceId,
+              buildStoryText(story),
+              readLogTail(storyLogFile),
+              'failed',
+              config.runId,
+              config.port,
+            );
+          }
+          await persistRetrievalOutcome(false);
+          if (currentRetries < MAX_RETRIES) {
+            if (workspaceId) {
+              await emitWalEvent(config.port, 'story_retry', workspaceId, {
+                run_id: config.runId,
+                story_id: story.id,
+                attempt: currentRetries + 1,
+                max_attempts: MAX_RETRIES,
+                reason: 'closeout_blocked',
+              }, story.id);
+            }
+            continue;
+          }
+          return 'closeout_blocked';
+        }
+        logger.info(`${story.id} closeout accepted (${closeout.decision.decisionId})`);
+      } else if (effectiveAgent === 'pi') {
+        const remediation = 'Re-dispatch the Pi story with a valid immutable execution manifest; process exit cannot authorize pass.';
+        recordPiProgress({
+          knownIssues: ['Pi closeout blocked because the immutable execution manifest is missing.'],
+          remainingWork: [remediation],
+          closeoutState: ['blocked: missing_execution_manifest'],
+        });
+        const blockedCompletionPacket = currentPiCompletionPacket('blocked', remediation);
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'blocked',
+            blocker_reason: 'missing_execution_manifest',
+            ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
+          }, story.id);
+          await postStoryResult(config.port, {
+            runId: config.runId,
+            storyId: story.id,
+            status: 'fail',
+            reason: 'missing_execution_manifest',
+            logPath: storyLogFile,
+            ...storyResultExtra,
+            ...activeSkillsExtra,
+            ...tokenPayload,
+            ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+          });
+        }
+        await persistRetrievalOutcome(false);
+        return 'closeout_blocked';
+      }
+
+      recordPiProgress({
+        completedWork: ['Host validation and shared closeout reconciliation accepted the agent proposal.'],
+        remainingWork: ['None; host-validated closeout is complete.'],
+        closeoutState: ['validated: shared LFC-031 closeout accepted'],
+      });
+      const validatedCompletionPacket = currentPiCompletionPacket(
+        'validated',
+        'Agent proposal was accepted by host validation and shared closeout reconciliation.',
+      );
+
       retryCounts.delete(story.id);
       retryCounts.delete(rateLimitKey);
 
@@ -6396,6 +7066,9 @@ async function executeStory(
         activeSkillsExtra,
         tokenPayload,
         ...(graphHits != null ? { graphHits } : {}),
+        commitSha: getGitHead(effectiveCwd),
+        commitBranch: getGitBranch(effectiveCwd),
+        ...(validatedCompletionPacket ? { completionPacket: validatedCompletionPacket } : {}),
       };
 
       if (worktreeInfo && pendingIntegratedPasses) {
@@ -6433,7 +7106,12 @@ async function executeStory(
         knownIssues: [`Story timed out after ${timeoutMin} minutes.`],
         validationResults: [`Attempt timed out after ${timeoutMin}m.`],
         remainingWork: ['Investigate the timeout, split the work, or run narrower checks before retrying.'],
+        closeoutState: ['timeout: story-owned Pi process tree cleanup requested'],
       });
+      const timeoutCompletionPacket = currentPiCompletionPacket(
+        'timeout',
+        `Story timed out after ${timeoutMin} minutes; host did not accept completion.`,
+      );
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -6452,8 +7130,18 @@ async function executeStory(
           output_tokens: tokenPayload.outputTokens,
           cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          ...(timeoutCompletionPacket ? { completion_packet: timeoutCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(timeoutCompletionPacket ? { completionPacket: timeoutCompletionPacket } : {}),
+        });
 
         // PG-020: Auto-synthesize memory from timed-out story
         await autoSynthesizeMemory(
@@ -6537,7 +7225,12 @@ async function executeStory(
         knownIssues: [`Non-retryable ${effectiveAgent} failure: ${classified.category}.`],
         validationResults: [`Attempt failed: ${classified.category} — ${classified.message}`],
         remainingWork: ['Resolve the configuration or runtime issue before rerunning.'],
+        closeoutState: [`blocked: ${classified.category}`],
       });
+      const blockedCompletionPacket = currentPiCompletionPacket(
+        'blocked',
+        `${classified.category}: ${classified.message}`,
+      );
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -6550,12 +7243,24 @@ async function executeStory(
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
-          reason: classified.category, error_message: classified.message,
+          reason: effectiveAgent === 'pi' ? 'blocked' : classified.category,
+          blocker_reason: classified.category,
+          error_message: classified.message,
           agent_type: effectiveAgent, exit_code: result.exitCode,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+        });
 
         // PG-020: Auto-synthesize memory from non-retryable failure
         await autoSynthesizeMemory(
@@ -6579,7 +7284,12 @@ async function executeStory(
         knownIssues: [`Engine exhausted retries due to ${classified.category}.`],
         validationResults: [`Max retries reached: ${classified.message}`],
         remainingWork: ['Inspect the logs and resolve the underlying failure before rerunning.'],
+        closeoutState: ['blocked: max_retries'],
       });
+      const maxRetriesCompletionPacket = currentPiCompletionPacket(
+        'blocked',
+        `Maximum retries reached after ${classified.category}: ${classified.message}`,
+      );
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -6598,8 +7308,18 @@ async function executeStory(
           agent_type: effectiveAgent,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
+          ...(maxRetriesCompletionPacket ? { completion_packet: maxRetriesCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(maxRetriesCompletionPacket ? { completionPacket: maxRetriesCompletionPacket } : {}),
+        });
 
         // PG-020: Auto-synthesize memory from max-retries failure
         await autoSynthesizeMemory(
@@ -6630,10 +7350,16 @@ async function executeStory(
       }, story.id);
     }
     await persistRetrievalOutcome(false);
-    return 'failed';
+    continue;
     }
   } finally {
-    // Pi story progress logs are intentionally persistent across retries and compaction.
+    // Progress is intentionally persistent; transient skill/process ownership is not.
+    unregisterPiProgressLog();
+    try {
+      await deletePiGeneratedSkillFile(piSkillBundle?.generatedSkillFile);
+    } catch (error: unknown) {
+      logger.warn(`  [pi] Failed to delete generated story skill: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 
@@ -6649,6 +7375,7 @@ export {
   isMeaningfulStoryChange,
   classifyStoryWorkingTreeChanges,
   getCommittedStoryChangesSince,
+  storyAllowsNoCodeChanges,
   formatRetrievedMemorySection,
   buildRetrievalSelectionsFromContext as buildStoryRetrievalSelections,
 };
@@ -6840,17 +7567,13 @@ async function main(): Promise<void> {
   initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
-  const piServerSkillBundle = requiredEngines.has('pi')
-    ? buildPiServerSkillFiles(config.cwd, config.runId)
-    : null;
-
   if (requiredEngines.has('pi')) {
     logger.info('[pi-rpc] Pi story RPC servers will be started per story for wave-parallel execution');
   }
 
   async function cleanupBrowserServers(): Promise<void> {
     await stopPiRpcServer();
-    await deleteFileIfExists(piServerSkillBundle?.generatedSkillFile);
+    await cleanupPiRunTempArtifacts(config.runId);
     if (_playwrightMcpServerPid) {
       try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
     }
@@ -6866,10 +7589,36 @@ async function main(): Promise<void> {
     }
   }
 
+  const flushPiShutdownCloseout = async (
+    status: 'cancelled' | 'worker_shutdown',
+    summary: string,
+  ): Promise<void> => {
+    const packets = flushActivePiStoryProgressLogs(status, summary);
+    if (!workspaceId) return;
+    for (const { ownerId, packet } of packets) {
+      const storyId = ownerId.slice(ownerId.indexOf(':') + 1);
+      await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        run_id: config.runId,
+        story_id: storyId,
+        reason: 'blocked',
+        blocker_reason: status,
+        completion_packet: packet,
+      }, storyId);
+      await postStoryResult(config.port, {
+        runId: config.runId,
+        storyId,
+        status: 'fail',
+        reason: status,
+        completionPacket: packet,
+      });
+    }
+  };
+
   process.on('SIGINT', () => {
     void (async () => {
       logger.info('');
       logger.info('[engine] Received SIGINT — stopping run');
+      await flushPiShutdownCloseout('cancelled', 'Engine received SIGINT; progress was flushed before process cleanup.');
       await runRegisteredPtyCleanupTasks();
       await shutdownWalTelemetry();
       await cleanupBrowserServers();
@@ -6880,6 +7629,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     void (async () => {
       logger.error('[engine] Received SIGTERM — terminating run before completion');
+      await flushPiShutdownCloseout('worker_shutdown', 'Engine received SIGTERM from cancellation or worker shutdown; progress was flushed before process cleanup.');
       await runRegisteredPtyCleanupTasks();
       await shutdownWalTelemetry();
       await cleanupBrowserServers();
@@ -6909,7 +7659,7 @@ async function main(): Promise<void> {
   }
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
-  if (config.parallelism > 1 && !config.specificStory) {
+  if (config.parallelism > 1 && config.terminalMode !== 'pty' && !config.specificStory) {
     process.exitCode = await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, initialExecutableStories, personaRegistry);
     return;
   }
@@ -6969,19 +7719,10 @@ async function main(): Promise<void> {
       writeProgressTxt(config.cwd);
       archiveRunState(config.cwd, config.runId);
 
-      // Auto-merge run-level worktree back into the workspace main branch.
-      // Only fires as a standalone fallback — when spawned by the worker
-      // (RORCA_PROCESS_ROLE=engine), the worker handles the more sophisticated
-      // autoMergeAfterRun() with agentic conflict resolution, WAL events, and
-      // merge_status tracking. Running both would cause a double-merge race.
-      if (config.worktreePath && config.branchName && config.workspacePath && process.env.RORCA_PROCESS_ROLE !== 'engine') {
-        const allPassed = executableStories.every(s => s.excluded || isPassed(s));
-        if (allPassed) {
-          autoMergeRunWorktree(config.workspacePath, config.worktreePath, config.branchName);
-        } else {
-          logger.warn(`[auto-merge] Skipping merge — not all stories passed for ${config.branchName}`);
-        }
-      }
+      // The worker is the sole final-base-merge authority. A direct engine
+      // invocation lacks the persisted run policy needed to prove
+      // autoMerge=true and mergeStrategy=direct, so it always preserves the
+      // run worktree. Internal wave merges still assemble the isolated branch.
 
       process.exitCode = 0;
       return;
@@ -7081,6 +7822,7 @@ async function runParallel(
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
+  const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
@@ -7133,7 +7875,12 @@ async function runParallel(
     const worktreeMap = new Map<string, StoryWorktree>();
 
     for (const story of executableStories) {
-      const wt = createStoryWorktree(config.cwd, specSlug, story.id);
+      const wt = createStoryWorktree(
+        config.cwd,
+        specSlug,
+        story.id,
+        config.executionManifests.get(story.id)?.execution.worktree,
+      );
       if (wt) {
         worktreeMap.set(story.id, wt);
       } else {
@@ -7174,10 +7921,14 @@ async function runParallel(
         const { storyId, result } = settled.value;
         processedIds.add(storyId);
         const wt = worktreeMap.get(storyId);
-        if (result === 'failed') {
+        if (result !== 'passed') {
           failedIds.add(storyId);
-          if (wt) failedInWave.push(wt);
-        } else if (result === 'passed' && wt) {
+          if (result === 'closeout_blocked' && wt) {
+            logger.info(`  [closeout] Preserving blocked worktree for inspection: ${wt.worktreePath}`);
+          } else if (wt) {
+            failedInWave.push(wt);
+          }
+        } else if (wt) {
           passedInWave.push(wt);
         }
       } else {
@@ -7198,17 +7949,16 @@ async function runParallel(
           await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
           logger.info(`  [worktree] Preserving failed merge worktree for inspection: ${wt.worktreePath}`);
         } else {
-          if (pendingPass) {
-            await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-            pendingIntegratedPasses.delete(wt.storyId);
-          } else {
-            await markStoryPassed(config.jsonPath, wt.storyId);
+          if (!pendingPass) {
+            throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
           }
+          await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+          pendingIntegratedPasses.delete(wt.storyId);
           removeStoryWorktree(config.cwd, wt);
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
-        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir);
+        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir, config, workspaceId ?? '', integratedPostures);
 
         if (mergeResult.success) {
           if (workspaceId) {
@@ -7218,14 +7968,14 @@ async function runParallel(
             });
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
+          // Advance each story only after its contribution reached the run branch.
           for (const wt of passedInWave) {
             const pendingPass = pendingIntegratedPasses.get(wt.storyId);
-            if (pendingPass) {
-              await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-              pendingIntegratedPasses.delete(wt.storyId);
-            } else {
-              await markStoryPassed(config.jsonPath, wt.storyId);
+            if (!pendingPass) {
+              throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
             }
+            await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+            pendingIntegratedPasses.delete(wt.storyId);
           }
           for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
         } else {
@@ -7255,12 +8005,11 @@ async function runParallel(
           for (const wt of passedInWave) {
             if (!failedStoryIds.has(wt.storyId)) {
               const pendingPass = pendingIntegratedPasses.get(wt.storyId);
-              if (pendingPass) {
-                await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-                pendingIntegratedPasses.delete(wt.storyId);
-              } else {
-                await markStoryPassed(config.jsonPath, wt.storyId);
+              if (!pendingPass) {
+                throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
               }
+              await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+              pendingIntegratedPasses.delete(wt.storyId);
               removeStoryWorktree(config.cwd, wt);
             }
           }
@@ -7341,6 +8090,29 @@ async function resolveWorkspaceId(port: number, cwd: string): Promise<string | n
 
 // ─── Argument Parser ────────────────────────────────────────────────────────
 
+function freezeLoadedExecutionManifest<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value as Record<string, unknown>)) freezeLoadedExecutionManifest(item);
+  }
+  return value;
+}
+
+function loadExecutionManifestMap(manifestPath: string | null, runId: number): ReadonlyMap<string, StoryExecutionManifest> {
+  if (!manifestPath) return new Map(); // Named legacy compatibility path only.
+  const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as unknown;
+  if (!Array.isArray(parsed)) throw new Error('Execution manifest bundle must be an array');
+  const manifests = new Map<string, StoryExecutionManifest>();
+  for (const candidate of parsed) {
+    const manifest = candidate as StoryExecutionManifest;
+    if (!verifyStoryExecutionManifest(manifest)) throw new Error('Execution manifest bundle contains a stale or invalid hash');
+    if (manifest.identity.runId !== runId) throw new Error('Execution manifest bundle contains the wrong run identity');
+    if (manifests.has(manifest.identity.storyId)) throw new Error(`Duplicate execution manifest for ${manifest.identity.storyId}`);
+    manifests.set(manifest.identity.storyId, freezeLoadedExecutionManifest(manifest));
+  }
+  return manifests;
+}
+
 function parseArgs(): EngineConfig {
   const args = process.argv.slice(2);
   let jsonPath = '';
@@ -7363,6 +8135,7 @@ function parseArgs(): EngineConfig {
   let thinkingEnabled: boolean | undefined;
   let thinkingBudget: number | undefined;
   let effortLevel: 'low' | 'medium' | 'high' | 'max' | 'xhigh' | undefined;
+  let executionManifestPath: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -7435,6 +8208,9 @@ function parseArgs(): EngineConfig {
       case '--reasoning-effort':
         effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max' | 'xhigh';
         break;
+      case '--execution-manifests':
+        executionManifestPath = args[++i];
+        break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
@@ -7451,7 +8227,8 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, workspaceId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
+  const executionManifests = loadExecutionManifestMap(executionManifestPath, runId);
+  return { jsonPath, cwd, runId, workspaceId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, executionManifests };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

@@ -106,6 +106,7 @@ export async function ensureQueues(boss: PgBoss): Promise<void> {
   await boss.createQueue('pipeline:cancel');
   await boss.createQueue('pipeline:cron');
   await boss.createQueue('pipeline:merge');
+  await boss.createQueue('pipeline:pr-delivery');
   await boss.createQueue('spec:enrich');
   await boss.createQueue('context:enrich');
   await boss.createQueue('workspace:hydrate');
@@ -114,7 +115,7 @@ export async function ensureQueues(boss: PgBoss): Promise<void> {
   await boss.createQueue('spec:match-skills');
   await boss.createQueue('spec:memory-synthesis');
   await boss.createQueue('spec:suggest-skills');
-  logger.debug('[pg-boss] ensureQueues — pipeline, context capture/distillation, and spec job queues created');
+  logger.debug('[pg-boss] ensureQueues — pipeline, reviewed PR delivery, context capture/distillation, and spec job queues created');
 }
 
 /**

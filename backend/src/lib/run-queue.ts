@@ -16,9 +16,56 @@ interface QueuedRunRow {
   queued_at: string;
   queue_position: number;
   auto_worktree: boolean;
+  auto_merge: boolean;
+  merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
+  include_graph: boolean;
+  terminal_mode: 'ansi-html' | 'pty' | null;
+  agent_type: 'claude' | 'opencode' | 'codex' | 'pi';
+  agent_model: string | null;
+  effective_options: { effort?: string | null } | null;
 }
 
 const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
+
+/**
+ * Bounded, canonical queue view for recovery clients. This intentionally reads
+ * pipeline_runs rather than exposing pg-boss jobs or their data payloads.
+ */
+export interface WorkspaceRecoveryQueueSummary {
+  queued: number;
+  active: number;
+  oldestQueuedAgeSeconds: number | null;
+  staleActive: number;
+}
+
+export async function getWorkspaceRecoveryQueueSummary(workspaceId: string): Promise<WorkspaceRecoveryQueueSummary> {
+  const row = await queryOne<{
+    queued: string;
+    active: string;
+    oldest_queued_age_seconds: number | null;
+    stale_active: string;
+  }>(
+    `SELECT
+       COUNT(*) FILTER (WHERE status = 'queued')::text AS queued,
+       COUNT(*) FILTER (WHERE status IN ('running', 'paused'))::text AS active,
+       EXTRACT(EPOCH FROM (NOW() - MIN(queued_at)))::integer
+         FILTER (WHERE status = 'queued') AS oldest_queued_age_seconds,
+       COUNT(*) FILTER (
+         WHERE status = 'running'
+           AND COALESCE(last_heartbeat, started_at, queued_at) < NOW() - INTERVAL '5 minutes'
+       )::text AS stale_active
+     FROM pipeline_runs
+     WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+
+  return {
+    queued: Number(row?.queued ?? 0),
+    active: Number(row?.active ?? 0),
+    oldestQueuedAgeSeconds: row?.oldest_queued_age_seconds ?? null,
+    staleActive: Number(row?.stale_active ?? 0),
+  };
+}
 
 /**
  * Read queue_max_concurrent from worker_settings.
@@ -68,7 +115,10 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
 
     // Find the next queued run (oldest first), including auto_worktree
     const nextQueued = await queryOne<QueuedRunRow>(
-      `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree FROM pipeline_runs
+      `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree,
+              auto_merge, merge_strategy, include_graph, terminal_mode, agent_type,
+              agent_model, effective_options
+         FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
        ORDER BY queued_at ASC NULLS LAST, id ASC LIMIT 1`,
       [workspaceId],
@@ -109,6 +159,13 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
         workspaceId: nextQueued.workspace_id,
         queuedRunId: nextQueued.id,
         autoWorktree: nextQueued.auto_worktree,
+        autoMerge: nextQueued.auto_merge,
+        mergeStrategy: nextQueued.merge_strategy ?? 'branch-only',
+        includeGraph: nextQueued.include_graph,
+        terminalMode: nextQueued.terminal_mode ?? 'ansi-html',
+        agentOverride: nextQueued.agent_type,
+        modelOverride: nextQueued.agent_model ?? undefined,
+        effortLevel: nextQueued.effective_options?.effort ?? undefined,
       }),
     }).then(async (resp) => {
       if (!resp.ok) {

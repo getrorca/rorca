@@ -35,6 +35,7 @@ import contextCandidatesRouter from './routes/context-candidates';
 import contextCaptureRouter from './routes/context-capture';
 import captureIngestRouter from './routes/capture-ingest';
 import pipelineRouter, { cleanupOldLogs, cleanupOrphanRuns } from './routes/pipeline';
+import recoveryRouter from './routes/recovery';
 import hooksRouter from './routes/hooks';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
@@ -136,6 +137,12 @@ import {
 } from './lib/mcp-auth';
 import { summarizeRorcaTiers } from './lib/tier-auth';
 import { planGate } from './lib/plan-gate';
+import lifecycleRouter from './routes/lifecycle';
+import lifecycleEvidenceRouter from './routes/lifecycle-evidence';
+import lifecycleDecisionsRouter from './routes/lifecycle-decisions';
+import lifecycleMutationsRouter from './routes/lifecycle-mutations';
+import deliveryGovernanceRouter from './routes/delivery-governance';
+import { startSsdlcEvidenceNormalizer } from './lib/ssdlc-evidence-subscriber';
 import { randomUUID } from 'crypto';
 
 
@@ -223,7 +230,7 @@ app.use(cors({
   origin: corsOrigin,
   credentials: allowCredentials,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key', 'Idempotency-Key'],
   maxAge: 86400,
 }));
 
@@ -416,6 +423,8 @@ app.use('/api/context-candidates', contextCandidatesRouter);
 app.use('/api/context-capture', contextCaptureRouter);
 app.use('/api/workspaces', captureIngestRouter);
 app.use('/api/pipeline', pipelineRouter);
+// Admin-only and deliberately absent from MCP/OpenAPI tool generation.
+app.use('/api/admin/recovery', recoveryRouter);
 app.use('/api/execution-environments', executionEnvironmentsRouter);
 app.use('/api/pipeline/hooks', hooksRouter);
 app.use('/api/pipeline/schedules', schedulesRouter);
@@ -428,6 +437,7 @@ app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/workspaces', workspaceGithubRouter);
+app.use('/api/workspaces', deliveryGovernanceRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/analytics', analyticsRouter);
@@ -463,6 +473,10 @@ app.use('/api/workflow-router', workflowRouterRouter);
 app.use('/api/retrieval-traces', retrievalTracesRouter);
 app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/gitreins', gitReinsEvidenceRouter);
+app.use('/api/lifecycle', lifecycleRouter);
+app.use('/api/lifecycle', lifecycleEvidenceRouter);
+app.use('/api/lifecycle', lifecycleDecisionsRouter);
+app.use('/api/lifecycle', lifecycleMutationsRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
@@ -506,6 +520,9 @@ if (BACKGROUND_RUNTIME_ENABLED) {
 
   // US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
   startCheckRunPoster();
+
+  // LFC-005: Normalize run/story evidence as an isolated immutable side-write.
+  startSsdlcEvidenceNormalizer();
 
   // PR-019: Auto-rotate memory after each pipeline run completion
   // PR-018: Auto-deduplicate memory after rotation (post-run)

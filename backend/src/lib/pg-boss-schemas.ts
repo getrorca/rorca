@@ -22,6 +22,14 @@ import { TerminalModeSchema } from './terminal-mode';
 import { ExecutionEnvironmentSchema } from './execution-environment';
 export type { UnifiedContextEventPayloadType } from './context-capture-contracts';
 
+const ExecutionSecretReferencesSchema = z.object({
+  version: z.literal('v1'),
+  workspaceId: z.string().min(1),
+  vaultUserId: z.string().min(1).optional(),
+  providers: z.array(z.enum(['anthropic', 'openrouter', 'openai-compat'])),
+  includeWorkspaceEnv: z.boolean(),
+}).strict();
+
 // ── pipeline:run ─────────────────────────────────────────────────────────────
 
 /**
@@ -51,7 +59,17 @@ export const PipelineRunJobPayload = z.object({
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
+  safetyOptions: z.object({
+    deploy: z.boolean(),
+    externalSend: z.boolean(),
+    policyLocked: z.boolean(),
+  }).strict().optional().default({ deploy: true, externalSend: true, policyLocked: false }),
+  /** Host-resolved immutable story manifests. Optional only for audited legacy jobs. */
+  executionManifestPath: z.string().min(1).optional(),
+  // Non-secret execution options only. Credentials and workspace values are
+  // referenced below and resolved by the worker immediately before spawn.
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
+  secretReferences: ExecutionSecretReferencesSchema.optional(),
   startFromStoryId: z.string().optional(),
   specificStory: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
@@ -65,6 +83,9 @@ export const PipelineRunJobPayload = z.object({
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
   taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  // Persisted request metadata is supplied by the pipeline route for worker
+  // correlation. It is not an execution authority, but strict schema parsing
+  // must preserve it rather than rejecting an otherwise valid run job.
   triggerOptions: z.record(z.string(), z.unknown()).optional(),
   executionEnvironmentId: z.string().optional(),
 }).strict();
@@ -81,14 +102,22 @@ export const PipelineRetryJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   originalRunId: z.coerce.number().int().positive(),
   storyIds: z.array(z.string()),
+  scopeHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  previewHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  approvedPreview: z.record(z.string(), z.unknown()),
+  generatedPlanHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
   retrySpecPath: z.string().min(1),
   agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),
   worktreePath: z.string().nullable(),
+  branchName: z.string().nullable(),
   sequenceOffset: z.number().int().min(0),
+  /** Host-resolved immutable retry manifests. Optional only for audited legacy jobs. */
+  executionManifestPath: z.string().min(1).optional(),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
+  secretReferences: ExecutionSecretReferencesSchema.optional(),
   includeGraph: z.boolean().optional().default(false),
   terminalMode: TerminalModeSchema.optional().default('ansi-html'),
   thinkingEnabled: z.boolean().optional(),
@@ -121,9 +150,26 @@ export const PipelineMergeJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   branch: z.string().min(1),
   workspaceId: z.string().min(1),
+  // Posture is non-secret persisted metadata. The worker re-verifies it from
+  // pipeline_runs before any semantic retry; old jobs may omit it.
+  posture: z.object({
+    agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
+    model: z.string().nullable(),
+    source: z.literal('manual-retry'),
+  }).optional(),
 }).strict();
 
 export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload>;
+
+// ── pipeline:pr-delivery ─────────────────────────────────────────────────────
+
+/** One bounded observation/actuation step for an existing reviewed PR. */
+export const AutonomousPrDeliveryJobPayload = z.object({
+  deliveryId: z.string().uuid(),
+  expectedHeadSha: z.string().regex(/^[0-9a-f]{40,64}$/),
+}).strict();
+
+export type AutonomousPrDeliveryJobPayloadType = z.infer<typeof AutonomousPrDeliveryJobPayload>;
 
 // ── spec jobs ────────────────────────────────────────────────────────────────
 

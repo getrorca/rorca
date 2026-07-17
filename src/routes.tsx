@@ -28,6 +28,7 @@ const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
  */
 export const PANEL_ROUTES: Record<PanelId, string> = {
   specs: '/specs',
+  lifecycle: '/lifecycle',
   runs: '/runs',
   analytics: '/analytics',
   direction: '/direction',
@@ -37,11 +38,18 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   'spec-review': '/specs',
 };
 
+/** Accept only same-origin app paths for drill-down return links. */
+export function safeInternalReturnTo(search: string, fallback: string): string {
+  const value = new URLSearchParams(search).get('returnTo');
+  return value && value.startsWith('/') && !value.startsWith('//') ? value : fallback;
+}
+
 /** Resolve current URL path to a PanelId. Returns 'specs' for unknown paths. */
 export function pathToPanelId(pathname: string): PanelId {
   if (/^\/runs\/\d+/.test(pathname)) return 'runs';
   if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'specs';
   if (pathname === '/analytics') return 'analytics';
+  if (pathname === '/lifecycle') return 'lifecycle';
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
   if (pathname === '/specs') return 'specs';
   if (pathname === '/runs') return 'runs';

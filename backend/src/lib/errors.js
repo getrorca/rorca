@@ -48,8 +48,8 @@ export class AuthError extends AppError {
 /** 403 — insufficient permissions */
 export class ForbiddenError extends AppError {
     statusCode = 403;
-    constructor(message = 'Insufficient permissions') {
-        super(message, 'FORBIDDEN');
+    constructor(message = 'Insufficient permissions', details) {
+        super(message, 'FORBIDDEN', details);
     }
 }
 /** 402 — paid plan or license required */

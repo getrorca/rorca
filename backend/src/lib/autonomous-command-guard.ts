@@ -10,7 +10,6 @@ import * as os from 'os';
 import * as path from 'path';
 
 const GUARD_DIR_PREFIX = 'rorca-autonomous-guard-';
-const LOCAL_DB_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 const AUTONOMOUS_SECRET_ENV_KEYS = new Set([
   'DATABASE_URL', 'DATABASE_URL_TEST', 'TEST_DATABASE_URL',
   'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE',
@@ -22,6 +21,7 @@ const AUTONOMOUS_SECRET_ENV_KEYS = new Set([
 export interface AutonomousCommandGuardOptions {
   cwd: string;
   env: Record<string, string>;
+  profile?: 'general' | 'conflict-resolution';
 }
 
 export interface AutonomousCommandGuardResult {
@@ -70,21 +70,10 @@ function buildAutonomousBackendJestEnv(url: URL): AutonomousBackendJestEnv | nul
 }
 
 export function deriveAutonomousBackendJestEnv(env: Record<string, string | undefined>): AutonomousBackendJestEnv | null {
-  const explicitTestUrl = parseUrl(env.DATABASE_URL_TEST);
-  const explicitTestEnv = explicitTestUrl ? buildAutonomousBackendJestEnv(explicitTestUrl) : null;
-  if (explicitTestEnv) return explicitTestEnv;
-
-  const databaseUrl = parseUrl(env.DATABASE_URL);
-  if (!databaseUrl) return null;
-  if (!LOCAL_DB_HOSTS.has(databaseUrl.hostname.toLowerCase())) return null;
-
-  const pgDatabase = getDatabaseName(databaseUrl);
-  if (!pgDatabase) return null;
-  if (!pgDatabase.endsWith('_test')) {
-    databaseUrl.pathname = `/${pgDatabase}_test`;
-  }
-
-  return buildAutonomousBackendJestEnv(databaseUrl);
+  // Never transform production credentials into test credentials. Autonomous
+  // runners require an explicit dedicated target, matching the Jest contract.
+  const explicitTestUrl = parseUrl(env.RORCA_TEST_DATABASE_URL || env.DATABASE_URL_TEST);
+  return explicitTestUrl ? buildAutonomousBackendJestEnv(explicitTestUrl) : null;
 }
 
 function resolveRealCommand(command: string): string | null {
@@ -106,7 +95,7 @@ function writeExecutable(filePath: string, content: string): void {
   fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o755 });
 }
 
-function buildWrapper(command: string, realCommand: string | null): string {
+function buildWrapper(command: string, realCommand: string | null, profile: 'general' | 'conflict-resolution'): string {
   const execTarget = realCommand ? shellQuote(realCommand) : command;
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -118,6 +107,24 @@ database_url="\${DATABASE_URL:-}"
 autonomous_jest_db_url="\${RORCA_AUTONOMOUS_BACKEND_JEST_DATABASE_URL:-}"
 pwd_now="$(pwd -P)"
 args_joined=" $* "
+profile=${shellQuote(profile)}
+
+if [[ "$profile" == "conflict-resolution" ]]; then
+  case "$cmd_name" in
+    gh|curl|wget|ssh|scp|rsync)
+      echo "[Rorca autonomous command guard] External/network command blocked during conflict resolution." >&2
+      exit 126
+      ;;
+    git)
+      case "\${1:-}" in
+        push|fetch|pull|remote|commit|merge|rebase|checkout|switch|reset|clean|worktree|tag)
+          echo "[Rorca autonomous command guard] Host-owned git operation blocked during conflict resolution." >&2
+          exit 126
+          ;;
+      esac
+      ;;
+  esac
+fi
 
 is_backend_dir=0
 if [[ -n "$workspace_root" ]]; then
@@ -146,6 +153,7 @@ esac
 
 if [[ $is_jest_like -eq 1 ]]; then
   if [[ $is_backend_dir -eq 1 && "$autonomous_jest_db_url" =~ _test($|[?&/]) ]]; then
+    export RORCA_TEST_DATABASE_URL="$autonomous_jest_db_url"
     export DATABASE_URL="$autonomous_jest_db_url"
     export DATABASE_URL_TEST="$autonomous_jest_db_url"
     export NODE_ENV=test
@@ -184,10 +192,13 @@ export function sanitizeAutonomousAgentEnv(env: Record<string, string>): Record<
 
 export function createAutonomousCommandGuard(options: AutonomousCommandGuardOptions): AutonomousCommandGuardResult {
   const guardBinDir = fs.mkdtempSync(path.join(os.tmpdir(), GUARD_DIR_PREFIX));
-  const commands = ['npm', 'npx', 'jest', 'yarn', 'pnpm'];
+  const profile = options.profile ?? 'general';
+  const commands = profile === 'conflict-resolution'
+    ? ['npm', 'npx', 'jest', 'yarn', 'pnpm', 'git', 'gh', 'curl', 'wget', 'ssh', 'scp', 'rsync']
+    : ['npm', 'npx', 'jest', 'yarn', 'pnpm'];
 
   for (const command of commands) {
-    writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command)));
+    writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command), profile));
   }
 
   const autonomousBackendJestEnv = deriveAutonomousBackendJestEnv(options.env);

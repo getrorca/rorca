@@ -22,6 +22,7 @@ import simpleGit from 'simple-git';
 import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
+import { resolveMergeConflict, type MergeResolutionPosture } from './merge-conflict-resolver';
 
 // ── Tracking-only files that are always safe to resolve with --theirs ────────
 const TRACKING_PATTERNS = [
@@ -29,6 +30,15 @@ const TRACKING_PATTERNS = [
   'progress.txt',
   '.rorca/memory/runs/',
 ];
+
+/** WAL is an operator surface: preserve bounded diagnostics, never local paths or diffs. */
+export function redactMergeDiagnostics(value: string, workspacePath?: string): string {
+  const withoutWorkspace = workspacePath ? value.split(workspacePath).join('<workspace>') : value;
+  return withoutWorkspace
+    .replace(/(?:^|\s)\/?(?:Users|private|tmp|home)\/[^\s:'"\n]+/g, ' <path>')
+    .replace(/^(?:\+\+\+|---|@@|[+-](?!\s*\d)).*$/gm, '[redacted-diff]')
+    .slice(0, 512);
+}
 
 export interface MergeResult {
   success: boolean;
@@ -57,14 +67,23 @@ export async function performMerge(
   runId: number | string,
   branchName: string,
   workspacePath: string,
+  resolverPosture?: MergeResolutionPosture,
+  resolverEnv: Record<string, string> = {},
 ): Promise<MergeResult> {
+  const normalizedRunId = Number(runId);
+  if (!Number.isSafeInteger(normalizedRunId) || normalizedRunId <= 0) {
+    return { success: false, error: 'Invalid run ID' };
+  }
   // Look up run row for worktree_path and workspace_id
   const run = await queryOne<{
     workspace_id: string;
     worktree_path: string | null;
     branch_name: string | null;
+    auto_merge: boolean | null;
+    merge_strategy: string | null;
   }>(
-    'SELECT workspace_id, worktree_path, branch_name FROM pipeline_runs WHERE id = $1',
+    `SELECT workspace_id, worktree_path, branch_name, auto_merge, merge_strategy
+     FROM pipeline_runs WHERE id = $1`,
     [runId],
   );
 
@@ -75,6 +94,13 @@ export async function performMerge(
   const worktreePath = run.worktree_path;
   const workspaceId = run.workspace_id;
   const effectiveBranch = branchName || run.branch_name;
+
+  // This service is the final base-branch merge boundary. Do not rely solely
+  // on route/worker callers: branch-only and PR runs must retain their branch
+  // and worktree even if an internal caller reaches this function directly.
+  if (run.auto_merge !== true || run.merge_strategy !== 'direct') {
+    return { success: false, error: 'Final base merge requires autoMerge=true and mergeStrategy=direct' };
+  }
 
   if (!effectiveBranch) {
     await execute(
@@ -108,7 +134,7 @@ export async function performMerge(
   let result: MergeResult;
 
   try {
-    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, runId);
+    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, normalizedRunId, resolverPosture, resolverEnv);
   } finally {
     // Always restore stash
     if (stashed) {
@@ -137,11 +163,14 @@ async function executeMerge(
   worktreePath: string | null,
   workspacePath: string,
   workspaceId: string,
-  runId: number | string,
+  runId: number,
+  resolverPosture?: MergeResolutionPosture,
+  resolverEnv: Record<string, string> = {},
 ): Promise<MergeResult> {
   // 2. Safety pre-check: dry-run merge
   let preCheckConflictFiles: string[] = [];
   let preCheckIsClean = false;
+  let semanticResolved = false;
 
   try {
     await git.merge([branchName, '--no-commit', '--no-ff']);
@@ -170,15 +199,43 @@ async function executeMerge(
           '[merge-handler] Only tracking file conflicts — auto-resolvable',
         );
       } else {
+        // Manual retry only supplies a persisted, validated posture. Never infer
+        // Claude here; legacy callers remain fail-closed/manual.
+        if (resolverPosture) {
+          try {
+            await git.merge([branchName, '--no-ff', '--no-commit']);
+          } catch {
+            const resolution = await resolveMergeConflict({
+              runId, workspaceId, cwd: workspacePath, branchName, conflictFiles: realConflicts,
+              logPath: path.join(workspacePath, '.rorca', 'logs', `run_${runId}_merge_resolve.log`),
+              posture: resolverPosture,
+              env: resolverEnv,
+            });
+            if (resolution.ok) {
+              await git.commit(`merge: ${branchName} (semantic retry)`);
+              semanticResolved = true;
+              preCheckIsClean = true;
+            }
+          }
+          if (semanticResolved) {
+            logger.info({ runId, agent: resolverPosture.agent }, '[merge-handler] Semantic retry resolved conflicts');
+          }
+        }
+        if (semanticResolved) {
+          // Continue through the normal success/event/worktree cleanup path.
+        } else {
+        // Leave the worktree and branch intact, but clear the base worktree's
+        // transient conflicted merge before reporting failure.
+        try { await git.merge(['--abort']); } catch { /* already clean */ }
         // Real code conflicts — emit WAL and bail
         const walEvent = await queryOne<WalEvent>(
           `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merge_failed', $1, $2) RETURNING *`,
           [workspaceId, JSON.stringify({
             run_id: runId,
             branchName,
-            worktreePath,
+            worktree: path.basename(worktreePath ?? ''),
             conflictFiles: realConflicts,
-            message: 'Auto-merge failed — code conflicts detected. Resolve manually or retry after fixing.',
+            message: redactMergeDiagnostics('Auto-merge failed — code conflicts detected. Resolve manually or retry after fixing.', workspacePath),
           })],
         );
         if (walEvent) broadcastAll(walEvent);
@@ -188,6 +245,7 @@ async function executeMerge(
           error: `Code conflicts in: ${realConflicts.join(', ')}`,
           conflictFiles: realConflicts,
         };
+        }
       }
     } else if (dryRunErr.message?.includes('Already up to date')) {
       preCheckIsClean = true;
@@ -201,8 +259,9 @@ async function executeMerge(
   }
 
   // 3. Execute the real merge
-  let mergeSuccess = false;
+  let mergeSuccess = semanticResolved;
   try {
+    if (!semanticResolved) {
     // Try fast-forward first
     try {
       await git.merge([branchName, '--ff-only']);
@@ -239,6 +298,7 @@ async function executeMerge(
           return { success: false, error: `Commit failed: ${commitErr.message}` };
         }
       }
+    }
     }
   } catch (unexpectedErr: any) {
     try { await git.merge(['--abort']); } catch { /* already clean */ }

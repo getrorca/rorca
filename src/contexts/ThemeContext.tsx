@@ -28,7 +28,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [mode, setModeRaw] = useState<ThemeMode>(() => {
     const stored = localStorage.getItem(LS_KEY);
     if (stored === 'light' || stored === 'dark' || stored === 'system') return stored;
-    return 'dark';
+    return 'light';
   });
 
   const [systemPref, setSystemPref] = useState<'light' | 'dark'>(getSystemPreference);

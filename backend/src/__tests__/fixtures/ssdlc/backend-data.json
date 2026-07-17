@@ -1,0 +1,41 @@
+{
+  "name": "backend data-storage change",
+  "input": {
+    "schemaVersion": 1,
+    "workspaceId": "workspace-data",
+    "canonicalSpec": {
+      "specId": "fixture-backend-data",
+      "version": "12",
+      "contentHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "json": {
+        "title": "Persist release subjects",
+        "tags": ["backend", "postgresql"],
+        "contextSummary": { "predictedFiles": ["backend/src/db/pg-migrations/063_release_subjects.sql"] },
+        "userStories": [{
+          "id": "FIX-DATA-001",
+          "title": "Store immutable release subjects",
+          "description": "Add PostgreSQL storage and recovery behavior.",
+          "acceptanceCriteria": [{ "text": "The migration preserves integrity, tenant isolation, rollback, and recovery.", "requirementId": "DATA-101" }],
+          "tags": ["database"],
+          "fileHints": ["backend/src/db/index.ts"]
+        }]
+      }
+    },
+    "workspaceTags": [{ "workspaceId": "workspace-data", "tag": "backend" }],
+    "riskAssignments": [{ "workspaceId": "workspace-data", "assignmentId": "risk-data", "scopeReference": "FIX-DATA-001", "risk": "high", "rationale": "Schema and tenant-isolation behavior changes." }],
+    "ownerAssignments": [{ "workspaceId": "workspace-data", "assignmentId": "owner-data", "scopeReference": "FIX-DATA-001", "ownerReference": "owner-database" }],
+    "policyAnnotations": [{ "workspaceId": "workspace-data", "annotationId": "policy-data", "scopeReference": "FIX-DATA-001", "policyReference": "policy-storage", "value": true }],
+    "compilerAnnotations": [],
+    "compilerVersion": "ssdlc-plan-compiler-2",
+    "policyVersion": "fixture-policy-1",
+    "compiledAt": "2026-06-15T12:00:00.000Z"
+  },
+  "expected": {
+    "profiles": ["code-change", "data-storage"],
+    "notApplicablePhases": [],
+    "capabilityHint": null,
+    "acceptedAnnotations": [],
+    "rejectedAnnotations": [],
+    "defaultedInputs": []
+  }
+}

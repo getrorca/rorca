@@ -8,144 +8,37 @@
 /**
  * jest.setup.ts — Jest globalSetup for PostgreSQL test database
  *
- * Connects to the Postgres test database, creates it if it doesn't exist,
- * runs all pg-migrations, and enables required extensions (vector, age).
- *
- * Derives the test DB URL from DATABASE_URL by appending _test to the db name.
+ * Connects only to an explicitly configured PostgreSQL test database, verifies
+ * the server-reported database name, runs migrations, and enables extensions.
+ * Database/role provisioning is intentionally outside Jest.
  */
 
 import { Pool } from 'pg';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import { runPgMigrations } from './src/db/pg-index';
+import {
+  assertConnectedTestDatabase,
+  resolveTestDatabaseUrl,
+} from './src/lib/test-db-safety';
 
-const DEFAULT_NATIVE_PORT = 5433;
-const DOCKER_PORT = 5432;
-
-function getDbModePath(): string {
-  return path.join(os.homedir(), '.rorca', 'db-mode');
-}
-
-function readDbModeFile(): 'docker' | 'native' | 'byop' | null {
-  try {
-    const value = fs.readFileSync(getDbModePath(), 'utf8').trim().toLowerCase();
-    return value === 'docker' || value === 'native' || value === 'byop'
-      ? value
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function resolveNativePort(): number {
-  const candidates = [
-    path.join(__dirname, '..', 'bin', 'rorca.ts'),
-    path.join(__dirname, '..', 'bin', 'rorca.js'),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const content = fs.readFileSync(candidate, 'utf8');
-      const match = content.match(/const MANAGED_PG_PORT = (\d+);/);
-      if (match) return parseInt(match[1], 10);
-    } catch {}
-  }
-  return DEFAULT_NATIVE_PORT;
-}
-
-function deriveSelectedBaseUrl(): string {
-  if (process.env.DATABASE_URL_TEST) return process.env.DATABASE_URL_TEST;
-  const current = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5433/rorca';
-  try {
-    const parsed = new URL(current);
-    const host = parsed.hostname.toLowerCase();
-    const isRemote = host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
-    if (isRemote) return current;
-  } catch {
-    return current;
-  }
-
-  const mode = readDbModeFile();
-  if (mode === 'docker') return `postgres://rorca:rorca@localhost:${DOCKER_PORT}/rorca`;
-  if (mode === 'native' || mode === null) return `postgres://rorca:rorca@localhost:${resolveNativePort()}/rorca`;
-  return current;
-}
-
-function deriveTestDbUrl(): string {
-  if (process.env.DATABASE_URL_TEST) return process.env.DATABASE_URL_TEST;
-  const prodUrl = deriveSelectedBaseUrl();
-  try {
-    const parsed = new URL(prodUrl);
-    const dbName = parsed.pathname.slice(1);
-    if (!dbName.endsWith('_test')) {
-      parsed.pathname = `/${dbName}_test`;
-    }
-    return parsed.toString();
-  } catch {
-    return 'postgres://rorca:rorca@localhost:5433/rorca_test';
-  }
-}
-
-const TEST_DB_URL = deriveTestDbUrl();
-
-function assertSafeTestDbUrl(url: string): void {
-  const dbName = new URL(url).pathname.slice(1);
-  if (!dbName.endsWith('_test')) {
-    throw new Error(`[jest-setup] Refusing to recreate non-test database "${dbName}"`);
-  }
-}
-
-assertSafeTestDbUrl(TEST_DB_URL);
-
-/**
- * Parse connection string to extract database name and build a "maintenance" URL
- * that connects to the default 'postgres' database (for CREATE DATABASE).
- */
-function parseDbUrl(url: string): { dbName: string; maintenanceUrl: string } {
-  const parsed = new URL(url);
-  const dbName = parsed.pathname.slice(1); // strip leading /
-  parsed.pathname = '/postgres';
-  return { dbName, maintenanceUrl: parsed.toString() };
-}
+const TEST_DB_URL = resolveTestDatabaseUrl();
 
 export default async function globalSetup(): Promise<void> {
-  const { dbName, maintenanceUrl } = parseDbUrl(TEST_DB_URL);
-
-  // 1. Connect to 'postgres' DB and recreate test DB fresh every time.
-  //    This prevents stale schema state (e.g., dual public/rorca schema tables)
-  //    from causing migration failures (ON CONFLICT resolves wrong table).
-  const adminPool = new Pool({ connectionString: maintenanceUrl });
+  // Database creation is deliberately outside Jest. The configured login must
+  // already own a dedicated *_test database and need not have CREATEDB or any
+  // production privileges. Verify server truth before schema or data changes.
+  const verificationPool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
   try {
-    // Terminate existing connections to the test DB and retry drop+create
-    // pg_terminate_backend is async — terminated backends may linger briefly,
-    // causing DROP DATABASE to see stale state or CREATE DATABASE to race.
-    const maxRetries = 3;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        await adminPool.query(
-          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-          [dbName],
-        );
-        // Give terminated backends time to fully disconnect
-        await new Promise(resolve => setTimeout(resolve, 200));
-        await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
-        await adminPool.query(`CREATE DATABASE "${dbName}" OWNER rorca`);
-        console.log(`[jest-setup] Recreated test database: ${dbName}`);
-        break;
-      } catch (err: any) {
-        if (attempt === maxRetries) throw err;
-        console.warn(`[jest-setup] Attempt ${attempt} failed (${err.message}), retrying in 500ms...`);
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-    }
+    const connected = await assertConnectedTestDatabase(verificationPool, TEST_DB_URL);
+    console.log(`[jest-setup] Verified dedicated database ${connected.database} as ${connected.user}`);
   } finally {
-    await adminPool.end();
+    await verificationPool.end();
   }
 
   // Install AGE on a short-lived bootstrap connection so the main test pool
   // doesn't inherit any extension setup instability during migrations.
   const agePool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
   try {
+    await assertConnectedTestDatabase(agePool, TEST_DB_URL);
     await agePool.query('CREATE EXTENSION IF NOT EXISTS age');
   } catch {
     /* AGE may be unavailable on some hosts, non-fatal */
@@ -157,6 +50,8 @@ export default async function globalSetup(): Promise<void> {
   //    Pool size 1 prevents AGE LOAD 'age' from poisoning idle connections
   const testPool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
   try {
+    await assertConnectedTestDatabase(testPool, TEST_DB_URL);
+
     // Test harness shim for Supabase/PostgREST auth helpers used by RLS migrations.
     // Local Postgres doesn't provide auth schema/functions, so create minimal stubs.
     await testPool.query(`
@@ -253,6 +148,8 @@ export default async function globalSetup(): Promise<void> {
     await testPool.end();
   }
 
-  // 4. Export the test DB URL so all tests use it
+  // Pin the same immutable URL for worker processes.
+  process.env.RORCA_TEST_DATABASE_URL = TEST_DB_URL;
+  process.env.DATABASE_URL_TEST = TEST_DB_URL;
   process.env.DATABASE_URL = TEST_DB_URL;
 }

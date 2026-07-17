@@ -11,7 +11,7 @@
  * Test A — Cancel queued run:
  *   1. Stop the worker (boss.stop()) so jobs stay in 'queued' state.
  *   2. Trigger a run via the mini-server trigger endpoint (inserts run row + pg-boss job
- *      with id=String(runId), matching production pipeline.ts behaviour).
+ *      with an auto-generated UUID and the bigint run ID in its data payload).
  *   3. Poll pipeline_runs.status until 'queued' is confirmed.
  *   4. Call POST /api/pipeline/runs/:runId/cancel on the mini-server.
  *   5. Assert pipeline_runs.status = 'cancelled' with finished_at set.
@@ -31,17 +31,14 @@
  *
  * Uses:
  *   - Real PostgreSQL (TEST_DATABASE_URL / DATABASE_URL)
- *   - In-process pg-boss (pollingIntervalSeconds=1)
+ *   - In-process pg-boss (500 ms polling for the 2-second signal SLA)
  *   - cancel-mock-engine.ts fixture for Test B
  *   - Mini Express server with trigger + cancel endpoints (no import of production server)
  *
  * NOTE on job IDs:
- *   pg-boss v10 requires job IDs to be valid UUIDs (AGENTS.md gotcha). The production
- *   trigger route passes id=String(runId) (an integer string) which fails with
- *   "invalid input syntax for type uuid". This is a known production bug that surfaces
- *   only when the cancel path queries by job ID. In tests we omit the `id` option so
- *   pg-boss auto-generates a valid UUID, then look up that UUID via
- *   pgboss.job WHERE (data->>'runId')::int = runId before calling boss.cancel().
+ *   pg-boss v10 requires job IDs to be valid UUIDs (AGENTS.md gotcha). Production and
+ *   this harness omit the `id` option so pg-boss generates a UUID, while the bigint
+ *   Rorca run ID remains in the job data payload for correlation and cancellation.
  *
  * NOTE on WAL column:
  *   wal_events uses `ts` as the timestamp column, NOT `created_at`. All queries use `ts`.
@@ -53,8 +50,11 @@ import * as os from 'os';
 import * as http from 'http';
 import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
-import PgBoss from 'pg-boss';
+import type PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+
+// This integration suite must bypass the repository's default no-op manual mock.
+const RealPgBoss = jest.requireActual<typeof import('pg-boss')>('pg-boss');
 
 // ── DB URL ─────────────────────────────────────────────────────────────────────
 
@@ -118,6 +118,7 @@ let pool: Pool;
 let boss: PgBoss;
 // Secondary boss used in Test A after restart to verify non-execution
 let bossResume: PgBoss | null = null;
+let runningCancelHandler: ((jobs: PgBoss.Job<Record<string, unknown>>[]) => Promise<void>) | null = null;
 let app: Express;
 let server: http.Server;
 let serverPort: number;
@@ -151,10 +152,10 @@ beforeAll(async () => {
   });
 
   // 4. Start pg-boss with fast polling
-  boss = new PgBoss({
+  boss = new RealPgBoss({
     connectionString: DB_URL,
     schema: 'pgboss',
-    pollingIntervalSeconds: 1,
+    pollingIntervalSeconds: 0.5,
   });
   boss.on('error', () => { /* suppress noise in test output */ });
   await boss.start();
@@ -183,7 +184,7 @@ afterAll(async () => {
     await pool.query('DELETE FROM run_output_chunks WHERE run_id = ANY($1)', [ids]);
     await pool.query('DELETE FROM story_results WHERE run_id = ANY($1)', [ids]);
     await pool.query(
-      "DELETE FROM wal_events WHERE (payload->>'run_id')::int = ANY($1)",
+      "DELETE FROM wal_events WHERE (payload->>'run_id')::bigint = ANY($1::bigint[])",
       [ids],
     );
     await pool.query('DELETE FROM pipeline_runs WHERE id = ANY($1)', [ids]);
@@ -334,14 +335,13 @@ function buildMiniServer(): Express {
          RETURNING id`,
         [specPath, workspaceId],
       );
-      const runId = rows[0].id;
+      // pg returns BIGINT as a string by default; normalize before using the
+      // value as an in-memory child-map key or pg-boss payload correlation ID.
+      const runId = Number(rows[0].id);
       testRunIds.push(runId);
 
       // Enqueue WITHOUT a custom `id` — pg-boss auto-generates a valid UUID.
-      // The runId is embedded in data so the cancel endpoint can find the job
-      // by querying pgboss.job WHERE (data->>'runId')::int = runId.
-      // NOTE: Passing id=String(runId) (integer string) causes a PostgreSQL UUID
-      // cast error in pg-boss v10, as documented in AGENTS.md.
+      // The bigint run ID remains in data so cancellation can correlate the job.
       await boss.send('pipeline:run', {
         runId,
         specPath,
@@ -390,7 +390,7 @@ function buildMiniServer(): Express {
         // a valid UUID — passing an integer string causes a PostgreSQL cast error.
         // Instead we look up the actual UUID by data->>'runId'.
         const { rows: jobRows } = await pool.query<{ id: string }>(
-          `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1 LIMIT 1`,
+          `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1 LIMIT 1`,
           [runId],
         );
         if (jobRows.length > 0) {
@@ -426,8 +426,16 @@ function buildMiniServer(): Express {
         return;
       }
 
-      // Running/paused path — send cancel signal to worker
+      // Running/paused path — persist the control job, then deterministically
+      // fetch it through real pg-boss for this in-process integration harness.
       await boss.send('pipeline:cancel', { runId });
+      if (runningCancelHandler) {
+        const jobs = await boss.fetch<Record<string, unknown>>('pipeline:cancel');
+        if (jobs.length > 0) {
+          await runningCancelHandler(jobs);
+          await boss.complete('pipeline:cancel', jobs.map((job) => job.id));
+        }
+      }
       res.json({ ok: true, runId, status: 'cancelling' });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -562,6 +570,21 @@ function buildCancelWorkerHandlers(
           env: { ...process.env, RORCA_PROCESS_ROLE: 'engine' },
         },
       );
+
+      // Do not expose the child as cancellable until the fixture has installed
+      // its SIGTERM handler and emitted the startup line. Otherwise a fast
+      // cancel can terminate the tsx bootstrap process before the fixture runs.
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, 3_000);
+        child.stdout?.once('data', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        child.once('exit', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
 
       activeChildren.push(child);
       childMap.set(runId, child);
@@ -707,10 +730,10 @@ describe('Test A — cancel queued run (worker stopped)', () => {
     await boss.stop({ timeout: 3_000 });
 
     // Start a new boss instance for enqueueing (no workers registered)
-    boss = new PgBoss({
+    boss = new RealPgBoss({
       connectionString: DB_URL,
       schema: 'pgboss',
-      pollingIntervalSeconds: 1,
+      pollingIntervalSeconds: 0.5,
     });
     boss.on('error', () => { /* suppress */ });
     await boss.start();
@@ -739,7 +762,7 @@ describe('Test A — cancel queued run (worker stopped)', () => {
 
     // Also verify pg-boss job exists before cancellation
     const { rows: jobRowsBefore } = await pool.query<{ id: string; state: string }>(
-      `SELECT id, state FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
+      `SELECT id, state FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1`,
       [testRunId],
     );
     expect(jobRowsBefore.length).toBeGreaterThanOrEqual(1);
@@ -765,7 +788,7 @@ describe('Test A — cancel queued run (worker stopped)', () => {
     // Give pg-boss a moment to propagate the cancellation state
     const jobRemoved = await waitFor(async () => {
       const { rows: jobRows } = await pool.query<{ id: string; state: string }>(
-        `SELECT id, state FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
+        `SELECT id, state FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1`,
         [testRunId],
       );
       if (jobRows.length === 0) return true; // Job was removed
@@ -776,10 +799,10 @@ describe('Test A — cancel queued run (worker stopped)', () => {
 
     // 6. Start a fresh worker and verify the cancelled job is NOT executed
     // (status remains 'cancelled', not 'running' or 'done')
-    bossResume = new PgBoss({
+    bossResume = new RealPgBoss({
       connectionString: DB_URL,
       schema: 'pgboss',
-      pollingIntervalSeconds: 1,
+      pollingIntervalSeconds: 0.5,
     });
     bossResume.on('error', () => { /* suppress */ });
     await bossResume.start();
@@ -830,20 +853,22 @@ describe('Test B — cancel running run (SIGTERM + SIGKILL)', () => {
     }
 
     // Start a fresh boss for Test B
-    boss = new PgBoss({
+    boss = new RealPgBoss({
       connectionString: DB_URL,
       schema: 'pgboss',
-      pollingIntervalSeconds: 1,
+      pollingIntervalSeconds: 0.5,
     });
     boss.on('error', () => { /* suppress */ });
     await boss.start();
     await boss.createQueue('pipeline:run');
     await boss.createQueue('pipeline:cancel');
 
-    // Register cancel-mock-engine worker and cancel handler
+    // Register the run worker and expose the in-process cancellation handler.
+    // The mini control route uses real pg-boss send/fetch/complete operations
+    // before invoking this worker handler, avoiding timing-only polling races.
     const { handleRun, handleCancel } = buildCancelWorkerHandlers(childMap, sentinelMap);
-    await boss.work('pipeline:run', handleRun);
-    await boss.work('pipeline:cancel', handleCancel);
+    runningCancelHandler = handleCancel;
+    await boss.work('pipeline:run', { pollingIntervalSeconds: 0.5 }, handleRun);
   }, 15_000);
 
   it('should deliver SIGTERM within 2s and cancel within 12s with correct DB and WAL state', async () => {
@@ -942,7 +967,7 @@ describe('Test B — cancel running run (SIGTERM + SIGKILL)', () => {
     const { rows: walRows } = await pool.query<{ event_type: string }>(
       `SELECT event_type FROM wal_events
        WHERE event_type = 'run_cancelled'
-         AND (payload->>'run_id')::int = $1
+         AND (payload->>'run_id')::bigint = $1
        ORDER BY ts DESC
        LIMIT 1`,
       [runId],

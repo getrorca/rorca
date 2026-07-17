@@ -19,6 +19,7 @@
  */
 
 import express from 'express';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -153,7 +154,8 @@ jest.mock('../../lib/spec-readiness', () => ({
 jest.mock('../../lib/execution-engine', () => ({
   scanRequiredEngines: jest.fn().mockReturnValue(new Set()),
   countStoriesByEngine: jest.fn().mockReturnValue(new Map()),
-  resolveStoryAgent: jest.fn(),
+  resolveStoryAgent: jest.fn((_story: unknown, defaultAgent: string) => defaultAgent),
+  storyAllowsNoCodeChanges: jest.fn().mockReturnValue(false),
   reroutedStories: jest.fn().mockReturnValue([]),
 }));
 
@@ -182,6 +184,10 @@ jest.mock('../../lib/worktree-runtime', () => ({
   ensureWorktreeRuntimeSupport: jest.fn().mockReturnValue({ linkedDirs: [], copiedEnvFiles: [] }),
 }));
 
+jest.mock('../../lib/story-closeout', () => ({
+  persistStoryExecutionManifest: jest.fn().mockResolvedValue('inserted'),
+}));
+
 jest.mock('../../lib/worktree-freshness', () => ({
   validateReusableBranch: jest.fn().mockReturnValue({ ok: true }),
   validateReusableWorktree: jest.fn().mockReturnValue({ ok: true }),
@@ -201,7 +207,10 @@ jest.mock('../../lib/worker-heartbeat', () => ({
 }));
 
 jest.mock('../../lib/run-pty-store', () => ({
+  getRunPtySessionHealth: jest.fn().mockResolvedValue(null),
   getRunPtySessionStatus: jest.fn().mockResolvedValue(null),
+  getRunPtyOutputLimits: jest.fn().mockReturnValue({ replayBatchChunks: 256 }),
+  listRecentRunPtyChunks: jest.fn().mockResolvedValue([]),
   listRunPtyChunks: jest.fn().mockResolvedValue([]),
   requestRunPtyInput: jest.fn().mockResolvedValue(undefined),
   requestRunPtyResize: jest.fn().mockResolvedValue(undefined),
@@ -336,11 +345,19 @@ beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hermes-bridge-'));
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(wsDir, { recursive: true });
+  execFileSync('git', ['init', '-b', 'main'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@rorca.local'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Rorca Test'], { cwd: wsDir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(wsDir, 'README.md'), '# fixture\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: wsDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'fixture'], { cwd: wsDir, stdio: 'ignore' });
 
   mockBoss.createQueue.mockResolvedValue(undefined);
   mockBoss.send.mockResolvedValue('mock-job-id');
   mockSimpleGitBranchLocal.mockResolvedValue({ all: [] });
-  mockSimpleGitRaw.mockResolvedValue('');
+  mockSimpleGitRaw.mockImplementation(async (args: string[]) => (
+    execFileSync('git', args, { cwd: wsDir, encoding: 'utf8' })
+  ));
   mockExecute.mockResolvedValue({ rowCount: 1 });
   mockAssertExecutionEnvironmentReadyForRun.mockResolvedValue({
     id: 'remote-rorca',

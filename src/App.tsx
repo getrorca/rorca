@@ -27,6 +27,7 @@ import { useBreakpoint } from './hooks/useBreakpoint';
 import { apiFetch, onApiFetchError } from './lib/apiFetch';
 import {
   BoardSkeleton,
+  LifecycleMatrixSkeleton,
   ListSkeleton,
   AnalyticsSkeleton,
   DirectionSkeleton,
@@ -36,7 +37,7 @@ import {
 import SlideOver from './components/SlideOver';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { usePipelineRuns } from './hooks/usePipelineRuns';
-import { useAppNavigate, useActivePanel } from './routes';
+import { safeInternalReturnTo, useAppNavigate, useActivePanel } from './routes';
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
@@ -53,6 +54,7 @@ const KeyboardShortcutsPanel = lazy(() => import('./components/KeyboardShortcuts
 // — Lazy-loaded panel components (each gets its own chunk) —
 // ULT-006: Only 5 primary panels + RunView + SpecReview + GitHubSettings
 const SpecsPanel = lazy(() => import('./panels/SpecsPanel'));
+const LifecyclePanel = lazy(() => import('./panels/LifecyclePanel'));
 const RunsTabbedPanel = lazy(() => import('./panels/RunsTabbedPanel'));
 const DirectionTabbedPanel = lazy(() => import('./panels/DirectionTabbedPanel'));
 const AnalyticsPanel = lazy(() => import('./panels/AnalyticsPanel'));
@@ -115,6 +117,7 @@ function GlobalErrorWiring() {
 /** Panel label for ErrorBoundary fallback */
 const PANEL_LABELS: Record<PanelId, string> = {
   specs: 'Specs',
+  lifecycle: 'Lifecycle Control',
   runs: 'Runs',
   analytics: 'Analytics',
   direction: 'Direction',
@@ -235,6 +238,8 @@ function AppRoutes() {
         <Route index element={<Navigate to="/specs" replace />} />
         {/* Specs — consolidated panel (Board | List | Marketplace tabs) */}
         <Route path="specs" element={<PanelRoute panel="specs" />} />
+        {/* Lifecycle Control — cross-phase delivery completeness matrix */}
+        <Route path="lifecycle" element={<PanelRoute panel="lifecycle" />} />
         {/* Runs — pipeline queue + run view */}
         <Route path="runs" element={<PanelRoute panel="runs" />} />
         {/* Direction — tabbed: Direction + Team + Memory + Rules */}
@@ -287,6 +292,8 @@ function getPanelSkeleton(panel: PanelId) {
   switch (panel) {
     case 'specs': case 'spec-review':
       return <BoardSkeleton />;
+    case 'lifecycle':
+      return <LifecycleMatrixSkeleton />;
     case 'runs':
       return <ListSkeleton />;
     case 'run-view':
@@ -341,6 +348,9 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
   switch (id) {
     case 'specs':
       return <SpecsPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
+
+    case 'lifecycle':
+      return <LifecyclePanel />;
 
     case 'runs':
       if (activeRunId !== null) {
@@ -450,8 +460,12 @@ function AppLayout() {
   }, [routerNavigate]);
 
   const navigateBackFromRun = useCallback(() => {
-    routerNavigate('/runs');
-  }, [routerNavigate]);
+    routerNavigate(safeInternalReturnTo(location.search, '/runs'));
+  }, [location.search, routerNavigate]);
+
+  const navigateBackFromSpecReview = useCallback(() => {
+    routerNavigate(safeInternalReturnTo(location.search, '/specs'));
+  }, [location.search, routerNavigate]);
 
   const navigateToSpecReview = useCallback((specId: string) => {
     routerNavigate(`/specs/${specId}/review`);
@@ -553,9 +567,15 @@ function AppLayout() {
         <Outlet />
 
         {/* Slide-over Overlays */}
-        <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>
+        <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromSpecReview} hideHeader={true}>
           {reviewSpecId !== null && (
-            <SpecReviewPanel specId={reviewSpecId} onBack={navigateBackFromRun} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} />
+            <SpecReviewPanel
+              specId={reviewSpecId}
+              initialTab={new URLSearchParams(location.search).get('tab') === 'lifecycle' ? 'lifecycle' : 'stories'}
+              onBack={navigateBackFromSpecReview}
+              onNavigate={handleNavigate}
+              onNavigateToRun={navigateToRun}
+            />
           )}
         </SlideOver>
 

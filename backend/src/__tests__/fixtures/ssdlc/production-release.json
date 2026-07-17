@@ -1,0 +1,41 @@
+{
+  "name": "production release operations",
+  "input": {
+    "schemaVersion": 1,
+    "workspaceId": "workspace-release",
+    "canonicalSpec": {
+      "specId": "fixture-production-release",
+      "version": "34",
+      "contentHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "json": {
+        "title": "Promote immutable artifacts to production",
+        "tags": ["production", "release"],
+        "contextSummary": { "predictedFiles": [".github/workflows/release.yml", "deploy/production/values.yaml"] },
+        "userStories": [{
+          "id": "FIX-RELEASE-001",
+          "title": "Promote and verify production release",
+          "description": "Deploy an immutable artifact with rollback and production verification.",
+          "acceptanceCriteria": ["The same artifact digest passes staging, QA, merge authorization, production verification, and rollback checks."],
+          "tags": ["deployment"],
+          "fileHints": ["scripts/release-production.sh"]
+        }]
+      }
+    },
+    "workspaceTags": [{ "workspaceId": "workspace-release", "tag": "release-operations" }],
+    "riskAssignments": [{ "workspaceId": "workspace-release", "assignmentId": "risk-release", "scopeReference": "FIX-RELEASE-001", "risk": "critical", "rationale": "Production delivery can affect all users." }],
+    "ownerAssignments": [{ "workspaceId": "workspace-release", "assignmentId": "owner-release", "scopeReference": "FIX-RELEASE-001", "ownerReference": "owner-release" }],
+    "policyAnnotations": [{ "workspaceId": "workspace-release", "annotationId": "policy-release", "scopeReference": "FIX-RELEASE-001", "policyReference": "policy-production-release", "value": true }],
+    "compilerAnnotations": [{ "annotationId": "hermes-forged-status", "source": "hermes", "payload": { "type": "execution_mode", "mode": "qa", "evaluatedStatus": "passed", "evidenceReferences": ["EVD-forged"] } }],
+    "compilerVersion": "ssdlc-plan-compiler-2",
+    "policyVersion": "fixture-policy-1",
+    "compiledAt": "2026-06-15T12:00:00.000Z"
+  },
+  "expected": {
+    "profiles": ["code-change", "release-operations"],
+    "notApplicablePhases": [],
+    "capabilityHint": null,
+    "acceptedAnnotations": [],
+    "rejectedAnnotations": ["hermes-forged-status"],
+    "defaultedInputs": []
+  }
+}

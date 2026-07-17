@@ -28,6 +28,13 @@ import { matchSkills, type MatchSkillsResult as SkillMatcherResult, type Suggest
 import { heuristicMatchSkills } from './match-skills-heuristic';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { autoSynthesizeSpecMemory } from './auto-memory';
+import {
+  computePostSaveWorkerMaterialHash,
+  mergeEnrichmentIntoLatest,
+  mergeSkillsIntoLatest,
+  writeSpecAtomically,
+  type EnrichmentStoryPatch,
+} from './spec-post-save-write';
 
 export interface WorkspaceRow {
   id: string;
@@ -233,6 +240,26 @@ function readPostSaveSaveGeneration(job: Awaited<ReturnType<typeof getJob>>): nu
   return readOptionalInteger(job?.saveGeneration) ?? readOptionalInteger(requestPayload?.saveGeneration);
 }
 
+async function assertPostSaveGenerationCurrent(specId: string, expectedGeneration: number | null): Promise<void> {
+  if (expectedGeneration === null) return;
+  const latest = await queryOne<{ save_generation: number | string }>(
+    `SELECT COALESCE(save_generation, id::bigint) AS save_generation
+     FROM spec_generation_logs
+     WHERE spec_slug = $1 AND context_summary_json ? 'postSaveStages'
+     ORDER BY COALESCE(save_generation, id::bigint) DESC, created_at DESC, id DESC
+     LIMIT 1`,
+    [specId],
+  );
+  const currentGeneration = latest ? Number(latest.save_generation) : expectedGeneration;
+  if (currentGeneration !== expectedGeneration) {
+    throw new UnprocessableError(
+      'Post-save worker was superseded by a newer spec save generation',
+      'STALE_POST_SAVE_GENERATION',
+      { expectedSaveGeneration: expectedGeneration, currentSaveGeneration: currentGeneration, retryable: true },
+    );
+  }
+}
+
 function mergeRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
@@ -265,11 +292,18 @@ export async function runMatchSkillsJob(
   workspaceId: string,
   specId: string,
   onProgress?: ProgressCallback,
+  options: { jobId?: string } = {},
 ): Promise<MatchSkillsResult> {
   const workspace = await getWorkspace(workspaceId);
   const { specFilePath, specStatus } = await resolveSpecFile(workspace.path, specId);
 
   const specContent = parseJsonFile<{ userStories?: UserStory[] }>(specFilePath);
+  const initialMaterialHash = computePostSaveWorkerMaterialHash(specContent as Record<string, unknown>);
+  const initialSkillsByStory = new Map(
+    (specContent.userStories ?? []).map((story) => [story.id, story.suggestedSkills] as const),
+  );
+  const postSaveJob = options.jobId ? await getJob(options.jobId) : null;
+  const postSaveSaveGeneration = readPostSaveSaveGeneration(postSaveJob);
   const stories: UserStory[] = specContent.userStories ?? [];
   if (stories.length === 0) {
     throw new UnprocessableError('Spec has no user stories');
@@ -466,8 +500,21 @@ ${storyList}`;
     }
   }
 
-  fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
-  await snapshotVersion(specId, JSON.stringify(specContent), specStatus);
+  await assertPostSaveGenerationCurrent(specId, postSaveSaveGeneration);
+  const latestContent = parseJsonFile<Record<string, unknown>>(specFilePath);
+  const mergedContent = mergeSkillsIntoLatest(
+    latestContent,
+    initialMaterialHash,
+    responseStories
+      .filter((story) => story.skills.length > 0)
+      .map((story) => ({
+        storyId: story.storyId,
+        suggestedSkills: story.skills,
+        sourceSuggestedSkills: initialSkillsByStory.get(story.storyId),
+      })),
+  );
+  writeSpecAtomically(specFilePath, mergedContent);
+  await snapshotVersion(specId, JSON.stringify(mergedContent), specStatus);
   await emitWalEvent('skill_matched', specId, workspaceId, {
     matched_count: totalSkillsMatched,
     stories_affected: storiesAffected,
@@ -676,6 +723,9 @@ export async function runEnrichJob(
     }>;
     model?: string;
   }>(specFile);
+  const initialMaterialHash = computePostSaveWorkerMaterialHash(specContent as Record<string, unknown>);
+  const postSaveJob = options.jobId ? await getJob(options.jobId) : null;
+  const postSaveSaveGeneration = readPostSaveSaveGeneration(postSaveJob);
   const userStories = specContent.userStories ?? [];
   if (userStories.length === 0) {
     return { success: true, retrieval_method: 'direction_only', storiesEnriched: 0 };
@@ -751,6 +801,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     retrievalSelections: RetrievalSelection[];
   };
   const results: PromiseSettledResult<StoryResult>[] = [];
+  const enrichmentPatches: EnrichmentStoryPatch[] = [];
 
   for (let i = 0; i < userStories.length; i += ENRICH_CONCURRENCY) {
     const batch = userStories.slice(i, i + ENRICH_CONCURRENCY);
@@ -802,8 +853,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
         highestTier = storyTier;
       }
 
-      const descWithoutOldContext = (story.description ?? '').replace(/\n\n## Context\n[\s\S]*$/, '');
-      story.description = `${descWithoutOldContext}\n\n## Context\n${annotation}`;
+      enrichmentPatches.push({ storyId: story.id, annotation, sourceDescription: story.description });
       storiesEnriched += 1;
       await recordRetrievalSelectionsOutcome(workspaceId, retrievalSelections, true);
     } else {
@@ -815,7 +865,11 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     }
   }
 
-  fs.writeFileSync(specFile, JSON.stringify(specContent, null, 2), 'utf8');
+  await assertPostSaveGenerationCurrent(specId, postSaveSaveGeneration);
+  const latestContent = parseJsonFile<Record<string, unknown>>(specFile);
+  const mergedContent = mergeEnrichmentIntoLatest(latestContent, initialMaterialHash, enrichmentPatches);
+  writeSpecAtomically(specFile, mergedContent);
+  await snapshotVersion(specId, JSON.stringify(mergedContent), fs.existsSync(approvedFile) ? 'approved' : 'pending');
 
   const durationMs = Date.now() - start;
   const enrichmentSummaryJson = {
@@ -845,8 +899,6 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     },
   };
 
-  const postSaveJob = options.jobId ? await getJob(options.jobId) : null;
-  const postSaveSaveGeneration = readPostSaveSaveGeneration(postSaveJob);
   const priorSummary = postSaveSaveGeneration !== null
     ? await queryOne<{ context_summary_json: unknown }>(
       `SELECT context_summary_json
