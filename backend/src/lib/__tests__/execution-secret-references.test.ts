@@ -31,6 +31,26 @@ describe('execution secret references', () => {
     expect(mockedVault).toHaveBeenCalledWith('user-1', 'anthropic');
   });
 
+  it('can resolve only model-provider credentials for contained recovery children', async () => {
+    const refs = createExecutionSecretReferences({
+      workspaceId: 'ws-1',
+      providers: ['openrouter'],
+      includeWorkspaceEnv: false,
+    });
+    mockedWorkspaceEnv.mockResolvedValue({
+      OPENROUTER_API_KEY: 'provider-key',
+      GITHUB_TOKEN: 'must-not-enter-child',
+      DATABASE_URL: 'postgres://must-not-enter-child/production',
+      ARBITRARY_WORKSPACE_SECRET: 'must-not-enter-child',
+    });
+
+    await expect(resolveExecutionSecrets(refs)).resolves.toEqual({ OPENROUTER_API_KEY: 'provider-key' });
+    expect(mockedVault).not.toHaveBeenCalled();
+    expect(redactExecutionJobPayload({ secretReferences: refs })).toMatchObject({
+      secretReferences: { includeWorkspaceEnv: false, providerCount: 1 },
+    });
+  });
+
   it('redacts queue logs and hook output without retaining plaintext credentials', () => {
     const payload = { runId: 7, envOverrides: { ANTHROPIC_API_KEY: 'sk-ant-real-secret' }, secretReferences: createExecutionSecretReferences({ workspaceId: 'ws-1' }) };
     const logPayload = JSON.stringify(redactExecutionJobPayload(payload));

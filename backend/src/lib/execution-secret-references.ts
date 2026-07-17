@@ -29,32 +29,41 @@ export interface ExecutionSecretReferences {
   /** Identity reference only; this is not a credential. */
   vaultUserId?: string;
   providers: ExecutionProviderCredential[];
-  includeWorkspaceEnv: true;
+  includeWorkspaceEnv: boolean;
 }
 
 export function createExecutionSecretReferences(input: {
   workspaceId: string | number;
   vaultUserId?: string;
   providers?: ExecutionProviderCredential[];
+  includeWorkspaceEnv?: boolean;
 }): ExecutionSecretReferences {
   return {
     version: EXECUTION_SECRET_REFERENCE_VERSION,
     workspaceId: String(input.workspaceId),
     ...(input.vaultUserId ? { vaultUserId: input.vaultUserId } : {}),
     providers: [...new Set(input.providers ?? Object.keys(PROVIDER_ENV) as ExecutionProviderCredential[])],
-    includeWorkspaceEnv: true,
+    includeWorkspaceEnv: input.includeWorkspaceEnv ?? true,
   };
 }
 
 /** Resolve secret material at the execution boundary only. */
 export async function resolveExecutionSecrets(refs?: ExecutionSecretReferences): Promise<Record<string, string>> {
   if (!refs) return {};
-  const env = refs.includeWorkspaceEnv ? await getWorkspaceEnvVars(refs.workspaceId) : {};
-  if (!refs.vaultUserId) return env;
+  const workspaceEnv = await getWorkspaceEnvVars(refs.workspaceId);
+  const env: Record<string, string> = refs.includeWorkspaceEnv ? { ...workspaceEnv } : {};
 
   for (const provider of refs.providers) {
     const mapping = PROVIDER_ENV[provider];
-    if (!mapping || env[mapping.key]) continue;
+    if (!mapping) continue;
+    // A contained recovery child may request only model-provider credentials,
+    // never arbitrary workspace variables. Prefer an existing workspace value
+    // before consulting the user vault.
+    if (workspaceEnv[mapping.key]) env[mapping.key] = workspaceEnv[mapping.key];
+    if (mapping.baseUrlKey && workspaceEnv[mapping.baseUrlKey]) {
+      env[mapping.baseUrlKey] = workspaceEnv[mapping.baseUrlKey];
+    }
+    if (env[mapping.key] || !refs.vaultUserId) continue;
     const vaultKey = await getVaultKey(refs.vaultUserId, provider);
     if (!vaultKey?.key || typeof vaultKey.key !== 'string') continue;
     env[mapping.key] = vaultKey.key;

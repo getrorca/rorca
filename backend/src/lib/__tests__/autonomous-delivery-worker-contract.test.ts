@@ -45,5 +45,6 @@ test('GitHub PR actuation never calls the local direct-merge handler or dispatch
   expect(delivery).not.toContain('performMerge');
   expect(delivery).not.toContain('dispatchWorkflowIfConfigured');
   expect(delivery).toContain("safetyOptions: { deploy: false, externalSend: true, policyLocked: true }");
+  expect(delivery).toContain('includeWorkspaceEnv: false');
   expect(delivery).toContain("source: 'autonomous-delivery'");
 });

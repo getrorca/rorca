@@ -27,7 +27,7 @@ const ExecutionSecretReferencesSchema = z.object({
   workspaceId: z.string().min(1),
   vaultUserId: z.string().min(1).optional(),
   providers: z.array(z.enum(['anthropic', 'openrouter', 'openai-compat'])),
-  includeWorkspaceEnv: z.literal(true),
+  includeWorkspaceEnv: z.boolean(),
 }).strict();
 
 // ── pipeline:run ─────────────────────────────────────────────────────────────

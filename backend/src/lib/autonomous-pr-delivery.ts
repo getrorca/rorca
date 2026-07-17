@@ -956,7 +956,10 @@ async function startCiRecovery(delivery: DeliveryRow, evidence: GithubPrDelivery
     mergeStrategy: 'branch-only',
     safetyOptions: { deploy: false, externalSend: true, policyLocked: true },
     envOverrides: { RORCA_AUTONOMOUS_GUARD_PROFILE: 'conflict-resolution' },
-    secretReferences: createExecutionSecretReferences({ workspaceId: delivery.workspace_id }),
+    secretReferences: createExecutionSecretReferences({
+      workspaceId: delivery.workspace_id,
+      includeWorkspaceEnv: false,
+    }),
     triggeredVia: 'run_now',
     includeGraph: false,
     ...(binding.thinking_enabled ? { thinkingEnabled: true } : {}),
@@ -1016,7 +1019,10 @@ async function recoverConflict(delivery: DeliveryRow): Promise<string> {
     } catch {
       conflicts = (await git.raw(['diff', '--name-only', '--diff-filter=U'])).trim().split('\n').filter(Boolean);
       if (conflicts.length === 0) throw new ConflictError('Base merge failed without bounded conflict paths');
-      const env = await resolveExecutionSecrets(createExecutionSecretReferences({ workspaceId: delivery.workspace_id }));
+      const env = await resolveExecutionSecrets(createExecutionSecretReferences({
+        workspaceId: delivery.workspace_id,
+        includeWorkspaceEnv: false,
+      }));
       const resolved = await resolveMergeConflict({
         runId: number(delivery.run_id),
         workspaceId: delivery.workspace_id,
