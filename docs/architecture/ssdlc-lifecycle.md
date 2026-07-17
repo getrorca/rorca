@@ -90,6 +90,16 @@ Lifecycle write adapters are authenticated and intentionally narrow: one-spec re
 
 After durable lifecycle changes, Rorca writes only bounded `lifecycle_changed` invalidation metadata (`workspaceId`, `specId`, `phaseId`, `runId`, `changeKind`) to existing WAL and publishes that row through `sse-hub`. Raw logs, Slack text, credentials, and attachments are never copied into invalidation events.
 
+### Standing autonomous PR-delivery policy and exact-SHA evidence
+
+The operator may draft a repository/base-branch-scoped `rorca.autonomous-delivery-policy.v1` revision through the existing workspace GitHub surface. Draft creation is always disabled. Activation is a separate admin-only mutation requiring the exact immutable policy digest, an `Idempotency-Key`, and the literal `ENABLE_AUTONOMOUS_PR_DELIVERY` confirmation. Policy scope, required checks, review rules, merge method, retry/time budget, expiry, creator, and repository identity are immutable. Activation and revocation are one-way, audited transitions; at most one policy is active per workspace. High/critical risk is never admitted to standing autonomy, and the database hard-codes `deployment_allowed = FALSE` so this switch cannot grant deployment authority.
+
+`github-pr-delivery-evidence.ts` is a read-only provider observer, not a scheduler. The caller selects a canonical Rorca run and supplies the full expected head SHA. Rorca derives repository, PR number, and head branch from its own run/workspace bindings; it rejects repository, PR, branch, URL, or SHA drift before persistence. The observer reads the PR, latest check runs/status contexts, reviews, mergeability, and base-to-head comparison through the existing workspace GitHub credential/rate limiter. It never writes GitHub.
+
+Each provider snapshot is bounded, redacted, payload-hashed, and append-only in `github_pr_delivery_evidence`. Current-head approvals are distinguished from stale approvals. Required-check and review summaries remain false when policy is absent/expired, policy scope differs, provider output is truncated, a required check is missing/pending/failing, a required reviewer is absent, changes are requested, or code-owner verification was requested but cannot yet be proven. Exact replay returns the existing row; conflicting or changed identity requires another observation. These records are evidence inputs only. Lifecycle gate consumption and any eventual merge actuator remain separate subsequent seams and may not infer authority merely because a snapshot exists.
+
+No background poller, queue, scheduler, workflow engine, deployment permission, or merge command is introduced by this policy/evidence foundation.
+
 ### Completeness
 
 The version-1 completeness contract forbids placeholder UI, TODO-backed primary flows, fake success states, and deferral of specified normal, negative, recovery, responsive, accessibility, or light-theme journeys to an unspecified later release. A plan that weakens any of these literals is invalid. Product delivery may still use governed phase disposition where genuinely appropriate; it may not relabel unfinished specified behavior as “post-v1.”
@@ -135,6 +145,7 @@ The complete client-neutral flow is: skill-first draft/decomposition/preflight �
 - Contracts/compilation: `ssdlc-contracts.ts`, `ssdlc-plan-compiler.ts`, `ssdlc-plan-service.ts`.
 - Attempt/closeout: `story-execution-packet.ts`, `story-closeout.ts`, canonical `execution-engine.ts`.
 - Evidence/decisions/evaluation: `ssdlc-evidence.ts`, `ssdlc-decisions.ts`, `ssdlc-phase-evaluator.ts`, `ssdlc-lifecycle-read.ts`.
+- Autonomous PR policy/evidence foundation: `autonomous-delivery-policy.ts`, `github-pr-delivery-evidence.ts`, and admin-only workspace GitHub governance routes.
 - Read APIs: `GET /api/lifecycle`, `/specs/:specId`, `/specs/:specId/phases/:phaseId`, `/evidence/:evidenceId`; operations health is the admin-tier `GET /api/lifecycle/operations` projection.
 - Mutations: one-spec/bounded-workspace recompile, evidence ingress, governed decision create/revoke, read-only retry preview, exact retry dispatch, and Learn closeout generation. Mutation replay uses `Idempotency-Key` where specified.
 - SSE: durable writes emit bounded `lifecycle_changed` WAL rows and publish through `sse-hub`. The payload is only `workspaceId`, optional `specId/phaseId/runId`, and `changeKind`. Clients refetch canonical snapshots; SSE is invalidation, not lifecycle truth.

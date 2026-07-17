@@ -141,6 +141,7 @@ import lifecycleRouter from './routes/lifecycle';
 import lifecycleEvidenceRouter from './routes/lifecycle-evidence';
 import lifecycleDecisionsRouter from './routes/lifecycle-decisions';
 import lifecycleMutationsRouter from './routes/lifecycle-mutations';
+import deliveryGovernanceRouter from './routes/delivery-governance';
 import { startSsdlcEvidenceNormalizer } from './lib/ssdlc-evidence-subscriber';
 import { randomUUID } from 'crypto';
 
@@ -229,7 +230,7 @@ app.use(cors({
   origin: corsOrigin,
   credentials: allowCredentials,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key', 'Idempotency-Key'],
   maxAge: 86400,
 }));
 
@@ -436,6 +437,7 @@ app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/workspaces', workspaceGithubRouter);
+app.use('/api/workspaces', deliveryGovernanceRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/analytics', analyticsRouter);

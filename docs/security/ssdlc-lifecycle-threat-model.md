@@ -12,6 +12,8 @@
 | Compiled lifecycle plan | Current `ssdlc_compiled_plans` row bound to workspace/spec/input hash | Agent-edited plans, stale UI plans, retry/worker payload copies |
 | Evidence ledger | Normalized append-only `ssdlc_lifecycle_evidence` written by host adapters, exact Hermes adapter, or authenticated manual QA | Agent success text, browser claims, screenshots alone, Duckbrain/session cache |
 | Approval/override state | Immutable `ssdlc_decisions`, authenticated principal, active policy, exact subject, expiry/revocation state | Request-body actor/role/trust, unmediated model waivers, stale approvals |
+| Standing PR-delivery authority | Disabled-by-default immutable `autonomous_delivery_policies`, exact digest activation, one-way revocation, bounded low/medium risk, expiry | UI toggle state, model request, body actor, high/critical risk, deployment permission |
+| GitHub PR evidence | Append-only `github_pr_delivery_evidence` bound to workspace/run/repo/PR/branch/full head SHA and active policy digest | PR title/body text, stale approval, mutable branch name alone, caller-supplied repository/PR |
 | Story pass | Accepted closeout decision for the current immutable manifest/revisions, then the narrow pass reconciler | `story_passed` event text, direct file mutation, process exit 0 |
 | Retry scope | Signed, expiring preview identity plus exact preview/spec scope comparison | Worker payload options, stale preview, prompt/provider fields |
 | Release lineage | Exact commit -> artifact digest -> deployment ID evidence chain | Branch name, mutable tag, successful command text, unbound deployment claim |
@@ -29,6 +31,7 @@ Rorca's canonical database and host observations are authoritative only within t
 5. **Database commit -> WAL/SSE.** Durable state is canonical. WAL metadata is persisted before publication; SSE is only invalidation. Replaying evidence/mutations after a crash republishes bounded invalidation without duplicating lifecycle truth.
 6. **Filesystem/Git/process/PTY -> reconciliation.** These are host observations with explicit availability. Missing or contradictory observations block or remain unknown; they do not default to pass.
 7. **Lifecycle database -> dashboard/API reads.** Workspace, plan, evidence, decisions, runs, learn candidates, traceability, phase detail, and inspector source state are read in one PostgreSQL `REPEATABLE READ READ ONLY` snapshot. Actions carrying an older snapshot receive `409 refresh_required`.
+8. **Rorca -> GitHub read observer.** Rorca derives repository, PR number, branch, and credential from canonical workspace/run state. The operator supplies only run ID and full expected head SHA. Provider responses are bounded and normalized; observation has no GitHub write method and cannot merge, deploy, or activate policy.
 
 ## Concrete attacker actions and mitigations
 
@@ -36,6 +39,8 @@ Rorca's canonical database and host observations are authoritative only within t
 |---|---|---|
 | Guess a plan/evidence/decision/spec/run ID from another workspace | Every repository lookup includes workspace; mixed run/workspace is rejected or returns not found. No fallback unscoped lookup. | lifecycle route/repository tests; evidence/decision/pass reconciler tests |
 | Supply `actor`, role, authority, trust level, provider label, or forged Hermes delegation | Actor/principal/trust come from authenticated request context. Only exact Hermes can submit automated evidence or mediate delegation; internal services cannot approve. | `lifecycle-evidence.test.ts`, `lifecycle-decisions.test.ts`, `ssdlc-decisions.test.ts` |
+| Arm autonomy by creating a policy, model request, body toggle, stale digest, or replayed request | Creation always yields `disabled`; activation is admin-only, idempotent, exact-digest, literal-confirmed, expiry-checked, and audited. High/critical risk and deployment authority are database-denied. | `autonomous-delivery-policy.test.ts`, `delivery-governance.test.ts`, autonomous-delivery migration test |
+| Swap repository/PR/branch/SHA or reuse stale reviews/checks | Observer derives repo/PR/branch from canonical run/workspace, requires a full expected SHA, rejects provider identity drift, compares base freshness, marks old-commit approvals stale, and makes missing/truncated/mismatched policy evidence ineligible. | `github-pr-delivery-evidence.test.ts`, autonomous-delivery migration test |
 | Use an internal-looking identity to claim deployment/GitReins evidence | Suffix matching grants no capability; only exact Hermes automated ingress is accepted. | `lifecycle-evidence.test.ts` |
 | Replay a stable source ID with changed payload/workspace/revision | Exact same canonical hash is idempotent; changed immutable payload returns typed conflict and an audit WAL record. Identity uniqueness is workspace-scoped. | `ssdlc-evidence.test.ts`, lifecycle migrations |
 | Submit old-revision proof or broken commit/artifact/deployment lineage | Revision mismatch stays visible but gate-ineligible. Build/staging require commit-bound artifact lineage; production requires commit, artifact, and exact deployment binding. | `ssdlc-evidence.test.ts`, phase evaluator tests |
@@ -55,7 +60,7 @@ Rorca's canonical database and host observations are authoritative only within t
 
 Unavailable evidence never becomes positive evidence:
 
-- **GitHub/GitReins:** no authenticated provider observation means the relevant gate is not started, blocked, or unknown with a collection/retry action.
+- **GitHub/GitReins:** no authenticated provider observation means the relevant gate is not started, blocked, or unknown with a collection/retry action. A missing active delivery policy, changed head SHA, stale approval, missing/pending/failing check, truncated response, base-branch drift, or unknown code-owner state is never treated as ready.
 - **PTY/process inspection:** `available: false` and `alive: null` remain unknown. PID existence without ownership/activity cannot prove liveness or completion.
 - **Graph:** unavailable graph enrichment falls back to bounded non-graph context; it cannot waive dependencies or gates.
 - **Staging/deployment:** missing artifact/deployment identity or lineage blocks the phase. A successful browser/CLI message is not production proof.
@@ -81,3 +86,4 @@ Each finding has a focused regression. No unresolved high-severity finding is ac
 - Filesystem and process state cannot be transactionally snapshotted with PostgreSQL. Contradiction or unavailable observation therefore fails closed, and mutating actions must carry the DB snapshot identity and revalidate immutable hashes.
 - External screenshots and raw logs are references, not canonical bundles. Operators must not copy raw secret-bearing output into evidence rationale.
 - Any newly discovered route with unscoped lifecycle lookup, direct pass mutation, direct SSE write, or caller-controlled authority is a release blocker.
+- The standing policy and PR evidence ledger do not yet feed Lifecycle gates or invoke a merge actuator. Until those later seams are implemented and validated, evidence observation is informational and direct auto-merge is not autonomous reviewed delivery.
