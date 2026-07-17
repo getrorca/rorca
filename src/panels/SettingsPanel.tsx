@@ -13,7 +13,7 @@ import { useActiveSettingsTab } from '../routes';
 
 export type SettingsTab =
   // Workspace group
-  | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context'
+  | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context' | 'github'
   // Execution group
   | 'providers' | 'direction' | 'pipeline'
   // FinOps group
@@ -46,6 +46,8 @@ const DirectionSettings = {
     import('./settings/DirectionSettingsTab').then((m) => ({ default: m.WsAgentsSection })),
   ),
 };
+
+const GitHubSettingsPanel = lazy(() => import('./GitHubSettingsPanel'));
 
 const ProviderSettingsTab = lazy(() =>
   import('./settings/ProviderSettingsTab').then((m) => ({ default: m.ProviderSettingsTab })),
@@ -106,6 +108,7 @@ export default function SettingsPanel() {
           {activeTab === 'hooks' && <DirectionSettings.WsHooksSection />}
           {activeTab === 'agents' && <DirectionSettings.WsAgentsSection />}
           {activeTab === 'context' && <DirectionSettings.WsContextSection />}
+          {activeTab === 'github' && <GitHubSettingsPanel />}
           {/* Execution group */}
           {activeTab === 'providers' && <ProviderSettingsTab />}
           {activeTab === 'direction' && <DirectionSettings.WsDirectionSection />}

@@ -9,12 +9,18 @@ import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vites
 import { waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../test/helpers';
 
+const routerState = vi.hoisted(() => ({ params: {} as { tab?: string } }));
+
 // ─── Mock react-router-dom (SettingsPanel uses useLocation + useNavigate) ─────
 vi.mock('react-router-dom', async (importOriginal) => ({
   ...await importOriginal<typeof import('react-router-dom')>(),
   useNavigate: vi.fn(() => vi.fn()),
   useLocation: vi.fn(() => ({ pathname: '/settings/general', search: '', hash: '', state: null })),
-  useParams: vi.fn(() => ({})),
+  useParams: vi.fn(() => routerState.params),
+}));
+
+vi.mock('../GitHubSettingsPanel', () => ({
+  default: () => <div>GitHub integration and autonomous delivery</div>,
 }));
 
 vi.mock('../../lib/apiFetch', () => ({
@@ -47,6 +53,7 @@ afterAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  routerState.params = {};
   localStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.setItem('rorca_workspaceId', 'ws-1');
   mockApiFetch.mockResolvedValue({ items: [], total: 0, hasMore: false });
@@ -61,6 +68,15 @@ describe('SettingsPanel', () => {
 
     renderWithProviders(<SettingsPanel />);
     expect(document.body).toBeInTheDocument();
+  });
+
+  it('routes the GitHub settings tab to integration and autonomous delivery controls', async () => {
+    routerState.params = { tab: 'github' };
+    renderWithProviders(<SettingsPanel />);
+
+    await waitFor(() => {
+      expect(document.body).toHaveTextContent('GitHub integration and autonomous delivery');
+    });
   });
 
   it('renders settings content area', async () => {

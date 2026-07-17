@@ -10,6 +10,12 @@ import { waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../test/helpers';
 import GitHubSettingsPanel from '../GitHubSettingsPanel';
 
+vi.mock('../../components/AutonomousDeliverySettings', () => ({
+  default: ({ connected }: { connected: boolean }) => (
+    <div data-testid="autonomous-delivery-settings">Autonomous delivery {connected ? 'connected' : 'disconnected'}</div>
+  ),
+}));
+
 vi.mock('../../lib/apiFetch', () => ({
   apiFetch: vi.fn(),
   BASE_URL: 'http://localhost:3030',
@@ -131,6 +137,7 @@ describe('GitHubSettingsPanel', () => {
       expect(document.body.textContent).toContain('Webhook management');
       expect(document.body.textContent).toContain('Ping webhook');
       expect(document.body.textContent).toContain('Preview latest run');
+      expect(document.body.textContent).toContain('Autonomous delivery connected');
     });
   });
 
