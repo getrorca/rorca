@@ -21,6 +21,7 @@ const xtermMockState = vi.hoisted(() => ({
     write: ReturnType<typeof vi.fn>;
     writeln: ReturnType<typeof vi.fn>;
     clear: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
     focus: ReturnType<typeof vi.fn>;
     dispose: ReturnType<typeof vi.fn>;
     onData: ReturnType<typeof vi.fn>;
@@ -38,6 +39,7 @@ vi.mock('@xterm/xterm', () => ({
     write = vi.fn();
     writeln = vi.fn();
     clear = vi.fn();
+    reset = vi.fn();
     focus = vi.fn();
     dispose = vi.fn();
     private dataListener: ((data: string) => void) | null = null;
@@ -309,6 +311,52 @@ describe('RunTerminal PTY fallback UI', () => {
         silent: true,
       }),
     ));
+  });
+
+  it('resets terminal state and sends controls only with the replacement generation token', async () => {
+    const replacementGenerationId = '33333333-3333-4333-8333-333333333333';
+    const replacementGenerationToken = '44444444-4444-4444-8444-444444444444';
+    renderTerminal('pty');
+
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    await waitFor(() => expect(xtermMockState.instances.length).toBe(1));
+    const terminal = xtermMockState.instances[0];
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks',
+        ptyGenerationId: PTY_GENERATION_ID, ptyGenerationToken: PTY_GENERATION_TOKEN,
+      }));
+      lastEventSource!.emit('chunk', Buffer.from('prior story bytes', 'utf8').toString('base64'), '17');
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', cursorReset: true,
+        ptyGenerationId: replacementGenerationId,
+        ptyGenerationToken: replacementGenerationToken,
+        ptyStoryId: 'PTY-002', ptyAttempt: 1,
+        ptyGenerationStatus: 'active', ptyGenerationActive: true,
+        ptyGenerationSource: 'native', ptyGenerationReplaySource: 'generation',
+      }));
+      terminal.emitData('new story input\n');
+    });
+
+    expect(terminal.reset).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem('rorca:terminal-output-generation:77')).toBe(replacementGenerationId);
+    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBeNull();
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      '/api/pipeline/runs/77/input',
+      expect.objectContaining({
+        body: JSON.stringify({
+          generationToken: replacementGenerationToken,
+          dataBase64: Buffer.from('new story input\n', 'utf8').toString('base64'),
+        }),
+      }),
+    ));
+    expect(apiFetch).not.toHaveBeenCalledWith(
+      '/api/pipeline/runs/77/input',
+      expect.objectContaining({ body: expect.stringContaining(PTY_GENERATION_TOKEN) }),
+    );
   });
 
   it('surfaces bounded initial replay metadata without implying data loss on reconnect', async () => {

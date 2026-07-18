@@ -149,6 +149,38 @@ describe('run-pty-store generations', () => {
     expect(resize).toMatchObject({ cols: 100, rows: 30 });
   });
 
+  it('cannot leak controls when admission races generation replacement', async () => {
+    const old = await start('PTY-001', 1);
+    const transition = Promise.allSettled([
+      start('PTY-002', 1),
+      requestRunPtyInput(runId, old.generationToken, Buffer.from('racing-input')),
+      requestRunPtyResize(runId, old.generationToken, 101, 31),
+    ]);
+
+    const [replacementResult, inputResult, resizeResult] = await transition;
+    expect(replacementResult.status).toBe('fulfilled');
+    if (replacementResult.status !== 'fulfilled') return;
+    const replacement = replacementResult.value;
+
+    for (const result of [inputResult, resizeResult]) {
+      if (result.status === 'rejected') {
+        expect(result.reason).toBeInstanceOf(ForbiddenError);
+      }
+    }
+    await expect(claimPendingRunPtyInput(ref(old))).resolves.toEqual([]);
+    await expect(claimLatestRunPtyResize(ref(old))).resolves.toBeNull();
+    await expect(claimPendingRunPtyInput(ref(replacement))).resolves.toEqual([]);
+    await expect(claimLatestRunPtyResize(ref(replacement))).resolves.toBeNull();
+
+    const controls = await queryOne<{ inputs: string; resizes: string }>(
+      `SELECT
+         (SELECT COUNT(*)::text FROM run_pty_input_requests WHERE run_id = $1) AS inputs,
+         (SELECT COUNT(*)::text FROM run_pty_resize_requests WHERE run_id = $1) AS resizes`,
+      [runId],
+    );
+    expect(controls).toEqual({ inputs: '0', resizes: '0' });
+  });
+
   it('classifies writes to a closed generation as conflicts', async () => {
     const generation = await start();
     await completeRunPtySession(ref(generation), 'exited', 0, null);
