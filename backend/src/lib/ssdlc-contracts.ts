@@ -432,7 +432,7 @@ export const ReleaseSubjectSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('spec_hash'), value: Sha256Schema }).strict(),
   z.object({
     type: z.literal('commit_sha'),
-    value: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/, 'Commit SHA must be 40 or 64 lowercase hex characters'),
+    value: z.string().regex(/^[a-f0-9]{40}$/, 'Commit SHA must be 40 lowercase hex characters'),
   }).strict(),
   z.object({ type: z.literal('artifact_digest'), value: Sha256Schema }).strict(),
   z.object({ type: z.literal('deployment_id'), value: StableIdSchema }).strict(),

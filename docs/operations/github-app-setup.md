@@ -21,7 +21,7 @@ Repository permissions:
 | Metadata | Read | Required repository identity metadata. |
 | Actions | **Read and write** | Workflow discovery and explicit workflow dispatch. |
 | Checks | **Read and write** | Exact-SHA evidence reads Check Runs; Rorca publishes exact-final-SHA Check Runs. |
-| Commit statuses | **Read and write** | Exact-SHA evidence reads statuses; Rorca publishes status evidence. |
+| Commit statuses | **Read and write** | Exact-SHA evidence reads statuses; only explicit admin manual/non-governing statuses are published. Per-story trusted-WAL status projection is disabled. |
 | Contents | **Read and write** | Compare/spec discovery reads contents; governed merge paths require write. |
 | Issues | Read | GitHub issue-to-story import. |
 | Pull requests | **Read and write** | PR/review evidence, PR creation/update, and governed merge operations. |
@@ -33,7 +33,7 @@ GitHub **Team plan remains separately required** for private-repository protecte
 ## Preferred Manifest flow
 
 1. Configure an HTTPS `RORCA_APP_URL`, `RORCA_GITHUB_WEBHOOK_URL=https://hooks.rorca.ai/api/webhooks/github`, and `RORCA_GITHUB_APP_CREATION_ORG=<organization-login>`. Configure `VAULT_KEY` (64 hex characters) or an explicit strong `JWT_SECRET` before storing credentials.
-2. In Settings > GitHub, choose **Prepare App setup**. The admin endpoint creates a random 10-minute, one-use state bound to the authenticated operator and workspace. Normal CSRF middleware protects each local POST; the callback does not depend on an in-memory CSRF value that changes across reload.
+2. In Settings > GitHub, choose **Prepare App setup** as an explicit platform/superuser operator who is also authorized for the workspace. An ordinary workspace administrator receives 403 for process-global setup, exchange, and import. The endpoint creates a random 10-minute, one-use state bound to the authenticated operator and workspace. Normal CSRF middleware protects each local POST; the callback does not depend on an in-memory CSRF value that changes across reload.
 3. Submit the returned manifest directly to the organization-owned GitHub App creation URL. Both Express/Helmet and the checked-in static nginx document CSP permit form submission only to the same origin and exact `https://github.com` origin; the manifest contains no private key.
 4. GitHub returns directly to `/settings/github`. After a reload or a new callback tab, choose **Complete one-time App registration**. Rorca atomically consumes the state before exchanging the one-time code. GitHub's returned private key and webhook secret are provider-profile checked and inserted in the same database transaction as the registration; they are never returned to the browser.
 5. Install the App for **selected repositories** under each desired owner/account.
@@ -45,7 +45,7 @@ No model may choose repository authority, grant permissions, install the App, ac
 
 ## Bounded import fallback
 
-If no public authenticated callback is available, setup returns `bounded-import` instead of pretending Manifest exchange completed. Create the App manually using the permission/event table above, then call the admin-only import endpoint once with `appId`, `appSlug`, PEM private key, and webhook secret. The server verifies `GET /app` with the supplied key before vaulting it and never echoes secret fields. Prefer a local operator browser/API client; do not put secrets in shell history, JSON files, tickets, chat, logs, or screenshots. Proceed with selected-repository installation and exact binding as above.
+If no public authenticated callback is available, setup returns `bounded-import` instead of pretending Manifest exchange completed. Create the App manually using the permission/event table above, then call the platform/superuser-only import endpoint once (with workspace authority also required) using `appId`, `appSlug`, PEM private key, and webhook secret. The server verifies `GET /app` with the supplied key and, when `RORCA_GITHUB_APP_OWNER` or `RORCA_GITHUB_APP_CREATION_ORG` is configured, requires the exact provider App owner before vaulting it. It never echoes secret fields. Prefer a local operator browser/API client; do not put secrets in shell history, JSON files, tickets, chat, logs, or screenshots. Proceed with selected-repository installation and exact binding as above.
 
 ## Rotation and incident response
 

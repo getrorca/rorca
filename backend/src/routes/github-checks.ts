@@ -17,7 +17,7 @@ import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
 import { fetchGithubWithTimeout } from '../lib/github-app-credential-provider';
 
 const router = Router();
-const FULL_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const FULL_SHA = /^[0-9a-f]{40}$/;
 
 interface RunBindingRow {
   id: number;
@@ -38,7 +38,7 @@ interface RunBindingRow {
  *       - in: path
  *         name: sha
  *         required: true
- *         schema: { type: string, pattern: '^[0-9a-f]{40}([0-9a-f]{24})?$' }
+ *         schema: { type: string, pattern: '^[0-9a-f]{40}$' }
  *         description: Full immutable Git commit object id
  *     requestBody:
  *       required: true
@@ -66,7 +66,7 @@ router.post('/:sha', requireWorkspaceAdmin(), async (req: Request, res: Response
     const sha = String(req.params.sha || '').toLowerCase();
     const { state, description, workspaceId } = req.body ?? {};
     const runId = Number(req.body?.runId);
-    if (!FULL_SHA.test(sha)) throw new ValidationError('Invalid SHA: a full 40- or 64-hex object id is required');
+    if (!FULL_SHA.test(sha)) throw new ValidationError('Invalid SHA: a full 40-hex Git/GitHub object id is required');
     if (!['pending', 'success', 'failure', 'error'].includes(String(state))) throw new ValidationError('Invalid state. Must be pending, success, failure, or error');
     if (!workspaceId || typeof workspaceId !== 'string') throw new ValidationError('workspaceId is required');
     if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('runId must be a positive safe integer');

@@ -169,6 +169,13 @@ beforeEach(() => {
   });
 });
 
+test('rejects 64-hex commit identities before any host transaction/finalization', async () => {
+  await expect(persistCanonicalStoryResult({
+    ...input(), commitSha: 'a'.repeat(64),
+  }, EXECUTION_ENGINE_RESULT_AUTHORITY)).rejects.toThrow('full 40-hex Git/GitHub object id');
+  expect(transaction).not.toHaveBeenCalled();
+});
+
 test('crash after local pass before relay is recovered by duplicate re-finalization', async () => {
   const first = await persistCanonicalStoryResult(input(), EXECUTION_ENGINE_RESULT_AUTHORITY);
   expect(first.duplicate).toBe(false);

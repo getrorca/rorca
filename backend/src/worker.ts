@@ -71,8 +71,16 @@ import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
-import { fallbackReplayBlocksCompletion, replayFallbackResults } from './lib/fallback-replay';
-import { deriveRunSpecPath, durableAtomicWriteFile } from './lib/run-spec-snapshot';
+import {
+  fallbackReplayBlocksCompletion,
+  replayFallbackResults,
+  replayRetainedRunJournals,
+} from './lib/fallback-replay';
+import {
+  assertRunSpecAuthorityProjection,
+  deriveRunSpecPath,
+  durableAtomicWriteFile,
+} from './lib/run-spec-snapshot';
 import {
   persistCanonicalStoryResult,
   WORKER_RESULT_AUTHORITY,
@@ -96,6 +104,7 @@ import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
 import { reconcilePendingCheckRunProjections } from './lib/check-run-poster';
+import { inspectRunHostAuthority, type RunHostAuthority } from './lib/run-host-authority';
 import {
   queueAutonomousPrDeliveryForRun,
   reconcilePendingAutonomousPrDeliveryMerges,
@@ -593,8 +602,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     const cwd = worktreePath ?? workspacePath;
 
     // Look up workspaceId for WAL events
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number }>(
-      'SELECT workspace_id, parallelism FROM pipeline_runs WHERE id = $1',
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; branch_name: string | null }>(
+      'SELECT workspace_id, parallelism, branch_name FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
@@ -602,6 +611,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
+    if (!runRow.branch_name) throw new Error('Pipeline run has no frozen canonical branch');
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
@@ -680,33 +690,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     await emitWalEvent('run_started', workspaceId, { run_id: runId, spec_path: specPath });
 
-    // 2b. US-034: Create draft PR on GitHub if this is a worktree run
-    if (payload.branchName) {
-      let specTitle = 'Pipeline run';
-      let totalStories = 0;
-      try {
-        const specFile = path.join(workspacePath, specPath);
-        if (fs.existsSync(specFile)) {
-          const specJson = JSON.parse(fs.readFileSync(specFile, 'utf-8'));
-          totalStories = (specJson.userStories ?? []).length;
-          const slug = path.basename(specPath, '.json');
-          specTitle = specJson.title ?? slug.replace(/-/g, ' ');
-        }
-      } catch { /* non-fatal — use defaults */ }
-
-      try {
-        await createDraftPr({
-          runId,
-          workspaceId,
-          branchName: payload.branchName,
-          workspacePath,
-          specTitle,
-          totalStories,
-        });
-      } catch (draftErr: any) {
-        logger.error({ err: draftErr, runId }, '[worker] createDraftPr threw unexpectedly');
-      }
-    }
+    // Pull requests are release projections, not progress indicators. The
+    // worker creates/finalizes them only after frozen host release authority is
+    // complete in the post-run routing block below.
 
     // 3. Build engine args
     const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(__dirname);
@@ -752,12 +738,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     if (worktreePath) {
       engineArgs.push('--worktree-path', worktreePath);
     }
-    if (payload.branchName) {
-      engineArgs.push('--branch-name', payload.branchName);
-    }
-    if (worktreePath) {
-      engineArgs.push('--workspace-path', workspacePath);
-    }
+    engineArgs.push('--branch-name', runRow.branch_name);
+    engineArgs.push('--workspace-path', workspacePath);
     if (includeGraph) {
       engineArgs.push('--include-graph');
     }
@@ -908,26 +890,33 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
 
         const wasCancelled = cancellingRuns.delete(runId);
+        let hostAuthority: RunHostAuthority | null = null;
+        let hostAuthorityError: unknown;
+        try {
+          hostAuthority = await inspectRunHostAuthority(runId);
+          if (!hostAuthority) throw new Error('Frozen host run authority is unavailable');
+          assertRunSpecAuthorityProjection({
+            specPath: engineSpecPath,
+            expectedStoryIds: hostAuthority.expectedStoryIds,
+            excludedStoryIds: hostAuthority.excludedStoryIds,
+            authoritativePassedStoryIds: hostAuthority.authoritativePassedStoryIds,
+          });
+          if (hostAuthority.invalidReason) throw new Error(hostAuthority.invalidReason);
+        } catch (error) {
+          hostAuthorityError = error;
+          logger.error({ error, runId }, '[worker] Host result/spec/branch authority validation failed');
+        }
         const criticalRecoveryBlocked = fallbackReplayBlocksCompletion(fallbackReplay)
           || Boolean(passRecoveryError)
           || (passRecovery ? passRecoveryBlocksCompletion(passRecovery) : false)
-          || Boolean(trustedRelayError);
-        let status = wasCancelled ? 'cancelled' : (code === 0 && !signal ? 'done' : 'failed');
-        if (!wasCancelled && criticalRecoveryBlocked) {
-          status = 'failed';
-          logger.error({ runId, passRecovery, passRecoveryError, fallbackReplay, trustedRelayError }, '[worker] Critical recovery incomplete — blocking terminal success');
-        }
-
-        // A run where every story was skipped is not "done" — it failed
-        if (status === 'done') {
-          const storyCheck = await queryOne<{ total: string; skipped: string }>(
-            `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'skip') AS skipped FROM story_results WHERE run_id = $1`,
-            [runId],
-          );
-          if (storyCheck && parseInt(storyCheck.total) > 0 && storyCheck.total === storyCheck.skipped) {
-            status = 'failed';
-            logger.warn({ runId }, '[worker] All stories skipped — marking run as failed');
-          }
+          || Boolean(trustedRelayError)
+          || Boolean(hostAuthorityError);
+        const hostSuccess = hostAuthority?.releaseEligible === true;
+        let status = wasCancelled
+          ? 'cancelled'
+          : (code === 0 && !signal && !criticalRecoveryBlocked && hostSuccess ? 'done' : 'failed');
+        if (!wasCancelled && (criticalRecoveryBlocked || !hostSuccess)) {
+          logger.error({ runId, passRecovery, passRecoveryError, fallbackReplay, trustedRelayError, hostAuthority, hostAuthorityError }, '[worker] Frozen host authority incomplete — blocking terminal success and release');
         }
 
         logger.info({ runId, code, signal, status, wasCancelled }, '[worker] execution-engine exited');
@@ -960,40 +949,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           // ── Post-run merge strategy routing ─────────────────────────────────
           // Resolve effective merge strategy from payload (set by pipeline trigger).
           const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
-          let allSpecStoriesPassed = false;
-
-          // Check spec JSON for story completion — regardless of exit code.
-          // The engine may exit non-zero (timeout, signal) while all stories
-          // actually passed across multiple incremental runs on the same worktree.
-          if (worktreePath && payload.branchName) {
-            try {
-              // Completion is first established on the isolated run branch.
-              // Reading the base spec here would promote stale canonical state.
-              const specJson = JSON.parse(fs.readFileSync(engineSpecPath, 'utf-8'));
-              const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
-              allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
-              if (allSpecStoriesPassed && status !== 'done' && !criticalRecoveryBlocked) {
-                logger.info({ runId, specPath, completionScope: 'run_branch' }, '[worker] All stories passed on the run branch despite exit status=%s — promoting execution closeout to done', status);
-                try { await execute(`UPDATE pipeline_runs SET status = 'done' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                status = 'done';
-              }
-              if (!allSpecStoriesPassed) {
-                logger.info({ runId, specPath }, '[worker] Skipping post-run routing — spec not fully complete (not all stories passed)');
-                if (status === 'done') {
-                  const storyCount = await queryOne<{ total: string }>(
-                    `SELECT COUNT(*) AS total FROM story_results WHERE run_id = $1`,
-                    [runId],
-                  );
-                  if (!storyCount || parseInt(storyCount.total, 10) === 0) {
-                    logger.warn({ runId, specPath, signal, code }, '[worker] Run exited as done with 0 story_results and incomplete spec — marking failed');
-                    try { await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                    status = 'failed';
-                  }
-                }
-              }
-            } catch (specErr: any) {
-              logger.warn({ runId, err: specErr?.message }, '[worker] Could not read spec JSON for merge check — skipping');
-            }
+          // External release routing is reachable only from frozen host result,
+          // closeout, commit, attestation, accounting, released-outbox, branch,
+          // terminal-HEAD, and exact file-projection authority.
+          const allSpecStoriesPassed = status === 'done' && hostAuthority?.releaseEligible === true;
+          if (!allSpecStoriesPassed) {
+            logger.info({ runId, specPath, hostAuthority }, '[worker] Skipping post-run routing — frozen host release authority is incomplete');
           }
 
           if (worktreePath && payload.branchName && allSpecStoriesPassed) {
@@ -1326,18 +1287,13 @@ function collectStoriesFromSpec(specJson: any): any[] {
 }
 
 function syncRetrySpecPassesToOriginalSpec(params: {
-  retrySpecPath: string;
   originalSpecPath: string;
   storyIds: string[];
+  authoritativePassedStoryIds: string[];
 }): { syncedStoryIds: string[]; remainingStoryIds: string[] } {
-  const retrySpecJson = JSON.parse(fs.readFileSync(params.retrySpecPath, 'utf8'));
   const originalSpecJson = JSON.parse(fs.readFileSync(params.originalSpecPath, 'utf8'));
   const retriedIds = new Set(params.storyIds);
-  const passedInRetry = new Set(
-    collectStoriesFromSpec(retrySpecJson)
-      .filter((story: any) => retriedIds.has(String(story.id)) && story.passes === true)
-      .map((story: any) => String(story.id)),
-  );
+  const passedInRetry = new Set(params.authoritativePassedStoryIds.filter(storyId => retriedIds.has(storyId)));
 
   const syncedStoryIds: string[] = [];
   let changed = false;
@@ -1578,6 +1534,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     if (executionManifestPath) {
       engineArgs.push('--execution-manifests', executionManifestPath);
     }
+    if (!branchName) throw new Error('Retry run has no frozen canonical branch');
+    engineArgs.push('--branch-name', branchName);
+    engineArgs.push('--workspace-path', workspacePath);
+    if (worktreePath) engineArgs.push('--worktree-path', worktreePath);
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
@@ -1686,35 +1646,43 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         let syncedStoryIds: string[] = [];
         let remainingStoryIds: string[] = [];
         let retrySpecSyncSucceeded = false;
+        let retryHostAuthority: RunHostAuthority | null = null;
+        let retryHostAuthorityError: unknown;
+        try {
+          retryHostAuthority = await inspectRunHostAuthority(runId);
+          if (!retryHostAuthority) throw new Error('Frozen retry host authority is unavailable');
+          assertRunSpecAuthorityProjection({
+            specPath: expectedRetrySpecPath,
+            expectedStoryIds: retryHostAuthority.expectedStoryIds,
+            excludedStoryIds: retryHostAuthority.excludedStoryIds,
+            authoritativePassedStoryIds: retryHostAuthority.authoritativePassedStoryIds,
+          });
+          if (retryHostAuthority.invalidReason) throw new Error(retryHostAuthority.invalidReason);
+        } catch (error) {
+          retryHostAuthorityError = error;
+          logger.error({ error, runId }, '[worker] Retry host result/spec/branch authority validation failed');
+        }
         const retryRecoveryBlocked = fallbackReplayBlocksCompletion(fallbackReplay)
           || Boolean(passRecoveryError)
           || Boolean(passRecovery && passRecoveryBlocksCompletion(passRecovery))
-          || Boolean(trustedRelayError);
+          || Boolean(trustedRelayError)
+          || Boolean(retryHostAuthorityError);
         if (wasCancelled) {
           finalStatus = 'cancelled';
         } else if (retryRecoveryBlocked) {
           finalStatus = 'failed';
           logger.error({ runId, passRecovery, passRecoveryError, fallbackReplay, trustedRelayError }, '[worker] Critical retry recovery incomplete — blocking terminal success');
         } else {
-          try {
-            const currentStories = await query<{ story_id: string; status: string }>(
-              'SELECT story_id, status FROM story_results WHERE run_id = $1 ORDER BY id ASC',
-              [runId],
-            );
-            const latest = new Map<string, string>();
-            for (const s of currentStories) latest.set(s.story_id, s.status);
-            const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
-            finalStatus = hasFailures ? 'partial_failure' : (code === 0 ? 'done' : 'partial_failure');
-          } catch {
-            finalStatus = code === 0 ? 'done' : 'failed';
-          }
+          finalStatus = code === 0 && retryHostAuthority?.releaseEligible === true
+            ? 'done'
+            : 'partial_failure';
 
           if (finalStatus === 'done') {
             try {
               const syncResult = syncRetrySpecPassesToOriginalSpec({
-                retrySpecPath: expectedRetrySpecPath,
                 originalSpecPath: path.join(workspacePath, specPath),
                 storyIds,
+                authoritativePassedStoryIds: retryHostAuthority?.authoritativePassedStoryIds ?? [],
               });
               syncedStoryIds = syncResult.syncedStoryIds;
               remainingStoryIds = syncResult.remainingStoryIds;
@@ -3019,16 +2987,20 @@ async function start(): Promise<void> {
     process.exit(1);
   }
 
-  // 3. Reconcile every committed-but-unreleased integrated pass before any
-  // startup terminal derivation. Rows without exact attestation/repository/file
-  // identity remain inert and will continue to block success rather than guess.
+  // 3. Reconcile committed pass authority, consume retained exact relay
+  // references, then re-scan. Recovery proves ordered descendants before an
+  // earlier pass can be released after a later story advanced canonical HEAD.
   try {
-    const passRecovery = await recoverUnreleasedIntegratedPasses();
-    if (passRecovery.scanned > 0 || passRecovery.blocked.length > 0) {
-      logger.info({ passRecovery }, '[worker] startup integrated pass refinalization complete');
+    const firstPassRecovery = await recoverUnreleasedIntegratedPasses();
+    const journalRecovery = await replayRetainedRunJournals();
+    const secondPassRecovery = await recoverUnreleasedIntegratedPasses();
+    if (firstPassRecovery.scanned > 0 || firstPassRecovery.blocked.length > 0
+      || journalRecovery.scannedRoots > 0 || secondPassRecovery.scanned > 0
+      || secondPassRecovery.blocked.length > 0) {
+      logger.info({ firstPassRecovery, journalRecovery, secondPassRecovery }, '[worker] startup integrated pass/journal refinalization complete');
     }
   } catch (error) {
-    logger.error({ error }, '[worker] startup integrated pass refinalization deferred');
+    logger.error({ error }, '[worker] startup integrated pass/journal refinalization deferred');
   }
 
   // 3a. Recover stale jobs left by a previously crashed worker instance.

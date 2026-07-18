@@ -36,9 +36,6 @@ export const EXECUTION_ENGINE_RESULT_AUTHORITY = Object.freeze({
 export const WORKER_RESULT_AUTHORITY = Object.freeze({
   provenance: 'host', source: 'worker',
 } satisfies StoryResultPersistenceAuthority);
-export const FALLBACK_RESULT_AUTHORITY = Object.freeze({
-  provenance: 'recovery_proposal', source: 'fallback-journal',
-} satisfies StoryResultPersistenceAuthority);
 const COMPATIBILITY_RESULT_AUTHORITY = Object.freeze({
   provenance: 'compatibility', source: 'compatibility-http',
 } satisfies StoryResultPersistenceAuthority);
@@ -315,10 +312,12 @@ function validateInput(
     && !hostIntegratedAuthority) {
     throw new ValidationError('Integrated result and commit identity are host-only');
   }
+  if (authority.provenance === 'recovery_proposal' || authority.source === 'fallback-journal') {
+    throw new ValidationError('Fallback story results are proposal-only and cannot be persisted');
+  }
   if ((authority.source === 'worker' && authority.provenance !== 'host')
     || (authority.source === 'execution-engine' && authority.provenance !== 'host')
-    || (authority.source === 'compatibility-http' && authority.provenance !== 'compatibility')
-    || (authority.source === 'fallback-journal' && authority.provenance !== 'recovery_proposal')) {
+    || (authority.source === 'compatibility-http' && authority.provenance !== 'compatibility')) {
     throw new ValidationError('Story result persistence authority is invalid');
   }
   if (process.env.NODE_ENV !== 'test' && authority.provenance === 'host') {
@@ -336,8 +335,8 @@ function validateInput(
   if (input.commitMessage !== undefined && input.commitSha === undefined) {
     throw new ValidationError('commitMessage requires commitSha');
   }
-  if (input.commitSha !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(input.commitSha)) {
-    throw new ValidationError('commitSha must be a full 40- or 64-hex git object id');
+  if (input.commitSha !== undefined && !/^[0-9a-f]{40}$/i.test(input.commitSha)) {
+    throw new ValidationError('commitSha must be a full 40-hex Git/GitHub object id');
   }
   if (input.finishedAt !== undefined) normalizeObservedTimestamp(input.finishedAt);
 }
@@ -358,8 +357,11 @@ function normalizedCommit(
   if (!projection.manifest_hash || !projection.closeout_decision_id || projection.closeout_status !== 'accepted') {
     throw new ConflictError('Integrated pass requires an accepted closeout decision for the active manifest');
   }
-  const branchName = input.worktreeBranch?.trim() || projection.branch_name?.trim();
-  if (!branchName) throw new ValidationError('Integrated pass requires exact commit branch identity');
+  const branchName = input.worktreeBranch?.trim();
+  const canonicalBranch = projection.branch_name?.trim();
+  if (!branchName || !canonicalBranch || branchName !== canonicalBranch) {
+    throw new ConflictError('Integrated pass branch must exactly match pipeline run authority');
+  }
   return {
     storyId: input.storyId,
     specId,
@@ -813,15 +815,15 @@ export async function persistCanonicalStoryResult(
 }
 
 /**
- * Recognize an agent-writable pass journal only after the host has independently
- * persisted, locally projected, and released the exact integrated result. This
- * is read-only: a proposal can never create or promote result/WAL authority.
+ * Recognize any agent-writable journal result only as an exact reference to an
+ * already immutable host result. This is read-only: pass/fail/skip/excluded
+ * proposals can never create, replace, or promote terminal authority.
  */
-export async function verifyReleasedHostPassProposal(
+export async function verifyReleasedHostResultProposal(
   input: CanonicalStoryResultInput,
 ): Promise<boolean> {
   validateInput(input, EXECUTION_ENGINE_RESULT_AUTHORITY);
-  if (input.status !== 'pass' || input.integrated !== true || !input.idempotencyKey) return false;
+  if (!input.idempotencyKey) return false;
   return transaction(async (client) => {
     const projection = await loadRunProjection(client, input);
     const specId = path.basename(projection.spec_path, '.json');
@@ -837,11 +839,12 @@ export async function verifyReleasedHostPassProposal(
     assertSameResultPayload(
       existing, input, projection, specId, commit, accounting, EXECUTION_ENGINE_RESULT_AUTHORITY,
     );
-    if (!commit) return false;
-    assertSameCommit(await loadCommit(client, commit), commit);
+    if (commit) assertSameCommit(await loadCommit(client, commit), commit);
     assertSameAccounting(
       await loadAccounting(client, existing.id), existing.id, projection.workspace_id, accounting,
     );
+    if (input.status !== 'pass') return true;
+    if (!commit) return false;
     const outboxes = rows(await client.query<TrustedWalRow>(`
       SELECT * FROM wal_events
        WHERE trust_provenance = 'host' AND trusted_source = 'story-result'

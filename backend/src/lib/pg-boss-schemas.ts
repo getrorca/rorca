@@ -168,7 +168,7 @@ export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload
 /** One bounded observation/actuation step for an existing reviewed PR. */
 export const AutonomousPrDeliveryJobPayload = z.object({
   deliveryId: z.string().uuid(),
-  expectedHeadSha: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),
+  expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/),
 }).strict();
 
 export type AutonomousPrDeliveryJobPayloadType = z.infer<typeof AutonomousPrDeliveryJobPayload>;

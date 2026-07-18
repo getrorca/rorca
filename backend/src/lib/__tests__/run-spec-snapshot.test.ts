@@ -9,7 +9,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { PipelineRetryJobPayload, PipelineRunJobPayload } from '../pg-boss-schemas';
-import { deriveRunSpecPath, prepareRunSpecSnapshot } from '../run-spec-snapshot';
+import {
+  assertRunSpecAuthorityProjection,
+  deriveRunSpecPath,
+  prepareRunSpecSnapshot,
+} from '../run-spec-snapshot';
 
 describe('prepareRunSpecSnapshot', () => {
   test('copies worktree runs to an isolated mutable artifact', () => {
@@ -38,6 +42,38 @@ describe('prepareRunSpecSnapshot', () => {
       workspacePath: '/tmp',
       worktreePath: null,
     })).toBe('/tmp/spec.json');
+  });
+
+  test('future-story pass/exclusion tampering cannot match host authority', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-run-spec-authority-'));
+    const specPath = path.join(root, 'run.json');
+    try {
+      fs.writeFileSync(specPath, JSON.stringify({ userStories: [
+        { id: 'US-1', passes: true, excluded: false },
+        { id: 'US-2', passes: true, excluded: true },
+        { id: 'US-X', passes: false, excluded: true },
+      ] }));
+      expect(() => assertRunSpecAuthorityProjection({
+        specPath,
+        expectedStoryIds: ['US-1', 'US-2'],
+        excludedStoryIds: ['US-X'],
+        authoritativePassedStoryIds: ['US-1'],
+      })).toThrow(/US-2/);
+
+      fs.writeFileSync(specPath, JSON.stringify({ userStories: [
+        { id: 'US-1', passes: true, excluded: false },
+        { id: 'US-2', passes: false, excluded: false },
+        { id: 'US-X', passes: false, excluded: true },
+      ] }));
+      expect(() => assertRunSpecAuthorityProjection({
+        specPath,
+        expectedStoryIds: ['US-1', 'US-2'],
+        excludedStoryIds: ['US-X'],
+        authoritativePassedStoryIds: ['US-1'],
+      })).not.toThrow();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test('queue payloads require the exact host-selected run snapshot', () => {

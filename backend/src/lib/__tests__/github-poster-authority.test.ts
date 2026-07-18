@@ -12,6 +12,7 @@ const checkRun = fs.readFileSync(path.join(__dirname, '..', 'check-run-poster.ts
 const commitStatus = fs.readFileSync(path.join(__dirname, '..', 'commit-status-poster.ts'), 'utf8');
 const checks = fs.readFileSync(path.join(__dirname, '..', 'github-checks.ts'), 'utf8');
 const authority = fs.readFileSync(path.join(__dirname, '..', 'github-poster-authority.ts'), 'utf8');
+const runAuthority = fs.readFileSync(path.join(__dirname, '..', 'run-host-authority.ts'), 'utf8');
 const trustedWal = fs.readFileSync(path.join(__dirname, '..', 'trusted-wal.ts'), 'utf8');
 
 test('final Check Runs require trusted complete state and move to the exact final SHA', () => {
@@ -26,7 +27,8 @@ test('final Check Runs require trusted complete state and move to the exact fina
   expect(authority).toContain("row.closeout_status !== 'accepted'");
   expect(authority).toContain("row.result_provenance !== 'host'");
   expect(authority).toContain("row.result_commit_source !== 'worktree_branch'");
-  expect(authority).toContain('outboxes.length !== 1 || !outboxes[0].outbox_ready_at');
+  expect(runAuthority).toContain('exact.length !== 1 || !exact[0].outbox_ready_at');
+  expect(runAuthority).toContain("sr.result_provenance = 'host'");
   const accept = checkRun.slice(
     checkRun.indexOf('export async function acceptCheckRunWalEvent'),
     checkRun.indexOf('async function claimProjection'),
@@ -35,10 +37,11 @@ test('final Check Runs require trusted complete state and move to the exact fina
   expect(accept).not.toContain('resolveWorkspaceGitHubToken(');
 });
 
-test('final commit status consumes only accepted trusted pass outbox events', () => {
-  expect(commitStatus).toContain('authorizeStoryPassEvent(event)');
-  expect(commitStatus).toContain("purpose: 'statuses-write'");
-  expect(commitStatus).toContain('fetchGithubWithTimeout(fetch, url');
+test('story commit statuses are explicitly removed from trusted/governing delivery', () => {
+  expect(commitStatus).toContain('compatibility seam is explicitly inert');
+  expect(commitStatus).toContain('Deliberate no-op');
+  expect(commitStatus).not.toContain("purpose: 'statuses-write'");
+  expect(commitStatus).not.toContain('subscribe(');
   expect(authority).toContain("event.trusted_source === 'story-result'");
   expect(trustedWal).toContain("trust_provenance !== 'host'");
 });

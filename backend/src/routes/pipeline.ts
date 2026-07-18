@@ -456,16 +456,28 @@ function acceptanceCriteriaForManifest(story: DispatchManifestStory): string[] {
     : [];
 }
 
-function frozenExpectedStoryIds(specJson: Record<string, unknown>): string[] {
+function frozenRunStoryScope(
+  specJson: Record<string, unknown>,
+  specificStory?: string,
+): { expectedStoryIds: string[]; excludedStoryIds: string[] } {
   const phaseStories = Array.isArray(specJson.phases)
-    ? (specJson.phases as Array<{ stories?: Array<{ id?: unknown }> }>).flatMap(phase => phase.stories ?? [])
+    ? (specJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap(phase => phase.stories ?? [])
     : [];
   const stories = Array.isArray(specJson.userStories)
-    ? specJson.userStories as Array<{ id?: unknown }>
+    ? specJson.userStories as DispatchManifestStory[]
     : phaseStories;
-  return [...new Set(stories
-    .map(story => typeof story.id === 'string' ? story.id.trim() : '')
-    .filter(Boolean))].sort();
+  const normalized = stories
+    .map(story => ({ story, id: typeof story.id === 'string' ? story.id.trim() : '' }))
+    .filter((entry): entry is { story: DispatchManifestStory; id: string } => Boolean(entry.id));
+  const excludedStoryIds = [...new Set(normalized
+    .filter(({ story }) => story.excluded === true)
+    .map(({ id }) => id))].sort();
+  const expectedStoryIds = [...new Set(normalized
+    .filter(({ story, id }) => story.excluded !== true
+      && story.passes !== true
+      && (!specificStory || id === specificStory))
+    .map(({ id }) => id))].sort();
+  return { expectedStoryIds, excludedStoryIds };
 }
 
 /** Resolve historical/null run metadata to a valid engine without changing public Unknown telemetry. */
@@ -1988,6 +2000,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       cwd = worktreePath;
     }
 
+    // The DB row, execution checkout, commit projection, recovery, and terminal
+    // release all bind to one symbolic branch. Direct mode keeps payload branch
+    // controls null while still freezing its actual repository branch in DB.
+    const canonicalRunBranch = branchName ?? (await simpleGit(cwd).revparse(['--abbrev-ref', 'HEAD'])).trim();
+    if (!canonicalRunBranch || canonicalRunBranch === 'HEAD') {
+      throw new ConflictError('Pipeline execution requires a canonical symbolic Git branch');
+    }
+
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     //    If queuedRunId is provided, promote the existing queued row instead of inserting
     // A base-branch merge is opt-in. Worktree isolation alone must never imply
@@ -2101,10 +2121,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
          branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14,
          idempotency_key = COALESCE($15, idempotency_key), task_manifest_id = COALESCE($16, task_manifest_id), task_manifest_artifacts = COALESCE($17::jsonb, task_manifest_artifacts), trigger_options = $18::jsonb
-         WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, existingRunId, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+         WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, canonicalRunBranch, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, existingRunId, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
       runId = normalizeWorkerRunId(existingRunId);
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, canonicalRunBranch, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
       runId = normalizeWorkerRunId(runResult?.id);
     }
 
@@ -2186,10 +2206,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         (s: { excluded?: boolean }) => s.excluded === true
       );
       for (const s of excludedStories) {
-        await execute(
-          `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, $2, 'excluded', NOW())`,
-          [runId, s.id]
-        );
+        // Telemetry only. Governing exclusion authority is frozen later in the
+        // host-owned pipeline_runs scope and never comes from a result journal.
         const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_excluded_from_run', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId })]);
         broadcastAll(walEvent!);
       }
@@ -2211,10 +2229,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         (s: { passes?: boolean; excluded?: boolean }) => s.passes === true && s.excluded !== true
       );
       for (const s of alreadyPassing) {
-        await execute(
-          `INSERT INTO story_results (run_id, story_id, status, reason, finished_at) VALUES ($1, $2, 'skip', 'previously_passed', NOW())`,
-          [runId, s.id]
-        );
+        // Historical canonical-spec passes are outside this run's frozen
+        // execution scope. This event is non-governing UI telemetry only.
         const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'previously_passed' })]);
         broadcastAll(walEvent!);
       }
@@ -2241,9 +2257,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // receives the resulting execution-only contract and does not recompute
     // lifecycle evidence or command-safety policy from story prose.
     const dispatchSpec = JSON.parse(fs.readFileSync(runSpecPath, 'utf8')) as Record<string, unknown>;
-    const expectedStoryIds = frozenExpectedStoryIds(dispatchSpec);
-    if (expectedStoryIds.length === 0) throw new ValidationError('Runnable spec must freeze at least one expected story');
-    await execute('UPDATE pipeline_runs SET expected_story_ids = $1::text[] WHERE id = $2', [expectedStoryIds, runId]);
+    const { expectedStoryIds, excludedStoryIds } = frozenRunStoryScope(dispatchSpec, storyId);
+    if (expectedStoryIds.length === 0) throw new ValidationError('Runnable spec must freeze at least one non-excluded expected story');
+    await execute(
+      'UPDATE pipeline_runs SET expected_story_ids = $1::text[], excluded_story_ids = $2::text[] WHERE id = $3',
+      [expectedStoryIds, excludedStoryIds, runId],
+    );
     const manifestBundle = await resolveAndPersistDispatchManifests({
       workspaceId: workspace.id,
       specId: path.basename(specPath, '.json'),
@@ -6078,8 +6097,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new ConflictError('Generated retry execution plan differs from the approved preview');
     }
     if (planComparison.actual.length === 0) throw new ConflictError('Retry run has no frozen expected stories');
-    await execute('UPDATE pipeline_runs SET expected_story_ids = $1::text[] WHERE id = $2', [
+    await execute('UPDATE pipeline_runs SET expected_story_ids = $1::text[], excluded_story_ids = $2::text[] WHERE id = $3', [
       [...new Set(planComparison.actual)].sort(),
+      [],
       newRunId,
     ]);
 
@@ -7337,8 +7357,8 @@ async function gateLegacyStoryResultIngress(
  *     summary: Record a legacy non-integrated story outcome
  *     operationId: recordStoryResult
  *     x-rorca-tier: admin
- *     x-rorca-rationale: "Disabled-by-default legacy compatibility write; workspace-admin only because it mutates non-governing canonical result metadata."
- *     description: Disabled-by-default, workspace-admin compatibility ingress for non-integrated story outcomes. Integrated/commit identity is always rejected; the host execution engine writes those results process-locally.
+ *     x-rorca-rationale: "Disabled-by-default legacy compatibility proposal write; workspace-admin only and never governing."
+ *     description: Disabled-by-default, workspace-admin compatibility ingress for inert non-integrated outcome proposals. Integrated/commit identity is always rejected; compatibility rows are excluded from worker completion and GitHub release authority.
  *     requestBody:
  *       required: true
  *       content:
@@ -7364,8 +7384,13 @@ async function gateLegacyStoryResultIngress(
  *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
  *               idempotencyKey: { type: string, maxLength: 256, description: "Stable immutable result ingest identity." }
  *     responses:
- *       201: { description: "Story result recorded" }
- *       400: { description: "Missing required fields or invalid status" }
+ *       200: { description: "Exact compatibility proposal duplicate recognized" }
+ *       201: { description: "Non-governing compatibility proposal recorded" }
+ *       400: { description: "Missing required fields, invalid status, or forbidden integrated identity" }
+ *       401: { description: "Authentication required" }
+ *       403: { description: "Ingress disabled or workspace administrator authority required" }
+ *       404: { description: "Pipeline run not found" }
+ *       409: { description: "Idempotency key conflicts with another immutable proposal" }
  *       500: { description: "Internal server error" }
  */
 router.post('/story-result', gateLegacyStoryResultIngress, requireWorkspaceAdmin(), async (req: Request, res: Response) => {
@@ -7419,7 +7444,12 @@ router.post('/story-result', gateLegacyStoryResultIngress, requireWorkspaceAdmin
       expectedWorkspaceId: String((req.body as Record<string, unknown>).workspaceId),
     });
 
-    res.status(outcome.duplicate ? 200 : 201).json({ ok: true, duplicate: outcome.duplicate });
+    res.status(outcome.duplicate ? 200 : 201).json({
+      ok: true,
+      duplicate: outcome.duplicate,
+      governing: false,
+      outcome: outcome.duplicate ? 'exact_compatibility_duplicate' : 'compatibility_proposal_recorded',
+    });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Story result');
   }

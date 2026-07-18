@@ -13,7 +13,7 @@ const now = new Date('2026-07-16T12:00:00.000Z');
 
 test('exact SHA normalization trims whitespace but rejects every overlong identity', () => {
   expect(normalizedSha(`  ${'a'.repeat(40)}\n`, 'sha')).toBe('a'.repeat(40));
-  expect(normalizedSha('B'.repeat(64), 'sha')).toBe('b'.repeat(64));
+  expect(() => normalizedSha('B'.repeat(64), 'sha')).toThrow('full Git commit SHA');
   expect(() => normalizedSha('a'.repeat(41), 'sha')).toThrow('full Git commit SHA');
   expect(() => normalizedSha('a'.repeat(65), 'sha')).toThrow('full Git commit SHA');
 });

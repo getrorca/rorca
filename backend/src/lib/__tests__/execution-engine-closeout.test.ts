@@ -229,9 +229,9 @@ describe('execution-engine closeout architecture', () => {
       const originSha = git('rev-parse', 'HEAD');
       git('checkout', '-q', mainBranch);
       git('merge', '--no-ff', '--no-commit', 'story/test');
-      expect(() => resolveIntegratedRunHead({ cwd: repo })).toThrow('unfinished merge');
+      expect(() => resolveIntegratedRunHead({ cwd: repo, workspacePath: repo, branchName: mainBranch })).toThrow('unfinished merge');
       git('commit', '-q', '-m', 'merge story');
-      const integrated = resolveIntegratedRunHead({ cwd: repo });
+      const integrated = resolveIntegratedRunHead({ cwd: repo, workspacePath: repo, branchName: mainBranch });
       expect(integrated.sha).toBe(git('rev-parse', 'HEAD'));
       expect(integrated.sha).not.toBe(originSha);
       expect(integrated.branch).toBe(mainBranch);

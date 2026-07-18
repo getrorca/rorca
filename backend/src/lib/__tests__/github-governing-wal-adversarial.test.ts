@@ -12,6 +12,8 @@ const transaction = jest.fn();
 const resolveToken = jest.fn();
 const getAuthority = jest.fn();
 const providerFetch = jest.fn();
+const inspectRunHostAuthority = jest.fn();
+const assertCanonicalRunCheckout = jest.fn();
 
 jest.mock('../../db/index', () => ({
   queryOne: (...args: unknown[]) => queryOne(...args),
@@ -35,6 +37,12 @@ jest.mock('../github-app-credential-provider', () => ({
 }));
 jest.mock('../github-rate-limiter', () => ({
   githubRateLimiter: { execute: (operation: () => unknown) => operation() },
+}));
+jest.mock('../run-host-authority', () => ({
+  inspectRunHostAuthority: (...args: unknown[]) => inspectRunHostAuthority(...args),
+}));
+jest.mock('../run-git-authority', () => ({
+  assertCanonicalRunCheckout: (...args: unknown[]) => assertCanonicalRunCheckout(...args),
 }));
 
 import { handleCommitStatusWalEvent } from '../commit-status-poster';
@@ -221,6 +229,30 @@ beforeEach(() => {
   });
   resolveToken.mockResolvedValue({ token: 'host-token' });
   getAuthority.mockResolvedValue({ owner: 'acme', name: 'widgets' });
+  assertCanonicalRunCheckout.mockImplementation(() => ({
+    headSha: terminalRows.filter(row => row.status === 'pass').at(-1)?.commit_sha ?? 'b'.repeat(40),
+    branchName: 'run/spec-a', cwd: '/tmp/canonical-run', repositoryTopLevel: '/tmp/canonical-run',
+  }));
+  inspectRunHostAuthority.mockImplementation(async () => {
+    if (!currentRun.spec_path.endsWith('/spec-a.json')) return null;
+    const expected = currentRun.expected_story_ids ?? [];
+    const governing = terminalRows.filter(row => row.result_provenance === 'host'
+      && ['execution-engine', 'worker'].includes(String(row.result_source)));
+    if (governing.length !== expected.length || !includePassOutboxes) return null;
+    const final = governing.filter(row => row.status === 'pass').at(-1)?.commit_sha as string | undefined;
+    return {
+      runId: currentRun.id, workspaceId: currentRun.workspace_id, specId: 'spec-a',
+      status: currentRun.status, lifecycleStatus: currentRun.lifecycle_status,
+      finishedAt: currentRun.finished_at, branchName: 'run/spec-a',
+      checkoutPath: '/tmp/canonical-run', repositoryTopLevel: '/tmp/canonical-run',
+      expectedStoryIds: expected, excludedStoryIds: [],
+      stories: governing.map(row => ({ storyId: row.story_id, status: row.status, reason: row.reason,
+        finishedAt: row.finished_at, resultId: Number(row.id), commitSha: row.commit_sha })),
+      authoritativePassedStoryIds: governing.filter(row => row.status === 'pass').map(row => row.story_id),
+      finalCommitSha: final ?? null, complete: true,
+      releaseEligible: governing.length > 0 && governing.every(row => row.status === 'pass'), invalidReason: null,
+    };
+  });
   providerFetch.mockImplementation(async (url: string, init: RequestInit) => {
     if (url.includes('/commits/') && init.method === 'GET') return response({ check_runs: [] });
     if (url.endsWith('/check-runs') && init.method === 'POST') return response({ id: 101 }, 201);
@@ -229,8 +261,9 @@ beforeEach(() => {
   queryOne.mockImplementation(async (sqlValue: unknown) => {
     const sql = String(sqlValue);
     if (sql.includes('SELECT id, workspace_id, spec_path, status, lifecycle_status')) return currentRun;
-    if (sql.includes('SELECT worktree_path, workspace_id FROM pipeline_runs')) {
-      return { worktree_path: '/tmp/canonical-run', workspace_id: currentRun.workspace_id };
+    if (sql.includes('SELECT pr.worktree_path')) {
+      return { worktree_path: '/tmp/canonical-run', workspace_id: currentRun.workspace_id,
+        branch_name: 'run/spec-a', workspace_path: '/tmp/canonical-run' };
     }
     if (sql.includes('FROM story_results sr')) return storyAuthority;
     if (sql.includes('SELECT status, result_provenance, result_source FROM story_results')) {
@@ -294,7 +327,7 @@ describe('commit status trusted authority', () => {
     expect(providerFetch).not.toHaveBeenCalled();
   });
 
-  test('missing accepted closeout does nothing, while exact trusted pass posts only its canonical SHA', async () => {
+  test('story commit statuses are explicitly inert even for an exact trusted pass', async () => {
     const event = trustedEvent({
       eventType: 'story_passed',
       storyId: 'US-001',
@@ -308,10 +341,9 @@ describe('commit status trusted authority', () => {
     storyAuthority = acceptedRow('US-001', 7, PASS_SHA, '2026-07-18T10:01:00.000Z');
     await handleCommitStatusWalEvent(event);
 
-    expect(resolveToken).toHaveBeenCalledWith('ws-a', expect.objectContaining({ purpose: 'statuses-write' }));
-    const [, init] = providerFetch.mock.calls.at(-1) as [string, RequestInit];
-    expect(providerFetch.mock.calls.at(-1)?.[0]).toContain(`/statuses/${PASS_SHA}`);
-    expect(JSON.parse(String(init.body))).toMatchObject({ state: 'success' });
+    expect(resolveToken).not.toHaveBeenCalled();
+    expect(getAuthority).not.toHaveBeenCalled();
+    expect(providerFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -357,6 +389,31 @@ describe('check run terminal completeness authority', () => {
       result_source: 'fallback-journal',
     }];
     includePassOutboxes = false;
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    expect(getAuthority).not.toHaveBeenCalled();
+    expect(resolveToken).not.toHaveBeenCalled();
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['skip', 'recovery_proposal', 'fallback-journal'],
+    ['excluded', 'recovery_proposal', 'fallback-journal'],
+    ['skip', 'compatibility', 'compatibility-http'],
+    ['excluded', 'compatibility', 'compatibility-http'],
+  ])('a forged %s after a valid pass is inert and never reaches repository/token authority', async (status, provenance, source) => {
+    currentRun = {
+      ...currentRun,
+      status: 'done', lifecycle_status: 'finished',
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [
+      acceptedRow('US-001', 1, PASS_SHA, '2026-07-18T10:01:00.000Z'),
+      { ...acceptedRow('US-002', 3, FINAL_SHA, '2026-07-18T10:02:00.000Z'),
+        status, result_provenance: provenance, result_source: source,
+        integrated: false, commit_sha: null, result_commit_sha: null },
+    ];
     await handleCheckRunWalEvent(trustedEvent({
       eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
     }));
@@ -477,6 +534,24 @@ describe('check run terminal completeness authority', () => {
     expect(JSON.parse(String(terminalWrite?.[1].body))).toMatchObject({
       head_sha: FINAL_SHA, status: 'completed', conclusion: 'failure',
     });
+  });
+
+  test('branch/HEAD drift after durable acceptance blocks repository and token resolution', async () => {
+    currentRun = {
+      ...currentRun,
+      status: 'done', lifecycle_status: 'finished', expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [acceptedRow('US-001', 1, FINAL_SHA, '2026-07-18T10:02:00.000Z')];
+    assertCanonicalRunCheckout.mockReturnValue({
+      headSha: PASS_SHA, branchName: 'run/spec-a', cwd: '/tmp/canonical-run', repositoryTopLevel: '/tmp/canonical-run',
+    });
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    expect(getAuthority).not.toHaveBeenCalled();
+    expect(resolveToken).not.toHaveBeenCalled();
+    expect(providerFetch).not.toHaveBeenCalled();
   });
 
   test('publishes success on the exact final SHA only for a trusted complete terminal run', async () => {

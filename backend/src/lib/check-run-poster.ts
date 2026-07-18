@@ -8,7 +8,6 @@
 /** Restart-safe, exact-SHA GitHub Check Run projection. */
 
 import { createHash, randomUUID } from 'crypto';
-import { execFileSync } from 'child_process';
 import {
   broadcastAll,
   subscribeDurable,
@@ -35,12 +34,14 @@ import {
   type CompleteTerminalRun,
 } from './github-poster-authority';
 import { ConflictError } from './errors';
+import { assertCanonicalRunCheckout } from './run-git-authority';
 
 interface PipelineRunRow {
   worktree_path: string | null;
   workspace_id: string;
+  branch_name: string | null;
+  workspace_path: string;
 }
-interface WorkspaceRow { path: string; }
 
 interface StoryProgress {
   storyId: string;
@@ -132,25 +133,19 @@ function parseProjectionPayload(value: ProjectionRow['desired_payload']): Projec
 }
 
 async function resolveBranchHead(runId: number, workspaceId: string): Promise<string | null> {
-  const run = await queryOne<PipelineRunRow>(
-    'SELECT worktree_path, workspace_id FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
-    [runId, workspaceId],
-  );
-  const workspace = run?.worktree_path
-    ? null
-    : await queryOne<WorkspaceRow>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
-  const cwd = run?.worktree_path ?? workspace?.path;
-  if (!cwd) return null;
+  const run = await queryOne<PipelineRunRow>(`
+    SELECT pr.worktree_path, pr.workspace_id, pr.branch_name, ws.path AS workspace_path
+      FROM pipeline_runs pr JOIN workspaces ws ON ws.id = pr.workspace_id
+     WHERE pr.id = $1 AND pr.workspace_id = $2
+  `, [runId, workspaceId]);
+  if (!run?.branch_name) return null;
   try {
-    return execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}'], {
-      cwd,
-      encoding: 'utf8',
-      timeout: 5_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim().toLowerCase();
-  } catch {
-    return null;
-  }
+    return assertCanonicalRunCheckout({
+      cwd: run.worktree_path ?? run.workspace_path,
+      repositoryTopLevel: run.workspace_path,
+      branchName: run.branch_name,
+    }).headSha;
+  } catch { return null; }
 }
 
 function buildSummaryTable(stories: StoryProgress[]): string {
@@ -612,8 +607,18 @@ export async function reconcileCheckRunProjection(runId: number): Promise<boolea
   const claim = await claimProjection(runId);
   if (!claim) return false;
   try {
+    // Repeat exact canonical branch and terminal HEAD verification immediately
+    // before repository authority/token resolution. Drift blocks all provider use.
+    const exactHead = await resolveBranchHead(Number(claim.run_id), claim.workspace_id);
+    if (!exactHead || exactHead !== claim.head_sha) {
+      await finishClaim(claim, 'blocked', {
+        errorCode: 'GITHUB_CHECK_RUN_TERMINAL_HEAD_DRIFT',
+        errorMessage: 'Canonical run branch/HEAD changed after durable projection acceptance',
+      });
+      return false;
+    }
     // Repository authority and token resolution happen only after the immutable
-    // local projection has been durably accepted and claimed.
+    // local projection has been durably accepted, claimed, and reverified.
     const repository = await getRepository(claim.workspace_id);
     if (!repository) {
       await finishClaim(claim, 'retry', {

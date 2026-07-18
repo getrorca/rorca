@@ -38,7 +38,7 @@ describe('worker fallback terminal gate', () => {
   });
 
   test('startup refinalizes pass authority before stale-job, orphan, or state terminal decisions', () => {
-    const startupRecovery = WORKER_SOURCE.lastIndexOf('const passRecovery = await recoverUnreleasedIntegratedPasses();');
+    const startupRecovery = WORKER_SOURCE.lastIndexOf('const firstPassRecovery = await recoverUnreleasedIntegratedPasses();');
     const staleRecovery = WORKER_SOURCE.indexOf('await recoverStaleJobs();', startupRecovery);
     const orphanSweep = WORKER_SOURCE.indexOf('await sweepOrphanProcesses();', startupRecovery);
     const stateReconcile = WORKER_SOURCE.indexOf('await reconcileState();', startupRecovery);
@@ -58,7 +58,8 @@ describe('worker fallback terminal gate', () => {
     const normalGate = WORKER_SOURCE.indexOf('fallbackReplayBlocksCompletion(fallbackReplay)', normalStatus);
     expect(normalReplay).toBeGreaterThan(0);
     expect(normalGate).toBeGreaterThan(normalStatus);
-    expect(WORKER_SOURCE).toContain("status !== 'done' && !criticalRecoveryBlocked");
+    expect(WORKER_SOURCE).toContain("hostAuthority?.releaseEligible === true");
+    expect(WORKER_SOURCE).not.toContain('All stories passed on the run branch despite exit');
 
     const retryReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayFallbackResults(cwd', normalReplay + 1);
     const retryStatus = WORKER_SOURCE.indexOf('let finalStatus: string;', retryReplay);

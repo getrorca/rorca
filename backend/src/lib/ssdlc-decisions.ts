@@ -277,7 +277,7 @@ function normalizeSubject(subject: DecisionSubject | null | undefined): Decision
   }
   const value = text(subject.value, 'subject.value').toLowerCase();
   if (subject.type === 'commit_sha' && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) {
-    throw new ValidationError('commit_sha must be a full 40 or 64 character hexadecimal revision', { field: 'subject.value' });
+    throw new ValidationError('commit_sha must be a full 40 character hexadecimal revision', { field: 'subject.value' });
   }
   if (subject.type === 'artifact_digest' && !/^sha256:[a-f0-9]{64}$/.test(value)) {
     throw new ValidationError('artifact_digest must be an immutable sha256 digest', { field: 'subject.value' });

@@ -8,12 +8,14 @@
 /** Replay execution-engine fallback journals after the child has fully closed. */
 
 import { createHash } from 'crypto';
+import * as fs from 'fs';
 import * as path from 'path';
-import { queryOne } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import {
   deleteFallbackFile,
   flushFallbackWrites,
+  getFallbackFilename,
   readFallbackJournal,
   type FallbackResultEntry,
 } from './resilient-post';
@@ -25,10 +27,8 @@ import {
   type TrustedWalReference,
 } from './trusted-wal';
 import {
-  FALLBACK_RESULT_AUTHORITY,
-  persistCanonicalStoryResult,
   STORY_RESULT_STATUSES,
-  verifyReleasedHostPassProposal,
+  verifyReleasedHostResultProposal,
   type CanonicalStoryResultInput,
   type CanonicalStoryResultStatus,
 } from './story-result-persistence';
@@ -151,6 +151,20 @@ async function replayWal(
       return 'invalid';
     }
     try {
+      if (reference.source === 'story-result') {
+        // A retained agent-writable pointer cannot release an inert pass outbox.
+        // Host recovery first proves the file/branch/ordered-successor state and
+        // marks the exact row ready; journal replay can then only re-notify it.
+        const released = await queryOne<{ id: number }>(`
+          SELECT id FROM wal_events
+           WHERE id = $1 AND ingest_key = $2 AND event_identity_hash = $3
+             AND workspace_id = $4 AND canonical_run_id = $5
+             AND story_result_id = $6 AND trust_provenance = 'host'
+             AND trusted_source = 'story-result' AND outbox_ready_at IS NOT NULL
+        `, [reference.id, reference.ingestKey, reference.identityHash,
+          reference.workspaceId, reference.runId, reference.storyResultId]);
+        if (!released) return 'invalid';
+      }
       await relayTrustedWalEvent(reference);
       return 'duplicate';
     } catch (error) {
@@ -245,7 +259,7 @@ async function replayStoryResult(
     || inputTokens === null || outputTokens === null || reasoningTokens === null
     || modelUsed === null || costUsd === null || logPath === null || reason === null
     || blockedBy === null || activeSkills === null
-    || (commitSha !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha))
+    || (commitSha !== undefined && !/^[0-9a-f]{40}$/i.test(commitSha))
     || (completionPacket !== undefined && (completionPacket === null
       || Array.isArray(completionPacket) || typeof completionPacket !== 'object'))) {
     return 'invalid';
@@ -275,14 +289,10 @@ async function replayStoryResult(
     expectedWorkspaceId: workspaceId,
   };
   try {
-    if (input.status === 'pass') {
-      // Agent-writable pass rows are proposals only. They may be discarded as
-      // duplicates after an independently released exact host result, but can
-      // never insert or promote canonical pass authority themselves.
-      return await verifyReleasedHostPassProposal(input) ? 'duplicate' : 'invalid';
-    }
-    const outcome = await persistCanonicalStoryResult(input, FALLBACK_RESULT_AUTHORITY);
-    return outcome.duplicate ? 'duplicate' : 'inserted';
+    // Every agent-writable result status is proposal-only. It is accepted only
+    // as an exact reference to an independently immutable host result; replay
+    // never inserts terminal story authority.
+    return await verifyReleasedHostResultProposal(input) ? 'duplicate' : 'invalid';
   } catch (error) {
     if (error instanceof AppError) return 'invalid';
     throw error;
@@ -347,4 +357,37 @@ export async function replayFallbackResults(cwd: string, workspaceId: string): P
 
   refreshReplayCompleteness(result);
   return result;
+}
+
+/** Startup scan of deterministic run roots; no recursive repository crawl. */
+export async function replayRetainedRunJournals(limit = 2_000): Promise<{
+  scannedRoots: number;
+  blockedRoots: Array<{ workspaceId: string; cwd: string }>;
+}> {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+    throw new RangeError('Retained journal startup scan limit must be between 1 and 10000');
+  }
+  const runs = await query<{ workspace_id: string; worktree_path: string | null; workspace_path: string }>(`
+    SELECT DISTINCT pr.workspace_id, pr.worktree_path, ws.path AS workspace_path
+      FROM pipeline_runs pr
+      JOIN workspaces ws ON ws.id = pr.workspace_id
+     WHERE pr.expected_story_ids IS NOT NULL
+     ORDER BY pr.workspace_id, pr.worktree_path NULLS FIRST
+     LIMIT $1
+  `, [limit]);
+  const roots = new Map<string, string>();
+  for (const run of runs) {
+    const cwd = path.resolve(run.worktree_path ?? run.workspace_path);
+    roots.set(`${run.workspace_id}\u0000${cwd}`, run.workspace_id);
+  }
+  const blockedRoots: Array<{ workspaceId: string; cwd: string }> = [];
+  let scannedRoots = 0;
+  for (const [key, workspaceId] of roots) {
+    const cwd = key.slice(key.indexOf('\u0000') + 1);
+    if (!fs.existsSync(path.join(cwd, getFallbackFilename()))) continue;
+    scannedRoots++;
+    const replay = await replayFallbackResults(cwd, workspaceId);
+    if (fallbackReplayBlocksCompletion(replay)) blockedRoots.push({ workspaceId, cwd });
+  }
+  return { scannedRoots, blockedRoots };
 }

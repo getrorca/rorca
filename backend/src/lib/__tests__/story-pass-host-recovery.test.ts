@@ -45,6 +45,7 @@ let root: string;
 let repo: string;
 let workspace: string;
 let candidate: Record<string, unknown>;
+let chain: Array<Record<string, unknown>>;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -66,14 +67,17 @@ beforeEach(() => {
   workspace = path.join(root, 'workspace');
   repo = path.join(root, 'run-worktree');
   fs.mkdirSync(workspace);
-  fs.mkdirSync(repo);
-  git(repo, 'init', '-q');
-  git(repo, 'config', 'user.email', 'test@rorca.invalid');
-  git(repo, 'config', 'user.name', 'Rorca Test');
+  git(workspace, 'init', '-q');
+  git(workspace, 'config', 'user.email', 'test@rorca.invalid');
+  git(workspace, 'config', 'user.name', 'Rorca Test');
+  fs.writeFileSync(path.join(workspace, 'code.txt'), 'base\n');
+  git(workspace, 'add', 'code.txt');
+  git(workspace, 'commit', '-q', '-m', 'base');
+  git(workspace, 'branch', '-M', 'main');
+  git(workspace, 'worktree', 'add', '-q', '-b', 'run/recovery', repo);
   fs.writeFileSync(path.join(repo, 'code.txt'), 'verified\n');
   git(repo, 'add', 'code.txt');
   git(repo, 'commit', '-q', '-m', 'verified integration');
-  git(repo, 'branch', '-M', 'run/recovery');
   // Use the real repository SHA in the candidate.
   const sha = git(repo, 'rev-parse', 'HEAD');
   const snapshot = path.join(repo, '.rorca', 'run-specs', 'run-51.json');
@@ -114,6 +118,8 @@ beforeEach(() => {
     run_branch_name: 'run/recovery',
     run_auto_worktree: true,
     run_retried_from_id: null,
+    run_expected_story_ids: ['US-RECOVERY-001'],
+    run_excluded_story_ids: [],
     workspace_path: workspace,
     closeout_status: 'accepted',
     closeout_manifest_hash: `sha256:${'1'.repeat(64)}`,
@@ -135,7 +141,30 @@ beforeEach(() => {
     attestation_revoked_at: null,
     attestation_count: 1,
   };
-  query.mockResolvedValue([candidate]);
+  chain = [{
+    id: 9, story_id: 'US-RECOVERY-001', commit_sha: sha, commit_branch: 'run/recovery',
+    result_provenance: 'host', result_source: 'execution-engine', integrated: true,
+    closeout_decision_id: 'CLO-host-recovery', closeout_status: 'accepted',
+    closeout_manifest_hash: `sha256:${'1'.repeat(64)}`,
+    manifest_hash: `sha256:${'1'.repeat(64)}`, projected_commit_sha: sha,
+    projected_commit_branch: 'run/recovery', commit_count: 1, outbox_count: 1,
+    attestation_count: 1,
+  }];
+  query.mockImplementation(async (sqlValue: unknown) => {
+    const sql = String(sqlValue);
+    if (sql.includes('SELECT sr.id, sr.story_id')) return chain;
+    if (sql.includes('SELECT * FROM wal_events')) return chain.map((row, index) => ({
+      id: 17 + index, ts: '2026-07-18T10:00:00.000Z', event_type: 'story_passed',
+      workspace_id: 'ws-recovery', spec_id: 'recovery-spec', story_id: row.story_id,
+      actor: 'rorca-host', payload: JSON.stringify({ run_id: 51, story_id: row.story_id,
+        story_result_id: row.id, commit_sha: row.commit_sha,
+        closeout_decision_id: row.closeout_decision_id }),
+      ingest_key: `trusted-wal:v1:${row.id}`, trust_provenance: 'host',
+      trusted_source: 'story-result', canonical_run_id: 51, story_result_id: row.id,
+      event_identity_hash: 'b'.repeat(64), outbox_ready_at: null, outbox_relayed_at: null,
+    }));
+    return [candidate];
+  });
 });
 
 afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -154,6 +183,37 @@ test('recovers file-before-ready idempotently without rewriting authority', asyn
   const result = await recoverUnreleasedIntegratedPasses({ runId: 51 });
   expect(result).toMatchObject({ recovered: 0, alreadyProjected: 1, blocked: [] });
   expect(relay).toHaveBeenCalledTimes(1);
+});
+
+test('recovers an earlier relay-failed pass after a later exact descendant pass advanced HEAD', async () => {
+  const firstSha = String(candidate.result_commit_sha);
+  fs.writeFileSync(path.join(repo, 'code.txt'), 'verified\nlater\n');
+  git(repo, 'add', 'code.txt');
+  git(repo, 'commit', '-q', '-m', 'later integrated story');
+  const laterSha = git(repo, 'rev-parse', 'HEAD');
+  const snapshot = path.join(repo, '.rorca', 'run-specs', 'run-51.json');
+  fs.writeFileSync(snapshot, JSON.stringify({ userStories: [
+    { id: 'US-RECOVERY-001', passes: false },
+    { id: 'US-RECOVERY-002', passes: true },
+  ] }));
+  candidate.run_expected_story_ids = ['US-RECOVERY-001', 'US-RECOVERY-002'];
+  chain = [
+    chain[0],
+    { ...chain[0], id: 10, story_id: 'US-RECOVERY-002', commit_sha: laterSha,
+      projected_commit_sha: laterSha, closeout_decision_id: 'CLO-host-recovery-2' },
+  ];
+
+  const result = await recoverUnreleasedIntegratedPasses({ runId: 51 });
+  expect(result).toMatchObject({ recovered: 1, blocked: [] });
+  expect(chain.map(row => row.commit_sha)).toEqual([firstSha, laterSha]);
+  expect(relay).toHaveBeenCalledTimes(1);
+});
+
+test('a symbolic branch switch blocks recovery before relay', async () => {
+  git(repo, 'switch', '-q', '-c', 'attacker/branch');
+  const result = await recoverUnreleasedIntegratedPasses({ runId: 51 });
+  expect(passRecoveryBlocksCompletion(result)).toBe(true);
+  expect(relay).not.toHaveBeenCalled();
 });
 
 test.each([

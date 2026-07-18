@@ -279,6 +279,20 @@ export function requireWorkspaceRole(minRole: WorkspaceRole) {
   };
 }
 
+export function requirePlatformAdmin() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    if (!isSuperUser(req.user)) {
+      res.status(403).json({ error: 'Platform administrator authority required' });
+      return;
+    }
+    next();
+  };
+}
+
 export const requireWorkspaceMember = () => requireWorkspaceRole('member');
 export const requireWorkspaceAdmin = () => requireWorkspaceRole('admin');
 export const requireWorkspaceOwner = () => requireWorkspaceRole('owner');

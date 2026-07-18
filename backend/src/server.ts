@@ -120,7 +120,6 @@ import gitReinsEvidenceRouter from './routes/gitreins-evidence';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
 import { StoryLogFollower } from './lib/story-log-follower';
-import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import retrievalTracesRouter from './routes/retrieval-traces';
@@ -533,7 +532,6 @@ if (BACKGROUND_RUNTIME_ENABLED) {
   storyLogFollower.start();
 
   // US-027: Subscribe commit status poster to post GitHub status checks for story progress
-  startCommitStatusPoster();
 
   // US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
   startCheckRunPoster();

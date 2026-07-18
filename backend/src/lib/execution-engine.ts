@@ -150,6 +150,7 @@ import type {
   CanonicalStoryResultOutcome,
 } from './story-result-persistence';
 import { durableAtomicWriteFile } from './run-spec-snapshot';
+import { assertCanonicalRunCheckout } from './run-git-authority';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -4776,29 +4777,16 @@ export function deriveIntegratedPassStoryResultIdempotencyKey(input: {
   return `story-result:integrated-pass-v1:${digest}`;
 }
 
-export function resolveIntegratedRunHead(config: Pick<EngineConfig, 'cwd'>): IntegratedRunHead {
-  const sha = getGitHead(config.cwd)?.trim().toLowerCase() ?? '';
-  const branch = getGitBranch(config.cwd)?.trim() ?? '';
-  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)
-    || !/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(branch)) {
-    throw new Error('integrated run-branch identity is unavailable');
-  }
-  const verified = execSync('git rev-parse --verify HEAD^{commit}', {
+export function resolveIntegratedRunHead(
+  config: Pick<EngineConfig, 'cwd' | 'workspacePath' | 'branchName'>,
+): IntegratedRunHead {
+  if (!config.branchName) throw new Error('pipeline run has no canonical branch authority');
+  const checkout = assertCanonicalRunCheckout({
     cwd: config.cwd,
-    env: buildCleanEnv(),
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim().toLowerCase();
-  if (verified !== sha) throw new Error('integrated run-branch HEAD changed during verification');
-  try {
-    execSync('git rev-parse -q --verify MERGE_HEAD', {
-      cwd: config.cwd, env: buildCleanEnv(), stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    throw new Error('integrated run branch still has an unfinished merge');
-  } catch (error) {
-    if (error instanceof Error && error.message === 'integrated run branch still has an unfinished merge') throw error;
-  }
-  return { sha, branch };
+    repositoryTopLevel: config.workspacePath ?? config.cwd,
+    branchName: config.branchName,
+  });
+  return { sha: checkout.headSha, branch: checkout.branchName };
 }
 
 async function recordIntegratedCheckpointAttestation(
@@ -4808,39 +4796,33 @@ async function recordIntegratedCheckpointAttestation(
   integratedHead: IntegratedRunHead,
 ): Promise<void> {
   if (config.dryRun) return;
-  try {
-    const checkpointSha = integratedHead.sha;
-    const branch = integratedHead.branch;
-    const passedAt = new Date();
-    const evidenceDigest = createHash('sha256').update(JSON.stringify({
-      contractVersion: 'checkpoint-validation-v1',
-      gate: 'execution-engine',
-      outcome: 'passed',
-      workspaceId,
-      runId: config.runId,
-      storyId: pending.story.id,
-      branch,
-      checkpointSha,
-      agentType: pending.agentType,
-    })).digest('hex');
-    const { recordCheckpointValidationAttestation } = await import('./checkpoint-reconciliation');
-    await recordCheckpointValidationAttestation({
-      id: randomUUID(),
-      workspaceId,
-      runId: config.runId,
-      storyId: pending.story.id,
-      branch,
-      checkpointSha,
-      validationGate: 'execution-engine',
-      evidenceDigest,
-      passedAt: passedAt.toISOString(),
-      expiresAt: new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    });
-  } catch (error: unknown) {
-    // The current story can still complete normally; the missing attestation only
-    // removes the crash-recovery shortcut and therefore fails closed on recovery.
-    logger.warn({ err: error, runId: config.runId, storyId: pending.story.id }, '[checkpoint] Failed to persist trusted integrated-worktree attestation');
-  }
+  const checkpointSha = integratedHead.sha;
+  const branch = integratedHead.branch;
+  const passedAt = new Date();
+  const evidenceDigest = createHash('sha256').update(JSON.stringify({
+    contractVersion: 'checkpoint-validation-v1',
+    gate: 'execution-engine',
+    outcome: 'passed',
+    workspaceId,
+    runId: config.runId,
+    storyId: pending.story.id,
+    branch,
+    checkpointSha,
+    agentType: pending.agentType,
+  })).digest('hex');
+  const { recordCheckpointValidationAttestation } = await import('./checkpoint-reconciliation');
+  await recordCheckpointValidationAttestation({
+    id: randomUUID(),
+    workspaceId,
+    runId: config.runId,
+    storyId: pending.story.id,
+    branch,
+    checkpointSha,
+    validationGate: 'execution-engine',
+    evidenceDigest,
+    passedAt: passedAt.toISOString(),
+    expiresAt: new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+  });
 }
 
 async function finalizeIntegratedStoryPass(

@@ -15,7 +15,6 @@ const providerCallers = [
   path.join(LIB, 'github-draft-pr.ts'),
   path.join(BACKEND_SRC, 'worker.ts'),
   path.join(LIB, 'check-run-poster.ts'),
-  path.join(LIB, 'commit-status-poster.ts'),
   path.join(LIB, 'github-checks.ts'),
   path.join(LIB, 'ci-autofix', 'fix-orchestrator.ts'),
   path.join(LIB, 'autonomous-pr-delivery.ts'),
@@ -35,7 +34,7 @@ test('durable error fields are fed bounded formatted errors rather than thrown/p
   const prCreator = fs.readFileSync(providerCallers[0], 'utf8');
   const draftPr = fs.readFileSync(providerCallers[1], 'utf8');
   const worker = fs.readFileSync(providerCallers[2], 'utf8');
-  const autonomousDelivery = fs.readFileSync(providerCallers[7], 'utf8');
+  const autonomousDelivery = fs.readFileSync(providerCallers[6], 'utf8');
   expect(prCreator).toContain('const errMsg = formatGithubProviderError(providerError)');
   expect(prCreator).toContain('await storeResult(runId, null, errMsg)');
   expect(draftPr).toContain('const errMsg = formatGithubProviderError(providerError)');

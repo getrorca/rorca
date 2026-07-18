@@ -11,7 +11,7 @@ import { ConflictError, NotFoundError, UnprocessableError, ValidationError } fro
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 const BRANCH = /^(?!\/)(?!.*(?:\.\.|\/\/|@\{|\\|[~^:?*\[]))(?!.*\.$)[A-Za-z0-9._\/-]{1,255}$/;
-const FULL_GIT_OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+const FULL_GIT_OBJECT_ID = /^[0-9a-f]{40}$/i;
 const GITHUB_API_ORIGIN = 'https://api.github.com';
 
 export type GithubRepositoryAuthoritySource = 'github-app-installation' | 'pat-oauth-fallback';

@@ -116,6 +116,29 @@ describe('fallback replay idempotency', () => {
     expect(fallbackReplayBlocksCompletion(invalid)).toBe(true);
   });
 
+  test.each(['fail', 'skip', 'excluded'] as const)('keeps forged %s result journals proposal-only and inert', async (status) => {
+    const proposal: FallbackResultEntry = {
+      type: 'story_result', storyId: 'US-PROPOSAL', status, runId: 7,
+      retries: 1, ts: '2026-07-15T00:00:00.000Z', idempotencyKey: `proposal-${status}`,
+      payload: { runId: 7, storyId: 'US-PROPOSAL', status, idempotencyKey: `proposal-${status}` },
+    };
+    await writeFallbackResult(cwd, proposal);
+    await flushFallbackWrites(cwd);
+    const client = { query: jest.fn(async (sqlValue: unknown) => {
+      if (String(sqlValue).includes('SELECT pr.workspace_id, pr.spec_path')) return { rows: [{
+        workspace_id: 'test-ws', spec_path: 'forge/specs/approved/fallback-spec.json',
+        branch_name: 'run/fallback', manifest_hash: null, spec_revision: null,
+        story_revision: null, closeout_decision_id: null, closeout_status: null,
+      }] };
+      return { rows: [] };
+    }) };
+    transaction.mockImplementation(async (fn: (dbClient: typeof client) => Promise<unknown>) => fn(client));
+
+    const replayed = await replayFallbackResults(cwd, 'test-ws');
+    expect(replayed).toMatchObject({ inserted: 0, duplicates: 0, invalid: 1, retained: true });
+    expect(client.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO story_results'))).toBe(false);
+  });
+
   test('treats malformed durable records as retained critical replay blockers', async () => {
     fs.writeFileSync(path.join(cwd, '.rorca-results.jsonl'), '{"type":"story_result"\n', 'utf8');
     const replay = await replayFallbackResults(cwd, 'test-ws');
@@ -293,7 +316,7 @@ describe('fallback replay idempotency', () => {
 
     expect(replayed).toMatchObject({ total: 1, inserted: 0, duplicates: 0, invalid: 1, retained: true, blocksCompletion: true });
     expect(persisted).toEqual({});
-    expect(transaction).not.toHaveBeenCalled();
+    expect(transaction).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(path.join(cwd, '.rorca-results.jsonl'))).toBe(true);
   });
 });

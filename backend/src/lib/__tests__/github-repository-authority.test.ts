@@ -8,6 +8,7 @@
 jest.mock('../../db/index', () => ({ queryOne: jest.fn() }));
 
 import { queryOne } from '../../db/index';
+import { AutonomousPrDeliveryJobPayload } from '../pg-boss-schemas';
 import {
   getGithubRepositoryAuthority,
   githubRepoApiUrl,
@@ -24,9 +25,15 @@ test('repository API URLs cannot escape the validated canonical repository path'
   expect(() => githubRepoApiUrl('..', 'widgets')).toThrow('Invalid GitHub repository');
 });
 
-test('full object ids accept only 40 or 64 hexadecimal characters', () => {
+test('Git/GitHub object authority exposes only the supported 40-hex contract', () => {
   expect(isFullGitObjectId('a'.repeat(40))).toBe(true);
-  expect(isFullGitObjectId('A'.repeat(64))).toBe(true);
+  expect(isFullGitObjectId('A'.repeat(64))).toBe(false);
+  expect(AutonomousPrDeliveryJobPayload.safeParse({
+    deliveryId: '00000000-0000-4000-8000-000000000001', expectedHeadSha: 'a'.repeat(40),
+  }).success).toBe(true);
+  expect(AutonomousPrDeliveryJobPayload.safeParse({
+    deliveryId: '00000000-0000-4000-8000-000000000001', expectedHeadSha: 'a'.repeat(64),
+  }).success).toBe(false);
   expect(isFullGitObjectId('a'.repeat(41))).toBe(false);
   expect(isFullGitObjectId('g'.repeat(40))).toBe(false);
 });

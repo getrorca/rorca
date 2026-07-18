@@ -73,6 +73,75 @@ export function durableAtomicWriteFile(filePath: string, content: string): void 
   }
 }
 
+interface ProjectionStory {
+  id?: unknown;
+  passes?: unknown;
+  excluded?: unknown;
+}
+
+function projectionStories(value: unknown): ProjectionStory[] {
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    throw new Error('run spec projection must be a JSON object');
+  }
+  const spec = value as { userStories?: unknown; phases?: unknown };
+  if (Array.isArray(spec.userStories)) return spec.userStories as ProjectionStory[];
+  if (Array.isArray(spec.phases)) {
+    return spec.phases.flatMap((phase) => {
+      if (!phase || Array.isArray(phase) || typeof phase !== 'object') return [];
+      const stories = (phase as { stories?: unknown }).stories;
+      return Array.isArray(stories) ? stories as ProjectionStory[] : [];
+    });
+  }
+  throw new Error('run spec projection has no story collection');
+}
+
+/**
+ * Verify lifecycle flags in the agent-writable file against frozen host scope.
+ * The file is a projection only: it can never create pass or exclusion authority.
+ */
+export function assertRunSpecAuthorityProjection(input: {
+  specPath: string;
+  expectedStoryIds: readonly string[];
+  excludedStoryIds?: readonly string[];
+  authoritativePassedStoryIds: readonly string[];
+}): void {
+  const expected = new Set(input.expectedStoryIds);
+  const excluded = new Set(input.excludedStoryIds ?? []);
+  const passed = new Set(input.authoritativePassedStoryIds);
+  if (expected.size !== input.expectedStoryIds.length
+    || excluded.size !== (input.excludedStoryIds ?? []).length
+    || [...expected].some(id => excluded.has(id))
+    || [...passed].some(id => !expected.has(id))) {
+    throw new Error('frozen run scope is internally inconsistent');
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(fs.readFileSync(input.specPath, 'utf8')) as unknown; }
+  catch { throw new Error('run spec projection is unavailable or invalid'); }
+  const stories = projectionStories(parsed);
+  const byId = new Map<string, ProjectionStory[]>();
+  for (const story of stories) {
+    if (typeof story.id !== 'string' || !story.id.trim()) continue;
+    const id = story.id.trim();
+    const group = byId.get(id) ?? [];
+    group.push(story);
+    byId.set(id, group);
+  }
+  for (const storyId of expected) {
+    const matches = byId.get(storyId) ?? [];
+    if (matches.length !== 1) throw new Error(`run spec projection differs from frozen story ${storyId}`);
+    const story = matches[0];
+    if (story.excluded === true || (story.passes === true) !== passed.has(storyId)) {
+      throw new Error(`run spec projection lifecycle flags lack host authority for ${storyId}`);
+    }
+  }
+  for (const storyId of excluded) {
+    const matches = byId.get(storyId) ?? [];
+    if (matches.length !== 1 || matches[0].excluded !== true || matches[0].passes === true) {
+      throw new Error(`run spec exclusion differs from frozen host policy for ${storyId}`);
+    }
+  }
+}
+
 /**
  * Worktree and retry runs mutate only a deterministic ignored snapshot. Direct
  * non-retry runs retain the historical canonical-spec contract.

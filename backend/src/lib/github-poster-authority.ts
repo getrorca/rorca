@@ -8,14 +8,14 @@
 /** Canonical local authority checks shared by GitHub Check/status posters. */
 
 import * as path from 'path';
-import { query, queryOne } from '../db/index';
+import { queryOne } from '../db/index';
 import { isFullGitObjectId } from './github-repository-authority';
 import {
-  assertExactTrustedWalRow,
   isTrustedGoverningWalEvent,
   type TrustedWalRow,
 } from './trusted-wal';
 import type { WalEvent } from './sse-hub';
+import { inspectRunHostAuthority } from './run-host-authority';
 
 export interface CanonicalPosterRun {
   id: number;
@@ -25,6 +25,7 @@ export interface CanonicalPosterRun {
   lifecycleStatus: string;
   expectedStoryIds: string[] | null;
   finishedAt: string | null;
+  branchName: string | null;
 }
 
 export interface AuthorizedWalEvent {
@@ -62,6 +63,7 @@ interface RunRow {
   lifecycle_status: string;
   expected_story_ids: string[] | null;
   finished_at: string | null;
+  branch_name: string | null;
 }
 
 interface StoryAuthorityRow {
@@ -120,7 +122,7 @@ export async function authorizeCanonicalWalEvent(event: WalEvent): Promise<Autho
 
   const row = await queryOne<RunRow>(`
     SELECT id, workspace_id, spec_path, status, lifecycle_status,
-           expected_story_ids, finished_at
+           expected_story_ids, finished_at, branch_name
       FROM pipeline_runs
      WHERE id = $1
   `, [runId]);
@@ -139,6 +141,7 @@ export async function authorizeCanonicalWalEvent(event: WalEvent): Promise<Autho
       lifecycleStatus: row.lifecycle_status,
       expectedStoryIds: row.expected_story_ids,
       finishedAt: row.finished_at,
+      branchName: row.branch_name,
     },
   };
 }
@@ -211,6 +214,7 @@ export async function authorizeStoryPassEvent(event: WalEvent): Promise<Authoriz
     || row.branch_name !== row.result_commit_branch
     || row.observed_source !== row.result_commit_source
     || row.result_commit_source !== 'worktree_branch'
+    || row.result_commit_branch !== authorized.run.branchName
     || row.author !== row.result_commit_author
     || row.result_commit_author !== 'rorca-execution-engine') {
     return null;
@@ -236,7 +240,9 @@ export async function authorizeTerminalStoryEvent(event: WalEvent): Promise<Auth
     ? ['fail', 'timeout'].includes(row?.status ?? '')
       && row?.result_provenance === 'host'
       && ['execution-engine', 'worker'].includes(row?.result_source ?? '')
-    : ['skip', 'excluded'].includes(row?.status ?? '');
+    : ['skip', 'excluded'].includes(row?.status ?? '')
+      && row?.result_provenance === 'host'
+      && ['execution-engine', 'worker'].includes(row?.result_source ?? '');
   return allowed ? authorized : null;
 }
 
@@ -259,124 +265,15 @@ export async function authorizeCompleteTerminalRun(event: WalEvent): Promise<Com
   const expected = authorized.run.expectedStoryIds;
   if (!expected || expected.length === 0 || new Set(expected).size !== expected.length) return null;
 
-  const rows = await query<StoryAuthorityRow>(`
-    SELECT DISTINCT ON (sr.story_id)
-           sr.id, sr.story_id, sr.status, sr.spec_id, sr.reason, sr.finished_at,
-           sr.closeout_decision_id, scd.status AS closeout_status,
-           scd.manifest_hash AS closeout_manifest_hash, sr.manifest_hash,
-           sr.integrated, sr.commit_sha AS result_commit_sha,
-           sr.commit_message AS result_commit_message,
-           sr.commit_author AS result_commit_author,
-           sr.commit_branch AS result_commit_branch,
-           sr.commit_observed_source AS result_commit_source,
-           sr.result_provenance, sr.result_source,
-           sc.commit_sha, sc.commit_message, sc.observed_source, sc.author,
-           sc.branch_name, sc.pushed_at,
-           (SELECT COUNT(*) FROM story_commits exact_sc
-             WHERE exact_sc.workspace_id = $2 AND exact_sc.spec_id = $3
-               AND exact_sc.run_id = sr.run_id AND exact_sc.story_id = sr.story_id
-               AND exact_sc.commit_sha = sr.commit_sha) AS commit_count
-      FROM story_results sr
-      LEFT JOIN story_closeout_decisions scd
-        ON scd.decision_id = sr.closeout_decision_id
-       AND scd.workspace_id = $2 AND scd.spec_id = $3
-       AND scd.run_id = sr.run_id AND scd.story_id = sr.story_id
-       AND scd.manifest_hash = sr.manifest_hash
-      LEFT JOIN story_commits sc
-        ON sc.workspace_id = $2 AND sc.spec_id = $3
-       AND sc.run_id = sr.run_id AND sc.story_id = sr.story_id
-       AND sc.commit_sha = sr.commit_sha
-     WHERE sr.run_id = $1 AND sr.story_id = ANY($4::text[])
-     ORDER BY sr.story_id, sr.id DESC
-  `, [authorized.run.id, authorized.run.workspaceId, authorized.run.specId, expected]);
-  if (rows.length !== expected.length || rows.some(row => !expected.includes(row.story_id))) return null;
-  const terminalStoryStatuses = new Set(['pass', 'fail', 'skip', 'timeout', 'excluded']);
-  if (rows.some(row => !terminalStoryStatuses.has(row.status) || !row.finished_at)) return null;
-  if (rows.some(row => ['fail', 'timeout'].includes(row.status)
-    && (row.result_provenance !== 'host'
-      || !['execution-engine', 'worker'].includes(row.result_source)))) return null;
-
-  const passingRows = rows.filter(row => row.status === 'pass');
-  for (const row of passingRows) {
-    if (row.spec_id !== authorized.run.specId
-      || row.integrated !== true
-      || row.result_provenance !== 'host'
-      || row.result_source !== 'execution-engine'
-      || !row.closeout_decision_id
-      || row.closeout_status !== 'accepted'
-      || row.closeout_manifest_hash !== row.manifest_hash
-      || !isFullGitObjectId(row.result_commit_sha)
-      || row.commit_sha?.toLowerCase() !== row.result_commit_sha?.toLowerCase()
-      || row.commit_message !== row.result_commit_message
-      || row.author !== row.result_commit_author
-      || row.result_commit_author !== 'rorca-execution-engine'
-      || row.branch_name !== row.result_commit_branch
-      || row.observed_source !== row.result_commit_source
-      || row.result_commit_source !== 'worktree_branch'
-      || Number(row.commit_count) !== 1) {
-      return null;
-    }
-  }
-
-  // A passing result is authoritative only when exactly one released immutable
-  // host outbox binds the complete result/run/workspace/spec/story/SHA/decision
-  // identity. This DB/hash verification completes before repository authority or
-  // token resolution in any poster caller.
-  const passIds = passingRows.map(row => Number(row.id));
-  const passOutboxes = passIds.length === 0 ? [] : await query<TrustedWalRow>(`
-    SELECT * FROM wal_events
-     WHERE trust_provenance = 'host' AND trusted_source = 'story-result'
-       AND event_type = 'story_passed'
-       AND story_result_id = ANY($1::int[])
-     ORDER BY id ASC
-  `, [passIds]);
-  const outboxesByResult = new Map<number, TrustedWalRow[]>();
-  for (const outbox of passOutboxes) {
-    const resultId = Number(outbox.story_result_id);
-    const group = outboxesByResult.get(resultId) ?? [];
-    group.push(outbox);
-    outboxesByResult.set(resultId, group);
-  }
-  for (const row of passingRows) {
-    const outboxes = outboxesByResult.get(Number(row.id)) ?? [];
-    if (outboxes.length !== 1 || !outboxes[0].outbox_ready_at) return null;
-    const outbox = outboxes[0];
-    try { assertExactTrustedWalRow(outbox); } catch { return null; }
-    const payload = parsePayload(outbox);
-    if (!payload
-      || outbox.workspace_id !== authorized.run.workspaceId
-      || outbox.spec_id !== authorized.run.specId
-      || outbox.story_id !== row.story_id
-      || Number(outbox.canonical_run_id) !== authorized.run.id
-      || Number(outbox.story_result_id) !== Number(row.id)
-      || Number(payload.run_id) !== authorized.run.id
-      || payload.story_id !== row.story_id
-      || Number(payload.story_result_id) !== Number(row.id)
-      || String(payload.commit_sha).toLowerCase() !== row.result_commit_sha?.toLowerCase()
-      || payload.closeout_decision_id !== row.closeout_decision_id) {
-      return null;
-    }
-  }
-
-  const commits = rows
-    .filter(row => row.status === 'pass' && row.commit_sha && row.pushed_at)
-    .sort((left, right) => new Date(left.pushed_at!).getTime() - new Date(right.pushed_at!).getTime());
-  const finalCommitSha = commits.length > 0 ? commits[commits.length - 1].commit_sha!.toLowerCase() : null;
-  const hasFailure = rows.some(row => row.status === 'fail' || row.status === 'timeout');
-  const hasPass = rows.some(row => row.status === 'pass');
-  const successAuthorized = authorized.run.status === 'done' && !hasFailure && hasPass && Boolean(finalCommitSha);
-
+  // Central frozen-scope authority ignores every compatibility/proposal row and
+  // independently repeats canonical checkout/branch/terminal-HEAD validation.
+  const host = await inspectRunHostAuthority(authorized.run.id);
+  if (!host || !host.complete || host.invalidReason) return null;
   return {
     ...authorized,
-    stories: rows.map(row => ({
-      storyId: row.story_id,
-      status: row.status,
-      reason: row.reason,
-      finishedAt: row.finished_at,
-      resultId: Number(row.id),
-      commitSha: row.commit_sha?.toLowerCase() ?? null,
-    })),
-    finalCommitSha,
-    successAuthorized,
+    stories: host.stories,
+    finalCommitSha: host.finalCommitSha,
+    successAuthorized: authorized.run.status === 'done' && host.releaseEligible,
   };
+
 }

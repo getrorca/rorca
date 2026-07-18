@@ -41,6 +41,8 @@ const subscribers = new Map<number, Subscriber>();
 const durableSubscribers = new Map<number, DurableSubscriber>();
 const topicSubscribers = new Map<string, Map<number, TopicSubscriber>>();
 const recentlyBroadcastWalIds = new Set<number>();
+const durablyAcceptedWalIds = new Set<number>();
+const durableBroadcastsInFlight = new Map<number, Promise<void>>();
 const MAX_RECENT_WAL_IDS = 2_048;
 let nextId = 1;
 
@@ -55,17 +57,21 @@ export function subscribe(fn: Subscriber): () => void {
   };
 }
 
+function rememberBounded(set: Set<number>, id: number): void {
+  set.add(id);
+  if (set.size > MAX_RECENT_WAL_IDS) {
+    const oldest = set.values().next().value as number | undefined;
+    if (oldest !== undefined) set.delete(oldest);
+  }
+}
+
 function claimBroadcast(event: WalEvent): boolean {
   // The inserting route and PostgreSQL LISTEN/NOTIFY can observe the same row in
   // one process. Suppress that duplicate without hiding events inserted by a
   // different process (which arrive only through LISTEN here).
   if (!Number.isSafeInteger(event.id)) return true;
   if (recentlyBroadcastWalIds.has(event.id)) return false;
-  recentlyBroadcastWalIds.add(event.id);
-  if (recentlyBroadcastWalIds.size > MAX_RECENT_WAL_IDS) {
-    const oldest = recentlyBroadcastWalIds.values().next().value as number | undefined;
-    if (oldest !== undefined) recentlyBroadcastWalIds.delete(oldest);
-  }
+  rememberBounded(recentlyBroadcastWalIds, event.id);
   return true;
 }
 
@@ -91,13 +97,32 @@ export function broadcastAll(event: WalEvent): void {
  * acceptance—not provider completion. A rejection leaves the outbox retryable.
  */
 export async function broadcastAllDurably(event: WalEvent): Promise<void> {
-  if (!claimBroadcast(event)) return;
-  broadcastVolatile(event);
-  try {
+  if (!Number.isSafeInteger(event.id)) {
+    broadcastVolatile(event);
     await Promise.all([...durableSubscribers.values()].map(fn => fn(event)));
+    return;
+  }
+  if (durablyAcceptedWalIds.has(event.id)) return;
+  const existing = durableBroadcastsInFlight.get(event.id);
+  if (existing) return existing;
+
+  const shouldBroadcastVolatile = claimBroadcast(event);
+  const durable = (async () => {
+    if (shouldBroadcastVolatile) broadcastVolatile(event);
+    await Promise.all([...durableSubscribers.values()].map(fn => fn(event)));
+    rememberBounded(durablyAcceptedWalIds, event.id);
+  })();
+  durableBroadcastsInFlight.set(event.id, durable);
+  try {
+    await durable;
   } catch (error) {
-    if (Number.isSafeInteger(event.id)) recentlyBroadcastWalIds.delete(event.id);
+    durablyAcceptedWalIds.delete(event.id);
+    if (shouldBroadcastVolatile) recentlyBroadcastWalIds.delete(event.id);
     throw error;
+  } finally {
+    if (durableBroadcastsInFlight.get(event.id) === durable) {
+      durableBroadcastsInFlight.delete(event.id);
+    }
   }
 }
 

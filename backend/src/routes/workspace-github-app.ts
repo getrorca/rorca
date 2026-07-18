@@ -8,7 +8,7 @@
 import crypto from 'node:crypto';
 import { Router, type Request } from 'express';
 import { execute, queryOne, transaction } from '../db/index';
-import { requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
+import { requirePlatformAdmin, requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import {
   assertGithubAppPermissions,
@@ -33,7 +33,7 @@ const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
 interface RegistrationRow { id: string; app_id: string | number; app_slug: string; private_key_secret_id: string; webhook_secret_id: string }
 interface AppConversion { id?: number; slug?: string; client_id?: string; pem?: string; webhook_secret?: string }
-interface ProviderApp { id?: number; slug?: string; permissions?: Record<string, string>; events?: string[] }
+interface ProviderApp { id?: number; slug?: string; permissions?: Record<string, string>; events?: string[]; owner?: { id?: number; login?: string } }
 
 function digest(value: string): `sha256:${string}` {
   return `sha256:${crypto.createHash('sha256').update(value, 'utf8').digest('hex')}`;
@@ -114,6 +114,12 @@ async function verifyProviderProfile(
   try {
     if (expectedApp && (providerApp.id !== expectedApp.id || providerApp.slug?.toLowerCase() !== expectedApp.slug.toLowerCase())) {
       throw new ConflictError('GitHub App identity does not match the supplied private key');
+    }
+    const expectedOwner = (process.env.RORCA_GITHUB_APP_OWNER
+      || process.env.RORCA_GITHUB_APP_CREATION_ORG || '').trim();
+    if (expectedOwner && (!ORG.test(expectedOwner)
+      || providerApp.owner?.login?.toLowerCase() !== expectedOwner.toLowerCase())) {
+      throw new ConflictError('GitHub App owner does not match configured platform authority');
     }
     const permissions = providerApp.permissions ?? {};
     const events = Array.isArray(providerApp.events) ? providerApp.events : [];
@@ -227,9 +233,9 @@ router.get('/:id/github/app', async (req, res, next) => {
  *         schema: { type: string }
  *     responses:
  *       200: { description: Manifest handoff or bounded import ceremony }
- *       403: { description: Workspace admin required }
+ *       403: { description: Workspace administration plus platform/superuser authority required }
  */
-router.post('/:id/github/app/setup/start', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/app/setup/start', requireWorkspaceAdmin(), requirePlatformAdmin(), async (req, res, next) => {
   try {
     const workspaceId = String(req.params.id); await requireWorkspace(workspaceId);
     const setup = publicSetup();
@@ -275,9 +281,10 @@ router.post('/:id/github/app/setup/start', requireWorkspaceAdmin(), async (req, 
  *               code: { type: string, minLength: 6, maxLength: 256 }
  *     responses:
  *       200: { description: App registered without returning secrets }
+ *       403: { description: Workspace administration plus platform/superuser authority required }
  *       409: { description: State expired, consumed, or owned by another operator }
  */
-router.post('/:id/github/app/setup/exchange', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/app/setup/exchange', requireWorkspaceAdmin(), requirePlatformAdmin(), async (req, res, next) => {
   try {
     const workspaceId = String(req.params.id);
     const state = typeof req.body?.state === 'string' ? req.body.state : '';
@@ -324,10 +331,11 @@ router.post('/:id/github/app/setup/exchange', requireWorkspaceAdmin(), async (re
  *               privateKeyPem: { type: string, maxLength: 65536, writeOnly: true }
  *               webhookSecret: { type: string, minLength: 16, maxLength: 1024, writeOnly: true }
  *     responses:
- *       200: { description: Provider profile verified and secrets atomically vaulted }
+ *       200: { description: Provider profile and configured owner verified; secrets atomically vaulted }
+ *       403: { description: Workspace administration plus platform/superuser authority required }
  *       409: { description: Active registration replacement is explicitly blocked }
  */
-router.post('/:id/github/app/import', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/app/import', requireWorkspaceAdmin(), requirePlatformAdmin(), async (req, res, next) => {
   try {
     await requireWorkspace(String(req.params.id));
     const registered = await registerApp({ id: Number(req.body?.appId), slug: String(req.body?.appSlug ?? ''),

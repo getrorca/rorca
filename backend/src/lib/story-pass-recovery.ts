@@ -9,11 +9,14 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
 import { query } from '../db/index';
 import { markStoryPassed } from './execution-engine';
-import { isFullGitObjectId } from './github-repository-authority';
-import { deriveRunSpecPath } from './run-spec-snapshot';
+import { deriveRunSpecPath, assertRunSpecAuthorityProjection } from './run-spec-snapshot';
+import {
+  assertCanonicalRunCheckout,
+  assertOrderedCommitAncestry,
+  isSupportedGitCommitSha,
+} from './run-git-authority';
 import {
   assertExactTrustedWalRow,
   relayTrustedWalEvent,
@@ -55,6 +58,8 @@ interface RecoveryCandidate {
   run_branch_name: string | null;
   run_auto_worktree: boolean | null;
   run_retried_from_id: number | string | null;
+  run_expected_story_ids: string[] | null;
+  run_excluded_story_ids: string[] | null;
   workspace_path: string;
   closeout_status: string | null;
   closeout_manifest_hash: string | null;
@@ -90,6 +95,25 @@ export interface PassRecoveryResult {
   alreadyProjected: number;
   blocked: PassRecoveryBlocked[];
   truncated: boolean;
+}
+
+interface RecoveryChainRow {
+  id: number | string;
+  story_id: string;
+  commit_sha: string;
+  commit_branch: string;
+  result_provenance: string;
+  result_source: string;
+  integrated: boolean;
+  closeout_decision_id: string | null;
+  closeout_status: string | null;
+  closeout_manifest_hash: string | null;
+  manifest_hash: string | null;
+  projected_commit_sha: string | null;
+  projected_commit_branch: string | null;
+  commit_count: number | string;
+  outbox_count: number | string;
+  attestation_count: number | string;
 }
 
 export interface PassRecoveryOptions {
@@ -129,33 +153,93 @@ function parsePayload(value: RecoveryCandidate['payload']): Record<string, unkno
   }
 }
 
-function gitValue(cwd: string, args: string[]): string {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    timeout: 10_000,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
-
-function assertExactRepositoryHead(candidate: RecoveryCandidate): void {
-  const cwd = path.resolve(candidate.run_worktree_path ?? candidate.workspace_path);
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('run repository root is unavailable');
-  const gitTop = path.resolve(gitValue(cwd, ['rev-parse', '--show-toplevel']));
-  if (fs.realpathSync(gitTop) !== fs.realpathSync(cwd)) {
-    throw new Error('run repository root does not match git top-level');
+async function assertExactRepositorySuccessorState(candidate: RecoveryCandidate): Promise<string[]> {
+  if (!candidate.run_branch_name || candidate.result_commit_branch !== candidate.run_branch_name) {
+    throw new Error('integrated pass branch differs from pipeline run authority');
   }
-  const head = gitValue(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']).toLowerCase();
-  const branch = gitValue(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (head !== candidate.result_commit_sha || branch !== candidate.result_commit_branch) {
-    throw new Error('run branch HEAD no longer matches the attested integrated result');
+  const checkout = assertCanonicalRunCheckout({
+    cwd: candidate.run_worktree_path ?? candidate.workspace_path,
+    repositoryTopLevel: candidate.workspace_path,
+    branchName: candidate.run_branch_name,
+  });
+  const chain = await query<RecoveryChainRow>(`
+    SELECT sr.id, sr.story_id, sr.commit_sha, sr.commit_branch,
+           sr.result_provenance, sr.result_source, sr.integrated,
+           sr.closeout_decision_id,
+           scd.status AS closeout_status,
+           scd.manifest_hash AS closeout_manifest_hash, sr.manifest_hash,
+           sc.commit_sha AS projected_commit_sha,
+           sc.branch_name AS projected_commit_branch,
+           (SELECT COUNT(*) FROM story_commits exact_sc
+             WHERE exact_sc.workspace_id = pr.workspace_id AND exact_sc.spec_id = sr.spec_id
+               AND exact_sc.run_id = sr.run_id AND exact_sc.story_id = sr.story_id
+               AND exact_sc.commit_sha = sr.commit_sha) AS commit_count,
+           (SELECT COUNT(*) FROM wal_events exact_w
+             WHERE exact_w.trust_provenance = 'host' AND exact_w.trusted_source = 'story-result'
+               AND exact_w.event_type = 'story_passed' AND exact_w.story_result_id = sr.id) AS outbox_count,
+           (SELECT COUNT(*) FROM checkpoint_validation_attestations exact_a
+             WHERE exact_a.workspace_id = pr.workspace_id AND exact_a.run_id = sr.run_id
+               AND exact_a.story_id = sr.story_id AND exact_a.branch_name = sr.commit_branch
+               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine'
+               AND exact_a.revoked_at IS NULL) AS attestation_count
+      FROM story_results sr
+      JOIN pipeline_runs pr ON pr.id = sr.run_id
+      LEFT JOIN story_closeout_decisions scd ON scd.decision_id = sr.closeout_decision_id
+      LEFT JOIN story_commits sc ON sc.workspace_id = pr.workspace_id
+       AND sc.spec_id = sr.spec_id AND sc.run_id = sr.run_id
+       AND sc.story_id = sr.story_id AND sc.commit_sha = sr.commit_sha
+     WHERE sr.run_id = $1 AND sr.status = 'pass'
+       AND sr.result_provenance = 'host' AND sr.result_source = 'execution-engine'
+     ORDER BY sr.id ASC
+  `, [Number(candidate.canonical_run_id)]);
+  const candidateChainRow = chain.find(row => Number(row.id) === Number(candidate.story_result_id));
+  if (!candidateChainRow
+    || candidateChainRow.commit_sha.toLowerCase() !== candidate.result_commit_sha?.toLowerCase()) {
+    throw new Error('recovery pass is absent from ordered host successor state');
   }
-  try {
-    gitValue(cwd, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-    throw new Error('run branch has an unfinished merge');
-  } catch (error) {
-    if (error instanceof Error && error.message === 'run branch has an unfinished merge') throw error;
+  for (const row of chain) {
+    if (!isSupportedGitCommitSha(row.commit_sha)
+      || row.commit_branch !== candidate.run_branch_name
+      || row.result_provenance !== 'host' || row.result_source !== 'execution-engine'
+      || row.integrated !== true || row.closeout_status !== 'accepted'
+      || row.closeout_manifest_hash !== row.manifest_hash
+      || row.projected_commit_sha !== row.commit_sha
+      || row.projected_commit_branch !== row.commit_branch
+      || Number(row.commit_count) !== 1 || Number(row.outbox_count) !== 1
+      || Number(row.attestation_count) !== 1) {
+      throw new Error('ordered host successor state is incomplete or inconsistent');
+    }
   }
+  const chainIds = chain.map(row => Number(row.id));
+  const outboxes = await query<TrustedWalRow>(`
+    SELECT * FROM wal_events
+     WHERE trust_provenance = 'host' AND trusted_source = 'story-result'
+       AND event_type = 'story_passed' AND story_result_id = ANY($1::int[])
+     ORDER BY id ASC
+  `, [chainIds]);
+  for (const row of chain) {
+    const exact = outboxes.filter(outbox => Number(outbox.story_result_id) === Number(row.id));
+    if (exact.length !== 1) throw new Error('ordered host successor outbox identity is ambiguous');
+    assertExactTrustedWalRow(exact[0]);
+    const payload = typeof exact[0].payload === 'string'
+      ? JSON.parse(exact[0].payload) as Record<string, unknown>
+      : exact[0].payload as unknown as Record<string, unknown>;
+    if (exact[0].workspace_id !== candidate.workspace_id
+      || exact[0].spec_id !== candidate.spec_id
+      || exact[0].story_id !== row.story_id
+      || Number(exact[0].canonical_run_id) !== Number(candidate.canonical_run_id)
+      || Number(payload.story_result_id) !== Number(row.id)
+      || String(payload.commit_sha).toLowerCase() !== row.commit_sha.toLowerCase()
+      || payload.closeout_decision_id !== row.closeout_decision_id) {
+      throw new Error('ordered host successor outbox identity is inconsistent');
+    }
+  }
+  const shas = chain.map(row => row.commit_sha.toLowerCase());
+  assertOrderedCommitAncestry(checkout.cwd, shas, checkout.headSha);
+  if (shas.at(-1) !== checkout.headSha) {
+    throw new Error('canonical run HEAD is not the exact latest host successor');
+  }
+  return chain.map(row => row.story_id);
 }
 
 function assertCandidateIdentity(candidate: RecoveryCandidate): void {
@@ -171,10 +255,12 @@ function assertCandidateIdentity(candidate: RecoveryCandidate): void {
     || candidate.result_integrated !== true
     || candidate.result_provenance !== 'host'
     || candidate.result_source !== 'execution-engine'
-    || !isFullGitObjectId(sha)
+    || !isSupportedGitCommitSha(sha)
     || candidate.result_commit_author !== 'rorca-execution-engine'
     || candidate.result_commit_source !== 'worktree_branch'
     || !candidate.result_commit_branch
+    || !candidate.run_branch_name
+    || candidate.result_commit_branch !== candidate.run_branch_name
     || !candidate.result_commit_message
     || candidate.run_workspace_id !== candidate.workspace_id
     || candidate.closeout_status !== 'accepted'
@@ -243,6 +329,8 @@ async function loadCandidates(options: { runId?: number; limit: number }): Promi
            pr.worktree_path AS run_worktree_path, pr.branch_name AS run_branch_name,
            pr.auto_worktree AS run_auto_worktree,
            pr.retried_from_run_id AS run_retried_from_id,
+           pr.expected_story_ids AS run_expected_story_ids,
+           COALESCE(pr.excluded_story_ids, '{}'::text[]) AS run_excluded_story_ids,
            ws.path AS workspace_path,
            scd.status AS closeout_status, scd.manifest_hash AS closeout_manifest_hash,
            scd.workspace_id AS closeout_workspace_id, scd.spec_id AS closeout_spec_id,
@@ -332,13 +420,19 @@ export async function recoverUnreleasedIntegratedPasses(
   for (const candidate of candidates) {
     try {
       assertCandidateIdentity(candidate);
-      assertExactRepositoryHead(candidate);
+      const hostSuccessorStoryIds = await assertExactRepositorySuccessorState(candidate);
       const specPath = runSpecPath(candidate);
       if (!fs.existsSync(specPath)) throw new Error('run-owned spec snapshot is unavailable');
       const lifecycle = await markStoryPassed(specPath, candidate.story_id);
       if (!lifecycle.storyFound) throw new Error('story is absent from the run-owned spec snapshot');
       if (lifecycle.changed) result.recovered++;
       else result.alreadyProjected++;
+      assertRunSpecAuthorityProjection({
+        specPath,
+        expectedStoryIds: candidate.run_expected_story_ids ?? [],
+        excludedStoryIds: candidate.run_excluded_story_ids ?? [],
+        authoritativePassedStoryIds: hostSuccessorStoryIds,
+      });
       await relayTrustedWalEvent(trustedWalReference(walRow(candidate)));
     } catch (error) {
       result.blocked.push({
