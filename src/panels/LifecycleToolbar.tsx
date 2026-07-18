@@ -48,6 +48,7 @@ const VIEW_OPTIONS = [
   ['current_view', 'Active delivery'], ['updated_desc', 'Recently updated'], ['title_asc', 'Spec title'],
   ['risk_desc', 'Highest risk'], ['readiness_desc', 'Most ready'], ['owner_asc', 'Owner'],
 ] as const;
+const QUERY_DEBOUNCE_MS = 160;
 
 interface FilterChip { key: keyof LifecyclePortfolioFilters; label: string }
 
@@ -196,7 +197,7 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
       setQueryErrors([]);
       return;
     }
-    const timer = window.setTimeout(() => applyQuery(query.trim()), 300);
+    const timer = window.setTimeout(() => applyQuery(query.trim()), QUERY_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
     // applyQuery intentionally closes over the current controller; canonical
     // query changes are the synchronization boundary for URL-backed filters.
@@ -219,6 +220,10 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
     } else if (event.key === 'Enter' && suggestions[highlightedSuggestion]) {
       event.preventDefault();
       chooseSuggestion(suggestions[highlightedSuggestion]);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      applyQuery(query.trim());
+      setQueryFocused(false);
     } else if (event.key === 'Escape') {
       setQueryFocused(false);
     }
@@ -282,6 +287,7 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
         ? `Updated ${new Date(lifecycle.lastSuccessfulRefresh).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
         : 'Not refreshed yet';
 
+  const prefetchFilters = lifecycle.prefetchFilters;
   const presets = [
     {
       label: 'Active',
@@ -308,6 +314,20 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
       clear: { status: undefined },
     },
   ];
+
+  useEffect(() => {
+    if (chips.length > 0 || !lifecycle.portfolio.data || lifecycle.portfolio.refreshing) return;
+    const patches: Array<Partial<LifecyclePortfolioFilters>> = [
+      { blocked: true },
+      { phase: 'qa', blocked: false },
+      { status: 'awaiting_approval' },
+      { status: 'in_progress' },
+    ];
+    const timers = patches.map((patch, index) => window.setTimeout(() => {
+      void prefetchFilters(patch);
+    }, 200 + (index * 450)));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [chips.length, lifecycle.portfolio.data, lifecycle.portfolio.refreshing, prefetchFilters]);
 
   return (
     <section className="rounded-lg border border-border bg-panel" aria-label="Lifecycle filters">
@@ -397,6 +417,8 @@ export default function LifecycleToolbar({ lifecycle, phaseOrder }: LifecycleToo
             key={preset.label}
             type="button"
             aria-pressed={preset.active}
+            onPointerEnter={() => { void prefetchFilters(preset.apply); }}
+            onFocus={() => { void prefetchFilters(preset.apply); }}
             onClick={() => lifecycle.updateFilters(preset.active ? preset.clear : preset.apply)}
             className={`min-h-8 rounded-full border px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
               preset.active ? 'border-accent bg-accent/10 text-accent' : 'border-border text-muted hover:text-[var(--text)]'

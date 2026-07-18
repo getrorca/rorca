@@ -133,6 +133,9 @@
   padding: 0.875rem;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 10rem;
 }
 
 .lifecycle-explorer-row:last-child {

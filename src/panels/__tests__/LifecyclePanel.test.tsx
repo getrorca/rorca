@@ -87,7 +87,7 @@ function lifecycleState() {
     selectedEvidenceId: null,
     pagination: { page: 1, limit: 25, total: 1, hasMore: false },
     empty: false, refreshing: false, stale: false, partialData: false, lastSuccessfulRefresh: '2026-07-15T12:00:00.000Z',
-    savedViews: [], refresh: vi.fn(), updateFilters: vi.fn(), updateUrlState: vi.fn(), setPage: vi.fn(), setCompact: vi.fn(), setMode: vi.fn(),
+    savedViews: [], refresh: vi.fn(), updateFilters: vi.fn(), updateUrlState: vi.fn(), prefetchFilters: vi.fn().mockResolvedValue(undefined), setPage: vi.fn(), setCompact: vi.fn(), setMode: vi.fn(),
     saveView: vi.fn(), renameSavedView: vi.fn(), removeSavedView: vi.fn(), applySavedView: vi.fn(),
     mutations: { recompile: vi.fn(), recordDecision: vi.fn(), revokeDecision: vi.fn() },
     openEvidence: vi.fn(), closeEvidence: vi.fn(),
@@ -214,6 +214,15 @@ describe('LifecyclePanel', () => {
     await waitFor(() => expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith(expect.objectContaining({ status: 'awaiting_approval' }), true), { timeout: 800 });
   });
 
+  it('commits a free-text query immediately on Enter without waiting for debounce', async () => {
+    const user = userEvent.setup();
+    render(<LifecyclePanel />);
+    const query = screen.getByRole('combobox', { name: 'Search and filter lifecycle specs' });
+    await user.type(query, 'release');
+    await user.keyboard('{Enter}');
+    expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith(expect.objectContaining({ search: 'release' }), true);
+  });
+
   it('announces active filters as removable chips and clears the complete query', async () => {
     const user = userEvent.setup();
     mocks.lifecycle.filters = { sort: 'risk_desc', status: 'blocked', phase: 'qa', risk: 'high', blocked: true };
@@ -289,6 +298,8 @@ describe('LifecyclePanel', () => {
     const matrix = screen.getByRole('button', { name: 'Matrix' });
     matrix.focus();
     await user.keyboard(' ');
+    expect(mocks.lifecycle.prefetchFilters).toHaveBeenCalledWith({ blocked: true });
+    expect(mocks.lifecycle.prefetchFilters).toHaveBeenCalledWith({ phase: 'qa', blocked: false });
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ blocked: true });
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ phase: 'qa', blocked: false });
     expect(mocks.lifecycle.setMode).toHaveBeenCalledWith('matrix');
