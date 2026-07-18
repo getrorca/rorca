@@ -31,7 +31,7 @@ import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
 import { logger } from '../lib/logger';
-import { decryptToken } from '../lib/auth-utils';
+import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -405,10 +405,6 @@ const SpecFileSchema = z.object({
   userStories: z.array(SpecUserStorySchema).min(1),
 });
 
-interface GithubConnectionRow {
-  encrypted_token: string;
-}
-
 /**
  * Fetch raw file content from GitHub API.
  * Returns null if the file cannot be fetched.
@@ -484,17 +480,19 @@ export async function handlePushSpecDiscovery(
   const allSpecPaths = new Set([...addedPaths, ...modifiedPaths]);
   if (allSpecPaths.size === 0) return;
 
-  // Resolve GitHub token
-  const conn = await queryOne<GithubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1'
-  );
-  if (!conn) {
-    logger.warn('[Webhook] No GitHub connection found — cannot fetch spec files');
+  const repoFullName: string = payload.repository?.full_name ?? '';
+  const [repoOwner, repoName] = repoFullName.split('/');
+  if (!repoOwner || !repoName) return;
+  const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
+    repository: { owner: repoOwner, name: repoName },
+    purpose: 'routine',
+  });
+  if (!resolved) {
+    logger.warn('[Webhook] No workspace GitHub credential found — cannot fetch spec files');
     return;
   }
-  const token = decryptToken(conn.encrypted_token);
+  const token = resolved.token;
 
-  const repoFullName: string = payload.repository?.full_name ?? '';
   const ref: string = payload.after ?? payload.ref?.replace('refs/heads/', '') ?? 'main';
 
   for (const filePath of allSpecPaths) {

@@ -604,7 +604,10 @@ async function providerMerge(
   delivery: DeliveryRow,
   evidence: GithubPrDeliveryEvidence,
 ): Promise<{ mergedSha: string; responseHash: `sha256:${string}`; mergedAt: string }> {
-  const resolved = await resolveWorkspaceGitHubToken(delivery.workspace_id);
+  const resolved = await resolveWorkspaceGitHubToken(delivery.workspace_id, {
+    repository: { owner: delivery.repo_owner, name: delivery.repo_name },
+    purpose: 'reviewed-delivery',
+  });
   if (!resolved) throw new UnprocessableError('Workspace GitHub credential is unavailable', 'GITHUB_CREDENTIAL_UNAVAILABLE');
   const prUrl = `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`;
   const preflight = await githubRateLimiter.execute(() => fetch(prUrl, {
@@ -835,7 +838,10 @@ export async function processAutonomousPrDelivery(
 async function fetchFailureAnnotations(delivery: DeliveryRow, checks: NormalizedGithubCheck[]): Promise<Array<{ path: string; line: number; message: string }>> {
   const failing = checks.filter((check) => check.source === 'check_run' && check.conclusion === 'failure').slice(0, 10);
   if (failing.length === 0) return [];
-  const resolved = await resolveWorkspaceGitHubToken(delivery.workspace_id);
+  const resolved = await resolveWorkspaceGitHubToken(delivery.workspace_id, {
+    repository: { owner: delivery.repo_owner, name: delivery.repo_name },
+    purpose: 'reviewed-delivery',
+  });
   if (!resolved) return [];
   const output: Array<{ path: string; line: number; message: string }> = [];
   for (const check of failing) {
@@ -1194,7 +1200,10 @@ export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Pr
       AND workspace_id = $2 AND run_id = $3
   `, [evidence.id, delivery.workspace_id, delivery.run_id]);
   if (!lifecycleRows?.merge_id) return false;
-  const token = await resolveWorkspaceGitHubToken(delivery.workspace_id);
+  const token = await resolveWorkspaceGitHubToken(delivery.workspace_id, {
+    repository: { owner: delivery.repo_owner, name: delivery.repo_name },
+    purpose: 'reviewed-delivery',
+  });
   if (!token) return false;
   const response = await githubRateLimiter.execute(() => fetch(
     `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`,

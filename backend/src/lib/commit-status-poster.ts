@@ -19,7 +19,7 @@
 import { execSync } from 'child_process';
 import { subscribe, type WalEvent } from './sse-hub';
 import { queryOne, execute } from '../db/index';
-import { decryptToken } from '../lib/auth-utils';
+import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 
@@ -29,10 +29,6 @@ interface GitHubWebhookRow {
   workspace_id: string;
   repo_owner: string;
   repo_name: string;
-}
-
-interface GitHubConnectionRow {
-  encrypted_token: string;
 }
 
 interface StoryCommitRow {
@@ -52,13 +48,13 @@ interface WorkspaceRow {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Get GitHub token. Returns null if not configured. */
-async function getGithubToken(): Promise<string | null> {
-  const row = await queryOne<GitHubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1',
-  );
-  if (!row) return null;
-  return decryptToken(row.encrypted_token);
+/** Get only the credential bound to this workspace/repository. */
+async function getGithubToken(workspaceId: string, owner: string, repo: string): Promise<string | null> {
+  const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
+    repository: { owner, name: repo },
+    purpose: 'checks',
+  });
+  return resolved?.token ?? null;
 }
 
 /** Get GitHub repo info for a workspace. Returns null if not connected. */
@@ -156,7 +152,7 @@ async function postStatus(
   targetUrl: string,
   workspaceId: string,
 ): Promise<void> {
-  const token = await getGithubToken();
+  const token = await getGithubToken(workspaceId, owner, repo);
   if (!token) {
     logger.debug('[CommitStatus] No GitHub token — skipping status post');
     return;

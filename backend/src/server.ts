@@ -45,6 +45,7 @@ import envVarsRouter from './routes/env-vars';
 import webhooksRouter from './routes/webhooks';
 import githubChecksRouter from './routes/github-checks';
 import workspaceGithubRouter from './routes/workspace-github';
+import workspaceGithubAppRouter from './routes/workspace-github-app';
 import activityRouter from './routes/activity';
 import analyticsRouter from './routes/analytics';
 import budgetRouter from './routes/budget';
@@ -237,6 +238,7 @@ app.use(cors({
 // Capture raw body for webhook signature verification.
 // The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
 app.use(express.json({
+  limit: '1mb',
   verify: (req, _res, buf) => {
     const url = (req as express.Request).originalUrl || '';
     if (url.startsWith('/api/webhooks/')) {
@@ -437,6 +439,7 @@ app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/workspaces', workspaceGithubRouter);
+app.use('/api/workspaces', workspaceGithubAppRouter);
 app.use('/api/workspaces', deliveryGovernanceRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/activity', activityRouter);

@@ -104,6 +104,8 @@ router.post('/:sha', async (req: Request, res: Response) => {
       sha,
       state as CheckState,
       desc,
+      undefined,
+      workspaceId,
     );
 
     if (!posted) {

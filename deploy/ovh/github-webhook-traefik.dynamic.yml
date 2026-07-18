@@ -1,0 +1,52 @@
+# Dedicated GitHub webhook ingress for hooks.rorca.ai.
+# REVIEW-ONLY ARTIFACT: do not install without explicit deployment authority.
+# Attach Traefik and the Rorca backend to a private Docker network where
+# `rorca-backend:3030` resolves. This exposes no other Rorca API path.
+http:
+  routers:
+    rorca-github-webhook-http:
+      entryPoints: [web]
+      rule: "Host(`hooks.rorca.ai`) && Path(`/api/webhooks/github`)"
+      priority: 10000
+      middlewares: [rorca-github-webhook-https]
+      service: noop@internal
+    rorca-github-webhook-https:
+      entryPoints: [websecure]
+      rule: "Host(`hooks.rorca.ai`) && Path(`/api/webhooks/github`)"
+      priority: 10000
+      middlewares:
+        - rorca-github-webhook-bounds
+        - rorca-github-webhook-headers
+      service: rorca-github-webhook
+      tls:
+        certResolver: letsencrypt
+
+  middlewares:
+    rorca-github-webhook-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+    rorca-github-webhook-bounds:
+      buffering:
+        maxRequestBodyBytes: 1048576
+        memRequestBodyBytes: 262144
+        retryExpression: "IsNetworkError() && Attempts() < 2"
+    rorca-github-webhook-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        customResponseHeaders:
+          Server: ""
+
+  services:
+    rorca-github-webhook:
+      loadBalancer:
+        passHostHeader: true
+        healthCheck:
+          # Private backend health check; this path is never routed publicly.
+          path: /api/health/live
+          interval: 30s
+          timeout: 3s
+        servers:
+          - url: "http://rorca-backend:3030"

@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { queryOne } from '../db/index';
-import { decryptToken } from '../lib/auth-utils';
+import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 import { githubRateLimiter } from './github-rate-limiter';
@@ -30,26 +30,19 @@ interface UserStory {
   [key: string]: unknown;
 }
 
-interface GitHubConnectionRow {
-  encrypted_token: string;
-}
-
 export type CheckState = 'pending' | 'success' | 'failure' | 'error';
 
 export const CHECK_NAME = 'rorca/spec-compliance';
 
 // ─── GitHub token resolution ─────────────────────────────────────────────────
 
-/**
- * Resolve a GitHub access token for API calls.
- * Looks up the first github_connection in the DB (user OAuth token).
- */
-async function getGithubToken(): Promise<string | null> {
-  const row = await queryOne<GitHubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1'
-  );
-  if (!row) return null;
-  return decryptToken(row.encrypted_token);
+/** Resolve only the credential bound to this workspace and repository. */
+async function getGithubToken(workspaceId: string, owner: string, repo: string): Promise<string | null> {
+  const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
+    repository: { owner, name: repo },
+    purpose: 'checks',
+  });
+  return resolved?.token ?? null;
 }
 
 // ─── Post commit status ──────────────────────────────────────────────────────
@@ -65,8 +58,13 @@ export async function postCommitStatus(
   state: CheckState,
   description: string,
   targetUrl?: string,
+  workspaceId?: string,
 ): Promise<boolean> {
-  const token = await getGithubToken();
+  if (!workspaceId) {
+    logger.error('[Checks] Workspace authority is required to post commit status');
+    return false;
+  }
+  const token = await getGithubToken(workspaceId, owner, repo);
   if (!token) {
     logger.error('[Checks] No GitHub token available to post commit status');
     return false;
@@ -121,8 +119,9 @@ async function fetchPrChangedFiles(
   owner: string,
   repo: string,
   prNumber: number,
+  workspaceId: string,
 ): Promise<PrFile[]> {
-  const token = await getGithubToken();
+  const token = await getGithubToken(workspaceId, owner, repo);
   if (!token) return [];
 
   const files: PrFile[] = [];
@@ -299,7 +298,7 @@ export async function evaluatePrAndPostCheck(
       storyIds,
       specId,
     };
-    await postCommitStatus(owner, repo, headSha, 'success', result.description, buildTargetUrl(workspaceId, specId, storyIds[0]));
+    await postCommitStatus(owner, repo, headSha, 'success', result.description, buildTargetUrl(workspaceId, specId, storyIds[0]), workspaceId);
     await emitCheckWalEvent(workspaceId, headSha, result);
     return result;
   }
@@ -309,10 +308,11 @@ export async function evaluatePrAndPostCheck(
     owner, repo, headSha, 'pending',
     `Checking ${allCriteria.length} acceptance criteria...`,
     buildTargetUrl(workspaceId, specId, storyIds[0]),
+    workspaceId,
   );
 
   // Fetch changed files from the PR
-  const changedFiles = await fetchPrChangedFiles(owner, repo, prNumber);
+  const changedFiles = await fetchPrChangedFiles(owner, repo, prNumber, workspaceId);
 
   // Evaluate coverage
   const coverage = checkCriteriaCoverage(allCriteria, changedFiles);
@@ -327,7 +327,7 @@ export async function evaluatePrAndPostCheck(
 
   const targetUrl = buildTargetUrl(workspaceId, specId, storyIds[0]);
 
-  await postCommitStatus(owner, repo, headSha, state, description, targetUrl);
+  await postCommitStatus(owner, repo, headSha, state, description, targetUrl, workspaceId);
 
   const result: CheckResult = {
     state,

@@ -5,12 +5,12 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useState, useEffect, useCallback, useDeferredValue, useMemo } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue } from 'react';
 import {
   Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
   RefreshCw, GitPullRequest, Users, X, Plus, Zap, KeyRound,
-  RadioTower, GitBranch, Activity, Lock, Copy,
+  RadioTower, GitBranch, Lock, Copy,
 } from 'lucide-react';
 import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -96,7 +96,10 @@ interface GithubStatus {
   connected: boolean;
   repoOwner?: string;
   repoName?: string;
-  webhookId?: number;
+  webhookId?: number | null;
+  installationId?: number;
+  repositoryId?: number;
+  credentialSource?: 'github-app-installation' | 'pat-oauth-fallback' | null;
   webhookUrl?: string;
   lastWebhookAt?: string | null;
   connectedAt?: string;
@@ -113,7 +116,35 @@ interface GithubAccount {
   avatarUrl?: string;
   connectedAt?: string;
   scopes?: string[];
-  source?: 'workspace-api-key' | 'workspace-oauth' | 'legacy-global' | 'env';
+  source?: 'github-app-installation' | 'workspace-pat' | 'workspace-oauth' | 'legacy-global';
+  installationId?: number;
+  repositoryId?: number;
+  repository?: string;
+  nextAction?: string | null;
+}
+
+interface GithubAppState {
+  configured: boolean;
+  connected?: boolean;
+  source?: 'github-app-installation';
+  registration?: { appId: number; appSlug: string } | null;
+  app?: { id: number; slug: string };
+  installation?: { id: number; accountId: number; account: string; type: string; status: string };
+  repository?: { id: number; owner: string; name: string };
+  binding?: { id: string; status: string; lastValidatedAt: string | null; lastWebhookAt: string | null; validationErrorCode: string | null };
+  capabilities?: Record<'repository' | 'actions' | 'pulls' | 'contents' | 'statuses' | 'checks' | 'webhooks', boolean>;
+  permissions?: Record<string, string>;
+  events?: string[];
+  nextAction: string | null;
+}
+
+interface GithubAppSetupResult {
+  mode: 'manifest' | 'bounded-import';
+  state?: string;
+  expiresAt?: string;
+  createUrl?: string;
+  manifest?: Record<string, unknown>;
+  nextAction: string;
 }
 
 interface GithubWorkflow {
@@ -144,22 +175,6 @@ interface TestResult {
 }
 
 // ─── Scope descriptions ─────────────────────────────────────────────────────
-
-const SCOPE_DESCRIPTIONS: Record<string, string> = {
-  'repo': 'Full control of private repositories',
-  'user:email': 'Access user email addresses',
-  'user': 'Read user profile data',
-  'read:user': 'Read user profile data',
-  'admin:repo_hook': 'Full control of repository hooks',
-  'write:repo_hook': 'Write repository hooks',
-  'read:repo_hook': 'Read repository hooks',
-  'admin:org': 'Full control of organizations',
-  'read:org': 'Read organization membership',
-  'workflow': 'Update GitHub Actions workflows',
-  'write:packages': 'Upload packages',
-  'read:packages': 'Download packages',
-  'delete:packages': 'Delete packages',
-};
 
 const REQUIRED_CAPABILITIES = [
   { key: 'repo', label: 'Repository access', scopes: ['repo'] },
@@ -243,6 +258,17 @@ export default function GitHubSettingsPanel() {
   // OAuth account
   const [account, setAccount] = useState<GithubAccount | null>(null);
   const [accountLoading, setAccountLoading] = useState(true);
+
+  // Repository-scoped GitHub App
+  const [appState, setAppState] = useState<GithubAppState | null>(null);
+  const [appLoading, setAppLoading] = useState(true);
+  const [appSetup, setAppSetup] = useState<GithubAppSetupResult | null>(null);
+  const [appActionError, setAppActionError] = useState<string | null>(null);
+  const [appActionLoading, setAppActionLoading] = useState(false);
+  const [installationId, setInstallationId] = useState('');
+  const [repositoryId, setRepositoryId] = useState('');
+  const [appRepoOwner, setAppRepoOwner] = useState('');
+  const [appRepoName, setAppRepoName] = useState('');
 
   // Connect form
   const [repoOwner, setRepoOwner] = useState('');
@@ -346,7 +372,20 @@ export default function GitHubSettingsPanel() {
     }
   }, [workspaceId]);
 
-  useEffect(() => { fetchStatus(); fetchAccount(); }, [fetchStatus, fetchAccount]);
+  const fetchAppState = useCallback(async () => {
+    if (!workspaceId) return;
+    setAppLoading(true);
+    try {
+      setAppState(await apiFetch<GithubAppState>(`/api/workspaces/${workspaceId}/github/app`));
+    } catch (err: unknown) {
+      setAppState({ configured: false, nextAction: 'GitHub App diagnostics are unavailable.' });
+      setAppActionError(err instanceof Error ? err.message : 'Failed to load GitHub App state');
+    } finally {
+      setAppLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchStatus(); fetchAccount(); fetchAppState(); }, [fetchStatus, fetchAccount, fetchAppState]);
 
   // ─── Fetch PR template from rorca-config ────────────────────────────────
 
@@ -423,18 +462,82 @@ export default function GitHubSettingsPanel() {
   }, [workspaceId, prTemplatePreviewVisible, prTemplateLoaded, deferredPrTemplate]);
 
   const webhookUrl = status?.webhookUrl ?? `${BASE_URL}/api/webhooks/github`;
+  const callbackParams = new URLSearchParams(window.location.search);
+  const appCallbackReady = callbackParams.get('github_app_setup') === 'callback'
+    && Boolean(callbackParams.get('state')) && Boolean(callbackParams.get('code'));
   const webhookIsLocal = isLocalWebhookUrl(webhookUrl);
   const credentialOk = !!account?.connected;
   const repoOk = !!status?.connected;
-  const webhookOk = !!status?.connected && !!status.webhookId && !webhookIsLocal;
+  const webhookOk = !!status?.connected && !webhookIsLocal
+    && (appState?.source === 'github-app-installation' ? Boolean(appState.capabilities?.webhooks) : Boolean(status.webhookId));
   const workflowOk = repoOk && workflowEnabled && !!workflowId.trim();
   const autoPrOk = repoOk && autoPrEnabled;
-  const missingCapabilities = useMemo(() => {
-    if (!account?.connected || !account.scopes?.length) return [];
-    return REQUIRED_CAPABILITIES.filter(capability => !hasAnyScope(account.scopes, capability.scopes));
-  }, [account?.connected, account?.scopes]);
-
   // ─── Handlers ────────────────────────────────────────────────────────────
+
+  async function handleStartAppSetup() {
+    if (!workspaceId) return;
+    setAppActionLoading(true);
+    setAppActionError(null);
+    try {
+      setAppSetup(await apiFetch<GithubAppSetupResult>(`/api/workspaces/${workspaceId}/github/app/setup/start`, { method: 'POST' }));
+    } catch (err: unknown) {
+      setAppActionError(err instanceof Error ? err.message : 'Failed to prepare GitHub App setup');
+    } finally {
+      setAppActionLoading(false);
+    }
+  }
+
+  async function handleExchangeAppManifest() {
+    if (!workspaceId) return;
+    const params = new URLSearchParams(window.location.search);
+    const state = params.get('state');
+    const code = params.get('code');
+    if (!state || !code) return;
+    setAppActionLoading(true);
+    setAppActionError(null);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/app/setup/exchange`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state, code }),
+      });
+      window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+      await fetchAppState();
+    } catch (err: unknown) {
+      setAppActionError(err instanceof Error ? err.message : 'GitHub App manifest exchange failed');
+    } finally {
+      setAppActionLoading(false);
+    }
+  }
+
+  async function handleRevalidateAppBinding() {
+    if (!workspaceId) return;
+    setAppActionLoading(true);
+    setAppActionError(null);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/app/revalidate`, { method: 'POST' });
+      await Promise.all([fetchAppState(), fetchStatus(), fetchAccount()]);
+    } catch (err: unknown) {
+      setAppActionError(err instanceof Error ? err.message : 'Failed to revalidate App binding');
+    } finally {
+      setAppActionLoading(false);
+    }
+  }
+
+  async function handleBindAppRepository() {
+    if (!workspaceId) return;
+    setAppActionLoading(true);
+    setAppActionError(null);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/app/bind`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ installationId: Number(installationId), repositoryId: Number(repositoryId), repoOwner: appRepoOwner.trim(), repoName: appRepoName.trim() }),
+      });
+      await Promise.all([fetchAppState(), fetchStatus(), fetchAccount()]);
+    } catch (err: unknown) {
+      setAppActionError(err instanceof Error ? err.message : 'Failed to bind App installation');
+    } finally {
+      setAppActionLoading(false);
+    }
+  }
 
   async function handleConnect() {
     if (!workspaceId || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()) return;
@@ -688,7 +791,7 @@ export default function GitHubSettingsPanel() {
           <div className="flex flex-wrap gap-2">
             <StatusPill ok={credentialOk} label={credentialOk ? 'Credential connected' : 'Credential missing'} />
             <StatusPill ok={repoOk} label={repoOk ? 'Repository connected' : 'Repository disconnected'} />
-            <StatusPill ok={webhookOk} warn={repoOk && !webhookOk} label={webhookOk ? 'Webhook reachable' : repoOk ? 'Webhook needs public URL' : 'Webhook locked'} />
+            <StatusPill ok={webhookOk} warn={repoOk && !webhookOk} label={webhookOk ? 'Webhook configured' : repoOk ? 'Webhook needs attention' : 'Webhook locked'} />
             <StatusPill ok={workflowOk} label={workflowOk ? 'Workflow enabled' : 'Workflow idle'} />
           </div>
         </div>
@@ -713,6 +816,104 @@ export default function GitHubSettingsPanel() {
             );
           })}
         </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-panel p-4 space-y-4" aria-labelledby="github-app-heading">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <Shield size={18} />
+              <h2 id="github-app-heading" className="text-sm font-semibold text-[var(--text)]">Repository-scoped GitHub App</h2>
+              {appLoading ? <Loader2 size={13} className="animate-spin text-muted" /> : (
+                <StatusPill ok={Boolean(appState?.connected)} label={appState?.connected ? 'App active' : appState?.configured ? 'App needs attention' : 'App not bound'} warn={Boolean(appState?.configured && !appState.connected)} />
+              )}
+            </div>
+            <p className="mt-1 text-xs text-muted">
+              Preferred credential source. Installation tokens are short-lived and minted for only the immutable repository binding; PAT/OAuth remains an explicit fallback only when no App binding exists.
+            </p>
+          </div>
+          {!appState?.configured && !appState?.registration && (
+            <button type="button" onClick={handleStartAppSetup} disabled={appActionLoading}
+              className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-bg disabled:opacity-50">
+              {appActionLoading ? <Loader2 size={12} className="animate-spin" /> : <KeyRound size={12} />}
+              Prepare App setup
+            </button>
+          )}
+        </div>
+
+        {appState?.configured && appState.app && appState.installation && appState.repository && (
+          <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-bg/50 p-3 text-xs sm:grid-cols-3">
+            <div><span className="text-muted">Source</span><p className="mt-1 font-medium text-[var(--text)]">GitHub App · {appState.app.slug}</p></div>
+            <div><span className="text-muted">Installation</span><p className="mt-1 font-mono text-[var(--text)]">#{appState.installation.id} · {appState.installation.account}</p></div>
+            <div><span className="text-muted">Repository binding</span><p className="mt-1 font-mono text-[var(--text)]">{appState.repository.owner}/{appState.repository.name} · #{appState.repository.id}</p></div>
+          </div>
+        )}
+
+        {appState?.capabilities && (
+          <div>
+            <p className="mb-2 text-xs font-medium text-muted">Capability diagnostics</p>
+            <div className="flex flex-wrap gap-1.5">
+              {Object.entries(appState.capabilities).map(([name, available]) => (
+                <span key={name} className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${available ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
+                  {available ? <CheckCircle2 size={11} /> : <AlertCircle size={11} />}{name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {appState?.registration && !appState.configured && (
+          <div className="space-y-3 rounded-lg border border-border bg-bg/50 p-3">
+            <p className="text-xs text-muted">Registered App: <span className="font-medium text-[var(--text)]">{appState.registration.appSlug}</span>. Enter identities copied from the selected-repository installation; the server verifies all four against GitHub before binding.</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                { label: 'Installation ID', value: installationId, set: setInstallationId, placeholder: '12345678' },
+                { label: 'Repository ID', value: repositoryId, set: setRepositoryId, placeholder: '987654321' },
+                { label: 'Owner', value: appRepoOwner, set: setAppRepoOwner, placeholder: 'owner' },
+                { label: 'Repository', value: appRepoName, set: setAppRepoName, placeholder: 'repo' },
+              ].map(field => (
+                <label key={field.label} className="text-xs text-muted">{field.label}
+                  <input value={field.value} onChange={event => field.set(event.target.value)} placeholder={field.placeholder}
+                    className="mt-1 w-full rounded border border-border bg-panel px-2.5 py-1.5 font-mono text-xs text-[var(--text)] focus:outline-none focus:border-accent" />
+                </label>
+              ))}
+            </div>
+            <button type="button" onClick={handleBindAppRepository}
+              disabled={appActionLoading || !installationId || !repositoryId || !appRepoOwner.trim() || !appRepoName.trim()}
+              className="inline-flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50">
+              {appActionLoading ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />}Verify and bind exact repository
+            </button>
+          </div>
+        )}
+
+        {appCallbackReady && (
+          <button type="button" onClick={handleExchangeAppManifest} disabled={appActionLoading}
+            className="inline-flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50">
+            {appActionLoading ? <Loader2 size={12} className="animate-spin" /> : <Shield size={12} />}Complete one-time App registration
+          </button>
+        )}
+
+        {appSetup?.mode === 'manifest' && appSetup.manifest && appSetup.createUrl && (
+          <form action={appSetup.createUrl} method="post" target="_blank" rel="noopener noreferrer" className="rounded-lg border border-border bg-bg/50 p-3 space-y-2">
+            <input type="hidden" name="manifest" value={JSON.stringify(appSetup.manifest)} />
+            <p className="text-xs text-muted">{appSetup.nextAction} State expires {appSetup.expiresAt ? new Date(appSetup.expiresAt).toLocaleTimeString() : 'soon'}.</p>
+            <button type="submit" className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-panel">
+              <ExternalLink size={12} />Continue to GitHub
+            </button>
+          </form>
+        )}
+        {appSetup?.mode === 'bounded-import' && <p className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">{appSetup.nextAction}</p>}
+        {appState?.configured && !appState.connected && (
+          <button type="button" onClick={handleRevalidateAppBinding} disabled={appActionLoading}
+            className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-bg disabled:opacity-50">
+            {appActionLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}Revalidate immutable binding
+          </button>
+        )}
+        {(appState?.nextAction || appActionError) && (
+          <div className={`flex items-start gap-2 text-xs ${appActionError ? 'text-red-400' : 'text-amber-300'}`}>
+            <AlertCircle size={13} className="mt-0.5 shrink-0" />{appActionError || appState?.nextAction}
+          </div>
+        )}
       </section>
 
       <AutonomousDeliverySettings
@@ -745,8 +946,10 @@ export default function GitHubSettingsPanel() {
               </div>
               <p className="mt-1 text-xs text-muted">
                 {account?.connected
-                  ? `Stored locally and encrypted for this workspace${account.source ? ` · Source: ${account.source}` : ''}.`
-                  : 'Paste a PAT in the repository form below. Rorca stores it locally and encrypted for this workspace.'}
+                  ? account.source === 'github-app-installation'
+                    ? 'Source: repository-scoped GitHub App installation. Short-lived tokens are never persisted.'
+                    : `Stored locally and encrypted for this workspace${account.source ? ` · Source: ${account.source}` : ''}.`
+                  : 'Preferred: bind the GitHub App above. PAT remains an explicit encrypted migration fallback.'}
               </p>
             </div>
           </div>
@@ -762,7 +965,7 @@ export default function GitHubSettingsPanel() {
                   {testing ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                   Validate
                 </button>
-                {!showOAuthDisconnect ? (
+                {account.source !== 'github-app-installation' && (!showOAuthDisconnect ? (
                   <button
                     onClick={() => setShowOAuthDisconnect(true)}
                     className="px-2.5 py-1.5 text-xs rounded text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors flex items-center gap-1.5"
@@ -786,7 +989,7 @@ export default function GitHubSettingsPanel() {
                       Cancel
                     </button>
                   </div>
-                )}
+                ))}
               </>
             ) : (
               REQUIRED_CAPABILITIES.map(capability => (
@@ -852,8 +1055,8 @@ export default function GitHubSettingsPanel() {
                   <p className="font-mono text-[var(--text)]">{status.repoOwner}/{status.repoName}</p>
                 </div>
                 <div>
-                  <span className="text-muted">Webhook ID</span>
-                  <p className="font-mono text-[var(--text)]">#{status.webhookId}</p>
+                  <span className="text-muted">{appState?.source === 'github-app-installation' ? 'Installation ID' : 'Webhook ID'}</span>
+                  <p className="font-mono text-[var(--text)]">#{appState?.source === 'github-app-installation' ? status.installationId : status.webhookId}</p>
                 </div>
                 <div>
                   <span className="text-muted">Connected</span>
@@ -869,11 +1072,11 @@ export default function GitHubSettingsPanel() {
                 </div>
               </div>
 
-              {status.webhookId ? (
+              {status.webhookId || appState?.source === 'github-app-installation' ? (
                 <div className="mt-3 space-y-3">
                   <div className="flex items-center gap-2 text-xs text-muted">
                     <Webhook size={14} />
-                    Events: push, pull_request, issues, check_run
+                    Events: push, pull_request · signed ping accepted for setup health
                   </div>
                   <div className="rounded-lg border border-border bg-bg/50 p-3 space-y-2">
                     <div className="space-y-1.5 text-xs">
@@ -899,14 +1102,16 @@ export default function GitHubSettingsPanel() {
                       </div>
                     )}
                     <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={handlePingWebhook}
-                        disabled={pingingWebhook}
-                        className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                      >
-                        {pingingWebhook ? <Loader2 size={12} className="animate-spin" /> : <RadioTower size={12} />}
-                        Ping webhook
-                      </button>
+                      {status.webhookId && (
+                        <button
+                          onClick={handlePingWebhook}
+                          disabled={pingingWebhook}
+                          className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          {pingingWebhook ? <Loader2 size={12} className="animate-spin" /> : <RadioTower size={12} />}
+                          Ping webhook
+                        </button>
+                      )}
                       {status.repoOwner && status.repoName && (
                         <a
                           href={`https://github.com/${status.repoOwner}/${status.repoName}/settings/hooks/${status.webhookId}`}

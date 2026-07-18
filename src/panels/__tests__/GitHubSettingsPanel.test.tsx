@@ -78,6 +78,7 @@ function mockWorkspaceApi(overrides?: {
   status?: Record<string, unknown>;
   account?: Record<string, unknown>;
   workflowConfig?: Record<string, unknown> | null;
+  app?: Record<string, unknown>;
   throwGithub?: boolean;
 }) {
   mockApiFetch.mockImplementation(async (path: string) => {
@@ -89,6 +90,10 @@ function mockWorkspaceApi(overrides?: {
     if (path === '/api/workspaces/ws-1/github/account') {
       if (overrides?.throwGithub) throw new Error('GitHub API error');
       return overrides?.account ?? MOCK_GITHUB_ACCOUNT;
+    }
+    if (path === '/api/workspaces/ws-1/github/app') {
+      if (overrides?.throwGithub) throw new Error('GitHub API error');
+      return overrides?.app ?? { configured: false, registration: null, nextAction: 'Register the canonical GitHub App.' };
     }
     if (path === '/api/workspaces/ws-1/rorca-config') return { config: {} };
     if (path === '/api/workspaces/ws-1/github/workflow-config') {
@@ -138,6 +143,31 @@ describe('GitHubSettingsPanel', () => {
       expect(document.body.textContent).toContain('Ping webhook');
       expect(document.body.textContent).toContain('Preview latest run');
       expect(document.body.textContent).toContain('Autonomous delivery connected');
+    });
+  });
+
+  it('shows exact App source, binding, capability diagnostics, and missing capability honestly', async () => {
+    mockWorkspaceApi({
+      status: { ...MOCK_CONNECTED_STATUS, credentialSource: 'github-app-installation', repositoryId: 99, installationId: 77 },
+      account: { connected: true, username: 'rorca[bot]', source: 'github-app-installation' },
+      app: {
+        configured: true, connected: true, source: 'github-app-installation',
+        app: { id: 12345, slug: 'rorca' },
+        installation: { id: 77, accountId: 88, account: 'acme', type: 'Organization', status: 'active' },
+        repository: { id: 99, owner: 'acme', name: 'widgets' },
+        binding: { id: 'b1', status: 'active', lastValidatedAt: null, lastWebhookAt: null, validationErrorCode: null },
+        capabilities: { repository: true, actions: true, pulls: true, contents: true, statuses: true, checks: false, webhooks: true },
+        nextAction: null,
+      },
+    });
+    renderWithProviders(<GitHubSettingsPanel />);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('GitHub App · rorca');
+      expect(document.body.textContent).toContain('#77 · acme');
+      expect(document.body.textContent).toContain('acme/widgets · #99');
+      expect(document.body.textContent).toContain('Capability diagnostics');
+      expect(document.body.textContent).toContain('checks');
+      expect(document.body.textContent).toContain('PAT/OAuth remains an explicit fallback');
     });
   });
 

@@ -8,6 +8,7 @@
 import { Router, Request, Response } from 'express';
 import { queryOne, execute } from '../db/index';
 import { decryptToken } from '../lib/auth-utils';
+import { getIntegrationSecret } from '../lib/integration-vault';
 import { verifyWebhookSignature } from './workspace-github';
 import { logger } from '../lib/logger';
 import { AuthError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
@@ -17,15 +18,23 @@ import { insertAuditEntry } from './integration-audit-log';
 
 const router = Router();
 
-interface GithubWebhookRow {
+interface GithubWebhookAuthority {
+  source: 'github-app' | 'legacy-repository-webhook';
   workspace_id: string;
   repo_owner: string;
   repo_name: string;
   webhook_id: number | null;
-  encrypted_webhook_secret: string;
-  last_webhook_at: string | null;
-  created_at: string;
+  encrypted_webhook_secret?: string;
+  webhook_secret_id?: string;
+  installation_id?: number | string;
+  repository_id?: number | string;
+  account_id?: number | string;
+  account_login?: string;
 }
+
+const MAX_GITHUB_WEBHOOK_BYTES = 1024 * 1024;
+const SUPPORTED_GITHUB_EVENTS = new Set(['ping', 'push', 'pull_request']);
+const DELIVERY_ID = /^[A-Za-z0-9-]{8,100}$/;
 
 // ─── Legacy event handler registry ──────────────────────────────────────────
 // Preserved for backward compatibility with webhook-handlers.ts registrations.
@@ -79,7 +88,7 @@ function isValidProvider(provider: string): provider is WebhookProvider {
  *     tags: [Webhooks]
  *     summary: Receive GitHub webhook events
  *     operationId: receiveGithubWebhook
- *     description: Public endpoint that receives GitHub webhook events. Verifies HMAC-SHA256 signature via X-Hub-Signature-256 header, deduplicates via X-GitHub-Delivery, responds immediately with 200, then dispatches to registered handlers with retry + DLQ.
+ *     description: Public path-only runtime callback. Verifies HMAC-SHA256 plus exact App installation/repository identity, applies a 1 MiB bound, atomically deduplicates X-GitHub-Delivery, and uses the existing webhook router. It is intentionally default-denied from MCP/public API tooling.
  *     parameters:
  *       - in: header
  *         name: x-hub-signature-256
@@ -125,15 +134,14 @@ router.post('/github', async (req: Request, res: Response) => {
   const event = req.headers['x-github-event'] as string | undefined;
   const deliveryId = req.headers['x-github-delivery'] as string | undefined;
 
-  if (!signature || !event) {
-    throw new AuthError('Invalid webhook signature');
+  if (!signature || !event || !deliveryId || !DELIVERY_ID.test(deliveryId)) {
+    throw new AuthError('Invalid webhook authentication headers');
   }
 
   // Use the raw body captured by the verify callback in express.json().
   const rawBody: Buffer | undefined = (req as any).rawBody;
-  if (!rawBody) {
-    throw new ValidationError('Missing raw body for signature verification');
-  }
+  if (!rawBody) throw new ValidationError('Missing raw body for signature verification');
+  if (rawBody.length > MAX_GITHUB_WEBHOOK_BYTES) throw new ValidationError('GitHub webhook payload exceeds the 1 MiB limit');
 
   // GitHub sends the repo full_name as owner/repo in the payload
   const payload = req.body;
@@ -143,39 +151,56 @@ router.post('/github', async (req: Request, res: Response) => {
     throw new ValidationError('Missing repository info in payload');
   }
 
-  const [repoOwner, repoName] = repoFullName.split('/');
+  const parts = repoFullName.split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) throw new ValidationError('Invalid repository identity in payload');
+  const [repoOwner, repoName] = parts;
+  const installationId = Number(payload?.installation?.id);
+  const repositoryId = Number(payload?.repository?.id);
+  let row: GithubWebhookAuthority | undefined;
 
-  // Look up the workspace connection by repo owner + name
-  const row = await queryOne<GithubWebhookRow>(
-    'SELECT * FROM workspace_github_webhooks WHERE repo_owner = $1 AND repo_name = $2',
-    [repoOwner, repoName]
-  );
-
-  if (!row) {
-    throw new NotFoundError('No workspace connected to this repository');
-  }
-
-  if (!row.encrypted_webhook_secret) {
-    throw new ForbiddenError('Webhook secret not configured');
-  }
-
-  // Verify webhook signature using the raw body
-  const secret = decryptToken(row.encrypted_webhook_secret);
-  if (!verifyWebhookSignature(rawBody.toString('utf8'), signature, secret)) {
-    throw new AuthError('Invalid webhook signature');
-  }
-
-  // ── Deduplication check ──
-  const webhookRouter = getWebhookRouter();
-  if (deliveryId) {
-    const existingStatus = await webhookRouter.checkDedup('github', deliveryId);
-    if (existingStatus) {
-      // Already processed or in-progress — acknowledge without re-processing
-      res.json({ ok: true, status: 'duplicate' });
-      return;
+  if (Number.isSafeInteger(installationId) && installationId > 0) {
+    if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
+      throw new ValidationError('GitHub App webhook is missing repository id');
     }
-    // Mark as processing
-    await webhookRouter.recordDelivery('github', deliveryId, event, 'processing', row.workspace_id);
+    row = await queryOne<GithubWebhookAuthority>(
+      `SELECT 'github-app' AS source, b.workspace_id, b.repo_owner, b.repo_name,
+              NULL::integer AS webhook_id, r.webhook_secret_id,
+              b.installation_id, b.repository_id, i.account_id, i.account_login
+         FROM github_app_workspace_bindings b
+         JOIN github_app_registrations r ON r.id = b.registration_id AND r.status = 'active'
+         JOIN github_app_installations i ON i.id = b.installation_record_id AND i.status = 'active'
+        WHERE b.status = 'active' AND b.installation_id = $1 AND b.repository_id = $2
+          AND lower(b.repo_owner) = lower($3) AND lower(b.repo_name) = lower($4)`,
+      [installationId, repositoryId, repoOwner, repoName],
+    );
+    if (!row || Number(payload?.repository?.owner?.id) !== Number(row.account_id)
+      || String(payload?.repository?.owner?.login ?? '').toLowerCase() !== String(row.account_login).toLowerCase()) {
+      throw new ForbiddenError('GitHub App installation/repository/owner identity does not match an active binding');
+    }
+  } else {
+    row = await queryOne<GithubWebhookAuthority>(
+      `SELECT 'legacy-repository-webhook' AS source, workspace_id, repo_owner, repo_name,
+              webhook_id, encrypted_webhook_secret
+         FROM workspace_github_webhooks
+        WHERE lower(repo_owner) = lower($1) AND lower(repo_name) = lower($2)`,
+      [repoOwner, repoName],
+    );
+  }
+  if (!row) throw new NotFoundError('No workspace connected to this repository');
+
+  const secret = row.source === 'github-app'
+    ? await getIntegrationSecret(String(row.webhook_secret_id), 'webhook_secret')
+    : row.encrypted_webhook_secret ? decryptToken(row.encrypted_webhook_secret) : null;
+  if (!secret) throw new ForbiddenError('Webhook secret not configured');
+  if (!verifyWebhookSignature(rawBody, signature, secret)) throw new AuthError('Invalid webhook signature');
+  if (!SUPPORTED_GITHUB_EVENTS.has(event)) throw new ValidationError(`Unsupported GitHub webhook event: ${event}`);
+
+  // Atomic replay claim on the existing event ledger/event bus.
+  const webhookRouter = getWebhookRouter();
+  const claimed = await webhookRouter.claimDelivery('github', deliveryId, event, row.workspace_id);
+  if (!claimed) {
+    res.json({ ok: true, status: 'duplicate' });
+    return;
   }
 
   // ── Signature valid — respond 200 immediately, process async ──
@@ -198,11 +223,18 @@ router.post('/github', async (req: Request, res: Response) => {
   // Async processing via setImmediate to avoid blocking the response
   setImmediate(async () => {
     try {
-      // Update last_webhook_at timestamp
-      await execute(
-        "UPDATE workspace_github_webhooks SET last_webhook_at = NOW() WHERE workspace_id = $1",
-        [row.workspace_id]
-      );
+      // Update only the authority record that authenticated this delivery.
+      if (row.source === 'github-app') {
+        await execute(
+          'UPDATE github_app_workspace_bindings SET last_webhook_at = NOW() WHERE workspace_id = $1 AND installation_id = $2 AND repository_id = $3',
+          [row.workspace_id, row.installation_id, row.repository_id],
+        );
+      } else {
+        await execute(
+          'UPDATE workspace_github_webhooks SET last_webhook_at = NOW() WHERE workspace_id = $1',
+          [row.workspace_id],
+        );
+      }
 
       // Log every received webhook to wal_events
       await execute(
@@ -227,9 +259,7 @@ router.post('/github', async (req: Request, res: Response) => {
       await dispatchLegacyHandlers(event, payload, row.workspace_id);
 
       // Mark delivery as completed
-      if (deliveryId) {
-        await webhookRouter.recordDelivery('github', deliveryId, event, 'completed', row.workspace_id);
-      }
+      await webhookRouter.recordDelivery('github', deliveryId, event, 'completed', row.workspace_id);
 
       insertAuditEntry({
         workspaceId: row.workspace_id,
@@ -244,9 +274,7 @@ router.post('/github', async (req: Request, res: Response) => {
       });
     } catch (err) {
       logger.error({ err }, '[Webhook] Async processing error');
-      if (deliveryId) {
-        await webhookRouter.recordDelivery('github', deliveryId, event, 'failed', row.workspace_id).catch(() => {});
-      }
+      await webhookRouter.recordDelivery('github', deliveryId, event, 'failed', row.workspace_id).catch(() => {});
 
       insertAuditEntry({
         workspaceId: row.workspace_id,

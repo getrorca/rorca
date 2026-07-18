@@ -22,7 +22,7 @@
 import { execSync } from 'child_process';
 import { subscribe, broadcastAll, type WalEvent } from './sse-hub';
 import { query, queryOne, execute } from '../db/index';
-import { decryptToken } from './auth-utils';
+import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 
@@ -32,10 +32,6 @@ interface GitHubWebhookRow {
   workspace_id: string;
   repo_owner: string;
   repo_name: string;
-}
-
-interface GitHubConnectionRow {
-  encrypted_token: string;
 }
 
 interface PipelineRunRow {
@@ -93,12 +89,12 @@ const DEBOUNCE_MS = 5000;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async function getGithubToken(): Promise<string | null> {
-  const row = await queryOne<GitHubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1',
-  );
-  if (!row) return null;
-  return decryptToken(row.encrypted_token);
+async function getGithubToken(workspaceId: string, owner: string, repo: string): Promise<string | null> {
+  const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
+    repository: { owner, name: repo },
+    purpose: 'checks',
+  });
+  return resolved?.token ?? null;
 }
 
 async function getRepoInfo(workspaceId: string): Promise<{ owner: string; repo: string } | null> {
@@ -274,7 +270,7 @@ async function createCheckRun(
   runId: number,
   workspaceId: string,
 ): Promise<number | null> {
-  const token = await getGithubToken();
+  const token = await getGithubToken(workspaceId, owner, repo);
   if (!token) {
     logger.debug('[CheckRun] No GitHub token — skipping check run creation');
     return null;
@@ -338,7 +334,7 @@ async function updateCheckRun(
     completed_at?: string;
   },
 ): Promise<void> {
-  const token = await getGithubToken();
+  const token = await getGithubToken(workspaceId, owner, repo);
   if (!token) return;
 
   const url = `https://api.github.com/repos/${owner}/${repo}/check-runs/${checkRunId}`;

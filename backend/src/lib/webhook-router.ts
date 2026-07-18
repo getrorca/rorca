@@ -122,6 +122,22 @@ export class WebhookRouter {
     return row?.status;
   }
 
+  /** Atomically claim a new delivery. False means another request already owns it. */
+  async claimDelivery(
+    provider: WebhookProvider,
+    deliveryId: string,
+    eventType: string,
+    workspaceId?: string,
+  ): Promise<boolean> {
+    const result = await execute(
+      `INSERT INTO webhook_events (provider, delivery_id, event_type, status, workspace_id)
+       VALUES ($1, $2, $3, 'processing', $4)
+       ON CONFLICT (provider, delivery_id) DO NOTHING`,
+      [provider, deliveryId, eventType, workspaceId || null],
+    );
+    return result.rowCount === 1;
+  }
+
   /**
    * Record a delivery in the dedup table.
    */

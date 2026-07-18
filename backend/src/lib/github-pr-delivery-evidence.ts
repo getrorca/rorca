@@ -505,7 +505,10 @@ export async function observeGithubPrDeliveryEvidence(
   if (!run.pr_number) throw new UnprocessableError('Run has no canonical pull request binding', 'PR_BINDING_REQUIRED');
   if (!run.branch_name) throw new UnprocessableError('Run has no canonical branch binding', 'BRANCH_BINDING_REQUIRED');
 
-  const token = await deps.resolveToken(input.workspaceId);
+  const token = await deps.resolveToken(input.workspaceId, {
+    repository: { owner: run.repo_owner, name: run.repo_name },
+    purpose: 'reviewed-delivery',
+  });
   if (!token) throw new UnprocessableError('Workspace GitHub credential is unavailable', 'GITHUB_CREDENTIAL_UNAVAILABLE');
   const owner = run.repo_owner;
   const repo = run.repo_name;
