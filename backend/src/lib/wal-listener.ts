@@ -21,8 +21,8 @@
 
 import { Client, type ClientConfig } from 'pg';
 import { broadcastAll, type WalEvent } from './sse-hub';
-import { queryOne, execute } from '../db/index';
 import { logger } from './logger';
+import { persistLegacyStoryResultAccounting } from './story-result-persistence';
 
 // ── Backoff Configuration ───────────────────────────────────────────────
 
@@ -39,88 +39,32 @@ let stopped = false;
 
 // ── Token Usage Recording ───────────────────────────────────────────────
 
-interface ModelPricingRow {
-  model_id: string;
-  input_cost_per_1k: number;
-  output_cost_per_1k: number;
-}
-
-async function recordTokenUsage(
-  runId: number,
-  storyId: string,
-  inputTokens: number,
-  outputTokens: number,
-  model?: string,
-  explicitCostUsd?: number,
-): Promise<void> {
-  const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
-  if (!run) return;
-
-  const modelName = model || 'unknown';
-  const pricing = await queryOne('SELECT * FROM model_pricing WHERE model_id = $1', [modelName]) as ModelPricingRow | undefined;
-
-  const derivedCostUsd = pricing
-    ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
-    : 0;
-  const costUsd = explicitCostUsd ?? derivedCostUsd;
-
-  await execute(
-    `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, Math.round(costUsd * 1_000_000) / 1_000_000],
-  );
-}
-
 async function handleTokenTracking(event: WalEvent): Promise<void> {
   if (!event.story_id || !event.payload) return;
   if (event.event_type !== 'story_passed' && event.event_type !== 'story_failed') return;
 
   try {
     const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
-    if (payload.input_tokens == null && payload.output_tokens == null) return;
+    if (payload.input_tokens == null && payload.output_tokens == null
+      && payload.reasoning_tokens == null && payload.cost_usd == null) return;
+    const runId = Number(payload.run_id);
+    if (!Number.isSafeInteger(runId) || runId <= 0) return;
 
-    const runId = payload.run_id;
-    if (!runId) return;
-
-    // Update story_results with token counts
-    const storyRow = await queryOne(
-      'SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1',
-      [runId, event.story_id],
-    ) as { id: number } | undefined;
-
-    // A missing result means its durable fallback may still be awaiting replay.
-    // The canonical story-result transaction owns result/commit/accounting as one
-    // unit; never create an orphan accounting row that replay would duplicate.
-    if (!storyRow) return;
-
-    await execute(
-      `UPDATE story_results
-       SET input_tokens = COALESCE($1, input_tokens),
-           output_tokens = COALESCE($2, output_tokens),
-           cost_usd = COALESCE($3, cost_usd)
-       WHERE id = $4`,
-      [payload.input_tokens ?? null, payload.output_tokens ?? null, payload.cost_usd ?? null, storyRow.id],
-    );
-
-    // Preserve legacy WAL accounting only when canonical result persistence did
-    // not already write it. Canonical execution-engine ordering makes this a
-    // compatibility backfill, not a competing story-result persistence path.
-    const existing = await queryOne(
-      'SELECT id FROM token_usage WHERE run_id = $1 AND story_id = $2 LIMIT 1',
-      [runId, event.story_id],
-    );
-    if (!existing) {
-      await recordTokenUsage(
-        runId,
-        event.story_id,
-        payload.input_tokens || 0,
-        payload.output_tokens || 0,
-        payload.model,
-        payload.cost_usd,
-      );
-    }
-  } catch {
-    // payload parse error — ignore
+    // The shared compatibility transaction refuses ingest-keyed canonical
+    // results and binds legacy accounting to one story_result_id. Therefore a
+    // WAL notification can neither double-account nor repair a partial
+    // canonical projection accidentally.
+    await persistLegacyStoryResultAccounting({
+      runId,
+      storyId: event.story_id,
+      inputTokens: payload.input_tokens,
+      outputTokens: payload.output_tokens,
+      reasoningTokens: payload.reasoning_tokens,
+      modelUsed: payload.model,
+      costUsd: payload.cost_usd,
+    });
+  } catch (error) {
+    logger.debug({ err: error, eventId: event.id }, '[wal-listener] Legacy token projection skipped');
   }
 }
 

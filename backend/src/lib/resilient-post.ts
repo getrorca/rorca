@@ -30,13 +30,22 @@ export interface RetryPostOptions {
   fetchImpl?: typeof fetch;
 }
 
-/** POST with bounded retry. The same body is reused so ingest keys remain stable. */
-export async function retryPost(
+export type PostDeliveryOutcome =
+  | { kind: 'delivered'; attempts: number; status: number }
+  | { kind: 'permanent_rejection'; attempts: number; status: number }
+  | { kind: 'retryable_exhausted'; attempts: number; status?: number; error?: string };
+
+function isRetryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+/** POST with bounded retry and an explicit semantic-vs-transport outcome. */
+export async function retryPostWithOutcome(
   url: string,
   body: Record<string, unknown>,
   label: string,
   options: RetryPostOptions = {},
-): Promise<boolean> {
+): Promise<PostDeliveryOutcome> {
   const maxRetries = options.maxRetries ?? POST_MAX_RETRIES;
   const retryDelayMs = options.retryDelayMs ?? POST_RETRY_DELAY_MS;
   const timeoutMs = options.timeoutMs ?? POST_TIMEOUT_MS;
@@ -49,6 +58,8 @@ export async function retryPost(
     throw new RangeError('timeoutMs must be positive');
   }
 
+  let lastStatus: number | undefined;
+  let lastError: string | undefined;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -60,13 +71,17 @@ export async function retryPost(
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      if (resp.ok) return true;
+      lastStatus = resp.status;
+      if (resp.ok) return { kind: 'delivered', attempts: attempt, status: resp.status };
       logger.error(`[resilient-post] ${label} attempt ${attempt}/${maxRetries}: HTTP ${resp.status}`);
+      if (!isRetryableHttpStatus(resp.status)) {
+        return { kind: 'permanent_rejection', attempts: attempt, status: resp.status };
+      }
     } catch (err: any) {
-      const message = err?.name === 'AbortError'
+      lastError = err?.name === 'AbortError'
         ? `timed out after ${timeoutMs}ms`
-        : (err?.message ?? err);
-      logger.error(`[resilient-post] ${label} attempt ${attempt}/${maxRetries}: ${message}`);
+        : String(err?.message ?? err);
+      logger.error(`[resilient-post] ${label} attempt ${attempt}/${maxRetries}: ${lastError}`);
     } finally {
       clearTimeout(timeoutId);
     }
@@ -75,7 +90,22 @@ export async function retryPost(
       await new Promise(resolve => setTimeout(resolve, retryDelayMs));
     }
   }
-  return false;
+  return {
+    kind: 'retryable_exhausted',
+    attempts: maxRetries,
+    ...(lastStatus === undefined ? {} : { status: lastStatus }),
+    ...(lastError === undefined ? {} : { error: lastError }),
+  };
+}
+
+/** Compatibility boolean for non-critical telemetry callers. */
+export async function retryPost(
+  url: string,
+  body: Record<string, unknown>,
+  label: string,
+  options: RetryPostOptions = {},
+): Promise<boolean> {
+  return (await retryPostWithOutcome(url, body, label, options)).kind === 'delivered';
 }
 
 export interface FallbackResultEntry {
@@ -118,25 +148,27 @@ export function compactFallbackEntries(
   input: FallbackResultEntry[],
   limits = fallbackLimits(),
 ): FallbackResultEntry[] {
-  const byId = new Map<string, number>();
-  const byCoalesceKey = new Map<string, number>();
-  const keep = new Array(input.length).fill(true);
-
+  // Keep the latest copy at the first observation's position. This preserves
+  // result-before-pass dependency order when an identical result is retried
+  // after its dependent WAL record has already been journaled.
+  const keyed = new Map<string, { firstIndex: number; entry: FallbackResultEntry }>();
+  const unkeyed: Array<{ firstIndex: number; entry: FallbackResultEntry }> = [];
   for (let index = 0; index < input.length; index++) {
     const entry = input[index];
-    if (entry.idempotencyKey) {
-      const prior = byId.get(entry.idempotencyKey);
-      if (prior !== undefined) keep[prior] = false;
-      byId.set(entry.idempotencyKey, index);
+    const key = entry.coalesceKey
+      ? `coalesce:${entry.coalesceKey}`
+      : entry.idempotencyKey ? `id:${entry.idempotencyKey}` : null;
+    if (!key) {
+      unkeyed.push({ firstIndex: index, entry });
+      continue;
     }
-    if (entry.coalesceKey) {
-      const prior = byCoalesceKey.get(entry.coalesceKey);
-      if (prior !== undefined) keep[prior] = false;
-      byCoalesceKey.set(entry.coalesceKey, index);
-    }
+    const prior = keyed.get(key);
+    keyed.set(key, { firstIndex: prior?.firstIndex ?? index, entry });
   }
 
-  const compacted = input.filter((_entry, index) => keep[index]);
+  const compacted = [...keyed.values(), ...unkeyed]
+    .sort((left, right) => left.firstIndex - right.firstIndex)
+    .map(value => value.entry);
   while (compacted.length > limits.maxEntries || serializedBytes(compacted) > limits.maxBytes) {
     const removable = compacted.findIndex(entry => Boolean(entry.coalesceKey));
     if (removable < 0) {
@@ -147,20 +179,30 @@ export function compactFallbackEntries(
   return compacted;
 }
 
-function parseFallbackText(text: string): FallbackResultEntry[] {
+interface ParsedFallbackText {
+  entries: FallbackResultEntry[];
+  malformed: number;
+}
+
+function parseFallbackText(text: string): ParsedFallbackText {
   const entries: FallbackResultEntry[] = [];
+  let malformed = 0;
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as FallbackResultEntry;
       if (parsed && (parsed.type === 'wal' || parsed.type === 'story_result') && parsed.payload) {
         entries.push(parsed);
+      } else {
+        malformed++;
+        logger.error(`[resilient-post] Invalid fallback record: ${line.slice(0, 100)}`);
       }
     } catch {
-      logger.error(`[resilient-post] Skipping malformed fallback line: ${line.slice(0, 100)}`);
+      malformed++;
+      logger.error(`[resilient-post] Malformed fallback line: ${line.slice(0, 100)}`);
     }
   }
-  return entries;
+  return { entries, malformed };
 }
 
 const journalWrites = new Map<string, Promise<boolean>>();
@@ -182,14 +224,18 @@ async function appendFallbackResult(cwd: string, entry: FallbackResultEntry): Pr
     let currentCount = journalEntryCounts.get(filePath);
     if (currentCount === undefined) {
       currentText = size > 0 ? await fs.promises.readFile(filePath, 'utf8').catch(() => '') : '';
-      currentCount = parseFallbackText(currentText).length;
+      currentCount = parseFallbackText(currentText).entries.length;
     }
     if (size + Buffer.byteLength(line) <= limits.maxBytes && currentCount + 1 <= limits.maxEntries) {
       await fs.promises.appendFile(filePath, line, 'utf8');
       journalEntryCounts.set(filePath, currentCount + 1);
     } else {
       const current = currentText ?? await fs.promises.readFile(filePath, 'utf8').catch(() => '');
-      const compacted = compactFallbackEntries([...parseFallbackText(current), entry], limits);
+      const parsed = parseFallbackText(current);
+      if (parsed.malformed > 0) {
+        throw new Error('fallback journal contains malformed retained records; refusing destructive compaction');
+      }
+      const compacted = compactFallbackEntries([...parsed.entries, entry], limits);
       const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
       await fs.promises.writeFile(tmpPath, compacted.map(value => JSON.stringify(value)).join('\n') + '\n', 'utf8');
       await fs.promises.rename(tmpPath, filePath);
@@ -222,15 +268,31 @@ export async function flushFallbackWrites(cwd?: string): Promise<void> {
   await Promise.allSettled(selected);
 }
 
-export function readFallbackResults(cwd: string): FallbackResultEntry[] {
+export interface FallbackJournalRead {
+  entries: FallbackResultEntry[];
+  malformed: number;
+}
+
+export function readFallbackJournal(cwd: string): FallbackJournalRead {
   const filePath = path.join(cwd, FALLBACK_FILENAME);
-  if (!fs.existsSync(filePath)) return [];
+  if (!fs.existsSync(filePath)) return { entries: [], malformed: 0 };
+  let parsed: ParsedFallbackText;
   try {
-    return compactFallbackEntries(parseFallbackText(fs.readFileSync(filePath, 'utf8')));
+    parsed = parseFallbackText(fs.readFileSync(filePath, 'utf8'));
+  } catch (err: any) {
+    logger.error(`[resilient-post] Failed to read fallback file ${filePath}: ${err?.message ?? err}`);
+    return { entries: [], malformed: 1 };
+  }
+  try {
+    return { entries: compactFallbackEntries(parsed.entries), malformed: parsed.malformed };
   } catch (err: any) {
     logger.error(`[resilient-post] Failed to compact fallback file ${filePath}: ${err?.message ?? err}`);
-    return parseFallbackText(fs.readFileSync(filePath, 'utf8'));
+    return parsed;
   }
+}
+
+export function readFallbackResults(cwd: string): FallbackResultEntry[] {
+  return readFallbackJournal(cwd).entries;
 }
 
 export function deleteFallbackFile(cwd: string): void {
@@ -423,13 +485,17 @@ export class CoalescingPostQueue {
   }
 
   private async deliver(item: CoalescingPostItem): Promise<void> {
-    const ok = await retryPost(item.url, item.body, item.label, this.postOptions);
-    if (ok) {
+    const outcome = await retryPostWithOutcome(item.url, item.body, item.label, this.postOptions);
+    if (outcome.kind === 'delivered') {
       this.counters.delivered++;
       return;
     }
+    if (outcome.kind === 'permanent_rejection') {
+      this.counters.rejected++;
+      return;
+    }
     this.blockedUntil = Date.now() + this.failureCooldownMs;
-    // A newer cumulative value supersedes this failed value.
+    // A newer cumulative value supersedes this failed transport observation.
     if (!this.pending.has(item.key)) await this.persistOnce(item);
   }
 

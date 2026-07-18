@@ -1,0 +1,60 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { fallbackReplayBlocksCompletion, type FallbackReplayResult } from '../lib/fallback-replay';
+
+const WORKER_SOURCE = fs.readFileSync(path.resolve(__dirname, '..', 'worker.ts'), 'utf8');
+
+function result(overrides: Partial<FallbackReplayResult>): FallbackReplayResult {
+  return {
+    total: 0,
+    inserted: 0,
+    duplicates: 0,
+    invalid: 0,
+    retained: false,
+    incomplete: false,
+    criticalTotal: 0,
+    criticalCompleted: 0,
+    criticalInvalid: 0,
+    criticalIncomplete: false,
+    blocksCompletion: false,
+    ...overrides,
+  };
+}
+
+describe('worker fallback terminal gate', () => {
+  test.each([
+    result({ retained: true, criticalTotal: 1, criticalCompleted: 1 }),
+    result({ invalid: 1, retained: true, criticalTotal: 1, criticalInvalid: 1 }),
+    result({ incomplete: true, criticalTotal: 1, criticalIncomplete: true }),
+  ])('blocks retained, invalid, or incomplete critical replay', (replay) => {
+    expect(fallbackReplayBlocksCompletion(replay)).toBe(true);
+  });
+
+  test('does not block a retained telemetry-only journal', () => {
+    expect(fallbackReplayBlocksCompletion(result({ retained: true, incomplete: true }))).toBe(false);
+  });
+
+  test('both normal and retry workers apply replay before terminal success/sync', () => {
+    expect(WORKER_SOURCE.match(/fallbackReplayBlocksCompletion\(fallbackReplay\)/g)).toHaveLength(2);
+    const normalReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayFallbackResults(cwd');
+    const normalStatus = WORKER_SOURCE.indexOf("let status = wasCancelled ? 'cancelled'", normalReplay);
+    const normalGate = WORKER_SOURCE.indexOf('fallbackReplayBlocksCompletion(fallbackReplay)', normalStatus);
+    expect(normalReplay).toBeGreaterThan(0);
+    expect(normalGate).toBeGreaterThan(normalStatus);
+
+    const retryReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayFallbackResults(cwd', normalReplay + 1);
+    const retryStatus = WORKER_SOURCE.indexOf('let finalStatus: string;', retryReplay);
+    const retryGate = WORKER_SOURCE.indexOf('fallbackReplayBlocksCompletion(fallbackReplay)', retryStatus);
+    const retrySync = WORKER_SOURCE.indexOf('syncRetrySpecPassesToOriginalSpec', retryGate);
+    expect(retryReplay).toBeGreaterThan(normalReplay);
+    expect(retryGate).toBeGreaterThan(retryStatus);
+    expect(retrySync).toBeGreaterThan(retryGate);
+  });
+});

@@ -20,7 +20,8 @@ jest.mock('../../db/index', () => ({
 }));
 jest.mock('../sse-hub', () => ({ broadcastAll: (...args: unknown[]) => broadcastAll(...args) }));
 
-import { replayFallbackResults } from '../fallback-replay';
+import { ConflictError } from '../errors';
+import { fallbackReplayBlocksCompletion, replayFallbackResults } from '../fallback-replay';
 import { flushFallbackWrites, writeFallbackResult, type FallbackResultEntry } from '../resilient-post';
 
 function entry(key: string, storyId: string): FallbackResultEntry {
@@ -82,6 +83,47 @@ describe('fallback replay idempotency', () => {
     expect(broadcastAll).toHaveBeenCalledTimes(2);
   });
 
+  test('marks interrupted and invalid critical replay as terminal blockers', async () => {
+    const critical: FallbackResultEntry = {
+      type: 'story_result', storyId: 'US-CRITICAL', status: 'fail', runId: 7,
+      retries: 1, ts: '2026-07-15T00:00:00.000Z', idempotencyKey: 'critical-result-1',
+      payload: { runId: 7, storyId: 'US-CRITICAL', status: 'fail', idempotencyKey: 'critical-result-1' },
+    };
+    await writeFallbackResult(cwd, critical);
+    await flushFallbackWrites(cwd);
+    transaction.mockRejectedValueOnce(new Error('connection terminated'));
+
+    const interrupted = await replayFallbackResults(cwd, 'test-ws');
+    expect(interrupted).toMatchObject({
+      retained: true,
+      incomplete: true,
+      criticalTotal: 1,
+      criticalCompleted: 0,
+      criticalIncomplete: true,
+      blocksCompletion: true,
+    });
+    expect(fallbackReplayBlocksCompletion(interrupted)).toBe(true);
+
+    transaction.mockImplementationOnce(async () => { throw new ConflictError('invalid duplicate'); });
+    const invalid = await replayFallbackResults(cwd, 'test-ws');
+    expect(invalid).toMatchObject({ retained: true, invalid: 1, criticalInvalid: 1, blocksCompletion: true });
+    expect(fallbackReplayBlocksCompletion(invalid)).toBe(true);
+  });
+
+  test('treats malformed durable records as retained critical replay blockers', async () => {
+    fs.writeFileSync(path.join(cwd, '.rorca-results.jsonl'), '{"type":"story_result"\n', 'utf8');
+    const replay = await replayFallbackResults(cwd, 'test-ws');
+    expect(replay).toMatchObject({
+      total: 1,
+      invalid: 1,
+      retained: true,
+      criticalTotal: 1,
+      criticalInvalid: 1,
+      blocksCompletion: true,
+    });
+    expect(fs.existsSync(path.join(cwd, '.rorca-results.jsonl'))).toBe(true);
+  });
+
   test('replays a complete story result through the canonical atomic projection', async () => {
     const sha = 'a'.repeat(40);
     const storyEntry: FallbackResultEntry = {
@@ -128,16 +170,25 @@ describe('fallback replay idempotency', () => {
             spec_revision: `sha256:${'2'.repeat(64)}`,
             story_revision: `sha256:${'3'.repeat(64)}`,
             closeout_decision_id: `CLO-sha256:${'4'.repeat(64)}`,
+            closeout_status: 'accepted',
           }] };
         }
         if (sql.includes('INSERT INTO story_results')) {
           persisted.result = {
             runId: values[0], storyId: values[1], status: values[2], finishedAt: values[3],
-            worktreePath: values[4], worktreeBranch: values[5], inputTokens: values[6],
-            outputTokens: values[7], modelUsed: values[8], costUsd: values[9], logPath: values[10],
-            blockedBy: values[11], activeSkills: values[12], completionPacket: JSON.parse(String(values[13])),
-            specId: values[14], specRevision: values[15], storyRevision: values[16],
-            manifestHash: values[17], closeoutDecisionId: values[18], ingestKey: values[19],
+            finishedAtSource: values[4], worktreePath: values[5], worktreeBranch: values[6],
+            integrated: values[7], commitSha: values[8], commitMessage: values[9],
+            commitAuthor: values[10], commitBranch: values[11], commitObservedSource: values[12],
+            inputTokens: values[13], outputTokens: values[14], reasoningTokens: values[15],
+            modelUsed: values[16], costUsd: values[17], logPath: values[18],
+            blockedBy: values[19], activeSkills: values[20], completionPacket: JSON.parse(String(values[21])),
+            specId: values[22], specRevision: values[23], storyRevision: values[24],
+            manifestHash: values[25], closeoutDecisionId: values[26], ingestKey: values[27],
+            accountingRequired: values[28], accountingModel: values[29],
+            accountingInputTokens: values[30], accountingOutputTokens: values[31],
+            accountingReasoningTokens: values[32], accountingCostUsd: values[33],
+            accountingCostSource: values[34], accountingInputRate: values[35], accountingOutputRate: values[36],
+            reason: values[37],
           };
           return { rows: [{ id: 1 }] };
         }
@@ -157,10 +208,17 @@ describe('fallback replay idempotency', () => {
         }
         if (sql.includes('INSERT INTO token_usage')) {
           persisted.usage = {
-            runId: values[0], storyId: values[1], workspaceId: values[2], model: values[3],
-            inputTokens: values[4], outputTokens: values[5], reasoningTokens: values[6], costUsd: values[7],
+            storyResultId: values[0], runId: values[1], storyId: values[2], workspaceId: values[3],
+            model: values[4], inputTokens: values[5], outputTokens: values[6],
+            reasoningTokens: values[7], costUsd: values[8], costSource: values[9],
+            inputRate: values[10], outputRate: values[11],
           };
-          return { rows: [], rowCount: 1 };
+          return { rows: [{
+            id: 1, story_result_id: values[0], workspace_id: values[3], model: values[4],
+            input_tokens: values[5], output_tokens: values[6], reasoning_tokens: values[7],
+            cost_usd: values[8], cost_source: values[9], input_cost_per_1k: values[10],
+            output_cost_per_1k: values[11],
+          }], rowCount: 1 };
         }
         return { rows: [] };
       }),
@@ -175,10 +233,18 @@ describe('fallback replay idempotency', () => {
       storyId: 'US-FALLBACK-001',
       status: 'pass',
       finishedAt: storyEntry.ts,
+      finishedAtSource: 'observed',
       worktreePath: '/tmp/fallback-story',
       worktreeBranch: 'run/fallback-integrated',
+      integrated: true,
+      commitSha: sha,
+      commitMessage: 'integrated story(US-FALLBACK-001): fallback exact head',
+      commitAuthor: 'rorca-execution-engine',
+      commitBranch: 'run/fallback-integrated',
+      commitObservedSource: 'worktree_branch',
       inputTokens: 321,
       outputTokens: 54,
+      reasoningTokens: 11,
       modelUsed: 'pi/fallback-model',
       costUsd: 0.1234567,
       logPath: '/tmp/fallback-story.log',
@@ -191,6 +257,16 @@ describe('fallback replay idempotency', () => {
       manifestHash: `sha256:${'1'.repeat(64)}`,
       closeoutDecisionId: `CLO-sha256:${'4'.repeat(64)}`,
       ingestKey: storyEntry.idempotencyKey,
+      accountingRequired: true,
+      accountingModel: 'pi/fallback-model',
+      accountingInputTokens: 321,
+      accountingOutputTokens: 54,
+      accountingReasoningTokens: 11,
+      accountingCostUsd: 0.123457,
+      accountingCostSource: 'explicit',
+      accountingInputRate: null,
+      accountingOutputRate: null,
+      reason: null,
     });
     expect(persisted.commit).toEqual({
       storyId: 'US-FALLBACK-001',
@@ -204,6 +280,7 @@ describe('fallback replay idempotency', () => {
       observedSource: 'worktree_branch',
     });
     expect(persisted.usage).toEqual({
+      storyResultId: 1,
       runId: 7,
       storyId: 'US-FALLBACK-001',
       workspaceId: 'test-ws',
@@ -212,6 +289,9 @@ describe('fallback replay idempotency', () => {
       outputTokens: 54,
       reasoningTokens: 11,
       costUsd: 0.123457,
+      costSource: 'explicit',
+      inputRate: null,
+      outputRate: null,
     });
     expect(fs.existsSync(path.join(cwd, '.rorca-results.jsonl'))).toBe(false);
   });

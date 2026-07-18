@@ -130,9 +130,16 @@ import { calculateCost } from './model-pricing';
 import {
   CoalescingPostQueue,
   retryPost,
+  retryPostWithOutcome,
   writeFallbackResult,
   type FallbackResultEntry,
 } from './resilient-post';
+import {
+  createEngineResultDeliveryContext,
+  deliverEngineStoryResult,
+  type EngineResultDeliveryContext,
+} from './engine-result-delivery';
+import type { CanonicalStoryResultInput } from './story-result-persistence';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -1045,9 +1052,9 @@ function getNextStory(stories: UserStory[]): UserStory | null {
   return null;
 }
 
-/** Stable run root for fallback writes; never point this at ephemeral story worktrees. */
-let _fallbackCwd: string | null = null;
-let _fallbackRunId = 0;
+/** Immutable per-process run context; the worker starts one engine process per run. */
+let _runFallbackContext: Readonly<{ cwd: string; runId: number }> | null = null;
+let _resultDeliveryContext: EngineResultDeliveryContext | null = null;
 let _walTelemetryQueue: CoalescingPostQueue | null = null;
 const _tokenAccumulators = new Map<string, {
   baseInput: number;
@@ -1060,19 +1067,26 @@ const _tokenAccumulators = new Map<string, {
   sequence: number;
 }>();
 
-function setFallbackContext(cwd: string, runId: number): void {
-  _fallbackCwd = cwd;
-  _fallbackRunId = runId;
-  if (!_walTelemetryQueue) {
-    _walTelemetryQueue = new CoalescingPostQueue({
-      maxPending: 64,
-      concurrency: 2,
-      timeoutMs: 750,
-      maxRetries: 1,
-      failureCooldownMs: 2_000,
-      persistFallback: entry => writeFallbackResult(cwd, entry),
-    });
+function initializeRunFallbackContext(cwd: string, runId: number, workspaceId: string | null): void {
+  const stableCwd = path.resolve(cwd);
+  if (_runFallbackContext) {
+    if (_runFallbackContext.cwd !== stableCwd || _runFallbackContext.runId !== runId) {
+      throw new Error('Execution-engine fallback context cannot be rebound after run initialization');
+    }
+    return;
   }
+  _runFallbackContext = Object.freeze({ cwd: stableCwd, runId });
+  if (workspaceId) {
+    _resultDeliveryContext = createEngineResultDeliveryContext(runId, workspaceId, stableCwd);
+  }
+  _walTelemetryQueue = new CoalescingPostQueue({
+    maxPending: 64,
+    concurrency: 2,
+    timeoutMs: 750,
+    maxRetries: 1,
+    failureCooldownMs: 2_000,
+    persistFallback: entry => writeFallbackResult(stableCwd, entry),
+  });
 }
 
 function tokenTelemetryKey(runId: number, storyId: string): string {
@@ -1117,7 +1131,8 @@ async function emitWalEvent(
   specId?: string,
 ): Promise<void> {
   const occurredAt = new Date().toISOString();
-  const idempotencyKey = `wal:${_fallbackRunId}:${randomUUID()}`;
+  const runContext = _runFallbackContext;
+  const idempotencyKey = `wal:${runContext?.runId ?? 0}:${randomUUID()}`;
   const body = {
     event_type: eventType,
     workspace_id: workspaceId,
@@ -1128,24 +1143,28 @@ async function emitWalEvent(
     occurred_at: occurredAt,
   };
 
-  const ok = await retryPost(
+  const outcome = await retryPostWithOutcome(
     engineApiEndpoint(port, '/api/wal'),
     body,
     `WAL:${eventType}`,
   );
 
-  if (!ok && _fallbackCwd) {
+  if (outcome.kind === 'permanent_rejection') {
+    throw new Error(`WAL delivery permanently rejected for ${eventType}: HTTP ${outcome.status}`);
+  }
+  if (outcome.kind === 'retryable_exhausted') {
+    if (!runContext) throw new Error(`WAL delivery failed before run fallback initialization for ${eventType}`);
     const entry: FallbackResultEntry = {
       type: 'wal',
       storyId: storyId ?? null,
       status: eventType,
-      runId: _fallbackRunId,
-      retries: 3,
+      runId: runContext.runId,
+      retries: outcome.attempts,
       ts: occurredAt,
       idempotencyKey,
       payload: body,
     };
-    if (!await writeFallbackResult(_fallbackCwd, entry)) {
+    if (!await writeFallbackResult(runContext.cwd, entry)) {
       throw new Error(`WAL fallback persistence failed for ${eventType}`);
     }
   }
@@ -1198,37 +1217,21 @@ async function emitContextTrace(
   );
 }
 
-/** POST a story result to the backend with retry + fallback. */
+/** Persist a story result through the host process's canonical DB transaction. */
 async function postStoryResult(
-  port: number,
+  _port: number,
   body: Record<string, unknown>,
   callerIdempotencyKey?: string,
 ): Promise<void> {
-  // Most results are distinct observations and retain their historical random
-  // identity. Crash-replayable closeout paths may supply immutable authority.
-  const idempotencyKey = callerIdempotencyKey ?? `story-result:${_fallbackRunId}:${randomUUID()}`;
-  const deliveryBody = { ...body, idempotencyKey };
-  const ok = await retryPost(
-    engineApiEndpoint(port, '/api/pipeline/story-result'),
-    deliveryBody,
-    `story-result:${body.storyId ?? 'unknown'}`,
-  );
-
-  if (!ok && _fallbackCwd) {
-    const entry: FallbackResultEntry = {
-      type: 'story_result',
-      storyId: (body.storyId as string) ?? null,
-      status: (body.status as string) ?? null,
-      runId: _fallbackRunId,
-      retries: 3,
-      ts: new Date().toISOString(),
-      idempotencyKey,
-      payload: deliveryBody,
-    };
-    if (!await writeFallbackResult(_fallbackCwd, entry)) {
-      throw new Error(`Story-result fallback persistence failed for ${String(body.storyId ?? 'unknown')}`);
-    }
-  }
+  const context = _resultDeliveryContext;
+  if (!context) throw new Error('Canonical story-result delivery context is unavailable');
+  if (Number(body.runId) !== context.runId) throw new Error('Story-result run identity does not match the engine run');
+  const idempotencyKey = callerIdempotencyKey ?? `story-result:${context.runId}:${randomUUID()}`;
+  const { runId: _runId, ...payload } = body;
+  await deliverEngineStoryResult(context, {
+    ...(payload as unknown as Omit<CanonicalStoryResultInput, 'runId' | 'expectedWorkspaceId'>),
+    idempotencyKey,
+  });
 }
 
 function buildCleanEnv(): Record<string, string> {
@@ -4797,6 +4800,7 @@ async function finalizeIntegratedStoryPass(
       runId: config.runId,
       storyId: pending.story.id,
       status: 'pass',
+      integrated: true,
       logPath: pending.logPath,
       ...pending.storyResultExtra,
       ...pending.activeSkillsExtra,
@@ -5575,9 +5579,6 @@ async function executeStory(
   const allowsNoCodeChanges = executionManifest
     ? executionManifest.repositoryProfile.changePolicy === 'no_code_allowed'
     : storyAllowsNoCodeChanges(story, mode);
-
-  // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
-  setFallbackContext(effectiveCwd, config.runId);
 
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
   // stable workspace/run artifact root, not ephemeral story worktrees, so the
@@ -7601,8 +7602,9 @@ async function main(): Promise<void> {
   }
   const retryCounts = new Map<string, number>();
 
-  // Set fallback context for emitWalEvent / postStoryResult fallback file writes
-  setFallbackContext(config.cwd, config.runId);
+  // Establish the immutable stable run root exactly once. Story worktrees are
+  // never eligible fallback targets, including during parallel execution.
+  initializeRunFallbackContext(config.cwd, config.runId, workspaceId);
 
   // ── Clear stale skipped/blocked flags from previous failed runs ───────────
   // Wave parallel failures mark downstream stories as skipped in the spec JSON.
@@ -7981,7 +7983,8 @@ async function runParallel(
     const passedInWave: StoryWorktree[] = [];
     const failedInWave: StoryWorktree[] = [];
 
-    for (const settled of results) {
+    for (let resultIndex = 0; resultIndex < results.length; resultIndex++) {
+      const settled = results[resultIndex];
       if (settled.status === 'fulfilled') {
         const { storyId, result } = settled.value;
         processedIds.add(storyId);
@@ -7997,7 +8000,12 @@ async function runParallel(
           passedInWave.push(wt);
         }
       } else {
-        logger.error(`[engine] Unexpected rejection in wave ${wave.index}:`, settled.reason);
+        const rejectedStory = storiesWithWorktrees[resultIndex];
+        logger.error(`[engine] Story rejection in wave ${wave.index} (${rejectedStory.id}):`, settled.reason);
+        failedIds.add(rejectedStory.id);
+        processedIds.add(rejectedStory.id);
+        const wt = worktreeMap.get(rejectedStory.id);
+        if (wt) failedInWave.push(wt);
       }
     }
 

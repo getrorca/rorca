@@ -74,7 +74,11 @@ import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, 
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
-import { persistCanonicalStoryResult, type CanonicalStoryResultStatus } from '../lib/story-result-persistence';
+import {
+  persistCanonicalStoryResult,
+  persistLegacyStoryResultAccounting,
+  type CanonicalStoryResultStatus,
+} from '../lib/story-result-persistence';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
@@ -133,7 +137,7 @@ import {
   resolveExecutionSecrets,
 } from '../lib/execution-secret-references';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
-import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
+import { fallbackReplayBlocksCompletion, replayFallbackResults } from '../lib/fallback-replay';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -635,58 +639,11 @@ function buildExecutionReadinessSummary(
 // This function reads that file and replays entries into the DB.
 
 export async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
-  const entries = readFallbackResults(cwd);
-  if (entries.length === 0) return 0;
-
-  let synced = 0;
-  for (const entry of entries) {
-    try {
-      if (entry.type === 'wal') {
-        // Replay WAL event directly into DB
-        const p = entry.payload as Record<string, unknown>;
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [p.event_type ?? entry.status,
-          p.workspace_id ?? workspaceId,
-          p.spec_id ?? null,
-          p.story_id ?? entry.storyId,
-          JSON.stringify(p.payload ?? p),]);
-        broadcastAll(walEvent!);
-        synced++;
-      } else if (entry.type === 'story_result') {
-        // Replay story_result into DB
-        const p = entry.payload as Record<string, unknown>;
-        const runId = (p.runId as number) ?? entry.runId;
-        const storyId = (p.storyId as string) ?? entry.storyId;
-        const status = (p.status as string) ?? entry.status;
-
-        if (!runId || !storyId || !status) continue;
-
-        // Check if already synced (idempotent — don't double-insert)
-        const existing = await queryOne('SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2', [runId, storyId]);
-
-        if (!existing) {
-          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
-            ? JSON.stringify(p.activeSkills)
-            : null;
-          await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills, completion_packet)
-             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`, [runId, storyId, status,
-            (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
-            (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
-            (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
-            activeSkillsVal,
-            p.completionPacket && typeof p.completionPacket === 'object' ? JSON.stringify(p.completionPacket) : null,]);
-        }
-        synced++;
-      }
-    } catch (err: any) {
-      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
-    }
+  const replay = await replayFallbackResults(cwd, workspaceId);
+  if (fallbackReplayBlocksCompletion(replay)) {
+    throw new ConflictError('Critical fallback replay is retained, invalid, or incomplete');
   }
-
-  if (synced > 0) {
-    deleteFallbackFile(cwd);
-    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
-  }
-  return synced;
+  return replay.inserted + replay.duplicates;
 }
 
 // All Claude Code env vars that block nested invocation (same as llm-client.ts)
@@ -7290,42 +7247,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 });
 
-// ─── Token usage recording helper ─────────────────────────────────────────────
-// Inserts into token_usage table with cost calculation from model_pricing.
-// Called by both the POST endpoint and WAL auto-record.
-
-interface ModelPricingRow {
-  model_id: string;
-  input_cost_per_1k: number;
-  output_cost_per_1k: number;
-}
-
-async function recordTokenUsage(
-  runId: number,
-  storyId: string,
-  inputTokens: number,
-  outputTokens: number,
-  model?: string,
-  reasoningTokens?: number,
-  explicitCostUsd?: number,
-) {
-  const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
-  if (!run) return;
-
-  const modelName = model || 'unknown';
-  const pricing = await queryOne('SELECT * FROM model_pricing WHERE model_id = $1', [modelName]) as ModelPricingRow | undefined;
-
-  const derivedCostUsd = pricing
-    ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
-    : 0;
-  const costUsd = explicitCostUsd ?? derivedCostUsd;
-
-  await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, reasoning_tokens, cost_usd)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, reasoningTokens ?? 0, Math.round(costUsd * 1_000_000) / 1_000_000]);
-}
-
-// ─── POST /api/pipeline/story-result — Record story outcome from run-loop.ts ──
-// Called by the TypeScript run-loop to insert story_results rows.
+// ─── POST /api/pipeline/story-result — Keyed compatibility result ingress ──
+// The host execution engine writes the same canonical transaction directly.
 
 /**
  * @swagger
@@ -7336,30 +7259,34 @@ async function recordTokenUsage(
  *     operationId: recordStoryResult
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Internal execution-engine closeout write — operator-only because it mutates canonical story result metadata."
- *     description: Called by run-loop.ts or execution-engine.ts to insert a story_results row after a story finishes. Also records token usage into the analytics table when tokens are present.
+ *     description: Keyed compatibility ingress for story results. The host execution engine calls the same canonical transaction directly before local pass mutation.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [runId, storyId, status]
+ *             required: [runId, storyId, status, idempotencyKey]
  *             properties:
  *               runId: { type: integer, description: "Pipeline run ID" }
  *               storyId: { type: string, description: "Story ID (e.g. US-001)" }
  *               status: { type: string, enum: [pass, fail, skip, excluded] }
  *               worktreePath: { type: string, nullable: true }
  *               worktreeBranch: { type: string, nullable: true }
+ *               integrated: { type: boolean, nullable: true, description: "True only for host-verified run-branch integration passes." }
  *               commitSha: { type: string, nullable: true, pattern: '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$', description: "Host-verified immutable integrated run-branch HEAD" }
  *               commitMessage: { type: string, nullable: true }
  *               inputTokens: { type: integer, nullable: true }
  *               outputTokens: { type: integer, nullable: true }
+ *               reasoningTokens: { type: integer, nullable: true }
  *               modelUsed: { type: string, nullable: true }
  *               costUsd: { type: number, nullable: true }
  *               logPath: { type: string, nullable: true }
+ *               reason: { type: string, nullable: true }
  *               blockedBy: { type: array, items: { type: string }, nullable: true }
  *               activeSkills: { type: array, items: { type: string }, nullable: true }
  *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
+ *               idempotencyKey: { type: string, maxLength: 256, description: "Stable immutable result ingest identity." }
  *     responses:
  *       201: { description: "Story result recorded" }
  *       400: { description: "Missing required fields or invalid status" }
@@ -7368,14 +7295,14 @@ async function recordTokenUsage(
 router.post('/story-result', async (req: Request, res: Response) => {
   try {
     const {
-      runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
+      runId, storyId, status, worktreePath, worktreeBranch, integrated, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey,
+      logPath, reason, blockedBy, activeSkills, completionPacket, idempotencyKey,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
-      worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
+      worktreePath?: string; worktreeBranch?: string; integrated?: boolean; commitSha?: string; commitMessage?: string;
       inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
-      logPath?: string; blockedBy?: string[]; activeSkills?: string[];
+      logPath?: string; reason?: string; blockedBy?: string[]; activeSkills?: string[];
       completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
     };
@@ -7403,6 +7330,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       status: status as CanonicalStoryResultStatus,
       worktreePath,
       worktreeBranch,
+      integrated,
       commitSha,
       commitMessage,
       inputTokens,
@@ -7411,6 +7339,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       modelUsed,
       costUsd,
       logPath,
+      reason,
       blockedBy,
       activeSkills,
       completionPacket,
@@ -7433,7 +7362,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Record token usage for a story
  *     operationId: recordStoryTokenUsage
- *     description: Updates the story_results row with token counts and records an entry in the token_usage analytics table. Called by run-loop.ts or external callers.
+ *     description: Compatibility accounting for legacy unkeyed story results. Canonical keyed results are immutable and return 409; their accounting is written with the result transaction.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -7457,6 +7386,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
  *       200: { description: "Token usage recorded" }
  *       400: { description: "Invalid runId or missing token counts" }
  *       404: { description: "Story result not found for this run and story" }
+ *       409: { description: "Canonical keyed result accounting is immutable" }
  *       500: { description: "Internal server error" }
  */
 router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Response) => {
@@ -7472,32 +7402,22 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
       return;
     }
 
-    if (inputTokens == null && outputTokens == null) {
-      throw new ValidationError('At least one of inputTokens or outputTokens required');
+    if (inputTokens == null && outputTokens == null && reasoningTokens == null && costUsd == null) {
+      throw new ValidationError('At least one accounting value is required');
       return;
     }
 
-    // Find the latest story_result row for this run + storyId
-    const row = await queryOne(`SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runId, storyId]) as { id: number } | undefined;
+    const outcome = await persistLegacyStoryResultAccounting({
+      runId,
+      storyId,
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      modelUsed: model,
+      costUsd,
+    });
 
-    if (!row) {
-      throw new NotFoundError('Story result not found');
-      return;
-    }
-
-    await execute(
-      `UPDATE story_results
-       SET input_tokens = COALESCE($1, input_tokens),
-           output_tokens = COALESCE($2, output_tokens),
-           cost_usd = COALESCE($3, cost_usd)
-       WHERE id = $4`,
-      [inputTokens ?? null, outputTokens ?? null, costUsd ?? null, row.id],
-    );
-
-    // Also record into token_usage analytics table
-    await recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model, reasoningTokens ?? 0, costUsd);
-
-    res.json({ ok: true });
+    res.json({ ok: true, duplicate: outcome.duplicate, storyResultId: outcome.storyResultId });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Record tokens');
   }

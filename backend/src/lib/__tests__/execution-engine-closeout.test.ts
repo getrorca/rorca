@@ -171,9 +171,17 @@ describe('execution-engine closeout architecture', () => {
     expect(STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_commits')).toBeLessThan(
       STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO token_usage'),
     );
-    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, specId)');
-    expect(WAL_LISTENER_SOURCE).toContain('if (!storyRow) return;');
-    expect(ENGINE_SOURCE).toContain('callerIdempotencyKey ?? `story-result:${_fallbackRunId}:${randomUUID()}`');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, projection, specId, commit)');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('WHERE story_result_id = $1');
+    expect(WAL_LISTENER_SOURCE).toContain('await persistLegacyStoryResultAccounting({');
+    const fallbackSync = PIPELINE_SOURCE.slice(
+      PIPELINE_SOURCE.indexOf('export async function syncFallbackResults('),
+      PIPELINE_SOURCE.indexOf('// All Claude Code env vars', PIPELINE_SOURCE.indexOf('export async function syncFallbackResults(')),
+    );
+    expect(fallbackSync).toContain('await replayFallbackResults(cwd, workspaceId)');
+    expect(fallbackSync).not.toContain('INSERT INTO story_results');
+    expect(ENGINE_SOURCE).toContain('await deliverEngineStoryResult(context, {');
+    expect(ENGINE_SOURCE).not.toContain("engineApiEndpoint(port, '/api/pipeline/story-result')");
   });
 
   test('reuses one bounded integrated-pass key across crash replay and scopes every immutable authority field', () => {
@@ -227,6 +235,16 @@ describe('execution-engine closeout architecture', () => {
     } finally {
       fs.rmSync(repo, { recursive: true, force: true });
     }
+  });
+
+  test('establishes one immutable run fallback root and never rebinds it to story worktrees', () => {
+    expect(ENGINE_SOURCE.match(/initializeRunFallbackContext\(/g)).toHaveLength(2); // definition + one run initialization
+    expect(ENGINE_SOURCE).toContain('initializeRunFallbackContext(config.cwd, config.runId, workspaceId)');
+    expect(ENGINE_SOURCE).not.toContain('initializeRunFallbackContext(effectiveCwd');
+    expect(ENGINE_SOURCE).not.toContain('setFallbackContext(effectiveCwd');
+    expect(ENGINE_SOURCE).toContain('Execution-engine fallback context cannot be rebound after run initialization');
+    expect(ENGINE_SOURCE).toContain('failedIds.add(rejectedStory.id)');
+    expect(ENGINE_SOURCE).toContain('processedIds.add(rejectedStory.id)');
   });
 
   test('covers direct/retry finalization and sequential/parallel worktree integration through one exact-head seam', () => {

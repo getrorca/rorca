@@ -15,6 +15,7 @@ import {
   flushFallbackWrites,
   readFallbackResults,
   retryPost,
+  retryPostWithOutcome,
   writeFallbackResult,
   type FallbackResultEntry,
 } from '../resilient-post';
@@ -57,9 +58,20 @@ describe('CoalescingPostQueue load/contention resilience', () => {
     });
     const port = await listen(server);
     const persisted: FallbackResultEntry[] = [];
+    let fetchActive = 0;
+    let maxFetchActive = 0;
+    const fetchImpl = (async (...args: Parameters<typeof fetch>) => {
+      fetchActive++;
+      maxFetchActive = Math.max(maxFetchActive, fetchActive);
+      try {
+        return await fetch(...args);
+      } finally {
+        fetchActive--;
+      }
+    }) as typeof fetch;
     const queue = new CoalescingPostQueue({
       concurrency: 2, maxPending: 8, timeoutMs: 25, maxRetries: 1,
-      failureCooldownMs: 10,
+      failureCooldownMs: 10, fetchImpl,
       persistFallback: async entry => { persisted.push(entry); return true; },
     });
 
@@ -80,7 +92,10 @@ describe('CoalescingPostQueue load/contention resilience', () => {
     const latest = compactFallbackEntries(persisted);
     expect(enqueueMs).toBeLessThan(250);
     expect(queue.stats().maxObservedActive).toBeLessThanOrEqual(2);
-    expect(maxServerActive).toBeLessThanOrEqual(2);
+    expect(maxFetchActive).toBeLessThanOrEqual(2);
+    // Aborted client requests may remain briefly active in the local HTTP server;
+    // client-side delivery concurrency is the queue invariant under test.
+    expect(maxServerActive).toBeGreaterThanOrEqual(1);
     expect(queue.stats().coalesced).toBeGreaterThan(250);
     expect(latest).toHaveLength(3);
     expect(latest.map(entry => entry.sequence).sort()).toEqual([100, 100, 100]);
@@ -102,6 +117,17 @@ describe('CoalescingPostQueue load/contention resilience', () => {
     expect(queue.stats().pending).toBeLessThanOrEqual(2);
     await queue.shutdown(250);
     expect(compactFallbackEntries(persisted)).toHaveLength(3);
+  });
+
+  test('returns permanent 4xx/409 rejection without retrying or relabeling it as transport failure', async () => {
+    const fetchImpl = jest.fn(async () => new Response('{}', { status: 409 })) as unknown as typeof fetch;
+    const outcome = await retryPostWithOutcome('http://127.0.0.1/story-result', {}, 'conflict', {
+      fetchImpl,
+      maxRetries: 3,
+      retryDelayMs: 0,
+    });
+    expect(outcome).toEqual({ kind: 'permanent_rejection', attempts: 1, status: 409 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   test('one unavailable endpoint attempt is bounded far below the old 30+ second path', async () => {
@@ -135,6 +161,16 @@ describe('bounded fallback journal', () => {
     if (originalMaxEntries === undefined) delete process.env.RORCA_FALLBACK_MAX_ENTRIES;
     else process.env.RORCA_FALLBACK_MAX_ENTRIES = originalMaxEntries;
     fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  test('preserves the first dependency position when a later retry replaces a result copy', () => {
+    const result = { ...fallback('US-001', 1), type: 'story_result' as const, status: 'pass', coalesceKey: undefined };
+    const passWal = { ...fallback('US-001', 2), status: 'story_passed', coalesceKey: undefined };
+    const retriedResult = { ...result, retries: 3 };
+    const compacted = compactFallbackEntries([result, passWal, retriedResult]);
+    expect(compacted).toHaveLength(2);
+    expect(compacted[0]).toMatchObject({ type: 'story_result', retries: 3 });
+    expect(compacted[1]).toMatchObject({ type: 'wal', status: 'story_passed' });
   });
 
   test('serializes parallel writes and compacts cumulative telemetry to latest values', async () => {

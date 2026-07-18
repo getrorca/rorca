@@ -13,10 +13,11 @@ import { broadcastAll, type WalEvent } from './sse-hub';
 import {
   deleteFallbackFile,
   flushFallbackWrites,
-  readFallbackResults,
+  readFallbackJournal,
   type FallbackResultEntry,
 } from './resilient-post';
 import { logger } from './logger';
+import { AppError } from './errors';
 import {
   persistCanonicalStoryResult,
   STORY_RESULT_STATUSES,
@@ -30,6 +31,31 @@ export interface FallbackReplayResult {
   duplicates: number;
   invalid: number;
   retained: boolean;
+  incomplete: boolean;
+  criticalTotal: number;
+  criticalCompleted: number;
+  criticalInvalid: number;
+  criticalIncomplete: boolean;
+  blocksCompletion: boolean;
+}
+
+function isCriticalEntry(entry: FallbackResultEntry): boolean {
+  return entry.type === 'story_result' || !entry.coalesceKey;
+}
+
+export function fallbackReplayBlocksCompletion(result: FallbackReplayResult): boolean {
+  return result.blocksCompletion
+    || result.criticalInvalid > 0
+    || result.criticalIncomplete
+    || (result.retained && result.criticalTotal > 0);
+}
+
+function refreshReplayCompleteness(result: FallbackReplayResult): void {
+  result.incomplete = result.inserted + result.duplicates + result.invalid !== result.total;
+  result.criticalIncomplete = result.criticalCompleted + result.criticalInvalid !== result.criticalTotal;
+  result.blocksCompletion = result.criticalInvalid > 0
+    || result.criticalIncomplete
+    || (result.retained && result.criticalTotal > 0);
 }
 
 function derivedIngestKey(entry: FallbackResultEntry): string {
@@ -94,6 +120,10 @@ function optionalNumber(value: unknown): number | undefined | null {
   return value === undefined ? undefined : typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function optionalBoolean(value: unknown): boolean | undefined | null {
+  return value === undefined ? undefined : typeof value === 'boolean' ? value : null;
+}
+
 function optionalStringArray(value: unknown): string[] | undefined | null {
   return value === undefined
     ? undefined
@@ -112,6 +142,7 @@ async function replayStoryResult(
   const payloadIngestKey = optionalString(payload.idempotencyKey);
   const worktreePath = optionalString(payload.worktreePath);
   const worktreeBranch = optionalString(payload.worktreeBranch);
+  const integrated = optionalBoolean(payload.integrated);
   const commitSha = optionalString(payload.commitSha);
   const commitMessage = optionalString(payload.commitMessage);
   const inputTokens = optionalNumber(payload.inputTokens);
@@ -120,6 +151,7 @@ async function replayStoryResult(
   const modelUsed = optionalString(payload.modelUsed);
   const costUsd = optionalNumber(payload.costUsd);
   const logPath = optionalString(payload.logPath);
+  const reason = optionalString(payload.reason);
   const blockedBy = optionalStringArray(payload.blockedBy);
   const activeSkills = optionalStringArray(payload.activeSkills);
   const completionPacket = payload.completionPacket;
@@ -128,9 +160,10 @@ async function replayStoryResult(
     || typeof storyId !== 'string' || storyId.length === 0
     || typeof status !== 'string' || !STORY_RESULT_STATUSES.includes(status as CanonicalStoryResultStatus)
     || payloadIngestKey === null || (payloadIngestKey !== undefined && payloadIngestKey !== ingestKey)
+    || integrated === null || (integrated === false && commitSha !== undefined)
     || worktreePath === null || worktreeBranch === null || commitSha === null || commitMessage === null
     || inputTokens === null || outputTokens === null || reasoningTokens === null
-    || modelUsed === null || costUsd === null || logPath === null
+    || modelUsed === null || costUsd === null || logPath === null || reason === null
     || blockedBy === null || activeSkills === null
     || (commitSha !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha))
     || (completionPacket !== undefined && (completionPacket === null
@@ -144,6 +177,7 @@ async function replayStoryResult(
     status: status as CanonicalStoryResultStatus,
     worktreePath,
     worktreeBranch,
+    integrated,
     commitSha,
     commitMessage,
     inputTokens,
@@ -152,6 +186,7 @@ async function replayStoryResult(
     modelUsed,
     costUsd,
     logPath,
+    reason,
     blockedBy,
     activeSkills,
     completionPacket: completionPacket as Record<string, unknown> | undefined,
@@ -159,8 +194,13 @@ async function replayStoryResult(
     finishedAt: entry.ts,
     expectedWorkspaceId: workspaceId,
   };
-  const outcome = await persistCanonicalStoryResult(input);
-  return outcome.duplicate ? 'duplicate' : 'inserted';
+  try {
+    const outcome = await persistCanonicalStoryResult(input);
+    return outcome.duplicate ? 'duplicate' : 'inserted';
+  } catch (error) {
+    if (error instanceof AppError) return 'invalid';
+    throw error;
+  }
 }
 
 /**
@@ -170,33 +210,48 @@ async function replayStoryResult(
  */
 export async function replayFallbackResults(cwd: string, workspaceId: string): Promise<FallbackReplayResult> {
   await flushFallbackWrites(cwd);
-  const entries = readFallbackResults(cwd);
+  const journal = readFallbackJournal(cwd);
+  const entries = journal.entries;
   const result: FallbackReplayResult = {
-    total: entries.length,
+    total: entries.length + journal.malformed,
     inserted: 0,
     duplicates: 0,
-    invalid: 0,
+    invalid: journal.malformed,
     retained: false,
+    incomplete: false,
+    criticalTotal: entries.filter(isCriticalEntry).length + journal.malformed,
+    criticalCompleted: 0,
+    criticalInvalid: journal.malformed,
+    criticalIncomplete: false,
+    blocksCompletion: false,
   };
-  if (entries.length === 0) return result;
+  if (result.total === 0) return result;
 
   try {
     for (const entry of entries) {
       const outcome = entry.type === 'wal'
         ? await replayWal(entry, workspaceId)
         : await replayStoryResult(entry, workspaceId);
+      const critical = isCriticalEntry(entry);
       result[outcome === 'inserted' ? 'inserted' : outcome === 'duplicate' ? 'duplicates' : 'invalid']++;
+      if (critical && outcome !== 'invalid') result.criticalCompleted++;
+      if (critical && outcome === 'invalid') result.criticalInvalid++;
     }
     if (result.invalid === 0) {
+      refreshReplayCompleteness(result);
       deleteFallbackFile(cwd);
       logger.info({ cwd, ...result }, '[fallback-replay] Journal replay complete');
     } else {
       result.retained = true;
+      refreshReplayCompleteness(result);
       logger.warn({ cwd, ...result }, '[fallback-replay] Invalid entries retained for operator review');
     }
   } catch (err) {
     result.retained = true;
+    refreshReplayCompleteness(result);
     logger.warn({ err, cwd, ...result }, '[fallback-replay] Replay interrupted; journal retained');
   }
+
+  refreshReplayCompleteness(result);
   return result;
 }

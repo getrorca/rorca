@@ -65,7 +65,7 @@ import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
-import { replayFallbackResults } from './lib/fallback-replay';
+import { fallbackReplayBlocksCompletion, replayFallbackResults } from './lib/fallback-replay';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { githubRepoApiUrl } from './lib/github-repository-authority';
@@ -833,7 +833,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         await flushPending();
         // The engine flushes its bounded telemetry queue before process close.
         // Replay its durable journal before deriving completion from DB state.
-        await replayFallbackResults(cwd, String(workspaceId));
+        const fallbackReplay = await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         const signal = capturedSignal;
@@ -842,6 +842,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
         const wasCancelled = cancellingRuns.delete(runId);
         let status = wasCancelled ? 'cancelled' : (code === 0 && !signal ? 'done' : 'failed');
+        if (!wasCancelled && fallbackReplayBlocksCompletion(fallbackReplay)) {
+          status = 'failed';
+          logger.error({ runId, fallbackReplay }, '[worker] Critical fallback replay incomplete — blocking terminal success');
+        }
 
         // A run where every story was skipped is not "done" — it failed
         if (status === 'done') {
@@ -1559,7 +1563,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       child.on('close', async () => {
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
         await flushPending();
-        await replayFallbackResults(cwd, String(workspaceId));
+        const fallbackReplay = await replayFallbackResults(cwd, String(workspaceId));
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -1575,6 +1579,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         let retrySpecSyncSucceeded = false;
         if (wasCancelled) {
           finalStatus = 'cancelled';
+        } else if (fallbackReplayBlocksCompletion(fallbackReplay)) {
+          finalStatus = 'failed';
+          logger.error({ runId, fallbackReplay }, '[worker] Critical retry fallback replay incomplete — blocking terminal success');
         } else {
           try {
             const currentStories = await query<{ story_id: string; status: string }>(
