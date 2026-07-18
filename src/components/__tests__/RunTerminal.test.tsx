@@ -114,6 +114,8 @@ class TestEventSource {
 }
 
 let lastEventSource: TestEventSource | null = null;
+const PTY_GENERATION_ID = '11111111-1111-4111-8111-111111111111';
+const PTY_GENERATION_TOKEN = '22222222-2222-4222-8222-222222222222';
 
 type ResizeObserverCallbackForTest = ConstructorParameters<typeof ResizeObserver>[0];
 
@@ -273,6 +275,8 @@ describe('RunTerminal PTY fallback UI', () => {
         requestedTerminalMode: 'pty',
         isPty: true,
         ptyAvailable: true,
+        ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationToken: PTY_GENERATION_TOKEN,
       }));
     });
 
@@ -298,7 +302,10 @@ describe('RunTerminal PTY fallback UI', () => {
       '/api/pipeline/runs/77/input',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ dataBase64: Buffer.from('ls -la\n', 'utf8').toString('base64') }),
+        body: JSON.stringify({
+          generationToken: PTY_GENERATION_TOKEN,
+          dataBase64: Buffer.from('ls -la\n', 'utf8').toString('base64'),
+        }),
         silent: true,
       }),
     ));
@@ -329,6 +336,8 @@ describe('RunTerminal PTY fallback UI', () => {
       lastEventSource!.emit('run_meta', JSON.stringify({
         terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
         outputSource: 'run_pty_output_chunks',
+        ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationToken: PTY_GENERATION_TOKEN,
       }));
       lastEventSource!.emit('chunk', Buffer.from('first durable chunk', 'utf8').toString('base64'), '17');
     });
@@ -340,6 +349,7 @@ describe('RunTerminal PTY fallback UI', () => {
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(2));
     expect(lastEventSource!.url).toContain('afterSequence=17');
     expect(lastEventSource!.url).toContain('outputSource=run_pty_output_chunks');
+    expect(lastEventSource!.url).toContain(`outputGenerationId=${PTY_GENERATION_ID}`);
   });
 
   it('reconnects with afterSequence after an SSE failure instead of replaying the fresh tail', async () => {
@@ -475,6 +485,10 @@ describe('RunTerminal PTY fallback UI', () => {
     vi.mocked(apiFetch).mockClear();
 
     act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        ptyGenerationId: PTY_GENERATION_ID, ptyGenerationToken: PTY_GENERATION_TOKEN,
+      }));
       lastEventSource!.emit('pty_health', JSON.stringify({ ptySessionStatus: 'active', ptyProcessAlive: true }));
       lastEventSource!.emit('pty_health', JSON.stringify({ ptySessionStatus: 'active', ptyProcessAlive: true }));
     });
@@ -482,7 +496,7 @@ describe('RunTerminal PTY fallback UI', () => {
     await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
     expect(apiFetch).toHaveBeenCalledWith(
       '/api/pipeline/runs/77/pty/resize',
-      expect.objectContaining({ body: JSON.stringify({ cols: 80, rows: 24 }) }),
+      expect.objectContaining({ body: JSON.stringify({ generationToken: PTY_GENERATION_TOKEN, cols: 80, rows: 24 }) }),
     );
   });
 
@@ -503,12 +517,19 @@ describe('RunTerminal PTY fallback UI', () => {
 
     await waitFor(() => expect(xtermMockState.instances.length).toBe(1));
     const terminal = xtermMockState.instances[0];
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        ptyGenerationId: PTY_GENERATION_ID, ptyGenerationToken: PTY_GENERATION_TOKEN,
+        ptySessionStatus: 'active', ptyProcessAlive: true,
+      }));
+    });
 
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
       '/api/pipeline/runs/77/pty/resize',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ cols: 80, rows: 24 }),
+        body: JSON.stringify({ generationToken: PTY_GENERATION_TOKEN, cols: 80, rows: 24 }),
         silent: true,
       }),
     ));
@@ -526,7 +547,7 @@ describe('RunTerminal PTY fallback UI', () => {
       '/api/pipeline/runs/77/pty/resize',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ cols: 132, rows: 43 }),
+        body: JSON.stringify({ generationToken: PTY_GENERATION_TOKEN, cols: 132, rows: 43 }),
         silent: true,
       }),
     ));

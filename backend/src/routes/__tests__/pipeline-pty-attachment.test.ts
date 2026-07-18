@@ -15,7 +15,7 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import * as db from '../../db/index';
-import { claimLatestRunPtyResize } from '../../lib/run-pty-store';
+import { claimLatestRunPtyResize, completeRunPtySession, startRunPtySession, type PtyGenerationIdentity } from '../../lib/run-pty-store';
 
 jest.setTimeout(90_000);
 
@@ -153,6 +153,19 @@ async function seedRun(status: string, terminalMode: 'ansi-html' | 'pty' | 'nati
   return Number(row!.id);
 }
 
+async function seedPtyGeneration(runId: number, status: 'active' | 'exited' = 'active'): Promise<PtyGenerationIdentity> {
+  const generation = await startRunPtySession({
+    runId, workspaceId: 'ws-pty-attach', storyId: 'US-001', attempt: 1,
+    cwd: wsDir, agentType: 'claude', cols: 80, rows: 24, childPid: null,
+  });
+  if (status === 'exited') {
+    await completeRunPtySession({
+      runId, generationId: generation.generationId, generationToken: generation.generationToken,
+    }, 'exited', 0, null);
+  }
+  return generation;
+}
+
 async function streamOutput(runId: number): Promise<string> {
   const response = await request(app)
     .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`)
@@ -240,12 +253,11 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     const ansiFallbackChunk = Buffer.from('ansi table should not render\n', 'utf8');
     const ptyChunk = Buffer.from('\u001b[32mreal pty bytes\u001b[0m\r\n', 'utf8');
 
+    const generation = await seedPtyGeneration(runId, 'exited');
     await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes, total_stored_bytes)
-       VALUES ($1, 'ws-pty-attach', $2, 'claude', 'exited', $3, $3)`,
-      [runId, wsDir, ptyChunk.length],
+      'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 1, $3)',
+      [runId, generation.generationId, ptyChunk],
     );
-    await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ptyChunk]);
     await db.execute('INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ansiFallbackChunk]);
 
     const [ptyCount, ansiCount] = await Promise.all([
@@ -275,11 +287,7 @@ describe('PTY attachment trigger and fallback discrimination', () => {
       Buffer.from('delayed fake CLI banner\r\n', 'utf8'),
       Buffer.from('\u001b[33mincremental terminal bytes\u001b[0m\r\n', 'utf8'),
     ];
-    await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
-      [runId, wsDir],
-    );
+    const generation = await seedPtyGeneration(runId);
 
     const server = app.listen(0);
     try {
@@ -299,14 +307,17 @@ describe('PTY attachment trigger and fallback discrimination', () => {
               inserted = true;
               setTimeout(() => {
                 void (async () => {
-                  await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, chunks[0]]);
-                  await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 2, $2)', [runId, chunks[1]]);
                   await db.execute(
-                    `UPDATE run_pty_sessions
-                     SET status = 'exited', total_output_bytes = $2, total_stored_bytes = $2, last_output_at = NOW(), exited_at = NOW(), updated_at = NOW()
-                     WHERE run_id = $1`,
-                    [runId, chunks[0].length + chunks[1].length],
+                    'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 1, $3)',
+                    [runId, generation.generationId, chunks[0]],
                   );
+                  await db.execute(
+                    'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 2, $3)',
+                    [runId, generation.generationId, chunks[1]],
+                  );
+                  await completeRunPtySession({
+                    runId, generationId: generation.generationId, generationToken: generation.generationToken,
+                  }, 'exited', 0, null);
                   await db.execute(`UPDATE pipeline_runs SET status = 'done', finished_at = NOW() WHERE id = $1`, [runId]);
                 })().catch(reject);
               }, 75);
@@ -431,15 +442,11 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 
   test('Last-Event-ID resumes PTY replay without duplicating acknowledged chunks', async () => {
     const runId = await seedRun('done', 'pty');
+    const generation = await seedPtyGeneration(runId, 'exited');
     await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
-      [runId, wsDir],
-    );
-    await db.execute(
-      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES
-       ($1, 1, $2), ($1, 2, $3)`,
-      [runId, Buffer.from('already-seen\n'), Buffer.from('resume-here\n')],
+      `INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES
+       ($1, $2, 1, $3), ($1, $2, 2, $4)`,
+      [runId, generation.generationId, Buffer.from('already-seen\n'), Buffer.from('resume-here\n')],
     );
 
     const response = await request(app)
@@ -454,15 +461,11 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 
   test('explicit afterSequence refresh cursor overrides Last-Event-ID and never replays from zero', async () => {
     const runId = await seedRun('done', 'pty');
+    const generation = await seedPtyGeneration(runId, 'exited');
     await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
-      [runId, wsDir],
-    );
-    await db.execute(
-      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES
-       ($1, 1, $2), ($1, 2, $3), ($1, 3, $4)`,
-      [runId, Buffer.from('zero\n'), Buffer.from('old-event-source\n'), Buffer.from('refresh-resume\n')],
+      `INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES
+       ($1, $2, 1, $3), ($1, $2, 2, $4), ($1, $2, 3, $5)`,
+      [runId, generation.generationId, Buffer.from('zero\n'), Buffer.from('old-event-source\n'), Buffer.from('refresh-resume\n')],
     );
 
     const response = await request(app)
@@ -479,14 +482,10 @@ describe('PTY attachment trigger and fallback discrimination', () => {
   test('resets a persisted cursor when its replay source differs from the selected PTY store', async () => {
     const runId = await seedRun('done', 'pty');
     const ptyChunk = Buffer.from('must-not-be-suppressed-by-ansi-cursor\n');
+    const generation = await seedPtyGeneration(runId, 'exited');
     await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited')`,
-      [runId, wsDir],
-    );
-    await db.execute(
-      'INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)',
-      [runId, ptyChunk],
+      'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 1, $3)',
+      [runId, generation.generationId, ptyChunk],
     );
 
     const response = await request(app)
@@ -502,12 +501,11 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     const runId = await seedRun('done', 'native-pty');
     const ptyChunk = Buffer.from('\u001b[36mnative cli bytes\u001b[0m\r\n', 'utf8');
 
+    const generation = await seedPtyGeneration(runId, 'exited');
     await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes, total_stored_bytes)
-       VALUES ($1, 'ws-pty-attach', $2, 'pi', 'exited', $3, $3)`,
-      [runId, wsDir, ptyChunk.length],
+      'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 1, $3)',
+      [runId, generation.generationId, ptyChunk],
     );
-    await db.execute('INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ptyChunk]);
 
     const body = await streamOutput(runId);
 
@@ -537,44 +535,45 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 describe('PTY resize forwarding and SSE attach/disconnect', () => {
   test('rejects input and resize for terminal partial-failure PTY runs', async () => {
     const runId = await seedRun('partial_failure', 'pty');
-    await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
-      [runId, wsDir],
-    );
+    const generationToken = crypto.randomUUID();
 
     const [resize, input] = await Promise.all([
       request(app)
         .post(`/api/pipeline/runs/${runId}/pty/resize`)
         .set('Authorization', `Bearer ${authToken}`)
-        .send({ cols: 132, rows: 43 }),
+        .send({ generationToken, cols: 132, rows: 43 }),
       request(app)
         .post(`/api/pipeline/runs/${runId}/input`)
         .set('Authorization', `Bearer ${authToken}`)
-        .send({ dataBase64: Buffer.from('must-not-send', 'utf8').toString('base64') }),
+        .send({ generationToken, dataBase64: Buffer.from('must-not-send', 'utf8').toString('base64') }),
     ]);
 
     expect(resize.status).toBe(409);
     expect(input.status).toBe(409);
   });
 
-  test('resize requests are consumed by the PTY polling contract and marked applied', async () => {
+  test('resize requests are consumed only by the exact PTY generation', async () => {
     const runId = await seedRun('running', 'pty');
-    await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
-      [runId, wsDir],
-    );
+    const generation = await startRunPtySession({
+      runId, workspaceId: 'ws-pty-attach', storyId: 'US-001', attempt: 1,
+      cwd: wsDir, agentType: 'claude', cols: 80, rows: 24, childPid: null,
+    });
+    const generationRef = {
+      runId, generationId: generation.generationId, generationToken: generation.generationToken,
+    };
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/pty/resize`)
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ cols: 132, rows: 43 });
+      .send({ generationToken: generation.generationToken, cols: 132, rows: 43 });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, runId, cols: 132, rows: 43 });
+    expect(res.body).toEqual(expect.objectContaining({
+      ok: true, runId, cols: 132, rows: 43,
+      generation: expect.objectContaining({ generationId: generation.generationId }),
+    }));
 
-    const claimed = await claimLatestRunPtyResize(runId);
+    const claimed = await claimLatestRunPtyResize(generationRef);
     expect(claimed).toEqual(expect.objectContaining({ cols: 132, rows: 43 }));
     const remaining = await db.queryOne<{ count: string }>(
       'SELECT COUNT(*)::text AS count FROM run_pty_resize_requests WHERE run_id = $1',
@@ -591,14 +590,15 @@ describe('PTY resize forwarding and SSE attach/disconnect', () => {
       [runId, wsDir],
     );
 
+    const generationToken = crypto.randomUUID();
     const resize = await request(app)
       .post(`/api/pipeline/runs/${runId}/pty/resize`)
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ cols: 501, rows: 24 });
+      .send({ generationToken, cols: 501, rows: 24 });
     const input = await request(app)
       .post(`/api/pipeline/runs/${runId}/input`)
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ dataBase64: Buffer.from([0xc3, 0x28]).toString('base64') });
+      .send({ generationToken, dataBase64: Buffer.from([0xc3, 0x28]).toString('base64') });
 
     expect(resize.status).toBe(400);
     expect(input.status).toBe(400);
@@ -613,11 +613,10 @@ describe('PTY resize forwarding and SSE attach/disconnect', () => {
 
   test('closing the SSE output attachment clears polling and stops further DB reads', async () => {
     const runId = await seedRun('running', 'pty');
-    await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
-      [runId, wsDir],
-    );
+    await startRunPtySession({
+      runId, workspaceId: 'ws-pty-attach', storyId: 'US-001', attempt: 1,
+      cwd: wsDir, agentType: 'claude', cols: 80, rows: 24, childPid: null,
+    });
 
     const querySpy = jest.spyOn(db, 'query');
     const queryOneSpy = jest.spyOn(db, 'queryOne');

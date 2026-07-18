@@ -81,6 +81,8 @@ import {
   recordRunPtyHeartbeat,
   recordRunPtyPromptReadiness,
   startRunPtySession,
+  updateRunPtyChildPid,
+  type PtyGenerationRef,
 } from './run-pty-store';
 import { attachRunPtyLifecycle, transitionRunLifecycle } from './run-lifecycle';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
@@ -1974,7 +1976,8 @@ interface PtyRunOptions {
   cols: number;
   rows: number;
   port?: number;
-  storyId?: string;
+  storyId: string;
+  attempt: number;
 }
 
 interface PtyProcessLike {
@@ -2249,6 +2252,7 @@ async function spawnAgentViaPty(
     let readinessState: PtyReadinessState | null = null;
     let adapter: InteractivePtyAgentAdapter | null = null;
     let outputBatcher: ReturnType<typeof createRunPtyOutputBatcher> | null = null;
+    let generationRef: PtyGenerationRef | null = null;
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -2304,11 +2308,11 @@ async function spawnAgentViaPty(
               : 'failed';
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
-      if (!completionFileSeen) {
-        try { await recordRunPtyCompletionFileError(ptyOptions.runId, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
+      if (!completionFileSeen && generationRef) {
+        try { await recordRunPtyCompletionFileError(generationRef, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
       }
       try {
-        await completeRunPtySession(ptyOptions.runId, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
+        if (generationRef) await completeRunPtySession(generationRef, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
       }
@@ -2374,9 +2378,7 @@ async function spawnAgentViaPty(
     let sequenceRef: { value: number } | null = null;
 
     try {
-      sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
-      outputBatcher = createRunPtyOutputBatcher(ptyOptions.runId, sequenceRef);
-      const storyIdForMarker = ptyOptions.storyId ?? 'run';
+      const storyIdForMarker = ptyOptions.storyId;
       const completionMarker = buildPtyCompletionMarker(ptyOptions.runId, storyIdForMarker);
       const markerFilePath = buildPtyMarkerFilePath(ptyOptions.runId, storyIdForMarker);
       const markerFile = path.resolve(cwd, markerFilePath);
@@ -2384,6 +2386,27 @@ async function spawnAgentViaPty(
       try { fs.unlinkSync(markerFile); } catch (err: any) {
         if (err?.code !== 'ENOENT') throw err;
       }
+      const requestedGenerationToken = randomUUID();
+      const generation = await startRunPtySession({
+        runId: ptyOptions.runId,
+        workspaceId: ptyOptions.workspaceId,
+        storyId: ptyOptions.storyId,
+        attempt: ptyOptions.attempt,
+        cwd,
+        agentType: ptyOptions.agentType,
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+        childPid: null,
+        generationToken: requestedGenerationToken,
+        completionMarker,
+      });
+      generationRef = {
+        runId: generation.runId,
+        generationId: generation.generationId,
+        generationToken: generation.generationToken,
+      };
+      sequenceRef = await initializeRunPtySequence(generationRef);
+      outputBatcher = createRunPtyOutputBatcher(generationRef, sequenceRef);
       completionState = createPtyCompletionState(completionMarker);
       readinessState = createPtyReadinessState(ptyOptions.agentType);
       adapter = buildInteractivePtyAgentAdapter(
@@ -2403,6 +2426,9 @@ async function spawnAgentViaPty(
         agentType: ptyOptions.agentType,
         completionMarker,
         markerFilePath,
+        generationId: generation.generationId,
+        generationToken: generation.generationToken,
+        attempt: generation.attempt,
       });
       ptyCommand = adapter.resolveCommand({
         agentType: ptyOptions.agentType,
@@ -2420,16 +2446,7 @@ async function spawnAgentViaPty(
         env: ptyCommand.env,
         encoding: null,
       });
-      await startRunPtySession({
-        runId: ptyOptions.runId,
-        workspaceId: ptyOptions.workspaceId,
-        cwd,
-        agentType: ptyOptions.agentType,
-        cols: ptyOptions.cols,
-        rows: ptyOptions.rows,
-        childPid: pty.pid ?? null,
-        completionMarker,
-      });
+      await updateRunPtyChildPid(generationRef, pty.pid);
       const ptyAttached = await attachRunPtyLifecycle(ptyOptions.runId, {
         transport: 'pty_attached',
         process: 'spawned',
@@ -2443,7 +2460,8 @@ async function spawnAgentViaPty(
       resetInactivity();
       heartbeatTimer = setInterval(() => {
         const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
-        void recordRunPtyHeartbeat(ptyOptions.runId)
+        if (!generationRef) return;
+        void recordRunPtyHeartbeat(generationRef)
           .catch((err: unknown) => logRunPtyStoreError('Failed to record PTY heartbeat', ptyOptions.runId, err));
         if (ptyOptions.port && ptyOptions.storyId) {
           void emitWalEvent(ptyOptions.port, 'story_heartbeat', ptyOptions.workspaceId, {
@@ -2462,7 +2480,8 @@ async function spawnAgentViaPty(
         void (async () => {
           if (!pty) return;
           try {
-            const resize = await claimLatestRunPtyResize(ptyOptions.runId);
+            if (!generationRef) return;
+            const resize = await claimLatestRunPtyResize(generationRef);
             if (resize) {
               pty.resize(resize.cols, resize.rows);
             }
@@ -2478,7 +2497,8 @@ async function spawnAgentViaPty(
           if (!pty || inputPollInFlight) return;
           inputPollInFlight = true;
           try {
-            const requests = await claimPendingRunPtyInput(ptyOptions.runId);
+            if (!generationRef) return;
+            const requests = await claimPendingRunPtyInput(generationRef);
             for (const request of requests) {
               pty.write(request.input.toString('utf8'));
               resetInactivity();
@@ -2500,13 +2520,17 @@ async function spawnAgentViaPty(
           const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
           const valid = parsed.storyId === storyIdForMarker
             && Number(parsed.runId) === ptyOptions.runId
-            && parsed.marker === completionMarker;
+            && parsed.marker === completionMarker
+            && parsed.generationId === generationRef?.generationId
+            && parsed.generationToken === generationRef?.generationToken
+            && Number(parsed.attempt) === ptyOptions.attempt;
           if (!valid) {
-            await recordRunPtyCompletionFileError(ptyOptions.runId, 'marker_file_payload_mismatch');
+            if (generationRef) await recordRunPtyCompletionFileError(generationRef, 'marker_file_payload_mismatch');
             return;
           }
           completionFileSeen = true;
-          await markRunPtyCompletionFileSeen(ptyOptions.runId, completionMarker);
+          if (!generationRef) return;
+          await markRunPtyCompletionFileSeen(generationRef, completionMarker);
           if (ptyOptions.port && ptyOptions.storyId) {
             await emitWalEvent(ptyOptions.port, 'story_completion_file', ptyOptions.workspaceId, {
               run_id: ptyOptions.runId,
@@ -2526,7 +2550,7 @@ async function spawnAgentViaPty(
           }, 250).unref?.();
         } catch (err: unknown) {
           const reason = err instanceof Error ? err.message : String(err);
-          await recordRunPtyCompletionFileError(ptyOptions.runId, reason);
+          if (generationRef) await recordRunPtyCompletionFileError(generationRef, reason);
           logRunPtyStoreError('Failed to inspect PTY completion file', ptyOptions.runId, err);
         } finally {
           completionFileCheckInFlight = false;
@@ -2555,7 +2579,8 @@ async function spawnAgentViaPty(
           const signal = adapter.detectCompletion?.(text, completionState) ?? null;
           if (signal?.type === 'marker') {
             terminalMarkerSeen = true;
-            void markRunPtyCompletionMarkerSeen(ptyOptions.runId, signal.marker)
+            if (!generationRef) return;
+            void markRunPtyCompletionMarkerSeen(generationRef, signal.marker)
               .catch((err: unknown) => logRunPtyStoreError('Failed to record corroborating PTY terminal marker', ptyOptions.runId, err));
           }
         }
@@ -2589,8 +2614,9 @@ async function spawnAgentViaPty(
       });
       if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
       if (settled) return;
+      if (!generationRef) throw new Error('PTY_GENERATION_REQUIRED: generation disappeared before readiness');
       void recordRunPtyPromptReadiness(
-        ptyOptions.runId,
+        generationRef,
         readiness.timedOut ? 'timeout_fallback' : 'ready',
         readiness.reason,
       ).catch((err) => logRunPtyStoreError('Failed to record PTY readiness', ptyOptions.runId, err));
@@ -2606,7 +2632,7 @@ async function spawnAgentViaPty(
         logger.warn(`[engine] Bracketed PTY prompt injection failed for ${ptyOptions.agentType}; falling back to chunked typing: ${message}`);
         await injectPromptWithChunkedTyping(pty, ptyCommand.prompt);
       }
-      void recordRunPtyPromptReadiness(ptyOptions.runId, 'injected', readiness.reason)
+      void recordRunPtyPromptReadiness(generationRef, 'injected', readiness.reason)
         .catch((err) => logRunPtyStoreError('Failed to record PTY prompt injection', ptyOptions.runId, err));
       const ptyRunning = await transitionRunLifecycle(ptyOptions.runId, 'running', {
         transport: 'pty_attached',
@@ -2672,7 +2698,7 @@ async function spawnAgentViaPty(
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
       try {
-        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
+        if (generationRef) await completeRunPtySession(generationRef, 'failed', 1, null);
       } catch { /* session may not have been persisted yet */ }
       logStream.end();
       ptyCommand?.cleanup?.();
@@ -6082,6 +6108,7 @@ async function executeStory(
             rows: DEFAULT_PTY_ROWS,
             port: config.port,
             storyId: story.id,
+            attempt: retryAttempt + 1,
           } satisfies PtyRunOptions
         : undefined;
       const result = await runAgent(

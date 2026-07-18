@@ -78,8 +78,8 @@ import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
+  getRunPtyGeneration,
   getRunPtySessionHealth,
-  getRunPtySessionStatus,
   getRunPtyOutputLimits,
   listRecentRunPtyChunks,
   listRunPtyChunks,
@@ -349,6 +349,22 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     : Number.parseInt(String(health.total_output_bytes ?? 0), 10) || 0;
   const processAlive = health.status === 'active' && isPtyPidAlive(health.child_pid);
   return {
+    ptyGenerationId: health.generationId,
+    pty_generation_id: health.generationId,
+    ptyGenerationToken: health.generationToken,
+    pty_generation_token: health.generationToken,
+    ptyStoryId: health.storyId,
+    pty_story_id: health.storyId,
+    ptyAttempt: health.attempt,
+    pty_attempt: health.attempt,
+    ptyGenerationStatus: health.status,
+    pty_generation_status: health.status,
+    ptyGenerationActive: health.isActive,
+    pty_generation_active: health.isActive,
+    ptyGenerationSource: health.source,
+    pty_generation_source: health.source,
+    ptyGenerationReplaySource: health.replaySource,
+    pty_generation_replay_source: health.replaySource,
     ptySessionStatus: health.status,
     pty_session_status: health.status,
     ptyChildPid: health.child_pid,
@@ -6727,8 +6743,9 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [cols, rows]
+ *             required: [generationToken, cols, rows]
  *             properties:
+ *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
  *               cols: { type: integer, minimum: 1, maximum: 500 }
  *               rows: { type: integer, minimum: 1, maximum: 200 }
  *     responses:
@@ -6739,8 +6756,12 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     const runId = parseInt(String(req.params.runId), 10);
     const cols = parseInt(String(req.body?.cols), 10);
     const rows = parseInt(String(req.body?.rows), 10);
+    const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
 
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
+      throw new ValidationError('generationToken must be a UUID');
+    }
     if (!Number.isInteger(cols) || cols <= 0 || cols > MAX_PTY_COLS
       || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
       throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
@@ -6762,13 +6783,8 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const ptyStatus = await getRunPtySessionStatus(runId);
-    if (ptyStatus !== 'active') {
-      throw new ConflictError('Run PTY session is not active');
-    }
-
-    await requestRunPtyResize(runId, cols, rows);
-    res.json({ ok: true, runId, cols, rows });
+    const generation = await requestRunPtyResize(runId, generationToken, cols, rows);
+    res.json({ ok: true, runId, cols, rows, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Resize PTY run');
   }
@@ -6798,10 +6814,11 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *           schema:
  *             type: object
  *             properties:
+ *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
  *               dataBase64:
  *                 type: string
  *                 description: "Base64-encoded UTF-8 terminal input bytes from xterm.onData."
- *             required: [dataBase64]
+ *             required: [generationToken, dataBase64]
  *     responses:
  *       200: { description: PTY input request recorded }
  */
@@ -6815,6 +6832,10 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
 
+    const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
+      throw new ValidationError('generationToken must be a UUID');
+    }
     const dataBase64 = typeof req.body?.dataBase64 === 'string' ? req.body.dataBase64 : '';
     if (!dataBase64) {
       throw new ValidationError('dataBase64 is required');
@@ -6855,16 +6876,11 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const ptyStatus = await getRunPtySessionStatus(runId);
-    if (ptyStatus !== 'active') {
-      throw new ConflictError('Run PTY session is not active');
-    }
-
-    const accepted = await requestRunPtyInput(runId, input);
-    if (!accepted) {
+    const generation = await requestRunPtyInput(runId, generationToken, input);
+    if (!generation) {
       throw new ConflictError('PTY input queue is full or the session is no longer active');
     }
-    res.json({ ok: true, runId, bytes: input.length });
+    res.json({ ok: true, runId, bytes: input.length, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] PTY input');
   }
@@ -6901,6 +6917,16 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *         required: false
  *         schema: { type: string, enum: [run_pty_output_chunks, run_output_chunks] }
  *         description: Optional durable store identity paired with afterSequence. A changed source resets the cursor so independent PTY and ANSI sequence spaces cannot suppress fallback output.
+ *       - in: query
+ *         name: outputGenerationId
+ *         required: false
+ *         schema: { type: string, format: uuid }
+ *         description: Generation identity paired with afterSequence; mismatch resets the cursor to the always-current generation.
+ *       - in: query
+ *         name: generationToken
+ *         required: false
+ *         schema: { type: string, format: uuid }
+ *         description: Explicit generation to replay. Omit to follow the active/newest generation.
  *     responses:
  *       200:
  *         description: SSE stream with chunk events (base64 data) and done event
@@ -6944,12 +6970,29 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const requestedReplaySource = typeof outputSourceQuery === 'string'
     ? parseOutputReplaySource(outputSourceQuery)
     : null;
+  const parseOptionalUuidQuery = (name: 'generationToken' | 'outputGenerationId'): string | null => {
+    const value = req.query[name];
+    if (Array.isArray(value)) throw new ValidationError(`${name} must be a single UUID`);
+    if (value === undefined) return null;
+    if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+      throw new ValidationError(`${name} must be a UUID`);
+    }
+    return value;
+  };
+  const requestedGenerationToken = parseOptionalUuidQuery('generationToken');
+  const cursorGenerationId = parseOptionalUuidQuery('outputGenerationId');
   const lastEventId = req.get('Last-Event-ID');
   const resumeSource = afterSequence !== null ? 'afterSequence' : lastEventId !== undefined ? 'Last-Event-ID' : null;
   let hasResumeCursor = resumeSource !== null;
   let lastSequence = hasResumeCursor
     ? parseOutputResumeCursor(afterSequence ?? lastEventId!, resumeSource!)
     : 0;
+  const preselectedPtyGeneration = isPtyTerminalMode(normalizeTerminalMode(runRow.terminal_mode))
+    ? await getRunPtyGeneration(runId, requestedGenerationToken)
+    : null;
+  if (requestedGenerationToken && !preselectedPtyGeneration) {
+    throw new NotFoundError('PTY generation not found');
+  }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -6986,9 +7029,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const terminalStatuses = ['done', 'failed', 'partial_failure', 'cancelled'];
   const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
   const requestedPtyMode = isPtyTerminalMode(requestedTerminalMode);
-  const ptyStatusAtOpen = requestedPtyMode
-    ? await getRunPtySessionStatus(runId)
-    : null;
+  let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
+  const ptyStatusAtOpen = selectedPtyGeneration?.status ?? null;
   // An active PTY run is legitimately session-pending while context routing and
   // prompt assembly run. Never permanently demote it because the browser attached
   // before node-pty started. A terminal run with no session is a real fallback.
@@ -6996,7 +7038,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     && PTY_AVAILABLE
     && (ptyStatusAtOpen !== null || !runIsTerminalAtOpen);
   const ptyHealthPayloadAtOpen = usePtyCapture
-    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId))
+    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken))
     : null;
   const terminalMode = usePtyCapture ? requestedTerminalMode : 'ansi-html';
   const isPty = usePtyCapture;
@@ -7004,7 +7046,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // PTY and ANSI captures intentionally have independent sequence spaces. A
   // resume cursor from the other source must never suppress freshly selected
   // fallback output; force the same bounded first-attach semantics instead.
-  const cursorReset = hasResumeCursor && requestedReplaySource !== null && requestedReplaySource !== replaySource;
+  const cursorReset = hasResumeCursor && (
+    (requestedReplaySource !== null && requestedReplaySource !== replaySource)
+    || (cursorGenerationId !== null && selectedPtyGeneration !== null && cursorGenerationId !== selectedPtyGeneration.generationId)
+  );
   if (cursorReset) {
     hasResumeCursor = false;
     lastSequence = 0;
@@ -7073,8 +7118,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let initialReplayMayHaveMore = false;
   if (usePtyCapture) {
     const existingChunks = hasResumeCursor
-      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS)
-      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS);
+      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS, selectedPtyGeneration)
+      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS, selectedPtyGeneration);
     initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
     if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
       res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
@@ -7142,7 +7187,31 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     try {
       let fetchedBatchIsFull = false;
       if (usePtyCapture) {
-        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS);
+        if (!requestedGenerationToken) {
+          const currentGeneration = await getRunPtyGeneration(runId);
+          if (currentGeneration && currentGeneration.generationId !== selectedPtyGeneration?.generationId) {
+            selectedPtyGeneration = currentGeneration;
+            lastSequence = 0;
+            const generationHealth = normalizePtyHealthPayload(
+              await getRunPtySessionHealth(runId, currentGeneration.generationToken),
+            );
+            res.write(`event: run_meta\ndata: ${JSON.stringify({
+              agentType: runMetadata.agentType,
+              agentModel: runMetadata.agentModel,
+              terminalMode,
+              terminal_mode: terminalMode,
+              requestedTerminalMode,
+              requested_terminal_mode: requestedTerminalMode,
+              isPty: true,
+              outputSource: replaySource,
+              output_source: replaySource,
+              cursorReset: true,
+              cursor_reset: true,
+              ...(generationHealth ?? {}),
+            })}\n\n`);
+          }
+        }
+        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS, selectedPtyGeneration);
         fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
@@ -7174,7 +7243,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         queryOne<{ status: string; lifecycle_status: string | null }>(
           'SELECT status, lifecycle_status FROM pipeline_runs WHERE id = $1', [runId],
         ),
-        usePtyCapture ? getRunPtySessionHealth(runId) : Promise.resolve(null),
+        usePtyCapture ? getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken) : Promise.resolve(null),
       ]);
       const ptyHealthPayload = normalizePtyHealthPayload(ptyHealth);
       if (ptyHealthPayload) {
@@ -7188,7 +7257,13 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       }
       const ptyStatus = ptyHealth?.status ?? null;
       const runBecameTerminal = Boolean(statusRow && terminalStatuses.includes(statusRow.status));
-      const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
+      // A followed generation ending is a story boundary, not a run boundary.
+      // Keep the stream attached so the next story/retry can switch generations.
+      // An explicit historical generation replay may close when that generation ends.
+      const explicitPtyGenerationEnded = usePtyCapture
+        && requestedGenerationToken !== null
+        && ptyStatus !== null
+        && ptyStatus !== 'active';
 
       // An attached browser may have observed the legitimate PTY startup-pending
       // state before the engine later failed to create any session. Demote that
@@ -7242,7 +7317,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         }
       }
 
-      if (!statusRow || runBecameTerminal || ptyTerminal) {
+      if (!statusRow || runBecameTerminal || explicitPtyGenerationEnded) {
         // Never emit done before a bounded cursor batch has fully drained.
         // Queue another non-overlapping poll; an exact-multiple batch simply
         // performs one empty confirmation read before closing.

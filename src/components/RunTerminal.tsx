@@ -46,6 +46,14 @@ interface RunTerminalMetaState {
   isPty: boolean;
   ptyAvailable?: boolean;
   ptyUnavailableHint?: string | null;
+  ptyGenerationId?: string | null;
+  ptyGenerationToken?: string | null;
+  ptyStoryId?: string | null;
+  ptyAttempt?: number | null;
+  ptyGenerationStatus?: string | null;
+  ptyGenerationActive?: boolean;
+  ptyGenerationSource?: 'native' | 'legacy' | null;
+  ptyGenerationReplaySource?: 'generation' | 'legacy_run_output' | 'legacy_pty_output' | null;
   ptySessionStatus?: string | null;
   ptyProcessAlive?: boolean | null;
   ptyLastOutputAt?: string | null;
@@ -266,6 +274,26 @@ type OutputReplaySource = 'run_pty_output_chunks' | 'run_output_chunks';
 
 function sourceStorageKey(runId: number): string {
   return `rorca:terminal-output-source:${runId}`;
+}
+
+function generationStorageKey(runId: number): string {
+  return `rorca:terminal-output-generation:${runId}`;
+}
+
+function loadReceivedGenerationId(runId: number): string | null {
+  try {
+    return sessionStorage.getItem(generationStorageKey(runId));
+  } catch {
+    return null;
+  }
+}
+
+function persistReceivedGenerationId(runId: number, generationId: string): void {
+  try {
+    sessionStorage.setItem(generationStorageKey(runId), generationId);
+  } catch {
+    // Session storage is an optimization for durable SSE replay, never a requirement.
+  }
 }
 
 function isOutputReplaySource(value: unknown): value is OutputReplaySource {
@@ -677,6 +705,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const streamKeyRef = useRef<string | null>(null);
   const lastReceivedSequenceRef = useRef(0);
   const outputReplaySourceRef = useRef<OutputReplaySource | null>(null);
+  const ptyGenerationIdRef = useRef<string | null>(null);
+  const ptyGenerationTokenRef = useRef<string | null>(null);
   const activeResizeRetryRef = useRef(false);
   const { resolved } = useTheme();
   const resolvedRef = useRef(resolved);
@@ -784,13 +814,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     // mutations with 409; avoid spamming the console/network panel for archived
     // run views. Preserve test/back-compat behavior when runStatus is omitted.
     const canResize = runStatus == null || runStatus === 'running' || runStatus === 'paused' || runStatus === 'blocked';
-    if (!canResize) return;
+    const generationToken = ptyGenerationTokenRef.current;
+    if (!canResize || !generationToken) return;
 
     try {
       await apiFetch(`/api/pipeline/runs/${runId}/pty/resize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cols, rows }),
+        body: JSON.stringify({ generationToken, cols, rows }),
         silent: true,
       });
     } catch {
@@ -819,6 +850,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     }
     if (chunk) chunks.push(chunk);
 
+    const generationToken = ptyGenerationTokenRef.current;
+    if (!generationToken) return;
     for (const inputChunk of chunks) {
       const dataBase64 = encodeUtf8Base64(inputChunk);
       const dataBytes = encoder.encode(inputChunk).byteLength;
@@ -828,7 +861,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           await apiFetch(`/api/pipeline/runs/${runId}/input`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dataBase64 }),
+            body: JSON.stringify({ generationToken, dataBase64 }),
             silent: true,
           });
           setPtyInputHealthy(true);
@@ -848,7 +881,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const runAllowsInput = currentRunStatus == null || currentRunStatus === 'running' || currentRunStatus === 'paused' || currentRunStatus === 'blocked';
     const sessionAllowsInput = currentSessionStatus === 'active'
       || (currentRunStatus == null && currentSessionStatus == null);
-    if (!runAllowsInput || !sessionAllowsInput) return;
+    if (!runAllowsInput || !sessionAllowsInput || !ptyGenerationTokenRef.current) return;
     const dataBytes = new TextEncoder().encode(data).byteLength;
     if (queuedPtyInputBytesRef.current + dataBytes > MAX_QUEUED_PTY_INPUT_BYTES) {
       setPtyInputHealthy(false);
@@ -1123,6 +1156,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       ansiDisplayDecoderRef.current = new TextDecoder();
       lastReceivedSequenceRef.current = loadReceivedSequence(runId);
       outputReplaySourceRef.current = loadReceivedOutputSource(runId);
+      ptyGenerationIdRef.current = loadReceivedGenerationId(runId);
+      ptyGenerationTokenRef.current = null;
       setAgentType('unknown');
       setAgentModel(null);
       setSteps([]);
@@ -1157,6 +1192,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     if (lastReceivedSequenceRef.current > 0) {
       outputParams.set('afterSequence', String(lastReceivedSequenceRef.current));
       if (outputReplaySourceRef.current) outputParams.set('outputSource', outputReplaySourceRef.current);
+      if (ptyGenerationIdRef.current) outputParams.set('outputGenerationId', ptyGenerationIdRef.current);
     }
     const outputUrl = `${BASE_URL}/api/pipeline/runs/${runId}/output${outputParams.toString() ? '?' + outputParams : ''}`;
     const es = new EventSource(outputUrl);
@@ -1181,6 +1217,22 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     };
 
     type PtyHealthMeta = {
+      ptyGenerationId?: string | null;
+      pty_generation_id?: string | null;
+      ptyGenerationToken?: string | null;
+      pty_generation_token?: string | null;
+      ptyStoryId?: string | null;
+      pty_story_id?: string | null;
+      ptyAttempt?: number | null;
+      pty_attempt?: number | null;
+      ptyGenerationStatus?: string | null;
+      pty_generation_status?: string | null;
+      ptyGenerationActive?: boolean;
+      pty_generation_active?: boolean;
+      ptyGenerationSource?: 'native' | 'legacy' | null;
+      pty_generation_source?: 'native' | 'legacy' | null;
+      ptyGenerationReplaySource?: 'generation' | 'legacy_run_output' | 'legacy_pty_output' | null;
+      pty_generation_replay_source?: 'generation' | 'legacy_run_output' | 'legacy_pty_output' | null;
       ptySessionStatus?: string | null;
       pty_session_status?: string | null;
       ptyProcessAlive?: boolean | null;
@@ -1210,6 +1262,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const applyPtyHealthMeta = (meta: PtyHealthMeta) => {
       setTerminalMeta(prev => ({
         ...prev,
+        ptyGenerationId: meta.ptyGenerationId ?? meta.pty_generation_id ?? prev.ptyGenerationId ?? null,
+        ptyGenerationToken: meta.ptyGenerationToken ?? meta.pty_generation_token ?? prev.ptyGenerationToken ?? null,
+        ptyStoryId: meta.ptyStoryId ?? meta.pty_story_id ?? prev.ptyStoryId ?? null,
+        ptyAttempt: meta.ptyAttempt ?? meta.pty_attempt ?? prev.ptyAttempt ?? null,
+        ptyGenerationStatus: meta.ptyGenerationStatus ?? meta.pty_generation_status ?? prev.ptyGenerationStatus ?? null,
+        ptyGenerationActive: meta.ptyGenerationActive ?? meta.pty_generation_active ?? prev.ptyGenerationActive ?? false,
+        ptyGenerationSource: meta.ptyGenerationSource ?? meta.pty_generation_source ?? prev.ptyGenerationSource ?? null,
+        ptyGenerationReplaySource: meta.ptyGenerationReplaySource ?? meta.pty_generation_replay_source ?? prev.ptyGenerationReplaySource ?? null,
         ptySessionStatus: meta.ptySessionStatus ?? meta.pty_session_status ?? prev.ptySessionStatus ?? null,
         ptyProcessAlive: meta.ptyProcessAlive ?? meta.pty_process_alive ?? prev.ptyProcessAlive ?? null,
         ptyLastOutputAt: meta.ptyLastOutputAt ?? meta.pty_last_output_at ?? prev.ptyLastOutputAt ?? null,
@@ -1253,7 +1313,27 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           cursor_reset?: boolean;
         };
         const nextReplaySource = meta.outputSource ?? meta.output_source ?? meta.ptyReplaySource ?? meta.pty_replay_source;
+        const nextGenerationId = meta.ptyGenerationId ?? meta.pty_generation_id ?? null;
+        const nextGenerationToken = meta.ptyGenerationToken ?? meta.pty_generation_token ?? null;
+        const generationChanged = typeof nextGenerationId === 'string'
+          && ptyGenerationIdRef.current !== null
+          && ptyGenerationIdRef.current !== nextGenerationId;
         const cursorReset = meta.cursorReset === true || meta.cursor_reset === true;
+        if (generationChanged) {
+          // A later story/retry is a distinct terminal. Never leave prior-story
+          // bytes, parser state, or sequence dedupe state in the live renderer.
+          xtermRef.current?.reset();
+          pendingPtyChunksRef.current = [];
+          pendingPtyBytesRef.current = 0;
+          seenChunkIdsRef.current.clear();
+          ptyDisplayScrubberRef.current = createPtyDisplayScrubberState();
+          ptyDisplayDecoderRef.current = new TextDecoder();
+        }
+        if (typeof nextGenerationId === 'string') {
+          ptyGenerationIdRef.current = nextGenerationId;
+          persistReceivedGenerationId(runId, nextGenerationId);
+        }
+        ptyGenerationTokenRef.current = typeof nextGenerationToken === 'string' ? nextGenerationToken : null;
         if (cursorReset || (isOutputReplaySource(nextReplaySource)
           && outputReplaySourceRef.current !== null
           && outputReplaySourceRef.current !== nextReplaySource)) {

@@ -7,6 +7,7 @@
 
 import { gunzipSync, gzipSync } from 'zlib';
 import { execute, query, queryOne, transaction } from '../db/index';
+import { ConflictError, ForbiddenError, NotFoundError } from './errors';
 import { logger } from './logger';
 
 const CHUNK_SIZE = 4 * 1024;
@@ -50,9 +51,44 @@ interface StoredRunPtyChunkRow {
   compression: string | null;
 }
 
+export type PtyGenerationStatus = 'active' | 'superseded' | 'exited' | 'killed' | 'failed' | 'timed_out' | 'legacy';
+export type PtyGenerationSource = 'native' | 'legacy';
+export type PtyReplaySource = 'generation' | 'legacy_run_output' | 'legacy_pty_output';
+
+export interface PtyGenerationIdentity {
+  generationId: string;
+  generationToken: string;
+  runId: number;
+  storyId: string;
+  attempt: number;
+  status: PtyGenerationStatus;
+  isActive: boolean;
+  source: PtyGenerationSource;
+  replaySource: PtyReplaySource;
+}
+
+export interface PtyGenerationRef {
+  runId: number;
+  generationId: string;
+  generationToken: string;
+}
+
+interface StoredPtyGenerationIdentityRow {
+  id: string;
+  generation_token: string;
+  run_id: number | string;
+  story_id: string;
+  attempt: number;
+  status: PtyGenerationStatus;
+  is_active: boolean;
+  source: PtyGenerationSource;
+  replay_source: PtyReplaySource;
+}
+
 export interface RunPtyChunkRow {
   sequence: number;
   chunk: Buffer;
+  generation: PtyGenerationIdentity;
 }
 
 export interface RunPtyResizeRequest {
@@ -69,17 +105,55 @@ export interface RunPtyInputRequest {
 export interface StartRunPtySessionParams {
   runId: number;
   workspaceId: string;
+  storyId: string;
+  attempt: number;
   cwd: string;
   agentType: string;
   cols: number;
   rows: number;
   childPid: number | null;
+  generationToken?: string;
   completionMarker?: string | null;
 }
 
-export interface RunPtySessionHealth {
-  status: string;
+function toGenerationIdentity(row: StoredPtyGenerationIdentityRow): PtyGenerationIdentity {
+  return {
+    generationId: row.id,
+    generationToken: row.generation_token,
+    runId: Number(row.run_id),
+    storyId: row.story_id,
+    attempt: Number(row.attempt),
+    status: row.status,
+    isActive: row.is_active,
+    source: row.source,
+    replaySource: row.replay_source,
+  };
+}
+
+export interface RunPtySessionHealth extends PtyGenerationIdentity {
+  status: PtyGenerationStatus;
+  workspace_id: string;
+  cwd: string;
+  agent_type: string;
   child_pid: number | null;
+  cols: number;
+  rows: number;
+  next_output_sequence: string | number;
+  total_stored_bytes: string | number;
+  pending_input_bytes: string | number;
+  last_input_request_id: string | number | null;
+  last_resize_request_id: string | number | null;
+  checkpoint_sequence: string | number;
+  checkpoint_at: string | null;
+  checkpoint_reference: string | null;
+  archive_reference: string | null;
+  archive_checksum: string | null;
+  archived_at: string | null;
+  started_at: string;
+  superseded_at: string | null;
+  exited_at: string | null;
+  exit_code: number | null;
+  exit_signal: string | null;
   last_output_at: string | null;
   last_heartbeat_at: string | null;
   completion_marker: string | null;
@@ -122,53 +196,105 @@ export function getRunPtyRetentionDays(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PTY_RETENTION_DAYS;
 }
 
-export async function startRunPtySession(params: StartRunPtySessionParams): Promise<void> {
-  await transaction(async (client) => {
-    // Serialize the session generation boundary with input admission. If an
-    // old-session input transaction wins the lock, its row is deleted below;
-    // if this transaction wins, later input is admitted to the new session.
-    await client.query('SELECT run_id FROM run_pty_sessions WHERE run_id = $1 FOR UPDATE', [params.runId]);
-    // Input/resize requests are scoped to one sequential story attachment. A
-    // request left behind by an exited story must never reach the next agent.
-    await client.query('DELETE FROM run_pty_input_requests WHERE run_id = $1', [params.runId]);
-    await client.query('DELETE FROM run_pty_resize_requests WHERE run_id = $1', [params.runId]);
+export async function startRunPtySession(params: StartRunPtySessionParams): Promise<PtyGenerationIdentity> {
+  return transaction(async (client) => {
+    // The run row is permanent lock authority even before its first generation.
+    // This makes UPDATE-old + INSERT-new one atomic, serial transition and lets
+    // the partial active index act as a final split-brain guard.
+    const authority = await client.query<{ id: number }>(
+      'SELECT id FROM pipeline_runs WHERE id = $1 FOR UPDATE',
+      [params.runId],
+    );
+    if (!authority.rows[0]) throw new NotFoundError('Run not found');
+
+    await client.query(
+      `UPDATE pty_generations
+       SET is_active = FALSE, status = 'superseded', superseded_at = NOW(), updated_at = NOW()
+       WHERE run_id = $1 AND is_active = TRUE`,
+      [params.runId],
+    );
+    // Controls are ephemeral. Removing every unclaimed prior-generation request
+    // within the same transition prevents retention and accidental legacy reads.
+    await client.query('DELETE FROM run_pty_input_requests WHERE run_id = $1 AND applied_at IS NULL', [params.runId]);
+    await client.query('DELETE FROM run_pty_resize_requests WHERE run_id = $1 AND applied_at IS NULL', [params.runId]);
+
+    const inserted = await client.query<StoredPtyGenerationIdentityRow>(
+      `INSERT INTO pty_generations
+        (run_id, workspace_id, story_id, attempt, cwd, agent_type, cols, rows,
+         child_pid, completion_marker, generation_token, prompt_readiness_status, prompt_readiness_reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+         COALESCE($11::uuid, gen_random_uuid()), 'waiting', 'awaiting_cli_readiness')
+       RETURNING id, generation_token, run_id, story_id, attempt, status, is_active, source, replay_source`,
+      [params.runId, params.workspaceId, params.storyId, params.attempt, params.cwd, params.agentType,
+        params.cols, params.rows, params.childPid, params.completionMarker ?? null, params.generationToken ?? null],
+    );
+    const generation = inserted.rows[0];
+    if (!generation) throw new ConflictError('PTY generation could not be created');
+
+    // Keep the run-level session as a compatibility projection for liveness and
+    // retention code. Every mutable counter/evidence field is reset; identity
+    // and replay authority live only in pty_generations.
     await client.query(
       `INSERT INTO run_pty_sessions
-        (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, completion_marker, completion_marker_seen_at, completion_file_seen_at, completion_file_error, terminal_marker_seen_at, prompt_readiness_status, prompt_readiness_reason, prompt_ready_at, prompt_injected_at, last_heartbeat_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW(), NULL, $8, NULL, NULL, NULL, NULL, 'waiting', 'awaiting_cli_readiness', NULL, NULL, NULL, NOW())
+        (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status,
+         total_output_bytes, total_stored_bytes, dropped_output_bytes, started_at,
+         last_output_at, completion_marker, completion_marker_seen_at,
+         completion_file_seen_at, completion_file_error, terminal_marker_seen_at,
+         prompt_readiness_status, prompt_readiness_reason, prompt_ready_at,
+         prompt_injected_at, last_heartbeat_at, output_truncated_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', 0, 0, 0, NOW(), NULL,
+         $8, NULL, NULL, NULL, NULL, 'waiting', 'awaiting_cli_readiness', NULL, NULL, NULL, NULL, NOW())
        ON CONFLICT (run_id) DO UPDATE SET
-         workspace_id = EXCLUDED.workspace_id,
-         cwd = EXCLUDED.cwd,
-         agent_type = EXCLUDED.agent_type,
-         cols = EXCLUDED.cols,
-         rows = EXCLUDED.rows,
-         child_pid = EXCLUDED.child_pid,
-         status = 'active',
-         last_output_at = CASE WHEN run_pty_sessions.total_output_bytes > 0 THEN run_pty_sessions.last_output_at ELSE NULL END,
-         completion_marker = EXCLUDED.completion_marker,
-         completion_marker_seen_at = NULL,
-         completion_file_seen_at = NULL,
-         completion_file_error = NULL,
-         terminal_marker_seen_at = NULL,
-         prompt_readiness_status = 'waiting',
-         prompt_readiness_reason = 'awaiting_cli_readiness',
-         prompt_ready_at = NULL,
-         prompt_injected_at = NULL,
-         last_heartbeat_at = NULL,
-         exit_code = NULL,
-         exit_signal = NULL,
-         exited_at = NULL,
-         updated_at = NOW()`,
-      [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows, params.childPid, params.completionMarker ?? null],
+         workspace_id = EXCLUDED.workspace_id, cwd = EXCLUDED.cwd,
+         agent_type = EXCLUDED.agent_type, cols = EXCLUDED.cols, rows = EXCLUDED.rows,
+         child_pid = EXCLUDED.child_pid, status = 'active', total_output_bytes = 0,
+         total_stored_bytes = 0, dropped_output_bytes = 0, started_at = NOW(),
+         last_output_at = NULL, completion_marker = EXCLUDED.completion_marker,
+         completion_marker_seen_at = NULL, completion_file_seen_at = NULL,
+         completion_file_error = NULL, terminal_marker_seen_at = NULL,
+         prompt_readiness_status = 'waiting', prompt_readiness_reason = 'awaiting_cli_readiness',
+         prompt_ready_at = NULL, prompt_injected_at = NULL, last_heartbeat_at = NULL,
+         output_truncated_at = NULL, exit_code = NULL, exit_signal = NULL,
+         exited_at = NULL, updated_at = NOW()`,
+      [params.runId, params.workspaceId, params.cwd, params.agentType, params.cols, params.rows,
+        params.childPid, params.completionMarker ?? null],
     );
+    return toGenerationIdentity(generation);
   });
 }
 
-export async function updateRunPtyDimensions(runId: number, cols: number, rows: number): Promise<void> {
-  await execute(
-    `UPDATE run_pty_sessions SET cols = $2, rows = $3, updated_at = NOW() WHERE run_id = $1`,
-    [runId, cols, rows],
-  );
+export async function updateRunPtyChildPid(generation: PtyGenerationRef, childPid: number): Promise<void> {
+  await transaction(async (client) => {
+    const updated = await client.query(
+      `UPDATE pty_generations SET child_pid = $4, updated_at = NOW()
+       WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
+       RETURNING id`,
+      [generation.runId, generation.generationId, generation.generationToken, childPid],
+    );
+    if (updated.rows[0]) {
+      await client.query(
+        'UPDATE run_pty_sessions SET child_pid = $2, updated_at = NOW() WHERE run_id = $1',
+        [generation.runId, childPid],
+      );
+    }
+  });
+}
+
+export async function updateRunPtyDimensions(generation: PtyGenerationRef, cols: number, rows: number): Promise<void> {
+  await transaction(async (client) => {
+    const updated = await client.query(
+      `UPDATE pty_generations SET cols = $4, rows = $5, updated_at = NOW()
+       WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
+       RETURNING id`,
+      [generation.runId, generation.generationId, generation.generationToken, cols, rows],
+    );
+    if (updated.rows[0]) {
+      await client.query(
+        `UPDATE run_pty_sessions SET cols = $2, rows = $3, updated_at = NOW() WHERE run_id = $1`,
+        [generation.runId, cols, rows],
+      );
+    }
+  });
 }
 
 interface AppendRunPtyOutputOptions {
@@ -188,7 +314,7 @@ interface RunPtyOutputSessionRow {
  * a completed terminal session.
  */
 export async function appendRunPtyOutputBatch(
-  runId: number,
+  generation: PtyGenerationRef,
   buffers: readonly Buffer[],
   sequenceRef: { value: number },
   options: AppendRunPtyOutputOptions = {},
@@ -201,11 +327,13 @@ export async function appendRunPtyOutputBatch(
   await transaction(async (client) => {
     const session = await client.query<RunPtyOutputSessionRow>(
       `SELECT total_output_bytes, dropped_output_bytes
-       FROM run_pty_sessions WHERE run_id = $1 FOR UPDATE`,
-      [runId],
+       FROM pty_generations
+       WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
+       FOR UPDATE`,
+      [generation.runId, generation.generationId, generation.generationToken],
     );
     const row = session.rows[0];
-    if (!row) throw new Error(`PTY session ${runId} does not exist`);
+    if (!row) throw new ConflictError('PTY generation is no longer active');
 
     const totalOutputBytes = Number(row.total_output_bytes) || 0;
     const droppedOutputBytes = Number(row.dropped_output_bytes) || 0;
@@ -224,10 +352,12 @@ export async function appendRunPtyOutputBatch(
       const slice = combined.subarray(offset, offset + length);
       const compressed = compressRunPtyChunk(slice);
       await client.query(
-        `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk, compression, byte_length, stored_byte_length)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (run_id, sequence) DO NOTHING`,
-        [runId, sequenceRef.value, compressed.chunk, compressed.compression, slice.length, compressed.chunk.length],
+        `INSERT INTO run_pty_output_chunks
+          (run_id, generation_id, sequence, chunk, compression, byte_length, stored_byte_length)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT DO NOTHING`,
+        [generation.runId, generation.generationId, sequenceRef.value, compressed.chunk,
+          compressed.compression, slice.length, compressed.chunk.length],
       );
       sequenceRef.value += 1;
       acceptedBytes += slice.length;
@@ -239,6 +369,19 @@ export async function appendRunPtyOutputBatch(
     const captureDroppedBytes = rawBytes - acceptedBytes;
     const droppedBytes = queueDroppedBytes + captureDroppedBytes;
     await client.query(
+      `UPDATE pty_generations
+       SET total_output_bytes = total_output_bytes + $4,
+           total_stored_bytes = total_stored_bytes + $5,
+           dropped_output_bytes = dropped_output_bytes + $6,
+           next_output_sequence = GREATEST(next_output_sequence, $7),
+           output_truncated_at = CASE WHEN $6 > 0 THEN COALESCE(output_truncated_at, NOW()) ELSE output_truncated_at END,
+           last_output_at = CASE WHEN $4 > $6 THEN NOW() ELSE last_output_at END,
+           updated_at = NOW()
+       WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE`,
+      [generation.runId, generation.generationId, generation.generationToken,
+        rawBytes + queueDroppedBytes, storedBytes, droppedBytes, sequenceRef.value],
+    );
+    await client.query(
       `UPDATE run_pty_sessions
        SET total_output_bytes = total_output_bytes + $2,
            total_stored_bytes = total_stored_bytes + $3,
@@ -247,17 +390,17 @@ export async function appendRunPtyOutputBatch(
            last_output_at = CASE WHEN $2 > $4 THEN NOW() ELSE last_output_at END,
            updated_at = NOW()
        WHERE run_id = $1`,
-      [runId, rawBytes + queueDroppedBytes, storedBytes, droppedBytes],
+      [generation.runId, rawBytes + queueDroppedBytes, storedBytes, droppedBytes],
     );
   });
 }
 
 export async function appendRunPtyOutput(
-  runId: number,
+  generation: PtyGenerationRef,
   data: Buffer,
   sequenceRef: { value: number },
 ): Promise<void> {
-  await appendRunPtyOutputBatch(runId, [data], sequenceRef);
+  await appendRunPtyOutputBatch(generation, [data], sequenceRef);
 }
 
 export interface RunPtyOutputBatcher {
@@ -273,7 +416,7 @@ export interface RunPtyOutputBatcher {
  * and buffers without bound under a noisy process or slow database.
  */
 export function createRunPtyOutputBatcher(
-  runId: number,
+  generation: PtyGenerationRef,
   sequenceRef: { value: number },
   limits: Partial<RunPtyOutputLimits> = {},
 ): RunPtyOutputBatcher {
@@ -311,13 +454,13 @@ export function createRunPtyOutputBatcher(
       const droppedBytes = pendingDroppedBytes;
       pendingDroppedBytes = 0;
       try {
-        await appendRunPtyOutputBatch(runId, batch, sequenceRef, { maxCaptureBytes, droppedBytes });
+        await appendRunPtyOutputBatch(generation, batch, sequenceRef, { maxCaptureBytes, droppedBytes });
       } catch (err) {
         // Do not put failed raw buffers back into the queue: doing so defeats
         // the memory bound. Persist their loss on a later successful batch.
         pendingDroppedBytes += droppedBytes + batch.reduce((total, buffer) => total + buffer.length, 0);
         retryRequired = true;
-        logger.warn({ err, runId, pendingBytes, pendingDroppedBytes }, '[run-pty-store] PTY output batch persistence failed; capture will retry as truncation metadata');
+        logger.warn({ err, runId: generation.runId, generationId: generation.generationId, pendingBytes, pendingDroppedBytes }, '[run-pty-store] PTY output batch persistence failed; capture will retry as truncation metadata');
         return;
       }
     }
@@ -355,248 +498,351 @@ export function createRunPtyOutputBatcher(
 }
 
 /** Terminal marker is corroborating telemetry; it never completes a turn. */
-export async function markRunPtyCompletionMarkerSeen(runId: number, marker: string): Promise<void> {
+export async function markRunPtyCompletionMarkerSeen(generation: PtyGenerationRef, marker: string): Promise<void> {
   await execute(
-    `UPDATE run_pty_sessions
-     SET completion_marker = COALESCE(completion_marker, $2),
+    `UPDATE pty_generations
+     SET completion_marker = COALESCE(completion_marker, $4),
          completion_marker_seen_at = COALESCE(completion_marker_seen_at, NOW()),
          terminal_marker_seen_at = COALESCE(terminal_marker_seen_at, NOW()),
          updated_at = NOW()
-     WHERE run_id = $1`,
-    [runId, marker],
+     WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE`,
+    [generation.runId, generation.generationId, generation.generationToken, marker],
   );
 }
 
 /** The agent-written completion file is the primary PTY turn-completion evidence. */
-export async function markRunPtyCompletionFileSeen(runId: number, marker: string): Promise<void> {
+export async function markRunPtyCompletionFileSeen(generation: PtyGenerationRef, marker: string): Promise<void> {
   await execute(
-    `UPDATE run_pty_sessions
-     SET completion_marker = COALESCE(completion_marker, $2),
+    `UPDATE pty_generations
+     SET completion_marker = COALESCE(completion_marker, $4),
          completion_file_seen_at = COALESCE(completion_file_seen_at, NOW()),
          completion_file_error = NULL,
          updated_at = NOW()
-     WHERE run_id = $1`,
-    [runId, marker],
+     WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE`,
+    [generation.runId, generation.generationId, generation.generationToken, marker],
   );
 }
 
-export async function recordRunPtyCompletionFileError(runId: number, reason: string): Promise<void> {
+export async function recordRunPtyCompletionFileError(generation: PtyGenerationRef, reason: string): Promise<void> {
   await execute(
-    `UPDATE run_pty_sessions
-     SET completion_file_error = $2, updated_at = NOW()
-     WHERE run_id = $1`,
-    [runId, reason.slice(0, 1000)],
+    `UPDATE pty_generations SET completion_file_error = $4, updated_at = NOW()
+     WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE`,
+    [generation.runId, generation.generationId, generation.generationToken, reason.slice(0, 1000)],
   );
 }
 
 export async function recordRunPtyPromptReadiness(
-  runId: number,
+  generation: PtyGenerationRef,
   status: 'waiting' | 'ready' | 'timeout_fallback' | 'injected' | 'failed',
   reason: string,
 ): Promise<void> {
   await execute(
-    `UPDATE run_pty_sessions
-     SET prompt_readiness_status = $2,
-         prompt_readiness_reason = $3,
-         prompt_ready_at = CASE WHEN $2 = 'ready' THEN COALESCE(prompt_ready_at, NOW()) ELSE prompt_ready_at END,
-         prompt_injected_at = CASE WHEN $2 = 'injected' THEN COALESCE(prompt_injected_at, NOW()) ELSE prompt_injected_at END,
+    `UPDATE pty_generations
+     SET prompt_readiness_status = $4,
+         prompt_readiness_reason = $5,
+         prompt_ready_at = CASE WHEN $4 = 'ready' THEN COALESCE(prompt_ready_at, NOW()) ELSE prompt_ready_at END,
+         prompt_injected_at = CASE WHEN $4 = 'injected' THEN COALESCE(prompt_injected_at, NOW()) ELSE prompt_injected_at END,
          updated_at = NOW()
-     WHERE run_id = $1`,
-    [runId, status, reason.slice(0, 1000)],
+     WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE`,
+    [generation.runId, generation.generationId, generation.generationToken, status, reason.slice(0, 1000)],
   );
 }
 
-export async function recordRunPtyHeartbeat(runId: number): Promise<void> {
+export async function recordRunPtyHeartbeat(generation: PtyGenerationRef): Promise<void> {
   await execute(
-    `UPDATE run_pty_sessions
-     SET last_heartbeat_at = NOW(), updated_at = NOW()
-     WHERE run_id = $1 AND status = 'active'`,
-    [runId],
+    `UPDATE pty_generations SET last_heartbeat_at = NOW(), updated_at = NOW()
+     WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE`,
+    [generation.runId, generation.generationId, generation.generationToken],
   );
 }
 
 export async function completeRunPtySession(
-  runId: number,
+  generation: PtyGenerationRef,
   status: 'exited' | 'killed' | 'failed' | 'timed_out',
   exitCode: number | null,
   exitSignal: string | null,
 ): Promise<void> {
-  await execute(
-    `UPDATE run_pty_sessions
-     SET status = $2,
-         exit_code = $3,
-         exit_signal = $4,
-         exited_at = NOW(),
-         updated_at = NOW()
-     WHERE run_id = $1`,
-    [runId, status, exitCode, exitSignal],
-  );
+  await transaction(async (client) => {
+    const completed = await client.query(
+      `UPDATE pty_generations
+       SET is_active = FALSE, status = $4, exit_code = $5, exit_signal = $6,
+           exited_at = NOW(), updated_at = NOW()
+       WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
+       RETURNING id`,
+      [generation.runId, generation.generationId, generation.generationToken, status, exitCode, exitSignal],
+    );
+    // An old process completing after replacement cannot close the replacement's
+    // compatibility session projection.
+    if (completed.rows[0]) {
+      await client.query(
+        `UPDATE run_pty_sessions SET status = $2, exit_code = $3, exit_signal = $4,
+         exited_at = NOW(), updated_at = NOW() WHERE run_id = $1`,
+        [generation.runId, status, exitCode, exitSignal],
+      );
+    }
+  });
 }
 
-export async function requestRunPtyResize(runId: number, cols: number, rows: number): Promise<void> {
-  await execute(
-    `INSERT INTO run_pty_resize_requests (run_id, cols, rows) VALUES ($1, $2, $3)`,
-    [runId, cols, rows],
-  );
-  await updateRunPtyDimensions(runId, cols, rows);
-}
-
-export async function claimLatestRunPtyResize(runId: number): Promise<RunPtyResizeRequest | null> {
+export async function requestRunPtyResize(runId: number, generationToken: string, cols: number, rows: number): Promise<PtyGenerationIdentity> {
   return transaction(async (client) => {
+    // Token admission and the control write share the same transaction. The
+    // exact active row lock races safely with generation replacement.
+    const active = await client.query<StoredPtyGenerationIdentityRow>(
+      `SELECT id, generation_token, run_id, story_id, attempt, status, is_active, source, replay_source
+       FROM pty_generations
+       WHERE run_id = $1 AND is_active = TRUE AND generation_token = $2
+       FOR UPDATE`,
+      [runId, generationToken],
+    );
+    const row = active.rows[0];
+    if (!row) {
+      const current = await client.query<{ supplied_exists: boolean; active_exists: boolean }>(
+        `SELECT EXISTS(SELECT 1 FROM pty_generations WHERE run_id = $1 AND generation_token = $2) AS supplied_exists,
+                EXISTS(SELECT 1 FROM pty_generations WHERE run_id = $1 AND is_active = TRUE) AS active_exists`,
+        [runId, generationToken],
+      );
+      if (current.rows[0]?.supplied_exists && !current.rows[0]?.active_exists) {
+        throw new ConflictError('PTY generation is closed or exited');
+      }
+      throw new ForbiddenError('PTY generation token is stale or mismatched');
+    }
+    const inserted = await client.query<{ id: number }>(
+      `INSERT INTO run_pty_resize_requests (run_id, generation_id, cols, rows)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [runId, row.id, cols, rows],
+    );
+    await client.query(
+      `UPDATE pty_generations SET cols = $3, rows = $4,
+       last_resize_request_id = $5, updated_at = NOW() WHERE run_id = $1 AND id = $2`,
+      [runId, row.id, cols, rows, inserted.rows[0]?.id ?? null],
+    );
+    await client.query('UPDATE run_pty_sessions SET cols = $2, rows = $3, updated_at = NOW() WHERE run_id = $1', [runId, cols, rows]);
+    return toGenerationIdentity(row);
+  });
+}
+
+export async function claimLatestRunPtyResize(generation: PtyGenerationRef): Promise<RunPtyResizeRequest | null> {
+  return transaction(async (client) => {
+    const authority = await client.query(
+      `SELECT id FROM pty_generations
+       WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
+       FOR UPDATE`,
+      [generation.runId, generation.generationId, generation.generationToken],
+    );
+    if (!authority.rows[0]) return null;
     const result = await client.query<RunPtyResizeRequest>(
-      `SELECT r.id, r.cols, r.rows
-       FROM run_pty_resize_requests r
-       JOIN run_pty_sessions s ON s.run_id = r.run_id
-       WHERE r.run_id = $1 AND r.applied_at IS NULL AND s.status = 'active'
-       ORDER BY r.id DESC
-       LIMIT 1
-       FOR UPDATE OF r`,
-      [runId],
+      `SELECT id, cols, rows FROM run_pty_resize_requests
+       WHERE run_id = $1 AND generation_id = $2 AND applied_at IS NULL
+       ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+      [generation.runId, generation.generationId],
     );
     const latest = result.rows[0];
     if (!latest) return null;
-
-    // Only the newest dimensions matter. Delete consumed/coalesced requests so
-    // a long-running attached terminal cannot grow this table without bound.
     await client.query(
-      'DELETE FROM run_pty_resize_requests WHERE run_id = $1 AND applied_at IS NULL AND id <= $2',
-      [runId, latest.id],
+      `DELETE FROM run_pty_resize_requests
+       WHERE run_id = $1 AND generation_id = $2 AND applied_at IS NULL AND id <= $3`,
+      [generation.runId, generation.generationId, latest.id],
     );
     return latest;
   });
 }
 
 /** Returns false when the per-run pending-input budget is exhausted. */
-export async function requestRunPtyInput(runId: number, input: Buffer): Promise<boolean> {
+export async function requestRunPtyInput(runId: number, generationToken: string, input: Buffer): Promise<PtyGenerationIdentity | false> {
   return transaction(async (client) => {
-    const session = await client.query<{ status: string }>(
-      'SELECT status FROM run_pty_sessions WHERE run_id = $1 FOR UPDATE',
-      [runId],
+    const active = await client.query<StoredPtyGenerationIdentityRow>(
+      `SELECT id, generation_token, run_id, story_id, attempt, status, is_active, source, replay_source
+       FROM pty_generations
+       WHERE run_id = $1 AND is_active = TRUE AND generation_token = $2
+       FOR UPDATE`,
+      [runId, generationToken],
     );
-    if (session.rows[0]?.status !== 'active') return false;
+    const row = active.rows[0];
+    if (!row) {
+      const current = await client.query<{ supplied_exists: boolean; active_exists: boolean }>(
+        `SELECT EXISTS(SELECT 1 FROM pty_generations WHERE run_id = $1 AND generation_token = $2) AS supplied_exists,
+                EXISTS(SELECT 1 FROM pty_generations WHERE run_id = $1 AND is_active = TRUE) AS active_exists`,
+        [runId, generationToken],
+      );
+      if (current.rows[0]?.supplied_exists && !current.rows[0]?.active_exists) {
+        throw new ConflictError('PTY generation is closed or exited');
+      }
+      throw new ForbiddenError('PTY generation token is stale or mismatched');
+    }
     const pending = await client.query<{ bytes: string }>(
       `SELECT COALESCE(SUM(byte_length), 0)::text AS bytes
-       FROM run_pty_input_requests WHERE run_id = $1 AND applied_at IS NULL`,
-      [runId],
+       FROM run_pty_input_requests WHERE generation_id = $1 AND applied_at IS NULL`,
+      [row.id],
     );
     const pendingBytes = Number(pending.rows[0]?.bytes ?? 0);
     if (pendingBytes + input.length > MAX_PTY_PENDING_INPUT_BYTES) return false;
-    await client.query(
-      `INSERT INTO run_pty_input_requests (run_id, input, byte_length)
-       VALUES ($1, $2, $3)`,
-      [runId, input, input.length],
+    const inserted = await client.query<{ id: number }>(
+      `INSERT INTO run_pty_input_requests (run_id, generation_id, input, byte_length)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [runId, row.id, input, input.length],
     );
-    return true;
+    await client.query(
+      `UPDATE pty_generations SET pending_input_bytes = $3,
+       last_input_request_id = $4, updated_at = NOW() WHERE run_id = $1 AND id = $2`,
+      [runId, row.id, pendingBytes + input.length, inserted.rows[0]?.id ?? null],
+    );
+    return toGenerationIdentity(row);
   });
 }
 
-export async function claimPendingRunPtyInput(runId: number, limit = 100): Promise<RunPtyInputRequest[]> {
+export async function claimPendingRunPtyInput(generation: PtyGenerationRef, limit = 100): Promise<RunPtyInputRequest[]> {
   const boundedLimit = Math.min(100, Math.max(1, Math.floor(limit)));
-  const rows = await query<RunPtyInputRequest>(
-    `DELETE FROM run_pty_input_requests
-     WHERE id IN (
-       SELECT id FROM run_pty_input_requests
-       WHERE run_id = $1 AND applied_at IS NULL
-       ORDER BY id ASC
-       LIMIT $2
-       FOR UPDATE SKIP LOCKED
-     )
-     RETURNING id, input`,
-    [runId, boundedLimit],
-  );
-
-  rows.sort((a, b) => Number(a.id) - Number(b.id));
-  return rows.map((row) => ({
-    id: row.id,
-    input: Buffer.isBuffer(row.input) ? row.input : Buffer.from(row.input),
-  }));
+  return transaction(async (client) => {
+    const authority = await client.query(
+      `SELECT id FROM pty_generations
+       WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
+       FOR UPDATE`,
+      [generation.runId, generation.generationId, generation.generationToken],
+    );
+    if (!authority.rows[0]) return [];
+    const result = await client.query<RunPtyInputRequest & { byte_length: number }>(
+      `DELETE FROM run_pty_input_requests
+       WHERE id IN (
+         SELECT id FROM run_pty_input_requests
+         WHERE run_id = $1 AND generation_id = $2 AND applied_at IS NULL
+         ORDER BY id ASC LIMIT $3 FOR UPDATE SKIP LOCKED
+       ) RETURNING id, input, byte_length`,
+      [generation.runId, generation.generationId, boundedLimit],
+    );
+    await client.query(
+      `UPDATE pty_generations SET pending_input_bytes = GREATEST(0,
+         pending_input_bytes - $3), updated_at = NOW() WHERE run_id = $1 AND id = $2`,
+      [generation.runId, generation.generationId,
+        result.rows.reduce((sum, item) => sum + Number(item.byte_length), 0)],
+    );
+    result.rows.sort((a, b) => Number(a.id) - Number(b.id));
+    return result.rows.map((row) => ({
+      id: row.id,
+      input: Buffer.isBuffer(row.input) ? row.input : Buffer.from(row.input),
+    }));
+  });
 }
 
-function decodeRunPtyChunkRows(rows: StoredRunPtyChunkRow[]): RunPtyChunkRow[] {
+function decodeRunPtyChunkRows(rows: StoredRunPtyChunkRow[], generation: PtyGenerationIdentity): RunPtyChunkRow[] {
   return rows.map((row) => ({
     sequence: Number(row.sequence),
     chunk: decompressRunPtyChunk(Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk), row.compression),
+    generation,
   }));
+}
+
+/** Active generation wins; after exit the newest native generation wins; only
+ * runs with no native generation fall back to their migration-created sentinel. */
+export async function getRunPtyGeneration(runId: number, generationToken?: string | null): Promise<PtyGenerationIdentity | null> {
+  const params: unknown[] = [runId];
+  const tokenFilter = generationToken ? 'AND generation_token = $2' : '';
+  if (generationToken) params.push(generationToken);
+  const row = await queryOne<StoredPtyGenerationIdentityRow>(
+    `SELECT id, generation_token, run_id, story_id, attempt, status, is_active, source, replay_source
+     FROM pty_generations WHERE run_id = $1 ${tokenFilter}
+     ORDER BY is_active DESC, (source = 'native') DESC, started_at DESC, id DESC LIMIT 1`,
+    params,
+  );
+  return row ? toGenerationIdentity(row) : null;
 }
 
 export async function listRunPtyChunks(
   runId: number,
   afterSequence = 0,
   limit = getRunPtyOutputLimits().replayBatchChunks,
+  selectedGeneration?: PtyGenerationIdentity | null,
 ): Promise<RunPtyChunkRow[]> {
   const boundedLimit = Math.min(4_096, Math.max(1, Math.floor(limit)));
-  const rows = await query<StoredRunPtyChunkRow>(
-    `SELECT sequence, chunk, compression
-     FROM run_pty_output_chunks
-     WHERE run_id = $1 AND sequence > $2
-     ORDER BY sequence ASC
-     LIMIT $3`,
-    [runId, afterSequence, boundedLimit],
-  );
-
-  return decodeRunPtyChunkRows(rows);
+  const generation = selectedGeneration ?? await getRunPtyGeneration(runId);
+  if (!generation) return [];
+  const rows = generation.source === 'legacy'
+    ? generation.replaySource === 'legacy_run_output'
+      ? await query<StoredRunPtyChunkRow>(
+          `SELECT sequence, chunk, NULL::text AS compression FROM run_output_chunks
+           WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC LIMIT $3`,
+          [runId, afterSequence, boundedLimit],
+        )
+      : await query<StoredRunPtyChunkRow>(
+          `SELECT sequence, chunk, compression FROM run_pty_output_chunks
+           WHERE run_id = $1 AND generation_id IS NULL AND sequence > $2
+           ORDER BY sequence ASC LIMIT $3`,
+          [runId, afterSequence, boundedLimit],
+        )
+    : await query<StoredRunPtyChunkRow>(
+        `SELECT sequence, chunk, compression FROM run_pty_output_chunks
+         WHERE run_id = $1 AND generation_id = $2 AND sequence > $3
+         ORDER BY sequence ASC LIMIT $4`,
+        [runId, generation.generationId, afterSequence, boundedLimit],
+      );
+  return decodeRunPtyChunkRows(rows, generation);
 }
 
 /** Bounded tail replay for first-time terminal attachments. */
-export async function listRecentRunPtyChunks(runId: number, limit: number): Promise<RunPtyChunkRow[]> {
+export async function listRecentRunPtyChunks(
+  runId: number,
+  limit: number,
+  selectedGeneration?: PtyGenerationIdentity | null,
+): Promise<RunPtyChunkRow[]> {
+  const generation = selectedGeneration ?? await getRunPtyGeneration(runId);
+  if (!generation) return [];
+  const table = generation.source === 'legacy' && generation.replaySource === 'legacy_run_output'
+    ? 'run_output_chunks'
+    : 'run_pty_output_chunks';
+  const generationPredicate = generation.source === 'legacy'
+    ? table === 'run_pty_output_chunks' ? 'AND generation_id IS NULL' : ''
+    : 'AND generation_id = $3';
+  const params: unknown[] = generation.source === 'native'
+    ? [runId, limit, generation.generationId]
+    : [runId, limit];
   const rows = await query<StoredRunPtyChunkRow>(
-    `SELECT sequence, chunk, compression
-     FROM (
-       SELECT sequence, chunk, compression
-       FROM run_pty_output_chunks
-       WHERE run_id = $1
-       ORDER BY sequence DESC
-       LIMIT $2
-     ) recent
-     ORDER BY sequence ASC`,
-    [runId, limit],
+    `SELECT sequence, chunk, compression FROM (
+       SELECT sequence, chunk, ${table === 'run_output_chunks' ? 'NULL::text' : 'compression'} AS compression
+       FROM ${table} WHERE run_id = $1 ${generationPredicate}
+       ORDER BY sequence DESC LIMIT $2
+     ) recent ORDER BY sequence ASC`,
+    params,
   );
-  return decodeRunPtyChunkRows(rows);
+  return decodeRunPtyChunkRows(rows, generation);
 }
 
-export async function getRunPtySequence(runId: number): Promise<number> {
+export async function getRunPtySequence(generation: PtyGenerationRef): Promise<number> {
   const row = await queryOne<{ max_sequence: number | string | null }>(
-    'SELECT MAX(sequence) AS max_sequence FROM run_pty_output_chunks WHERE run_id = $1',
-    [runId],
+    `SELECT MAX(sequence) AS max_sequence FROM run_pty_output_chunks
+     WHERE run_id = $1 AND generation_id = $2`,
+    [generation.runId, generation.generationId],
   );
   return Number(row?.max_sequence ?? 0);
 }
 
-export async function getRunPtySessionStatus(runId: number): Promise<string | null> {
-  const row = await queryOne<{ status: string }>(
-    'SELECT status FROM run_pty_sessions WHERE run_id = $1',
-    [runId],
-  );
-  return row?.status ?? null;
+export async function getRunPtySessionStatus(runId: number): Promise<PtyGenerationStatus | null> {
+  return (await getRunPtyGeneration(runId))?.status ?? null;
 }
 
-export async function getRunPtySessionHealth(runId: number): Promise<RunPtySessionHealth | null> {
-  const row = await queryOne<RunPtySessionHealth>(
-    `SELECT status,
-            child_pid,
-            last_output_at,
-            last_heartbeat_at,
-            completion_marker,
-            completion_marker_seen_at,
-            completion_file_seen_at,
-            completion_file_error,
-            terminal_marker_seen_at,
-            prompt_readiness_status,
-            prompt_readiness_reason,
-            prompt_ready_at,
-            prompt_injected_at,
-            total_output_bytes,
-            dropped_output_bytes,
-            output_truncated_at
-     FROM run_pty_sessions
-     WHERE run_id = $1`,
-    [runId],
+export async function getRunPtySessionHealth(runId: number, generationToken?: string | null): Promise<RunPtySessionHealth | null> {
+  const params: unknown[] = [runId];
+  const tokenFilter = generationToken ? 'AND generation_token = $2' : '';
+  if (generationToken) params.push(generationToken);
+  const row = await queryOne<StoredPtyGenerationIdentityRow & Omit<RunPtySessionHealth, keyof PtyGenerationIdentity>>(
+    `SELECT id, generation_token, run_id, story_id, attempt, status, is_active, source, replay_source,
+            workspace_id, cwd, agent_type, child_pid, cols, rows, next_output_sequence,
+            total_stored_bytes, pending_input_bytes, last_input_request_id,
+            last_resize_request_id, checkpoint_sequence, checkpoint_at,
+            checkpoint_reference, archive_reference, archive_checksum, archived_at,
+            started_at, superseded_at, exited_at, exit_code, exit_signal,
+            last_output_at, last_heartbeat_at, completion_marker,
+            completion_marker_seen_at, completion_file_seen_at, completion_file_error,
+            terminal_marker_seen_at, prompt_readiness_status, prompt_readiness_reason,
+            prompt_ready_at, prompt_injected_at, total_output_bytes,
+            dropped_output_bytes, output_truncated_at
+     FROM pty_generations WHERE run_id = $1 ${tokenFilter}
+     ORDER BY is_active DESC, (source = 'native') DESC, started_at DESC, id DESC LIMIT 1`,
+    params,
   );
-  return row ?? null;
+  return row ? { ...row, ...toGenerationIdentity(row) } : null;
 }
 
-export async function initializeRunPtySequence(runId: number): Promise<{ value: number }> {
-  return { value: (await getRunPtySequence(runId)) + 1 };
+export async function initializeRunPtySequence(generation: PtyGenerationRef): Promise<{ value: number }> {
+  return { value: (await getRunPtySequence(generation)) + 1 };
 }
 
 export async function pruneExpiredRunPtyCaptures(retentionDays = getRunPtyRetentionDays()): Promise<number> {
