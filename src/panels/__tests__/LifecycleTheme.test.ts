@@ -14,6 +14,7 @@ const tokensCss = source('src/styles/tokens.css');
 const indexCss = source('src/styles/index.css');
 const lifecycleSources = [
   'src/panels/LifecycleCell.tsx',
+  'src/panels/LifecycleExplorer.tsx',
   'src/panels/LifecycleMatrix.tsx',
   'src/panels/LifecycleMetrics.tsx',
   'src/panels/LifecyclePanel.tsx',

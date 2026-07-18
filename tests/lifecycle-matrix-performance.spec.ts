@@ -102,7 +102,7 @@ test('50-row lifecycle matrix meets the documented interaction budget', async ({
   await page.route('**/api/lifecycle/specs/billing-anomaly-alerts?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(detail) }));
 
   const responseReady = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/lifecycle');
-  await page.goto('/lifecycle?limit=50');
+  await page.goto('/lifecycle?limit=50&mode=matrix');
   await responseReady;
   const dataAvailableAt = await page.evaluate(() => performance.now());
   const validationCell = page.getByRole('button', { name: /Billing anomaly alerts, Validation: Blocked.*2 of 4 required gates passed/i });

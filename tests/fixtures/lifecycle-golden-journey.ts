@@ -45,6 +45,8 @@ export const GOLDEN = {
     stagedArtifactDigest: `sha256:${'3'.repeat(64)}`,
   },
   screenshots: [
+    'explorer-default-1440x900-light.png', 'explorer-default-1440x900-dark.png',
+    'explorer-default-390x844-light.png', 'explorer-row-390x844-light.png',
     'blocked-1440x900-light.png', 'blocked-1024x768-light.png', 'blocked-390x844-light.png',
     'recovery-1440x900-light.png', 'recovery-1024x768-light.png', 'recovery-390x844-light.png',
     'approval-1440x900-light.png', 'stale-1024x768-light.png',

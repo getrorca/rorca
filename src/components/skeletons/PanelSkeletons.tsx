@@ -43,7 +43,7 @@ export function BoardSkeleton() {
   );
 }
 
-/** Lifecycle matrix skeleton: KPI cards, filters, phase headers, and rows. */
+/** Lifecycle Explorer skeleton: KPI cards, query controls, and responsive journey rows. */
 export function LifecycleMatrixSkeleton() {
   return (
     <div className="lifecycle-control h-full flex flex-col bg-bg" aria-label="Loading Lifecycle Control" role="status">
@@ -60,12 +60,17 @@ export function LifecycleMatrixSkeleton() {
           <div className="lifecycle-skeleton-block h-9 w-full rounded-md" />
         </div>
         <div className="overflow-hidden rounded-xl border border-border bg-panel">
-          <div className="overflow-hidden">
-            <div className="lifecycle-skeleton-matrix grid min-w-[1710px] grid-cols-[280px_repeat(11,130px)] gap-px bg-border">
-              {Array.from({ length: 12 }).map((_, index) => <div key={`header-${index}`} className="lifecycle-skeleton-block h-10" />)}
-              {Array.from({ length: 48 }).map((_, index) => <div key={`cell-${index}`} className="lifecycle-skeleton-block h-16" />)}
+          {Array.from({ length: 3 }).map((_, row) => (
+            <div key={row} className="border-b border-border p-3 last:border-b-0">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="lifecycle-skeleton-block h-5 w-48 max-w-[55%] rounded" />
+                <div className="lifecycle-skeleton-block h-6 w-24 rounded-full" />
+              </div>
+              <div className="lifecycle-skeleton-explorer grid grid-cols-11 gap-1">
+                {Array.from({ length: 11 }).map((_, phase) => <div key={phase} className="lifecycle-skeleton-block h-12 min-w-0 rounded-md" />)}
+              </div>
             </div>
-          </div>
+          ))}
         </div>
       </div>
       <span className="sr-only">Loading metrics, filters, and lifecycle phases.</span>

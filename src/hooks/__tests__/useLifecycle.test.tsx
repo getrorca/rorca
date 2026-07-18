@@ -18,6 +18,7 @@ import type {
   LifecycleSpecResponse,
 } from '../../types/lifecycle';
 import {
+  DEFAULT_LIFECYCLE_URL_STATE,
   LIFECYCLE_DISPLAY_PREFERENCES_KEY,
   LIFECYCLE_SAVED_VIEWS_KEY,
   lifecycleInvalidationTargets,
@@ -147,9 +148,14 @@ beforeEach(() => {
 describe('lifecycle URL and saved display state', () => {
   it('round-trips search, filters, sort, page, compact mode, spec, and phase', () => {
     const parsed = parseLifecycleUrlState(new URLSearchParams(
-      'search=release&status=blocked&specStatus=approved&phase=security&risk=critical&owner=u1&blocked=true&disposition=required&sort=risk_desc&page=4&limit=50&compact=1&spec=spec-a&phaseDetail=qa',
+      'search=release&status=blocked&specStatus=approved&phase=security&risk=critical&owner=u1&blocked=true&disposition=required&sort=risk_desc&page=4&limit=50&compact=1&mode=matrix&spec=spec-a&phaseDetail=qa',
     ));
     expect(parseLifecycleUrlState(serializeLifecycleUrlState(parsed))).toEqual(parsed);
+  });
+
+  it('defaults to Explorer and serializes Matrix as explicit URL state', () => {
+    expect(parseLifecycleUrlState(new URLSearchParams()).mode).toBe('explorer');
+    expect(serializeLifecycleUrlState({ ...DEFAULT_LIFECYCLE_URL_STATE, mode: 'matrix' }).get('mode')).toBe('matrix');
   });
 
   it('migrates legacy local storage, bounds views, and strips lifecycle truth', () => {

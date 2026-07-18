@@ -47,6 +47,7 @@ export type LifecycleSpecStatus = 'pending' | 'approved' | 'completed' | 'reject
 export type LifecycleRisk = 'low' | 'medium' | 'high' | 'critical';
 export type LifecycleDisposition = 'required' | 'deferred' | 'not_applicable';
 export type LifecycleSort = 'current_view' | 'updated_desc' | 'title_asc' | 'risk_desc' | 'readiness_desc' | 'owner_asc';
+export type LifecycleViewMode = 'explorer' | 'matrix';
 export type LifecyclePlanState = 'current' | 'stale' | 'needs_compilation' | 'compilation_failed';
 export type LifecyclePermittedAction =
   | 'inspect_evidence'
@@ -72,6 +73,7 @@ export interface LifecycleUrlState extends LifecyclePortfolioFilters {
   page: number;
   limit: number;
   compact: boolean;
+  mode: LifecycleViewMode;
   selectedSpecId: string | null;
   selectedPhaseId: LifecyclePhaseId | null;
 }

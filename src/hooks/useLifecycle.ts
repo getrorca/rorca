@@ -50,6 +50,7 @@ export const DEFAULT_LIFECYCLE_URL_STATE: LifecycleUrlState = {
   page: 1,
   limit: DEFAULT_LIMIT,
   compact: false,
+  mode: 'explorer',
   selectedSpecId: null,
   selectedPhaseId: null,
 };
@@ -77,6 +78,7 @@ export function parseLifecycleUrlState(params: URLSearchParams): LifecycleUrlSta
     page: positiveInteger(params.get('page'), 1, 10_000),
     limit: positiveInteger(params.get('limit'), DEFAULT_LIMIT, 100),
     compact: params.get('compact') === '1' || params.get('compact') === 'true',
+    mode: params.get('mode') === 'matrix' ? 'matrix' : 'explorer',
     selectedSpecId,
     selectedPhaseId: PHASES.has(selectedPhaseValue ?? '') ? selectedPhaseValue as LifecyclePhaseId : null,
   };
@@ -106,7 +108,7 @@ export function parseLifecycleUrlState(params: URLSearchParams): LifecycleUrlSta
 /** Serializes only lifecycle view state; caller-owned route parameters may be supplied as base. */
 export function serializeLifecycleUrlState(state: LifecycleUrlState, base = new URLSearchParams()): URLSearchParams {
   const params = new URLSearchParams(base);
-  for (const key of ['search', 'status', 'specStatus', 'phase', 'phaseFilter', 'risk', 'owner', 'blocked', 'disposition', 'sort', 'page', 'limit', 'compact', 'spec', 'phaseDetail']) {
+  for (const key of ['search', 'status', 'specStatus', 'phase', 'phaseFilter', 'risk', 'owner', 'blocked', 'disposition', 'sort', 'page', 'limit', 'compact', 'mode', 'spec', 'phaseDetail']) {
     params.delete(key);
   }
   if (state.search) params.set('search', state.search);
@@ -121,6 +123,7 @@ export function serializeLifecycleUrlState(state: LifecycleUrlState, base = new 
   if (state.page !== 1) params.set('page', String(state.page));
   if (state.limit !== DEFAULT_LIMIT) params.set('limit', String(state.limit));
   if (state.compact) params.set('compact', '1');
+  if (state.mode === 'matrix') params.set('mode', 'matrix');
   if (state.selectedSpecId) params.set('spec', state.selectedSpecId);
   if (state.selectedSpecId && state.selectedPhaseId) params.set('phase', state.selectedPhaseId);
   return params;
@@ -751,6 +754,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       setDisplayPreferences((current) => ({ ...current, compact }));
       if (urlState.compact) updateUrlState({ compact: false }, true);
     },
+    setMode: (mode: LifecycleUrlState['mode']) => updateUrlState({ mode }, true),
     refresh,
     mutations,
     saveView,
