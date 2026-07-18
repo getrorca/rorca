@@ -147,12 +147,13 @@ describe('GitHubSettingsPanel', () => {
       expect(document.body.textContent).toContain('Ping webhook');
       expect(document.body.textContent).toContain('Preview latest run');
       expect(document.body.textContent).toContain('Autonomous delivery connected');
+      expect(document.querySelector('a[href$="/settings/hooks/12345"]')).toBeInTheDocument();
     });
   });
 
   it('shows exact App source, binding, capability diagnostics, and missing capability honestly', async () => {
     mockWorkspaceApi({
-      status: { ...MOCK_CONNECTED_STATUS, credentialSource: 'github-app-installation', repositoryId: 99, installationId: 77 },
+      status: { ...MOCK_CONNECTED_STATUS, credentialSource: 'github-app-installation', repositoryId: 99, installationId: 77, webhookId: null },
       account: { connected: true, username: 'rorca[bot]', source: 'github-app-installation' },
       app: {
         configured: true, connected: true, credentialReady: true, source: 'github-app-installation',
@@ -176,7 +177,10 @@ describe('GitHubSettingsPanel', () => {
       expect(document.body.textContent).not.toContain('Credential ready');
       expect(document.body.textContent).toContain('Provider hook configured');
       expect(document.body.textContent).toContain('Awaiting signed delivery');
+      expect(document.body.textContent).toContain('App webhook health is shown in the diagnostics above');
       expect(document.body.textContent).toContain('PAT/OAuth remains an explicit fallback');
+      expect(document.querySelector('a[href*="/settings/hooks/null"]')).not.toBeInTheDocument();
+      expect(document.querySelector('a[href*="/settings/hooks/"]')).not.toBeInTheDocument();
     });
   });
 

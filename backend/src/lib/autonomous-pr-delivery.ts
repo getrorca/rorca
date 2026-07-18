@@ -33,6 +33,11 @@ import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { isFullGitObjectId } from './github-repository-authority';
 import { githubRateLimiter } from './github-rate-limiter';
+import {
+  extractGithubProviderError,
+  formatGithubProviderError,
+  sanitizeGithubProviderException,
+} from './github-provider-error';
 import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 import { validateReusableWorktree } from './worktree-freshness';
 import { resolveMergeConflict } from './merge-conflict-resolver';
@@ -645,11 +650,11 @@ async function providerMerge(
   } catch (error) {
     transportError = error;
   }
-  const raw = response
-    ? await response.json().catch(() => ({})) as { sha?: string; merged?: boolean; message?: string }
+  const raw = response?.ok
+    ? await response.json().catch(() => ({})) as { sha?: string; merged?: boolean }
     : {};
   if (response?.ok && raw.merged === true && isFullGitObjectId(raw.sha)) {
-    const stable = { sha: raw.sha, merged: true, message: String(raw.message ?? '').slice(0, 256), status: response.status };
+    const stable = { sha: raw.sha, merged: true, status: response.status };
     return { mergedSha: raw.sha, responseHash: sha(stable), mergedAt: new Date().toISOString() };
   }
 
@@ -665,8 +670,10 @@ async function providerMerge(
     const stable = { sha: pr.merge_commit_sha, merged: true, reconciled: true, status: response?.status ?? null };
     return { mergedSha: pr.merge_commit_sha, responseHash: sha(stable), mergedAt: pr.merged_at ?? new Date().toISOString() };
   }
-  const reason = transportError instanceof Error ? transportError.name : String(raw.message ?? 'merge failed');
-  throw new ConflictError(`GitHub exact-SHA merge could not be proven (${response?.status ?? 'transport'}): ${reason.slice(0, 256)}`);
+  const providerError = response
+    ? extractGithubProviderError(response, 'GITHUB_EXACT_SHA_MERGE_FAILED')
+    : sanitizeGithubProviderException(transportError, 'GITHUB_EXACT_SHA_MERGE_FAILED');
+  throw new ConflictError(`GitHub exact-SHA merge could not be proven: ${formatGithubProviderError(providerError)}`);
 }
 
 function dependencies(overrides: Partial<AutonomousDeliveryJobDependencies>): AutonomousDeliveryJobDependencies {

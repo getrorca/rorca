@@ -18,6 +18,7 @@ const providerCallers = [
   path.join(LIB, 'commit-status-poster.ts'),
   path.join(LIB, 'github-checks.ts'),
   path.join(LIB, 'ci-autofix', 'fix-orchestrator.ts'),
+  path.join(LIB, 'autonomous-pr-delivery.ts'),
   path.join(BACKEND_SRC, 'routes', 'workspace-github.ts'),
 ];
 
@@ -34,9 +35,13 @@ test('durable error fields are fed bounded formatted errors rather than thrown/p
   const prCreator = fs.readFileSync(providerCallers[0], 'utf8');
   const draftPr = fs.readFileSync(providerCallers[1], 'utf8');
   const worker = fs.readFileSync(providerCallers[2], 'utf8');
+  const autonomousDelivery = fs.readFileSync(providerCallers[7], 'utf8');
   expect(prCreator).toContain('const errMsg = formatGithubProviderError(providerError)');
   expect(prCreator).toContain('await storeResult(runId, null, errMsg)');
   expect(draftPr).toContain('const errMsg = formatGithubProviderError(providerError)');
   expect(worker).toContain('error: errorMessage');
   expect(worker).not.toContain('error: err.message');
+  expect(autonomousDelivery).toContain("extractGithubProviderError(response, 'GITHUB_EXACT_SHA_MERGE_FAILED')");
+  expect(autonomousDelivery).toContain('formatGithubProviderError(providerError)');
+  expect(autonomousDelivery).not.toContain('raw.message');
 });

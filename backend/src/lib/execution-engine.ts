@@ -1202,8 +1202,11 @@ async function emitContextTrace(
 async function postStoryResult(
   port: number,
   body: Record<string, unknown>,
+  callerIdempotencyKey?: string,
 ): Promise<void> {
-  const idempotencyKey = `story-result:${_fallbackRunId}:${randomUUID()}`;
+  // Most results are distinct observations and retain their historical random
+  // identity. Crash-replayable closeout paths may supply immutable authority.
+  const idempotencyKey = callerIdempotencyKey ?? `story-result:${_fallbackRunId}:${randomUUID()}`;
   const deliveryBody = { ...body, idempotencyKey };
   const ok = await retryPost(
     engineApiEndpoint(port, '/api/pipeline/story-result'),
@@ -4680,6 +4683,23 @@ interface IntegratedRunHead {
   branch: string;
 }
 
+/** Stable logical identity for replaying one integrated-pass result delivery. */
+export function deriveIntegratedPassStoryResultIdempotencyKey(input: {
+  workspaceId: string;
+  runId: number;
+  storyId: string;
+  integratedSha: string;
+}): string {
+  const digest = createHash('sha256').update(JSON.stringify({
+    contractVersion: 'integrated-pass-story-result-v1',
+    workspaceId: input.workspaceId,
+    runId: input.runId,
+    storyId: input.storyId,
+    integratedSha: input.integratedSha.toLowerCase(),
+  })).digest('hex');
+  return `story-result:integrated-pass-v1:${digest}`;
+}
+
 export function resolveIntegratedRunHead(config: Pick<EngineConfig, 'cwd'>): IntegratedRunHead {
   const sha = getGitHead(config.cwd)?.trim().toLowerCase() ?? '';
   const branch = getGitBranch(config.cwd)?.trim() ?? '';
@@ -4756,6 +4776,14 @@ async function finalizeIntegratedStoryPass(
   // integration validation, before any canonical pass mutation. Never reuse the
   // story worktree parent as integrated evidence.
   const integratedHead = resolveIntegratedRunHead(config);
+  const resultIdempotencyKey = workspaceId
+    ? deriveIntegratedPassStoryResultIdempotencyKey({
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      integratedSha: integratedHead.sha,
+    })
+    : undefined;
 
   // Persist trusted crash-recovery evidence after run-branch integration but
   // before canonical pass mutation. If the process dies between these steps,
@@ -4777,7 +4805,7 @@ async function finalizeIntegratedStoryPass(
       commitMessage: `integrated story(${pending.story.id}): ${pending.story.title}`,
       worktreeBranch: integratedHead.branch,
       ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
-    });
+    }, resultIdempotencyKey);
   }
 
   const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);

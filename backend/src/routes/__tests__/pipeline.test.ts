@@ -1146,6 +1146,8 @@ describe('POST /api/pipeline/story-result', () => {
       inputTokens: 100,
       outputTokens: 25,
       modelUsed: 'pi/test/model',
+      commitSha: 'a'.repeat(40),
+      worktreeBranch: 'run/idempotent-result',
       idempotencyKey: `story-result-${runId}-US-IDEMPOTENT-001`,
     };
 
@@ -1159,12 +1161,17 @@ describe('POST /api/pipeline/story-result', () => {
       'SELECT COUNT(*)::int AS count FROM token_usage WHERE run_id = $1 AND story_id = $2',
       [runId, body.storyId],
     );
+    const commitCount = await queryOne<{ count: number }>(
+      'SELECT COUNT(*)::int AS count FROM story_commits WHERE run_id = $1 AND story_id = $2 AND commit_sha = $3',
+      [runId, body.storyId, body.commitSha],
+    );
 
     expect(first.status).toBe(201);
     expect(retry.status).toBe(200);
     expect(retry.body.duplicate).toBe(true);
     expect(storyCount?.count).toBe(1);
     expect(usageCount?.count).toBe(1);
+    expect(commitCount?.count).toBe(1);
   });
 });
 

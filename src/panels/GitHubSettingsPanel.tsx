@@ -486,11 +486,13 @@ export default function GitHubSettingsPanel() {
   const webhookIsLocal = isLocalWebhookUrl(webhookUrl);
   const credentialOk = !!account?.connected;
   const repoOk = !!status?.connected;
+  const usesGithubApp = appState?.source === 'github-app-installation'
+    || status?.credentialSource === 'github-app-installation';
   const webhookConfigured = !webhookIsLocal
-    && (appState?.source === 'github-app-installation' ? Boolean(appState.webhookHealth?.configured) : Boolean(status?.webhookId));
+    && (usesGithubApp ? Boolean(appState?.webhookHealth?.configured ?? status?.webhookConfigured) : Boolean(status?.webhookId));
   const webhookOk = !!status?.connected && webhookConfigured
-    && (appState?.source === 'github-app-installation'
-      ? appWebhookObserved
+    && (usesGithubApp
+      ? Boolean(appWebhookObserved || status?.signedDeliveryObserved)
       : Boolean(status?.signedDeliveryObserved ?? status?.lastWebhookAt));
   const workflowOk = repoOk && workflowEnabled && !!workflowId.trim();
   const autoPrOk = repoOk && autoPrEnabled;
@@ -1132,8 +1134,8 @@ export default function GitHubSettingsPanel() {
                   <p className="font-mono text-[var(--text)]">{status.repoOwner}/{status.repoName}</p>
                 </div>
                 <div>
-                  <span className="text-muted">{appState?.source === 'github-app-installation' ? 'Installation ID' : 'Webhook ID'}</span>
-                  <p className="font-mono text-[var(--text)]">#{appState?.source === 'github-app-installation' ? status.installationId : status.webhookId}</p>
+                  <span className="text-muted">{usesGithubApp ? 'Installation ID' : 'Webhook ID'}</span>
+                  <p className="font-mono text-[var(--text)]">#{usesGithubApp ? status.installationId : status.webhookId}</p>
                 </div>
                 <div>
                   <span className="text-muted">Connected</span>
@@ -1149,7 +1151,7 @@ export default function GitHubSettingsPanel() {
                 </div>
               </div>
 
-              {status.webhookId || appState?.source === 'github-app-installation' ? (
+              {status.webhookId || usesGithubApp ? (
                 <div className="mt-3 space-y-3">
                   <div className="flex items-center gap-2 text-xs text-muted">
                     <Webhook size={14} />
@@ -1189,7 +1191,14 @@ export default function GitHubSettingsPanel() {
                           Ping webhook
                         </button>
                       )}
-                      {status.repoOwner && status.repoName && (
+                      {usesGithubApp ? (
+                        <span className="text-xs text-muted">
+                          App webhook health is shown in the diagnostics above. Manage provider settings from the owning account&apos;s GitHub App settings.
+                        </span>
+                      ) : status.repoOwner && status.repoName
+                        && typeof status.webhookId === 'number'
+                        && Number.isSafeInteger(status.webhookId)
+                        && status.webhookId > 0 && (
                         <a
                           href={`https://github.com/${status.repoOwner}/${status.repoName}/settings/hooks/${status.webhookId}`}
                           target="_blank"

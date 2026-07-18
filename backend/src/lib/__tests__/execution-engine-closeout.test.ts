@@ -12,7 +12,10 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { createStoryExecutionManifest, type StoryExecutionManifestInput } from '../story-execution-packet';
-import { resolveIntegratedRunHead } from '../execution-engine';
+import {
+  deriveIntegratedPassStoryResultIdempotencyKey,
+  resolveIntegratedRunHead,
+} from '../execution-engine';
 import {
   createStoryAttemptResult,
   evaluateStoryCloseout,
@@ -145,13 +148,44 @@ describe('execution-engine closeout architecture', () => {
     const finalizerStart = ENGINE_SOURCE.indexOf('async function finalizeIntegratedStoryPass(');
     const finalizerEnd = ENGINE_SOURCE.indexOf('async function recordStoryMergeConflict(', finalizerStart);
     const finalizer = ENGINE_SOURCE.slice(finalizerStart, finalizerEnd);
-    expect(finalizer.indexOf('resolveIntegratedRunHead(config)')).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
+    expect(finalizer.indexOf('resolveIntegratedRunHead(config)')).toBeLessThan(finalizer.indexOf('deriveIntegratedPassStoryResultIdempotencyKey({'));
+    expect(finalizer.indexOf('deriveIntegratedPassStoryResultIdempotencyKey({')).toBeLessThan(finalizer.indexOf('await postStoryResult('));
+    expect(finalizer.indexOf('resultIdempotencyKey')).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
     expect(finalizer.indexOf("status: 'pass'")).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
     expect(finalizer.indexOf('await markStoryPassed(')).toBeLessThan(finalizer.indexOf("'story_passed'"));
     expect(finalizer.indexOf('if (!lifecycle.changed)')).toBeLessThan(finalizer.indexOf("'story_passed'"));
     expect(finalizer).toContain('commitSha: integratedHead.sha');
     expect(finalizer).toContain('commit_sha: integratedHead.sha');
     expect(finalizer).toContain('origin_commit_sha: pending.originCommitSha');
+    expect(finalizer).toContain('}, resultIdempotencyKey);');
+    expect(PIPELINE_SOURCE).toContain('ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING');
+    expect(PIPELINE_SOURCE).toContain("if (inserted && status === 'pass' && commitSha)");
+    expect(PIPELINE_SOURCE).toContain('if (inserted && ((inputTokens && inputTokens > 0)');
+    expect(ENGINE_SOURCE).toContain('callerIdempotencyKey ?? `story-result:${_fallbackRunId}:${randomUUID()}`');
+  });
+
+  test('reuses one bounded integrated-pass key across crash replay and scopes every immutable authority field', () => {
+    const authority = {
+      workspaceId: 'ws-closeout',
+      runId: 31,
+      storyId: 'LFC-031',
+      integratedSha: SHA,
+    };
+    const first = deriveIntegratedPassStoryResultIdempotencyKey(authority);
+    const replay = deriveIntegratedPassStoryResultIdempotencyKey({ ...authority });
+
+    expect(replay).toBe(first);
+    expect(first).toMatch(/^story-result:integrated-pass-v1:[0-9a-f]{64}$/);
+    expect(first.length).toBeLessThanOrEqual(128);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, workspaceId: 'ws-other' })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, runId: 32 })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, storyId: 'LFC-032' })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, integratedSha: BASE_SHA })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({
+      ...authority,
+      workspaceId: 'w'.repeat(10_000),
+      storyId: 's'.repeat(10_000),
+    }).length).toBeLessThanOrEqual(128);
   });
 
   test('proves the immutable integrated branch head and rejects an unfinished no-ff merge before pass', () => {
