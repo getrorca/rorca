@@ -21,7 +21,7 @@
 
 import { execSync } from 'child_process';
 import { subscribe, broadcastAll, type WalEvent } from './sse-hub';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } from './github-repository-authority';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
@@ -32,6 +32,12 @@ import {
   formatGithubProviderError,
   sanitizeGithubProviderException,
 } from './github-provider-error';
+import {
+  authorizeCanonicalWalEvent,
+  authorizeCompleteTerminalRun,
+  authorizeStoryPassEvent,
+  authorizeTerminalStoryEvent,
+} from './github-poster-authority';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,13 +51,6 @@ interface PipelineRunRow {
 
 interface WorkspaceRow {
   path: string;
-}
-
-interface StoryResultRow {
-  story_id: string;
-  status: string;
-  reason: string | null;
-  finished_at: string | null;
 }
 
 interface StoryProgress {
@@ -402,35 +401,33 @@ async function flushStoryUpdate(runId: number): Promise<void> {
 // ─── WAL Event Handlers ─────────────────────────────────────────────────────
 
 async function handleRunStarted(event: WalEvent): Promise<void> {
-  const { workspace_id } = event;
-  if (!workspace_id) return;
-
-  const payload = event.payload ? JSON.parse(event.payload) : {};
-  const runId: number | null = typeof payload.run_id === 'number' ? payload.run_id : null;
-  if (!runId) return;
-
-  // Check if GitHub is connected
-  const repoInfo = await getRepoInfo(workspace_id);
-  if (!repoInfo) {
-    logger.debug(`[CheckRun] No GitHub connection for workspace ${workspace_id} — skipping`);
+  const authorized = await authorizeCanonicalWalEvent(event);
+  if (!authorized
+    || event.event_type !== 'run_started'
+    || authorized.run.status !== 'running'
+    || !['starting', 'pty_attached', 'running'].includes(authorized.run.lifecycleStatus)) {
     return;
   }
+  const { workspaceId, id: runId } = authorized.run;
 
-  // Resolve HEAD SHA
-  const sha = await resolveBranchHead(runId, workspace_id);
+  // Resolve every canonical/local value before repository authority can resolve
+  // an App/PAT token inside createCheckRun().
+  const sha = await resolveBranchHead(runId, workspaceId);
   if (!isFullGitObjectId(sha)) {
     logger.debug(`[CheckRun] No full commit SHA for run #${runId} — skipping check run`);
     return;
   }
-
-  // Create the check run
-  const checkRunId = await createCheckRun(repoInfo.owner, repoInfo.repo, sha, runId, workspace_id);
+  const repoInfo = await getRepoInfo(workspaceId);
+  if (!repoInfo) {
+    logger.debug(`[CheckRun] No GitHub connection for workspace ${workspaceId} — skipping`);
+    return;
+  }
+  const checkRunId = await createCheckRun(repoInfo.owner, repoInfo.repo, sha, runId, workspaceId);
   if (!checkRunId) return;
 
-  // Store state for story updates
   activeCheckRuns.set(runId, {
     checkRunId,
-    workspaceId: workspace_id,
+    workspaceId,
     owner: repoInfo.owner,
     repo: repoInfo.repo,
     stories: new Map(),
@@ -438,115 +435,98 @@ async function handleRunStarted(event: WalEvent): Promise<void> {
     headSha: sha.toLowerCase(),
   });
 
-  // Emit WAL event for check run creation
   const walPayload = JSON.stringify({ run_id: runId, check_run_id: checkRunId, sha });
   const walEvent = await queryOne<WalEvent>(
     `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('check_run_created', $1, 'github', $2) RETURNING *`,
-    [workspace_id, walPayload],
+    [workspaceId, walPayload],
   );
   if (walEvent) broadcastAll(walEvent);
 }
 
 async function handleStoryEvent(event: WalEvent): Promise<void> {
-  const { event_type, workspace_id, story_id } = event;
-  if (!workspace_id || !story_id) return;
-
-  const payload = event.payload ? JSON.parse(event.payload) : {};
-  const runId: number | null = typeof payload.run_id === 'number' ? payload.run_id : null;
-  if (!runId) return;
-
-  const state = activeCheckRuns.get(runId);
-  if (!state) return; // No active check run for this pipeline run
-
-  const storyTitle: string = (payload.story_title as string) || story_id;
-
-  let status: StoryProgress['status'];
-  if (event_type === 'story_started') {
-    status = 'in_progress';
-  } else if (event_type === 'story_passed') {
-    status = 'pass';
-  } else if (event_type === 'story_failed') {
-    status = 'fail';
-  } else if (event_type === 'story_skipped') {
-    status = 'skip';
-  } else {
+  const { event_type, story_id } = event;
+  if (!story_id) return;
+  const authorized = event_type === 'story_passed'
+    ? await authorizeStoryPassEvent(event)
+    : event_type === 'story_failed' || event_type === 'story_skipped'
+      ? await authorizeTerminalStoryEvent(event)
+      : await authorizeCanonicalWalEvent(event);
+  if (!authorized) return;
+  if (event_type === 'story_started'
+    && (authorized.run.status !== 'running'
+      || !['starting', 'pty_attached', 'running'].includes(authorized.run.lifecycleStatus))) {
     return;
   }
 
+  const runId = authorized.run.id;
+  const state = activeCheckRuns.get(runId);
+  if (!state
+    || state.workspaceId !== authorized.run.workspaceId
+    || event.workspace_id !== state.workspaceId) {
+    return;
+  }
+  const payload = authorized.payload;
+  const storyTitle = typeof payload.story_title === 'string' ? payload.story_title : story_id;
+  const status: StoryProgress['status'] = event_type === 'story_started'
+    ? 'in_progress'
+    : event_type === 'story_passed'
+      ? 'pass'
+      : event_type === 'story_failed'
+        ? 'fail'
+        : 'skip';
   state.stories.set(story_id, {
     storyId: story_id,
     title: storyTitle,
     status,
-    reason: (payload.reason as string) || undefined,
+    reason: typeof payload.reason === 'string' ? payload.reason : undefined,
   });
-
-  // Debounce: batch updates to reduce API calls
   scheduleFlush(runId);
 }
 
 async function handleRunFinished(event: WalEvent): Promise<void> {
-  const { workspace_id } = event;
-  if (!workspace_id) return;
-
-  const payload = event.payload ? JSON.parse(event.payload) : {};
-  const runId: number | null = typeof payload.run_id === 'number' ? payload.run_id : null;
-  if (!runId) return;
-
+  // Terminal run status, frozen expected set, every latest result, accepted
+  // closeouts, and exact integrated commits are all validated before any token.
+  const complete = await authorizeCompleteTerminalRun(event);
+  if (!complete) return;
+  const runId = complete.run.id;
   const state = activeCheckRuns.get(runId);
-  if (!state) return;
+  if (!state
+    || state.workspaceId !== complete.run.workspaceId
+    || event.workspace_id !== state.workspaceId) {
+    return;
+  }
+  const currentRepo = await getRepoInfo(complete.run.workspaceId);
+  if (!currentRepo || currentRepo.owner !== state.owner || currentRepo.repo !== state.repo) return;
 
-  // Cancel any pending debounce
   if (state.pendingFlush) {
     clearTimeout(state.pendingFlush);
     state.pendingFlush = null;
   }
-
-  // Fetch final story results from DB (most authoritative source)
-  const results = await query<StoryResultRow>(
-    'SELECT story_id, status, reason, finished_at FROM story_results WHERE run_id = $1 ORDER BY id',
-    [runId],
-  );
-
-  // Update state with final results
-  for (const r of results) {
-    const existing = state.stories.get(r.story_id);
-    const status = r.status === 'pass' ? 'pass' : r.status === 'fail' ? 'fail' : 'skip';
-    state.stories.set(r.story_id, {
-      storyId: r.story_id,
-      title: existing?.title || r.story_id,
+  const priorStories = new Map(state.stories);
+  state.stories.clear();
+  for (const result of complete.stories) {
+    const existing = priorStories.get(result.storyId);
+    const status = result.status === 'pass'
+      ? 'pass'
+      : result.status === 'fail' || result.status === 'timeout'
+        ? 'fail'
+        : 'skip';
+    state.stories.set(result.storyId, {
+      storyId: result.storyId,
+      title: existing?.title || result.storyId,
       status,
-      reason: r.reason || existing?.reason,
+      reason: result.reason || existing?.reason,
     });
   }
 
-  // Determine conclusion
   const passed = [...state.stories.values()].filter(s => s.status === 'pass').length;
   const failed = [...state.stories.values()].filter(s => s.status === 'fail').length;
   const skipped = [...state.stories.values()].filter(s => s.status === 'skip').length;
   const total = state.stories.size;
-
-  let conclusion: 'success' | 'failure' | 'neutral';
-  if (failed > 0) {
-    conclusion = 'failure';
-  } else if (total === 0 || (passed === 0 && skipped > 0)) {
-    conclusion = 'neutral';
-  } else {
-    conclusion = 'success';
-  }
-
-  // Resolve the final immutable run head from story_commits scoped by both
-  // workspace and run. A mutable worktree HEAD is never accepted for completion.
-  const finalCommit = await queryOne<{ commit_sha: string }>(
-    `SELECT commit_sha FROM story_commits
-      WHERE workspace_id = $1 AND run_id = $2
-      ORDER BY pushed_at DESC, id DESC LIMIT 1`,
-    [workspace_id, runId],
-  );
-  const finalSha = finalCommit && isFullGitObjectId(finalCommit.commit_sha)
-    ? finalCommit.commit_sha.toLowerCase() : null;
-  if (!finalSha) {
-    conclusion = 'neutral';
-  }
+  let conclusion: 'success' | 'failure' | 'neutral' = complete.successAuthorized
+    ? 'success'
+    : failed > 0 ? 'failure' : 'neutral';
+  const finalSha = complete.finalCommitSha;
 
   // Build annotations for failed stories
   const annotations = extractAnnotations(state.stories);
@@ -589,7 +569,7 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
   });
   const walEvent = await queryOne<WalEvent>(
     `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('check_run_completed', $1, 'github', $2) RETURNING *`,
-    [workspace_id, walPayload],
+    [complete.run.workspaceId, walPayload],
   );
   if (walEvent) broadcastAll(walEvent);
 
@@ -608,7 +588,7 @@ const HANDLED_EVENTS = new Set([
   'run_finished',
 ]);
 
-async function handleWalEvent(event: WalEvent): Promise<void> {
+export async function handleCheckRunWalEvent(event: WalEvent): Promise<void> {
   if (!HANDLED_EVENTS.has(event.event_type)) return;
 
   if (event.event_type === 'run_started') {
@@ -626,9 +606,16 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
  * Subscribe to WAL events and manage GitHub Check Runs for pipeline runs.
  * Call once at server startup.
  */
+export function resetCheckRunPosterForTests(): void {
+  for (const state of activeCheckRuns.values()) {
+    if (state.pendingFlush) clearTimeout(state.pendingFlush);
+  }
+  activeCheckRuns.clear();
+}
+
 export function startCheckRunPoster(): void {
   subscribe((event: WalEvent) => {
-    handleWalEvent(event).catch((err) => {
+    handleCheckRunWalEvent(event).catch((err) => {
       // Never let check run errors break the event pipeline
       logger.debug({ err }, '[CheckRun] Error handling WAL event');
     });

@@ -29,12 +29,13 @@ import {
   formatGithubProviderError,
   sanitizeGithubProviderException,
 } from './github-provider-error';
+import {
+  authorizeCanonicalWalEvent,
+  authorizeStoryPassEvent,
+  authorizeTerminalStoryEvent,
+} from './github-poster-authority';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-interface StoryCommitRow {
-  commit_sha: string;
-}
 
 interface PipelineRunRow {
   id: number;
@@ -62,24 +63,6 @@ async function getGithubToken(workspaceId: string, owner: string, repo: string):
 async function getRepoInfo(workspaceId: string): Promise<{ owner: string; repo: string } | null> {
   const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
   return authority ? { owner: authority.owner, repo: authority.name } : null;
-}
-
-/** Resolve only the immutable commit persisted for this exact run/workspace/story. */
-async function resolveCommitSha(
-  storyId: string,
-  specId: string | null,
-  runId: number | null,
-  workspaceId: string,
-): Promise<string | null> {
-  if (!specId || !runId) return null;
-  const row = await queryOne<StoryCommitRow>(
-    `SELECT commit_sha FROM story_commits
-      WHERE workspace_id = $1 AND run_id = $2 AND story_id = $3 AND spec_id = $4
-      ORDER BY pushed_at DESC, id DESC LIMIT 1`,
-    [workspaceId, runId, storyId, specId],
-  );
-  if (!row || !isFullGitObjectId(row.commit_sha)) return null;
-  return row.commit_sha.toLowerCase();
 }
 
 /** Get HEAD SHA for the run's working directory (worktree or workspace root). */
@@ -192,54 +175,50 @@ async function postStatus(
 
 // ─── WAL Event Handler ──────────────────────────────────────────────────────
 
-async function handleWalEvent(event: WalEvent): Promise<void> {
-  const { event_type, workspace_id, story_id, spec_id, payload: rawPayload } = event;
+export async function handleCommitStatusWalEvent(event: WalEvent): Promise<void> {
+  const { event_type, story_id } = event;
+  if (!story_id || !['story_started', 'story_passed', 'story_failed'].includes(event_type)) return;
 
-  if (!workspace_id || !story_id) return;
-  if (event_type !== 'story_started' && event_type !== 'story_passed' && event_type !== 'story_failed') return;
-
-  const payload = rawPayload ? JSON.parse(rawPayload) : {};
-  const runId: number | null = typeof payload.run_id === 'number' ? payload.run_id : null;
-  const storyTitle: string = (payload.story_title as string) || story_id;
-
-  // Check if GitHub is connected for this workspace
-  const repoInfo = await getRepoInfo(workspace_id);
-  if (!repoInfo) {
-    logger.debug(`[CommitStatus] No GitHub connection for workspace ${workspace_id} — skipping`);
+  // Finish every local trust, ownership, closeout, and commit check before even
+  // resolving repository authority or an App/PAT token.
+  const authorized = event_type === 'story_passed'
+    ? await authorizeStoryPassEvent(event)
+    : event_type === 'story_failed'
+      ? await authorizeTerminalStoryEvent(event)
+      : await authorizeCanonicalWalEvent(event);
+  if (!authorized) return;
+  if (event_type === 'story_started'
+    && (authorized.run.status !== 'running'
+      || !['starting', 'pty_attached', 'running'].includes(authorized.run.lifecycleStatus))) {
     return;
   }
 
+  const workspaceId = authorized.run.workspaceId;
+  const runId = authorized.run.id;
+  const payload = authorized.payload;
+  const storyTitle = typeof payload.story_title === 'string' ? payload.story_title : story_id;
+  let sha: string | null = null;
+  if (event_type === 'story_passed') {
+    sha = (authorized as Awaited<ReturnType<typeof authorizeStoryPassEvent>>)?.commitSha ?? null;
+  } else {
+    sha = await resolveBranchHead(runId, workspaceId);
+  }
+  if (!isFullGitObjectId(sha)) return;
+
+  const repoInfo = await getRepoInfo(workspaceId);
+  if (!repoInfo) {
+    logger.debug(`[CommitStatus] No GitHub connection for workspace ${workspaceId} — skipping`);
+    return;
+  }
   const contextStr = `rorca/${story_id}: ${storyTitle}`;
   const targetUrl = buildRunViewUrl(runId);
-
   if (event_type === 'story_started') {
-    // For pending status, use branch HEAD (story hasn't committed yet)
-    const sha = await resolveBranchHead(runId, workspace_id);
-    if (!isFullGitObjectId(sha)) {
-      logger.debug(`[CommitStatus] No full commit SHA for ${story_id} — skipping pending status`);
-      return;
-    }
-    await postStatus(repoInfo.owner, repoInfo.repo, sha, 'pending', contextStr, `Running ${story_id}...`, targetUrl, workspace_id);
+    await postStatus(repoInfo.owner, repoInfo.repo, sha, 'pending', contextStr, `Running ${story_id}...`, targetUrl, workspaceId);
   } else if (event_type === 'story_passed') {
-    // The run/workspace-scoped closeout row is canonical. The WAL value is an
-    // integrity cross-check only; it can never independently authorize a post.
-    const sha = await resolveCommitSha(story_id, spec_id, runId, workspace_id);
-    const eventSha = typeof payload.commit_sha === 'string' && isFullGitObjectId(payload.commit_sha)
-      ? payload.commit_sha.toLowerCase() : null;
-    if (!sha || (eventSha !== null && eventSha !== sha)) {
-      logger.debug(`[CommitStatus] Missing or mismatched scoped commit SHA for ${story_id} — skipping success status`);
-      return;
-    }
-    await postStatus(repoInfo.owner, repoInfo.repo, sha, 'success', contextStr, `${story_id} passed`, targetUrl, workspace_id);
-  } else if (event_type === 'story_failed') {
-    const reason = (payload.reason as string) || 'unknown';
-    // Final failure evidence is also immutable. If no scoped commit exists, skip.
-    const sha = await resolveCommitSha(story_id, spec_id, runId, workspace_id);
-    if (!sha) {
-      logger.debug(`[CommitStatus] No commit SHA for ${story_id} — skipping failure status`);
-      return;
-    }
-    await postStatus(repoInfo.owner, repoInfo.repo, sha, 'failure', contextStr, `${story_id} failed: ${reason}`, targetUrl, workspace_id);
+    await postStatus(repoInfo.owner, repoInfo.repo, sha, 'success', contextStr, `${story_id} passed`, targetUrl, workspaceId);
+  } else {
+    const reason = typeof payload.reason === 'string' ? payload.reason : 'unknown';
+    await postStatus(repoInfo.owner, repoInfo.repo, sha, 'failure', contextStr, `${story_id} failed: ${reason}`, targetUrl, workspaceId);
   }
 }
 
@@ -251,7 +230,7 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
  */
 export function startCommitStatusPoster(): void {
   subscribe((event: WalEvent) => {
-    handleWalEvent(event).catch((err) => {
+    handleCommitStatusWalEvent(event).catch((err) => {
       // Never let commit status errors break the event pipeline
       logger.debug({ err }, '[CommitStatus] Error handling WAL event');
     });

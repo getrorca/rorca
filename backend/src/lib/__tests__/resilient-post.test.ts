@@ -173,6 +173,25 @@ describe('bounded fallback journal', () => {
     expect(compacted[1]).toMatchObject({ type: 'wal', status: 'story_passed' });
   });
 
+  test('preserves exact trusted relay ordering while retaining the latest result payload', () => {
+    const result = (attempt: number): FallbackResultEntry => ({
+      type: 'story_result', storyId: 'US-001', status: 'pass', runId: 42,
+      retries: attempt, ts: new Date(attempt).toISOString(),
+      idempotencyKey: 'story-result:integrated-pass-v1:stable',
+      payload: { runId: 42, storyId: 'US-001', status: 'pass', attempt },
+    });
+    const passRelay: FallbackResultEntry = {
+      type: 'wal', storyId: 'US-001', status: 'story_passed', runId: 42,
+      retries: 1, ts: new Date(2).toISOString(),
+      idempotencyKey: `trusted-wal:v1:${'a'.repeat(64)}`,
+      payload: { trusted_relay: { eventType: 'story_passed' } },
+    };
+
+    const compacted = compactFallbackEntries([result(1), passRelay, result(3)]);
+    expect(compacted.map(entry => entry.type)).toEqual(['story_result', 'wal']);
+    expect(compacted[0].payload).toMatchObject({ attempt: 3 });
+  });
+
   test('serializes parallel writes and compacts cumulative telemetry to latest values', async () => {
     await Promise.all(Array.from({ length: 50 }, (_value, index) =>
       writeFallbackResult(cwd, fallback(`US-00${(index % 3) + 1}`, index + 1))));

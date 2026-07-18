@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const MIGRATIONS = path.resolve(__dirname, '..', 'pg-migrations');
-const FILENAME = '20260718120000_story_result_accounting_identity.sql';
+const FILENAME = '20260718130000_story_result_accounting_identity.sql';
 const SQL = fs.readFileSync(path.join(MIGRATIONS, FILENAME), 'utf8');
 
 describe('story-result accounting identity migration', () => {

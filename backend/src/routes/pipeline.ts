@@ -450,6 +450,18 @@ function acceptanceCriteriaForManifest(story: DispatchManifestStory): string[] {
     : [];
 }
 
+function frozenExpectedStoryIds(specJson: Record<string, unknown>): string[] {
+  const phaseStories = Array.isArray(specJson.phases)
+    ? (specJson.phases as Array<{ stories?: Array<{ id?: unknown }> }>).flatMap(phase => phase.stories ?? [])
+    : [];
+  const stories = Array.isArray(specJson.userStories)
+    ? specJson.userStories as Array<{ id?: unknown }>
+    : phaseStories;
+  return [...new Set(stories
+    .map(story => typeof story.id === 'string' ? story.id.trim() : '')
+    .filter(Boolean))].sort();
+}
+
 /** Resolve historical/null run metadata to a valid engine without changing public Unknown telemetry. */
 function resolveDispatchAgent(value: unknown): AgentType {
   const normalized = normalizeRunAgentType(value);
@@ -2213,6 +2225,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // engine receives the resulting execution-only contract and does not
     // recompute lifecycle evidence or command-safety policy from story prose.
     const dispatchSpec = JSON.parse(fs.readFileSync(absSpecPath, 'utf8')) as Record<string, unknown>;
+    const expectedStoryIds = frozenExpectedStoryIds(dispatchSpec);
+    if (expectedStoryIds.length === 0) throw new ValidationError('Runnable spec must freeze at least one expected story');
+    await execute('UPDATE pipeline_runs SET expected_story_ids = $1::text[] WHERE id = $2', [expectedStoryIds, runId]);
     const manifestBundle = await resolveAndPersistDispatchManifests({
       workspaceId: workspace.id,
       specId: path.basename(specPath, '.json'),
@@ -6042,6 +6057,11 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       });
       throw new ConflictError('Generated retry execution plan differs from the approved preview');
     }
+    if (planComparison.actual.length === 0) throw new ConflictError('Retry run has no frozen expected stories');
+    await execute('UPDATE pipeline_runs SET expected_story_ids = $1::text[] WHERE id = $2', [
+      [...new Set(planComparison.actual)].sort(),
+      newRunId,
+    ]);
 
     const jobPayload = PipelineRetryJobPayload.parse({
       runId: Number(newRunId),

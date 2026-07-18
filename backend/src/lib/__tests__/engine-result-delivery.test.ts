@@ -85,6 +85,23 @@ describe('run-scoped engine result delivery', () => {
     expect(fs.existsSync(path.join(root, '.rorca-results.jsonl'))).toBe(true);
   });
 
+  test('transient pass fallback cannot mint a trusted outbox from the untrusted journal', async () => {
+    const context = createEngineResultDeliveryContext(79, 'ws-untrusted-journal', root);
+    await expect(deliverEngineStoryResult(context, {
+      storyId: 'US-PASS',
+      status: 'pass',
+      integrated: true,
+      commitSha: 'a'.repeat(40),
+      idempotencyKey: 'story-result:pass-outage',
+      trustedPassOutbox: { payload: { story_title: 'Host-only pass' } },
+    }, {
+      persist: async () => { throw transportFailure(); },
+    })).rejects.toThrow('connection terminated');
+    await flushFallbackWrites(root);
+    const [entry] = readFallbackResults(root);
+    expect(entry.payload).not.toHaveProperty('trustedPassOutbox');
+  });
+
   test('permanent canonical conflicts throw without creating a replay record', async () => {
     const context = createEngineResultDeliveryContext(78, 'ws-permanent', root);
     await expect(deliverEngineStoryResult(context, {

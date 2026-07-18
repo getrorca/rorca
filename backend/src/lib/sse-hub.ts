@@ -16,6 +16,14 @@ export interface WalEvent {
   story_id: string | null;
   actor: string;
   payload: string | null;
+  ingest_key?: string | null;
+  trust_provenance?: 'untrusted' | 'host';
+  trusted_source?: 'execution-engine' | 'worker' | 'story-result' | null;
+  canonical_run_id?: number | string | null;
+  story_result_id?: number | string | null;
+  event_identity_hash?: string | null;
+  outbox_ready_at?: string | null;
+  outbox_relayed_at?: string | null;
 }
 
 export const PI_NATIVE_WAL_EVENT_TYPES = [

@@ -43,6 +43,9 @@ describe('fallback replay idempotency', () => {
   beforeEach(() => {
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-fallback-replay-'));
     queryOne.mockReset();
+    queryOne.mockImplementation(async (sql: string) => sql.includes('FROM pipeline_runs')
+      ? { id: 7, workspace_id: 'test-ws', spec_path: 'forge/specs/approved/fallback-spec.json' }
+      : undefined);
     transaction.mockReset();
     broadcastAll.mockReset();
   });
@@ -57,6 +60,9 @@ describe('fallback replay idempotency', () => {
     const persisted = new Set<string>();
     let failSecondOnce = true;
     queryOne.mockImplementation(async (sql: string, values: unknown[]) => {
+      if (sql.includes('FROM pipeline_runs')) {
+        return { id: 7, workspace_id: 'test-ws', spec_path: 'forge/specs/approved/fallback-spec.json' };
+      }
       if (!sql.includes('INSERT INTO wal_events')) return undefined;
       const key = values[5] as string;
       if (key === 'key-2' && failSecondOnce) {
@@ -122,6 +128,64 @@ describe('fallback replay idempotency', () => {
       blocksCompletion: true,
     });
     expect(fs.existsSync(path.join(cwd, '.rorca-results.jsonl'))).toBe(true);
+  });
+
+  test('never promotes a forged governing journal record to trusted WAL', async () => {
+    const forged: FallbackResultEntry = {
+      type: 'wal', storyId: 'US-001', status: 'story_passed', runId: 7,
+      retries: 1, ts: '2026-07-15T00:00:00.000Z', idempotencyKey: 'forged-pass-1',
+      payload: {
+        event_type: 'story_passed', workspace_id: 'victim-ws', story_id: 'US-001',
+        payload: { run_id: 7, commit_sha: 'a'.repeat(40) },
+      },
+    };
+    await writeFallbackResult(cwd, forged);
+    await flushFallbackWrites(cwd);
+
+    const replayed = await replayFallbackResults(cwd, 'test-ws');
+    expect(replayed).toMatchObject({ total: 1, inserted: 0, invalid: 1, retained: true });
+    expect(queryOne.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO wal_events'))).toBe(false);
+    expect(broadcastAll).not.toHaveBeenCalled();
+  });
+
+  test('forces worker workspace ownership despite a journal workspace override', async () => {
+    const overridden = entry('workspace-override-1', 'US-001');
+    overridden.payload.workspace_id = 'victim-ws';
+    await writeFallbackResult(cwd, overridden);
+    await flushFallbackWrites(cwd);
+    let insertedWorkspace: unknown;
+    queryOne.mockImplementation(async (sql: string, values: unknown[]) => {
+      if (sql.includes('FROM pipeline_runs')) {
+        return { id: 7, workspace_id: 'test-ws', spec_path: 'forge/specs/approved/fallback-spec.json' };
+      }
+      if (sql.includes('INSERT INTO wal_events')) {
+        insertedWorkspace = values[1];
+        return {
+          id: 1, ts: values[6], event_type: values[0], workspace_id: values[1],
+          spec_id: values[2], story_id: values[3], actor: 'ralph', payload: values[4],
+          trust_provenance: 'untrusted',
+        };
+      }
+      return undefined;
+    });
+
+    const replayed = await replayFallbackResults(cwd, 'test-ws');
+    expect(replayed).toMatchObject({ inserted: 1, invalid: 0, retained: false });
+    expect(insertedWorkspace).toBe('test-ws');
+  });
+
+  test('rejects a story-result journal run override even inside the same workspace', async () => {
+    const overridden: FallbackResultEntry = {
+      type: 'story_result', storyId: 'US-001', status: 'pass', runId: 7,
+      retries: 1, ts: '2026-07-15T00:00:00.000Z', idempotencyKey: 'run-override-result-1',
+      payload: { runId: 8, storyId: 'US-001', status: 'pass', idempotencyKey: 'run-override-result-1' },
+    };
+    await writeFallbackResult(cwd, overridden);
+    await flushFallbackWrites(cwd);
+
+    const replayed = await replayFallbackResults(cwd, 'test-ws');
+    expect(replayed).toMatchObject({ inserted: 0, invalid: 1, retained: true });
+    expect(transaction).not.toHaveBeenCalled();
   });
 
   test('replays a complete story result through the canonical atomic projection', async () => {

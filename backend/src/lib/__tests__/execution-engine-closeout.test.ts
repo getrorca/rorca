@@ -156,12 +156,13 @@ describe('execution-engine closeout architecture', () => {
     expect(finalizer.indexOf('deriveIntegratedPassStoryResultIdempotencyKey({')).toBeLessThan(finalizer.indexOf('await postStoryResult('));
     expect(finalizer.indexOf('resultIdempotencyKey')).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
     expect(finalizer.indexOf("status: 'pass'")).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
-    expect(finalizer.indexOf('await markStoryPassed(')).toBeLessThan(finalizer.indexOf("'story_passed'"));
-    expect(finalizer.indexOf('if (!lifecycle.changed)')).toBeLessThan(finalizer.indexOf("'story_passed'"));
+    expect(finalizer.indexOf('await postStoryResult(')).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
+    expect(finalizer.indexOf('await markStoryPassed(')).toBeLessThan(finalizer.indexOf('relayOrJournalTrustedWal'));
+    expect(finalizer.indexOf('relayOrJournalTrustedWal')).toBeLessThan(finalizer.indexOf('if (!lifecycle.changed)'));
     expect(finalizer).toContain('commitSha: integratedHead.sha');
     expect(finalizer).toContain('commit_sha: integratedHead.sha');
     expect(finalizer).toContain('origin_commit_sha: pending.originCommitSha');
-    expect(finalizer).toContain('}, resultIdempotencyKey);');
+    expect(finalizer).toContain('trustedPassOutbox: { payload: passPayload }');
     expect(PIPELINE_SOURCE).toContain('await persistCanonicalStoryResult({');
     expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('return transaction(async (client) => {');
     expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING');
@@ -171,7 +172,7 @@ describe('execution-engine closeout architecture', () => {
     expect(STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_commits')).toBeLessThan(
       STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO token_usage'),
     );
-    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, projection, specId, commit)');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, projection, specId, commit, accounting)');
     expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('WHERE story_result_id = $1');
     expect(WAL_LISTENER_SOURCE).toContain('await persistLegacyStoryResultAccounting({');
     const fallbackSync = PIPELINE_SOURCE.slice(
@@ -254,6 +255,14 @@ describe('execution-engine closeout architecture', () => {
     expect(ENGINE_SOURCE).toContain('story, config, mode, playbook, logDir, workspaceId, retryCounts');
     expect(ENGINE_SOURCE.match(/const integratedHead = resolveIntegratedRunHead\(config\)/g)).toHaveLength(1);
     expect(ENGINE_SOURCE).not.toContain('commitSha: pending.commitSha');
+  });
+
+  test('keeps host database authority out of every model child environment', () => {
+    expect(ENGINE_SOURCE).toContain('HOST_ONLY_AGENT_ENV_VARS');
+    for (const key of ['DATABASE_URL', 'PGPASSWORD', 'PGDATABASE', 'RORCA_PROCESS_ROLE']) {
+      expect(ENGINE_SOURCE).toContain(`'${key}'`);
+    }
+    expect(ENGINE_SOURCE).toContain("!k.startsWith('RORCA_WAL_TRUST_')");
   });
 
   test('keeps one mode/provider-neutral adapter and removes parallel merge bypasses', () => {

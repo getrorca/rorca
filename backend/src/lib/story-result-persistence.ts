@@ -11,6 +11,11 @@ import * as path from 'path';
 import type { PoolClient } from 'pg';
 import { transaction } from '../db/index';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
+import {
+  insertTrustedWalEvent,
+  trustedWalReference,
+  type TrustedWalReference,
+} from './trusted-wal';
 
 export const STORY_RESULT_STATUSES = ['pass', 'fail', 'skip', 'excluded'] as const;
 export type CanonicalStoryResultStatus = typeof STORY_RESULT_STATUSES[number];
@@ -40,11 +45,16 @@ export interface CanonicalStoryResultInput {
   finishedAt?: string;
   /** Fallback/direct host writes bind a workspace journal to its owning run. */
   expectedWorkspaceId?: string;
+  /** Host-only integrated-pass outbox request. Public story-result routes omit it. */
+  trustedPassOutbox?: {
+    payload: Record<string, unknown>;
+  };
 }
 
 export interface CanonicalStoryResultOutcome {
   id: number;
   duplicate: boolean;
+  trustedWal?: TrustedWalReference;
 }
 
 export interface LegacyStoryAccountingInput {
@@ -260,6 +270,17 @@ function validateInput(input: CanonicalStoryResultInput): void {
     && (input.completionPacket === null || Array.isArray(input.completionPacket) || typeof input.completionPacket !== 'object')) {
     throw new ValidationError('completionPacket must be an object');
   }
+  if (input.trustedPassOutbox !== undefined
+    && (!input.trustedPassOutbox || Array.isArray(input.trustedPassOutbox)
+      || typeof input.trustedPassOutbox !== 'object'
+      || !input.trustedPassOutbox.payload
+      || Array.isArray(input.trustedPassOutbox.payload)
+      || typeof input.trustedPassOutbox.payload !== 'object')) {
+    throw new ValidationError('trustedPassOutbox.payload must be an object');
+  }
+  if (input.trustedPassOutbox && input.integrated !== true) {
+    throw new ValidationError('Trusted pass outbox requires an explicit integrated pass');
+  }
   if (input.integrated === true && (input.status !== 'pass' || input.commitSha === undefined)) {
     throw new ValidationError('Integrated pass requires pass status and exact commitSha');
   }
@@ -369,6 +390,7 @@ function assertSameResultPayload(
   projection: RunProjectionRow,
   specId: string,
   commit: NormalizedCommit | null,
+  accounting: NormalizedAccounting | null,
 ): void {
   const expectedCompletionPacket = input.completionPacket ?? null;
   const actualCompletionPacket = existing.completion_packet ?? null;
@@ -380,17 +402,17 @@ function assertSameResultPayload(
       ? existing.finished_at_source === 'database'
       : existing.finished_at_source === 'observed'
         && sameTimestamp(existing.finished_at, normalizeObservedTimestamp(input.finishedAt!));
-  const expectedAccountingRequired = needsAccounting(input);
-  const expectedCostSource = input.costUsd !== undefined ? 'explicit' : 'derived';
   const existingAccounting = accountingFromResult(existing);
-  const accountingIdentityMatches = expectedAccountingRequired
+  const accountingIdentityMatches = accounting
     ? existingAccounting != null
-      && existingAccounting.model === (input.modelUsed || 'unknown')
-      && existingAccounting.input_tokens === (input.inputTokens ?? 0)
-      && existingAccounting.output_tokens === (input.outputTokens ?? 0)
-      && existingAccounting.reasoning_tokens === (input.reasoningTokens ?? 0)
-      && (existingAccounting.cost_source === expectedCostSource || existingAccounting.cost_source === 'legacy')
-      && (input.costUsd === undefined || existingAccounting.cost_usd === roundedCost(input.costUsd))
+      && existingAccounting.model === accounting.model
+      && existingAccounting.input_tokens === accounting.input_tokens
+      && existingAccounting.output_tokens === accounting.output_tokens
+      && existingAccounting.reasoning_tokens === accounting.reasoning_tokens
+      && existingAccounting.cost_usd === accounting.cost_usd
+      && existingAccounting.cost_source === accounting.cost_source
+      && sameNumber(existingAccounting.input_cost_per_1k, accounting.input_cost_per_1k)
+      && sameNumber(existingAccounting.output_cost_per_1k, accounting.output_cost_per_1k)
     : existingAccounting == null;
 
   const matches = Number(existing.run_id) === input.runId
@@ -421,7 +443,7 @@ function assertSameResultPayload(
     && existing.manifest_hash === projection.manifest_hash
     && existing.closeout_decision_id === projection.closeout_decision_id
     && existing.ingest_key === input.idempotencyKey
-    && existing.accounting_required === expectedAccountingRequired
+    && existing.accounting_required === Boolean(accounting)
     && accountingIdentityMatches;
 
   if (!matches) {
@@ -537,6 +559,41 @@ function resultIdentitySelect(): string {
           accounting_output_rate`;
 }
 
+async function persistTrustedPassOutbox(
+  client: PoolClient,
+  input: CanonicalStoryResultInput,
+  projection: RunProjectionRow,
+  specId: string,
+  resultId: number,
+  commit: NormalizedCommit | null,
+): Promise<TrustedWalReference | undefined> {
+  if (!input.trustedPassOutbox) return undefined;
+  if (input.status !== 'pass' || !commit) {
+    throw new ConflictError('Trusted pass outbox requires an exact integrated pass commit');
+  }
+  if (!projection.closeout_decision_id || projection.closeout_status !== 'accepted') {
+    throw new ConflictError('Trusted pass outbox requires an accepted canonical closeout decision');
+  }
+  const event = await insertTrustedWalEvent(client, {
+    eventType: 'story_passed',
+    workspaceId: projection.workspace_id,
+    runId: input.runId,
+    storyId: input.storyId,
+    specId,
+    source: 'story-result',
+    storyResultId: resultId,
+    payload: {
+      ...input.trustedPassOutbox.payload,
+      run_id: input.runId,
+      story_id: input.storyId,
+      story_result_id: resultId,
+      commit_sha: commit.commitSha,
+      closeout_decision_id: projection.closeout_decision_id,
+    },
+  });
+  return trustedWalReference(event.row);
+}
+
 /**
  * Persist the logical result and every dependent projection in one transaction.
  * A duplicate is acknowledged only after every immutable input and keyed
@@ -626,18 +683,19 @@ export async function persistCanonicalStoryResult(
         FOR UPDATE
       `, [input.idempotencyKey]))[0];
       if (!existing) throw new ConflictError('Story result duplicate is not durably readable');
-      assertSameResultPayload(existing, input, projection, specId, commit);
+      assertSameResultPayload(existing, input, projection, specId, commit, accounting);
 
       if (commit) assertSameCommit(await loadCommit(client, commit), commit);
-      const storedAccounting = accountingFromResult(existing);
-      if (storedAccounting) storedAccounting.workspace_id = projection.workspace_id;
       assertSameAccounting(
         await loadAccounting(client, existing.id),
         existing.id,
         projection.workspace_id,
-        storedAccounting,
+        accounting,
       );
-      return { id: existing.id, duplicate: true };
+      const trustedWal = await persistTrustedPassOutbox(
+        client, input, projection, specId, existing.id, commit,
+      );
+      return { id: existing.id, duplicate: true, ...(trustedWal ? { trustedWal } : {}) };
     }
 
     if (commit) {
@@ -690,7 +748,10 @@ export async function persistCanonicalStoryResult(
       assertSameAccounting(usage, inserted.id, projection.workspace_id, accounting);
     }
 
-    return { id: inserted.id, duplicate: false };
+    const trustedWal = await persistTrustedPassOutbox(
+      client, input, projection, specId, inserted.id, commit,
+    );
+    return { id: inserted.id, duplicate: false, ...(trustedWal ? { trustedWal } : {}) };
   });
 }
 

@@ -13,6 +13,9 @@ import { validateBody } from '../lib/validate';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { handleRouteError } from '../lib/async-handler';
+import { requireWorkspaceMember } from '../lib/auth-utils';
+import { ConflictError, ValidationError } from '../lib/errors';
+import { stableWalJson } from '../lib/trusted-wal';
 
 const router = Router();
 
@@ -187,9 +190,11 @@ router.get('/', async (req, res, next) => {
  * /api/wal:
  *   post:
  *     tags: [WAL]
- *     summary: Insert a WAL event
+ *     summary: Insert an untrusted WAL event
  *     operationId: insertWalEvent
- *     description: Inserts a new WAL event and broadcasts it to all SSE subscribers. Used by run-loop.ts to report story progress.
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Caller-authored audit ingestion is workspace-scoped and can never create host-trusted governing evidence."
+ *     description: Inserts a caller-authored untrusted WAL event and broadcasts it to SSE subscribers. Host governing events use the canonical transactional outbox instead.
  *     requestBody:
  *       required: true
  *       content:
@@ -226,16 +231,23 @@ const WalEventSchema = z.object({
   occurred_at: z.string().datetime().optional(),
 });
 
-router.post('/', validateBody(WalEventSchema), async (req: Request, res: Response, _next: NextFunction) => {
+router.post('/', requireWorkspaceMember(), validateBody(WalEventSchema), async (req: Request, res: Response, _next: NextFunction) => {
   try {
     const {
       event_type, workspace_id, story_id, spec_id, payload,
       idempotency_key, occurred_at,
     } = req.body;
 
+    if (!workspace_id) throw new ValidationError('workspace_id is required');
+    if (idempotency_key?.startsWith('trusted-wal:')) {
+      throw new ValidationError('idempotency_key uses a host-reserved namespace');
+    }
+
     const inserted = await operationalQueryOne<WalEvent>({
-      text: `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload, ingest_key, ts)
-       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, NOW()))
+      text: `INSERT INTO wal_events (
+         event_type, workspace_id, spec_id, story_id, payload, ingest_key, ts,
+         trust_provenance, trusted_source, canonical_run_id, event_identity_hash
+       ) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, NOW()), 'untrusted', NULL, NULL, NULL)
        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
        RETURNING *`,
       values: [
@@ -261,7 +273,21 @@ router.post('/', validateBody(WalEventSchema), async (req: Request, res: Respons
       values: [idempotency_key],
       query_timeout: 650,
     } as QueryConfig & { query_timeout: number });
-    res.status(200).json({ ok: true, id: existing?.id ?? null, duplicate: true });
+    const existingPayload = typeof existing?.payload === 'string'
+      ? JSON.parse(existing.payload) as unknown
+      : existing?.payload ?? null;
+    const exactDuplicate = existing
+      && existing.trust_provenance !== 'host'
+      && existing.event_type === event_type
+      && existing.workspace_id === workspace_id
+      && existing.spec_id === (spec_id ?? null)
+      && existing.story_id === (story_id ?? null)
+      && stableWalJson(existingPayload) === stableWalJson(payload ?? null)
+      && (!occurred_at || new Date(existing.ts).toISOString() === new Date(occurred_at).toISOString());
+    if (!exactDuplicate) {
+      throw new ConflictError('WAL idempotency key is already bound to a different immutable payload');
+    }
+    res.status(200).json({ ok: true, id: existing.id, duplicate: true });
   } catch (error: any) {
     handleRouteError(res, error, '[WAL] POST');
   }

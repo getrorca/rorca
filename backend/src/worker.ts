@@ -60,6 +60,12 @@ import { registerHydrationWorker } from './lib/hydration-worker';
 import { registerContextCaptureHandlers } from './lib/context-distillation';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
+import {
+  GITHUB_GOVERNING_WAL_EVENTS,
+  persistTrustedWalEvent,
+  relayTrustedWalEvent,
+  relayUnacknowledgedTrustedRunEvents,
+} from './lib/trusted-wal';
 import { advanceQueue } from './lib/run-queue';
 import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
@@ -380,6 +386,21 @@ async function emitWalEvent(
   storyId?: string | null,
 ): Promise<void> {
   try {
+    const runId = Number(payload.run_id);
+    if (GITHUB_GOVERNING_WAL_EVENTS.has(eventType)
+      && Number.isSafeInteger(runId) && runId > 0) {
+      const trusted = await persistTrustedWalEvent({
+        eventType,
+        workspaceId: String(workspaceId),
+        runId,
+        storyId: storyId ?? null,
+        source: 'worker',
+        payload,
+      });
+      await relayTrustedWalEvent(trusted.reference);
+      return;
+    }
+
     const walEvent = await queryOne<{
       id: number;
       ts: string;
@@ -832,8 +853,16 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       try {
         await flushPending();
         // The engine flushes its bounded telemetry queue before process close.
-        // Replay its durable journal before deriving completion from DB state.
+        // Replay its stable-root journal before deriving completion, then retry
+        // only trusted outbox rows already released after their local boundary.
         const fallbackReplay = await replayFallbackResults(cwd, String(workspaceId));
+        let trustedRelayError: unknown;
+        try {
+          await relayUnacknowledgedTrustedRunEvents(String(workspaceId), runId);
+        } catch (error) {
+          trustedRelayError = error;
+          logger.error({ error, runId }, '[worker] Trusted WAL recovery failed — blocking terminal success');
+        }
 
         const code = capturedCode;
         const signal = capturedSignal;
@@ -841,10 +870,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
 
         const wasCancelled = cancellingRuns.delete(runId);
+        const criticalRecoveryBlocked = fallbackReplayBlocksCompletion(fallbackReplay)
+          || Boolean(trustedRelayError);
         let status = wasCancelled ? 'cancelled' : (code === 0 && !signal ? 'done' : 'failed');
-        if (!wasCancelled && fallbackReplayBlocksCompletion(fallbackReplay)) {
+        if (!wasCancelled && criticalRecoveryBlocked) {
           status = 'failed';
-          logger.error({ runId, fallbackReplay }, '[worker] Critical fallback replay incomplete — blocking terminal success');
+          logger.error({ runId, fallbackReplay, trustedRelayError }, '[worker] Critical recovery incomplete — blocking terminal success');
         }
 
         // A run where every story was skipped is not "done" — it failed
@@ -886,14 +917,6 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             source: 'worker',
           });
         } else {
-          await emitWalEvent('run_finished', workspaceId, {
-            run_id: runId,
-            status,
-            exit_code: code,
-            exit_signal: signal,
-            source: 'worker',
-          });
-
           // ── Post-run merge strategy routing ─────────────────────────────────
           // Resolve effective merge strategy from payload (set by pipeline trigger).
           const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
@@ -909,7 +932,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               const specJson = JSON.parse(fs.readFileSync(engineSpecPath, 'utf-8'));
               const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
               allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
-              if (allSpecStoriesPassed && status !== 'done') {
+              if (allSpecStoriesPassed && status !== 'done' && !criticalRecoveryBlocked) {
                 logger.info({ runId, specPath, completionScope: 'run_branch' }, '[worker] All stories passed on the run branch despite exit status=%s — promoting execution closeout to done', status);
                 try { await execute(`UPDATE pipeline_runs SET status = 'done' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
                 status = 'done';
@@ -1199,6 +1222,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (status === 'done' ? 'finished' : 'failed'), {
           owner: 'worker', outcome: status, mergeGate: payload.mergeStrategy ?? 'direct',
         });
+        if (!wasCancelled) {
+          await emitWalEvent('run_finished', workspaceId, {
+            run_id: runId,
+            status,
+            exit_code: code,
+            exit_signal: signal,
+            source: 'worker',
+          });
+        }
 
         // Advance run queue — promote next queued run for this workspace
         advanceQueue(String(workspaceId)).catch(err =>
@@ -1564,6 +1596,13 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
         await flushPending();
         const fallbackReplay = await replayFallbackResults(cwd, String(workspaceId));
+        let trustedRelayError: unknown;
+        try {
+          await relayUnacknowledgedTrustedRunEvents(String(workspaceId), runId);
+        } catch (error) {
+          trustedRelayError = error;
+          logger.error({ error, runId }, '[worker] Trusted retry WAL recovery failed — blocking terminal success');
+        }
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -1579,9 +1618,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         let retrySpecSyncSucceeded = false;
         if (wasCancelled) {
           finalStatus = 'cancelled';
-        } else if (fallbackReplayBlocksCompletion(fallbackReplay)) {
+        } else if (fallbackReplayBlocksCompletion(fallbackReplay) || trustedRelayError) {
           finalStatus = 'failed';
-          logger.error({ runId, fallbackReplay }, '[worker] Critical retry fallback replay incomplete — blocking terminal success');
+          logger.error({ runId, fallbackReplay, trustedRelayError }, '[worker] Critical retry recovery incomplete — blocking terminal success');
         } else {
           try {
             const currentStories = await query<{ story_id: string; status: string }>(

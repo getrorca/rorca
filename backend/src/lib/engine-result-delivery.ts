@@ -80,6 +80,10 @@ export async function deliverEngineStoryResult(
   } catch (error) {
     if (!isRetryableStoryResultPersistenceError(error)) throw error;
     const observedAt = now().toISOString();
+    // The stable journal is intentionally untrusted. It may replay the canonical
+    // result projection, but it can never mint governing WAL. A later host
+    // re-finalization attaches the trusted pass outbox after re-verifying HEAD.
+    const { trustedPassOutbox: _trustedPassOutbox, ...replayableInput } = canonicalInput;
     const entry: FallbackResultEntry = {
       type: 'story_result',
       storyId: canonicalInput.storyId,
@@ -89,7 +93,7 @@ export async function deliverEngineStoryResult(
       ts: observedAt,
       idempotencyKey: canonicalInput.idempotencyKey,
       payload: {
-        ...canonicalInput,
+        ...replayableInput,
         runId: context.runId,
         expectedWorkspaceId: undefined,
         finishedAt: observedAt,

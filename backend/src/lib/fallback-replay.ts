@@ -8,6 +8,7 @@
 /** Replay execution-engine fallback journals after the child has fully closed. */
 
 import { createHash } from 'crypto';
+import * as path from 'path';
 import { queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import {
@@ -18,6 +19,11 @@ import {
 } from './resilient-post';
 import { logger } from './logger';
 import { AppError } from './errors';
+import {
+  GITHUB_GOVERNING_WAL_EVENTS,
+  relayTrustedWalEvent,
+  type TrustedWalReference,
+} from './trusted-wal';
 import {
   persistCanonicalStoryResult,
   STORY_RESULT_STATUSES,
@@ -63,6 +69,20 @@ function derivedIngestKey(entry: FallbackResultEntry): string {
   return `fallback:${createHash('sha256').update(JSON.stringify(entry)).digest('hex')}`;
 }
 
+interface JournalRunBinding {
+  id: number | string;
+  workspace_id: string;
+  spec_path: string;
+}
+
+async function loadJournalRun(entry: FallbackResultEntry, workspaceId: string): Promise<JournalRunBinding | undefined> {
+  if (!Number.isSafeInteger(entry.runId) || entry.runId <= 0) return undefined;
+  return queryOne<JournalRunBinding>(
+    'SELECT id, workspace_id, spec_path FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
+    [entry.runId, workspaceId],
+  );
+}
+
 async function isLegacyWalDuplicate(entry: FallbackResultEntry, workspaceId: string): Promise<boolean> {
   if (entry.idempotencyKey) return false;
   const payload = entry.payload;
@@ -76,7 +96,7 @@ async function isLegacyWalDuplicate(entry: FallbackResultEntry, workspaceId: str
       ORDER BY id DESC LIMIT 1`,
     [
       payload.event_type ?? entry.status,
-      payload.workspace_id ?? workspaceId,
+      workspaceId,
       payload.story_id ?? entry.storyId,
       JSON.stringify(payload.payload ?? payload),
       entry.ts,
@@ -85,24 +105,81 @@ async function isLegacyWalDuplicate(entry: FallbackResultEntry, workspaceId: str
   return Boolean(existing);
 }
 
-async function replayWal(entry: FallbackResultEntry, workspaceId: string): Promise<'inserted' | 'duplicate' | 'invalid'> {
+function parseTrustedRelay(value: unknown): TrustedWalReference | null {
+  if (!value || Array.isArray(value) || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(candidate.id) || Number(candidate.id) <= 0
+    || typeof candidate.ingestKey !== 'string'
+    || !candidate.ingestKey.startsWith('trusted-wal:')
+    || typeof candidate.identityHash !== 'string'
+    || !/^[0-9a-f]{64}$/.test(candidate.identityHash)
+    || typeof candidate.eventType !== 'string'
+    || typeof candidate.workspaceId !== 'string'
+    || !Number.isSafeInteger(candidate.runId) || Number(candidate.runId) <= 0
+    || typeof candidate.specId !== 'string'
+    || !(candidate.storyId === null || typeof candidate.storyId === 'string')
+    || !['execution-engine', 'worker', 'story-result'].includes(String(candidate.source))
+    || !(candidate.storyResultId === null
+      || (Number.isSafeInteger(candidate.storyResultId) && Number(candidate.storyResultId) > 0))
+    || (candidate.source === 'story-result') !== (candidate.storyResultId !== null)
+    || !candidate.payload || Array.isArray(candidate.payload) || typeof candidate.payload !== 'object') {
+    return null;
+  }
+  return candidate as unknown as TrustedWalReference;
+}
+
+async function replayWal(
+  entry: FallbackResultEntry,
+  workspaceId: string,
+  canonicalSpecId: string,
+): Promise<'inserted' | 'duplicate' | 'invalid'> {
   const payload = entry.payload;
   const eventType = payload.event_type ?? entry.status;
   if (typeof eventType !== 'string' || eventType.length === 0) return 'invalid';
+
+  if (GITHUB_GOVERNING_WAL_EVENTS.has(eventType)) {
+    const reference = parseTrustedRelay(payload.trusted_relay);
+    if (!reference
+      || reference.eventType !== eventType
+      || reference.workspaceId !== workspaceId
+      || reference.runId !== entry.runId
+      || reference.specId !== canonicalSpecId
+      || reference.storyId !== entry.storyId
+      || entry.idempotencyKey !== reference.ingestKey) {
+      return 'invalid';
+    }
+    try {
+      await relayTrustedWalEvent(reference);
+      return 'duplicate';
+    } catch (error) {
+      if (error instanceof AppError) return 'invalid';
+      throw error;
+    }
+  }
+
+  const nestedPayload = payload.payload ?? payload;
+  if (!nestedPayload || Array.isArray(nestedPayload) || typeof nestedPayload !== 'object') return 'invalid';
+  const nestedRecord = nestedPayload as Record<string, unknown>;
+  const nestedRunId = Number(nestedRecord.run_id ?? entry.runId);
+  const payloadStoryId = payload.story_id ?? nestedRecord.story_id ?? entry.storyId;
+  if (nestedRunId !== entry.runId || payloadStoryId !== entry.storyId) return 'invalid';
   if (await isLegacyWalDuplicate(entry, workspaceId)) return 'duplicate';
 
   const ingestKey = derivedIngestKey(entry);
+  if (ingestKey.startsWith('trusted-wal:')) return 'invalid';
   const walEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload, ingest_key, ts)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
+    `INSERT INTO wal_events (
+       event_type, workspace_id, spec_id, story_id, payload, ingest_key, ts,
+       trust_provenance, trusted_source, canonical_run_id, event_identity_hash
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, 'untrusted', NULL, NULL, NULL)
      ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
      RETURNING *`,
     [
       eventType,
-      payload.workspace_id ?? workspaceId,
-      payload.spec_id ?? null,
-      payload.story_id ?? entry.storyId,
-      JSON.stringify(payload.payload ?? payload),
+      workspaceId,
+      canonicalSpecId,
+      entry.storyId,
+      JSON.stringify(nestedPayload),
       ingestKey,
       payload.occurred_at ?? entry.ts,
     ],
@@ -156,9 +233,10 @@ async function replayStoryResult(
   const activeSkills = optionalStringArray(payload.activeSkills);
   const completionPacket = payload.completionPacket;
 
-  if (!Number.isSafeInteger(runId) || runId <= 0
-    || typeof storyId !== 'string' || storyId.length === 0
-    || typeof status !== 'string' || !STORY_RESULT_STATUSES.includes(status as CanonicalStoryResultStatus)
+  if (!Number.isSafeInteger(runId) || runId <= 0 || runId !== entry.runId
+    || typeof storyId !== 'string' || storyId.length === 0 || storyId !== entry.storyId
+    || typeof status !== 'string' || status !== entry.status
+    || !STORY_RESULT_STATUSES.includes(status as CanonicalStoryResultStatus)
     || payloadIngestKey === null || (payloadIngestKey !== undefined && payloadIngestKey !== ingestKey)
     || integrated === null || (integrated === false && commitSha !== undefined)
     || worktreePath === null || worktreeBranch === null || commitSha === null || commitMessage === null
@@ -229,8 +307,15 @@ export async function replayFallbackResults(cwd: string, workspaceId: string): P
 
   try {
     for (const entry of entries) {
+      const run = await loadJournalRun(entry, workspaceId);
+      if (!run) {
+        result.invalid++;
+        if (isCriticalEntry(entry)) result.criticalInvalid++;
+        continue;
+      }
+      const canonicalSpecId = path.basename(run.spec_path, '.json');
       const outcome = entry.type === 'wal'
-        ? await replayWal(entry, workspaceId)
+        ? await replayWal(entry, workspaceId, canonicalSpecId)
         : await replayStoryResult(entry, workspaceId);
       const critical = isCriticalEntry(entry);
       result[outcome === 'inserted' ? 'inserted' : outcome === 'duplicate' ? 'duplicates' : 'invalid']++;

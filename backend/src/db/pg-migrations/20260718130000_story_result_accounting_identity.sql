@@ -1,4 +1,4 @@
--- 20260718120000_story_result_accounting_identity.sql
+-- 20260718130000_story_result_accounting_identity.sql
 -- F-04: bind each canonical accounting projection to exactly one story result
 -- and retain the immutable commit/accounting provenance used for idempotency.
 

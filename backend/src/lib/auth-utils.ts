@@ -230,7 +230,8 @@ function resolveWorkspaceId(req: Request): string | null {
     params.workspaceId ||
     params.id ||
     (typeof query.workspaceId === 'string' ? query.workspaceId : undefined) ||
-    (typeof body.workspaceId === 'string' ? body.workspaceId : undefined);
+    (typeof body.workspaceId === 'string' ? body.workspaceId : undefined) ||
+    (typeof body.workspace_id === 'string' ? body.workspace_id : undefined);
 
   return candidate ? String(candidate) : null;
 }

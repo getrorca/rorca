@@ -135,11 +135,20 @@ import {
   type FallbackResultEntry,
 } from './resilient-post';
 import {
+  persistTrustedWalEvent,
+  relayTrustedWalEvent,
+  type TrustedWalReference,
+} from './trusted-wal';
+import {
   createEngineResultDeliveryContext,
   deliverEngineStoryResult,
+  isRetryableStoryResultPersistenceError,
   type EngineResultDeliveryContext,
 } from './engine-result-delivery';
-import type { CanonicalStoryResultInput } from './story-result-persistence';
+import type {
+  CanonicalStoryResultInput,
+  CanonicalStoryResultOutcome,
+} from './story-result-persistence';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -1122,6 +1131,35 @@ function engineMcpEndpoint(port: number): string {
   return `${root}/mcp`;
 }
 
+async function relayOrJournalTrustedWal(reference: TrustedWalReference): Promise<void> {
+  try {
+    await relayTrustedWalEvent(reference);
+  } catch (error) {
+    // Exact identity/authority conflicts are permanent and must never be
+    // disguised as transport fallback success.
+    if (!isRetryableStoryResultPersistenceError(error)) throw error;
+    const runContext = _runFallbackContext;
+    if (!runContext
+      || runContext.runId !== reference.runId
+      || _resultDeliveryContext?.workspaceId !== reference.workspaceId) {
+      throw error;
+    }
+    const entry: FallbackResultEntry = {
+      type: 'wal',
+      storyId: reference.storyId,
+      status: reference.eventType,
+      runId: reference.runId,
+      retries: 1,
+      ts: new Date().toISOString(),
+      idempotencyKey: reference.ingestKey,
+      payload: { trusted_relay: reference },
+    };
+    if (!await writeFallbackResult(runContext.cwd, entry)) {
+      throw new Error(`Trusted WAL relay fallback persistence failed for ${reference.eventType}`, { cause: error });
+    }
+  }
+}
+
 async function emitWalEvent(
   port: number,
   eventType: string,
@@ -1132,6 +1170,27 @@ async function emitWalEvent(
 ): Promise<void> {
   const occurredAt = new Date().toISOString();
   const runContext = _runFallbackContext;
+
+  // Governing story events are host-authored directly. Caller/API WAL remains
+  // untrusted and can never be promoted by fallback replay.
+  if (storyId && ['story_started', 'story_failed', 'story_skipped'].includes(eventType)) {
+    if (!runContext || runContext.runId !== Number(payload.run_id)) {
+      throw new Error(`Trusted WAL run context is unavailable for ${eventType}`);
+    }
+    const trusted = await persistTrustedWalEvent({
+      eventType,
+      workspaceId,
+      runId: runContext.runId,
+      storyId,
+      specId,
+      source: 'execution-engine',
+      payload,
+      occurredAt,
+    });
+    await relayOrJournalTrustedWal(trusted.reference);
+    return;
+  }
+
   const idempotencyKey = `wal:${runContext?.runId ?? 0}:${randomUUID()}`;
   const body = {
     event_type: eventType,
@@ -1222,22 +1281,32 @@ async function postStoryResult(
   _port: number,
   body: Record<string, unknown>,
   callerIdempotencyKey?: string,
-): Promise<void> {
+): Promise<CanonicalStoryResultOutcome> {
   const context = _resultDeliveryContext;
   if (!context) throw new Error('Canonical story-result delivery context is unavailable');
   if (Number(body.runId) !== context.runId) throw new Error('Story-result run identity does not match the engine run');
   const idempotencyKey = callerIdempotencyKey ?? `story-result:${context.runId}:${randomUUID()}`;
   const { runId: _runId, ...payload } = body;
-  await deliverEngineStoryResult(context, {
+  return await deliverEngineStoryResult(context, {
     ...(payload as unknown as Omit<CanonicalStoryResultInput, 'runId' | 'expectedWorkspaceId'>),
     idempotencyKey,
   });
 }
 
+const HOST_ONLY_AGENT_ENV_VARS = new Set([
+  'DATABASE_URL', 'DATABASE_URL_TEST', 'PGHOST', 'PGPORT', 'PGUSER',
+  'PGPASSWORD', 'PGDATABASE', 'PGOPTIONS', 'PGSSLMODE', 'PGSSLROOTCERT',
+  'RORCA_PROCESS_ROLE',
+]);
+
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+    if (v !== undefined
+      && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)
+      && !HOST_ONLY_AGENT_ENV_VARS.has(k)
+      && !k.startsWith('PG')
+      && !k.startsWith('RORCA_WAL_TRUST_')) {
       env[k] = v;
     }
   }
@@ -4793,33 +4862,7 @@ async function finalizeIntegratedStoryPass(
   // reconciliation can later prove the exact integrated branch head.
   if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending, integratedHead);
 
-  if (workspaceId) {
-    // Durably persist the scoped integrated-head result (or its local fallback)
-    // before local pass projection and pass WAL publication.
-    await postStoryResult(config.port, {
-      runId: config.runId,
-      storyId: pending.story.id,
-      status: 'pass',
-      integrated: true,
-      logPath: pending.logPath,
-      ...pending.storyResultExtra,
-      ...pending.activeSkillsExtra,
-      ...pending.tokenPayload,
-      commitSha: integratedHead.sha,
-      commitMessage: `integrated story(${pending.story.id}): ${pending.story.title}`,
-      worktreeBranch: integratedHead.branch,
-      ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
-    }, resultIdempotencyKey);
-  }
-
-  const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
-  if (!lifecycle.changed) {
-    logger.info(`Ignored duplicate pass finalization for ${pending.story.id}`);
-    return;
-  }
-  if (!workspaceId) return;
-
-  await emitWalEvent(config.port, 'story_passed', workspaceId, {
+  const passPayload = {
     run_id: config.runId,
     story_id: pending.story.id,
     story_title: pending.story.title,
@@ -4834,7 +4877,38 @@ async function finalizeIntegratedStoryPass(
     origin_branch: pending.originBranch,
     ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
     ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
-  }, pending.story.id);
+  };
+
+  const persisted = workspaceId
+    ? await postStoryResult(config.port, {
+      runId: config.runId,
+      storyId: pending.story.id,
+      status: 'pass',
+      integrated: true,
+      logPath: pending.logPath,
+      ...pending.storyResultExtra,
+      ...pending.activeSkillsExtra,
+      ...pending.tokenPayload,
+      commitSha: integratedHead.sha,
+      commitMessage: `integrated story(${pending.story.id}): ${pending.story.title}`,
+      worktreeBranch: integratedHead.branch,
+      ...(pending.completionPacket
+        ? { completionPacket: pending.completionPacket as unknown as Record<string, unknown> }
+        : {}),
+      trustedPassOutbox: { payload: passPayload },
+    }, resultIdempotencyKey)
+    : null;
+
+  // Local spec projection follows the complete canonical result/commit/outbox
+  // transaction. Relay follows the file mutation, so a crash at either boundary
+  // is recovered by the same deterministic duplicate finalization.
+  const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
+  if (persisted?.trustedWal) await relayOrJournalTrustedWal(persisted.trustedWal);
+  if (!lifecycle.changed) {
+    logger.info(`Recovered duplicate pass finalization for ${pending.story.id}`);
+    return;
+  }
+  if (!workspaceId) return;
 
   await autoSynthesizeMemory(
     pending.story.id,
@@ -7876,15 +7950,8 @@ async function runParallel(
   }
   logger.info('');
 
-  if (workspaceId) {
-    await emitWalEvent(config.port, 'run_started', workspaceId, {
-      run_id: config.runId,
-      parallelism: config.parallelism,
-      waveCount: waves.length,
-      agent_type: config.agentType,
-    });
-  }
-
+  // The worker owns the single trusted run_started event after it transitions
+  // the canonical run. The engine must not create a second caller-WAL copy.
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();

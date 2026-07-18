@@ -20,9 +20,14 @@
  */
 
 import { Client, type ClientConfig } from 'pg';
+import { queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 import { persistLegacyStoryResultAccounting } from './story-result-persistence';
+import {
+  acknowledgeTrustedWalRelay,
+  relayReadyTrustedWalEvents,
+} from './trusted-wal';
 
 // ── Backoff Configuration ───────────────────────────────────────────────
 
@@ -41,6 +46,9 @@ let stopped = false;
 
 async function handleTokenTracking(event: WalEvent): Promise<void> {
   if (!event.story_id || !event.payload) return;
+  // Canonical story-result outbox events already committed their keyed
+  // accounting projection in the same transaction. Only legacy WAL may backfill.
+  if (event.trust_provenance === 'host' && event.trusted_source === 'story-result') return;
   if (event.event_type !== 'story_passed' && event.event_type !== 'story_failed') return;
 
   try {
@@ -112,6 +120,46 @@ function resetBackoff(): void {
   backoffMs = INITIAL_BACKOFF_MS;
 }
 
+function toWalEvent(row: Record<string, unknown>): WalEvent {
+  return {
+    id: Number(row.id),
+    ts: String(row.ts),
+    event_type: String(row.event_type),
+    workspace_id: row.workspace_id == null ? null : String(row.workspace_id),
+    spec_id: row.spec_id == null ? null : String(row.spec_id),
+    story_id: row.story_id == null ? null : String(row.story_id),
+    actor: row.actor == null ? 'system' : String(row.actor),
+    payload: typeof row.payload === 'string'
+      ? row.payload
+      : row.payload != null ? JSON.stringify(row.payload) : null,
+    ingest_key: row.ingest_key == null ? null : String(row.ingest_key),
+    trust_provenance: row.trust_provenance === 'host' ? 'host' : 'untrusted',
+    trusted_source: row.trusted_source === 'execution-engine'
+      || row.trusted_source === 'worker'
+      || row.trusted_source === 'story-result'
+      ? row.trusted_source
+      : null,
+    canonical_run_id: row.canonical_run_id == null ? null : String(row.canonical_run_id),
+    story_result_id: row.story_result_id == null ? null : String(row.story_result_id),
+    event_identity_hash: row.event_identity_hash == null ? null : String(row.event_identity_hash),
+    outbox_ready_at: row.outbox_ready_at == null ? null : String(row.outbox_ready_at),
+    outbox_relayed_at: row.outbox_relayed_at == null ? null : String(row.outbox_relayed_at),
+  };
+}
+
+async function dispatchWalRow(row: Record<string, unknown>): Promise<void> {
+  const event = toWalEvent(row);
+  broadcastAll(event);
+  if (event.trust_provenance === 'host') {
+    await acknowledgeTrustedWalRelay(event.id).catch((err) => {
+      logger.debug({ err, eventId: event.id }, '[wal-listener] Trusted outbox acknowledgement error');
+    });
+  }
+  handleTokenTracking(event).catch((err) => {
+    logger.debug({ err, eventId: event.id }, '[wal-listener] Token tracking error');
+  });
+}
+
 async function connect(): Promise<void> {
   if (stopped) return;
 
@@ -141,26 +189,21 @@ async function connect(): Promise<void> {
       if (msg.channel !== CHANNEL || !msg.payload) return;
 
       try {
-        const row = JSON.parse(msg.payload);
-
-        // Build WalEvent from the notification payload (row_to_json(NEW))
-        const event: WalEvent = {
-          id: row.id,
-          ts: row.ts,
-          event_type: row.event_type,
-          workspace_id: row.workspace_id ?? null,
-          spec_id: row.spec_id ?? null,
-          story_id: row.story_id ?? null,
-          actor: row.actor ?? 'system',
-          payload: typeof row.payload === 'string' ? row.payload : (row.payload != null ? JSON.stringify(row.payload) : null),
-        };
-
-        broadcastAll(event);
-
-        // Token tracking (fire-and-forget — errors logged internally)
-        handleTokenTracking(event).catch((err) => {
-          logger.debug({ err, eventId: event.id }, '[wal-listener] Token tracking error');
-        });
+        const row = JSON.parse(msg.payload) as Record<string, unknown>;
+        const trustedWalId = Number(row.trusted_wal_id);
+        if (Number.isSafeInteger(trustedWalId) && trustedWalId > 0) {
+          queryOne<Record<string, unknown>>(
+            `SELECT * FROM wal_events
+              WHERE id = $1 AND trust_provenance = 'host'`,
+            [trustedWalId],
+          ).then(async (trustedRow) => {
+            if (trustedRow) await dispatchWalRow(trustedRow);
+          }).catch((err) => {
+            logger.warn({ err, trustedWalId }, '[wal-listener] Failed to resolve trusted WAL relay pointer');
+          });
+          return;
+        }
+        void dispatchWalRow(row);
       } catch (err) {
         logger.warn({ err, raw: msg.payload?.substring(0, 200) }, '[wal-listener] Failed to parse notification payload');
       }
@@ -168,6 +211,11 @@ async function connect(): Promise<void> {
 
     await client.connect();
     await client.query(`LISTEN ${CHANNEL}`);
+
+    // Recover only rows released after their host ordering boundary. Rows from
+    // a result transaction that crashed before local pass remain inert until
+    // duplicate re-finalization releases the exact same outbox reference.
+    await relayReadyTrustedWalEvents();
 
     resetBackoff();
     logger.info('[wal-listener] Connected and listening on channel "wal_events"');

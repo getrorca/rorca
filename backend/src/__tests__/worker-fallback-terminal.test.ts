@@ -48,6 +48,7 @@ describe('worker fallback terminal gate', () => {
     const normalGate = WORKER_SOURCE.indexOf('fallbackReplayBlocksCompletion(fallbackReplay)', normalStatus);
     expect(normalReplay).toBeGreaterThan(0);
     expect(normalGate).toBeGreaterThan(normalStatus);
+    expect(WORKER_SOURCE).toContain("status !== 'done' && !criticalRecoveryBlocked");
 
     const retryReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayFallbackResults(cwd', normalReplay + 1);
     const retryStatus = WORKER_SOURCE.indexOf('let finalStatus: string;', retryReplay);
