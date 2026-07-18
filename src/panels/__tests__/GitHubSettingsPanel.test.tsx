@@ -155,11 +155,12 @@ describe('GitHubSettingsPanel', () => {
       status: { ...MOCK_CONNECTED_STATUS, credentialSource: 'github-app-installation', repositoryId: 99, installationId: 77 },
       account: { connected: true, username: 'rorca[bot]', source: 'github-app-installation' },
       app: {
-        configured: true, connected: true, source: 'github-app-installation',
+        configured: true, connected: true, credentialReady: true, source: 'github-app-installation',
         app: { id: 12345, slug: 'rorca' },
         installation: { id: 77, accountId: 88, account: 'acme', type: 'Organization', status: 'active' },
         repository: { id: 99, owner: 'acme', name: 'widgets' },
         binding: { id: 'b1', status: 'active', lastValidatedAt: null, lastWebhookAt: null, validationErrorCode: null },
+        webhookHealth: { configured: true, signedDeliveryObserved: false, lastWebhookAt: null },
         capabilities: { repository: true, actions: true, pulls: true, contents: true, statuses: true, checks: false, webhooks: true },
         nextAction: null,
       },
@@ -171,8 +172,10 @@ describe('GitHubSettingsPanel', () => {
       expect(document.body.textContent).toContain('acme/widgets · #99');
       expect(document.body.textContent).toContain('Capability diagnostics');
       expect(document.body.textContent).toContain('checks');
-      expect(document.body.textContent).toContain('App needs attention');
-      expect(document.body.textContent).not.toContain('App active');
+      expect(document.body.textContent).toContain('Credential needs revalidation');
+      expect(document.body.textContent).not.toContain('Credential ready');
+      expect(document.body.textContent).toContain('Provider hook configured');
+      expect(document.body.textContent).toContain('Awaiting signed delivery');
       expect(document.body.textContent).toContain('PAT/OAuth remains an explicit fallback');
     });
   });
@@ -254,9 +257,10 @@ describe('GitHubSettingsPanel', () => {
     mockWorkspaceApi({
       status: { ...MOCK_CONNECTED_STATUS, credentialSource: 'github-app-installation' },
       account: { connected: true, username: 'rorca[bot]', source: 'github-app-installation' },
-      app: { configured: true, connected: true, source: 'github-app-installation', app: { id: 1, slug: 'rorca' },
+      app: { configured: true, connected: true, credentialReady: true, source: 'github-app-installation', app: { id: 1, slug: 'rorca' },
         installation: { id: 2, accountId: 3, account: 'acme', type: 'Organization', status: 'active' },
         repository: { id: 4, owner: 'acme', name: 'widgets' },
+        webhookHealth: { configured: true, signedDeliveryObserved: true, lastWebhookAt: '2026-07-18T00:00:00.000Z' },
         capabilities: { repository: true, actions: true, pulls: true, contents: true, statuses: true, checks: true, issues: true, webhooks: true }, nextAction: null },
       onRequest: (path, init) => path === '/api/workspaces/ws-1/github' && init?.method === 'DELETE' ? { disconnected: true } : undefined,
     });

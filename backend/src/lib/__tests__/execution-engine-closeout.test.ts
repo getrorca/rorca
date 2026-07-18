@@ -7,9 +7,12 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { createStoryExecutionManifest, type StoryExecutionManifestInput } from '../story-execution-packet';
+import { resolveIntegratedRunHead } from '../execution-engine';
 import {
   createStoryAttemptResult,
   evaluateStoryCloseout,
@@ -142,10 +145,51 @@ describe('execution-engine closeout architecture', () => {
     const finalizerStart = ENGINE_SOURCE.indexOf('async function finalizeIntegratedStoryPass(');
     const finalizerEnd = ENGINE_SOURCE.indexOf('async function recordStoryMergeConflict(', finalizerStart);
     const finalizer = ENGINE_SOURCE.slice(finalizerStart, finalizerEnd);
+    expect(finalizer.indexOf('resolveIntegratedRunHead(config)')).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
+    expect(finalizer.indexOf("status: 'pass'")).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
     expect(finalizer.indexOf('await markStoryPassed(')).toBeLessThan(finalizer.indexOf("'story_passed'"));
-    expect(finalizer.indexOf('if (!transitioned)')).toBeLessThan(finalizer.indexOf("'story_passed'"));
-    expect(finalizer.indexOf("status: 'pass'")).toBeLessThan(finalizer.indexOf("'story_passed'"));
-    expect(finalizer).toContain('commit_sha: pending.commitSha');
+    expect(finalizer.indexOf('if (!lifecycle.changed)')).toBeLessThan(finalizer.indexOf("'story_passed'"));
+    expect(finalizer).toContain('commitSha: integratedHead.sha');
+    expect(finalizer).toContain('commit_sha: integratedHead.sha');
+    expect(finalizer).toContain('origin_commit_sha: pending.originCommitSha');
+  });
+
+  test('proves the immutable integrated branch head and rejects an unfinished no-ff merge before pass', () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-integrated-head-'));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    try {
+      git('init', '-q');
+      git('config', 'user.email', 'test@rorca.invalid');
+      git('config', 'user.name', 'Rorca Test');
+      fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+      git('add', 'base.txt');
+      git('commit', '-q', '-m', 'base');
+      const mainBranch = git('branch', '--show-current');
+      git('checkout', '-q', '-b', 'story/test');
+      fs.writeFileSync(path.join(repo, 'story.txt'), 'story\n');
+      git('add', 'story.txt');
+      git('commit', '-q', '-m', 'story');
+      const originSha = git('rev-parse', 'HEAD');
+      git('checkout', '-q', mainBranch);
+      git('merge', '--no-ff', '--no-commit', 'story/test');
+      expect(() => resolveIntegratedRunHead({ cwd: repo })).toThrow('unfinished merge');
+      git('commit', '-q', '-m', 'merge story');
+      const integrated = resolveIntegratedRunHead({ cwd: repo });
+      expect(integrated.sha).toBe(git('rev-parse', 'HEAD'));
+      expect(integrated.sha).not.toBe(originSha);
+      expect(integrated.branch).toBe(mainBranch);
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('covers direct/retry finalization and sequential/parallel worktree integration through one exact-head seam', () => {
+    expect(ENGINE_SOURCE.match(/await finalizeIntegratedStoryPass\(/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(ENGINE_SOURCE).toContain('Single-story wave — direct merge');
+    expect(ENGINE_SOURCE).toContain('await mergeWave(');
+    expect(ENGINE_SOURCE).toContain('story, config, mode, playbook, logDir, workspaceId, retryCounts');
+    expect(ENGINE_SOURCE.match(/const integratedHead = resolveIntegratedRunHead\(config\)/g)).toHaveLength(1);
+    expect(ENGINE_SOURCE).not.toContain('commitSha: pending.commitSha');
   });
 
   test('keeps one mode/provider-neutral adapter and removes parallel merge bypasses', () => {

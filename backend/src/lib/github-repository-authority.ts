@@ -25,7 +25,8 @@ export interface GithubRepositoryAuthority {
   bindingId: string | null;
   installationId: number | null;
   repositoryId: number | null;
-  webhookVerified: boolean;
+  webhookConfigured: boolean;
+  signedDeliveryObserved: boolean;
   connectedAt: string | null;
   lastWebhookAt: string | null;
   autoPrEnabled: boolean;
@@ -43,7 +44,8 @@ interface AuthorityRow {
   binding_id: string | null;
   installation_id: string | number | null;
   repository_id: string | number | null;
-  webhook_verified: boolean;
+  webhook_configured: boolean;
+  signed_delivery_observed: boolean;
   connected_at: string | null;
   last_webhook_at: string | null;
   auto_pr_enabled: boolean;
@@ -106,8 +108,8 @@ export async function getGithubRepositoryAuthority(
 ): Promise<GithubRepositoryAuthority | null> {
   const row = await queryOne<AuthorityRow>(
     `SELECT workspace_id, repo_owner, repo_name, authority_source, authority_status,
-            binding_id, installation_id, repository_id, webhook_verified,
-            connected_at, last_webhook_at, auto_pr_enabled, auto_pr_target_branch,
+            binding_id, installation_id, repository_id, webhook_configured,
+            signed_delivery_observed, connected_at, last_webhook_at, auto_pr_enabled, auto_pr_target_branch,
             auto_pr_reviewers, workflow_config
        FROM github_workspace_repository_authority
       WHERE workspace_id = $1`,
@@ -124,7 +126,8 @@ export async function getGithubRepositoryAuthority(
     bindingId: row.binding_id,
     installationId: row.installation_id == null ? null : Number(row.installation_id),
     repositoryId: row.repository_id == null ? null : Number(row.repository_id),
-    webhookVerified: row.webhook_verified,
+    webhookConfigured: row.webhook_configured,
+    signedDeliveryObserved: row.signed_delivery_observed,
     connectedAt: row.connected_at,
     lastWebhookAt: row.last_webhook_at,
     autoPrEnabled: row.auto_pr_enabled,

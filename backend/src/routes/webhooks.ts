@@ -62,13 +62,7 @@ async function dispatchLegacyHandlers(
   workspaceId: string,
 ): Promise<void> {
   const handlers = eventHandlers.get(event) || [];
-  for (const handler of handlers) {
-    try {
-      await handler(payload, event, workspaceId);
-    } catch (err) {
-      logger.error({ err }, `[Webhook] Legacy handler error for '${event}'`);
-    }
-  }
+  for (const handler of handlers) await handler(payload, event, workspaceId);
 }
 
 // ─── Valid providers ────────────────────────────────────────────────────────
@@ -131,6 +125,8 @@ function isValidProvider(provider: string): provider is WebhookProvider {
  *         description: App installation/repository identity mismatch or missing webhook secret
  *       404:
  *         description: No workspace connected to this repository
+ *       503:
+ *         description: Processing failed or another non-completed claim must be retried by the provider
  */
 router.post('/github', async (req: Request, res: Response) => {
   const signature = req.headers['x-hub-signature-256'] as string | undefined;
@@ -187,7 +183,7 @@ router.post('/github', async (req: Request, res: Response) => {
           AND i.registration_id = b.registration_id
           AND i.installation_id = b.installation_id
           AND i.status = 'active'
-        WHERE b.superseded_at IS NULL AND b.status = 'active' AND b.webhook_verified = TRUE
+        WHERE b.superseded_at IS NULL AND b.status = 'active' AND b.provider_hook_configured = TRUE
           AND b.installation_id = $1 AND b.repository_id = $2
           AND lower(b.repo_owner) = lower($3) AND lower(b.repo_name) = lower($4)`,
       [installationId, repositoryId, repoOwner, repoName],
@@ -216,101 +212,90 @@ router.post('/github', async (req: Request, res: Response) => {
   if (!verifyWebhookSignature(rawBody, signature, secret)) throw new AuthError('Invalid webhook signature');
   if (!SUPPORTED_GITHUB_EVENTS.has(event)) throw new ValidationError(`Unsupported GitHub webhook event: ${event}`);
 
-  // Atomic replay claim on the existing event ledger/event bus.
+  // Atomically claim a new, failed, or bounded stale delivery in the existing
+  // ledger. Provider redelivery supplies the payload; Rorca does not claim
+  // exactly-once handler semantics.
   const webhookRouter = getWebhookRouter();
-  const claimed = await webhookRouter.claimDelivery('github', deliveryId, event, row.workspace_id);
-  if (!claimed) {
-    res.json({ ok: true, status: 'duplicate' });
+  const claim = await webhookRouter.claimDelivery('github', deliveryId, event, row.workspace_id);
+  if (!claim) {
+    const existingStatus = await webhookRouter.checkDedup('github', deliveryId, event, row.workspace_id);
+    if (existingStatus === 'completed') res.json({ ok: true, status: 'duplicate' });
+    else res.status(503).json({ ok: false, status: 'retry-later', code: 'WEBHOOK_DELIVERY_IN_PROGRESS' });
     return;
   }
 
-  // ── Signature valid — respond 200 immediately, process async ──
-  res.json({ ok: true, status: 'processing' });
+  try {
+    await insertAuditEntry({
+      workspaceId: row.workspace_id,
+      provider: 'github',
+      action: 'webhook_received',
+      actorType: 'webhook',
+      details: {
+        webhook_event: event,
+        delivery_id: deliveryId,
+        repo: repoFullName,
+        delivery_attempt: claim.attempt,
+        action: payload.action || null,
+        sender: payload.sender?.login || null,
+      },
+    }).catch(() => {});
 
-  insertAuditEntry({
-    workspaceId: row.workspace_id,
-    provider: 'github',
-    action: 'webhook_received',
-    actorType: 'webhook',
-    details: {
-      webhook_event: event,
-      delivery_id: deliveryId,
-      repo: repoFullName,
-      action: payload.action || null,
-      sender: payload.sender?.login || null,
-    },
-  });
-
-  // Async processing via setImmediate to avoid blocking the response
-  setImmediate(async () => {
-    try {
-      // Update only the authority record that authenticated this delivery.
-      if (row.source === 'github-app') {
-        await execute(
-          'UPDATE github_app_workspace_bindings SET last_webhook_at = NOW() WHERE workspace_id = $1 AND installation_id = $2 AND repository_id = $3 AND superseded_at IS NULL',
-          [row.workspace_id, row.installation_id, row.repository_id],
-        );
-      } else {
-        await execute(
-          'UPDATE workspace_github_webhooks SET last_webhook_at = NOW() WHERE workspace_id = $1',
-          [row.workspace_id],
-        );
-      }
-
-      // Log every received webhook to wal_events
+    // A valid signed App delivery promotes observed health independently from
+    // provider hook configuration, including the initial signed ping.
+    if (row.source === 'github-app') {
       await execute(
-        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_webhook', $1, $2)",
-        [row.workspace_id, JSON.stringify({
-          event,
-          deliveryId,
-          repo: repoFullName,
-          action: payload.action || null,
-          ref: payload.ref || null,
-          sender: payload.sender?.login || null,
-        })]
+        `UPDATE github_app_workspace_bindings
+            SET last_webhook_at = NOW(), signed_delivery_observed = TRUE
+          WHERE workspace_id = $1 AND installation_id = $2 AND repository_id = $3
+            AND status = 'active' AND superseded_at IS NULL`,
+        [row.workspace_id, row.installation_id, row.repository_id],
       );
-
-      logger.info(`[Webhook] GitHub ${event} from ${repoFullName} for workspace ${row.workspace_id}`);
-
-      // Dispatch via WebhookRouter (retry + DLQ) for new-style handlers
-      const meta = { deliveryId, workspaceId: row.workspace_id };
-      await webhookRouter.dispatch('github', event, payload, meta);
-
-      // Also dispatch legacy handlers for backward compatibility
-      await dispatchLegacyHandlers(event, payload, row.workspace_id);
-
-      // Mark delivery as completed
-      await webhookRouter.recordDelivery('github', deliveryId, event, 'completed', row.workspace_id);
-
-      insertAuditEntry({
-        workspaceId: row.workspace_id,
-        provider: 'github',
-        action: 'webhook_processed',
-        actorType: 'webhook',
-        details: {
-          webhook_event: event,
-          delivery_id: deliveryId,
-          repo: repoFullName,
-        },
-      });
-    } catch (err) {
-      logger.error({ err }, '[Webhook] Async processing error');
-      await webhookRouter.recordDelivery('github', deliveryId, event, 'failed', row.workspace_id).catch(() => {});
-
-      insertAuditEntry({
-        workspaceId: row.workspace_id,
-        provider: 'github',
-        action: 'webhook_failed',
-        actorType: 'webhook',
-        details: {
-          webhook_event: event,
-          delivery_id: deliveryId,
-          repo: repoFullName,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      });
+    } else {
+      await execute(
+        'UPDATE workspace_github_webhooks SET last_webhook_at = NOW() WHERE workspace_id = $1',
+        [row.workspace_id],
+      );
     }
-  });
+
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_webhook', $1, $2)",
+      [row.workspace_id, JSON.stringify({
+        event, deliveryId, repo: repoFullName, deliveryAttempt: claim.attempt,
+        action: payload.action || null, ref: payload.ref || null, sender: payload.sender?.login || null,
+      })],
+    );
+
+    logger.info(`[Webhook] GitHub ${event} from ${repoFullName} for workspace ${row.workspace_id}`);
+    const meta = { deliveryId, workspaceId: row.workspace_id };
+    await webhookRouter.dispatch('github', event, payload, meta);
+    await dispatchLegacyHandlers(event, payload, row.workspace_id);
+
+    const completed = await webhookRouter.completeDelivery('github', deliveryId, claim.claimToken);
+    if (!completed) throw new Error('Webhook delivery claim was reclaimed before acknowledgement');
+
+    await insertAuditEntry({
+      workspaceId: row.workspace_id,
+      provider: 'github',
+      action: 'webhook_processed',
+      actorType: 'webhook',
+      details: { webhook_event: event, delivery_id: deliveryId, repo: repoFullName, delivery_attempt: claim.attempt },
+    }).catch(() => {});
+    res.json({ ok: true, status: 'completed' });
+  } catch {
+    logger.error({ deliveryId, event, workspaceId: row.workspace_id }, '[Webhook] Processing failed; requesting provider redelivery');
+    await webhookRouter.failDelivery('github', deliveryId, claim.claimToken).catch(() => false);
+    await insertAuditEntry({
+      workspaceId: row.workspace_id,
+      provider: 'github',
+      action: 'webhook_failed',
+      actorType: 'webhook',
+      details: {
+        webhook_event: event, delivery_id: deliveryId, repo: repoFullName,
+        delivery_attempt: claim.attempt, error_code: 'WEBHOOK_PROCESSING_FAILED',
+      },
+    }).catch(() => {});
+    res.status(503).json({ ok: false, status: 'failed', code: 'WEBHOOK_PROCESSING_FAILED' });
+  }
 });
 
 // ─── GET /api/webhooks/dlq — List dead letter queue ─────────────────────────
@@ -489,6 +474,8 @@ router.post('/dlq/:id/retry', async (req: Request, res: Response) => {
  *         description: Invalid provider
  *       401:
  *         description: Signature verification failed
+ *       503:
+ *         description: Processing failed or a delivery claim must be retried
  */
 router.post('/:provider', async (req: Request, res: Response) => {
   const provider = String(req.params.provider);
@@ -527,35 +514,28 @@ router.post('/:provider', async (req: Request, res: Response) => {
     }
   }
 
-  // Deduplication check
-  if (deliveryId) {
-    const existingStatus = await webhookRouter.checkDedup(provider, deliveryId);
-    if (existingStatus) {
-      res.json({ ok: true, status: 'duplicate' });
-      return;
-    }
-    await webhookRouter.recordDelivery(provider, deliveryId, eventType, 'processing');
+  const claim = deliveryId
+    ? await webhookRouter.claimDelivery(provider, deliveryId, eventType)
+    : null;
+  if (deliveryId && !claim) {
+    const existingStatus = await webhookRouter.checkDedup(provider, deliveryId, eventType);
+    if (existingStatus === 'completed') res.json({ ok: true, status: 'duplicate' });
+    else res.status(503).json({ ok: false, status: 'retry-later', code: 'WEBHOOK_DELIVERY_IN_PROGRESS' });
+    return;
   }
 
-  // Respond 200 immediately
-  res.json({ ok: true, status: webhookRouter.hasHandlers(provider, eventType) ? 'processing' : 'unhandled' });
-
-  // Async dispatch
-  setImmediate(async () => {
-    try {
-      const meta = { deliveryId };
-      await webhookRouter.dispatch(provider, eventType, payload, meta);
-
-      if (deliveryId) {
-        await webhookRouter.recordDelivery(provider, deliveryId, eventType, 'completed');
-      }
-    } catch (err) {
-      logger.error({ err, provider, eventType }, '[Webhook] Generic async processing error');
-      if (deliveryId) {
-        await webhookRouter.recordDelivery(provider, deliveryId, eventType, 'failed').catch(() => {});
-      }
+  try {
+    const meta = { deliveryId };
+    await webhookRouter.dispatch(provider, eventType, payload, meta);
+    if (deliveryId && claim) {
+      const completed = await webhookRouter.completeDelivery(provider, deliveryId, claim.claimToken);
+      if (!completed) throw new Error('Webhook delivery claim was reclaimed before acknowledgement');
     }
-  });
+    res.json({ ok: true, status: webhookRouter.hasHandlers(provider, eventType) ? 'completed' : 'unhandled' });
+  } catch {
+    if (deliveryId && claim) await webhookRouter.failDelivery(provider, deliveryId, claim.claimToken).catch(() => false);
+    res.status(503).json({ ok: false, status: 'failed', code: 'WEBHOOK_PROCESSING_FAILED' });
+  }
 });
 
 // ─── Provider-specific header extraction ────────────────────────────────────

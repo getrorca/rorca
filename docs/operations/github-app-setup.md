@@ -10,7 +10,7 @@ Rorca uses one canonical GitHub App registration with any number of GitHub accou
 
 At runtime Rorca creates an RS256 App JWT and asks GitHub for a short-lived installation token constrained with exactly one `repository_ids` entry and an operation-specific `permissions` object. Every returned token must enumerate exactly that repository and exactly the requested permission profile; broader or unknown grants fail closed. JWTs and installation tokens live only in process memory. Private keys and webhook secrets are AES-256-GCM encrypted in the integration vault. Responses, WAL, audit details, logs, and database rows never contain plaintext secrets, JWTs, or installation tokens.
 
-An active App binding is authoritative. Binding it transactionally retires the legacy repository-webhook row and marks that secret authority revoked; omission of App installation identity can never fall back to the retained row. Identity drift, suspension, expiry, permission uncertainty, or repository mismatch fails closed. Rorca does not silently replace it with a broader PAT/OAuth/environment token. Workspace PAT/OAuth remains an explicit migration fallback only for workspaces with no current App binding. Rorca remains canonical for run, story, policy, decision, and Lifecycle/provider-evidence state; the App is only a credential provider.
+An active App binding is authoritative. Binding it transactionally retires the legacy repository-webhook row and marks that secret authority revoked; omission of App installation identity can never fall back to the retained row. Identity drift, suspension, expiry, permission uncertainty, provider-profile staleness (24 hours), inactive/mismatched hook configuration, authoritative provider rejection, or repository mismatch fails closed. Rorca does not silently replace it with a broader PAT/OAuth/environment token. Workspace PAT/OAuth remains an explicit migration fallback only for workspaces with no current App binding. Rorca remains canonical for run, story, policy, decision, and Lifecycle/provider-evidence state; the App is only a credential provider.
 
 ## Recommended GitHub App permissions
 
@@ -34,11 +34,11 @@ GitHub **Team plan remains separately required** for private-repository protecte
 
 1. Configure an HTTPS `RORCA_APP_URL`, `RORCA_GITHUB_WEBHOOK_URL=https://hooks.rorca.ai/api/webhooks/github`, and `RORCA_GITHUB_APP_CREATION_ORG=<organization-login>`. Configure `VAULT_KEY` (64 hex characters) or an explicit strong `JWT_SECRET` before storing credentials.
 2. In Settings > GitHub, choose **Prepare App setup**. The admin endpoint creates a random 10-minute, one-use state bound to the authenticated operator and workspace. Normal CSRF middleware protects each local POST; the callback does not depend on an in-memory CSRF value that changes across reload.
-3. Submit the returned manifest directly to the organization-owned GitHub App creation URL. Production CSP permits form submission only to the same origin and `https://github.com`; the manifest contains no private key.
+3. Submit the returned manifest directly to the organization-owned GitHub App creation URL. Both Express/Helmet and the checked-in static nginx document CSP permit form submission only to the same origin and exact `https://github.com` origin; the manifest contains no private key.
 4. GitHub returns directly to `/settings/github`. After a reload or a new callback tab, choose **Complete one-time App registration**. Rorca atomically consumes the state before exchanging the one-time code. GitHub's returned private key and webhook secret are provider-profile checked and inserted in the same database transaction as the registration; they are never returned to the browser.
 5. Install the App for **selected repositories** under each desired owner/account.
 6. Copy the numeric installation id and repository id plus owner/name into **Verify and bind exact repository**. The server validates App id, installation id/account, selected-repository mode, repository id/full name, token expiry, and permissions before persisting the immutable binding.
-7. Review every capability diagnostic. A missing capability is not “connected.” Provider permissions, events, and exact webhook URL/configuration must all verify. No autonomous policy, merge, or deployment authority is activated by registration or binding.
+7. Review credential readiness separately from webhook health. Provider permissions, events, active state, and exact webhook URL/configuration must verify (and remain within the 24-hour freshness window) before credential readiness is connected. A new binding truthfully shows **Awaiting signed delivery**; the first valid signed App ping/event promotes observed webhook health without being required to authenticate that initial delivery. No autonomous policy, merge, or deployment authority is activated by registration or binding.
 8. To replace a disabled/invalid binding, enter the new exact installation/repository identity and an audited replacement reason. Rorca preserves and permanently supersedes the old row; it never deletes or rewrites binding identity.
 
 No model may choose repository authority, grant permissions, install the App, activate policy, merge, or deploy.
@@ -50,6 +50,8 @@ If no public authenticated callback is available, setup returns `bounded-import`
 ## Rotation and incident response
 
 The current schema audit-retains bindings, registrations, and secret records. Disable an invalid binding rather than deleting evidence. Registration identity and typed secret references are immutable; a future dedicated rotation ceremony must create an audited replacement registration/secrets, supersede affected bindings, clear in-memory token state, and revalidate every replacement. Until that ceremony exists, use a maintenance window and do not overwrite ciphertext or secret references manually.
+
+GitHub webhook processing is bounded at-least-once. Rorca acknowledges only after durable handler completion; failed or two-minute-stale claims may be reclaimed on provider redelivery, up to five claims. Completed duplicates return 200 without dispatch; current non-completed claims return retry-later 503 so a crash is never falsely acknowledged. Handlers must remain idempotent because Rorca does not claim exactly-once side effects.
 
 If installation or repository drift is reported:
 

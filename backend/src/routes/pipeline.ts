@@ -7349,7 +7349,7 @@ async function recordTokenUsage(
  *               status: { type: string, enum: [pass, fail, skip, excluded] }
  *               worktreePath: { type: string, nullable: true }
  *               worktreeBranch: { type: string, nullable: true }
- *               commitSha: { type: string, nullable: true, description: "Host-observed story/worktree branch commit" }
+ *               commitSha: { type: string, nullable: true, pattern: '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$', description: "Host-verified immutable integrated run-branch HEAD" }
  *               commitMessage: { type: string, nullable: true }
  *               inputTokens: { type: integer, nullable: true }
  *               outputTokens: { type: integer, nullable: true }
@@ -7389,8 +7389,8 @@ router.post('/story-result', async (req: Request, res: Response) => {
       return;
     }
 
-    if (commitSha && !/^[0-9a-f]{40}$/i.test(commitSha)) {
-      throw new ValidationError('commitSha must be a full git SHA');
+    if (commitSha && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+      throw new ValidationError('commitSha must be a full 40- or 64-hex git object id');
     }
     if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
       throw new ValidationError('completionPacket must be an object');
@@ -7465,7 +7465,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
         projection.workspace_id,
         runId,
         commitSha,
-        commitMessage?.trim() || `story(${storyId}): host-observed output`,
+        commitMessage?.trim() || `integrated story(${storyId}): host-verified run-branch HEAD`,
         worktreeBranch ?? projection.branch_name,
       ]);
     }

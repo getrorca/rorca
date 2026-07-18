@@ -14,6 +14,7 @@ import { logger } from './logger';
 import { githubRateLimiter } from './github-rate-limiter';
 import { githubRepoApiUrl, isFullGitObjectId } from './github-repository-authority';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
+import { extractGithubProviderError, sanitizeGithubProviderException } from './github-provider-error';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -109,15 +110,16 @@ export async function postCommitStatus(
     );
 
     if (!res.ok) {
-      const text = await res.text();
-      logger.error({ text }, `[Checks] GitHub status API error (${res.status})`);
+      const providerError = extractGithubProviderError(res, 'GITHUB_MANUAL_STATUS_FAILED');
+      logger.error({ providerError }, `[Checks] GitHub status API error (${res.status})`);
       return false;
     }
 
     logger.info(`[Checks] Posted ${state} status to ${owner}/${repo}@${sha.slice(0, 7)}`);
     return true;
   } catch (err) {
-    logger.error({ err }, '[Checks] Failed to post commit status');
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_MANUAL_STATUS_FAILED');
+    logger.error({ providerError }, '[Checks] Failed to post commit status');
     return false;
   }
 }

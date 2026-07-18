@@ -30,6 +30,12 @@ import { spawnSync } from 'child_process';
 import { getGithubRepositoryAuthority, githubRepoApiUrl } from './github-repository-authority';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
+import {
+  extractGithubProviderError,
+  formatGithubProviderError,
+  githubProviderError,
+  sanitizeGithubProviderException,
+} from './github-provider-error';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -249,23 +255,22 @@ export async function createDraftPr(opts: {
       fetchGithubWithTimeout(fetch, checkUrl, { headers: buildGitHubHeaders(token) }),
     );
 
-    if (checkRes.ok) {
-      const existing = await checkRes.json() as Array<{ number: number }>;
-      if (existing.length > 0) {
-        // PR already exists — store number and skip creation
-        const prNumber = existing[0].number;
-        await execute(
-          'UPDATE pipeline_runs SET pr_number = $1, pr_creating = FALSE WHERE id = $2',
-          [prNumber, runId],
-        );
-        await emitWalEvent('pr_draft_created', workspaceId, {
-          run_id: runId, pr_number: prNumber,
-          pr_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
-          reused: true,
-        });
-        logger.info({ runId, prNumber }, '[draft-pr] Reusing existing PR');
-        return;
-      }
+    if (!checkRes.ok) throw githubProviderError(checkRes, 'GITHUB_DRAFT_PR_LOOKUP_FAILED');
+    const existing = await checkRes.json() as Array<{ number: number }>;
+    if (existing.length > 0) {
+      // PR already exists — store number and skip creation
+      const prNumber = existing[0].number;
+      await execute(
+        'UPDATE pipeline_runs SET pr_number = $1, pr_creating = FALSE WHERE id = $2',
+        [prNumber, runId],
+      );
+      await emitWalEvent('pr_draft_created', workspaceId, {
+        run_id: runId, pr_number: prNumber,
+        pr_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
+        reused: true,
+      });
+      logger.info({ runId, prNumber }, '[draft-pr] Reusing existing PR');
+      return;
     }
 
     // Create draft PR
@@ -289,10 +294,7 @@ export async function createDraftPr(opts: {
       }),
     );
 
-    if (!createRes.ok) {
-      const errText = await createRes.text();
-      throw new Error(`GitHub POST /pulls (draft) returned ${createRes.status}: ${errText}`);
-    }
+    if (!createRes.ok) throw githubProviderError(createRes, 'GITHUB_DRAFT_PR_CREATE_FAILED');
 
     const prData = await createRes.json() as { number: number; html_url: string };
     const prNumber = prData.number;
@@ -321,8 +323,9 @@ export async function createDraftPr(opts: {
 
     logger.info({ runId, prNumber, prUrl: prData.html_url }, '[draft-pr] Draft PR created');
   } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    logger.error({ err, runId, owner, repo, branchName }, '[draft-pr] Draft PR creation failed');
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_DRAFT_PR_CREATE_FAILED');
+    const errMsg = formatGithubProviderError(providerError);
+    logger.error({ providerError, runId, owner, repo, branchName }, '[draft-pr] Draft PR creation failed');
 
     await execute(
       'UPDATE pipeline_runs SET pr_creating = FALSE, pr_creation_error = $1 WHERE id = $2',
@@ -398,13 +401,16 @@ async function _doUpdateDraftPrProgress(runId: number, workspaceId: string | num
           stories_total: progress.total,
         });
       } else {
-        logger.warn({ runId, status: res.status }, '[draft-pr] Progress PATCH failed');
+        const providerError = extractGithubProviderError(res, 'GITHUB_DRAFT_PR_PROGRESS_FAILED');
+        logger.warn({ runId, providerError }, '[draft-pr] Progress PATCH failed');
       }
     }).catch((err) => {
-      logger.warn({ err, runId }, '[draft-pr] Progress PATCH error');
+      const providerError = sanitizeGithubProviderException(err, 'GITHUB_DRAFT_PR_PROGRESS_FAILED');
+      logger.warn({ providerError, runId }, '[draft-pr] Progress PATCH error');
     });
   } catch (err) {
-    logger.warn({ err, runId }, '[draft-pr] updateDraftPrProgress error');
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_DRAFT_PR_PROGRESS_FAILED');
+    logger.warn({ providerError, runId }, '[draft-pr] updateDraftPrProgress error');
   }
 }
 
@@ -544,24 +550,23 @@ export async function finalizeDraftPr(opts: {
         }),
       );
 
-      if (!patchRes.ok) {
-        const errText = await patchRes.text();
-        throw new Error(`GitHub PATCH /pulls/${prNumber} (finalize) returned ${patchRes.status}: ${errText}`);
-      }
+      if (!patchRes.ok) throw githubProviderError(patchRes, 'GITHUB_DRAFT_PR_FINALIZE_FAILED');
 
       // Request reviewers if configured
       const reviewers = parseReviewers(config.auto_pr_reviewers);
       if (reviewers.length > 0) {
         try {
-          await githubRateLimiter.execute(() =>
+          const reviewerResponse = await githubRateLimiter.execute(() =>
             fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${prNumber}/requested_reviewers`), {
               method: 'POST',
               headers: buildGitHubHeaders(token),
               body: JSON.stringify({ reviewers }),
             }),
           );
+          if (!reviewerResponse.ok) throw githubProviderError(reviewerResponse, 'GITHUB_PR_REVIEWERS_FAILED');
         } catch (reviewerErr) {
-          logger.warn({ reviewerErr, runId, prNumber }, '[draft-pr] Failed to request reviewers (non-fatal)');
+          const providerError = sanitizeGithubProviderException(reviewerErr, 'GITHUB_PR_REVIEWERS_FAILED');
+          logger.warn({ providerError, runId, prNumber }, '[draft-pr] Failed to request reviewers (non-fatal)');
         }
       }
 
@@ -597,13 +602,14 @@ export async function finalizeDraftPr(opts: {
       failureSummary.push('');
       failureSummary.push('*This PR remains as a draft. Fix the failed stories and re-run the pipeline.*');
 
-      await githubRateLimiter.execute(() =>
+      const failurePatch = await githubRateLimiter.execute(() =>
         fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${prNumber}`), {
           method: 'PATCH',
           headers: buildGitHubHeaders(token),
           body: JSON.stringify({ body: failureSummary.join('\n') }),
         }),
       );
+      if (!failurePatch.ok) throw githubProviderError(failurePatch, 'GITHUB_DRAFT_PR_FINALIZE_FAILED');
 
       await emitWalEvent('pr_updated', workspaceId, {
         run_id: runId,
@@ -623,8 +629,9 @@ export async function finalizeDraftPr(opts: {
       details: { action: 'finalize_draft_pr', pr_number: prNumber, run_id: runId, status },
     });
   } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    logger.error({ err, runId, prNumber }, '[draft-pr] finalizeDraftPr failed');
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_DRAFT_PR_FINALIZE_FAILED');
+    const errMsg = formatGithubProviderError(providerError);
+    logger.error({ providerError, runId, prNumber }, '[draft-pr] finalizeDraftPr failed');
 
     await insertAuditEntry({
       workspaceId: String(workspaceId),

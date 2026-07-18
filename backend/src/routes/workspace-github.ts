@@ -15,6 +15,7 @@ import { NotFoundError, ValidationError } from '../lib/errors';
 import { storeOAuthToken, revokeToken, markTokenValidated } from '../lib/integration-vault';
 import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
 import { fetchGithubWithTimeout, getWorkspaceGithubAppBinding, githubAppBindingHasVerifiedProfile } from '../lib/github-app-credential-provider';
+import { extractGithubProviderError } from '../lib/github-provider-error';
 import {
   assertGithubRef,
   assertGithubRepositoryIdentity,
@@ -103,8 +104,8 @@ async function validateGitHubToken(token: string): Promise<{
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new ValidationError(`GitHub token invalid: ${response.status} ${text || response.statusText}`);
+    const safe = extractGithubProviderError(response, 'GITHUB_TOKEN_VALIDATION_FAILED');
+    throw new ValidationError(safe.message, { providerStatus: safe.providerStatus, providerRequestId: safe.requestId });
   }
 
   const data = await response.json() as { login?: string; avatar_url?: string | null };
@@ -275,8 +276,8 @@ async function createWebhook(
   }
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new ValidationError(`Failed to create webhook: ${response.status} ${text || response.statusText}`);
+    const safe = extractGithubProviderError(response, 'GITHUB_WEBHOOK_CREATE_FAILED');
+    throw new ValidationError(safe.message, { providerStatus: safe.providerStatus, providerRequestId: safe.requestId });
   }
 
   const data = await response.json() as { id?: number };
@@ -293,8 +294,8 @@ async function deleteWebhook(owner: string, repo: string, webhookId: number, tok
   });
 
   if (!response.ok && response.status !== 404) {
-    const text = await response.text();
-    throw new ValidationError(`Failed to delete webhook: ${response.status} ${text || response.statusText}`);
+    const safe = extractGithubProviderError(response, 'GITHUB_WEBHOOK_DELETE_FAILED');
+    throw new ValidationError(safe.message, { providerStatus: safe.providerStatus, providerRequestId: safe.requestId });
   }
 }
 
@@ -332,7 +333,8 @@ router.get('/:id/github', async (req: Request, res: Response, next: NextFunction
     const appBinding = authority.source === 'github-app-installation' ? await getWorkspaceGithubAppBinding(workspaceId) : null;
     const appCapable = appBinding ? githubAppBindingHasVerifiedProfile(appBinding) : true;
     const legacy = authority.source === 'pat-oauth-fallback' ? await getGithubRow(workspaceId) : null;
-    const connected = authority.status === 'active' && appCapable && (authority.source === 'github-app-installation' ? authority.webhookVerified : Boolean(legacy));
+    const connected = authority.status === 'active' && appCapable
+      && (authority.source === 'github-app-installation' ? authority.webhookConfigured : Boolean(legacy));
     res.json({
       connected,
       credentialSource: authority.source,
@@ -345,6 +347,8 @@ router.get('/:id/github', async (req: Request, res: Response, next: NextFunction
         ? process.env.RORCA_GITHUB_WEBHOOK_URL?.trim() || 'https://hooks.rorca.ai/api/webhooks/github'
         : `${getBackendBaseUrl(req)}/api/webhooks/github`,
       lastWebhookAt: authority.lastWebhookAt,
+      webhookConfigured: authority.webhookConfigured,
+      signedDeliveryObserved: authority.signedDeliveryObserved,
       connectedAt: authority.connectedAt,
       nextAction: connected ? null : 'Provider capability revalidation is required; fallback is blocked while an App binding exists.',
       autoPr: { enabled: authority.autoPrEnabled, targetBranch: authority.autoPrTargetBranch, reviewers: authority.autoPrReviewers },
@@ -508,6 +512,24 @@ router.post('/:id/github/connect', requireWorkspaceAdmin(), async (req: Request,
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/test-connection:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Test the canonical workspace GitHub credential
+ *     operationId: testWorkspaceGithubConnection
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace members may verify only the credential already bound to their canonical repository."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Credential validation result }
+ *       401: { description: Authentication required }
+ */
 router.post('/:id/github/test-connection', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const workspaceId = String(req.params.id);
@@ -534,6 +556,24 @@ router.post('/:id/github/test-connection', async (req: Request, res: Response, n
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/disconnect-oauth:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Revoke the workspace OAuth credential
+ *     operationId: disconnectWorkspaceGithubOauth
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Credential revocation changes workspace authority and requires an administrator."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: OAuth credential revoked }
+ *       403: { description: Workspace admin required }
+ */
 router.post('/:id/github/disconnect-oauth', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
@@ -544,6 +584,33 @@ router.post('/:id/github/disconnect-oauth', requireWorkspaceAdmin(), async (req:
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/disconnect:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Disconnect a legacy repository webhook using an explicit token
+ *     operationId: disconnectWorkspaceGithubLegacyWebhook
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Legacy webhook removal changes repository authority and requires an administrator."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [githubToken]
+ *             properties:
+ *               githubToken: { type: string, minLength: 1, writeOnly: true }
+ *     responses:
+ *       200: { description: Legacy webhook disconnected }
+ *       403: { description: Workspace admin required }
+ */
 router.post('/:id/github/disconnect', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
@@ -573,6 +640,24 @@ router.post('/:id/github/disconnect', requireWorkspaceAdmin(), async (req: Reque
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github:
+ *   delete:
+ *     tags: [GitHub]
+ *     summary: Disable current workspace GitHub authority
+ *     operationId: disconnectWorkspaceGithub
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Disabling canonical GitHub authority is an explicit administrator action."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Current authority disabled }
+ *       403: { description: Workspace admin required }
+ */
 router.delete('/:id/github', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const workspaceId = String(req.params.id);
@@ -606,6 +691,34 @@ router.delete('/:id/github', requireWorkspaceAdmin(), async (req: Request, res: 
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/auto-pr:
+ *   put:
+ *     tags: [GitHub]
+ *     summary: Update credential-neutral auto-PR settings
+ *     operationId: updateWorkspaceGithubAutoPr
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Auto-PR configuration controls repository writes and requires an administrator."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled, targetBranch, reviewers]
+ *             properties:
+ *               enabled: { type: boolean }
+ *               targetBranch: { type: string, minLength: 1, maxLength: 255 }
+ *               reviewers: { type: array, maxItems: 50, items: { type: string } }
+ *     responses:
+ *       200: { description: Auto-PR settings updated }
+ */
 router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
@@ -636,6 +749,23 @@ router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (req: Request, 
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/workflow-config:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Read workspace workflow dispatch configuration
+ *     operationId: getWorkspaceGithubWorkflowConfig
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace members may inspect non-secret workflow configuration."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Workflow configuration }
+ */
 router.get('/:id/github/workflow-config', async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
@@ -646,6 +776,35 @@ router.get('/:id/github/workflow-config', async (req: Request, res: Response, ne
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/workflow-config:
+ *   put:
+ *     tags: [GitHub]
+ *     summary: Update workspace workflow dispatch configuration
+ *     operationId: updateWorkspaceGithubWorkflowConfig
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Workflow dispatch configuration controls provider-side execution and requires an administrator."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled, workflow_id, ref]
+ *             properties:
+ *               enabled: { type: boolean }
+ *               workflow_id: { type: string, maxLength: 255 }
+ *               ref: { type: string, minLength: 1, maxLength: 255 }
+ *               inputs: { type: object, additionalProperties: { type: string } }
+ *     responses:
+ *       200: { description: Workflow configuration updated }
+ */
 router.put('/:id/github/workflow-config', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
@@ -698,8 +857,8 @@ router.get('/:id/github/workflows', async (req: Request, res: Response, next: Ne
     });
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new ValidationError(`Failed to list workflows: ${response.status} ${text || response.statusText}`);
+      const safe = extractGithubProviderError(response, 'GITHUB_WORKFLOW_LIST_FAILED');
+      throw new ValidationError(safe.message, { providerStatus: safe.providerStatus, providerRequestId: safe.requestId });
     }
 
     const data = await response.json() as { workflows?: Array<Record<string, unknown>> };
@@ -742,8 +901,8 @@ router.post('/:id/github/webhook-ping', requireWorkspaceAdmin(), async (req: Req
     });
 
     if (!response.ok && response.status !== 204) {
-      const text = await response.text();
-      throw new ValidationError(`Failed to ping webhook: ${response.status} ${text || response.statusText}`);
+      const safe = extractGithubProviderError(response, 'GITHUB_WEBHOOK_PING_FAILED');
+      throw new ValidationError(safe.message, { providerStatus: safe.providerStatus, providerRequestId: safe.requestId });
     }
 
     res.json({ ok: true, pingedAt: new Date().toISOString() });
@@ -778,6 +937,27 @@ router.post('/:id/github/pr-template-preview', async (req: Request, res: Respons
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/actions-yaml:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Render the workspace GitHub Actions example
+ *     operationId: getWorkspaceGithubActionsYaml
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace members may read the non-secret generated workflow example."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: GitHub Actions YAML
+ *         content:
+ *           application/x-yaml:
+ *             schema: { type: string }
+ */
 router.get('/:id/github/actions-yaml', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const workspace = await requireWorkspace(String(req.params.id));
@@ -813,6 +993,35 @@ jobs:
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/dispatch:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Dispatch one configured GitHub Actions workflow
+ *     operationId: dispatchWorkspaceGithubWorkflow
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Provider workflow execution is an explicit administrator operation."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workflow_id, ref]
+ *             properties:
+ *               workflow_id: { type: string, minLength: 1, maxLength: 255 }
+ *               ref: { type: string, minLength: 1, maxLength: 255 }
+ *               inputs: { type: object, additionalProperties: true }
+ *     responses:
+ *       200: { description: Workflow dispatch accepted by GitHub }
+ *       400: { description: Invalid workflow or ref }
+ */
 router.post('/:id/github/dispatch', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
@@ -843,8 +1052,8 @@ router.post('/:id/github/dispatch', requireWorkspaceAdmin(), async (req: Request
     );
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new ValidationError(`Failed to dispatch workflow: ${response.status} ${text || response.statusText}`);
+      const safe = extractGithubProviderError(response, 'GITHUB_WORKFLOW_DISPATCH_FAILED');
+      throw new ValidationError(safe.message, { providerStatus: safe.providerStatus, providerRequestId: safe.requestId });
     }
 
     res.json({ ok: true });

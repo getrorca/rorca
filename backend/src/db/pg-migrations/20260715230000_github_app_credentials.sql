@@ -38,8 +38,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_github_app_single_active_registration
 
 CREATE TABLE IF NOT EXISTS github_app_installations (
   id UUID PRIMARY KEY,
-  registration_id UUID NOT NULL REFERENCES github_app_registrations(id) ON DELETE RESTRICT,
-  installation_id BIGINT NOT NULL UNIQUE CHECK (installation_id > 0),
+  registration_id UUID NOT NULL,
+  installation_id BIGINT NOT NULL CHECK (installation_id > 0),
   account_id BIGINT NOT NULL CHECK (account_id > 0),
   account_login TEXT NOT NULL CHECK (account_login ~ '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$'),
   account_type TEXT NOT NULL CHECK (account_type IN ('Organization', 'User')),
@@ -49,14 +49,17 @@ CREATE TABLE IF NOT EXISTS github_app_installations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_validated_at TIMESTAMPTZ,
   status_changed_at TIMESTAMPTZ,
-  UNIQUE (id, registration_id)
+  CONSTRAINT ga_install_registration_fk
+    FOREIGN KEY (registration_id) REFERENCES github_app_registrations(id) ON DELETE RESTRICT,
+  CONSTRAINT ga_install_installation_id_key UNIQUE (installation_id),
+  CONSTRAINT ga_install_id_registration_key UNIQUE (id, registration_id)
 );
 CREATE INDEX IF NOT EXISTS idx_github_app_installations_registration
   ON github_app_installations (registration_id, status);
 
 CREATE TABLE IF NOT EXISTS github_app_workspace_bindings (
   id UUID PRIMARY KEY,
-  workspace_id TEXT NOT NULL UNIQUE REFERENCES workspaces(id) ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
   registration_id UUID NOT NULL REFERENCES github_app_registrations(id) ON DELETE RESTRICT,
   installation_record_id UUID NOT NULL,
   installation_id BIGINT NOT NULL CHECK (installation_id > 0),
@@ -72,10 +75,12 @@ CREATE TABLE IF NOT EXISTS github_app_workspace_bindings (
   last_webhook_at TIMESTAMPTZ,
   validation_error_code TEXT,
   status_changed_at TIMESTAMPTZ,
-  FOREIGN KEY (installation_record_id, registration_id)
+  CONSTRAINT ga_binding_installation_registration_fk
+    FOREIGN KEY (installation_record_id, registration_id)
     REFERENCES github_app_installations(id, registration_id) ON DELETE RESTRICT,
-  UNIQUE (registration_id, repository_id),
-  UNIQUE (registration_id, installation_id, repository_id),
+  CONSTRAINT ga_binding_workspace_key UNIQUE (workspace_id),
+  CONSTRAINT ga_binding_registration_repository_key UNIQUE (registration_id, repository_id),
+  CONSTRAINT ga_binding_registration_install_repo_key UNIQUE (registration_id, installation_id, repository_id),
   CONSTRAINT github_app_binding_status_check CHECK (
     (status = 'active' AND validation_error_code IS NULL)
     OR status IN ('disabled', 'invalid')

@@ -262,8 +262,8 @@ function safeProviderUrl(value: unknown): string | null {
   }
 }
 
-function normalizedSha(value: unknown, field: string): string {
-  const sha = boundedText(value, 64).toLowerCase();
+export function normalizedSha(value: unknown, field: string): string {
+  const sha = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!isFullGitObjectId(sha)) throw new ValidationError(`${field} must be a full Git commit SHA`, { field });
   return sha;
 }

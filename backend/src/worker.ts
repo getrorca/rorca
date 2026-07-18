@@ -71,6 +71,11 @@ import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { githubRepoApiUrl } from './lib/github-repository-authority';
 import { resolveWorkspaceGitHubToken } from './lib/github-token-resolver';
 import { fetchGithubWithTimeout } from './lib/github-app-credential-provider';
+import {
+  extractGithubProviderError,
+  formatGithubProviderError,
+  sanitizeGithubProviderException,
+} from './lib/github-provider-error';
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
@@ -216,14 +221,16 @@ async function dispatchWorkflowIfConfigured(
       );
       logger.info({ runId, workflow_id: cfg.workflow_id }, '[worker] GitHub workflow dispatch succeeded');
     } else {
-      const errText = await dispatchRes.text().catch(() => String(dispatchRes.status));
+      const providerError = extractGithubProviderError(dispatchRes, 'GITHUB_WORKFLOW_DISPATCH_FAILED');
+      const errorMessage = formatGithubProviderError(providerError);
       await execute(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
         [String(workspaceId), JSON.stringify({
           run_id: runId,
           workflow_id: cfg.workflow_id,
-          error: errText,
+          error: errorMessage,
           status_code: dispatchRes.status,
+          provider_request_id: providerError.requestId,
         })]
       );
       // Also log to integration_audit_log for the Run View amber banner
@@ -234,18 +241,21 @@ async function dispatchWorkflowIfConfigured(
           run_id: runId,
           workflow_id: cfg.workflow_id,
           status_code: dispatchRes.status,
-          error: errText,
+          provider_request_id: providerError.requestId,
+          error: errorMessage,
         })]
       ).catch(() => { /* non-fatal */ });
-      logger.warn({ runId, workflow_id: cfg.workflow_id, status: dispatchRes.status, errText }, '[worker] GitHub workflow dispatch failed');
+      logger.warn({ runId, workflow_id: cfg.workflow_id, providerError }, '[worker] GitHub workflow dispatch failed');
     }
-  } catch (err: any) {
-    logger.error({ err, runId }, '[worker] dispatchWorkflowIfConfigured threw unexpectedly');
+  } catch (err: unknown) {
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_WORKFLOW_DISPATCH_FAILED');
+    const errorMessage = formatGithubProviderError(providerError);
+    logger.error({ providerError, runId }, '[worker] dispatchWorkflowIfConfigured threw unexpectedly');
     // Emit failure WAL event so the UI can show the amber banner
     try {
       await execute(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
-        [String(workspaceId), JSON.stringify({ run_id: runId, error: err.message })]
+        [String(workspaceId), JSON.stringify({ run_id: runId, error: errorMessage })]
       );
     } catch { /* double-fault, ignore */ }
   }

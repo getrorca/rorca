@@ -31,30 +31,31 @@ ALTER TABLE github_app_registrations
 -- Drop the dependent two-column binding FK before replacing its referenced
 -- installation uniqueness with the full immutable installation identity.
 ALTER TABLE github_app_workspace_bindings
-  DROP CONSTRAINT IF EXISTS github_app_workspace_bindings_installation_record_id_registration_id_fkey;
+  DROP CONSTRAINT IF EXISTS ga_binding_installation_registration_fk;
 
 ALTER TABLE github_app_installations
-  DROP CONSTRAINT IF EXISTS github_app_installations_id_registration_id_key,
-  ADD CONSTRAINT github_app_installations_identity_key
+  DROP CONSTRAINT IF EXISTS ga_install_id_registration_key,
+  ADD CONSTRAINT ga_install_identity_key
     UNIQUE (id, registration_id, installation_id);
 
 ALTER TABLE github_app_workspace_bindings
   ADD COLUMN IF NOT EXISTS provider_profile_verified_at TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS webhook_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS provider_hook_configured BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS signed_delivery_observed BOOLEAN NOT NULL DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS superseded_by_principal TEXT,
   ADD COLUMN IF NOT EXISTS replacement_reason TEXT;
 
 -- Replace the original global uniqueness constraints with one current binding.
 ALTER TABLE github_app_workspace_bindings
-  DROP CONSTRAINT IF EXISTS github_app_workspace_bindings_workspace_id_key,
-  DROP CONSTRAINT IF EXISTS github_app_workspace_bindings_registration_id_repository_id_key,
-  DROP CONSTRAINT IF EXISTS github_app_workspace_bindings_registration_id_installation_id_repository_id_key;
+  DROP CONSTRAINT IF EXISTS ga_binding_workspace_key,
+  DROP CONSTRAINT IF EXISTS ga_binding_registration_repository_key,
+  DROP CONSTRAINT IF EXISTS ga_binding_registration_install_repo_key;
 DROP INDEX IF EXISTS uq_github_app_binding_repo_name_ci;
 
 ALTER TABLE github_app_workspace_bindings
-  DROP CONSTRAINT IF EXISTS github_app_binding_installation_identity_fk,
-  ADD CONSTRAINT github_app_binding_installation_identity_fk
+  DROP CONSTRAINT IF EXISTS ga_binding_installation_identity_fk,
+  ADD CONSTRAINT ga_binding_installation_identity_fk
     FOREIGN KEY (installation_record_id, registration_id, installation_id)
     REFERENCES github_app_installations(id, registration_id, installation_id) ON DELETE RESTRICT,
   DROP CONSTRAINT IF EXISTS github_app_binding_supersession_check,
@@ -116,7 +117,8 @@ SELECT b.workspace_id,
        CASE
          WHEN b.status = 'disabled' THEN 'disabled'
          WHEN b.status = 'active' AND r.status = 'active' AND i.status = 'active'
-              AND b.provider_profile_verified_at IS NOT NULL AND b.webhook_verified = TRUE
+              AND b.provider_profile_verified_at >= NOW() - INTERVAL '24 hours'
+              AND b.provider_hook_configured = TRUE
               AND b.permissions = '{"metadata":"read","actions":"write","checks":"write","contents":"write","issues":"read","pull_requests":"write","statuses":"write"}'::jsonb
               AND jsonb_array_length(b.events) = 4
               AND b.events @> '["check_run","issues","pull_request","push"]'::jsonb THEN 'active'
@@ -125,7 +127,8 @@ SELECT b.workspace_id,
        b.id AS binding_id,
        b.installation_id,
        b.repository_id,
-       b.webhook_verified,
+       b.provider_hook_configured AS webhook_configured,
+       b.signed_delivery_observed,
        b.created_at AS connected_at,
        b.last_webhook_at,
        COALESCE(c.auto_pr_enabled, FALSE) AS auto_pr_enabled,
@@ -149,7 +152,8 @@ SELECT w.workspace_id,
        NULL::uuid AS binding_id,
        NULL::bigint AS installation_id,
        NULL::bigint AS repository_id,
-       (w.webhook_id IS NOT NULL)::boolean AS webhook_verified,
+       (w.webhook_id IS NOT NULL)::boolean AS webhook_configured,
+       (w.last_webhook_at IS NOT NULL)::boolean AS signed_delivery_observed,
        w.created_at AS connected_at,
        w.last_webhook_at,
        COALESCE(c.auto_pr_enabled, w.auto_pr_enabled) AS auto_pr_enabled,
@@ -211,13 +215,15 @@ BEGIN
   IF (to_jsonb(OLD) - ARRAY[
         'permissions','events','status','last_validated_at','last_webhook_at',
         'validation_error_code','status_changed_at','provider_profile_verified_at',
-        'webhook_verified','superseded_at','superseded_by_principal','replacement_reason'
+        'provider_hook_configured','signed_delivery_observed','superseded_at',
+        'superseded_by_principal','replacement_reason'
       ]::text[])
      IS DISTINCT FROM
      (to_jsonb(NEW) - ARRAY[
         'permissions','events','status','last_validated_at','last_webhook_at',
         'validation_error_code','status_changed_at','provider_profile_verified_at',
-        'webhook_verified','superseded_at','superseded_by_principal','replacement_reason'
+        'provider_hook_configured','signed_delivery_observed','superseded_at',
+        'superseded_by_principal','replacement_reason'
       ]::text[]) THEN
     RAISE EXCEPTION 'GitHub App workspace/repository/installation binding identity is immutable';
   END IF;
@@ -240,6 +246,33 @@ DROP TRIGGER IF EXISTS trg_github_app_binding_identity ON github_app_workspace_b
 CREATE TRIGGER trg_github_app_binding_identity
   BEFORE UPDATE OR DELETE ON github_app_workspace_bindings
   FOR EACH ROW EXECUTE FUNCTION guard_github_app_binding_identity();
+
+-- The existing webhook ledger supports bounded at-least-once redelivery. A
+-- fresh claim token prevents a stale request from acknowledging a reclaimed
+-- delivery; payloads remain provider-redelivered rather than duplicated here.
+ALTER TABLE webhook_events
+  ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS claim_token UUID,
+  ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+UPDATE webhook_events
+   SET processing_started_at = COALESCE(processing_started_at, created_at),
+       claim_token = COALESCE(claim_token, md5(provider || ':' || delivery_id || ':' || id::text)::uuid),
+       attempt_count = GREATEST(attempt_count, 1)
+ WHERE status = 'processing';
+UPDATE webhook_events
+   SET completed_at = COALESCE(completed_at, created_at)
+ WHERE status = 'completed';
+ALTER TABLE webhook_events
+  DROP CONSTRAINT IF EXISTS ga_webhook_event_claim_state_check,
+  ADD CONSTRAINT ga_webhook_event_claim_state_check CHECK (
+    attempt_count >= 0 AND attempt_count <= 5
+    AND (status <> 'processing' OR (claim_token IS NOT NULL AND processing_started_at IS NOT NULL))
+    AND (status <> 'completed' OR completed_at IS NOT NULL)
+  );
+CREATE INDEX IF NOT EXISTS idx_webhook_events_reclaim
+  ON webhook_events (provider, status, processing_started_at)
+  WHERE status IN ('processing', 'failed');
 
 -- Manifest state remains one-time, operator/session bound and CSRF middleware
 -- still protects each local POST. A regenerated browser CSRF token is not used

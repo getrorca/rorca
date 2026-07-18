@@ -22,6 +22,7 @@
  *   await router.dispatch('github', 'push', payload, meta);
  */
 
+import crypto from 'node:crypto';
 import { queryOne, execute } from '../db/index';
 import { logger } from './logger';
 
@@ -67,7 +68,21 @@ interface DlqRow {
 // ─── Constants ────────────────────────────────────────────────────────────
 
 const MAX_RETRY_ATTEMPTS = 3;
+const MAX_DELIVERY_CLAIMS = 5;
+const STALE_PROCESSING_MS = 2 * 60_000;
 const BACKOFF_DELAYS_MS = [1000, 2000, 4000]; // exponential: 1s, 2s, 4s
+
+export interface WebhookDeliveryClaim {
+  claimToken: string;
+  attempt: number;
+}
+
+export class WebhookDispatchError extends Error {
+  constructor(readonly failedHandlers: number) {
+    super(`${failedHandlers} webhook handler(s) exhausted bounded retries`);
+    this.name = 'WebhookDispatchError';
+  }
+}
 
 // ─── WebhookRouter ────────────────────────────────────────────────────────
 
@@ -114,26 +129,69 @@ export class WebhookRouter {
    * Check if a delivery has already been processed (dedup).
    * Returns the status if found, undefined if new.
    */
-  async checkDedup(provider: WebhookProvider, deliveryId: string): Promise<string | undefined> {
+  async checkDedup(
+    provider: WebhookProvider,
+    deliveryId: string,
+    eventType: string,
+    workspaceId?: string,
+  ): Promise<string | undefined> {
     const row = await queryOne<{ status: string }>(
-      'SELECT status FROM webhook_events WHERE provider = $1 AND delivery_id = $2',
-      [provider, deliveryId],
+      `SELECT status FROM webhook_events
+        WHERE provider = $1 AND delivery_id = $2 AND event_type = $3
+          AND workspace_id IS NOT DISTINCT FROM $4`,
+      [provider, deliveryId, eventType, workspaceId || null],
     );
     return row?.status;
   }
 
-  /** Atomically claim a new delivery. False means another request already owns it. */
+  /**
+   * Atomically claim a new, failed, or bounded stale-processing delivery.
+   * Completed/recent/exhausted claims remain duplicates. The returned token is
+   * required for acknowledgement so a crashed claimant cannot complete a claim
+   * that a provider redelivery has reclaimed.
+   */
   async claimDelivery(
     provider: WebhookProvider,
     deliveryId: string,
     eventType: string,
     workspaceId?: string,
-  ): Promise<boolean> {
+  ): Promise<WebhookDeliveryClaim | null> {
+    const claimToken = crypto.randomUUID();
+    const staleBefore = new Date(Date.now() - STALE_PROCESSING_MS);
+    const row = await queryOne<{ claim_token: string; attempt_count: number }>(
+      `INSERT INTO webhook_events
+         (provider, delivery_id, event_type, status, workspace_id, processing_started_at, completed_at, claim_token, attempt_count)
+       VALUES ($1, $2, $3, 'processing', $4, NOW(), NULL, $5, 1)
+       ON CONFLICT (provider, delivery_id) DO UPDATE
+         SET status = 'processing', processing_started_at = NOW(), completed_at = NULL,
+             claim_token = EXCLUDED.claim_token, attempt_count = webhook_events.attempt_count + 1
+       WHERE webhook_events.event_type = EXCLUDED.event_type
+         AND webhook_events.workspace_id IS NOT DISTINCT FROM EXCLUDED.workspace_id
+         AND webhook_events.attempt_count < $7
+         AND (webhook_events.status = 'failed'
+              OR (webhook_events.status = 'processing' AND webhook_events.processing_started_at < $6))
+       RETURNING claim_token, attempt_count`,
+      [provider, deliveryId, eventType, workspaceId || null, claimToken, staleBefore, MAX_DELIVERY_CLAIMS],
+    );
+    return row ? { claimToken: row.claim_token, attempt: Number(row.attempt_count) } : null;
+  }
+
+  async completeDelivery(provider: WebhookProvider, deliveryId: string, claimToken: string): Promise<boolean> {
     const result = await execute(
-      `INSERT INTO webhook_events (provider, delivery_id, event_type, status, workspace_id)
-       VALUES ($1, $2, $3, 'processing', $4)
-       ON CONFLICT (provider, delivery_id) DO NOTHING`,
-      [provider, deliveryId, eventType, workspaceId || null],
+      `UPDATE webhook_events
+          SET status = 'completed', completed_at = NOW(), claim_token = NULL
+        WHERE provider = $1 AND delivery_id = $2 AND status = 'processing' AND claim_token = $3`,
+      [provider, deliveryId, claimToken],
+    );
+    return result.rowCount === 1;
+  }
+
+  async failDelivery(provider: WebhookProvider, deliveryId: string, claimToken: string): Promise<boolean> {
+    const result = await execute(
+      `UPDATE webhook_events
+          SET status = 'failed', completed_at = NULL, claim_token = NULL
+        WHERE provider = $1 AND delivery_id = $2 AND status = 'processing' AND claim_token = $3`,
+      [provider, deliveryId, claimToken],
     );
     return result.rowCount === 1;
   }
@@ -149,9 +207,10 @@ export class WebhookRouter {
     workspaceId?: string,
   ): Promise<void> {
     await execute(
-      `INSERT INTO webhook_events (provider, delivery_id, event_type, status, workspace_id)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (provider, delivery_id) DO UPDATE SET status = $4`,
+      `INSERT INTO webhook_events (provider, delivery_id, event_type, status, workspace_id, completed_at, claim_token, attempt_count)
+       VALUES ($1, $2, $3, $4, $5, CASE WHEN $4 = 'completed' THEN NOW() ELSE NULL END, NULL, 0)
+       ON CONFLICT (provider, delivery_id) DO UPDATE
+         SET status = $4, completed_at = CASE WHEN $4 = 'completed' THEN NOW() ELSE NULL END, claim_token = NULL`,
       [provider, deliveryId, eventType, status, workspaceId || null],
     );
   }
@@ -180,6 +239,7 @@ export class WebhookRouter {
     }
 
     let handlerCount = 0;
+    let failedHandlers = 0;
 
     for (const handler of handlers) {
       let lastError: Error | null = null;
@@ -206,11 +266,14 @@ export class WebhookRouter {
       }
 
       if (!succeeded && lastError) {
-        // All retries exhausted — insert into DLQ
+        // All retries exhausted — retain DLQ diagnostics, then fail dispatch so
+        // the provider receives a retryable response and can redeliver payload.
         await this.insertDlq(provider, eventType, payload, lastError, meta);
+        failedHandlers++;
       }
     }
 
+    if (failedHandlers > 0) throw new WebhookDispatchError(failedHandlers);
     return handlerCount;
   }
 

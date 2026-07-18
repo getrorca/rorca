@@ -10,12 +10,14 @@ import { execute, queryOne } from '../db/index';
 import { ConflictError, UnprocessableError, ValidationError } from './errors';
 import { getIntegrationSecret } from './integration-vault';
 import { assertGithubRepositoryIdentity } from './github-repository-authority';
+import { extractGithubProviderError, isAuthoritativeGithubFailure } from './github-provider-error';
 
 const JWT_MAX_LIFETIME_SECONDS = 9 * 60;
 const JWT_BACKDATE_SECONDS = 60;
 const TOKEN_EXPIRY_SKEW_MS = 60_000;
 const MAX_CACHE_ENTRIES = 256;
 const PROVIDER_TIMEOUT_MS = 10_000;
+export const GITHUB_APP_PROFILE_FRESHNESS_MS = 24 * 60 * 60_000;
 
 type PermissionLevel = 'read' | 'write' | 'admin';
 export type GithubPermissionRequest = Record<string, 'read' | 'write'>;
@@ -62,7 +64,8 @@ export interface GithubAppBindingRecord {
   lastWebhookAt: string | null;
   validationErrorCode: string | null;
   providerProfileVerifiedAt: string | null;
-  webhookVerified: boolean;
+  providerHookConfigured: boolean;
+  signedDeliveryObserved: boolean;
 }
 
 interface BindingRow {
@@ -74,7 +77,7 @@ interface BindingRow {
   repository_selection: 'selected'; repository_id: string | number; repo_owner: string; repo_name: string;
   permissions: Record<string, string> | string; events: string[] | string; last_validated_at: string | null;
   last_webhook_at: string | null; validation_error_code: string | null;
-  provider_profile_verified_at: string | null; webhook_verified: boolean;
+  provider_profile_verified_at: string | null; provider_hook_configured: boolean; signed_delivery_observed: boolean;
 }
 
 export interface GithubAppTokenMetadata {
@@ -108,7 +111,7 @@ function mapBinding(row: BindingRow): GithubAppBindingRecord {
     repoOwner: row.repo_owner, repoName: row.repo_name, permissions: parseObject(row.permissions), events: parseArray(row.events),
     lastValidatedAt: row.last_validated_at, lastWebhookAt: row.last_webhook_at,
     validationErrorCode: row.validation_error_code, providerProfileVerifiedAt: row.provider_profile_verified_at,
-    webhookVerified: row.webhook_verified,
+    providerHookConfigured: row.provider_hook_configured, signedDeliveryObserved: row.signed_delivery_observed,
   };
 }
 
@@ -121,7 +124,7 @@ export async function getWorkspaceGithubAppBinding(workspaceId: string): Promise
            i.account_id, i.account_login, i.account_type, i.repository_selection,
            b.repository_id, b.repo_owner, b.repo_name, b.permissions, b.events,
            b.last_validated_at, b.last_webhook_at, b.validation_error_code,
-           b.provider_profile_verified_at, b.webhook_verified
+           b.provider_profile_verified_at, b.provider_hook_configured, b.signed_delivery_observed
       FROM github_app_workspace_bindings b
       JOIN github_app_registrations r ON r.id = b.registration_id
       JOIN github_app_installations i
@@ -178,9 +181,12 @@ export function assertGithubAppProviderProfile(permissions: Record<string, strin
   }
 }
 
-export function githubAppBindingHasVerifiedProfile(binding: GithubAppBindingRecord | null): boolean {
+export function githubAppBindingHasVerifiedProfile(binding: GithubAppBindingRecord | null, now = new Date()): boolean {
   if (!binding || binding.status !== 'active' || binding.registrationStatus !== 'active'
-    || binding.installationStatus !== 'active' || !binding.providerProfileVerifiedAt || !binding.webhookVerified) return false;
+    || binding.installationStatus !== 'active' || !binding.providerProfileVerifiedAt || !binding.providerHookConfigured) return false;
+  const verifiedAt = new Date(binding.providerProfileVerifiedAt).getTime();
+  const ageMs = now.getTime() - verifiedAt;
+  if (!Number.isFinite(verifiedAt) || ageMs < -5 * 60_000 || ageMs > GITHUB_APP_PROFILE_FRESHNESS_MS) return false;
   try {
     assertGithubAppProviderProfile(binding.permissions, binding.events);
     return true;
@@ -218,62 +224,76 @@ export async function fetchGithubWithTimeout(fetchImpl: typeof fetch, url: strin
   return fetchImpl(url, { ...init, signal: timeout });
 }
 async function providerJson<T>(response: Response, code: string): Promise<T> {
-  if (!response.ok) throw new UnprocessableError(`GitHub App provider request failed with status ${response.status}`, code, { providerStatus: response.status });
+  if (!response.ok) {
+    const safe = extractGithubProviderError(response, code);
+    throw new UnprocessableError(safe.message, safe.code, {
+      providerStatus: safe.providerStatus, providerRequestId: safe.requestId,
+    });
+  }
   try { return await response.json() as T; } catch { throw new UnprocessableError('GitHub App provider returned an invalid response', code); }
 }
-async function markBindingInvalid(bindingId: string, code: string): Promise<void> {
+export async function markGithubAppBindingInvalid(bindingId: string, code: string): Promise<void> {
   for (const key of tokenCache.keys()) if (key.startsWith(`${bindingId}:`)) tokenCache.delete(key);
   await execute(`UPDATE github_app_workspace_bindings SET status = 'invalid', validation_error_code = $2, status_changed_at = NOW()
-                  WHERE id = $1 AND status = 'active' AND superseded_at IS NULL`, [bindingId, code.slice(0, 100)]).catch(() => {});
+                  WHERE id = $1 AND status = 'active' AND superseded_at IS NULL`, [bindingId, code.slice(0, 100)]);
 }
 
 async function refreshRepositoryToken(binding: GithubAppBindingRecord, request: GithubPermissionRequest, deps: ProviderDependencies): Promise<RepositoryInstallationToken> {
   const cacheKey = permissionProfileKey(binding.bindingId, request);
   const privateKey = await deps.getSecret(binding.privateKeySecretId, 'private_key');
   if (!privateKey) {
-    await markBindingInvalid(binding.bindingId, 'private_key_unavailable');
+    await markGithubAppBindingInvalid(binding.bindingId, 'private_key_unavailable');
     throw new UnprocessableError('GitHub App private key is unavailable', 'GITHUB_APP_PRIVATE_KEY_UNAVAILABLE');
   }
   const appJwt = createGithubAppJwt(binding.appId, privateKey, deps.now());
   const appHeaders = { Authorization: `Bearer ${appJwt}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Rorca-OSS' };
+  const installationResponse = await fetchGithubWithTimeout(deps.fetch, `https://api.github.com/app/installations/${binding.installationId}`, { headers: appHeaders });
+  if (!installationResponse.ok && isAuthoritativeGithubFailure(installationResponse.status)) {
+    await markGithubAppBindingInvalid(binding.bindingId, 'installation_provider_rejected');
+  }
   const installation = await providerJson<{ id?: number; app_id?: number; repository_selection?: string; suspended_at?: string | null; account?: { id?: number; login?: string; type?: string } }>(
-    await fetchGithubWithTimeout(deps.fetch, `https://api.github.com/app/installations/${binding.installationId}`, { headers: appHeaders }),
-    'GITHUB_APP_INSTALLATION_UNAVAILABLE',
+    installationResponse, 'GITHUB_APP_INSTALLATION_UNAVAILABLE',
   );
   const matches = installation.id === binding.installationId && installation.app_id === binding.appId
     && installation.repository_selection === 'selected' && !installation.suspended_at
     && installation.account?.id === binding.accountId && installation.account?.login?.toLowerCase() === binding.accountLogin.toLowerCase()
     && installation.account?.type === binding.accountType;
   if (!matches) {
-    await markBindingInvalid(binding.bindingId, 'installation_identity_mismatch');
+    await markGithubAppBindingInvalid(binding.bindingId, 'installation_identity_mismatch');
     throw new ConflictError('GitHub App installation identity no longer matches the immutable binding');
   }
 
+  const tokenProviderResponse = await fetchGithubWithTimeout(deps.fetch, `https://api.github.com/app/installations/${binding.installationId}/access_tokens`, {
+    method: 'POST', headers: { ...appHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repository_ids: [binding.repositoryId], permissions: request }),
+  });
+  if (!tokenProviderResponse.ok && isAuthoritativeGithubFailure(tokenProviderResponse.status)) {
+    await markGithubAppBindingInvalid(binding.bindingId, 'token_provider_rejected');
+  }
   const tokenResponse = await providerJson<{ token?: string; expires_at?: string; permissions?: Record<string, string>; repository_selection?: string; repositories?: Array<{ id?: number }> }>(
-    await fetchGithubWithTimeout(deps.fetch, `https://api.github.com/app/installations/${binding.installationId}/access_tokens`, {
-      method: 'POST', headers: { ...appHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repository_ids: [binding.repositoryId], permissions: request }),
-    }), 'GITHUB_APP_TOKEN_UNAVAILABLE',
+    tokenProviderResponse, 'GITHUB_APP_TOKEN_UNAVAILABLE',
   );
   const expiresAtMs = new Date(tokenResponse.expires_at ?? '').getTime();
   if (!tokenResponse.token || !Number.isFinite(expiresAtMs) || expiresAtMs <= deps.now().getTime() + TOKEN_EXPIRY_SKEW_MS
     || tokenResponse.repository_selection !== 'selected' || !Array.isArray(tokenResponse.repositories)
     || tokenResponse.repositories.length !== 1 || tokenResponse.repositories[0]?.id !== binding.repositoryId) {
-    await markBindingInvalid(binding.bindingId, 'token_response_invalid');
+    await markGithubAppBindingInvalid(binding.bindingId, 'token_response_invalid');
     throw new UnprocessableError('GitHub App returned an unusable repository token', 'GITHUB_APP_TOKEN_INVALID');
   }
   const permissions = tokenResponse.permissions ?? {};
   try { assertExactTokenProfile(permissions, request); } catch (error) {
-    await markBindingInvalid(binding.bindingId, 'token_permission_profile_confusion');
+    await markGithubAppBindingInvalid(binding.bindingId, 'token_permission_profile_confusion');
     throw error;
   }
-  const repo = await providerJson<{ id?: number; full_name?: string }>(
-    await fetchGithubWithTimeout(deps.fetch, `https://api.github.com/repos/${encodeURIComponent(binding.repoOwner)}/${encodeURIComponent(binding.repoName)}`, {
-      headers: { ...appHeaders, Authorization: `Bearer ${tokenResponse.token}` },
-    }), 'GITHUB_APP_REPOSITORY_UNAVAILABLE',
-  );
+  const repositoryResponse = await fetchGithubWithTimeout(deps.fetch, `https://api.github.com/repos/${encodeURIComponent(binding.repoOwner)}/${encodeURIComponent(binding.repoName)}`, {
+    headers: { ...appHeaders, Authorization: `Bearer ${tokenResponse.token}` },
+  });
+  if (!repositoryResponse.ok && isAuthoritativeGithubFailure(repositoryResponse.status)) {
+    await markGithubAppBindingInvalid(binding.bindingId, 'repository_provider_rejected');
+  }
+  const repo = await providerJson<{ id?: number; full_name?: string }>(repositoryResponse, 'GITHUB_APP_REPOSITORY_UNAVAILABLE');
   if (repo.id !== binding.repositoryId || repo.full_name?.toLowerCase() !== `${binding.repoOwner}/${binding.repoName}`.toLowerCase()) {
-    await markBindingInvalid(binding.bindingId, 'repository_identity_mismatch');
+    await markGithubAppBindingInvalid(binding.bindingId, 'repository_identity_mismatch');
     throw new ConflictError('GitHub App repository identity no longer matches the immutable binding');
   }
   const result: RepositoryInstallationToken = { token: tokenResponse.token, metadata: {
@@ -299,9 +319,11 @@ export async function resolveRepositoryInstallationToken(
   assertGithubRepositoryIdentity(repository.owner, repository.name);
   const binding = await getWorkspaceGithubAppBinding(workspaceId);
   if (!binding) return null;
-  if (!githubAppBindingHasVerifiedProfile(binding)) {
+  if (!githubAppBindingHasVerifiedProfile(binding, (overrides.now ?? DEFAULT_DEPS.now)())) {
     throw new UnprocessableError('GitHub App binding is not active with a provider-verified supported profile', 'GITHUB_APP_BINDING_INACTIVE', {
-      bindingStatus: binding.status, installationStatus: binding.installationStatus, webhookVerified: binding.webhookVerified,
+      bindingStatus: binding.status, installationStatus: binding.installationStatus,
+      providerHookConfigured: binding.providerHookConfigured,
+      providerProfileVerifiedAt: binding.providerProfileVerifiedAt,
     });
   }
   if (binding.repoOwner.toLowerCase() !== repository.owner.toLowerCase() || binding.repoName.toLowerCase() !== repository.name.toLowerCase()) {

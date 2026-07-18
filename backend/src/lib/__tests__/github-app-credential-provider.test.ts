@@ -16,7 +16,7 @@ const mockBindingRow = {
   repository_id: 99, repo_owner: 'acme', repo_name: 'widgets',
   permissions: { metadata: 'read', actions: 'write', checks: 'write', statuses: 'write', contents: 'write', issues: 'read', pull_requests: 'write' },
   events: ['check_run', 'issues', 'pull_request', 'push'], last_validated_at: null, last_webhook_at: null, validation_error_code: null,
-  provider_profile_verified_at: '2026-07-17T11:00:00.000Z', webhook_verified: true,
+  provider_profile_verified_at: '2026-07-17T11:00:00.000Z', provider_hook_configured: true, signed_delivery_observed: false,
 };
 
 jest.mock('../../db/index', () => ({
@@ -35,6 +35,7 @@ import {
   assertGithubAppProviderProfile,
   clearGithubAppTokenCacheForTests,
   createGithubAppJwt,
+  githubAppBindingHasVerifiedProfile,
   resolveRepositoryInstallationToken,
 } from '../github-app-credential-provider';
 import { execute, queryOne } from '../../db/index';
@@ -107,6 +108,14 @@ describe('exact GitHub App provider profile', () => {
 });
 
 describe('repository-scoped installation token provider', () => {
+  test('separates configured provider hook from observed delivery and expires stale profiles', async () => {
+    const binding = await import('../github-app-credential-provider').then(module => module.getWorkspaceGithubAppBinding('ws-1'));
+    expect(binding?.signedDeliveryObserved).toBe(false);
+    expect(githubAppBindingHasVerifiedProfile(binding, new Date('2026-07-18T10:59:59.000Z'))).toBe(true);
+    expect(githubAppBindingHasVerifiedProfile(binding, new Date('2026-07-18T11:00:01.000Z'))).toBe(false);
+    expect(githubAppBindingHasVerifiedProfile(binding ? { ...binding, providerHookConfigured: false } : null, new Date('2026-07-17T12:00:00.000Z'))).toBe(false);
+  });
+
   test('uses bounded single-flight and then the in-memory cache without serializing secrets', async () => {
     const now = new Date('2026-07-17T12:00:00.000Z');
     const fetchMock = providerFetch(() => new Date(now.getTime() + 5 * 60_000).toISOString());
@@ -199,8 +208,19 @@ describe('repository-scoped installation token provider', () => {
     }));
     await expect(resolveRepositoryInstallationToken('ws-1', { owner: 'acme', name: 'widgets' }, {}, {
       fetch: fetchMock as unknown as typeof fetch,
+      now: () => new Date('2026-07-17T12:00:00.000Z'),
     })).rejects.toThrow('no longer matches');
     expect(execute).toHaveBeenCalledWith(expect.stringContaining("status = 'invalid'"), [mockBindingRow.binding_id, 'installation_identity_mismatch']);
     expect(JSON.stringify((execute as jest.Mock).mock.calls)).not.toContain('ghs_');
+  });
+
+  test('invalidates the binding on an authoritative provider 404 without retaining its body', async () => {
+    const fetchMock = jest.fn(async () => response({ message: 'secret ghs_body repository details' }, 404));
+    await expect(resolveRepositoryInstallationToken('ws-1', { owner: 'acme', name: 'widgets' }, {}, {
+      fetch: fetchMock as unknown as typeof fetch,
+      now: () => new Date('2026-07-17T12:00:00.000Z'),
+    })).rejects.toThrow('resource is unavailable');
+    expect(execute).toHaveBeenCalledWith(expect.stringContaining("status = 'invalid'"), [mockBindingRow.binding_id, 'installation_provider_rejected']);
+    expect(JSON.stringify((execute as jest.Mock).mock.calls)).not.toContain('ghs_body');
   });
 });

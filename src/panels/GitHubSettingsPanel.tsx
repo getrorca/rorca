@@ -101,6 +101,8 @@ interface GithubStatus {
   repositoryId?: number;
   credentialSource?: 'github-app-installation' | 'pat-oauth-fallback' | null;
   webhookUrl?: string;
+  webhookConfigured?: boolean;
+  signedDeliveryObserved?: boolean;
   lastWebhookAt?: string | null;
   connectedAt?: string | null;
   autoPr?: {
@@ -126,12 +128,14 @@ interface GithubAccount {
 interface GithubAppState {
   configured: boolean;
   connected?: boolean;
+  credentialReady?: boolean;
   source?: 'github-app-installation';
   registration?: { appId: number; appSlug: string } | null;
   app?: { id: number; slug: string };
   installation?: { id: number; accountId: number; account: string; type: string; status: string };
   repository?: { id: number; owner: string; name: string };
   binding?: { id: string; status: string; lastValidatedAt: string | null; lastWebhookAt: string | null; validationErrorCode: string | null };
+  webhookHealth?: { configured: boolean; signedDeliveryObserved: boolean; lastWebhookAt: string | null };
   capabilities?: Record<'repository' | 'actions' | 'pulls' | 'contents' | 'statuses' | 'checks' | 'issues' | 'webhooks', boolean>;
   permissions?: Record<string, string>;
   events?: string[];
@@ -471,8 +475,9 @@ export default function GitHubSettingsPanel() {
   const callbackParams = new URLSearchParams(window.location.search);
   const appCallbackReady = callbackParams.get('github_app_setup') === 'callback'
     && Boolean(callbackParams.get('state')) && Boolean(callbackParams.get('code'));
-  const appCapabilitiesReady = Boolean(appState?.connected && appState.capabilities
+  const appCapabilitiesReady = Boolean(appState?.credentialReady ?? appState?.connected) && Boolean(appState?.capabilities
     && Object.values(appState.capabilities).every(Boolean));
+  const appWebhookObserved = Boolean(appState?.webhookHealth?.signedDeliveryObserved);
   const appCanBindOrReplace = Boolean(
     (!appState?.configured && appState?.registration)
     || (appState?.configured && !appCapabilitiesReady && appState?.app),
@@ -481,8 +486,12 @@ export default function GitHubSettingsPanel() {
   const webhookIsLocal = isLocalWebhookUrl(webhookUrl);
   const credentialOk = !!account?.connected;
   const repoOk = !!status?.connected;
-  const webhookOk = !!status?.connected && !webhookIsLocal
-    && (appState?.source === 'github-app-installation' ? appCapabilitiesReady : Boolean(status.webhookId));
+  const webhookConfigured = !webhookIsLocal
+    && (appState?.source === 'github-app-installation' ? Boolean(appState.webhookHealth?.configured) : Boolean(status?.webhookId));
+  const webhookOk = !!status?.connected && webhookConfigured
+    && (appState?.source === 'github-app-installation'
+      ? appWebhookObserved
+      : Boolean(status?.signedDeliveryObserved ?? status?.lastWebhookAt));
   const workflowOk = repoOk && workflowEnabled && !!workflowId.trim();
   const autoPrOk = repoOk && autoPrEnabled;
   // ─── Handlers ────────────────────────────────────────────────────────────
@@ -826,7 +835,8 @@ export default function GitHubSettingsPanel() {
           <div className="flex flex-wrap gap-2">
             <StatusPill ok={credentialOk} label={credentialOk ? 'Credential connected' : 'Credential missing'} />
             <StatusPill ok={repoOk} label={repoOk ? 'Repository connected' : 'Repository disconnected'} />
-            <StatusPill ok={webhookOk} warn={repoOk && !webhookOk} label={webhookOk ? 'Webhook configured' : repoOk ? 'Webhook needs attention' : 'Webhook locked'} />
+            <StatusPill ok={webhookOk} warn={repoOk && webhookConfigured && !webhookOk}
+              label={webhookOk ? 'Signed webhook observed' : webhookConfigured ? 'Webhook configured; no delivery observed' : repoOk ? 'Webhook needs configuration' : 'Webhook locked'} />
             <StatusPill ok={workflowOk} label={workflowOk ? 'Workflow enabled' : 'Workflow idle'} />
           </div>
         </div>
@@ -860,7 +870,7 @@ export default function GitHubSettingsPanel() {
               <Shield size={18} />
               <h2 id="github-app-heading" className="text-sm font-semibold text-[var(--text)]">Repository-scoped GitHub App</h2>
               {appLoading ? <Loader2 size={13} className="animate-spin text-muted" /> : (
-                <StatusPill ok={appCapabilitiesReady} label={appCapabilitiesReady ? 'App active' : appState?.configured ? 'App needs attention' : 'App not bound'} warn={Boolean(appState?.configured && !appCapabilitiesReady)} />
+                <StatusPill ok={appCapabilitiesReady} label={appCapabilitiesReady ? 'Credential ready' : appState?.configured ? 'Credential needs revalidation' : 'App not bound'} warn={Boolean(appState?.configured && !appCapabilitiesReady)} />
               )}
             </div>
             <p className="mt-1 text-xs text-muted">
@@ -884,9 +894,18 @@ export default function GitHubSettingsPanel() {
           </div>
         )}
 
+        {appState?.webhookHealth && (
+          <div className="flex flex-wrap gap-2" aria-label="GitHub App webhook health">
+            <StatusPill ok={appState.webhookHealth.configured} label={appState.webhookHealth.configured ? 'Provider hook configured' : 'Provider hook not configured'} />
+            <StatusPill ok={appState.webhookHealth.signedDeliveryObserved} warn={appState.webhookHealth.configured && !appState.webhookHealth.signedDeliveryObserved}
+              label={appState.webhookHealth.signedDeliveryObserved ? 'Signed delivery observed' : 'Awaiting signed delivery'} />
+            <span className="self-center text-xs text-muted">Last signed delivery: {timeAgo(appState.webhookHealth.lastWebhookAt)}</span>
+          </div>
+        )}
+
         {appState?.capabilities && (
           <div>
-            <p className="mb-2 text-xs font-medium text-muted">Capability diagnostics</p>
+            <p className="mb-2 text-xs font-medium text-muted">Capability diagnostics (credential readiness)</p>
             <div className="flex flex-wrap gap-1.5">
               {Object.entries(appState.capabilities).map(([name, available]) => (
                 <span key={name} className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${available ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>

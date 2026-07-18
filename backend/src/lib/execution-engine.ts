@@ -4129,7 +4129,7 @@ function getGitHead(cwd: string): string | null {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
-    return /^[0-9a-f]{40}$/i.test(head) ? head : null;
+    return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) ? head : null;
   } catch {
     return null;
   }
@@ -4587,8 +4587,8 @@ interface PendingIntegratedPass {
     costUsd: number;
   };
   graphHits?: number;
-  commitSha: string | null;
-  commitBranch: string | null;
+  originCommitSha: string | null;
+  originBranch: string | null;
   completionPacket?: PiCompletionPacket;
 }
 
@@ -4675,23 +4675,46 @@ function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegration
   return { ok: true, files: [] };
 }
 
+interface IntegratedRunHead {
+  sha: string;
+  branch: string;
+}
+
+export function resolveIntegratedRunHead(config: Pick<EngineConfig, 'cwd'>): IntegratedRunHead {
+  const sha = getGitHead(config.cwd)?.trim().toLowerCase() ?? '';
+  const branch = getGitBranch(config.cwd)?.trim() ?? '';
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)
+    || !/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(branch)) {
+    throw new Error('integrated run-branch identity is unavailable');
+  }
+  const verified = execSync('git rev-parse --verify HEAD^{commit}', {
+    cwd: config.cwd,
+    env: buildCleanEnv(),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim().toLowerCase();
+  if (verified !== sha) throw new Error('integrated run-branch HEAD changed during verification');
+  try {
+    execSync('git rev-parse -q --verify MERGE_HEAD', {
+      cwd: config.cwd, env: buildCleanEnv(), stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    throw new Error('integrated run branch still has an unfinished merge');
+  } catch (error) {
+    if (error instanceof Error && error.message === 'integrated run branch still has an unfinished merge') throw error;
+  }
+  return { sha, branch };
+}
+
 async function recordIntegratedCheckpointAttestation(
   config: EngineConfig,
   workspaceId: string,
   pending: PendingIntegratedPass,
+  integratedHead: IntegratedRunHead,
 ): Promise<void> {
   if (config.dryRun) return;
   try {
-    const checkpointSha = getGitHead(config.cwd);
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd: config.cwd,
-      env: buildCleanEnv(),
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-    if (typeof checkpointSha !== 'string' || !/^[0-9a-f]{40}$/i.test(checkpointSha) || !/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(branch)) {
-      throw new Error('integrated branch identity is unavailable');
-    }
+    const checkpointSha = integratedHead.sha;
+    const branch = integratedHead.branch;
     const passedAt = new Date();
     const evidenceDigest = createHash('sha256').update(JSON.stringify({
       contractVersion: 'checkpoint-validation-v1',
@@ -4729,34 +4752,41 @@ async function finalizeIntegratedStoryPass(
   workspaceId: string | null,
   pending: PendingIntegratedPass,
 ): Promise<void> {
+  // Resolve and validate the immutable run-branch HEAD after every merge and
+  // integration validation, before any canonical pass mutation. Never reuse the
+  // story worktree parent as integrated evidence.
+  const integratedHead = resolveIntegratedRunHead(config);
+
   // Persist trusted crash-recovery evidence after run-branch integration but
   // before canonical pass mutation. If the process dies between these steps,
   // reconciliation can later prove the exact integrated branch head.
-  if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending);
+  if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending, integratedHead);
+
+  if (workspaceId) {
+    // Durably persist the scoped integrated-head result (or its local fallback)
+    // before local pass projection and pass WAL publication.
+    await postStoryResult(config.port, {
+      runId: config.runId,
+      storyId: pending.story.id,
+      status: 'pass',
+      logPath: pending.logPath,
+      ...pending.storyResultExtra,
+      ...pending.activeSkillsExtra,
+      ...pending.tokenPayload,
+      commitSha: integratedHead.sha,
+      commitMessage: `integrated story(${pending.story.id}): ${pending.story.title}`,
+      worktreeBranch: integratedHead.branch,
+      ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
+    });
+  }
+
   const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
   if (!lifecycle.changed) {
     logger.info(`Ignored duplicate pass finalization for ${pending.story.id}`);
     return;
   }
-
   if (!workspaceId) return;
 
-  // Persist the exact run/workspace-scoped commit before publishing the pass
-  // event. Subscribers may publish immutable-SHA evidence immediately; they must
-  // never race ahead of the canonical story_commits closeout row.
-  await postStoryResult(config.port, {
-    runId: config.runId,
-    storyId: pending.story.id,
-    status: 'pass',
-    logPath: pending.logPath,
-    commitSha: pending.commitSha,
-    commitMessage: `story(${pending.story.id}): ${pending.story.title}`,
-    worktreeBranch: pending.commitBranch,
-    ...pending.storyResultExtra,
-    ...pending.activeSkillsExtra,
-    ...pending.tokenPayload,
-    ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
-  });
   await emitWalEvent(config.port, 'story_passed', workspaceId, {
     run_id: config.runId,
     story_id: pending.story.id,
@@ -4766,7 +4796,10 @@ async function finalizeIntegratedStoryPass(
     output_tokens: pending.tokenPayload.outputTokens,
     cost_usd: pending.tokenPayload.costUsd,
     integrated: true,
-    commit_sha: pending.commitSha,
+    commit_sha: integratedHead.sha,
+    integrated_branch: integratedHead.branch,
+    origin_commit_sha: pending.originCommitSha,
+    origin_branch: pending.originBranch,
     ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
     ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
   }, pending.story.id);
@@ -7070,8 +7103,8 @@ async function executeStory(
         activeSkillsExtra,
         tokenPayload,
         ...(graphHits != null ? { graphHits } : {}),
-        commitSha: getGitHead(effectiveCwd),
-        commitBranch: getGitBranch(effectiveCwd),
+        originCommitSha: getGitHead(effectiveCwd),
+        originBranch: getGitBranch(effectiveCwd),
         ...(validatedCompletionPacket ? { completionPacket: validatedCompletionPacket } : {}),
       };
 

@@ -35,6 +35,11 @@ import { chatComplete } from './llm-client';
 import { getGithubRepositoryAuthority, githubRepoApiUrl } from './github-repository-authority';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
+import {
+  formatGithubProviderError,
+  githubProviderError,
+  sanitizeGithubProviderException,
+} from './github-provider-error';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -195,10 +200,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
         }),
       );
 
-      if (!updateRes.ok) {
-        const errText = await updateRes.text();
-        throw new Error(`GitHub PATCH /pulls/${existingPr.number} returned ${updateRes.status}: ${errText}`);
-      }
+      if (!updateRes.ok) throw githubProviderError(updateRes, 'GITHUB_PR_UPDATE_FAILED');
 
       prNumber = existingPr.number;
       logger.info({ runId, prNumber, owner, repo }, '[auto-pr] PR body updated');
@@ -225,10 +227,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
         }),
       );
 
-      if (!createRes.ok) {
-        const errText = await createRes.text();
-        throw new Error(`GitHub POST /pulls returned ${createRes.status}: ${errText}`);
-      }
+      if (!createRes.ok) throw githubProviderError(createRes, 'GITHUB_PR_CREATE_FAILED');
 
       const prData = await createRes.json() as { number: number; html_url: string };
       prNumber = prData.number;
@@ -237,15 +236,17 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
       const reviewers = parseReviewers(webhookConfig.auto_pr_reviewers);
       if (reviewers.length > 0) {
         try {
-          await githubRateLimiter.execute(() =>
+          const reviewerResponse = await githubRateLimiter.execute(() =>
             fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${prNumber}/requested_reviewers`), {
               method: 'POST',
               headers: buildGitHubHeaders(token),
               body: JSON.stringify({ reviewers }),
             }),
           );
+          if (!reviewerResponse.ok) throw githubProviderError(reviewerResponse, 'GITHUB_PR_REVIEWERS_FAILED');
         } catch (reviewerErr) {
-          logger.warn({ reviewerErr, runId, prNumber }, '[auto-pr] Failed to request reviewers (non-fatal)');
+          const safe = sanitizeGithubProviderException(reviewerErr, 'GITHUB_PR_REVIEWERS_FAILED');
+          logger.warn({ providerError: safe, runId, prNumber }, '[auto-pr] Failed to request reviewers (non-fatal)');
         }
       }
 
@@ -261,8 +262,9 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
       });
     }
   } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    logger.error({ err, runId, owner, repo, branchName }, '[auto-pr] PR creation failed');
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_AUTO_PR_FAILED');
+    const errMsg = formatGithubProviderError(providerError);
+    logger.error({ providerError, runId, owner, repo, branchName }, '[auto-pr] PR creation failed');
 
     await storeResult(runId, null, errMsg);
     await emitWalEvent('pr_creation_failed', workspaceId, {
@@ -307,10 +309,7 @@ async function findExistingPr(
     fetchGithubWithTimeout(fetch, url, { headers: buildGitHubHeaders(token) }),
   );
 
-  if (!res.ok) {
-    logger.warn({ status: res.status, url }, '[auto-pr] Could not check for existing PRs — proceeding with create');
-    return null;
-  }
+  if (!res.ok) throw githubProviderError(res, 'GITHUB_PR_LOOKUP_FAILED');
 
   const prs = await res.json() as Array<{ number: number; title: string }>;
   return prs.length > 0 ? { number: prs[0].number, title: prs[0].title } : null;

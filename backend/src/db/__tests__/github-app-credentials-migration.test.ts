@@ -19,9 +19,10 @@ test('GitHub App migration is repository-scoped, auditable, and avoids pg-boss',
   expect(sql).toContain('github_app_installations');
   expect(sql).toContain('github_app_workspace_bindings');
   expect(sql).toContain('github_app_setup_states');
-  expect(sql).toMatch(/workspace_id TEXT NOT NULL UNIQUE REFERENCES workspaces\(id\) ON DELETE RESTRICT/);
-  expect(sql).toContain('UNIQUE (registration_id, repository_id)');
-  expect(sql).toContain('FOREIGN KEY (installation_record_id, registration_id)');
+  expect(sql).toMatch(/workspace_id TEXT NOT NULL REFERENCES workspaces\(id\) ON DELETE RESTRICT/);
+  expect(sql).toContain('CONSTRAINT ga_binding_workspace_key UNIQUE (workspace_id)');
+  expect(sql).toContain('CONSTRAINT ga_binding_registration_repository_key UNIQUE (registration_id, repository_id)');
+  expect(sql).toContain('CONSTRAINT ga_binding_installation_registration_fk');
   expect(sql).toContain("repository_selection TEXT NOT NULL CHECK (repository_selection = 'selected')");
   expect(sql).toContain('GitHub App workspace/repository/installation binding identity is immutable');
   expect(sql).not.toMatch(/CREATE\s+(TABLE|SCHEMA).*pgboss|ALTER\s+TABLE\s+pgboss/i);
@@ -32,13 +33,46 @@ test('remediation makes App identity typed, immutable, and audit-supersedable', 
   expect(remediationSql).toContain('github_app_registration_private_key_typed_fk');
   expect(remediationSql).toContain('github_app_registration_webhook_secret_typed_fk');
   expect(remediationSql).toContain('FOREIGN KEY (installation_record_id, registration_id, installation_id)');
-  expect(remediationSql.indexOf('DROP CONSTRAINT IF EXISTS github_app_workspace_bindings_installation_record_id_registration_id_fkey'))
-    .toBeLessThan(remediationSql.indexOf('DROP CONSTRAINT IF EXISTS github_app_installations_id_registration_id_key'));
+  expect(remediationSql.indexOf('DROP CONSTRAINT IF EXISTS ga_binding_installation_registration_fk'))
+    .toBeLessThan(remediationSql.indexOf('DROP CONSTRAINT IF EXISTS ga_install_id_registration_key'));
   expect(remediationSql).toContain('uq_github_app_one_current_workspace_binding');
   expect(remediationSql).toContain('WHERE superseded_at IS NULL');
   expect(remediationSql).toContain('GitHub App binding supersession evidence is immutable');
   expect(remediationSql).toContain('CREATE OR REPLACE VIEW github_workspace_repository_authority');
   expect(remediationSql).toContain('NOT EXISTS (');
   expect(remediationSql).toContain('github_repository_configs');
+  expect(remediationSql).toContain("provider_profile_verified_at >= NOW() - INTERVAL '24 hours'");
+  expect(remediationSql).toContain('provider_hook_configured');
+  expect(remediationSql).toContain('signed_delivery_observed');
+  expect(remediationSql).toContain("status IN ('processing', 'failed')");
   expect(remediationSql).not.toMatch(/CREATE\s+(TABLE|SCHEMA).*pgboss|ALTER\s+TABLE\s+pgboss/i);
+});
+
+test('all explicit migration identifiers fit PostgreSQL and remediation drops match first-migration names', () => {
+  const identifiers = [sql, remediationSql].flatMap(source => [
+    ...source.matchAll(/\bCONSTRAINT\s+([A-Za-z_][A-Za-z0-9_]*)/g),
+    ...source.matchAll(/\b(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/g),
+    ...source.matchAll(/\bTRIGGER\s+([A-Za-z_][A-Za-z0-9_]*)/g),
+  ].map(match => match[1]));
+  expect(identifiers.length).toBeGreaterThan(20);
+  for (const identifier of identifiers) expect(Buffer.byteLength(identifier, 'utf8')).toBeLessThanOrEqual(63);
+
+  const initialConstraints = new Set([...sql.matchAll(/\bCONSTRAINT\s+([A-Za-z_][A-Za-z0-9_]*)/g)].map(match => match[1]));
+  const replacementDrops = [...remediationSql.matchAll(/DROP CONSTRAINT IF EXISTS (ga_(?:binding|install)_[A-Za-z0-9_]+)/g)]
+    .map(match => match[1])
+    .filter(name => ['ga_binding_installation_registration_fk', 'ga_install_id_registration_key',
+      'ga_binding_workspace_key', 'ga_binding_registration_repository_key', 'ga_binding_registration_install_repo_key'].includes(name));
+  expect(new Set(replacementDrops)).toEqual(new Set([
+    'ga_binding_installation_registration_fk', 'ga_install_id_registration_key', 'ga_binding_workspace_key',
+    'ga_binding_registration_repository_key', 'ga_binding_registration_install_repo_key',
+  ]));
+  for (const dropped of replacementDrops) expect(initialConstraints.has(dropped)).toBe(true);
+
+  const dropBindingFk = remediationSql.indexOf('DROP CONSTRAINT IF EXISTS ga_binding_installation_registration_fk');
+  const dropInstallKey = remediationSql.indexOf('DROP CONSTRAINT IF EXISTS ga_install_id_registration_key');
+  const addInstallKey = remediationSql.indexOf('ADD CONSTRAINT ga_install_identity_key');
+  const addBindingFk = remediationSql.indexOf('ADD CONSTRAINT ga_binding_installation_identity_fk');
+  expect(dropBindingFk).toBeLessThan(dropInstallKey);
+  expect(dropInstallKey).toBeLessThan(addInstallKey);
+  expect(addInstallKey).toBeLessThan(addBindingFk);
 });

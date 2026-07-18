@@ -30,6 +30,7 @@ import { githubRateLimiter } from '../github-rate-limiter';
 import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } from '../github-repository-authority';
 import { resolveWorkspaceGitHubToken } from '../github-token-resolver';
 import { fetchGithubWithTimeout } from '../github-app-credential-provider';
+import { extractGithubProviderError, sanitizeGithubProviderException } from '../github-provider-error';
 import type { CiCheckFailure, CiAnnotation } from './webhook-handler';
 import type { AgentType } from '../config';
 
@@ -421,15 +422,16 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
         );
 
         if (!res.ok) {
-          const text = await res.text();
-          logger.warn({ status: res.status, text }, '[CI Autofix] GitHub commit status API error');
+          const providerError = extractGithubProviderError(res, 'GITHUB_CI_AUTOFIX_STATUS_FAILED');
+          logger.warn({ providerError }, '[CI Autofix] GitHub commit status API error');
         } else {
           logger.info(
             `[CI Autofix] Posted ${state} commit status for ${autofixRow.head_sha.slice(0, 7)} (${autofixRow.check_run_name})`,
           );
         }
       } catch (err) {
-        logger.warn({ err }, '[CI Autofix] Failed to post GitHub commit status');
+        const providerError = sanitizeGithubProviderException(err, 'GITHUB_CI_AUTOFIX_STATUS_FAILED');
+        logger.warn({ providerError }, '[CI Autofix] Failed to post GitHub commit status');
       }
     } else {
       logger.warn('[CI Autofix] No GitHub token available — skipping commit status post');

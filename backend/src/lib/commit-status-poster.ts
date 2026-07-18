@@ -24,6 +24,11 @@ import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } fro
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
+import {
+  extractGithubProviderError,
+  formatGithubProviderError,
+  sanitizeGithubProviderException,
+} from './github-provider-error';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -171,17 +176,17 @@ async function postStatus(
     );
 
     if (!res.ok) {
-      const text = await res.text();
-      logger.warn({ status: res.status }, `[CommitStatus] GitHub API error posting ${state} for ${context}`);
-      await logAudit(workspaceId, 'commit_status_failed', res.status, text, { sha, state, context });
+      const providerError = extractGithubProviderError(res, 'GITHUB_COMMIT_STATUS_FAILED');
+      logger.warn({ providerError }, `[CommitStatus] GitHub API error posting ${state} for ${context}`);
+      await logAudit(workspaceId, 'commit_status_failed', res.status, formatGithubProviderError(providerError), { sha, state, context, providerRequestId: providerError.requestId });
     } else {
       logger.info(`[CommitStatus] Posted ${state} for ${context} to ${owner}/${repo}@${sha.slice(0, 7)}`);
       await logAudit(workspaceId, 'commit_status_posted', res.status, null, { sha, state, context });
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn({ err }, `[CommitStatus] Failed to post ${state} for ${context}`);
-    await logAudit(workspaceId, 'commit_status_failed', null, message, { sha, state, context });
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_COMMIT_STATUS_FAILED');
+    logger.warn({ providerError }, `[CommitStatus] Failed to post ${state} for ${context}`);
+    await logAudit(workspaceId, 'commit_status_failed', null, formatGithubProviderError(providerError), { sha, state, context });
   }
 }
 

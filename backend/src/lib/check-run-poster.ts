@@ -27,6 +27,11 @@ import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } fro
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
+import {
+  extractGithubProviderError,
+  formatGithubProviderError,
+  sanitizeGithubProviderException,
+} from './github-provider-error';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -292,9 +297,9 @@ async function createCheckRun(
     );
 
     if (!res.ok) {
-      const text = await res.text();
-      logger.warn({ status: res.status }, `[CheckRun] Failed to create check run for run #${runId}`);
-      await logAudit(workspaceId, 'check_run_create_failed', res.status, text, { runId, headSha });
+      const providerError = extractGithubProviderError(res, 'GITHUB_CHECK_RUN_CREATE_FAILED');
+      logger.warn({ providerError }, `[CheckRun] Failed to create check run for run #${runId}`);
+      await logAudit(workspaceId, 'check_run_create_failed', res.status, formatGithubProviderError(providerError), { runId, headSha, providerRequestId: providerError.requestId });
       return null;
     }
 
@@ -303,9 +308,9 @@ async function createCheckRun(
     await logAudit(workspaceId, 'check_run_created', res.status, null, { runId, headSha, checkRunId: data.id });
     return data.id;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn({ err }, `[CheckRun] Error creating check run for run #${runId}`);
-    await logAudit(workspaceId, 'check_run_create_failed', null, message, { runId, headSha });
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_CHECK_RUN_CREATE_FAILED');
+    logger.warn({ providerError }, `[CheckRun] Error creating check run for run #${runId}`);
+    await logAudit(workspaceId, 'check_run_create_failed', null, formatGithubProviderError(providerError), { runId, headSha });
     return null;
   }
 }
@@ -342,17 +347,17 @@ async function updateCheckRun(
     );
 
     if (!res.ok) {
-      const text = await res.text();
-      logger.warn({ status: res.status }, `[CheckRun] Failed to update check run ${checkRunId}`);
-      await logAudit(workspaceId, 'check_run_update_failed', res.status, text, { checkRunId });
+      const providerError = extractGithubProviderError(res, 'GITHUB_CHECK_RUN_UPDATE_FAILED');
+      logger.warn({ providerError }, `[CheckRun] Failed to update check run ${checkRunId}`);
+      await logAudit(workspaceId, 'check_run_update_failed', res.status, formatGithubProviderError(providerError), { checkRunId, providerRequestId: providerError.requestId });
     } else {
       logger.debug(`[CheckRun] Updated check run ${checkRunId}`);
       await logAudit(workspaceId, 'check_run_updated', res.status, null, { checkRunId });
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn({ err }, `[CheckRun] Error updating check run ${checkRunId}`);
-    await logAudit(workspaceId, 'check_run_update_failed', null, message, { checkRunId });
+    const providerError = sanitizeGithubProviderException(err, 'GITHUB_CHECK_RUN_UPDATE_FAILED');
+    logger.warn({ providerError }, `[CheckRun] Error updating check run ${checkRunId}`);
+    await logAudit(workspaceId, 'check_run_update_failed', null, formatGithubProviderError(providerError), { checkRunId });
   }
 }
 
