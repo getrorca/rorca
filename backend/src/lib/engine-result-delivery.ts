@@ -10,6 +10,7 @@
 import * as path from 'path';
 import { AppError } from './errors';
 import {
+  EXECUTION_ENGINE_RESULT_AUTHORITY,
   persistCanonicalStoryResult,
   type CanonicalStoryResultInput,
   type CanonicalStoryResultOutcome,
@@ -69,17 +70,23 @@ export async function deliverEngineStoryResult(
   const persist = dependencies.persist ?? persistCanonicalStoryResult;
   const journal = dependencies.journal ?? writeFallbackResult;
   const now = dependencies.now ?? (() => new Date());
+  // Freeze one observation time before the first DB attempt. A transport-
+  // ambiguous commit and its fallback proposal therefore share an exact
+  // immutable timestamp and can be compared during host refinalization.
+  const finishedAt = input.finishedAt ?? now().toISOString();
   const canonicalInput: CanonicalStoryResultInput = {
     ...input,
+    finishedAt,
     runId: context.runId,
     expectedWorkspaceId: context.workspaceId,
   };
 
   try {
-    return await persist(canonicalInput);
+    return dependencies.persist
+      ? await persist(canonicalInput)
+      : await persistCanonicalStoryResult(canonicalInput, EXECUTION_ENGINE_RESULT_AUTHORITY);
   } catch (error) {
     if (!isRetryableStoryResultPersistenceError(error)) throw error;
-    const observedAt = now().toISOString();
     // The stable journal is intentionally untrusted. It may replay the canonical
     // result projection, but it can never mint governing WAL. A later host
     // re-finalization attaches the trusted pass outbox after re-verifying HEAD.
@@ -90,13 +97,13 @@ export async function deliverEngineStoryResult(
       status: canonicalInput.status,
       runId: context.runId,
       retries: 0,
-      ts: observedAt,
+      ts: finishedAt,
       idempotencyKey: canonicalInput.idempotencyKey,
       payload: {
         ...replayableInput,
         runId: context.runId,
         expectedWorkspaceId: undefined,
-        finishedAt: observedAt,
+        finishedAt,
       },
     };
     if (!await journal(context.fallbackRoot, entry)) {

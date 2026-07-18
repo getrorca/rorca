@@ -16,7 +16,10 @@ jest.mock('../../db/index', () => ({
   execute: (...args: unknown[]) => execute(...args),
 }));
 
-import { persistCanonicalStoryResult } from '../story-result-persistence';
+import {
+  EXECUTION_ENGINE_RESULT_AUTHORITY,
+  persistCanonicalStoryResult,
+} from '../story-result-persistence';
 import { relayTrustedWalEvent, type TrustedWalRow } from '../trusted-wal';
 
 const SHA = 'a'.repeat(40);
@@ -69,6 +72,7 @@ const client = {
         accounting_reasoning_tokens: values[32], accounting_cost_usd: values[33],
         accounting_cost_source: values[34], accounting_input_rate: values[35],
         accounting_output_rate: values[36], reason: values[37],
+        result_provenance: values[38], result_source: values[39],
       };
       return { rows: [{ id: 1 }] };
     }
@@ -166,7 +170,7 @@ beforeEach(() => {
 });
 
 test('crash after local pass before relay is recovered by duplicate re-finalization', async () => {
-  const first = await persistCanonicalStoryResult(input());
+  const first = await persistCanonicalStoryResult(input(), EXECUTION_ENGINE_RESULT_AUTHORITY);
   expect(first.duplicate).toBe(false);
   expect(first.trustedWal).toBeDefined();
   expect(state.wal?.outbox_relayed_at).toBeNull();
@@ -175,7 +179,7 @@ test('crash after local pass before relay is recovered by duplicate re-finalizat
   const localSpecAlreadyPassed = true;
   expect(localSpecAlreadyPassed).toBe(true);
 
-  const refinalized = await persistCanonicalStoryResult(input());
+  const refinalized = await persistCanonicalStoryResult(input(), EXECUTION_ENGINE_RESULT_AUTHORITY);
   expect(refinalized).toMatchObject({ duplicate: true, trustedWal: first.trustedWal });
   await relayTrustedWalEvent(refinalized.trustedWal!);
 
@@ -197,7 +201,7 @@ test('crash after local pass before relay is recovered by duplicate re-finalizat
 
   const changed = input();
   changed.trustedPassOutbox.payload.story_title = 'Changed duplicate identity';
-  await expect(persistCanonicalStoryResult(changed)).rejects.toThrow(
+  await expect(persistCanonicalStoryResult(changed, EXECUTION_ENGINE_RESULT_AUTHORITY)).rejects.toThrow(
     'Trusted WAL relay reference does not exactly match the durable event',
   );
 });

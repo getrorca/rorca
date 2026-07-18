@@ -8,6 +8,7 @@
 const queryOne = jest.fn();
 const query = jest.fn();
 const execute = jest.fn().mockResolvedValue({ rowCount: 1 });
+const transaction = jest.fn();
 const resolveToken = jest.fn();
 const getAuthority = jest.fn();
 const providerFetch = jest.fn();
@@ -16,7 +17,7 @@ jest.mock('../../db/index', () => ({
   queryOne: (...args: unknown[]) => queryOne(...args),
   query: (...args: unknown[]) => query(...args),
   execute: (...args: unknown[]) => execute(...args),
-  transaction: jest.fn(),
+  transaction: (...args: unknown[]) => transaction(...args),
 }));
 jest.mock('child_process', () => ({
   execSync: jest.fn(() => `${'b'.repeat(40)}\n`),
@@ -39,6 +40,7 @@ jest.mock('../github-rate-limiter', () => ({
 import { handleCommitStatusWalEvent } from '../commit-status-poster';
 import {
   handleCheckRunWalEvent,
+  reconcileCheckRunProjection,
   resetCheckRunPosterForTests,
 } from '../check-run-poster';
 import { trustedWalIdentityHash, type TrustedWalSource } from '../trusted-wal';
@@ -59,6 +61,8 @@ let currentRun: {
 let storyAuthority: Record<string, unknown> | undefined;
 let latestTerminalStatus: string | undefined;
 let terminalRows: Array<Record<string, unknown>> = [];
+let projection: Record<string, unknown> | undefined;
+let includePassOutboxes = true;
 
 function response(body: unknown = {}, status = 200) {
   return {
@@ -126,12 +130,62 @@ function acceptedRow(storyId: string, resultId: number, commitSha: string, pushe
     finished_at: '2026-07-18T10:01:00.000Z',
     closeout_decision_id: `CLO-${storyId}`,
     closeout_status: 'accepted',
+    closeout_manifest_hash: `sha256:${storyId.padEnd(64, '1').slice(0, 64)}`,
+    manifest_hash: `sha256:${storyId.padEnd(64, '1').slice(0, 64)}`,
+    integrated: true,
+    result_commit_sha: commitSha,
+    result_commit_message: `integrated ${storyId}`,
+    result_commit_author: 'rorca-execution-engine',
+    result_commit_branch: 'run/spec-a',
+    result_commit_source: 'worktree_branch',
+    result_provenance: 'host',
+    result_source: 'execution-engine',
     commit_sha: commitSha,
+    commit_message: `integrated ${storyId}`,
     observed_source: 'worktree_branch',
     author: 'rorca-execution-engine',
+    branch_name: 'run/spec-a',
     pushed_at: pushedAt,
+    commit_count: 1,
   };
 }
+
+const projectionClient = {
+  query: jest.fn(async (sqlValue: unknown, params: unknown[] = []) => {
+    const sql = String(sqlValue);
+    if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}] };
+    if (sql.includes('SELECT * FROM github_check_run_projections')) {
+      return { rows: projection ? [projection] : [] };
+    }
+    if (sql.includes('INSERT INTO github_check_run_projections')) {
+      projection = {
+        run_id: Number(params[0]), workspace_id: params[1], spec_id: params[2],
+        desired_event_id: params[3], desired_event_identity_hash: params[4],
+        desired_state: params[5], head_sha: params[6], conclusion: params[7],
+        desired_payload: JSON.parse(String(params[8])), desired_payload_hash: params[9],
+        external_id: params[10], projection_status: 'pending', check_run_id: null,
+        provider_head_sha: null, claim_token: null, claimed_at: null, attempts: 0,
+        next_attempt_at: null,
+      };
+      return { rows: [] };
+    }
+    if (sql.includes('SET desired_event_id')) {
+      projection = {
+        ...projection,
+        desired_event_id: params[1], desired_event_identity_hash: params[2],
+        desired_state: params[3], head_sha: params[4], conclusion: params[5],
+        desired_payload: JSON.parse(String(params[6])), desired_payload_hash: params[7],
+        projection_status: 'pending', claim_token: null, claimed_at: null,
+      };
+      return { rows: [] };
+    }
+    if (sql.includes("SET projection_status = 'processing'")) {
+      projection = { ...projection, projection_status: 'processing', claim_token: params[1], claimed_at: new Date().toISOString(), attempts: Number(projection?.attempts ?? 0) + 1 };
+      return { rows: [projection] };
+    }
+    return { rows: [] };
+  }),
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -149,9 +203,26 @@ beforeEach(() => {
   storyAuthority = undefined;
   latestTerminalStatus = undefined;
   terminalRows = [];
+  projection = undefined;
+  includePassOutboxes = true;
+  transaction.mockImplementation(async (fn: (client: typeof projectionClient) => Promise<unknown>) => fn(projectionClient));
+  execute.mockImplementation(async (sqlValue: unknown, params: unknown[] = []) => {
+    if (String(sqlValue).includes('UPDATE github_check_run_projections') && projection) {
+      projection = {
+        ...projection,
+        projection_status: params[3],
+        check_run_id: params[4] ?? projection.check_run_id,
+        provider_head_sha: params[5] ?? projection.provider_head_sha,
+        claim_token: null,
+        claimed_at: null,
+      };
+    }
+    return { rowCount: 1 };
+  });
   resolveToken.mockResolvedValue({ token: 'host-token' });
   getAuthority.mockResolvedValue({ owner: 'acme', name: 'widgets' });
   providerFetch.mockImplementation(async (url: string, init: RequestInit) => {
+    if (url.includes('/commits/') && init.method === 'GET') return response({ check_runs: [] });
     if (url.endsWith('/check-runs') && init.method === 'POST') return response({ id: 101 }, 201);
     return response({}, 200);
   });
@@ -162,15 +233,34 @@ beforeEach(() => {
       return { worktree_path: '/tmp/canonical-run', workspace_id: currentRun.workspace_id };
     }
     if (sql.includes('FROM story_results sr')) return storyAuthority;
-    if (sql.includes('SELECT status FROM story_results')) {
-      return latestTerminalStatus ? { status: latestTerminalStatus } : undefined;
+    if (sql.includes('SELECT status, result_provenance, result_source FROM story_results')) {
+      return latestTerminalStatus ? {
+        status: latestTerminalStatus,
+        result_provenance: 'host',
+        result_source: 'execution-engine',
+      } : undefined;
     }
     if (sql.includes('INSERT INTO wal_events')) return undefined;
     return undefined;
   });
-  query.mockImplementation(async (sqlValue: unknown) => String(sqlValue).includes('DISTINCT ON (sr.story_id)')
-    ? terminalRows
-    : []);
+  query.mockImplementation(async (sqlValue: unknown) => {
+    const sql = String(sqlValue);
+    if (sql.includes('DISTINCT ON (sr.story_id)')) return terminalRows;
+    if (sql.includes("FROM wal_events") && sql.includes("trusted_source = 'story-result'")) {
+      if (!includePassOutboxes) return [];
+      return terminalRows.filter(row => row.status === 'pass').map(row => trustedEvent({
+        eventType: 'story_passed',
+        storyId: String(row.story_id),
+        source: 'story-result',
+        payload: {
+          story_result_id: Number(row.id),
+          closeout_decision_id: String(row.closeout_decision_id),
+          commit_sha: String(row.result_commit_sha),
+        },
+      }));
+    }
+    return [];
+  });
 });
 
 afterEach(() => resetCheckRunPosterForTests());
@@ -253,7 +343,46 @@ describe('check run terminal completeness authority', () => {
     expect(providerFetch).toHaveBeenCalledTimes(callsAfterStart);
   });
 
-  test('wrong in-memory workspace state cannot complete a check run', async () => {
+  test('forged journal pass replayed after closeout never reaches repository or token resolution', async () => {
+    currentRun = {
+      ...currentRun,
+      status: 'done',
+      lifecycle_status: 'finished',
+      expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [{
+      ...acceptedRow('US-001', 77, PASS_SHA, '2026-07-18T10:01:00.000Z'),
+      result_provenance: 'recovery_proposal',
+      result_source: 'fallback-journal',
+    }];
+    includePassOutboxes = false;
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    expect(getAuthority).not.toHaveBeenCalled();
+    expect(resolveToken).not.toHaveBeenCalled();
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
+  test('a host-looking pass without its one released immutable outbox never resolves a token', async () => {
+    currentRun = {
+      ...currentRun,
+      status: 'done',
+      lifecycle_status: 'finished',
+      expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [acceptedRow('US-001', 78, PASS_SHA, '2026-07-18T10:01:00.000Z')];
+    includePassOutboxes = false;
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    expect(getAuthority).not.toHaveBeenCalled();
+    expect(resolveToken).not.toHaveBeenCalled();
+  });
+
+  test('wrong canonical workspace state cannot complete a check run', async () => {
     await startWorkspaceA();
     const callsAfterStart = providerFetch.mock.calls.length;
     currentRun = {
@@ -278,6 +407,76 @@ describe('check run terminal completeness authority', () => {
     });
     await handleCheckRunWalEvent(finishB);
     expect(providerFetch).toHaveBeenCalledTimes(callsAfterStart);
+  });
+
+  test('terminal-before-start ordering creates one exact completed provider check', async () => {
+    currentRun = {
+      ...currentRun,
+      status: 'done', lifecycle_status: 'finished', expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [acceptedRow('US-001', 1, FINAL_SHA, '2026-07-18T10:02:00.000Z')];
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    const providerCalls = providerFetch.mock.calls.length;
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_started', source: 'worker', payload: { spec_path: currentRun.spec_path },
+    }));
+    expect(providerFetch).toHaveBeenCalledTimes(providerCalls);
+    expect(providerFetch.mock.calls.filter(([url, init]: [string, RequestInit]) =>
+      url.endsWith('/check-runs') && init.method === 'POST')).toHaveLength(1);
+  });
+
+  test('provider-uncertain create is reconciled by external identity after restart without a second create', async () => {
+    currentRun = {
+      ...currentRun,
+      status: 'done', lifecycle_status: 'finished', expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [acceptedRow('US-001', 1, FINAL_SHA, '2026-07-18T10:02:00.000Z')];
+    let createAttempts = 0;
+    providerFetch.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.includes('/commits/') && init.method === 'GET') {
+        return response(createAttempts === 0 ? { check_runs: [] } : {
+          check_runs: [{ id: 909, external_id: 'rorca:pipeline-run:41:v1', head_sha: FINAL_SHA }],
+        });
+      }
+      if (url.endsWith('/check-runs') && init.method === 'POST') {
+        createAttempts++;
+        throw Object.assign(new Error('connection reset after provider accepted request'), { code: 'ECONNRESET' });
+      }
+      if (url.endsWith('/check-runs/909') && init.method === 'PATCH') return response({}, 200);
+      return response({}, 200);
+    });
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    expect(projection?.projection_status).toBe('uncertain');
+    resetCheckRunPosterForTests(); // process-memory loss; durable projection remains
+    await reconcileCheckRunProjection(41);
+    expect(createAttempts).toBe(1);
+    expect(providerFetch.mock.calls.some(([url, init]: [string, RequestInit]) =>
+      url.endsWith('/check-runs/909') && init.method === 'PATCH')).toBe(true);
+    expect(projection?.projection_status).toBe('completed');
+  });
+
+  test('a failed terminal run cannot publish neutral or success merely because its last story passed', async () => {
+    currentRun = {
+      ...currentRun,
+      status: 'failed', lifecycle_status: 'failed', expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [acceptedRow('US-001', 1, FINAL_SHA, '2026-07-18T10:02:00.000Z')];
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'failed' },
+    }));
+    const terminalWrite = providerFetch.mock.calls.find(([url, init]: [string, RequestInit]) =>
+      url.endsWith('/check-runs') && init.method === 'POST');
+    expect(terminalWrite).toBeDefined();
+    expect(JSON.parse(String(terminalWrite?.[1].body))).toMatchObject({
+      head_sha: FINAL_SHA, status: 'completed', conclusion: 'failure',
+    });
   });
 
   test('publishes success on the exact final SHA only for a trusted complete terminal run', async () => {
@@ -306,8 +505,16 @@ describe('check run terminal completeness authority', () => {
       method: init.method,
     }));
     expect(parsedCalls).toEqual(expect.arrayContaining([
-      expect.objectContaining({ url: expect.stringContaining('/check-runs'), body: expect.objectContaining({ head_sha: FINAL_SHA }) }),
-      expect.objectContaining({ url: expect.stringContaining('/check-runs/101'), body: expect.objectContaining({ conclusion: 'success' }) }),
+      expect.objectContaining({
+        url: expect.stringMatching(/\/check-runs$/),
+        method: 'POST',
+        body: expect.objectContaining({
+          head_sha: FINAL_SHA,
+          external_id: 'rorca:pipeline-run:41:v1',
+          status: 'completed',
+          conclusion: 'success',
+        }),
+      }),
     ]));
     expect(resolveToken).toHaveBeenCalled();
   });

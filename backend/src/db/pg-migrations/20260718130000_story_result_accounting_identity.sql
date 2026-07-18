@@ -36,6 +36,17 @@ WITH one_to_one AS (
   JOIN token_usage tu
     ON tu.run_id = sr.run_id AND tu.story_id = sr.story_id
   WHERE tu.story_result_id IS NULL
+    -- Every predicate below accepts the complete new NUMERIC/check contract
+    -- before any cast occurs. Old schemas allowed negative counters, empty
+    -- models, NaN/infinities, and REAL values outside NUMERIC(18,6); those rows
+    -- remain unbound historical telemetry instead of blocking an upgrade.
+    AND NULLIF(BTRIM(tu.model), '') IS NOT NULL
+    AND tu.input_tokens >= 0
+    AND tu.output_tokens >= 0
+    AND tu.reasoning_tokens >= 0
+    AND tu.cost_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
+    AND tu.cost_usd >= 0
+    AND tu.cost_usd < 1000000000000
   GROUP BY sr.run_id, sr.story_id
   HAVING COUNT(DISTINCT sr.id) = 1 AND COUNT(DISTINCT tu.id) = 1
 )
@@ -47,7 +58,7 @@ WHERE tu.id = pair.token_usage_id AND tu.story_result_id IS NULL;
 UPDATE story_results sr
 SET reasoning_tokens = COALESCE(sr.reasoning_tokens, tu.reasoning_tokens),
     accounting_required = TRUE,
-    accounting_model = tu.model,
+    accounting_model = BTRIM(tu.model),
     accounting_input_tokens = tu.input_tokens,
     accounting_output_tokens = tu.output_tokens,
     accounting_reasoning_tokens = tu.reasoning_tokens,

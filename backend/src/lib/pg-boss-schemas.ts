@@ -49,6 +49,7 @@ export type MergeStrategy = z.infer<typeof MergeStrategyEnum>;
 export const PipelineRunJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   specPath: z.string().min(1),
+  runSpecPath: z.string().min(1),
   workspacePath: z.string().min(1),
   agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),
@@ -108,6 +109,7 @@ export const PipelineRetryJobPayload = z.object({
   generatedPlanHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
+  runSpecPath: z.string().min(1),
   retrySpecPath: z.string().min(1),
   agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),

@@ -12,13 +12,36 @@ import type { PoolClient } from 'pg';
 import { transaction } from '../db/index';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
 import {
+  assertExactTrustedWalRow,
   insertTrustedWalEvent,
   trustedWalReference,
   type TrustedWalReference,
+  type TrustedWalRow,
 } from './trusted-wal';
 
 export const STORY_RESULT_STATUSES = ['pass', 'fail', 'skip', 'excluded'] as const;
 export type CanonicalStoryResultStatus = typeof STORY_RESULT_STATUSES[number];
+
+export type StoryResultProvenance = 'host' | 'compatibility' | 'recovery_proposal';
+export type StoryResultSource = 'execution-engine' | 'worker' | 'compatibility-http' | 'fallback-journal';
+
+export interface StoryResultPersistenceAuthority {
+  provenance: StoryResultProvenance;
+  source: StoryResultSource;
+}
+
+export const EXECUTION_ENGINE_RESULT_AUTHORITY = Object.freeze({
+  provenance: 'host', source: 'execution-engine',
+} satisfies StoryResultPersistenceAuthority);
+export const WORKER_RESULT_AUTHORITY = Object.freeze({
+  provenance: 'host', source: 'worker',
+} satisfies StoryResultPersistenceAuthority);
+export const FALLBACK_RESULT_AUTHORITY = Object.freeze({
+  provenance: 'recovery_proposal', source: 'fallback-journal',
+} satisfies StoryResultPersistenceAuthority);
+const COMPATIBILITY_RESULT_AUTHORITY = Object.freeze({
+  provenance: 'compatibility', source: 'compatibility-http',
+} satisfies StoryResultPersistenceAuthority);
 
 export interface CanonicalStoryResultInput {
   runId: number;
@@ -85,6 +108,8 @@ interface StoryResultIdentityRow {
   status: string;
   finished_at: string | Date | null;
   finished_at_source: string;
+  result_provenance: string;
+  result_source: string;
   worktree_path: string | null;
   worktree_branch: string | null;
   integrated: boolean;
@@ -225,7 +250,10 @@ function assertNonNegativeFinite(name: string, value: number | undefined): void 
   }
 }
 
-function validateInput(input: CanonicalStoryResultInput): void {
+function validateInput(
+  input: CanonicalStoryResultInput,
+  authority: StoryResultPersistenceAuthority,
+): void {
   if (!Number.isSafeInteger(input.runId) || input.runId <= 0) throw new ValidationError('runId must be a positive integer');
   if (typeof input.storyId !== 'string' || !input.storyId) throw new ValidationError('storyId is required');
   if (typeof input.idempotencyKey !== 'string' || !input.idempotencyKey || input.idempotencyKey.length > 256) {
@@ -278,8 +306,26 @@ function validateInput(input: CanonicalStoryResultInput): void {
       || typeof input.trustedPassOutbox.payload !== 'object')) {
     throw new ValidationError('trustedPassOutbox.payload must be an object');
   }
-  if (input.trustedPassOutbox && input.integrated !== true) {
-    throw new ValidationError('Trusted pass outbox requires an explicit integrated pass');
+  const hostIntegratedAuthority = authority.provenance === 'host'
+    && authority.source === 'execution-engine';
+  if (input.trustedPassOutbox && (!hostIntegratedAuthority || input.integrated !== true)) {
+    throw new ValidationError('Trusted pass outbox requires host execution-engine authority and an explicit integrated pass');
+  }
+  if ((input.integrated === true || input.commitSha !== undefined || input.commitMessage !== undefined)
+    && !hostIntegratedAuthority) {
+    throw new ValidationError('Integrated result and commit identity are host-only');
+  }
+  if ((authority.source === 'worker' && authority.provenance !== 'host')
+    || (authority.source === 'execution-engine' && authority.provenance !== 'host')
+    || (authority.source === 'compatibility-http' && authority.provenance !== 'compatibility')
+    || (authority.source === 'fallback-journal' && authority.provenance !== 'recovery_proposal')) {
+    throw new ValidationError('Story result persistence authority is invalid');
+  }
+  if (process.env.NODE_ENV !== 'test' && authority.provenance === 'host') {
+    const requiredRole = authority.source === 'worker' ? 'worker' : 'engine';
+    if (process.env.RORCA_PROCESS_ROLE !== requiredRole) {
+      throw new ValidationError(`Host story result source ${authority.source} requires ${requiredRole} process authority`);
+    }
   }
   if (input.integrated === true && (input.status !== 'pass' || input.commitSha === undefined)) {
     throw new ValidationError('Integrated pass requires pass status and exact commitSha');
@@ -300,9 +346,13 @@ function normalizedCommit(
   input: CanonicalStoryResultInput,
   projection: RunProjectionRow,
   specId: string,
+  authority: StoryResultPersistenceAuthority,
 ): NormalizedCommit | null {
   const integrated = input.integrated === true || (input.integrated === undefined && input.commitSha !== undefined);
   if (!integrated) return null;
+  if (authority.provenance !== 'host' || authority.source !== 'execution-engine') {
+    throw new ValidationError('Integrated result and commit identity are host-only');
+  }
   if (input.status !== 'pass') throw new ValidationError('Only pass results can be integrated');
   if (!input.commitSha) throw new ValidationError('Integrated pass requires exact commitSha');
   if (!projection.manifest_hash || !projection.closeout_decision_id || projection.closeout_status !== 'accepted') {
@@ -391,6 +441,7 @@ function assertSameResultPayload(
   specId: string,
   commit: NormalizedCommit | null,
   accounting: NormalizedAccounting | null,
+  authority: StoryResultPersistenceAuthority,
 ): void {
   const expectedCompletionPacket = input.completionPacket ?? null;
   const actualCompletionPacket = existing.completion_packet ?? null;
@@ -419,6 +470,8 @@ function assertSameResultPayload(
     && existing.story_id === input.storyId
     && existing.status === input.status
     && finishedMatches
+    && existing.result_provenance === authority.provenance
+    && existing.result_source === authority.source
     && existing.worktree_path === nullable(input.worktreePath)
     && existing.worktree_branch === nullable(input.worktreeBranch)
     && existing.integrated === Boolean(commit)
@@ -548,7 +601,8 @@ async function loadAccounting(client: PoolClient, storyResultId: number): Promis
 
 function resultIdentitySelect(): string {
   return `id, run_id, story_id, status, finished_at, finished_at_source,
-          worktree_path, worktree_branch, integrated, commit_sha, commit_message,
+          result_provenance, result_source, worktree_path, worktree_branch,
+          integrated, commit_sha, commit_message,
           commit_author, commit_branch, commit_observed_source, input_tokens,
           output_tokens, reasoning_tokens, model_used, cost_usd, log_path,
           reason, blocked_by, active_skills, completion_packet, spec_id, spec_revision,
@@ -601,12 +655,13 @@ async function persistTrustedPassOutbox(
  */
 export async function persistCanonicalStoryResult(
   input: CanonicalStoryResultInput,
+  authority: StoryResultPersistenceAuthority = COMPATIBILITY_RESULT_AUTHORITY,
 ): Promise<CanonicalStoryResultOutcome> {
-  validateInput(input);
+  validateInput(input, authority);
   return transaction(async (client) => {
     const projection = await loadRunProjection(client, input);
     const specId = path.basename(projection.spec_path, '.json');
-    const commit = normalizedCommit(input, projection, specId);
+    const commit = normalizedCommit(input, projection, specId, authority);
     const accounting = await deriveAccounting(client, input, projection.workspace_id);
     const finishedAt = input.finishedAt === undefined ? null : normalizeObservedTimestamp(input.finishedAt);
     const finishedAtSource = input.finishedAt === undefined ? 'database' : 'observed';
@@ -622,12 +677,12 @@ export async function persistCanonicalStoryResult(
         accounting_required, accounting_model, accounting_input_tokens,
         accounting_output_tokens, accounting_reasoning_tokens,
         accounting_cost_usd, accounting_cost_source, accounting_input_rate,
-        accounting_output_rate, reason
+        accounting_output_rate, reason, result_provenance, result_source
       ) VALUES (
         $1, $2, $3, COALESCE($4::timestamptz, NOW()), $5, $6, $7, $8, $9,
         $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22::jsonb, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32,
-        $33, $34, $35, $36, $37, $38
+        $33, $34, $35, $36, $37, $38, $39, $40
       )
       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
       RETURNING id
@@ -670,6 +725,8 @@ export async function persistCanonicalStoryResult(
       accounting?.input_cost_per_1k ?? null,
       accounting?.output_cost_per_1k ?? null,
       input.reason ?? null,
+      authority.provenance,
+      authority.source,
     ]))[0];
 
     if (!inserted) {
@@ -683,7 +740,7 @@ export async function persistCanonicalStoryResult(
         FOR UPDATE
       `, [input.idempotencyKey]))[0];
       if (!existing) throw new ConflictError('Story result duplicate is not durably readable');
-      assertSameResultPayload(existing, input, projection, specId, commit, accounting);
+      assertSameResultPayload(existing, input, projection, specId, commit, accounting, authority);
 
       if (commit) assertSameCommit(await loadCommit(client, commit), commit);
       assertSameAccounting(
@@ -752,6 +809,58 @@ export async function persistCanonicalStoryResult(
       client, input, projection, specId, inserted.id, commit,
     );
     return { id: inserted.id, duplicate: false, ...(trustedWal ? { trustedWal } : {}) };
+  });
+}
+
+/**
+ * Recognize an agent-writable pass journal only after the host has independently
+ * persisted, locally projected, and released the exact integrated result. This
+ * is read-only: a proposal can never create or promote result/WAL authority.
+ */
+export async function verifyReleasedHostPassProposal(
+  input: CanonicalStoryResultInput,
+): Promise<boolean> {
+  validateInput(input, EXECUTION_ENGINE_RESULT_AUTHORITY);
+  if (input.status !== 'pass' || input.integrated !== true || !input.idempotencyKey) return false;
+  return transaction(async (client) => {
+    const projection = await loadRunProjection(client, input);
+    const specId = path.basename(projection.spec_path, '.json');
+    const commit = normalizedCommit(input, projection, specId, EXECUTION_ENGINE_RESULT_AUTHORITY);
+    const accounting = await deriveAccounting(client, input, projection.workspace_id);
+    const existing = rows(await client.query<StoryResultIdentityRow>(`
+      SELECT ${resultIdentitySelect()}
+        FROM story_results
+       WHERE ingest_key = $1
+       FOR SHARE
+    `, [input.idempotencyKey]))[0];
+    if (!existing) return false;
+    assertSameResultPayload(
+      existing, input, projection, specId, commit, accounting, EXECUTION_ENGINE_RESULT_AUTHORITY,
+    );
+    if (!commit) return false;
+    assertSameCommit(await loadCommit(client, commit), commit);
+    assertSameAccounting(
+      await loadAccounting(client, existing.id), existing.id, projection.workspace_id, accounting,
+    );
+    const outboxes = rows(await client.query<TrustedWalRow>(`
+      SELECT * FROM wal_events
+       WHERE trust_provenance = 'host' AND trusted_source = 'story-result'
+         AND story_result_id = $1
+       FOR SHARE
+    `, [existing.id]));
+    if (outboxes.length !== 1 || !outboxes[0].outbox_ready_at) return false;
+    assertExactTrustedWalRow(outboxes[0]);
+    const payload = typeof outboxes[0].payload === 'string'
+      ? JSON.parse(outboxes[0].payload) as Record<string, unknown>
+      : outboxes[0].payload as unknown as Record<string, unknown>;
+    return outboxes[0].event_type === 'story_passed'
+      && outboxes[0].workspace_id === projection.workspace_id
+      && outboxes[0].spec_id === specId
+      && outboxes[0].story_id === input.storyId
+      && Number(outboxes[0].canonical_run_id) === input.runId
+      && Number(payload.story_result_id) === existing.id
+      && String(payload.commit_sha).toLowerCase() === commit.commitSha
+      && payload.closeout_decision_id === projection.closeout_decision_id;
   });
 }
 

@@ -16,13 +16,23 @@ const trustedWal = fs.readFileSync(path.join(__dirname, '..', 'trusted-wal.ts'),
 
 test('final Check Runs require trusted complete state and move to the exact final SHA', () => {
   expect(checkRun).toContain('authorizeCompleteTerminalRun(event)');
-  expect(checkRun).toContain('state.workspaceId !== complete.run.workspaceId');
-  expect(checkRun).toContain("conclusion: 'neutral'");
-  expect(checkRun).toContain('createCheckRun(state.owner, state.repo, finalSha');
+  expect(checkRun).toContain('persistDesiredProjection({');
+  expect(checkRun).toContain("desired_state: 'in_progress' | 'completed'");
+  expect(checkRun).toContain('subscribeDurable(async (event)');
+  expect(checkRun).toContain('reconcilePendingCheckRunProjections');
+  expect(checkRun).toContain('external_id: claim.external_id');
   expect(checkRun).toContain('fetchGithubWithTimeout(fetch, url');
   expect(authority).toContain('expected_story_ids');
   expect(authority).toContain("row.closeout_status !== 'accepted'");
-  expect(authority).toContain("row.observed_source !== 'worktree_branch'");
+  expect(authority).toContain("row.result_provenance !== 'host'");
+  expect(authority).toContain("row.result_commit_source !== 'worktree_branch'");
+  expect(authority).toContain('outboxes.length !== 1 || !outboxes[0].outbox_ready_at');
+  const accept = checkRun.slice(
+    checkRun.indexOf('export async function acceptCheckRunWalEvent'),
+    checkRun.indexOf('async function claimProjection'),
+  );
+  expect(accept).not.toContain('getGithubRepositoryAuthority(');
+  expect(accept).not.toContain('resolveWorkspaceGitHubToken(');
 });
 
 test('final commit status consumes only accepted trusted pass outbox events', () => {

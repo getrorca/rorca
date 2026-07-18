@@ -37,8 +37,18 @@ describe('worker fallback terminal gate', () => {
     expect(fallbackReplayBlocksCompletion(replay)).toBe(true);
   });
 
-  test('does not block a retained telemetry-only journal', () => {
-    expect(fallbackReplayBlocksCompletion(result({ retained: true, incomplete: true }))).toBe(false);
+  test('startup refinalizes pass authority before stale-job, orphan, or state terminal decisions', () => {
+    const startupRecovery = WORKER_SOURCE.lastIndexOf('const passRecovery = await recoverUnreleasedIntegratedPasses();');
+    const staleRecovery = WORKER_SOURCE.indexOf('await recoverStaleJobs();', startupRecovery);
+    const orphanSweep = WORKER_SOURCE.indexOf('await sweepOrphanProcesses();', startupRecovery);
+    const stateReconcile = WORKER_SOURCE.indexOf('await reconcileState();', startupRecovery);
+    expect(startupRecovery).toBeGreaterThan(0);
+    expect(staleRecovery).toBeGreaterThan(startupRecovery);
+    expect(orphanSweep).toBeGreaterThan(staleRecovery);
+    expect(stateReconcile).toBeGreaterThan(orphanSweep);
+  });
+
+  test('does not block a retained telemetry-only journal', () => {    expect(fallbackReplayBlocksCompletion(result({ retained: true, incomplete: true }))).toBe(false);
   });
 
   test('both normal and retry workers apply replay before terminal success/sync', () => {

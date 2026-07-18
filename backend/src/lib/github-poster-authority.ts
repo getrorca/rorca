@@ -10,7 +10,11 @@
 import * as path from 'path';
 import { query, queryOne } from '../db/index';
 import { isFullGitObjectId } from './github-repository-authority';
-import { isTrustedGoverningWalEvent, type TrustedWalRow } from './trusted-wal';
+import {
+  assertExactTrustedWalRow,
+  isTrustedGoverningWalEvent,
+  type TrustedWalRow,
+} from './trusted-wal';
 import type { WalEvent } from './sse-hub';
 
 export interface CanonicalPosterRun {
@@ -69,10 +73,23 @@ interface StoryAuthorityRow {
   finished_at: string | null;
   closeout_decision_id: string | null;
   closeout_status: string | null;
+  closeout_manifest_hash: string | null;
+  manifest_hash: string | null;
+  integrated: boolean;
+  result_commit_sha: string | null;
+  result_commit_message: string | null;
+  result_commit_author: string | null;
+  result_commit_branch: string | null;
+  result_commit_source: string | null;
+  result_provenance: string;
+  result_source: string;
   commit_sha: string | null;
+  commit_message: string | null;
   observed_source: string | null;
   author: string | null;
+  branch_name: string | null;
   pushed_at: string | null;
+  commit_count: number | string;
 }
 
 function parsePayload(event: WalEvent): Record<string, unknown> | null {
@@ -141,12 +158,22 @@ export async function authorizeStoryPassEvent(event: WalEvent): Promise<Authoriz
   const decisionId = typeof authorized.payload.closeout_decision_id === 'string'
     ? authorized.payload.closeout_decision_id
     : null;
-  if (!Number.isSafeInteger(resultId) || resultId <= 0 || !eventSha || !decisionId) return null;
+  if (!Number.isSafeInteger(resultId) || resultId <= 0
+    || resultId !== Number((event as TrustedWalRow).story_result_id)
+    || !eventSha || !decisionId) return null;
 
   const row = await queryOne<StoryAuthorityRow>(`
     SELECT sr.id, sr.story_id, sr.status, sr.spec_id, sr.reason, sr.finished_at,
            sr.closeout_decision_id, scd.status AS closeout_status,
-           sc.commit_sha, sc.observed_source, sc.author, sc.pushed_at
+           scd.manifest_hash AS closeout_manifest_hash, sr.manifest_hash,
+           sr.integrated, sr.commit_sha AS result_commit_sha,
+           sr.commit_message AS result_commit_message,
+           sr.commit_author AS result_commit_author,
+           sr.commit_branch AS result_commit_branch,
+           sr.commit_observed_source AS result_commit_source,
+           sr.result_provenance, sr.result_source,
+           sc.commit_sha, sc.commit_message, sc.observed_source, sc.author,
+           sc.branch_name, sc.pushed_at, 1 AS commit_count
       FROM story_results sr
       JOIN story_closeout_decisions scd
         ON scd.decision_id = sr.closeout_decision_id
@@ -172,11 +199,20 @@ export async function authorizeStoryPassEvent(event: WalEvent): Promise<Authoriz
   if (!row
     || row.status !== 'pass'
     || row.spec_id !== authorized.run.specId
+    || row.integrated !== true
+    || row.result_provenance !== 'host'
+    || row.result_source !== 'execution-engine'
     || row.closeout_status !== 'accepted'
     || row.closeout_decision_id !== decisionId
-    || row.commit_sha?.toLowerCase() !== eventSha
-    || row.observed_source !== 'worktree_branch'
-    || row.author !== 'rorca-execution-engine') {
+    || row.closeout_manifest_hash !== row.manifest_hash
+    || row.result_commit_sha?.toLowerCase() !== eventSha
+    || row.commit_sha?.toLowerCase() !== row.result_commit_sha?.toLowerCase()
+    || row.commit_message !== row.result_commit_message
+    || row.branch_name !== row.result_commit_branch
+    || row.observed_source !== row.result_commit_source
+    || row.result_commit_source !== 'worktree_branch'
+    || row.author !== row.result_commit_author
+    || row.result_commit_author !== 'rorca-execution-engine') {
     return null;
   }
   return {
@@ -191,13 +227,15 @@ export async function authorizeTerminalStoryEvent(event: WalEvent): Promise<Auth
   if (!event.story_id || !['story_failed', 'story_skipped'].includes(event.event_type)) return null;
   const authorized = await authorizeCanonicalWalEvent(event);
   if (!authorized) return null;
-  const row = await queryOne<{ status: string }>(`
-    SELECT status FROM story_results
+  const row = await queryOne<{ status: string; result_provenance: string; result_source: string }>(`
+    SELECT status, result_provenance, result_source FROM story_results
      WHERE run_id = $1 AND story_id = $2
      ORDER BY id DESC LIMIT 1
   `, [authorized.run.id, event.story_id]);
   const allowed = event.event_type === 'story_failed'
     ? ['fail', 'timeout'].includes(row?.status ?? '')
+      && row?.result_provenance === 'host'
+      && ['execution-engine', 'worker'].includes(row?.result_source ?? '')
     : ['skip', 'excluded'].includes(row?.status ?? '');
   return allowed ? authorized : null;
 }
@@ -225,37 +263,101 @@ export async function authorizeCompleteTerminalRun(event: WalEvent): Promise<Com
     SELECT DISTINCT ON (sr.story_id)
            sr.id, sr.story_id, sr.status, sr.spec_id, sr.reason, sr.finished_at,
            sr.closeout_decision_id, scd.status AS closeout_status,
-           sc.commit_sha, sc.observed_source, sc.author, sc.pushed_at
+           scd.manifest_hash AS closeout_manifest_hash, sr.manifest_hash,
+           sr.integrated, sr.commit_sha AS result_commit_sha,
+           sr.commit_message AS result_commit_message,
+           sr.commit_author AS result_commit_author,
+           sr.commit_branch AS result_commit_branch,
+           sr.commit_observed_source AS result_commit_source,
+           sr.result_provenance, sr.result_source,
+           sc.commit_sha, sc.commit_message, sc.observed_source, sc.author,
+           sc.branch_name, sc.pushed_at,
+           (SELECT COUNT(*) FROM story_commits exact_sc
+             WHERE exact_sc.workspace_id = $2 AND exact_sc.spec_id = $3
+               AND exact_sc.run_id = sr.run_id AND exact_sc.story_id = sr.story_id
+               AND exact_sc.commit_sha = sr.commit_sha) AS commit_count
       FROM story_results sr
       LEFT JOIN story_closeout_decisions scd
         ON scd.decision_id = sr.closeout_decision_id
        AND scd.workspace_id = $2 AND scd.spec_id = $3
        AND scd.run_id = sr.run_id AND scd.story_id = sr.story_id
-      LEFT JOIN LATERAL (
-        SELECT commit_sha, observed_source, author, pushed_at
-          FROM story_commits
-         WHERE workspace_id = $2 AND spec_id = $3
-           AND run_id = sr.run_id AND story_id = sr.story_id
-         ORDER BY pushed_at DESC, id DESC LIMIT 1
-      ) sc ON TRUE
+       AND scd.manifest_hash = sr.manifest_hash
+      LEFT JOIN story_commits sc
+        ON sc.workspace_id = $2 AND sc.spec_id = $3
+       AND sc.run_id = sr.run_id AND sc.story_id = sr.story_id
+       AND sc.commit_sha = sr.commit_sha
      WHERE sr.run_id = $1 AND sr.story_id = ANY($4::text[])
      ORDER BY sr.story_id, sr.id DESC
   `, [authorized.run.id, authorized.run.workspaceId, authorized.run.specId, expected]);
   if (rows.length !== expected.length || rows.some(row => !expected.includes(row.story_id))) return null;
   const terminalStoryStatuses = new Set(['pass', 'fail', 'skip', 'timeout', 'excluded']);
   if (rows.some(row => !terminalStoryStatuses.has(row.status) || !row.finished_at)) return null;
+  if (rows.some(row => ['fail', 'timeout'].includes(row.status)
+    && (row.result_provenance !== 'host'
+      || !['execution-engine', 'worker'].includes(row.result_source)))) return null;
 
-  for (const row of rows) {
-    if (row.status !== 'pass') continue;
+  const passingRows = rows.filter(row => row.status === 'pass');
+  for (const row of passingRows) {
     if (row.spec_id !== authorized.run.specId
+      || row.integrated !== true
+      || row.result_provenance !== 'host'
+      || row.result_source !== 'execution-engine'
       || !row.closeout_decision_id
       || row.closeout_status !== 'accepted'
-      || !isFullGitObjectId(row.commit_sha)
-      || row.observed_source !== 'worktree_branch'
-      || row.author !== 'rorca-execution-engine') {
+      || row.closeout_manifest_hash !== row.manifest_hash
+      || !isFullGitObjectId(row.result_commit_sha)
+      || row.commit_sha?.toLowerCase() !== row.result_commit_sha?.toLowerCase()
+      || row.commit_message !== row.result_commit_message
+      || row.author !== row.result_commit_author
+      || row.result_commit_author !== 'rorca-execution-engine'
+      || row.branch_name !== row.result_commit_branch
+      || row.observed_source !== row.result_commit_source
+      || row.result_commit_source !== 'worktree_branch'
+      || Number(row.commit_count) !== 1) {
       return null;
     }
   }
+
+  // A passing result is authoritative only when exactly one released immutable
+  // host outbox binds the complete result/run/workspace/spec/story/SHA/decision
+  // identity. This DB/hash verification completes before repository authority or
+  // token resolution in any poster caller.
+  const passIds = passingRows.map(row => Number(row.id));
+  const passOutboxes = passIds.length === 0 ? [] : await query<TrustedWalRow>(`
+    SELECT * FROM wal_events
+     WHERE trust_provenance = 'host' AND trusted_source = 'story-result'
+       AND event_type = 'story_passed'
+       AND story_result_id = ANY($1::int[])
+     ORDER BY id ASC
+  `, [passIds]);
+  const outboxesByResult = new Map<number, TrustedWalRow[]>();
+  for (const outbox of passOutboxes) {
+    const resultId = Number(outbox.story_result_id);
+    const group = outboxesByResult.get(resultId) ?? [];
+    group.push(outbox);
+    outboxesByResult.set(resultId, group);
+  }
+  for (const row of passingRows) {
+    const outboxes = outboxesByResult.get(Number(row.id)) ?? [];
+    if (outboxes.length !== 1 || !outboxes[0].outbox_ready_at) return null;
+    const outbox = outboxes[0];
+    try { assertExactTrustedWalRow(outbox); } catch { return null; }
+    const payload = parsePayload(outbox);
+    if (!payload
+      || outbox.workspace_id !== authorized.run.workspaceId
+      || outbox.spec_id !== authorized.run.specId
+      || outbox.story_id !== row.story_id
+      || Number(outbox.canonical_run_id) !== authorized.run.id
+      || Number(outbox.story_result_id) !== Number(row.id)
+      || Number(payload.run_id) !== authorized.run.id
+      || payload.story_id !== row.story_id
+      || Number(payload.story_result_id) !== Number(row.id)
+      || String(payload.commit_sha).toLowerCase() !== row.result_commit_sha?.toLowerCase()
+      || payload.closeout_decision_id !== row.closeout_decision_id) {
+      return null;
+    }
+  }
+
   const commits = rows
     .filter(row => row.status === 'pass' && row.commit_sha && row.pushed_at)
     .sort((left, right) => new Date(left.pushed_at!).getTime() - new Date(right.pushed_at!).getTime());

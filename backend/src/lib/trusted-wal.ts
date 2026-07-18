@@ -272,6 +272,20 @@ export async function insertTrustedWalEvent(
     throw new ConflictError('Trusted WAL story is outside the frozen run scope');
   }
 
+  if (input.eventType === 'story_failed') {
+    const failure = rows(await client.query<{ id: number }>(`
+      SELECT id FROM story_results
+       WHERE run_id = $1 AND story_id = $2
+         AND status IN ('fail', 'timeout')
+         AND result_provenance = 'host' AND result_source = $3
+       ORDER BY id DESC LIMIT 1
+       FOR SHARE
+    `, [input.runId, storyId, input.source]))[0];
+    if (!failure) {
+      throw new ConflictError('Trusted story failure requires a durable host result before event release');
+    }
+  }
+
   if (storyResultId !== null) {
     const commitSha = typeof input.payload.commit_sha === 'string'
       ? input.payload.commit_sha.toLowerCase()

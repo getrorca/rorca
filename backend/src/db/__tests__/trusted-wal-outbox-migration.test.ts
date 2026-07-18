@@ -25,7 +25,9 @@ test('trusted WAL migration precedes webhook and accounting while identifiers st
   expect(names.indexOf('20260718120000_webhook_replay_provenance.sql')).toBeLessThan(
     names.indexOf('20260718130000_story_result_accounting_identity.sql'),
   );
-  expect(names.at(-1)).toBe('20260718130000_story_result_accounting_identity.sql');
+  expect(names.indexOf('20260718130000_story_result_accounting_identity.sql')).toBeLessThan(
+    names.indexOf('20260718140000_story_result_authority_and_github_projection.sql'),
+  );
   const identifiers = [...sql.matchAll(/(?:CONSTRAINT|INDEX IF NOT EXISTS)\s+([a-zA-Z0-9_]+)/g)]
     .map(match => match[1]);
   expect(identifiers.length).toBeGreaterThan(0);

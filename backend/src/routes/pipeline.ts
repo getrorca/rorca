@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { isUtf8 } from 'buffer';
 import { execSync, spawn } from 'child_process';
 import * as path from 'path';
@@ -24,6 +24,7 @@ import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
+import { requireWorkspaceAdmin } from '../lib/auth-utils';
 import { parsePaginationParams } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine } from '../lib/semantic-log-parser';
@@ -70,7 +71,7 @@ import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired, isSuperUser } from '../lib/auth-utils';
-import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
+import { AuthError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
@@ -94,6 +95,11 @@ import {
 import { sweepOrphanProcesses } from '../worker';
 import { safelyRefreshReusableWorktree, validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 import { PipelineRetryJobPayload } from '../lib/pg-boss-schemas';
+import {
+  deriveRunSpecPath,
+  durableAtomicWriteFile,
+  prepareRunSpecSnapshot,
+} from '../lib/run-spec-snapshot';
 import {
   buildGovernedRetrySpec,
   compareRetryPlanToPreview,
@@ -2221,10 +2227,20 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       startFromStoryId = startFromStory?.id ?? undefined;
     } catch { /* spec read error — non-fatal, worker will handle */ }
 
-    // 10. Resolve immutable per-story manifests before queue dispatch. The
-    // engine receives the resulting execution-only contract and does not
-    // recompute lifecycle evidence or command-safety policy from story prose.
-    const dispatchSpec = JSON.parse(fs.readFileSync(absSpecPath, 'utf8')) as Record<string, unknown>;
+    // 10. Resolve the deterministic run-owned mutable spec. Worktree runs use
+    // .rorca/run-specs/run-<id>.json; only direct non-retry execution retains
+    // the canonical approved-spec mutation contract.
+    const runSpecPath = prepareRunSpecSnapshot({
+      runId,
+      sourceSpecPath: absSpecPath,
+      workspacePath: workspace.path,
+      worktreePath,
+    });
+
+    // Resolve immutable per-story manifests before queue dispatch. The engine
+    // receives the resulting execution-only contract and does not recompute
+    // lifecycle evidence or command-safety policy from story prose.
+    const dispatchSpec = JSON.parse(fs.readFileSync(runSpecPath, 'utf8')) as Record<string, unknown>;
     const expectedStoryIds = frozenExpectedStoryIds(dispatchSpec);
     if (expectedStoryIds.length === 0) throw new ValidationError('Runnable spec must freeze at least one expected story');
     await execute('UPDATE pipeline_runs SET expected_story_ids = $1::text[] WHERE id = $2', [expectedStoryIds, runId]);
@@ -2255,6 +2271,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const jobPayload = {
       runId,
       specPath,
+      runSpecPath,
       workspacePath: workspace.path,
       agent: resolvedAgentType,
       model: finalAgentModel ?? null,
@@ -5975,11 +5992,14 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     //     Include all stories so dependency resolution works correctly — passed stories
     //     (passes:true) are skipped naturally by the engine.
     const specJson = buildGovernedRetrySpec(sourceSpecJson, approvedPreview.scope);
-    const retrySpecName = `retry-${newRunId}-${Date.now()}.json`;
-    const retrySpecDir = path.join(workspace.path, 'forge', 'specs', 'approved');
-    const retrySpecPath = path.join(retrySpecDir, retrySpecName);
-    fs.mkdirSync(retrySpecDir, { recursive: true });
-    fs.writeFileSync(retrySpecPath, JSON.stringify(specJson, null, 2));
+    const retrySpecPath = deriveRunSpecPath({
+      runId: Number(newRunId),
+      sourceSpecPath: path.join(workspace.path, originalRun.spec_path),
+      workspacePath: workspace.path,
+      worktreePath: approvedPreview.options.worktree.path,
+      retry: true,
+    });
+    durableAtomicWriteFile(retrySpecPath, JSON.stringify(specJson, null, 2) + '\n');
 
     // 11. A retry follows the same opaque-secret contract as a fresh run.
     // Never serialize process.env or decrypted workspace values into pg-boss.
@@ -6073,6 +6093,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       generatedPlanHash: planComparison.scopeHash,
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
+      runSpecPath: retrySpecPath,
       retrySpecPath,
       agent: approvedPreview.options.agent,
       model: approvedPreview.options.model,
@@ -7267,19 +7288,57 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/pipeline/story-result — Keyed compatibility result ingress ──
-// The host execution engine writes the same canonical transaction directly.
+// ─── POST /api/pipeline/story-result — Disabled-by-default compatibility ingress ──
+// Integrated results are process-local host writes and can never cross HTTP.
+
+async function gateLegacyStoryResultIngress(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (!req.user) throw new AuthError('Authentication required');
+    if (body.integrated !== undefined || body.commitSha !== undefined || body.commitMessage !== undefined) {
+      throw new ValidationError('Integrated result and commit identity are host-only');
+    }
+    if (process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS !== '1') {
+      throw new ForbiddenError('Legacy story-result HTTP ingress is disabled');
+    }
+    const runId = Number(body.runId);
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new ValidationError('runId must be a positive integer');
+    }
+    const run = await queryOne<{ workspace_id: string; membership_role: string | null }>(`
+      SELECT pr.workspace_id,
+             (SELECT wm.role FROM workspace_members wm
+               WHERE wm.workspace_id = pr.workspace_id AND wm.user_auth_id = $2
+               LIMIT 1) AS membership_role
+        FROM pipeline_runs pr
+       WHERE pr.id = $1
+    `, [runId, req.user.supabaseId]);
+    if (!run) throw new NotFoundError('Pipeline run', String(runId));
+    if (!isSuperUser(req.user) && !['admin', 'owner'].includes(run.membership_role ?? '')) {
+      throw new ForbiddenError('Workspace admin access is required');
+    }
+    body.workspaceId = run.workspace_id;
+    body.integrated = false;
+    next();
+  } catch (error) {
+    handleRouteError(res, error, '[Pipeline] Story result ingress gate');
+  }
+}
 
 /**
  * @swagger
  * /api/pipeline/story-result:
  *   post:
  *     tags: [Pipeline]
- *     summary: Record a story outcome from the execution engine
+ *     summary: Record a legacy non-integrated story outcome
  *     operationId: recordStoryResult
  *     x-rorca-tier: admin
- *     x-rorca-rationale: "Internal execution-engine closeout write — operator-only because it mutates canonical story result metadata."
- *     description: Keyed compatibility ingress for story results. The host execution engine calls the same canonical transaction directly before local pass mutation.
+ *     x-rorca-rationale: "Disabled-by-default legacy compatibility write; workspace-admin only because it mutates non-governing canonical result metadata."
+ *     description: Disabled-by-default, workspace-admin compatibility ingress for non-integrated story outcomes. Integrated/commit identity is always rejected; the host execution engine writes those results process-locally.
  *     requestBody:
  *       required: true
  *       content:
@@ -7293,9 +7352,6 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
  *               status: { type: string, enum: [pass, fail, skip, excluded] }
  *               worktreePath: { type: string, nullable: true }
  *               worktreeBranch: { type: string, nullable: true }
- *               integrated: { type: boolean, nullable: true, description: "True only for host-verified run-branch integration passes." }
- *               commitSha: { type: string, nullable: true, pattern: '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$', description: "Host-verified immutable integrated run-branch HEAD" }
- *               commitMessage: { type: string, nullable: true }
  *               inputTokens: { type: integer, nullable: true }
  *               outputTokens: { type: integer, nullable: true }
  *               reasoningTokens: { type: integer, nullable: true }
@@ -7312,10 +7368,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
  *       400: { description: "Missing required fields or invalid status" }
  *       500: { description: "Internal server error" }
  */
-router.post('/story-result', async (req: Request, res: Response) => {
+router.post('/story-result', gateLegacyStoryResultIngress, requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const {
-      runId, storyId, status, worktreePath, worktreeBranch, integrated, commitSha, commitMessage,
+      runId, storyId, status, worktreePath, worktreeBranch,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
       logPath, reason, blockedBy, activeSkills, completionPacket, idempotencyKey,
     } = req.body as {
@@ -7325,6 +7381,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath?: string; reason?: string; blockedBy?: string[]; activeSkills?: string[];
       completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
+      workspaceId?: string;
     };
 
     if (!runId || !storyId || !status) {
@@ -7337,9 +7394,6 @@ router.post('/story-result', async (req: Request, res: Response) => {
       return;
     }
 
-    if (commitSha && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
-      throw new ValidationError('commitSha must be a full 40- or 64-hex git object id');
-    }
     if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
       throw new ValidationError('completionPacket must be an object');
     }
@@ -7350,9 +7404,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       status: status as CanonicalStoryResultStatus,
       worktreePath,
       worktreeBranch,
-      integrated,
-      commitSha,
-      commitMessage,
+      integrated: false,
       inputTokens,
       outputTokens,
       reasoningTokens,
@@ -7364,6 +7416,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       activeSkills,
       completionPacket,
       idempotencyKey,
+      expectedWorkspaceId: String((req.body as Record<string, unknown>).workspaceId),
     });
 
     res.status(outcome.duplicate ? 200 : 201).json({ ok: true, duplicate: outcome.duplicate });

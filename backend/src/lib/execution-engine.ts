@@ -149,6 +149,7 @@ import type {
   CanonicalStoryResultInput,
   CanonicalStoryResultOutcome,
 } from './story-result-persistence';
+import { durableAtomicWriteFile } from './run-spec-snapshot';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -4026,6 +4027,9 @@ export async function markStoryPassed(jsonPath: string, storyId: string): Promis
     const raw = fs.readFileSync(jsonPath, 'utf8');
     const spec: SpecJson = JSON.parse(raw);
     const stories = getStories(spec);
+    if (stories.filter(story => story.id === storyId).length > 1) {
+      throw new Error(`Spec contains duplicate story identity ${storyId}`);
+    }
 
     for (const s of stories) {
       if (s.id !== storyId) continue;
@@ -4042,7 +4046,7 @@ export async function markStoryPassed(jsonPath: string, storyId: string): Promis
     }
 
     if (result.changed) {
-      fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+      durableAtomicWriteFile(jsonPath, JSON.stringify(spec, null, 2) + '\n');
       logger.info(`Marked ${storyId} as passed`);
     }
   });
@@ -4933,14 +4937,6 @@ async function recordStoryMergeConflict(
 
   if (!workspaceId) return;
 
-  await emitWalEvent(config.port, 'story_failed', workspaceId, {
-    run_id: config.runId,
-    story_id: wt.storyId,
-    reason: 'merge_conflict',
-    conflictingFiles,
-    worktree_branch: wt.branchName,
-    ...(wave != null ? { wave } : {}),
-  }, wt.storyId);
   await postStoryResult(config.port, {
     runId: config.runId,
     storyId: wt.storyId,
@@ -4953,6 +4949,14 @@ async function recordStoryMergeConflict(
     ...(pending?.activeSkillsExtra ?? {}),
     ...(pending?.tokenPayload ?? {}),
   });
+  await emitWalEvent(config.port, 'story_failed', workspaceId, {
+    run_id: config.runId,
+    story_id: wt.storyId,
+    reason: 'merge_conflict',
+    conflictingFiles,
+    worktree_branch: wt.branchName,
+    ...(wave != null ? { wave } : {}),
+  }, wt.storyId);
 }
 
 function createStoryWorktree(
@@ -6328,13 +6332,13 @@ async function executeStory(
         writeProgressTxt(effectiveCwd);
 
         if (workspaceId) {
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', reason: 'rate_limit_exhausted', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id,
             reason: 'rate_limit_exhausted', attempts: rateLimitAttempts,
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
           // PG-020: Auto-synthesize memory from rate-limit-exhausted failure
           await autoSynthesizeMemory(
@@ -6428,6 +6432,7 @@ async function executeStory(
         }
 
         if (workspaceId && currentRetries >= MAX_RETRIES) {
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', reason: 'max_retries', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId,
             story_id: story.id,
@@ -6437,7 +6442,6 @@ async function executeStory(
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
         } else if (workspaceId) {
           await emitWalEvent(config.port, 'story_retry', workspaceId, {
             run_id: config.runId,
@@ -6537,6 +6541,17 @@ async function executeStory(
               'Maximum repair attempts produced no meaningful implementation change.',
             );
             if (workspaceId) {
+              await postStoryResult(config.port, {
+                runId: config.runId,
+                storyId: story.id,
+                status: 'fail',
+                reason: 'max_retries',
+                logPath: storyLogFile,
+                ...storyResultExtra,
+                ...activeSkillsExtra,
+                ...tokenPayload,
+                ...(noCodeCompletionPacket ? { completionPacket: noCodeCompletionPacket } : {}),
+              });
               await emitWalEvent(config.port, 'story_failed', workspaceId, {
                 run_id: config.runId,
                 story_id: story.id,
@@ -6546,16 +6561,6 @@ async function executeStory(
                 log_file: storyLogFile,
                 ...(noCodeCompletionPacket ? { completion_packet: noCodeCompletionPacket } : {}),
               }, story.id);
-              await postStoryResult(config.port, {
-                runId: config.runId,
-                storyId: story.id,
-                status: 'fail',
-                logPath: storyLogFile,
-                ...storyResultExtra,
-                ...activeSkillsExtra,
-                ...tokenPayload,
-                ...(noCodeCompletionPacket ? { completionPacket: noCodeCompletionPacket } : {}),
-              });
             }
             markStorySkipped(config.jsonPath, story.id);
             rsMarkStoryFailed(effectiveCwd, {
@@ -6704,6 +6709,17 @@ async function executeStory(
           });
           const commitFailurePacket = currentPiCompletionPacket('blocked', failureSummary);
           if (workspaceId) {
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason: failureReason,
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+              ...(commitFailurePacket ? { completionPacket: commitFailurePacket } : {}),
+            });
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
@@ -6713,16 +6729,6 @@ async function executeStory(
               log_file: storyLogFile,
               ...(commitFailurePacket ? { completion_packet: commitFailurePacket } : {}),
             }, story.id);
-            await postStoryResult(config.port, {
-              runId: config.runId,
-              storyId: story.id,
-              status: 'fail',
-              logPath: storyLogFile,
-              ...storyResultExtra,
-              ...activeSkillsExtra,
-              ...tokenPayload,
-              ...(commitFailurePacket ? { completionPacket: commitFailurePacket } : {}),
-            });
           }
           markStorySkipped(config.jsonPath, story.id);
           rsMarkStoryFailed(effectiveCwd, {
@@ -6781,6 +6787,16 @@ async function executeStory(
             writeProgressTxt(effectiveCwd);
           }
           if (workspaceId && currentRetries >= MAX_RETRIES) {
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason: 'max_retries',
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+            });
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
@@ -6789,15 +6805,6 @@ async function executeStory(
               summary: manifestGate.output,
               log_file: storyLogFile,
             }, story.id);
-            await postStoryResult(config.port, {
-              runId: config.runId,
-              storyId: story.id,
-              status: 'fail',
-              logPath: storyLogFile,
-              ...storyResultExtra,
-              ...activeSkillsExtra,
-              ...tokenPayload,
-            });
           } else if (workspaceId) {
             await emitWalEvent(config.port, 'story_retry', workspaceId, {
               run_id: config.runId,
@@ -6943,16 +6950,6 @@ async function executeStory(
         });
 
         if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId,
-            story_id: story.id,
-            reason: `gitreins_${gitReinsResult.reasonCode}`,
-            attempt: gitReinsAttempt,
-            max_attempts: MAX_RETRIES,
-            evidence_id: gitReinsEvidenceId,
-            worktree: gitReinsResult.worktree,
-            log_file: storyLogFile,
-          }, story.id);
           await postStoryResult(config.port, {
             runId: config.runId,
             storyId: story.id,
@@ -6964,6 +6961,16 @@ async function executeStory(
             ...activeSkillsExtra,
             ...tokenPayload,
           });
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: `gitreins_${gitReinsResult.reasonCode}`,
+            attempt: gitReinsAttempt,
+            max_attempts: MAX_RETRIES,
+            evidence_id: gitReinsEvidenceId,
+            worktree: gitReinsResult.worktree,
+            log_file: storyLogFile,
+          }, story.id);
         }
 
         if (action === 'retry') {
@@ -7073,6 +7080,21 @@ async function executeStory(
           }
 
           if (workspaceId) {
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason,
+              closeoutReasonCodes: reasonCodes,
+              closeoutDecisionId: closeout?.decision.decisionId ?? null,
+              attemptResultId: closeout?.attempt.attemptResultId ?? null,
+              manifestHash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+              ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+            });
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
@@ -7096,21 +7118,6 @@ async function executeStory(
               ...(graphHits != null ? { graph_hits: graphHits } : {}),
               ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
             }, story.id);
-            await postStoryResult(config.port, {
-              runId: config.runId,
-              storyId: story.id,
-              status: 'fail',
-              reason,
-              closeoutReasonCodes: reasonCodes,
-              closeoutDecisionId: closeout?.decision.decisionId ?? null,
-              attemptResultId: closeout?.attempt.attemptResultId ?? null,
-              manifestHash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
-              logPath: storyLogFile,
-              ...storyResultExtra,
-              ...activeSkillsExtra,
-              ...tokenPayload,
-              ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
-            });
           }
           if (currentRetries >= MAX_RETRIES && workspaceId) {
             await autoSynthesizeMemory(
@@ -7148,13 +7155,6 @@ async function executeStory(
         });
         const blockedCompletionPacket = currentPiCompletionPacket('blocked', remediation);
         if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId,
-            story_id: story.id,
-            reason: 'blocked',
-            blocker_reason: 'missing_execution_manifest',
-            ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
-          }, story.id);
           await postStoryResult(config.port, {
             runId: config.runId,
             storyId: story.id,
@@ -7166,6 +7166,13 @@ async function executeStory(
             ...tokenPayload,
             ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
           });
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'blocked',
+            blocker_reason: 'missing_execution_manifest',
+            ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
+          }, story.id);
         }
         await persistRetrievalOutcome(false);
         return 'closeout_blocked';
@@ -7262,6 +7269,17 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: 'timeout',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(timeoutCompletionPacket ? { completionPacket: timeoutCompletionPacket } : {}),
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: 'timeout', timeout_minutes: timeoutMin,
@@ -7272,16 +7290,6 @@ async function executeStory(
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
           ...(timeoutCompletionPacket ? { completion_packet: timeoutCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-          ...(timeoutCompletionPacket ? { completionPacket: timeoutCompletionPacket } : {}),
-        });
 
         // PG-020: Auto-synthesize memory from timed-out story
         await autoSynthesizeMemory(
@@ -7330,6 +7338,16 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId,
           story_id: story.id,
@@ -7342,16 +7360,6 @@ async function executeStory(
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-        });
       }
       await persistRetrievalOutcome(false);
       return 'failed';
@@ -7381,6 +7389,17 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: classified.category,
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: effectiveAgent === 'pi' ? 'blocked' : classified.category,
@@ -7391,16 +7410,6 @@ async function executeStory(
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
           ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-          ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
-        });
 
         // PG-020: Auto-synthesize memory from non-retryable failure
         await autoSynthesizeMemory(
@@ -7441,6 +7450,17 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: 'max_retries',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(maxRetriesCompletionPacket ? { completionPacket: maxRetriesCompletionPacket } : {}),
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: 'max_retries', attempts: currentRetries,
@@ -7450,16 +7470,6 @@ async function executeStory(
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
           ...(maxRetriesCompletionPacket ? { completion_packet: maxRetriesCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-          ...(maxRetriesCompletionPacket ? { completionPacket: maxRetriesCompletionPacket } : {}),
-        });
 
         // PG-020: Auto-synthesize memory from max-retries failure
         await autoSynthesizeMemory(
@@ -7738,13 +7748,6 @@ async function main(): Promise<void> {
     if (!workspaceId) return;
     for (const { ownerId, packet } of packets) {
       const storyId = ownerId.slice(ownerId.indexOf(':') + 1);
-      await emitWalEvent(config.port, 'story_failed', workspaceId, {
-        run_id: config.runId,
-        story_id: storyId,
-        reason: 'blocked',
-        blocker_reason: status,
-        completion_packet: packet,
-      }, storyId);
       await postStoryResult(config.port, {
         runId: config.runId,
         storyId,
@@ -7752,6 +7755,13 @@ async function main(): Promise<void> {
         reason: status,
         completionPacket: packet,
       });
+      await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        run_id: config.runId,
+        story_id: storyId,
+        reason: 'blocked',
+        blocker_reason: status,
+        completion_packet: packet,
+      }, storyId);
     }
   };
 
@@ -7989,11 +7999,11 @@ async function runParallel(
         });
 
         if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip', reason: 'blocked_by', blockedBy: blockers });
+          await emitWalEvent(config.port, 'story_skipped', workspaceId, {
             run_id: config.runId, story_id: original.id,
             reason: 'blocked_by', blockedBy: blockers,
           }, original.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip', blockedBy: blockers });
         }
         continue;
       }
@@ -8028,10 +8038,10 @@ async function runParallel(
         });
 
         if (workspaceId) {
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', reason: 'worktree_create_failed' });
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
         }
       }
     }
@@ -8178,11 +8188,11 @@ async function runParallel(
         });
 
         if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip', reason: 'blocked_by', blockedBy: blockers });
+          await emitWalEvent(config.port, 'story_skipped', workspaceId, {
             run_id: config.runId, story_id: blockedId,
             reason: 'blocked_by', blockedBy: blockers,
           }, blockedId);
-          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip', blockedBy: blockers });
         }
       }
     }

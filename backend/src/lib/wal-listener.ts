@@ -21,7 +21,7 @@
 
 import { Client, type ClientConfig } from 'pg';
 import { queryOne } from '../db/index';
-import { broadcastAll, type WalEvent } from './sse-hub';
+import { broadcastAll, broadcastAllDurably, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 import { persistLegacyStoryResultAccounting } from './story-result-persistence';
 import {
@@ -149,11 +149,13 @@ function toWalEvent(row: Record<string, unknown>): WalEvent {
 
 async function dispatchWalRow(row: Record<string, unknown>): Promise<void> {
   const event = toWalEvent(row);
-  broadcastAll(event);
   if (event.trust_provenance === 'host') {
-    await acknowledgeTrustedWalRelay(event.id).catch((err) => {
-      logger.debug({ err, eventId: event.id }, '[wal-listener] Trusted outbox acknowledgement error');
-    });
+    await broadcastAllDurably(event);
+    // Acknowledgement records durable local projection acceptance only. GitHub
+    // provider completion has its own claimable/retryable ledger state.
+    await acknowledgeTrustedWalRelay(event.id);
+  } else {
+    broadcastAll(event);
   }
   handleTokenTracking(event).catch((err) => {
     logger.debug({ err, eventId: event.id }, '[wal-listener] Token tracking error');

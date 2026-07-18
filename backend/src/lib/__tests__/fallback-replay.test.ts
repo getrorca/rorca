@@ -188,7 +188,7 @@ describe('fallback replay idempotency', () => {
     expect(transaction).not.toHaveBeenCalled();
   });
 
-  test('replays a complete story result through the canonical atomic projection', async () => {
+  test('quarantines an integrated pass proposal instead of minting canonical authority', async () => {
     const sha = 'a'.repeat(40);
     const storyEntry: FallbackResultEntry = {
       type: 'story_result',
@@ -291,72 +291,9 @@ describe('fallback replay idempotency', () => {
 
     const replayed = await replayFallbackResults(cwd, 'test-ws');
 
-    expect(replayed).toMatchObject({ total: 1, inserted: 1, duplicates: 0, invalid: 0, retained: false });
-    expect(persisted.result).toEqual({
-      runId: 7,
-      storyId: 'US-FALLBACK-001',
-      status: 'pass',
-      finishedAt: storyEntry.ts,
-      finishedAtSource: 'observed',
-      worktreePath: '/tmp/fallback-story',
-      worktreeBranch: 'run/fallback-integrated',
-      integrated: true,
-      commitSha: sha,
-      commitMessage: 'integrated story(US-FALLBACK-001): fallback exact head',
-      commitAuthor: 'rorca-execution-engine',
-      commitBranch: 'run/fallback-integrated',
-      commitObservedSource: 'worktree_branch',
-      inputTokens: 321,
-      outputTokens: 54,
-      reasoningTokens: 11,
-      modelUsed: 'pi/fallback-model',
-      costUsd: 0.1234567,
-      logPath: '/tmp/fallback-story.log',
-      blockedBy: JSON.stringify(['US-000']),
-      activeSkills: JSON.stringify(['release-review']),
-      completionPacket: { status: 'completed', closeout: { accepted: true } },
-      specId: 'fallback-spec',
-      specRevision: `sha256:${'2'.repeat(64)}`,
-      storyRevision: `sha256:${'3'.repeat(64)}`,
-      manifestHash: `sha256:${'1'.repeat(64)}`,
-      closeoutDecisionId: `CLO-sha256:${'4'.repeat(64)}`,
-      ingestKey: storyEntry.idempotencyKey,
-      accountingRequired: true,
-      accountingModel: 'pi/fallback-model',
-      accountingInputTokens: 321,
-      accountingOutputTokens: 54,
-      accountingReasoningTokens: 11,
-      accountingCostUsd: 0.123457,
-      accountingCostSource: 'explicit',
-      accountingInputRate: null,
-      accountingOutputRate: null,
-      reason: null,
-    });
-    expect(persisted.commit).toEqual({
-      storyId: 'US-FALLBACK-001',
-      specId: 'fallback-spec',
-      workspaceId: 'test-ws',
-      runId: 7,
-      commitSha: sha,
-      commitMessage: 'integrated story(US-FALLBACK-001): fallback exact head',
-      author: 'rorca-execution-engine',
-      branchName: 'run/fallback-integrated',
-      observedSource: 'worktree_branch',
-    });
-    expect(persisted.usage).toEqual({
-      storyResultId: 1,
-      runId: 7,
-      storyId: 'US-FALLBACK-001',
-      workspaceId: 'test-ws',
-      model: 'pi/fallback-model',
-      inputTokens: 321,
-      outputTokens: 54,
-      reasoningTokens: 11,
-      costUsd: 0.123457,
-      costSource: 'explicit',
-      inputRate: null,
-      outputRate: null,
-    });
-    expect(fs.existsSync(path.join(cwd, '.rorca-results.jsonl'))).toBe(false);
+    expect(replayed).toMatchObject({ total: 1, inserted: 0, duplicates: 0, invalid: 1, retained: true, blocksCompletion: true });
+    expect(persisted).toEqual({});
+    expect(transaction).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(cwd, '.rorca-results.jsonl'))).toBe(true);
   });
 });

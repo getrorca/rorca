@@ -172,7 +172,9 @@ describe('execution-engine closeout architecture', () => {
     expect(STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_commits')).toBeLessThan(
       STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO token_usage'),
     );
-    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, projection, specId, commit, accounting)');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, projection, specId, commit, accounting, authority)');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain("result_provenance, result_source");
+    expect(ENGINE_SOURCE.indexOf("await postStoryResult(config.port, {\n            runId: config.runId,\n            storyId: story.id,\n            status: 'fail'")).toBeGreaterThan(-1);
     expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('WHERE story_result_id = $1');
     expect(WAL_LISTENER_SOURCE).toContain('await persistLegacyStoryResultAccounting({');
     const fallbackSync = PIPELINE_SOURCE.slice(

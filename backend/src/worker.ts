@@ -72,6 +72,16 @@ import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import { fallbackReplayBlocksCompletion, replayFallbackResults } from './lib/fallback-replay';
+import { deriveRunSpecPath, durableAtomicWriteFile } from './lib/run-spec-snapshot';
+import {
+  persistCanonicalStoryResult,
+  WORKER_RESULT_AUTHORITY,
+} from './lib/story-result-persistence';
+import {
+  passRecoveryBlocksCompletion,
+  recoverUnreleasedIntegratedPasses,
+  type PassRecoveryResult,
+} from './lib/story-pass-recovery';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { githubRepoApiUrl } from './lib/github-repository-authority';
@@ -85,6 +95,7 @@ import {
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
+import { reconcilePendingCheckRunProjections } from './lib/check-run-poster';
 import {
   queueAutonomousPrDeliveryForRun,
   reconcilePendingAutonomousPrDeliveryMerges,
@@ -433,6 +444,7 @@ async function emitWalEvent(
     }
   } catch (err) {
     logger.warn({ err, eventType }, '[worker] Failed to emit WAL event through /api/wal');
+    if (GITHUB_GOVERNING_WAL_EVENTS.has(eventType)) throw err;
   }
 }
 
@@ -465,22 +477,29 @@ async function synthesizeInterruptedStoryFailure(params: {
     const storyId = active?.story_id ?? (typeof payload.story_id === 'string' ? payload.story_id : null);
     if (!storyId) return;
 
-    const existing = await queryOne<{ id: number; status: string }>(
-      `SELECT id, status FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`,
+    const existing = await queryOne<{ id: number; status: string; result_provenance: string }>(
+      `SELECT id, status, result_provenance
+         FROM story_results
+        WHERE run_id = $1 AND story_id = $2
+        ORDER BY id DESC LIMIT 1`,
       [params.runId, storyId],
     );
-    if (existing && existing.status !== 'retry') return;
+    if (existing?.result_provenance === 'host' && existing.status !== 'retry') return;
 
     const reason = params.exitSignal === 'SIGTERM' || params.exitCode === 143
       ? 'engine_interrupted_sigterm'
       : 'engine_interrupted';
     const logPath = typeof payload.log_file === 'string' ? payload.log_file : null;
 
-    await execute(
-      `INSERT INTO story_results (run_id, story_id, status, reason, log_path, finished_at)
-       VALUES ($1, $2, 'fail', $3, $4, NOW())`,
-      [params.runId, storyId, reason, logPath],
-    );
+    await persistCanonicalStoryResult({
+      runId: params.runId,
+      storyId,
+      status: 'fail',
+      reason,
+      logPath: logPath ?? undefined,
+      idempotencyKey: `story-result:worker-interrupted:v1:${params.runId}:${storyId}:${reason}`,
+      expectedWorkspaceId: String(params.workspaceId),
+    }, WORKER_RESULT_AUTHORITY);
 
     await emitWalEvent('story_failed', params.workspaceId, {
       run_id: params.runId,
@@ -494,6 +513,7 @@ async function synthesizeInterruptedStoryFailure(params: {
     }, storyId);
   } catch (err) {
     logger.warn({ err, runId: params.runId }, '[worker] Failed to synthesize interrupted story failure');
+    throw err;
   }
 }
 
@@ -557,7 +577,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, runSpecPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -695,9 +715,18 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     const engineLauncher = resolveExecutionEngineLauncher(executionEngineEntrypoint);
     const backendPort = process.env.PORT ?? '3030';
-    // A worktree run owns its lifecycle state on its run branch. Never point
-    // the engine at the approved/base spec before final integration.
-    const engineSpecPath = path.join(cwd, specPath);
+    // A worktree run owns its lifecycle state in the deterministic ignored
+    // snapshot. Direct non-retry runs alone may use the canonical approved spec.
+    const expectedRunSpecPath = deriveRunSpecPath({
+      runId,
+      sourceSpecPath: path.join(workspacePath, specPath),
+      workspacePath,
+      worktreePath,
+    });
+    if (path.resolve(runSpecPath) !== expectedRunSpecPath || !fs.existsSync(expectedRunSpecPath)) {
+      throw new Error('Run spec path does not match the deterministic host-owned snapshot');
+    }
+    const engineSpecPath = expectedRunSpecPath;
 
     const engineArgs = [
       ...engineLauncher.args,
@@ -853,8 +882,17 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       try {
         await flushPending();
         // The engine flushes its bounded telemetry queue before process close.
-        // Replay its stable-root journal before deriving completion, then retry
-        // only trusted outbox rows already released after their local boundary.
+        // First cross any host-attested result->file->ready crash boundary, then
+        // replay the stable-root journal. An untrusted pass proposal can only be
+        // discarded after this host refinalization has released the exact row.
+        let passRecovery: PassRecoveryResult | undefined;
+        let passRecoveryError: unknown;
+        try {
+          passRecovery = await recoverUnreleasedIntegratedPasses({ runId });
+        } catch (error) {
+          passRecoveryError = error;
+          logger.error({ error, runId }, '[worker] Integrated pass refinalization failed');
+        }
         const fallbackReplay = await replayFallbackResults(cwd, String(workspaceId));
         let trustedRelayError: unknown;
         try {
@@ -871,11 +909,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
         const wasCancelled = cancellingRuns.delete(runId);
         const criticalRecoveryBlocked = fallbackReplayBlocksCompletion(fallbackReplay)
+          || Boolean(passRecoveryError)
+          || (passRecovery ? passRecoveryBlocksCompletion(passRecovery) : false)
           || Boolean(trustedRelayError);
         let status = wasCancelled ? 'cancelled' : (code === 0 && !signal ? 'done' : 'failed');
         if (!wasCancelled && criticalRecoveryBlocked) {
           status = 'failed';
-          logger.error({ runId, fallbackReplay, trustedRelayError }, '[worker] Critical recovery incomplete — blocking terminal success');
+          logger.error({ runId, passRecovery, passRecoveryError, fallbackReplay, trustedRelayError }, '[worker] Critical recovery incomplete — blocking terminal success');
         }
 
         // A run where every story was skipped is not "done" — it failed
@@ -1311,7 +1351,7 @@ function syncRetrySpecPassesToOriginalSpec(params: {
   }
 
   if (changed) {
-    fs.writeFileSync(params.originalSpecPath, JSON.stringify(originalSpecJson, null, 2), 'utf8');
+    durableAtomicWriteFile(params.originalSpecPath, JSON.stringify(originalSpecJson, null, 2) + '\n');
   }
 
   const remainingStoryIds = collectStoriesFromSpec(originalSpecJson)
@@ -1322,7 +1362,7 @@ function syncRetrySpecPassesToOriginalSpec(params: {
 }
 
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
-  await Promise.allSettled(jobs.map(async (job) => {
+  const outcomes = await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
     logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:retry received');
 
@@ -1341,6 +1381,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       workspacePath,
       specPath,
       retrySpecPath,
+      runSpecPath,
       agent,
       model,
       worktreePath,
@@ -1374,6 +1415,19 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
     const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
+    if (['done', 'failed', 'partial_failure'].includes(runRow.status)) {
+      // A batch-level pg-boss retry after terminal event persistence failed must
+      // never execute the implementation engine again. Re-release terminal
+      // intent from the durable run state instead.
+      await emitWalEvent('run_finished', workspaceId, {
+        run_id: runId,
+        original_run_id: originalRunId,
+        status: runRow.status,
+        source: 'worker_retry_terminal_recovery',
+      });
+      await advanceQueue(workspaceId);
+      return;
+    }
     if (runRow.status === 'cancelled') {
       logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
       return;
@@ -1419,15 +1473,23 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       }
     }
 
-    // Re-read the generated retry spec after queue handoff and compare its
-    // executable plan before marking the run started. A prompt/model cannot
-    // authorize work absent from this frozen preview.
-    if (!fs.existsSync(retrySpecPath)) {
+    // Re-read only the deterministic host-owned retry snapshot after queue
+    // handoff and compare its executable plan before marking the run started.
+    const expectedRetrySpecPath = deriveRunSpecPath({
+      runId,
+      sourceSpecPath: path.join(workspacePath, specPath),
+      workspacePath,
+      worktreePath,
+      retry: true,
+    });
+    if (path.resolve(runSpecPath) !== expectedRetrySpecPath
+      || path.resolve(retrySpecPath) !== expectedRetrySpecPath
+      || !fs.existsSync(expectedRetrySpecPath)) {
       await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_spec_missing' WHERE id = $1`, [runId]);
       await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'retry_spec_missing' });
       return;
     }
-    const actualRetrySpec = JSON.parse(fs.readFileSync(retrySpecPath, 'utf8')) as Record<string, unknown>;
+    const actualRetrySpec = JSON.parse(fs.readFileSync(expectedRetrySpecPath, 'utf8')) as Record<string, unknown>;
     const planComparison = compareRetryPlanToPreview(actualRetrySpec, approvedPreview);
     if (!planComparison.matches || planComparison.scopeHash !== generatedPlanHash || retryHash(approvedPreview.scope.executable.map((entry) => entry.storyId)) !== payload.scopeHash) {
       await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'worker_scope_mismatch' WHERE preview_hash = $1`, [previewHash]);
@@ -1470,9 +1532,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     const engineLauncher = resolveExecutionEngineLauncher(executionEngineEntrypoint);
     const backendPort = process.env.PORT ?? '3030';
 
-    // Verify the temp retry spec file still exists (route handler should have written it)
-    if (!fs.existsSync(retrySpecPath)) {
-      logger.error({ jobId, runId, retrySpecPath }, '[worker] retry spec file not found — failing run');
+    // Recheck the snapshot immediately before spawn.
+    if (!fs.existsSync(expectedRetrySpecPath)) {
+      logger.error({ jobId, runId, retrySpecPath, runSpecPath }, '[worker] retry spec path is missing or not host-owned');
       await execute(
         `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
         [runId],
@@ -1486,7 +1548,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
     const engineArgs = [
       ...engineLauncher.args,
-      '--json', retrySpecPath,
+      '--json', expectedRetrySpecPath,
       '--cwd', cwd,
       '--run-id', String(runId),
       '--workspace-id', workspaceId,
@@ -1588,13 +1650,21 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     // 7. Wait for close (not exit), flush remaining bytes, update run status.
     // Same fix as handlePipelineRun (US-007): use 'close' so all stdout/stderr
     // data events have been emitted before we flush the pending buffer.
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       let capturedCode: number | null = null;
       child.on('exit', (code) => { capturedCode = code; });
 
       child.on('close', async () => {
-        // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
+        // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done.
         await flushPending();
+        let passRecovery: PassRecoveryResult | undefined;
+        let passRecoveryError: unknown;
+        try {
+          passRecovery = await recoverUnreleasedIntegratedPasses({ runId });
+        } catch (error) {
+          passRecoveryError = error;
+          logger.error({ error, runId }, '[worker] Integrated retry pass refinalization failed');
+        }
         const fallbackReplay = await replayFallbackResults(cwd, String(workspaceId));
         let trustedRelayError: unknown;
         try {
@@ -1616,11 +1686,15 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         let syncedStoryIds: string[] = [];
         let remainingStoryIds: string[] = [];
         let retrySpecSyncSucceeded = false;
+        const retryRecoveryBlocked = fallbackReplayBlocksCompletion(fallbackReplay)
+          || Boolean(passRecoveryError)
+          || Boolean(passRecovery && passRecoveryBlocksCompletion(passRecovery))
+          || Boolean(trustedRelayError);
         if (wasCancelled) {
           finalStatus = 'cancelled';
-        } else if (fallbackReplayBlocksCompletion(fallbackReplay) || trustedRelayError) {
+        } else if (retryRecoveryBlocked) {
           finalStatus = 'failed';
-          logger.error({ runId, fallbackReplay, trustedRelayError }, '[worker] Critical retry recovery incomplete — blocking terminal success');
+          logger.error({ runId, passRecovery, passRecoveryError, fallbackReplay, trustedRelayError }, '[worker] Critical retry recovery incomplete — blocking terminal success');
         } else {
           try {
             const currentStories = await query<{ story_id: string; status: string }>(
@@ -1638,7 +1712,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           if (finalStatus === 'done') {
             try {
               const syncResult = syncRetrySpecPassesToOriginalSpec({
-                retrySpecPath,
+                retrySpecPath: expectedRetrySpecPath,
                 originalSpecPath: path.join(workspacePath, specPath),
                 storyIds,
               });
@@ -1671,6 +1745,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           source: 'worker_retry',
         });
 
+        let terminalUpdateError: unknown;
         try {
           await execute(
             `UPDATE pipeline_runs SET status = $1, finished_at = NOW(), summary = COALESCE($3, summary) WHERE id = $2`,
@@ -1714,15 +1789,26 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
             learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
           });
         } catch (err) {
+          terminalUpdateError = err;
           logger.error({ err, runId }, '[worker] Failed to update retry run status on exit');
+        }
+
+        if (terminalUpdateError) {
+          logger.warn({ runId, retrySpecPath: expectedRetrySpecPath }, '[worker] Preserving retry snapshot after terminal persistence failure');
+          reject(terminalUpdateError);
+          return;
         }
 
         advanceQueue(workspaceId).catch(qErr =>
           logger.error({ err: qErr, runId, workspaceId }, '[worker] advanceQueue failed after retry completion'),
         );
 
-        // Clean up the temporary retry spec file
-        try { fs.unlinkSync(retrySpecPath); } catch { /* best-effort */ }
+        // Preserve a blocked snapshot for deterministic later refinalization.
+        if (!retryRecoveryBlocked) {
+          try { fs.unlinkSync(expectedRetrySpecPath); } catch { /* best-effort */ }
+        } else {
+          logger.warn({ runId, retrySpecPath: expectedRetrySpecPath }, '[worker] Preserving blocked retry snapshot for recovery');
+        }
 
         resolve();
       });
@@ -1734,6 +1820,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         cancellingRuns.delete(runId);
 
+        let terminalUpdateError: unknown;
         try {
           await execute(
             `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
@@ -1750,7 +1837,14 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
             source: 'worker_retry',
           });
         } catch (dbErr) {
+          terminalUpdateError = dbErr;
           logger.error({ dbErr, runId }, '[worker] Failed to update retry run status after spawn error');
+        }
+
+        if (terminalUpdateError) {
+          logger.warn({ runId, retrySpecPath: expectedRetrySpecPath }, '[worker] Preserving retry snapshot after spawn terminal persistence failure');
+          reject(terminalUpdateError);
+          return;
         }
 
         advanceQueue(workspaceId).catch(qErr =>
@@ -1763,6 +1857,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       });
     });
   }));
+  const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+  if (failures.length > 0) {
+    throw new AggregateError(failures.map(failure => failure.reason), 'One or more retry jobs failed before durable terminal completion');
+  }
 }
 
 // ── Job handler: pipeline:cron ────────────────────────────────────────────
@@ -2048,8 +2146,17 @@ export async function recoverStaleJobs(): Promise<void> {
       logger.warn({ err, runId }, '[worker] recoverStaleJobs — failed to update pipeline_runs');
     }
 
-    // 4. Emit WAL event for UI notification
+    // 4. Persist the interrupted story outcome before any trusted failure or
+    // terminal event can be released.
     if (runRow) {
+      await synthesizeInterruptedStoryFailure({
+        runId,
+        workspaceId: runRow.workspace_id,
+        status: 'failed',
+        exitCode: null,
+        exitSignal: null,
+        source: 'worker',
+      });
       await emitWalEvent('run_finished', runRow.workspace_id, {
         run_id: runId,
         status: 'failed',
@@ -2259,21 +2366,11 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
         );
       }
 
-      // ── 4. Emit run_finished WAL event ────────────────────────────────
-      await emitWalEvent('run_finished', workspaceId, {
-        run_id: runId,
-        status: 'failed',
-        reason: 'orphan_sweep',
-        swept_pid: pid,
-        swept_pty_pid: ptyChildPid,
-        swept_at: new Date().toISOString(),
-      });
-
-      // ── 5. Emit story_failed for each incomplete story ─────────────────
+      // ── 4. Persist then release story failures ─────────────────────────
       let incompleteStories: { story_id: string }[] = [];
       try {
         incompleteStories = await query<{ story_id: string }>(
-          `SELECT story_id FROM story_results
+          `SELECT DISTINCT story_id FROM story_results
            WHERE run_id = $1 AND status != 'pass'`,
           [runId],
         );
@@ -2282,12 +2379,41 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
       }
 
       for (const story of incompleteStories) {
+        await persistCanonicalStoryResult({
+          runId,
+          storyId: story.story_id,
+          status: 'fail',
+          reason: 'orphan_sweep',
+          idempotencyKey: `story-result:worker-orphan-sweep:v1:${runId}:${story.story_id}`,
+          expectedWorkspaceId: String(workspaceId),
+        }, WORKER_RESULT_AUTHORITY);
         await emitWalEvent('story_failed', workspaceId, {
           run_id: runId,
           story_id: story.story_id,
           reason: 'orphan_sweep',
         });
       }
+
+      // Capture an active story that had not inserted any result before the
+      // crash; known non-pass rows above are already host-finalized.
+      await synthesizeInterruptedStoryFailure({
+        runId,
+        workspaceId,
+        status: 'failed',
+        exitCode: null,
+        exitSignal: null,
+        source: 'worker',
+      });
+
+      // ── 5. Terminal run event follows all durable failure results ──────
+      await emitWalEvent('run_finished', workspaceId, {
+        run_id: runId,
+        status: 'failed',
+        reason: 'orphan_sweep',
+        swept_pid: pid,
+        swept_pty_pid: ptyChildPid,
+        swept_at: new Date().toISOString(),
+      });
 
       logger.warn(
         { runId, pid, killed, ptyChildPid, ptyKilled, incompleteStories: incompleteStories.length },
@@ -2379,10 +2505,23 @@ async function reconcileState(): Promise<void> {
 
     logger.warn(
       { runId: run.id, currentStatus: 'running', lastHeartbeat: run.last_heartbeat },
-      '[worker] reconcileState — Case A: no live pgboss job, no recent heartbeat, PID dead — marking failed',
+      '[worker] reconcileState — Case A: no live pgboss job, no recent heartbeat, PID dead — reconciling pass boundaries before failure',
     );
 
     try {
+      const passRecovery = await recoverUnreleasedIntegratedPasses({ runId: run.id });
+      if (passRecoveryBlocksCompletion(passRecovery)) {
+        logger.error({ runId: run.id, passRecovery }, '[worker] startup pass refinalization remains blocked');
+      }
+
+      await synthesizeInterruptedStoryFailure({
+        runId: run.id,
+        workspaceId: run.workspace_id,
+        status: 'failed',
+        exitCode: null,
+        exitSignal: null,
+        source: 'worker',
+      });
       await execute(
         `UPDATE pipeline_runs
          SET status = 'failed', finished_at = NOW()
@@ -2461,6 +2600,12 @@ async function reconcileState(): Promise<void> {
     } catch (err) {
       logger.warn({ err, jobId: job.id }, '[worker] reconcileState — Case B: failed to update pgboss.job');
     }
+  }
+
+  try {
+    await reconcilePendingCheckRunProjections();
+  } catch (error) {
+    logger.warn({ error }, '[worker] Check Run projection reconciliation deferred');
   }
 
   const totalFixed = stuckRuns.length + orphanJobs.length;
@@ -2874,12 +3019,24 @@ async function start(): Promise<void> {
     process.exit(1);
   }
 
-  // 3. Recover stale jobs left by a previously crashed worker instance.
+  // 3. Reconcile every committed-but-unreleased integrated pass before any
+  // startup terminal derivation. Rows without exact attestation/repository/file
+  // identity remain inert and will continue to block success rather than guess.
+  try {
+    const passRecovery = await recoverUnreleasedIntegratedPasses();
+    if (passRecovery.scanned > 0 || passRecovery.blocked.length > 0) {
+      logger.info({ passRecovery }, '[worker] startup integrated pass refinalization complete');
+    }
+  } catch (error) {
+    logger.error({ error }, '[worker] startup integrated pass refinalization deferred');
+  }
+
+  // 3a. Recover stale jobs left by a previously crashed worker instance.
   // Must run after initBoss() (pg-boss schema exists) but before boss.work()
   // (so freed slots are available when handlers start polling).
   await recoverStaleJobs();
 
-  // 3a. Sweep orphan processes — execution-engine subprocesses left running
+  // 3b. Sweep orphan processes — execution-engine subprocesses left running
   // by a previous worker that crashed without a graceful shutdown.
   // Must complete before boss.work() — do not race sweep against new job pickup.
   // Error-isolated: a sweep failure must NOT prevent job handler registration.
@@ -2900,7 +3057,7 @@ async function start(): Promise<void> {
     logger.error({ err }, '[worker] Startup orphan sweep failed — continuing with worker startup');
   }
 
-  // 3b. Reconcile state between pipeline_runs and pgboss.job.
+  // Reconcile state between pipeline_runs and pgboss.job.
   // Runs once at startup, then every 60s during normal operation.
   await reconcileState();
   try {

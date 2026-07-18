@@ -20,7 +20,10 @@ jest.mock('../../db/index', () => ({
 }));
 
 import { deriveIntegratedPassStoryResultIdempotencyKey } from '../../lib/execution-engine';
-import { persistCanonicalStoryResult } from '../../lib/story-result-persistence';
+import {
+  EXECUTION_ENGINE_RESULT_AUTHORITY,
+  persistCanonicalStoryResult,
+} from '../../lib/story-result-persistence';
 import pipelineRouter from '../pipeline';
 
 interface StoredResult {
@@ -30,6 +33,8 @@ interface StoredResult {
   status: string;
   finished_at: string | null;
   finished_at_source: string;
+  result_provenance: string;
+  result_source: string;
   worktree_path: string | null;
   worktree_branch: string | null;
   integrated: boolean;
@@ -132,6 +137,8 @@ const client = {
         status: String(params[2]),
         finished_at: (params[3] as string | null) ?? '2026-07-18T12:00:00.000Z',
         finished_at_source: String(params[4]),
+        result_provenance: String(params[38]),
+        result_source: String(params[39]),
         worktree_path: params[5] as string | null,
         worktree_branch: params[6] as string | null,
         integrated: Boolean(params[7]),
@@ -264,7 +271,47 @@ const client = {
 
 const app = express();
 app.use(express.json());
+// Test-only process-local host seam. The real compatibility HTTP route below
+// is separately asserted to reject integrated identity.
+app.post('/api/pipeline/story-result', async (req, res) => {
+  try {
+    const outcome = await persistCanonicalStoryResult(
+      req.body,
+      EXECUTION_ENGINE_RESULT_AUTHORITY,
+    );
+    res.status(outcome.duplicate ? 200 : 201).json({ ok: true, duplicate: outcome.duplicate });
+  } catch (error) {
+    const candidate = error as { statusCode?: number; message?: string };
+    res.status(candidate.statusCode ?? 500).json({ error: candidate.message ?? 'Internal error' });
+  }
+});
 app.use('/api/pipeline', pipelineRouter);
+
+const compatibilityApp = express();
+compatibilityApp.use(express.json());
+compatibilityApp.use('/api/pipeline', pipelineRouter);
+
+const adminCompatibilityApp = express();
+adminCompatibilityApp.use(express.json());
+adminCompatibilityApp.use((req, _res, next) => {
+  req.user = {
+    id: 'local-admin', email: 'admin@rorca.local',
+    supabaseId: '00000000-0000-0000-0000-000000000001', role: 'admin',
+  };
+  next();
+});
+adminCompatibilityApp.use('/api/pipeline', pipelineRouter);
+
+const memberCompatibilityApp = express();
+memberCompatibilityApp.use(express.json());
+memberCompatibilityApp.use((req, _res, next) => {
+  req.user = {
+    id: 'member-user', email: 'member@rorca.local',
+    supabaseId: '00000000-0000-0000-0000-000000000002', role: 'user',
+  };
+  next();
+});
+memberCompatibilityApp.use('/api/pipeline', pipelineRouter);
 
 function integratedBody() {
   const integratedSha = 'a'.repeat(40);
@@ -381,6 +428,78 @@ describe('story-result integrated-pass atomic retry boundary', () => {
         release();
       }
     });
+  });
+
+  it('mounted compatibility HTTP ingress cannot mint integrated result or commit identity', async () => {
+    const transactionCalls = mockTransaction.mock.calls.length;
+    const response = await request(adminCompatibilityApp).post('/api/pipeline/story-result').send(integratedBody());
+    expect(response.status).toBe(400);
+    expect(response.body.error).toContain('host-only');
+    expect(mockTransaction).toHaveBeenCalledTimes(transactionCalls);
+  });
+
+  it('keeps non-integrated compatibility ingress disabled by default', async () => {
+    const previous = process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+    delete process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+    const response = await request(adminCompatibilityApp).post('/api/pipeline/story-result').send({
+      runId: 41, storyId: 'US-COMPAT', status: 'fail', idempotencyKey: 'compat-disabled',
+    });
+    expect(response.status).toBe(403);
+    if (previous === undefined) delete process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+    else process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = previous;
+  });
+
+  it('explicitly enabled compatibility ingress still rejects unauthenticated callers before lookup', async () => {
+    const previous = process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+    process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = '1';
+    try {
+      const response = await request(compatibilityApp).post('/api/pipeline/story-result').send({
+        runId: 41, storyId: 'US-COMPAT', status: 'fail', idempotencyKey: 'compat-unauthenticated',
+      });
+      expect(response.status).toBe(401);
+      expect(mockQueryOne).not.toHaveBeenCalled();
+      expect(mockTransaction).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+      else process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = previous;
+    }
+  });
+
+  it('explicitly enabled compatibility ingress rejects non-admin workspace members', async () => {
+    const previous = process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+    process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = '1';
+    mockQueryOne.mockResolvedValueOnce({
+      workspace_id: 'ws-integrated-result', membership_role: 'member',
+    });
+    try {
+      const response = await request(memberCompatibilityApp).post('/api/pipeline/story-result').send({
+        runId: 41, storyId: 'US-COMPAT', status: 'fail', idempotencyKey: 'compat-member',
+      });
+      expect(response.status).toBe(403);
+      expect(mockTransaction).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+      else process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = previous;
+    }
+  });
+
+  it('explicitly enabled admin compatibility ingress remains non-integrated and non-governing', async () => {
+    const previous = process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+    process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = '1';
+    mockQueryOne.mockResolvedValueOnce({ workspace_id: 'ws-integrated-result' });
+    try {
+      const response = await request(adminCompatibilityApp).post('/api/pipeline/story-result').send({
+        runId: 41, storyId: 'US-COMPAT', status: 'fail', idempotencyKey: 'compat-enabled',
+      });
+      expect(response.status).toBe(201);
+      expect(state.results).toEqual([expect.objectContaining({
+        story_id: 'US-COMPAT', integrated: false,
+        result_provenance: 'compatibility', result_source: 'compatibility-http',
+      })]);
+    } finally {
+      if (previous === undefined) delete process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+      else process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = previous;
+    }
   });
 
   it('rolls back a failure after result insertion and retries to one complete projection', async () => {

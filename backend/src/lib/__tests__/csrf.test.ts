@@ -5,6 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import express from 'express';
+import request from 'supertest';
 import { csrfProtection, generateCsrfToken, setCsrfCookie } from '../csrf';
 import { CsrfError } from '../errors';
 import type { Request, Response, NextFunction } from 'express';
@@ -119,11 +121,64 @@ describe('csrfProtection middleware', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  test.each([
+    '/api/webhooks/dlq/%31/retry',
+    '/API/WEBHOOKS/DLQ/1/RETRY',
+    '/api//webhooks///dlq//1//retry',
+    '/api/webhooks/dlq/1/retry?source=operator',
+    '/api/webhooks/dlq/1/retry/',
+  ])('mounted replay variant %s cannot use the no-Origin bypass', async (pathname) => {
+    const app = express();
+    app.use(csrfProtection);
+    app.post('/api/webhooks/dlq/:id/retry', (_req, res) => res.json({ ok: true }));
+    app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      const candidate = error as { statusCode?: number; message?: string };
+      res.status(candidate.statusCode ?? 500).json({ error: candidate.message });
+    });
+    const response = await request(app).post(pathname);
+    expect(response.status).toBe(403);
+    expect(response.body.error).toContain('Missing CSRF cookie');
+  });
+
+  test.each([
+    '/api/webhooks/dlq/%ZZ/retry',
+    '/api/%2fwebhooks/dlq/%ZZ/retry',
+    '/api/%252fwebhooks/dlq/%ZZ/retry',
+    '/api/%25252fwebhooks/dlq/1/retry',
+    '/api/webhooks/dlq/1/retry%00',
+    '/api/webhooks/ignored/%2e%2e/dlq/1/retry',
+  ])('malformed API path %s fails closed without Origin', (pathname) => {
+    const req = mockReq({ method: 'POST', originalUrl: pathname, headers: {} });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    '/api//webhooks/github',
+    '/api/webhooks/%67ithub',
+    '/api/webhooks/github/',
+    '/API/WEBHOOKS/GITHUB',
+  ])('provider callback lookalike %s is not an exact CSRF exemption', (pathname) => {
+    const req = mockReq({
+      method: 'POST', originalUrl: pathname, headers: { origin: 'https://attacker.example' },
+    });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
+  });
+
   test('callback-prefix lookalikes are not CSRF exempt', () => {
     const req = mockReq({
       method: 'POST',
       originalUrl: '/api/webhooks/github/extra',
       headers: { origin: 'https://attacker.example' },
+    });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test.each(['/mcp-evil', '/api/healthcheck', '/api/docs-private'])('%s is not a prefix-lookalike exemption', (pathname) => {
+    const req = mockReq({
+      method: 'POST', originalUrl: pathname, headers: { origin: 'https://attacker.example' },
     });
     expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
     expect(next).not.toHaveBeenCalled();

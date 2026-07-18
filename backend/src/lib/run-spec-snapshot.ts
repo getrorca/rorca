@@ -7,34 +7,81 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 
-export interface PrepareRunSpecSnapshotOptions {
+export interface RunSpecPathOptions {
   runId: number;
   sourceSpecPath: string;
+  workspacePath?: string;
   worktreePath: string | null;
+  /** Retries always own an isolated snapshot, even in direct execution mode. */
+  retry?: boolean;
+}
+
+function assertRunId(runId: number): void {
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid run ID for spec snapshot');
+}
+
+function contained(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+/** Deterministically derive the only mutable spec path a run may own. */
+export function deriveRunSpecPath(options: RunSpecPathOptions): string {
+  assertRunId(options.runId);
+  const source = path.resolve(options.sourceSpecPath);
+  if (!options.worktreePath && !options.retry) {
+    if (!options.workspacePath) return source;
+    const workspace = path.resolve(options.workspacePath);
+    if (!contained(workspace, source)) throw new Error('Direct run spec escaped the workspace');
+    return source;
+  }
+  const rootInput = options.worktreePath ?? options.workspacePath;
+  if (!rootInput) throw new Error('Run snapshot root is required');
+  const root = path.resolve(rootInput);
+  const snapshot = path.resolve(root, '.rorca', 'run-specs', `run-${options.runId}.json`);
+  if (!contained(root, snapshot)) throw new Error('Run spec snapshot escaped its run root');
+  return snapshot;
+}
+
+function fsyncDirectory(directory: string): void {
+  const fd = fs.openSync(directory, 'r');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
+/** Atomically replace and durably flush a bounded local JSON projection. */
+export function durableAtomicWriteFile(filePath: string, content: string): void {
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true });
+  const temporary = path.join(directory, `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(fd, content, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporary, filePath);
+    fsyncDirectory(directory);
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best effort */ }
+    }
+    try { fs.unlinkSync(temporary); } catch { /* best effort */ }
+    throw error;
+  }
 }
 
 /**
- * Isolated runs must never mutate passes/skipped flags in the source workspace's
- * approved spec. Copy the executable JSON into the worktree's ignored runtime
- * directory and let execution-engine mutate only that run-owned snapshot.
+ * Worktree and retry runs mutate only a deterministic ignored snapshot. Direct
+ * non-retry runs retain the historical canonical-spec contract.
  */
-export function prepareRunSpecSnapshot({
-  runId,
-  sourceSpecPath,
-  worktreePath,
-}: PrepareRunSpecSnapshotOptions): string {
-  if (!worktreePath) return sourceSpecPath;
-  if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid run ID for spec snapshot');
-  if (!fs.existsSync(sourceSpecPath)) throw new Error(`Run spec not found: ${sourceSpecPath}`);
-
-  const worktreeRoot = path.resolve(worktreePath);
-  const runtimeDir = path.resolve(worktreeRoot, '.rorca', 'run-specs');
-  if (runtimeDir !== worktreeRoot && !runtimeDir.startsWith(`${worktreeRoot}${path.sep}`)) {
-    throw new Error('Run spec snapshot escaped the worktree');
-  }
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  const snapshotPath = path.join(runtimeDir, `run-${runId}.json`);
-  fs.copyFileSync(sourceSpecPath, snapshotPath);
-  return snapshotPath;
+export function prepareRunSpecSnapshot(options: RunSpecPathOptions): string {
+  const source = path.resolve(options.sourceSpecPath);
+  if (!fs.existsSync(source)) throw new Error(`Run spec not found: ${source}`);
+  const destination = deriveRunSpecPath(options);
+  if (destination === source) return source;
+  durableAtomicWriteFile(destination, fs.readFileSync(source, 'utf8'));
+  return destination;
 }

@@ -25,8 +25,10 @@ import {
   type TrustedWalReference,
 } from './trusted-wal';
 import {
+  FALLBACK_RESULT_AUTHORITY,
   persistCanonicalStoryResult,
   STORY_RESULT_STATUSES,
+  verifyReleasedHostPassProposal,
   type CanonicalStoryResultInput,
   type CanonicalStoryResultStatus,
 } from './story-result-persistence';
@@ -273,7 +275,13 @@ async function replayStoryResult(
     expectedWorkspaceId: workspaceId,
   };
   try {
-    const outcome = await persistCanonicalStoryResult(input);
+    if (input.status === 'pass') {
+      // Agent-writable pass rows are proposals only. They may be discarded as
+      // duplicates after an independently released exact host result, but can
+      // never insert or promote canonical pass authority themselves.
+      return await verifyReleasedHostPassProposal(input) ? 'duplicate' : 'invalid';
+    }
+    const outcome = await persistCanonicalStoryResult(input, FALLBACK_RESULT_AUTHORITY);
     return outcome.duplicate ? 'duplicate' : 'inserted';
   } catch (error) {
     if (error instanceof AppError) return 'invalid';
