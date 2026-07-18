@@ -88,18 +88,23 @@ async function handleTokenTracking(event: WalEvent): Promise<void> {
       [runId, event.story_id],
     ) as { id: number } | undefined;
 
-    if (storyRow) {
-      await execute(
-        `UPDATE story_results
-         SET input_tokens = COALESCE($1, input_tokens),
-             output_tokens = COALESCE($2, output_tokens),
-             cost_usd = COALESCE($3, cost_usd)
-         WHERE id = $4`,
-        [payload.input_tokens ?? null, payload.output_tokens ?? null, payload.cost_usd ?? null, storyRow.id],
-      );
-    }
+    // A missing result means its durable fallback may still be awaiting replay.
+    // The canonical story-result transaction owns result/commit/accounting as one
+    // unit; never create an orphan accounting row that replay would duplicate.
+    if (!storyRow) return;
 
-    // Record into token_usage analytics table — skip if already recorded by story-result endpoint
+    await execute(
+      `UPDATE story_results
+       SET input_tokens = COALESCE($1, input_tokens),
+           output_tokens = COALESCE($2, output_tokens),
+           cost_usd = COALESCE($3, cost_usd)
+       WHERE id = $4`,
+      [payload.input_tokens ?? null, payload.output_tokens ?? null, payload.cost_usd ?? null, storyRow.id],
+    );
+
+    // Preserve legacy WAL accounting only when canonical result persistence did
+    // not already write it. Canonical execution-engine ordering makes this a
+    // compatibility backfill, not a competing story-result persistence path.
     const existing = await queryOne(
       'SELECT id FROM token_usage WHERE run_id = $1 AND story_id = $2 LIMIT 1',
       [runId, event.story_id],

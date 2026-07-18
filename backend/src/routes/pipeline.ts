@@ -74,6 +74,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, 
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
+import { persistCanonicalStoryResult, type CanonicalStoryResultStatus } from '../lib/story-result-persistence';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
@@ -7396,87 +7397,27 @@ router.post('/story-result', async (req: Request, res: Response) => {
       throw new ValidationError('completionPacket must be an object');
     }
 
-    const projection = await queryOne<{
-      workspace_id: string;
-      spec_path: string;
-      branch_name: string | null;
-      manifest_hash: string | null;
-      spec_revision: string | null;
-      story_revision: string | null;
-      closeout_decision_id: string | null;
-    }>(`
-      SELECT pr.workspace_id, pr.spec_path, pr.branch_name,
-             sem.manifest_hash, sem.spec_revision, sem.story_revision,
-             scd.decision_id AS closeout_decision_id
-      FROM pipeline_runs pr
-      LEFT JOIN LATERAL (
-        SELECT manifest_hash, spec_revision, story_revision
-        FROM story_execution_manifests
-        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
-        ORDER BY attempt DESC, created_at DESC LIMIT 1
-      ) sem ON TRUE
-      LEFT JOIN LATERAL (
-        SELECT decision_id
-        FROM story_closeout_decisions
-        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
-          AND manifest_hash = sem.manifest_hash
-        ORDER BY attempt DESC, created_at DESC LIMIT 1
-      ) scd ON TRUE
-      WHERE pr.id = $1
-    `, [runId, storyId]);
-    if (!projection) throw new NotFoundError('Pipeline run not found');
-    const specId = path.basename(projection.spec_path, '.json');
+    const outcome = await persistCanonicalStoryResult({
+      runId,
+      storyId,
+      status: status as CanonicalStoryResultStatus,
+      worktreePath,
+      worktreeBranch,
+      commitSha,
+      commitMessage,
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      modelUsed,
+      costUsd,
+      logPath,
+      blockedBy,
+      activeSkills,
+      completionPacket,
+      idempotencyKey,
+    });
 
-    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (
-         run_id, story_id, status, finished_at, worktree_path, worktree_branch,
-         input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by,
-         active_skills, completion_packet, spec_id, spec_revision, story_revision,
-         manifest_hash, closeout_decision_id, ingest_key
-       ) VALUES (
-         $1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
-         $14, $15, $16, $17, $18, $19
-       )
-       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
-       RETURNING id`, [runId, storyId, status,
-      worktreePath ?? null, worktreeBranch ?? null,
-      inputTokens ?? null, outputTokens ?? null,
-      modelUsed ?? null, costUsd ?? null,
-      logPath ?? null,
-      blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
-      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
-      completionPacket ? JSON.stringify(completionPacket) : null,
-      specId,
-      projection.spec_revision,
-      projection.story_revision,
-      projection.manifest_hash,
-      projection.closeout_decision_id,
-      idempotencyKey ?? null,
-    ]);
-
-    if (inserted && status === 'pass' && commitSha) {
-      await execute(`
-        INSERT INTO story_commits (
-          story_id, spec_id, workspace_id, run_id, commit_sha, commit_message, author, pushed_at, branch_name, observed_source
-        ) VALUES ($1,$2,$3,$4,$5,$6,'rorca-execution-engine',NOW(),$7,'worktree_branch')
-        ON CONFLICT DO NOTHING
-      `, [
-        storyId,
-        specId,
-        projection.workspace_id,
-        runId,
-        commitSha,
-        commitMessage?.trim() || `integrated story(${storyId}): host-verified run-branch HEAD`,
-        worktreeBranch ?? projection.branch_name,
-      ]);
-    }
-
-    // Only the first ingest records analytics. A retry after a response timeout
-    // returns the original logical result without double-accounting.
-    if (inserted && ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0))) {
-      await recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed, reasoningTokens ?? 0, costUsd);
-    }
-
-    res.status(inserted ? 201 : 200).json({ ok: true, duplicate: !inserted });
+    res.status(outcome.duplicate ? 200 : 201).json({ ok: true, duplicate: outcome.duplicate });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Story result');
   }

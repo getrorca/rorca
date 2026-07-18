@@ -27,8 +27,12 @@ import {
 
 const ENGINE_PATH = path.resolve(__dirname, '..', 'execution-engine.ts');
 const PIPELINE_PATH = path.resolve(__dirname, '..', '..', 'routes', 'pipeline.ts');
+const STORY_RESULT_PERSISTENCE_PATH = path.resolve(__dirname, '..', 'story-result-persistence.ts');
+const WAL_LISTENER_PATH = path.resolve(__dirname, '..', 'wal-listener.ts');
 const ENGINE_SOURCE = fs.readFileSync(ENGINE_PATH, 'utf8');
 const PIPELINE_SOURCE = fs.readFileSync(PIPELINE_PATH, 'utf8');
+const STORY_RESULT_PERSISTENCE_SOURCE = fs.readFileSync(STORY_RESULT_PERSISTENCE_PATH, 'utf8');
+const WAL_LISTENER_SOURCE = fs.readFileSync(WAL_LISTENER_PATH, 'utf8');
 const SHA = 'a'.repeat(40);
 const BASE_SHA = 'b'.repeat(40);
 const CWD = '/tmp/rorca-closeout-story';
@@ -158,9 +162,17 @@ describe('execution-engine closeout architecture', () => {
     expect(finalizer).toContain('commit_sha: integratedHead.sha');
     expect(finalizer).toContain('origin_commit_sha: pending.originCommitSha');
     expect(finalizer).toContain('}, resultIdempotencyKey);');
-    expect(PIPELINE_SOURCE).toContain('ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING');
-    expect(PIPELINE_SOURCE).toContain("if (inserted && status === 'pass' && commitSha)");
-    expect(PIPELINE_SOURCE).toContain('if (inserted && ((inputTokens && inputTokens > 0)');
+    expect(PIPELINE_SOURCE).toContain('await persistCanonicalStoryResult({');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('return transaction(async (client) => {');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_results')).toBeLessThan(
+      STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_commits'),
+    );
+    expect(STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_commits')).toBeLessThan(
+      STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO token_usage'),
+    );
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, specId)');
+    expect(WAL_LISTENER_SOURCE).toContain('if (!storyRow) return;');
     expect(ENGINE_SOURCE).toContain('callerIdempotencyKey ?? `story-result:${_fallbackRunId}:${randomUUID()}`');
   });
 

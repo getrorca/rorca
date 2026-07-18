@@ -17,6 +17,12 @@ import {
   type FallbackResultEntry,
 } from './resilient-post';
 import { logger } from './logger';
+import {
+  persistCanonicalStoryResult,
+  STORY_RESULT_STATUSES,
+  type CanonicalStoryResultInput,
+  type CanonicalStoryResultStatus,
+} from './story-result-persistence';
 
 export interface FallbackReplayResult {
   total: number;
@@ -80,57 +86,81 @@ async function replayWal(entry: FallbackResultEntry, workspaceId: string): Promi
   return 'inserted';
 }
 
-async function isLegacyStoryResultDuplicate(entry: FallbackResultEntry): Promise<boolean> {
-  if (entry.idempotencyKey) return false;
-  const payload = entry.payload;
-  const runId = Number(payload.runId ?? entry.runId);
-  const storyId = payload.storyId ?? entry.storyId;
-  const status = payload.status ?? entry.status;
-  const existing = await queryOne<{ id: number }>(
-    `SELECT id FROM story_results
-      WHERE run_id = $1 AND story_id = $2 AND status = $3
-      ORDER BY id DESC LIMIT 1`,
-    [runId, storyId, status],
-  );
-  return Boolean(existing);
+function optionalString(value: unknown): string | undefined | null {
+  return value === undefined ? undefined : typeof value === 'string' ? value : null;
 }
 
-async function replayStoryResult(entry: FallbackResultEntry): Promise<'inserted' | 'duplicate' | 'invalid'> {
+function optionalNumber(value: unknown): number | undefined | null {
+  return value === undefined ? undefined : typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function optionalStringArray(value: unknown): string[] | undefined | null {
+  return value === undefined
+    ? undefined
+    : Array.isArray(value) && value.every(item => typeof item === 'string') ? value : null;
+}
+
+async function replayStoryResult(
+  entry: FallbackResultEntry,
+  workspaceId: string,
+): Promise<'inserted' | 'duplicate' | 'invalid'> {
   const payload = entry.payload;
   const runId = Number(payload.runId ?? entry.runId);
   const storyId = payload.storyId ?? entry.storyId;
   const status = payload.status ?? entry.status;
-  if (!Number.isSafeInteger(runId) || runId <= 0 || typeof storyId !== 'string' || typeof status !== 'string') {
+  const ingestKey = derivedIngestKey(entry);
+  const payloadIngestKey = optionalString(payload.idempotencyKey);
+  const worktreePath = optionalString(payload.worktreePath);
+  const worktreeBranch = optionalString(payload.worktreeBranch);
+  const commitSha = optionalString(payload.commitSha);
+  const commitMessage = optionalString(payload.commitMessage);
+  const inputTokens = optionalNumber(payload.inputTokens);
+  const outputTokens = optionalNumber(payload.outputTokens);
+  const reasoningTokens = optionalNumber(payload.reasoningTokens);
+  const modelUsed = optionalString(payload.modelUsed);
+  const costUsd = optionalNumber(payload.costUsd);
+  const logPath = optionalString(payload.logPath);
+  const blockedBy = optionalStringArray(payload.blockedBy);
+  const activeSkills = optionalStringArray(payload.activeSkills);
+  const completionPacket = payload.completionPacket;
+
+  if (!Number.isSafeInteger(runId) || runId <= 0
+    || typeof storyId !== 'string' || storyId.length === 0
+    || typeof status !== 'string' || !STORY_RESULT_STATUSES.includes(status as CanonicalStoryResultStatus)
+    || payloadIngestKey === null || (payloadIngestKey !== undefined && payloadIngestKey !== ingestKey)
+    || worktreePath === null || worktreeBranch === null || commitSha === null || commitMessage === null
+    || inputTokens === null || outputTokens === null || reasoningTokens === null
+    || modelUsed === null || costUsd === null || logPath === null
+    || blockedBy === null || activeSkills === null
+    || (commitSha !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha))
+    || (completionPacket !== undefined && (completionPacket === null
+      || Array.isArray(completionPacket) || typeof completionPacket !== 'object'))) {
     return 'invalid';
   }
-  if (await isLegacyStoryResultDuplicate(entry)) return 'duplicate';
 
-  const inserted = await queryOne<{ id: number }>(
-    `INSERT INTO story_results
-       (run_id, story_id, status, finished_at, worktree_path, worktree_branch,
-        input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by,
-        active_skills, ingest_key)
-     VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-     ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
-     RETURNING id`,
-    [
-      runId,
-      storyId,
-      status,
-      entry.ts,
-      payload.worktreePath ?? null,
-      payload.worktreeBranch ?? null,
-      payload.inputTokens ?? null,
-      payload.outputTokens ?? null,
-      payload.modelUsed ?? null,
-      payload.costUsd ?? null,
-      payload.logPath ?? null,
-      Array.isArray(payload.blockedBy) ? JSON.stringify(payload.blockedBy) : null,
-      Array.isArray(payload.activeSkills) ? JSON.stringify(payload.activeSkills) : null,
-      derivedIngestKey(entry),
-    ],
-  );
-  return inserted ? 'inserted' : 'duplicate';
+  const input: CanonicalStoryResultInput = {
+    runId,
+    storyId,
+    status: status as CanonicalStoryResultStatus,
+    worktreePath,
+    worktreeBranch,
+    commitSha,
+    commitMessage,
+    inputTokens,
+    outputTokens,
+    reasoningTokens,
+    modelUsed,
+    costUsd,
+    logPath,
+    blockedBy,
+    activeSkills,
+    completionPacket: completionPacket as Record<string, unknown> | undefined,
+    idempotencyKey: ingestKey,
+    finishedAt: entry.ts,
+    expectedWorkspaceId: workspaceId,
+  };
+  const outcome = await persistCanonicalStoryResult(input);
+  return outcome.duplicate ? 'duplicate' : 'inserted';
 }
 
 /**
@@ -154,7 +184,7 @@ export async function replayFallbackResults(cwd: string, workspaceId: string): P
     for (const entry of entries) {
       const outcome = entry.type === 'wal'
         ? await replayWal(entry, workspaceId)
-        : await replayStoryResult(entry);
+        : await replayStoryResult(entry, workspaceId);
       result[outcome === 'inserted' ? 'inserted' : outcome === 'duplicate' ? 'duplicates' : 'invalid']++;
     }
     if (result.invalid === 0) {
