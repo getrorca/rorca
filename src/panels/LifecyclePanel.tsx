@@ -74,7 +74,7 @@ function lifecycleErrorState(error: Error): { title: string; explanation: string
 }
 
 export default function LifecyclePanel() {
-  const { workspaceId, selectedWorkspace } = useWorkspace();
+  const { workspaceId } = useWorkspace();
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useGlobalToast();
@@ -330,15 +330,11 @@ export default function LifecyclePanel() {
 
   return (
     <section className="lifecycle-control h-full min-h-0 flex flex-col bg-bg" aria-labelledby="lifecycle-control-heading">
-      <header className="flex min-h-[72px] shrink-0 items-center border-b border-border bg-panel px-4 sm:px-6">
-        <ShieldCheck size={22} className="mr-3 shrink-0 text-accent" aria-hidden="true" />
+      <header className="flex min-h-16 shrink-0 items-center border-b border-border bg-panel px-4 sm:px-6">
+        <ShieldCheck size={20} className="mr-2.5 shrink-0 text-accent" aria-hidden="true" />
         <div className="min-w-0">
-          <h1 id="lifecycle-control-heading" className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</h1>
+          <h1 id="lifecycle-control-heading" className="text-base font-semibold tracking-tight text-[var(--text)] sm:text-lg">Lifecycle Control</h1>
           <p className="truncate text-xs text-muted" title="End-to-end delivery completeness and evidence">End-to-end delivery completeness and evidence</p>
-        </div>
-        <div className="ml-auto min-w-0 rounded-md border border-border bg-bg px-3 py-1.5 text-right" aria-label={`Current workspace: ${selectedWorkspace?.name ?? data.workspace.label}`}>
-          <div className="text-xs uppercase tracking-wide text-muted">Current workspace</div>
-          <div className="max-w-[240px] truncate text-xs font-medium text-[var(--text)]" title={selectedWorkspace?.name ?? data.workspace.label}>{selectedWorkspace?.name ?? data.workspace.label}</div>
         </div>
       </header>
 

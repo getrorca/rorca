@@ -169,9 +169,10 @@ describe('LifecyclePanel', () => {
     }
   });
 
-  it('shows workspace context and all compact API KPI totals', () => {
+  it('avoids redundant workspace chrome and shows all compact API KPI totals', () => {
     render(<LifecyclePanel />);
-    expect(screen.getByLabelText('Current workspace: Hermes')).toBeInTheDocument();
+    expect(screen.queryByText('Current workspace')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Current workspace: Hermes')).not.toBeInTheDocument();
     expect(screen.getByText('Active specs')).toBeInTheDocument();
     expect(screen.getByText('Lifecycle coverage')).toBeInTheDocument();
     expect(screen.getByText('2 missing gates')).toBeInTheDocument();
