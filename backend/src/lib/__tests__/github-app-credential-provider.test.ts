@@ -194,9 +194,11 @@ describe('repository-scoped installation token provider', () => {
   });
 
   test('fails before provider calls on repository mismatch', async () => {
-    const fetchMock = providerFetch(() => new Date(Date.now() + 300_000).toISOString());
+    const now = new Date('2026-07-17T12:00:00.000Z');
+    const fetchMock = providerFetch(() => new Date(now.getTime() + 300_000).toISOString());
     await expect(resolveRepositoryInstallationToken('ws-1', { owner: 'acme', name: 'other' }, {}, {
       fetch: fetchMock as unknown as typeof fetch,
+      now: () => now,
     })).rejects.toThrow('does not match');
     expect(fetchMock).not.toHaveBeenCalled();
   });

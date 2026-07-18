@@ -42,7 +42,7 @@ import templatesRouter from './routes/templates';
 import storiesRouter from './routes/stories';
 import schedulesRouter from './routes/schedules';
 import envVarsRouter from './routes/env-vars';
-import webhooksRouter from './routes/webhooks';
+import webhooksRouter, { webhookAdminRouter } from './routes/webhooks';
 import githubChecksRouter from './routes/github-checks';
 import workspaceGithubRouter from './routes/workspace-github';
 import workspaceGithubAppRouter from './routes/workspace-github-app';
@@ -235,13 +235,20 @@ app.use(cors({
   maxAge: 86400,
 }));
 
-// Capture raw body for webhook signature verification.
-// The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
+// Capture raw bytes only for exact provider callback paths. Protected webhook
+// administration is deliberately not part of this signature/CSRF exemption.
+const WEBHOOK_CALLBACK_PATHS = new Set([
+  '/api/webhooks/github',
+  '/api/webhooks/linear',
+  '/api/webhooks/vercel',
+  '/api/webhooks/slack',
+]);
 app.use(express.json({
   limit: '1mb',
   verify: (req, _res, buf) => {
     const url = (req as express.Request).originalUrl || '';
-    if (url.startsWith('/api/webhooks/')) {
+    const callbackPath = url.split('?', 1)[0];
+    if (WEBHOOK_CALLBACK_PATHS.has(callbackPath)) {
       (req as any).rawBody = buf;
     }
   },
@@ -298,6 +305,8 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 
 // Rate limit public routes by IP (unauthenticated tier)
 app.use('/api/auth', rateLimiter, authRouter);
+// Exact provider callbacks only. The GitHub Manifest browser callback remains the
+// static GET /settings/github route; credential exchange stays protected below.
 app.use('/api/webhooks', webhooksRouter);
 // EQ-007: Public review routes (no auth required — accessed via shareable token)
 app.use('/api/review', rateLimiter, publicReviewRouter);
@@ -406,8 +415,12 @@ app.use(rateLimiter);
 
 // ─── CSRF protection (double-submit cookie pattern) ───
 // Validates X-CSRF-Token header against _csrf cookie on POST/PUT/PATCH/DELETE.
-// Exempt: webhooks, MCP, docs, health, CSRF bootstrap, login/register, billing webhook.
+// Exempt: exact provider callbacks, MCP, docs, health, and CSRF bootstrap.
 app.use(csrfProtection);
+// Default-denied/MCP-excluded webhook administration requires platform +
+// workspace authorization in the router. It mounts after auth/CSRF but before
+// planGate so default-denied native routes remain callable only here, never MCP.
+app.use('/api/webhooks', webhookAdminRouter);
 app.use(planGate());
 
 // ─── Protected routes ───

@@ -57,13 +57,16 @@ test('Manifest callback survives reload, targets GitHub Settings, and is allowed
 test('GitHub webhook path enforces HMAC, exact App identity, event bounds, and atomic replay claim', () => {
   expect(webhook).toContain('MAX_GITHUB_WEBHOOK_BYTES');
   expect(webhook).toContain("'issues', 'check_run'");
-  expect(webhook).toContain('b.installation_id = $1 AND b.repository_id = $2');
-  expect(webhook.indexOf('const currentApp')).toBeLessThan(webhook.indexOf("'legacy-repository-webhook' AS source"));
-  expect(webhook).toContain('GitHub App-bound repositories require installation');
-  expect(webhook).toContain("authority_status = 'active' AND webhook_secret_revoked_at IS NULL");
+  expect(webhook).toContain('github_workspace_repository_authority a');
+  expect(webhook).toContain("COALESCE(a.authority_status, 'invalid') AS authority_status");
+  expect(webhook.indexOf('WITH current_app')).toBeLessThan(webhook.indexOf("'legacy-repository-webhook' AS source"));
+  expect(webhook).toContain('b.superseded_at IS NULL');
+  expect(webhook).toContain("a.authority_source = 'pat-oauth-fallback' AND a.authority_status = 'active'");
   expect(route).toContain('webhook_secret_revoked_at = NOW()');
   expect(webhook).toContain('verifyWebhookSignature(rawBody, signature, secret)');
   expect(webhook).toContain("claimDelivery('github', deliveryId");
+  expect(webhook).toContain("verifiedDelivery(payload, 'github-hmac-sha256')");
+  expect(webhook).toContain("github_webhook_rejected");
   expect(webhook).toContain("signed_delivery_observed = TRUE");
   expect(webhook).toContain("await webhookRouter.completeDelivery('github'");
   expect(webhook).toContain("await webhookRouter.failDelivery('github'");
@@ -71,4 +74,33 @@ test('GitHub webhook path enforces HMAC, exact App identity, event bounds, and a
   expect(webhook).toContain("status: 'retry-later'");
   expect(webhook).toContain("res.status(503).json");
   expect(webhook).not.toContain('setImmediate(async () =>');
+});
+
+test('webhook callback and administration docs remain default-denied and explicitly MCP-excluded', () => {
+  for (const operationId of ['receiveGithubWebhook', 'listWebhookDlq', 'retryWebhookDlqEvent', 'receiveProviderWebhook']) {
+    const start = webhook.indexOf(`operationId: ${operationId}`);
+    expect(start).toBeGreaterThan(0);
+    const operation = webhook.slice(start, start + 800);
+    expect(operation).toContain('x-rorca-mcp: false');
+    expect(operation).not.toContain('x-rorca-tier:');
+    expect(operation).not.toContain('x-rorca-public-api: true');
+  }
+});
+
+test('public callbacks and protected webhook administration have separate server mounts', () => {
+  const publicMount = server.indexOf("app.use('/api/webhooks', webhooksRouter)");
+  const manifestStaticMount = server.indexOf('app.use(express.static(staticDir))');
+  const authMount = server.indexOf('app.use(authRequired)');
+  const csrfMount = server.indexOf('app.use(csrfProtection)');
+  const adminMount = server.indexOf("app.use('/api/webhooks', webhookAdminRouter)");
+  const planGateMount = server.indexOf('app.use(planGate())');
+  expect(publicMount).toBeGreaterThan(0);
+  expect(publicMount).toBeLessThan(authMount);
+  expect(manifestStaticMount).toBeGreaterThan(publicMount);
+  expect(manifestStaticMount).toBeLessThan(authMount);
+  expect(adminMount).toBeGreaterThan(authMount);
+  expect(adminMount).toBeGreaterThan(csrfMount);
+  expect(adminMount).toBeLessThan(planGateMount);
+  expect(server).toContain("'/api/webhooks/github'");
+  expect(server).not.toContain("url.startsWith('/api/webhooks/')");
 });

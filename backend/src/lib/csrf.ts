@@ -11,13 +11,16 @@ import { CsrfError } from './errors';
 
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-const EXEMPT_PREFIXES = [
-  '/api/webhooks',
-  '/mcp',
-  '/api/health',
-  '/api/docs',
+const EXEMPT_EXACT_PATHS = new Set([
+  '/api/webhooks/github',
+  '/api/webhooks/linear',
+  '/api/webhooks/vercel',
+  '/api/webhooks/slack',
   '/api/auth/csrf-token',
-];
+]);
+
+const EXEMPT_PREFIXES = ['/mcp', '/api/health', '/api/docs'];
+const WEBHOOK_ADMIN_REPLAY = /^\/api\/webhooks\/dlq\/[1-9][0-9]*\/retry$/;
 
 /**
  * Generate a cryptographically random CSRF token (32 bytes, hex encoded).
@@ -43,7 +46,8 @@ export function setCsrfCookie(res: Response, token: string): void {
  * Double-submit cookie CSRF middleware.
  *
  * - Skips non-state-changing methods (GET, HEAD, OPTIONS).
- * - Skips exempt paths (webhooks, docs, health, auth bootstrap, MCP).
+ * - Skips exact provider callbacks plus docs, health, auth bootstrap, and MCP.
+ * - Never applies the no-Origin bypass to explicit webhook administration replay.
  * - Requires both _csrf cookie and X-CSRF-Token header.
  * - If header and cookie values don't match, returns 403.
  */
@@ -53,17 +57,15 @@ export function csrfProtection(req: Request, _res: Response, next: NextFunction)
     return;
   }
 
-  const reqPath = req.originalUrl || req.path;
-  for (const prefix of EXEMPT_PREFIXES) {
-    if (reqPath.startsWith(prefix)) {
-      next();
-      return;
-    }
+  const reqPath = (req.originalUrl || req.path).split('?', 1)[0];
+  if (EXEMPT_EXACT_PATHS.has(reqPath) || EXEMPT_PREFIXES.some((prefix) => reqPath.startsWith(prefix))) {
+    next();
+    return;
   }
 
   // Server-to-server requests (MCP, CLI tools, curl) have no Origin header.
-  // Browser CSRF attacks always send Origin. Exempt non-browser callers.
-  if (!req.headers.origin) {
+  // Explicit admin replay is intentionally excluded from this bypass.
+  if (!req.headers.origin && !WEBHOOK_ADMIN_REPLAY.test(reqPath)) {
     next();
     return;
   }
