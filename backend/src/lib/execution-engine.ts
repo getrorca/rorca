@@ -4741,18 +4741,9 @@ async function finalizeIntegratedStoryPass(
 
   if (!workspaceId) return;
 
-  await emitWalEvent(config.port, 'story_passed', workspaceId, {
-    run_id: config.runId,
-    story_id: pending.story.id,
-    story_title: pending.story.title,
-    agent_type: pending.agentType,
-    input_tokens: pending.tokenPayload.inputTokens,
-    output_tokens: pending.tokenPayload.outputTokens,
-    cost_usd: pending.tokenPayload.costUsd,
-    integrated: true,
-    ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
-    ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
-  }, pending.story.id);
+  // Persist the exact run/workspace-scoped commit before publishing the pass
+  // event. Subscribers may publish immutable-SHA evidence immediately; they must
+  // never race ahead of the canonical story_commits closeout row.
   await postStoryResult(config.port, {
     runId: config.runId,
     storyId: pending.story.id,
@@ -4766,6 +4757,19 @@ async function finalizeIntegratedStoryPass(
     ...pending.tokenPayload,
     ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
   });
+  await emitWalEvent(config.port, 'story_passed', workspaceId, {
+    run_id: config.runId,
+    story_id: pending.story.id,
+    story_title: pending.story.title,
+    agent_type: pending.agentType,
+    input_tokens: pending.tokenPayload.inputTokens,
+    output_tokens: pending.tokenPayload.outputTokens,
+    cost_usd: pending.tokenPayload.costUsd,
+    integrated: true,
+    commit_sha: pending.commitSha,
+    ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
+    ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
+  }, pending.story.id);
 
   await autoSynthesizeMemory(
     pending.story.id,

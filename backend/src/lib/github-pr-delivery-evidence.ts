@@ -25,12 +25,14 @@ import {
 } from './autonomous-delivery-policy';
 import { githubRateLimiter } from './github-rate-limiter';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { MANUAL_CHECK_NAME } from './github-checks';
+import { isFullGitObjectId, requireGithubRepositoryAuthority } from './github-repository-authority';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { paginateQuery, type PaginatedResponse, type PaginationParams } from './paginate';
 
 export const GITHUB_PR_DELIVERY_EVIDENCE_SCHEMA_VERSION = 'rorca.github-pr-delivery-evidence.v1' as const;
 const MAX_PROVIDER_ITEMS = 500;
 const PER_PAGE = 100;
-const FULL_SHA = /^[0-9a-f]{40,64}$/;
 
 export interface DeliveryEvidencePrincipal {
   principalId: string;
@@ -193,6 +195,7 @@ interface GithubEvidenceDependencies {
   fetchJson: <T>(url: string, token: string) => Promise<T>;
   resolveToken: typeof resolveWorkspaceGitHubToken;
   getActivePolicy: typeof getActiveAutonomousDeliveryPolicy;
+  resolveAuthority: typeof requireGithubRepositoryAuthority;
   queryOne: typeof queryOne;
   query: typeof query;
   transaction: typeof transaction;
@@ -200,7 +203,7 @@ interface GithubEvidenceDependencies {
 }
 
 async function defaultFetchJson<T>(url: string, token: string): Promise<T> {
-  const response = await githubRateLimiter.execute(() => fetch(url, {
+  const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch, url, {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: 'application/vnd.github+json',
@@ -220,6 +223,7 @@ const DEFAULT_DEPS: GithubEvidenceDependencies = {
   fetchJson: defaultFetchJson,
   resolveToken: resolveWorkspaceGitHubToken,
   getActivePolicy: getActiveAutonomousDeliveryPolicy,
+  resolveAuthority: requireGithubRepositoryAuthority,
   queryOne,
   query,
   transaction,
@@ -260,7 +264,7 @@ function safeProviderUrl(value: unknown): string | null {
 
 function normalizedSha(value: unknown, field: string): string {
   const sha = boundedText(value, 64).toLowerCase();
-  if (!FULL_SHA.test(sha)) throw new ValidationError(`${field} must be a full Git commit SHA`, { field });
+  if (!isFullGitObjectId(sha)) throw new ValidationError(`${field} must be a full Git commit SHA`, { field });
   return sha;
 }
 
@@ -493,13 +497,13 @@ export async function observeGithubPrDeliveryEvidence(
   if (!Number.isSafeInteger(input.runId) || input.runId <= 0) throw new ValidationError('runId must be a positive safe integer');
   const expectedHeadSha = normalizedSha(input.expectedHeadSha, 'expectedHeadSha');
   const deps = { ...DEFAULT_DEPS, ...overrides };
+  const authority = await deps.resolveAuthority(input.workspaceId);
   const run = await deps.queryOne<RunBindingRow>(
     `SELECT r.id, r.workspace_id, r.spec_path, r.branch_name, r.pr_number,
-            g.repo_owner, g.repo_name, g.auto_pr_target_branch
+            $3::text AS repo_owner, $4::text AS repo_name, $5::text AS auto_pr_target_branch
        FROM pipeline_runs r
-       JOIN workspace_github_webhooks g ON g.workspace_id = r.workspace_id
       WHERE r.id = $1 AND r.workspace_id = $2`,
-    [input.runId, input.workspaceId],
+    [input.runId, input.workspaceId, authority.owner, authority.name, authority.autoPrTargetBranch],
   );
   if (!run) throw new NotFoundError('GitHub-bound pipeline run', String(input.runId));
   if (!run.pr_number) throw new UnprocessableError('Run has no canonical pull request binding', 'PR_BINDING_REQUIRED');
@@ -583,7 +587,11 @@ export async function observeGithubPrDeliveryEvidence(
     observedAt: iso(check.completed_at ?? check.started_at),
     app: check.app?.slug ? boundedText(check.app.slug, 100) : null,
   }));
-  const statuses = statusPage.items.map<NormalizedGithubCheck>((status) => ({
+  // Operator-written manual statuses are deliberately non-governing even if a
+  // standing policy is misconfigured to name their fixed context.
+  const statuses = statusPage.items
+    .filter((status) => boundedText(status.context, 200) !== MANUAL_CHECK_NAME)
+    .map<NormalizedGithubCheck>((status) => ({
     source: 'commit_status',
     id: String(status.id),
     name: boundedText(status.context, 200),
@@ -604,7 +612,7 @@ export async function observeGithubPrDeliveryEvidence(
   const reviews = reviewPage.items
     .filter((review) => Boolean(review.user?.login))
     .map<NormalizedGithubReview>((review) => {
-      const commitSha = review.commit_id && FULL_SHA.test(review.commit_id.toLowerCase()) ? review.commit_id.toLowerCase() : null;
+      const commitSha = isFullGitObjectId(review.commit_id) ? review.commit_id.toLowerCase() : null;
       return {
         id: String(review.id),
         reviewer: boundedText(review.user?.login, 100),
@@ -641,7 +649,7 @@ export async function observeGithubPrDeliveryEvidence(
     pullRequest: {
       number: prNumber, url: pr.html_url, state: pr.state, draft: Boolean(pr.draft), merged: Boolean(pr.merged),
       headRef: pr.head.ref, baseRef: pr.base.ref, headSha, baseSha,
-      mergeCommitSha: finalPr.merge_commit_sha && FULL_SHA.test(finalPr.merge_commit_sha.toLowerCase()) ? finalPr.merge_commit_sha.toLowerCase() : null,
+      mergeCommitSha: isFullGitObjectId(finalPr.merge_commit_sha) ? finalPr.merge_commit_sha.toLowerCase() : null,
       mergeable: typeof finalPr.mergeable === 'boolean' ? finalPr.mergeable : null,
       mergeableState: boundedText(finalPr.mergeable_state || 'unknown', 64),
     },

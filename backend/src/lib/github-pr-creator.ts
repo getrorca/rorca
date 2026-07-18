@@ -16,8 +16,8 @@
  * stored in pipeline_runs.pr_creation_error. They never fail the run itself.
  *
  * Flow:
- *   1. Look up workspace_github_webhooks → get repo_owner, repo_name, auto_pr config
- *   2. Resolve a local GitHub token for repository access
+ *   1. Resolve canonical workspace repository authority + neutral auto-PR config
+ *   2. Resolve the exact-repository GitHub credential
  *   3. Query story_results + token_usage + pipeline_runs for PR body
  *   4. Check for existing open PR (GET /repos/:owner/:repo/pulls?head=branch)
  *   5. Create (POST) or update (PATCH) PR
@@ -27,12 +27,14 @@
 
 import { spawnSync } from 'child_process';
 import { query, queryOne, execute } from '../db/index';
-import { decryptToken } from '../lib/auth-utils';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 import { loadRorcaConfig } from './rorca-config';
 import { renderPrTemplate, PrTemplateData } from './github/pr-template';
 import { chatComplete } from './llm-client';
+import { getGithubRepositoryAuthority, githubRepoApiUrl } from './github-repository-authority';
+import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -42,10 +44,6 @@ interface GithubWebhookConfig {
   auto_pr_enabled: boolean;
   auto_pr_target_branch: string;
   auto_pr_reviewers: string; // JSON array string
-}
-
-interface GitHubConnection {
-  encrypted_token: string;
 }
 
 interface RunSummary {
@@ -86,47 +84,38 @@ export interface AutoPrOptions {
 export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
   const { runId, workspaceId, branchName, force } = opts;
 
-  // 1. Look up GitHub webhook config for this workspace
-  const webhookConfig = await queryOne<GithubWebhookConfig>(
-    `SELECT repo_owner, repo_name, auto_pr_enabled, auto_pr_target_branch, auto_pr_reviewers
-     FROM workspace_github_webhooks WHERE workspace_id = $1`,
-    [String(workspaceId)],
-  );
-
-  if (!webhookConfig) {
+  // 1–2. Canonical authority makes App-only workspaces first-class and binds
+  // every fallback token to this exact repository.
+  let authority;
+  try {
+    authority = await getGithubRepositoryAuthority(String(workspaceId), { requireActive: true });
+  } catch (err) {
+    logger.warn({ err, runId, workspaceId }, '[auto-pr] Canonical GitHub authority is inactive');
+    return;
+  }
+  if (!authority) {
     logger.info({ runId, workspaceId }, '[auto-pr] Skipping auto-PR: GitHub not connected');
     return;
   }
-
+  const webhookConfig: GithubWebhookConfig = {
+    repo_owner: authority.owner,
+    repo_name: authority.name,
+    auto_pr_enabled: authority.autoPrEnabled,
+    auto_pr_target_branch: authority.autoPrTargetBranch,
+    auto_pr_reviewers: JSON.stringify(authority.autoPrReviewers),
+  };
   if (!force && !webhookConfig.auto_pr_enabled) {
     logger.info({ runId, workspaceId }, '[auto-pr] Skipping auto-PR: auto_pr_enabled is false');
     return;
   }
-
-  // 2. Resolve a GitHub token (single-user local tool)
-  const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-  if (!userRow) {
-    logger.info({ runId }, '[auto-pr] Skipping auto-PR: no users configured');
-    return;
-  }
-
-  const ghConn = await queryOne<GitHubConnection>(
-    'SELECT encrypted_token FROM github_connections WHERE user_id = $1',
-    [userRow.id],
-  );
-
-  if (!ghConn) {
-    logger.info({ runId }, '[auto-pr] Skipping auto-PR: no GitHub token found');
-    return;
-  }
-
-  let token: string;
-  try {
-    token = decryptToken(ghConn.encrypted_token);
-  } catch (err) {
-    logger.warn({ err, runId }, '[auto-pr] Failed to decrypt GitHub token — skipping');
-    return;
-  }
+  const resolved = await resolveWorkspaceGitHubToken(String(workspaceId), {
+    repository: { owner: authority.owner, name: authority.name }, purpose: 'pulls-write',
+  }).catch((err) => {
+    logger.warn({ err, runId }, '[auto-pr] Exact-repository GitHub credential unavailable');
+    return null;
+  });
+  if (!resolved) return;
+  const token = resolved.token;
 
   // 3. Mark pr_creating=true so the frontend shows a spinner
   try {
@@ -199,7 +188,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
     if (existingPr) {
       // Update existing PR body
       const updateRes = await githubRateLimiter.execute(() =>
-        fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${existingPr.number}`, {
+        fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${existingPr.number}`), {
           method: 'PATCH',
           headers: buildGitHubHeaders(token),
           body: JSON.stringify({ body: prBody }),
@@ -224,7 +213,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
     } else {
       // Create new PR
       const createRes = await githubRateLimiter.execute(() =>
-        fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+        fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, '/pulls'), {
           method: 'POST',
           headers: buildGitHubHeaders(token),
           body: JSON.stringify({
@@ -249,7 +238,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
       if (reviewers.length > 0) {
         try {
           await githubRateLimiter.execute(() =>
-            fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/requested_reviewers`, {
+            fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${prNumber}/requested_reviewers`), {
               method: 'POST',
               headers: buildGitHubHeaders(token),
               body: JSON.stringify({ reviewers }),
@@ -312,10 +301,10 @@ async function findExistingPr(
   token: string,
 ): Promise<ExistingPr | null> {
   const head = `${repoOwner}:${branchName}`;
-  const url = `https://api.github.com/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(head)}&state=open&per_page=1`;
+  const url = githubRepoApiUrl(owner, repo, `/pulls?head=${encodeURIComponent(head)}&state=open&per_page=1`);
 
   const res = await githubRateLimiter.execute(() =>
-    fetch(url, { headers: buildGitHubHeaders(token) }),
+    fetchGithubWithTimeout(fetch, url, { headers: buildGitHubHeaders(token) }),
   );
 
   if (!res.ok) {

@@ -33,7 +33,7 @@ interface GithubWebhookAuthority {
 }
 
 const MAX_GITHUB_WEBHOOK_BYTES = 1024 * 1024;
-const SUPPORTED_GITHUB_EVENTS = new Set(['ping', 'push', 'pull_request']);
+const SUPPORTED_GITHUB_EVENTS = new Set(['ping', 'push', 'pull_request', 'issues', 'check_run']);
 const DELIVERY_ID = /^[A-Za-z0-9-]{8,100}$/;
 
 // ─── Legacy event handler registry ──────────────────────────────────────────
@@ -100,7 +100,8 @@ function isValidProvider(provider: string): provider is WebhookProvider {
  *         schema: { type: string }
  *       - in: header
  *         name: x-github-delivery
- *         schema: { type: string }
+ *         required: true
+ *         schema: { type: string, pattern: '^[A-Za-z0-9-]{8,100}$' }
  *     requestBody:
  *       required: true
  *       content:
@@ -126,6 +127,8 @@ function isValidProvider(provider: string): provider is WebhookProvider {
  *         description: Missing webhook headers or raw body
  *       401:
  *         description: Invalid webhook signature
+ *       403:
+ *         description: App installation/repository identity mismatch or missing webhook secret
  *       404:
  *         description: No workspace connected to this repository
  */
@@ -158,9 +161,20 @@ router.post('/github', async (req: Request, res: Response) => {
   const repositoryId = Number(payload?.repository?.id);
   let row: GithubWebhookAuthority | undefined;
 
-  if (Number.isSafeInteger(installationId) && installationId > 0) {
-    if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
-      throw new ValidationError('GitHub App webhook is missing repository id');
+  // Repository identity is resolved before choosing a secret. Once a current
+  // App binding exists (active, invalid, or disabled), omission of installation
+  // metadata can never downgrade authority to a retained legacy secret.
+  const currentApp = await queryOne<{ workspace_id: string }>(
+    `SELECT workspace_id FROM github_app_workspace_bindings
+      WHERE superseded_at IS NULL
+        AND lower(repo_owner) = lower($1) AND lower(repo_name) = lower($2)`,
+    [repoOwner, repoName],
+  );
+
+  if (currentApp) {
+    if (!Number.isSafeInteger(installationId) || installationId <= 0
+      || !Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
+      throw new ForbiddenError('GitHub App-bound repositories require installation and immutable repository identity');
     }
     row = await queryOne<GithubWebhookAuthority>(
       `SELECT 'github-app' AS source, b.workspace_id, b.repo_owner, b.repo_name,
@@ -168,12 +182,18 @@ router.post('/github', async (req: Request, res: Response) => {
               b.installation_id, b.repository_id, i.account_id, i.account_login
          FROM github_app_workspace_bindings b
          JOIN github_app_registrations r ON r.id = b.registration_id AND r.status = 'active'
-         JOIN github_app_installations i ON i.id = b.installation_record_id AND i.status = 'active'
-        WHERE b.status = 'active' AND b.installation_id = $1 AND b.repository_id = $2
+         JOIN github_app_installations i
+           ON i.id = b.installation_record_id
+          AND i.registration_id = b.registration_id
+          AND i.installation_id = b.installation_id
+          AND i.status = 'active'
+        WHERE b.superseded_at IS NULL AND b.status = 'active' AND b.webhook_verified = TRUE
+          AND b.installation_id = $1 AND b.repository_id = $2
           AND lower(b.repo_owner) = lower($3) AND lower(b.repo_name) = lower($4)`,
       [installationId, repositoryId, repoOwner, repoName],
     );
-    if (!row || Number(payload?.repository?.owner?.id) !== Number(row.account_id)
+    if (!row || row.workspace_id !== currentApp.workspace_id
+      || Number(payload?.repository?.owner?.id) !== Number(row.account_id)
       || String(payload?.repository?.owner?.login ?? '').toLowerCase() !== String(row.account_login).toLowerCase()) {
       throw new ForbiddenError('GitHub App installation/repository/owner identity does not match an active binding');
     }
@@ -182,7 +202,8 @@ router.post('/github', async (req: Request, res: Response) => {
       `SELECT 'legacy-repository-webhook' AS source, workspace_id, repo_owner, repo_name,
               webhook_id, encrypted_webhook_secret
          FROM workspace_github_webhooks
-        WHERE lower(repo_owner) = lower($1) AND lower(repo_name) = lower($2)`,
+        WHERE authority_status = 'active' AND webhook_secret_revoked_at IS NULL
+          AND lower(repo_owner) = lower($1) AND lower(repo_name) = lower($2)`,
       [repoOwner, repoName],
     );
   }
@@ -226,7 +247,7 @@ router.post('/github', async (req: Request, res: Response) => {
       // Update only the authority record that authenticated this delivery.
       if (row.source === 'github-app') {
         await execute(
-          'UPDATE github_app_workspace_bindings SET last_webhook_at = NOW() WHERE workspace_id = $1 AND installation_id = $2 AND repository_id = $3',
+          'UPDATE github_app_workspace_bindings SET last_webhook_at = NOW() WHERE workspace_id = $1 AND installation_id = $2 AND repository_id = $3 AND superseded_at IS NULL',
           [row.workspace_id, row.installation_id, row.repository_id],
         );
       } else {

@@ -14,7 +14,13 @@ import { encryptToken, requireWorkspaceAdmin, requireWorkspaceMember } from '../
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { storeOAuthToken, revokeToken, markTokenValidated } from '../lib/integration-vault';
 import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
-import { getWorkspaceGithubAppBinding } from '../lib/github-app-credential-provider';
+import { fetchGithubWithTimeout, getWorkspaceGithubAppBinding, githubAppBindingHasVerifiedProfile } from '../lib/github-app-credential-provider';
+import {
+  assertGithubRef,
+  assertGithubRepositoryIdentity,
+  getGithubRepositoryAuthority,
+  githubRepoApiUrl,
+} from '../lib/github-repository-authority';
 import { renderPrTemplate, SAMPLE_PR_TEMPLATE_DATA, type PrTemplateData } from '../lib/github/pr-template';
 
 const router = Router();
@@ -75,31 +81,6 @@ function parseScopes(headerValue: string | null): string[] {
     .filter(Boolean);
 }
 
-function parseReviewers(value: GithubWebhookRow['auto_pr_reviewers']): string[] {
-  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function parseWorkflowConfig(value: GithubWebhookRow['workflow_config']): Record<string, unknown> | null {
-  if (!value) return null;
-  if (typeof value === 'string') {
-    try {
-      return JSON.parse(value) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-  return value as Record<string, unknown>;
-}
-
 function getBackendBaseUrl(req: Request): string {
   return process.env.RORCA_API_URL?.trim() || `${req.protocol}://${req.get('host')}`;
 }
@@ -117,7 +98,7 @@ async function validateGitHubToken(token: string): Promise<{
   avatarUrl: string | null;
   scopes: string[];
 }> {
-  const response = await fetch('https://api.github.com/user', {
+  const response = await fetchGithubWithTimeout(fetch, 'https://api.github.com/user', {
     headers: buildGitHubHeaders(token),
   });
 
@@ -264,7 +245,7 @@ async function createWebhook(
   webhookUrl: string,
   secret: string,
 ): Promise<number> {
-  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks`, {
+  const response = await fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, '/hooks'), {
     method: 'POST',
     headers: buildGitHubHeaders(token),
     body: JSON.stringify({
@@ -281,7 +262,7 @@ async function createWebhook(
   });
 
   if (response.status === 422) {
-    const hooksResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks`, {
+    const hooksResponse = await fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, '/hooks'), {
       headers: buildGitHubHeaders(token),
     });
     if (hooksResponse.ok) {
@@ -306,7 +287,7 @@ async function createWebhook(
 }
 
 async function deleteWebhook(owner: string, repo: string, webhookId: number, token: string): Promise<void> {
-  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks/${webhookId}`, {
+  const response = await fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/hooks/${webhookId}`), {
     method: 'DELETE',
     headers: buildGitHubHeaders(token),
   });
@@ -318,13 +299,15 @@ async function deleteWebhook(owner: string, repo: string, webhookId: number, tok
 }
 
 async function getGithubRow(workspaceId: string): Promise<GithubWebhookRow | null> {
-  return (await queryOne<GithubWebhookRow>(
+  const row = (await queryOne<GithubWebhookRow>(
     `SELECT workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret, last_webhook_at,
             auto_pr_enabled, auto_pr_target_branch, auto_pr_reviewers, workflow_config, created_at
        FROM workspace_github_webhooks
-      WHERE workspace_id = $1`,
+      WHERE workspace_id = $1 AND authority_status = 'active'`,
     [workspaceId],
   )) ?? null;
+  if (row) assertGithubRepositoryIdentity(row.repo_owner, row.repo_name);
+  return row;
 }
 
 router.use('/:id/github', requireWorkspaceMember());
@@ -344,45 +327,27 @@ router.get('/:id/github', async (req: Request, res: Response, next: NextFunction
   try {
     await requireWorkspace(String(req.params.id));
     const workspaceId = String(req.params.id);
-    const appBinding = await getWorkspaceGithubAppBinding(workspaceId);
-    const row = await getGithubRow(workspaceId);
-    if (appBinding) {
-      const connected = appBinding.status === 'active' && appBinding.installationStatus === 'active' && appBinding.registrationStatus === 'active';
-      res.json({
-        connected,
-        credentialSource: 'github-app-installation',
-        repoOwner: appBinding.repoOwner,
-        repoName: appBinding.repoName,
-        repositoryId: appBinding.repositoryId,
-        installationId: appBinding.installationId,
-        webhookId: null,
-        webhookUrl: process.env.RORCA_GITHUB_WEBHOOK_URL?.trim() || 'https://hooks.rorca.ai/api/webhooks/github',
-        lastWebhookAt: appBinding.lastWebhookAt,
-        connectedAt: null,
-        nextAction: connected ? null : 'Administrator revalidation is required; fallback is blocked while this App binding exists.',
-        autoPr: row ? { enabled: row.auto_pr_enabled, targetBranch: row.auto_pr_target_branch, reviewers: parseReviewers(row.auto_pr_reviewers) } : { enabled: false, targetBranch: 'main', reviewers: [] },
-      });
-      return;
-    }
-    if (!row) {
-      res.json({ connected: false, credentialSource: null });
-      return;
-    }
-
+    const authority = await getGithubRepositoryAuthority(workspaceId);
+    if (!authority) { res.json({ connected: false, credentialSource: null }); return; }
+    const appBinding = authority.source === 'github-app-installation' ? await getWorkspaceGithubAppBinding(workspaceId) : null;
+    const appCapable = appBinding ? githubAppBindingHasVerifiedProfile(appBinding) : true;
+    const legacy = authority.source === 'pat-oauth-fallback' ? await getGithubRow(workspaceId) : null;
+    const connected = authority.status === 'active' && appCapable && (authority.source === 'github-app-installation' ? authority.webhookVerified : Boolean(legacy));
     res.json({
-      connected: true,
-      credentialSource: 'pat-oauth-fallback',
-      repoOwner: row.repo_owner,
-      repoName: row.repo_name,
-      webhookId: row.webhook_id,
-      webhookUrl: `${getBackendBaseUrl(req)}/api/webhooks/github`,
-      lastWebhookAt: row.last_webhook_at,
-      connectedAt: row.created_at,
-      autoPr: {
-        enabled: row.auto_pr_enabled,
-        targetBranch: row.auto_pr_target_branch,
-        reviewers: parseReviewers(row.auto_pr_reviewers),
-      },
+      connected,
+      credentialSource: authority.source,
+      repoOwner: authority.owner,
+      repoName: authority.name,
+      repositoryId: authority.repositoryId,
+      installationId: authority.installationId,
+      webhookId: legacy?.webhook_id ?? null,
+      webhookUrl: authority.source === 'github-app-installation'
+        ? process.env.RORCA_GITHUB_WEBHOOK_URL?.trim() || 'https://hooks.rorca.ai/api/webhooks/github'
+        : `${getBackendBaseUrl(req)}/api/webhooks/github`,
+      lastWebhookAt: authority.lastWebhookAt,
+      connectedAt: authority.connectedAt,
+      nextAction: connected ? null : 'Provider capability revalidation is required; fallback is blocked while an App binding exists.',
+      autoPr: { enabled: authority.autoPrEnabled, targetBranch: authority.autoPrTargetBranch, reviewers: authority.autoPrReviewers },
     });
   } catch (err) {
     next(err);
@@ -406,7 +371,7 @@ router.get('/:id/github/account', async (req: Request, res: Response, next: Next
     await requireWorkspace(workspaceId);
     const appBinding = await getWorkspaceGithubAppBinding(workspaceId);
     if (appBinding) {
-      const connected = appBinding.status === 'active' && appBinding.installationStatus === 'active' && appBinding.registrationStatus === 'active';
+      const connected = githubAppBindingHasVerifiedProfile(appBinding);
       res.json({
         connected,
         source: 'github-app-installation',
@@ -420,7 +385,7 @@ router.get('/:id/github/account', async (req: Request, res: Response, next: Next
       });
       return;
     }
-    const resolved = await resolveWorkspaceGitHubToken(workspaceId, { allowLegacyGlobal: true });
+    const resolved = await resolveWorkspaceGitHubToken(workspaceId, { purpose: 'repository-read' });
     if (!resolved) {
       res.json({ connected: false });
       return;
@@ -473,11 +438,19 @@ router.post('/:id/github/connect', requireWorkspaceAdmin(), async (req: Request,
     const repoName = String(req.body.repoName || '').trim();
     const githubToken = String(req.body.githubToken || '').trim();
 
-    if (!repoOwner || !repoName || !githubToken) {
-      throw new ValidationError('repoOwner, repoName, and githubToken are required');
+    if (!repoOwner || !repoName || !githubToken) throw new ValidationError('repoOwner, repoName, and githubToken are required');
+    assertGithubRepositoryIdentity(repoOwner, repoName);
+    if (await getWorkspaceGithubAppBinding(String(req.params.id))) {
+      throw new ValidationError('Legacy PAT/webhook authority cannot be connected while a current GitHub App binding exists');
     }
 
     const validated = await validateGitHubToken(githubToken);
+    const repositoryResponse = await fetchGithubWithTimeout(fetch, githubRepoApiUrl(repoOwner, repoName), { headers: buildGitHubHeaders(githubToken) });
+    if (!repositoryResponse.ok) throw new ValidationError(`PAT cannot access the exact repository: ${repositoryResponse.status}`);
+    const providerRepository = await repositoryResponse.json() as { full_name?: string };
+    if (providerRepository.full_name?.toLowerCase() !== `${repoOwner}/${repoName}`.toLowerCase()) {
+      throw new ValidationError('GitHub returned a different repository identity');
+    }
     await storeOAuthToken(String(req.params.id), 'github', {
       token: githubToken,
       tokenType: 'api_key',
@@ -506,8 +479,19 @@ router.post('/:id/github/connect', requireWorkspaceAdmin(), async (req: Request,
          repo_owner = EXCLUDED.repo_owner,
          repo_name = EXCLUDED.repo_name,
          webhook_id = EXCLUDED.webhook_id,
-         encrypted_webhook_secret = EXCLUDED.encrypted_webhook_secret`,
+         encrypted_webhook_secret = EXCLUDED.encrypted_webhook_secret,
+         authority_status = 'active',
+         retired_at = NULL,
+         retirement_reason = NULL,
+         webhook_secret_revoked_at = NULL`,
       [String(req.params.id), repoOwner, repoName, webhookId, encryptedWebhookSecret],
+    );
+    await execute(
+      `INSERT INTO github_repository_configs (workspace_id, repo_owner, repo_name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (workspace_id) DO UPDATE SET repo_owner = EXCLUDED.repo_owner,
+         repo_name = EXCLUDED.repo_name, updated_at = NOW()`,
+      [String(req.params.id), repoOwner, repoName],
     );
 
     res.json({
@@ -531,7 +515,7 @@ router.post('/:id/github/test-connection', async (req: Request, res: Response, n
     const appBinding = await getWorkspaceGithubAppBinding(workspaceId);
     const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
       ...(appBinding ? { repository: { owner: appBinding.repoOwner, name: appBinding.repoName } } : {}),
-      purpose: 'routine', allowLegacyGlobal: true, allowEnvFallback: true,
+      purpose: 'repository-read',
     });
     if (!resolved) throw new ValidationError('No GitHub token configured for this workspace');
     if (resolved.source === 'github-app-installation') {
@@ -572,7 +556,7 @@ router.post('/:id/github/disconnect', requireWorkspaceAdmin(), async (req: Reque
     const bodyToken = String(req.body.githubToken || '').trim();
     const resolved = bodyToken
       ? { token: bodyToken }
-      : await resolveWorkspaceGitHubToken(String(req.params.id), { allowLegacyGlobal: true, allowEnvFallback: true });
+      : await resolveWorkspaceGitHubToken(String(req.params.id), { purpose: 'repository-read' });
 
     if (row.webhook_id && !resolved?.token) {
       throw new ValidationError('GitHub token required to remove the configured webhook');
@@ -608,13 +592,13 @@ router.delete('/:id/github', requireWorkspaceAdmin(), async (req: Request, res: 
         [workspaceId, req.user?.email || req.user?.id || 'operator', JSON.stringify({ bindingId: appBinding.bindingId, installationId: appBinding.installationId, repositoryId: appBinding.repositoryId })],
       );
     } else {
-      const resolved = await resolveWorkspaceGitHubToken(workspaceId, { allowLegacyGlobal: true, allowEnvFallback: true });
+      const resolved = await resolveWorkspaceGitHubToken(workspaceId, { purpose: 'repository-read' });
       if (row?.webhook_id && resolved?.token) {
         await deleteWebhook(row.repo_owner, row.repo_name, row.webhook_id, resolved.token).catch(() => {});
       }
     }
 
-    await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]);
+    if (!appBinding) await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]);
     await revokeToken(workspaceId, 'github');
     res.json({ disconnected: true, source: appBinding ? 'github-app-installation' : 'pat-oauth-fallback' });
   } catch (err) {
@@ -627,22 +611,23 @@ router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (req: Request, 
     await requireWorkspace(String(req.params.id));
     const enabled = !!req.body.enabled;
     const targetBranch = String(req.body.targetBranch || 'main').trim() || 'main';
-    const reviewers = Array.isArray(req.body.reviewers)
+    const reviewers: string[] = Array.isArray(req.body.reviewers)
       ? req.body.reviewers.filter((value: unknown): value is string => typeof value === 'string').map((value: string) => value.trim()).filter(Boolean)
       : [];
 
-    const row = await getGithubRow(String(req.params.id));
-    if (!row) {
-      throw new ValidationError('No GitHub repository connected for this workspace');
-    }
-
+    const workspaceId = String(req.params.id);
+    const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
+    if (!authority) throw new ValidationError('No GitHub repository connected for this workspace');
+    assertGithubRef(targetBranch);
+    reviewers.forEach((reviewer) => {
+      if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(reviewer)) throw new ValidationError('Invalid GitHub reviewer login');
+    });
     await execute(
-      `UPDATE workspace_github_webhooks
-          SET auto_pr_enabled = $2,
-              auto_pr_target_branch = $3,
-              auto_pr_reviewers = $4::jsonb
+      `UPDATE github_repository_configs
+          SET auto_pr_enabled = $2, auto_pr_target_branch = $3,
+              auto_pr_reviewers = $4::jsonb, updated_at = NOW()
         WHERE workspace_id = $1`,
-      [String(req.params.id), enabled, targetBranch, JSON.stringify(reviewers)],
+      [workspaceId, enabled, targetBranch, JSON.stringify(reviewers)],
     );
 
     res.json({ ok: true });
@@ -654,8 +639,8 @@ router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (req: Request, 
 router.get('/:id/github/workflow-config', async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
-    const row = await getGithubRow(String(req.params.id));
-    res.json({ workflowConfig: parseWorkflowConfig(row?.workflow_config ?? null) });
+    const authority = await getGithubRepositoryAuthority(String(req.params.id));
+    res.json({ workflowConfig: authority?.workflowConfig ?? null });
   } catch (err) {
     next(err);
   }
@@ -664,10 +649,8 @@ router.get('/:id/github/workflow-config', async (req: Request, res: Response, ne
 router.put('/:id/github/workflow-config', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
-    const row = await getGithubRow(String(req.params.id));
-    if (!row) {
-      throw new ValidationError('No GitHub repository connected for this workspace');
-    }
+    const authority = await getGithubRepositoryAuthority(String(req.params.id), { requireActive: true });
+    if (!authority) throw new ValidationError('No GitHub repository connected for this workspace');
 
     const body = req.body ?? {};
     const workflowConfig = typeof body.workflowConfig === 'object' && body.workflowConfig !== null && !Array.isArray(body.workflowConfig)
@@ -678,7 +661,7 @@ router.put('/:id/github/workflow-config', requireWorkspaceAdmin(), async (req: R
     }
 
     await execute(
-      'UPDATE workspace_github_webhooks SET workflow_config = $2::jsonb WHERE workspace_id = $1',
+      'UPDATE github_repository_configs SET workflow_config = $2::jsonb, updated_at = NOW() WHERE workspace_id = $1',
       [String(req.params.id), JSON.stringify(workflowConfig)],
     );
 
@@ -702,17 +685,15 @@ router.put('/:id/github/workflow-config', requireWorkspaceAdmin(), async (req: R
 router.get('/:id/github/workflows', async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
-    const row = await getGithubRow(String(req.params.id));
-    if (!row) {
-      throw new ValidationError('No GitHub repository connected for this workspace');
-    }
+    const authority = await getGithubRepositoryAuthority(String(req.params.id), { requireActive: true });
+    if (!authority) throw new ValidationError('No GitHub repository connected for this workspace');
 
-    const resolved = await resolveWorkspaceGitHubToken(String(req.params.id), { allowLegacyGlobal: true, allowEnvFallback: true });
-    if (!resolved) {
-      throw new ValidationError('No GitHub token configured for this workspace');
-    }
+    const resolved = await resolveWorkspaceGitHubToken(String(req.params.id), {
+      repository: { owner: authority.owner, name: authority.name }, purpose: 'workflow-read',
+    });
+    if (!resolved) throw new ValidationError('No GitHub token configured for this workspace');
 
-    const response = await fetch(`https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/actions/workflows`, {
+    const response = await fetchGithubWithTimeout(fetch, githubRepoApiUrl(authority.owner, authority.name, '/actions/workflows'), {
       headers: buildGitHubHeaders(resolved.token),
     });
 
@@ -750,12 +731,12 @@ router.post('/:id/github/webhook-ping', requireWorkspaceAdmin(), async (req: Req
       throw new ValidationError('No GitHub webhook id is configured for this workspace');
     }
 
-    const resolved = await resolveWorkspaceGitHubToken(String(req.params.id), { allowLegacyGlobal: true, allowEnvFallback: true });
-    if (!resolved) {
-      throw new ValidationError('No GitHub token configured for this workspace');
-    }
+    const resolved = await resolveWorkspaceGitHubToken(String(req.params.id), {
+      repository: { owner: row.repo_owner, name: row.repo_name }, purpose: 'repository-read',
+    });
+    if (!resolved) throw new ValidationError('No GitHub token configured for this workspace');
 
-    const response = await fetch(`https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/hooks/${row.webhook_id}/pings`, {
+    const response = await fetchGithubWithTimeout(fetch, githubRepoApiUrl(row.repo_owner, row.repo_name, `/hooks/${row.webhook_id}/pings`), {
       method: 'POST',
       headers: buildGitHubHeaders(resolved.token),
     });
@@ -835,15 +816,13 @@ jobs:
 router.post('/:id/github/dispatch', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
-    const row = await getGithubRow(String(req.params.id));
-    if (!row) {
-      throw new ValidationError('No GitHub repository connected for this workspace');
-    }
+    const authority = await getGithubRepositoryAuthority(String(req.params.id), { requireActive: true });
+    if (!authority) throw new ValidationError('No GitHub repository connected for this workspace');
 
-    const resolved = await resolveWorkspaceGitHubToken(String(req.params.id), { allowLegacyGlobal: true, allowEnvFallback: true });
-    if (!resolved) {
-      throw new ValidationError('No GitHub token configured for this workspace');
-    }
+    const resolved = await resolveWorkspaceGitHubToken(String(req.params.id), {
+      repository: { owner: authority.owner, name: authority.name }, purpose: 'workflow-dispatch',
+    });
+    if (!resolved) throw new ValidationError('No GitHub token configured for this workspace');
 
     const workflowId = String(req.body.workflow_id || '').trim();
     const ref = String(req.body.ref || 'main').trim() || 'main';
@@ -851,12 +830,11 @@ router.post('/:id/github/dispatch', requireWorkspaceAdmin(), async (req: Request
       ? req.body.inputs
       : {};
 
-    if (!workflowId) {
-      throw new ValidationError('workflow_id is required');
-    }
+    if (!workflowId || workflowId.length > 255) throw new ValidationError('workflow_id is required and must be at most 255 characters');
+    assertGithubRef(ref);
 
-    const response = await fetch(
-      `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/actions/workflows/${encodeURIComponent(workflowId)}/dispatches`,
+    const response = await fetchGithubWithTimeout(fetch,
+      githubRepoApiUrl(authority.owner, authority.name, `/actions/workflows/${encodeURIComponent(workflowId)}/dispatches`),
       {
         method: 'POST',
         headers: buildGitHubHeaders(resolved.token),

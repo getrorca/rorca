@@ -30,6 +30,8 @@ import {
   type DeliveryLifecycleBridgeResult,
 } from './autonomous-delivery-lifecycle';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
+import { isFullGitObjectId } from './github-repository-authority';
 import { githubRateLimiter } from './github-rate-limiter';
 import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 import { validateReusableWorktree } from './worktree-freshness';
@@ -180,7 +182,8 @@ async function bindingForRun(workspaceId: string, runId: number): Promise<RunDel
            cp.provenance_json->'profiles' AS profiles
     FROM pipeline_runs r
     JOIN workspaces w ON w.id = r.workspace_id
-    JOIN workspace_github_webhooks gh ON gh.workspace_id = r.workspace_id
+    JOIN github_workspace_repository_authority gh
+      ON gh.workspace_id = r.workspace_id AND gh.authority_status = 'active'
     LEFT JOIN LATERAL (
       SELECT compiler_version, provenance_json
       FROM ssdlc_compiled_plans
@@ -348,7 +351,7 @@ export async function queueAutonomousPrDeliveryForRun(input: {
   });
   if (!worktree.ok) return { queued: false, deliveryId: null, reason: `worktree_guard:${worktree.reason}`, replayed: false };
   const headSha = (await simpleGit(binding.worktree_path).revparse(['HEAD'])).trim().toLowerCase();
-  if (!/^[0-9a-f]{40,64}$/.test(headSha)) throw new UnprocessableError('Run branch HEAD is not a full Git SHA', 'REVISION_UNAVAILABLE');
+  if (!isFullGitObjectId(headSha)) throw new UnprocessableError('Run branch HEAD is not a full Git SHA', 'REVISION_UNAVAILABLE');
   const id = crypto.randomUUID();
   const sourceRequestId = input.sourceRequestId ?? `autonomous-pr-delivery:${input.runId}:${headSha}`;
   const deadline = new Date(Date.now() + policy.retryBudget.maxElapsedMinutes * 60_000);
@@ -606,11 +609,11 @@ async function providerMerge(
 ): Promise<{ mergedSha: string; responseHash: `sha256:${string}`; mergedAt: string }> {
   const resolved = await resolveWorkspaceGitHubToken(delivery.workspace_id, {
     repository: { owner: delivery.repo_owner, name: delivery.repo_name },
-    purpose: 'reviewed-delivery',
+    purpose: 'merge',
   });
   if (!resolved) throw new UnprocessableError('Workspace GitHub credential is unavailable', 'GITHUB_CREDENTIAL_UNAVAILABLE');
   const prUrl = `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`;
-  const preflight = await githubRateLimiter.execute(() => fetch(prUrl, {
+  const preflight = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch, prUrl, {
     headers: { Authorization: `Bearer ${resolved.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
   }));
   const currentPr = await preflight.json().catch(() => ({})) as {
@@ -629,7 +632,7 @@ async function providerMerge(
   let response: Response | null = null;
   let transportError: unknown = null;
   try {
-    response = await githubRateLimiter.execute(() => fetch(url, {
+    response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch, url, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${resolved.token}`,
@@ -645,20 +648,20 @@ async function providerMerge(
   const raw = response
     ? await response.json().catch(() => ({})) as { sha?: string; merged?: boolean; message?: string }
     : {};
-  if (response?.ok && raw.merged === true && typeof raw.sha === 'string' && /^[0-9a-f]{40,64}$/.test(raw.sha)) {
+  if (response?.ok && raw.merged === true && isFullGitObjectId(raw.sha)) {
     const stable = { sha: raw.sha, merged: true, message: String(raw.message ?? '').slice(0, 256), status: response.status };
     return { mergedSha: raw.sha, responseHash: sha(stable), mergedAt: new Date().toISOString() };
   }
 
   // A response may be lost after GitHub committed the merge. Reconcile once;
   // never issue an unconditional second merge with a different head.
-  const check = await githubRateLimiter.execute(() => fetch(
+  const check = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
     `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`,
     { headers: { Authorization: `Bearer ${resolved.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
   ));
   const pr = await check.json().catch(() => ({})) as { merged?: boolean; merged_at?: string; merge_commit_sha?: string; head?: { sha?: string } };
   if (check.ok && pr.merged === true && pr.head?.sha?.toLowerCase() === delivery.current_head_sha
-    && typeof pr.merge_commit_sha === 'string' && /^[0-9a-f]{40,64}$/.test(pr.merge_commit_sha)) {
+    && isFullGitObjectId(pr.merge_commit_sha)) {
     const stable = { sha: pr.merge_commit_sha, merged: true, reconciled: true, status: response?.status ?? null };
     return { mergedSha: pr.merge_commit_sha, responseHash: sha(stable), mergedAt: pr.merged_at ?? new Date().toISOString() };
   }
@@ -846,7 +849,7 @@ async function fetchFailureAnnotations(delivery: DeliveryRow, checks: Normalized
   const output: Array<{ path: string; line: number; message: string }> = [];
   for (const check of failing) {
     if (!/^\d+$/.test(check.id)) return [];
-    const response = await githubRateLimiter.execute(() => fetch(
+    const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
       `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/check-runs/${check.id}/annotations?per_page=100`,
       { headers: { Authorization: `Bearer ${resolved.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
     ));
@@ -1052,7 +1055,7 @@ async function recoverConflict(delivery: DeliveryRow): Promise<string> {
     if (afterMerge.conflicted.length > 0) throw new ConflictError('Configured-agent recovery left unresolved conflict paths');
     await git.commit(`merge: refresh ${delivery.branch_name} from ${delivery.base_branch} for reviewed delivery`);
     const nextHead = (await git.revparse(['HEAD'])).trim().toLowerCase();
-    if (nextHead === delivery.current_head_sha || !/^[0-9a-f]{40,64}$/.test(nextHead)) {
+    if (nextHead === delivery.current_head_sha || !isFullGitObjectId(nextHead)) {
       throw new ConflictError('Conflict recovery did not produce a new full Git SHA');
     }
     await git.push('origin', delivery.branch_name);
@@ -1112,7 +1115,7 @@ export async function resumeAutonomousDeliveryAfterRecoveryRun(childRunId: numbe
     try {
       const git = simpleGit(row.worktree_path);
       nextHead = (await git.revparse(['HEAD'])).trim().toLowerCase();
-      if (!/^[0-9a-f]{40,64}$/.test(nextHead) || nextHead === row.head_sha_before) {
+      if (!isFullGitObjectId(nextHead) || nextHead === row.head_sha_before) {
         failure = 'ci_recovery_produced_no_new_revision';
         nextHead = null;
       } else {
@@ -1205,7 +1208,7 @@ export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Pr
     purpose: 'reviewed-delivery',
   });
   if (!token) return false;
-  const response = await githubRateLimiter.execute(() => fetch(
+  const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
     `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`,
     { headers: { Authorization: `Bearer ${token.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
   ));
@@ -1216,7 +1219,7 @@ export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Pr
     head?: { sha?: string };
   };
   if (!response.ok || pr.merged !== true || pr.head?.sha?.toLowerCase() !== delivery.current_head_sha
-    || typeof pr.merge_commit_sha !== 'string' || !/^[0-9a-f]{40,64}$/.test(pr.merge_commit_sha)) return false;
+    || !isFullGitObjectId(pr.merge_commit_sha)) return false;
   const lifecycle: DeliveryLifecycleBridgeResult = {
     validationEvidenceId: lifecycleRows.validation_id ?? lifecycleRows.merge_id,
     mergeEvidenceId: lifecycleRows.merge_id,

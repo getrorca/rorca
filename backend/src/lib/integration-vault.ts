@@ -16,6 +16,7 @@
  */
 
 import crypto from 'crypto';
+import type { PoolClient } from 'pg';
 import { query, queryOne, execute } from '../db/index';
 import { ValidationError } from './errors';
 
@@ -33,6 +34,15 @@ export interface StoredIntegrationSecret {
   createdAt: string;
   rotatedAt: string | null;
   revokedAt: string | null;
+}
+
+export interface PreparedIntegrationSecret {
+  id: string;
+  provider: 'github_app';
+  secretKind: IntegrationSecretKind;
+  encryptedValue: string;
+  fingerprint: `sha256:${string}`;
+  createdBy: string;
 }
 
 export interface TokenData {
@@ -150,15 +160,12 @@ function rowToStoredToken(row: TokenRow): StoredToken {
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-/**
- * Store a non-workspace App secret in the same AES-256-GCM integration vault.
- * Plaintext is accepted only at this boundary and is never returned as metadata.
- */
-export async function storeIntegrationSecret(
+/** Encrypt and fingerprint one App secret for an enclosing database transaction. */
+export function prepareIntegrationSecret(
   secretKind: IntegrationSecretKind,
   plaintext: string,
   createdBy: string,
-): Promise<StoredIntegrationSecret> {
+): PreparedIntegrationSecret {
   const value = plaintext.trim();
   const maxLength = secretKind === 'private_key' ? 65_536 : 1_024;
   if (!value || value.length > maxLength) {
@@ -167,14 +174,46 @@ export async function storeIntegrationSecret(
   if (!createdBy.trim() || createdBy.length > 255) {
     throw new ValidationError('createdBy is required and must be at most 255 characters');
   }
-  const id = crypto.randomUUID();
-  const fingerprint = `sha256:${crypto.createHash('sha256').update(value, 'utf8').digest('hex')}` as const;
+  return {
+    id: crypto.randomUUID(),
+    provider: 'github_app',
+    secretKind,
+    encryptedValue: encrypt(value),
+    fingerprint: `sha256:${crypto.createHash('sha256').update(value, 'utf8').digest('hex')}`,
+    createdBy: createdBy.trim(),
+  };
+}
+
+/** Insert a prepared App secret through the caller's transaction. */
+export async function insertPreparedIntegrationSecret(
+  client: PoolClient,
+  prepared: PreparedIntegrationSecret,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO integration_vault_secrets
+       (id, provider, secret_kind, encrypted_value, fingerprint, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [prepared.id, prepared.provider, prepared.secretKind, prepared.encryptedValue, prepared.fingerprint, prepared.createdBy],
+  );
+}
+
+/**
+ * Store a non-workspace App secret in the same AES-256-GCM integration vault.
+ * Prefer prepareIntegrationSecret + insertPreparedIntegrationSecret when the
+ * secret belongs to a larger registration transaction.
+ */
+export async function storeIntegrationSecret(
+  secretKind: IntegrationSecretKind,
+  plaintext: string,
+  createdBy: string,
+): Promise<StoredIntegrationSecret> {
+  const prepared = prepareIntegrationSecret(secretKind, plaintext, createdBy);
   const row = await queryOne<IntegrationSecretRow>(
     `INSERT INTO integration_vault_secrets
        (id, provider, secret_kind, encrypted_value, fingerprint, created_by)
-     VALUES ($1, 'github_app', $2, $3, $4, $5)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING *`,
-    [id, secretKind, encrypt(value), fingerprint, createdBy.trim()],
+    [prepared.id, prepared.provider, prepared.secretKind, prepared.encryptedValue, prepared.fingerprint, prepared.createdBy],
   );
   if (!row) throw new ValidationError('Failed to store encrypted integration secret');
   return {

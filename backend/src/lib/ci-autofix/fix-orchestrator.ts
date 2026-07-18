@@ -26,8 +26,10 @@ import { subscribe, broadcastAll, type WalEvent } from '../sse-hub';
 import { queryOne, query, execute } from '../../db/index';
 import { getBoss } from '../pg-boss';
 import { logger } from '../logger';
-import { decryptToken } from '../../lib/auth-utils';
 import { githubRateLimiter } from '../github-rate-limiter';
+import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } from '../github-repository-authority';
+import { resolveWorkspaceGitHubToken } from '../github-token-resolver';
+import { fetchGithubWithTimeout } from '../github-app-credential-provider';
 import type { CiCheckFailure, CiAnnotation } from './webhook-handler';
 import type { AgentType } from '../config';
 
@@ -57,15 +59,6 @@ interface CiAutofixRunRow {
   check_run_name: string;
   run_id: number;
   agent_type: string;
-}
-
-interface GitHubWebhookRow {
-  repo_owner: string;
-  repo_name: string;
-}
-
-interface GitHubConnectionRow {
-  encrypted_token: string;
 }
 
 interface StoryResultRow {
@@ -389,14 +382,16 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
   const finalStatus = success ? 'completed' : 'failed';
 
   // 3. Post GitHub commit status
-  const repoInfo = await queryOne<GitHubWebhookRow>(
-    'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1',
-    [autofixRow.workspace_id],
-  );
+  const repoInfo = await getGithubRepositoryAuthority(autofixRow.workspace_id, { requireActive: true }).catch(() => null);
 
   if (repoInfo) {
-    const token = await getGithubTokenForWorkspace();
-    if (token) {
+    const resolved = await resolveWorkspaceGitHubToken(autofixRow.workspace_id, {
+      repository: { owner: repoInfo.owner, name: repoInfo.name }, purpose: 'statuses-write',
+    }).catch(() => null);
+    const token = resolved?.token ?? null;
+    if (!isFullGitObjectId(autofixRow.head_sha)) {
+      logger.warn('[CI Autofix] Full immutable commit SHA is unavailable — skipping commit status post');
+    } else if (token) {
       const state = success ? 'success' : 'failure';
       const description = success
         ? `Rorca autofix: all errors in ${autofixRow.check_run_name} resolved`
@@ -405,10 +400,10 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
       const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:5210';
       const targetUrl = `${baseUrl}/runs/${runId}`;
 
-      const url = `https://api.github.com/repos/${repoInfo.repo_owner}/${repoInfo.repo_name}/statuses/${autofixRow.head_sha}`;
+      const url = githubRepoApiUrl(repoInfo.owner, repoInfo.name, `/statuses/${autofixRow.head_sha}`);
       try {
         const res = await githubRateLimiter.execute(() =>
-          fetch(url, {
+          fetchGithubWithTimeout(fetch, url, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${token}`,
@@ -478,15 +473,6 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
   logger.info(
     `[CI Autofix] Feedback loop complete for run #${runId}: ${finalStatus} (${passed.length} passed, ${failed.length} failed)`,
   );
-}
-
-/** Get GitHub token (workspace-agnostic, single-user mode). */
-async function getGithubTokenForWorkspace(): Promise<string | null> {
-  const row = await queryOne<GitHubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1',
-  );
-  if (!row) return null;
-  return decryptToken(row.encrypted_token);
 }
 
 // ─── Startup ────────────────────────────────────────────────────────────────

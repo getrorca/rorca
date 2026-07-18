@@ -20,16 +20,12 @@ import { execSync } from 'child_process';
 import { subscribe, type WalEvent } from './sse-hub';
 import { queryOne, execute } from '../db/index';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } from './github-repository-authority';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-interface GitHubWebhookRow {
-  workspace_id: string;
-  repo_owner: string;
-  repo_name: string;
-}
 
 interface StoryCommitRow {
   commit_sha: string;
@@ -52,39 +48,33 @@ interface WorkspaceRow {
 async function getGithubToken(workspaceId: string, owner: string, repo: string): Promise<string | null> {
   const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
     repository: { owner, name: repo },
-    purpose: 'checks',
+    purpose: 'statuses-write',
   });
   return resolved?.token ?? null;
 }
 
 /** Get GitHub repo info for a workspace. Returns null if not connected. */
 async function getRepoInfo(workspaceId: string): Promise<{ owner: string; repo: string } | null> {
-  const row = await queryOne<GitHubWebhookRow>(
-    'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1',
-    [workspaceId],
-  );
-  if (!row) return null;
-  return { owner: row.repo_owner, repo: row.repo_name };
+  const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
+  return authority ? { owner: authority.owner, repo: authority.name } : null;
 }
 
-/** Resolve commit SHA for a story. Falls back to branch HEAD if no story_commits entry. */
+/** Resolve only the immutable commit persisted for this exact run/workspace/story. */
 async function resolveCommitSha(
   storyId: string,
   specId: string | null,
   runId: number | null,
   workspaceId: string,
 ): Promise<string | null> {
-  // Primary: story_commits table (written by execution-engine.ts after gitCommitStory)
-  if (specId) {
-    const row = await queryOne<StoryCommitRow>(
-      'SELECT commit_sha FROM story_commits WHERE story_id = $1 AND spec_id = $2 ORDER BY pushed_at DESC LIMIT 1',
-      [storyId, specId],
-    );
-    if (row) return row.commit_sha;
-  }
-
-  // Fallback: branch HEAD from the workspace/worktree
-  return resolveBranchHead(runId, workspaceId);
+  if (!specId || !runId) return null;
+  const row = await queryOne<StoryCommitRow>(
+    `SELECT commit_sha FROM story_commits
+      WHERE workspace_id = $1 AND run_id = $2 AND story_id = $3 AND spec_id = $4
+      ORDER BY pushed_at DESC, id DESC LIMIT 1`,
+    [workspaceId, runId, storyId, specId],
+  );
+  if (!row || !isFullGitObjectId(row.commit_sha)) return null;
+  return row.commit_sha.toLowerCase();
 }
 
 /** Get HEAD SHA for the run's working directory (worktree or workspace root). */
@@ -93,8 +83,8 @@ async function resolveBranchHead(runId: number | null, workspaceId: string): Pro
 
   if (runId) {
     const run = await queryOne<PipelineRunRow>(
-      'SELECT worktree_path, workspace_id FROM pipeline_runs WHERE id = $1',
-      [runId],
+      'SELECT worktree_path, workspace_id FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
+      [runId, workspaceId],
     );
     if (run?.worktree_path) {
       cwd = run.worktree_path;
@@ -158,7 +148,7 @@ async function postStatus(
     return;
   }
 
-  const url = `https://api.github.com/repos/${owner}/${repo}/statuses/${sha}`;
+  const url = githubRepoApiUrl(owner, repo, `/statuses/${sha}`);
   const body = {
     state,
     context,
@@ -168,7 +158,7 @@ async function postStatus(
 
   try {
     const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
+      fetchGithubWithTimeout(fetch, url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -220,22 +210,25 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
   if (event_type === 'story_started') {
     // For pending status, use branch HEAD (story hasn't committed yet)
     const sha = await resolveBranchHead(runId, workspace_id);
-    if (!sha) {
-      logger.debug(`[CommitStatus] No commit SHA for ${story_id} — skipping pending status`);
+    if (!isFullGitObjectId(sha)) {
+      logger.debug(`[CommitStatus] No full commit SHA for ${story_id} — skipping pending status`);
       return;
     }
     await postStatus(repoInfo.owner, repoInfo.repo, sha, 'pending', contextStr, `Running ${story_id}...`, targetUrl, workspace_id);
   } else if (event_type === 'story_passed') {
-    // Story passed — use the committed SHA from story_commits
+    // The run/workspace-scoped closeout row is canonical. The WAL value is an
+    // integrity cross-check only; it can never independently authorize a post.
     const sha = await resolveCommitSha(story_id, spec_id, runId, workspace_id);
-    if (!sha) {
-      logger.debug(`[CommitStatus] No commit SHA for ${story_id} — skipping success status`);
+    const eventSha = typeof payload.commit_sha === 'string' && isFullGitObjectId(payload.commit_sha)
+      ? payload.commit_sha.toLowerCase() : null;
+    if (!sha || (eventSha !== null && eventSha !== sha)) {
+      logger.debug(`[CommitStatus] Missing or mismatched scoped commit SHA for ${story_id} — skipping success status`);
       return;
     }
     await postStatus(repoInfo.owner, repoInfo.repo, sha, 'success', contextStr, `${story_id} passed`, targetUrl, workspace_id);
   } else if (event_type === 'story_failed') {
     const reason = (payload.reason as string) || 'unknown';
-    // For failed stories, try story_commits first (may have partial commits), fall back to HEAD
+    // Final failure evidence is also immutable. If no scoped commit exists, skip.
     const sha = await resolveCommitSha(story_id, spec_id, runId, workspace_id);
     if (!sha) {
       logger.debug(`[CommitStatus] No commit SHA for ${story_id} — skipping failure status`);

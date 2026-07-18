@@ -32,6 +32,8 @@ import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
 import { logger } from '../lib/logger';
 import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
+import { githubRepoApiUrl } from '../lib/github-repository-authority';
+import { fetchGithubWithTimeout } from '../lib/github-app-credential-provider';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -410,14 +412,15 @@ const SpecFileSchema = z.object({
  * Returns null if the file cannot be fetched.
  */
 async function fetchGithubFileContent(
-  repoFullName: string,
+  owner: string,
+  repo: string,
   filePath: string,
   ref: string,
   token: string,
 ): Promise<string | null> {
   try {
-    const url = `https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(ref)}`;
-    const resp = await fetch(url, {
+    const url = githubRepoApiUrl(owner, repo, `/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(ref)}`);
+    const resp = await fetchGithubWithTimeout(fetch, url, {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/vnd.github.v3.raw',
@@ -425,7 +428,7 @@ async function fetchGithubFileContent(
       },
     });
     if (!resp.ok) {
-      logger.warn(`[Webhook] GitHub API ${resp.status} fetching ${filePath} from ${repoFullName}`);
+      logger.warn(`[Webhook] GitHub API ${resp.status} fetching ${filePath} from ${owner}/${repo}`);
       return null;
     }
     return await resp.text();
@@ -485,7 +488,7 @@ export async function handlePushSpecDiscovery(
   if (!repoOwner || !repoName) return;
   const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
     repository: { owner: repoOwner, name: repoName },
-    purpose: 'routine',
+    purpose: 'repository-read',
   });
   if (!resolved) {
     logger.warn('[Webhook] No workspace GitHub credential found — cannot fetch spec files');
@@ -500,7 +503,7 @@ export async function handlePushSpecDiscovery(
     const isNew = addedPaths.has(filePath);
 
     // Fetch file content from GitHub
-    const content = await fetchGithubFileContent(repoFullName, filePath, ref, token);
+    const content = await fetchGithubFileContent(repoOwner, repoName, filePath, ref, token);
     if (!content) continue;
 
     // Parse JSON

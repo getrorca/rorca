@@ -14,8 +14,9 @@ const mockBindingRow = {
   installation_record_id: '10000000-0000-4000-8000-000000000004', installation_id: 77, installation_status: 'active',
   account_id: 88, account_login: 'acme', account_type: 'Organization', repository_selection: 'selected',
   repository_id: 99, repo_owner: 'acme', repo_name: 'widgets',
-  permissions: { checks: 'write', statuses: 'write', contents: 'write', pull_requests: 'write' },
-  events: ['pull_request', 'push'], last_validated_at: null, last_webhook_at: null, validation_error_code: null,
+  permissions: { metadata: 'read', actions: 'write', checks: 'write', statuses: 'write', contents: 'write', issues: 'read', pull_requests: 'write' },
+  events: ['check_run', 'issues', 'pull_request', 'push'], last_validated_at: null, last_webhook_at: null, validation_error_code: null,
+  provider_profile_verified_at: '2026-07-17T11:00:00.000Z', webhook_verified: true,
 };
 
 jest.mock('../../db/index', () => ({
@@ -31,6 +32,7 @@ jest.mock('../integration-vault', () => ({
 }));
 
 import {
+  assertGithubAppProviderProfile,
   clearGithubAppTokenCacheForTests,
   createGithubAppJwt,
   resolveRepositoryInstallationToken,
@@ -43,15 +45,16 @@ function response(body: unknown, status = 200): Response {
 }
 
 function providerFetch(expiresAt: () => string) {
-  return jest.fn(async (url: string) => {
+  return jest.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith('/app/installations/77')) return response({
       id: 77, app_id: 12345, repository_selection: 'selected', suspended_at: null,
       account: { id: 88, login: 'acme', type: 'Organization' },
     });
-    if (url.endsWith('/app/installations/77/access_tokens')) return response({
-      token: 'ghs_short_lived_secret', expires_at: expiresAt(), repository_selection: 'selected',
-      permissions: { checks: 'write', statuses: 'write', contents: 'write', pull_requests: 'write' }, repositories: [{ id: 99 }],
-    });
+    if (url.endsWith('/app/installations/77/access_tokens')) {
+      const requested = JSON.parse(String(init?.body ?? '{}')).permissions;
+      return response({ token: 'ghs_short_lived_secret', expires_at: expiresAt(), repository_selection: 'selected',
+        permissions: requested, repositories: [{ id: 99 }] });
+    }
     if (url.endsWith('/repos/acme/widgets')) return response({ id: 99, full_name: 'acme/widgets' });
     throw new Error(`unexpected URL ${url}`);
   });
@@ -87,6 +90,22 @@ describe('GitHub App RS256 JWT', () => {
   });
 });
 
+describe('exact GitHub App provider profile', () => {
+  test('rejects unknown grants, broader levels, missing permissions, and extra events', () => {
+    expect(() => assertGithubAppProviderProfile(mockBindingRow.permissions, mockBindingRow.events)).not.toThrow();
+    expect(() => assertGithubAppProviderProfile({ ...mockBindingRow.permissions, administration: 'write' }, mockBindingRow.events))
+      .toThrow('do not match the supported profile');
+    expect(() => assertGithubAppProviderProfile({ ...mockBindingRow.permissions, issues: 'write' }, mockBindingRow.events))
+      .toThrow('do not match the supported profile');
+    const { checks: _checks, ...missingChecks } = mockBindingRow.permissions;
+    expect(() => assertGithubAppProviderProfile(missingChecks, mockBindingRow.events)).toThrow('do not match the supported profile');
+    expect(() => assertGithubAppProviderProfile(mockBindingRow.permissions, [...mockBindingRow.events, 'deployment']))
+      .toThrow('do not match the supported profile');
+    expect(() => assertGithubAppProviderProfile(mockBindingRow.permissions, [...mockBindingRow.events, 'push']))
+      .toThrow('do not match the supported profile');
+  });
+});
+
 describe('repository-scoped installation token provider', () => {
   test('uses bounded single-flight and then the in-memory cache without serializing secrets', async () => {
     const now = new Date('2026-07-17T12:00:00.000Z');
@@ -98,6 +117,9 @@ describe('repository-scoped installation token provider', () => {
     ]);
     const cached = await resolveRepositoryInstallationToken('ws-1', { owner: 'acme', name: 'widgets' }, { checks: 'write' }, options);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      repository_ids: [99], permissions: { checks: 'write', metadata: 'read' },
+    });
     expect(first?.token).toBe('ghs_short_lived_secret');
     expect(second?.metadata.repositoryId).toBe(99);
     expect(cached?.metadata.source).toBe('github-app-installation');
@@ -130,6 +152,36 @@ describe('repository-scoped installation token provider', () => {
       fetch: fetchMock as unknown as typeof fetch, now: () => now,
     })).rejects.toThrow('unusable repository token');
     expect(JSON.stringify((execute as jest.Mock).mock.calls)).not.toContain('ghs_too_broad');
+  });
+
+  test('rejects unknown or broader token grants and isolates cache by exact permission profile', async () => {
+    const now = new Date('2026-07-17T12:00:00.000Z');
+    const fetchMock = providerFetch(() => new Date(now.getTime() + 300_000).toISOString());
+    await resolveRepositoryInstallationToken('ws-1', { owner: 'acme', name: 'widgets' }, { checks: 'write' }, {
+      fetch: fetchMock as unknown as typeof fetch, now: () => now,
+    });
+    await resolveRepositoryInstallationToken('ws-1', { owner: 'acme', name: 'widgets' }, { statuses: 'write' }, {
+      fetch: fetchMock as unknown as typeof fetch, now: () => now,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+
+    clearGithubAppTokenCacheForTests();
+    const confused = jest.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/app/installations/77')) return response({
+        id: 77, app_id: 12345, repository_selection: 'selected', suspended_at: null,
+        account: { id: 88, login: 'acme', type: 'Organization' },
+      });
+      if (url.endsWith('/access_tokens')) {
+        const requested = JSON.parse(String(init?.body ?? '{}')).permissions;
+        return response({ token: 'ghs_confused', expires_at: new Date(now.getTime() + 300_000).toISOString(),
+          repository_selection: 'selected', permissions: { ...requested, administration: 'write' }, repositories: [{ id: 99 }] });
+      }
+      return response({ id: 99, full_name: 'acme/widgets' });
+    });
+    await expect(resolveRepositoryInstallationToken('ws-1', { owner: 'acme', name: 'widgets' }, { checks: 'write' }, {
+      fetch: confused as unknown as typeof fetch, now: () => now,
+    })).rejects.toThrow('permission profile is not exact');
+    expect(JSON.stringify((execute as jest.Mock).mock.calls)).not.toContain('ghs_confused');
   });
 
   test('fails before provider calls on repository mismatch', async () => {

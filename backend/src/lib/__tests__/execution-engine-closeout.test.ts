@@ -144,7 +144,8 @@ describe('execution-engine closeout architecture', () => {
     const finalizer = ENGINE_SOURCE.slice(finalizerStart, finalizerEnd);
     expect(finalizer.indexOf('await markStoryPassed(')).toBeLessThan(finalizer.indexOf("'story_passed'"));
     expect(finalizer.indexOf('if (!transitioned)')).toBeLessThan(finalizer.indexOf("'story_passed'"));
-    expect(finalizer.indexOf("'story_passed'")).toBeLessThan(finalizer.indexOf("status: 'pass'"));
+    expect(finalizer.indexOf("status: 'pass'")).toBeLessThan(finalizer.indexOf("'story_passed'"));
+    expect(finalizer).toContain('commit_sha: pending.commitSha');
   });
 
   test('keeps one mode/provider-neutral adapter and removes parallel merge bypasses', () => {

@@ -12,6 +12,8 @@ import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 import { githubRateLimiter } from './github-rate-limiter';
+import { githubRepoApiUrl, isFullGitObjectId } from './github-repository-authority';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -33,14 +35,21 @@ interface UserStory {
 export type CheckState = 'pending' | 'success' | 'failure' | 'error';
 
 export const CHECK_NAME = 'rorca/spec-compliance';
+/** Manual operator evidence is intentionally excluded from governed delivery. */
+export const MANUAL_CHECK_NAME = 'rorca/manual-spec-compliance';
 
 // ─── GitHub token resolution ─────────────────────────────────────────────────
 
-/** Resolve only the credential bound to this workspace and repository. */
-async function getGithubToken(workspaceId: string, owner: string, repo: string): Promise<string | null> {
+/** Resolve only the purpose-narrow credential bound to this workspace/repository. */
+async function getGithubToken(
+  workspaceId: string,
+  owner: string,
+  repo: string,
+  purpose: 'pulls-read' | 'statuses-write',
+): Promise<string | null> {
   const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
     repository: { owner, name: repo },
-    purpose: 'checks',
+    purpose,
   });
   return resolved?.token ?? null;
 }
@@ -59,21 +68,26 @@ export async function postCommitStatus(
   description: string,
   targetUrl?: string,
   workspaceId?: string,
+  context = CHECK_NAME,
 ): Promise<boolean> {
   if (!workspaceId) {
     logger.error('[Checks] Workspace authority is required to post commit status');
     return false;
   }
-  const token = await getGithubToken(workspaceId, owner, repo);
+  if (!isFullGitObjectId(sha)) {
+    logger.error('[Checks] Full immutable commit SHA is required to post commit status');
+    return false;
+  }
+  const token = await getGithubToken(workspaceId, owner, repo, 'statuses-write');
   if (!token) {
     logger.error('[Checks] No GitHub token available to post commit status');
     return false;
   }
 
-  const url = `https://api.github.com/repos/${owner}/${repo}/statuses/${sha}`;
+  const url = githubRepoApiUrl(owner, repo, `/statuses/${sha}`);
   const body: Record<string, string> = {
     state,
-    context: CHECK_NAME,
+    context,
     description: description.slice(0, 140), // GitHub caps at 140 chars
   };
   if (targetUrl) {
@@ -82,7 +96,7 @@ export async function postCommitStatus(
 
   try {
     const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
+      fetchGithubWithTimeout(fetch, url, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -121,7 +135,7 @@ async function fetchPrChangedFiles(
   prNumber: number,
   workspaceId: string,
 ): Promise<PrFile[]> {
-  const token = await getGithubToken(workspaceId, owner, repo);
+  const token = await getGithubToken(workspaceId, owner, repo, 'pulls-read');
   if (!token) return [];
 
   const files: PrFile[] = [];
@@ -130,10 +144,10 @@ async function fetchPrChangedFiles(
 
   // Fetch up to 3 pages (300 files) to avoid excessive API calls
   while (page <= 3) {
-    const url = `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=${perPage}&page=${page}`;
+    const url = githubRepoApiUrl(owner, repo, `/pulls/${prNumber}/files?per_page=${perPage}&page=${page}`);
     try {
       const res = await githubRateLimiter.execute(() =>
-        fetch(url, {
+        fetchGithubWithTimeout(fetch, url, {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Accept': 'application/vnd.github+json',

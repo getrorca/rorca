@@ -259,6 +259,7 @@ app.use(helmet({
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'https:'],
       connectSrc: ["'self'", 'ws:', 'wss:', 'http:', 'https:'],
+      formAction: ["'self'", 'https://github.com'],
       upgradeInsecureRequests: httpsEnabled ? [] : null,
     },
   },

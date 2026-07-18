@@ -21,13 +21,15 @@
  */
 
 import { query, queryOne, execute } from '../db/index';
-import { decryptToken } from '../lib/auth-utils';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 import { renderPrTemplate, PrTemplateData } from './github/pr-template';
 import { loadRorcaConfig } from './rorca-config';
 import { insertAuditEntry } from '../routes/integration-audit-log';
 import { spawnSync } from 'child_process';
+import { getGithubRepositoryAuthority, githubRepoApiUrl } from './github-repository-authority';
+import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -37,10 +39,6 @@ interface GithubWebhookConfig {
   auto_pr_enabled: boolean;
   auto_pr_target_branch: string;
   auto_pr_reviewers: string;
-}
-
-interface GitHubConnection {
-  encrypted_token: string;
 }
 
 interface StoryProgress {
@@ -73,28 +71,23 @@ async function resolveGithubContext(workspaceId: string | number, force = false)
   token: string;
   config: GithubWebhookConfig;
 } | null> {
-  const webhookConfig = await queryOne<GithubWebhookConfig>(
-    `SELECT repo_owner, repo_name, auto_pr_enabled, auto_pr_target_branch, auto_pr_reviewers
-     FROM workspace_github_webhooks WHERE workspace_id = $1`,
-    [String(workspaceId)],
-  );
-
-  if (!webhookConfig || (!force && !webhookConfig.auto_pr_enabled)) {
-    return null;
-  }
-
-  const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-  if (!userRow) return null;
-
-  const ghConn = await queryOne<GitHubConnection>(
-    'SELECT encrypted_token FROM github_connections WHERE user_id = $1',
-    [userRow.id],
-  );
-  if (!ghConn) return null;
-
   try {
-    const token = decryptToken(ghConn.encrypted_token);
-    return { token, config: webhookConfig };
+    const authority = await getGithubRepositoryAuthority(String(workspaceId), { requireActive: true });
+    if (!authority || (!force && !authority.autoPrEnabled)) return null;
+    const resolved = await resolveWorkspaceGitHubToken(String(workspaceId), {
+      repository: { owner: authority.owner, name: authority.name }, purpose: 'pulls-write',
+    });
+    if (!resolved) return null;
+    return {
+      token: resolved.token,
+      config: {
+        repo_owner: authority.owner,
+        repo_name: authority.name,
+        auto_pr_enabled: authority.autoPrEnabled,
+        auto_pr_target_branch: authority.autoPrTargetBranch,
+        auto_pr_reviewers: JSON.stringify(authority.autoPrReviewers),
+      },
+    };
   } catch {
     return null;
   }
@@ -251,9 +244,9 @@ export async function createDraftPr(opts: {
 
     // Check for existing PR on this branch
     const head = `${owner}:${branchName}`;
-    const checkUrl = `https://api.github.com/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(head)}&state=open&per_page=1`;
+    const checkUrl = githubRepoApiUrl(owner, repo, `/pulls?head=${encodeURIComponent(head)}&state=open&per_page=1`);
     const checkRes = await githubRateLimiter.execute(() =>
-      fetch(checkUrl, { headers: buildGitHubHeaders(token) }),
+      fetchGithubWithTimeout(fetch, checkUrl, { headers: buildGitHubHeaders(token) }),
     );
 
     if (checkRes.ok) {
@@ -283,7 +276,7 @@ export async function createDraftPr(opts: {
     );
 
     const createRes = await githubRateLimiter.execute(() =>
-      fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+      fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, '/pulls'), {
         method: 'POST',
         headers: buildGitHubHeaders(token),
         body: JSON.stringify({
@@ -391,7 +384,7 @@ async function _doUpdateDraftPrProgress(runId: number, workspaceId: string | num
 
     // Fire-and-forget PATCH — don't await response status
     githubRateLimiter.execute(() =>
-      fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${runRow.pr_number}`, {
+      fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${runRow.pr_number}`), {
         method: 'PATCH',
         headers: buildGitHubHeaders(token),
         body: JSON.stringify({ body }),
@@ -540,7 +533,7 @@ export async function finalizeDraftPr(opts: {
 
       // Convert draft to ready-for-review + update title + body
       const patchRes = await githubRateLimiter.execute(() =>
-        fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
+        fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${prNumber}`), {
           method: 'PATCH',
           headers: buildGitHubHeaders(token),
           body: JSON.stringify({
@@ -561,7 +554,7 @@ export async function finalizeDraftPr(opts: {
       if (reviewers.length > 0) {
         try {
           await githubRateLimiter.execute(() =>
-            fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/requested_reviewers`, {
+            fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${prNumber}/requested_reviewers`), {
               method: 'POST',
               headers: buildGitHubHeaders(token),
               body: JSON.stringify({ reviewers }),
@@ -605,7 +598,7 @@ export async function finalizeDraftPr(opts: {
       failureSummary.push('*This PR remains as a draft. Fix the failed stories and re-run the pipeline.*');
 
       await githubRateLimiter.execute(() =>
-        fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
+        fetchGithubWithTimeout(fetch, githubRepoApiUrl(owner, repo, `/pulls/${prNumber}`), {
           method: 'PATCH',
           headers: buildGitHubHeaders(token),
           body: JSON.stringify({ body: failureSummary.join('\n') }),

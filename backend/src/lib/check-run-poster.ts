@@ -23,16 +23,12 @@ import { execSync } from 'child_process';
 import { subscribe, broadcastAll, type WalEvent } from './sse-hub';
 import { query, queryOne, execute } from '../db/index';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } from './github-repository-authority';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-interface GitHubWebhookRow {
-  workspace_id: string;
-  repo_owner: string;
-  repo_name: string;
-}
 
 interface PipelineRunRow {
   id: number;
@@ -67,6 +63,7 @@ interface CheckRunState {
   repo: string;
   stories: Map<string, StoryProgress>;
   pendingFlush: ReturnType<typeof setTimeout> | null;
+  headSha: string;
 }
 
 // GitHub Check Run annotation
@@ -92,18 +89,14 @@ const DEBOUNCE_MS = 5000;
 async function getGithubToken(workspaceId: string, owner: string, repo: string): Promise<string | null> {
   const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
     repository: { owner, name: repo },
-    purpose: 'checks',
+    purpose: 'checks-write',
   });
   return resolved?.token ?? null;
 }
 
 async function getRepoInfo(workspaceId: string): Promise<{ owner: string; repo: string } | null> {
-  const row = await queryOne<GitHubWebhookRow>(
-    'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1',
-    [workspaceId],
-  );
-  if (!row) return null;
-  return { owner: row.repo_owner, repo: row.repo_name };
+  const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
+  return authority ? { owner: authority.owner, repo: authority.name } : null;
 }
 
 async function resolveBranchHead(runId: number | null, workspaceId: string): Promise<string | null> {
@@ -111,8 +104,8 @@ async function resolveBranchHead(runId: number | null, workspaceId: string): Pro
 
   if (runId) {
     const run = await queryOne<PipelineRunRow>(
-      'SELECT worktree_path, workspace_id FROM pipeline_runs WHERE id = $1',
-      [runId],
+      'SELECT worktree_path, workspace_id FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
+      [runId, workspaceId],
     );
     if (run?.worktree_path) {
       cwd = run.worktree_path;
@@ -276,7 +269,7 @@ async function createCheckRun(
     return null;
   }
 
-  const url = `https://api.github.com/repos/${owner}/${repo}/check-runs`;
+  const url = githubRepoApiUrl(owner, repo, '/check-runs');
   const body = {
     name: CHECK_RUN_NAME,
     head_sha: headSha,
@@ -291,7 +284,7 @@ async function createCheckRun(
 
   try {
     const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
+      fetchGithubWithTimeout(fetch, url, {
         method: 'POST',
         headers: buildGitHubHeaders(token),
         body: JSON.stringify(body),
@@ -337,11 +330,11 @@ async function updateCheckRun(
   const token = await getGithubToken(workspaceId, owner, repo);
   if (!token) return;
 
-  const url = `https://api.github.com/repos/${owner}/${repo}/check-runs/${checkRunId}`;
+  const url = githubRepoApiUrl(owner, repo, `/check-runs/${checkRunId}`);
 
   try {
     const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
+      fetchGithubWithTimeout(fetch, url, {
         method: 'PATCH',
         headers: buildGitHubHeaders(token),
         body: JSON.stringify(update),
@@ -420,8 +413,8 @@ async function handleRunStarted(event: WalEvent): Promise<void> {
 
   // Resolve HEAD SHA
   const sha = await resolveBranchHead(runId, workspace_id);
-  if (!sha) {
-    logger.debug(`[CheckRun] No commit SHA for run #${runId} — skipping check run`);
+  if (!isFullGitObjectId(sha)) {
+    logger.debug(`[CheckRun] No full commit SHA for run #${runId} — skipping check run`);
     return;
   }
 
@@ -437,6 +430,7 @@ async function handleRunStarted(event: WalEvent): Promise<void> {
     repo: repoInfo.repo,
     stories: new Map(),
     pendingFlush: null,
+    headSha: sha.toLowerCase(),
   });
 
   // Emit WAL event for check run creation
@@ -535,11 +529,37 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
     conclusion = 'success';
   }
 
+  // Resolve the final immutable run head from story_commits scoped by both
+  // workspace and run. A mutable worktree HEAD is never accepted for completion.
+  const finalCommit = await queryOne<{ commit_sha: string }>(
+    `SELECT commit_sha FROM story_commits
+      WHERE workspace_id = $1 AND run_id = $2
+      ORDER BY pushed_at DESC, id DESC LIMIT 1`,
+    [workspace_id, runId],
+  );
+  const finalSha = finalCommit && isFullGitObjectId(finalCommit.commit_sha)
+    ? finalCommit.commit_sha.toLowerCase() : null;
+  if (!finalSha) {
+    conclusion = 'neutral';
+  }
+
   // Build annotations for failed stories
   const annotations = extractAnnotations(state.stories);
+  let finalCheckRunId = state.checkRunId;
+  if (finalSha && finalSha !== state.headSha) {
+    // Close the run-start check as non-governing, then publish completion on the
+    // exact final head. GitHub Check Runs cannot change head_sha after creation.
+    await updateCheckRun(state.owner, state.repo, state.checkRunId, state.workspaceId, {
+      status: 'completed', conclusion: 'neutral', completed_at: new Date().toISOString(),
+      output: { title: `Pipeline Run #${runId} — superseded head`, summary: `Final evidence moved to ${finalSha}.` },
+    });
+    const createdOnFinalHead = await createCheckRun(state.owner, state.repo, finalSha, runId, state.workspaceId);
+    if (createdOnFinalHead) finalCheckRunId = createdOnFinalHead;
+    else conclusion = 'neutral';
+  }
 
-  // Final PATCH with conclusion
-  await updateCheckRun(state.owner, state.repo, state.checkRunId, state.workspaceId, {
+  // Final PATCH with conclusion. Success is possible only on a scoped final SHA.
+  await updateCheckRun(state.owner, state.repo, finalCheckRunId, state.workspaceId, {
     status: 'completed',
     conclusion,
     completed_at: new Date().toISOString(),
@@ -554,7 +574,8 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
   // Emit completion WAL event
   const walPayload = JSON.stringify({
     run_id: runId,
-    check_run_id: state.checkRunId,
+    check_run_id: finalCheckRunId,
+    sha: finalSha,
     conclusion,
     passed,
     failed,

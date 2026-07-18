@@ -102,7 +102,7 @@ interface GithubStatus {
   credentialSource?: 'github-app-installation' | 'pat-oauth-fallback' | null;
   webhookUrl?: string;
   lastWebhookAt?: string | null;
-  connectedAt?: string;
+  connectedAt?: string | null;
   autoPr?: {
     enabled: boolean;
     targetBranch: string;
@@ -114,7 +114,7 @@ interface GithubAccount {
   connected: boolean;
   username?: string;
   avatarUrl?: string;
-  connectedAt?: string;
+  connectedAt?: string | null;
   scopes?: string[];
   source?: 'github-app-installation' | 'workspace-pat' | 'workspace-oauth' | 'legacy-global';
   installationId?: number;
@@ -132,7 +132,7 @@ interface GithubAppState {
   installation?: { id: number; accountId: number; account: string; type: string; status: string };
   repository?: { id: number; owner: string; name: string };
   binding?: { id: string; status: string; lastValidatedAt: string | null; lastWebhookAt: string | null; validationErrorCode: string | null };
-  capabilities?: Record<'repository' | 'actions' | 'pulls' | 'contents' | 'statuses' | 'checks' | 'webhooks', boolean>;
+  capabilities?: Record<'repository' | 'actions' | 'pulls' | 'contents' | 'statuses' | 'checks' | 'issues' | 'webhooks', boolean>;
   permissions?: Record<string, string>;
   events?: string[];
   nextAction: string | null;
@@ -269,6 +269,12 @@ export default function GitHubSettingsPanel() {
   const [repositoryId, setRepositoryId] = useState('');
   const [appRepoOwner, setAppRepoOwner] = useState('');
   const [appRepoName, setAppRepoName] = useState('');
+  const [replacementReason, setReplacementReason] = useState('');
+  const [importAppId, setImportAppId] = useState('');
+  const [importAppSlug, setImportAppSlug] = useState('');
+  const [importClientId, setImportClientId] = useState('');
+  const [importPrivateKey, setImportPrivateKey] = useState('');
+  const [importWebhookSecret, setImportWebhookSecret] = useState('');
 
   // Connect form
   const [repoOwner, setRepoOwner] = useState('');
@@ -465,11 +471,18 @@ export default function GitHubSettingsPanel() {
   const callbackParams = new URLSearchParams(window.location.search);
   const appCallbackReady = callbackParams.get('github_app_setup') === 'callback'
     && Boolean(callbackParams.get('state')) && Boolean(callbackParams.get('code'));
+  const appCapabilitiesReady = Boolean(appState?.connected && appState.capabilities
+    && Object.values(appState.capabilities).every(Boolean));
+  const appCanBindOrReplace = Boolean(
+    (!appState?.configured && appState?.registration)
+    || (appState?.configured && !appCapabilitiesReady && appState?.app),
+  );
+  const registeredAppSlug = appState?.registration?.appSlug ?? appState?.app?.slug;
   const webhookIsLocal = isLocalWebhookUrl(webhookUrl);
   const credentialOk = !!account?.connected;
   const repoOk = !!status?.connected;
   const webhookOk = !!status?.connected && !webhookIsLocal
-    && (appState?.source === 'github-app-installation' ? Boolean(appState.capabilities?.webhooks) : Boolean(status.webhookId));
+    && (appState?.source === 'github-app-installation' ? appCapabilitiesReady : Boolean(status.webhookId));
   const workflowOk = repoOk && workflowEnabled && !!workflowId.trim();
   const autoPrOk = repoOk && autoPrEnabled;
   // ─── Handlers ────────────────────────────────────────────────────────────
@@ -508,6 +521,27 @@ export default function GitHubSettingsPanel() {
     }
   }
 
+  async function handleImportApp() {
+    if (!workspaceId) return;
+    setAppActionLoading(true);
+    setAppActionError(null);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/app/import`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId: Number(importAppId), appSlug: importAppSlug.trim(), clientId: importClientId.trim() || undefined,
+          privateKeyPem: importPrivateKey, webhookSecret: importWebhookSecret }),
+      });
+      setImportPrivateKey('');
+      setImportWebhookSecret('');
+      setAppSetup(null);
+      await fetchAppState();
+    } catch (err: unknown) {
+      setAppActionError(err instanceof Error ? err.message : 'GitHub App import failed');
+    } finally {
+      setAppActionLoading(false);
+    }
+  }
+
   async function handleRevalidateAppBinding() {
     if (!workspaceId) return;
     setAppActionLoading(true);
@@ -529,8 +563,10 @@ export default function GitHubSettingsPanel() {
     try {
       await apiFetch(`/api/workspaces/${workspaceId}/github/app/bind`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ installationId: Number(installationId), repositoryId: Number(repositoryId), repoOwner: appRepoOwner.trim(), repoName: appRepoName.trim() }),
+        body: JSON.stringify({ installationId: Number(installationId), repositoryId: Number(repositoryId), repoOwner: appRepoOwner.trim(), repoName: appRepoName.trim(),
+          replacementReason: appState?.configured ? replacementReason.trim() : undefined }),
       });
+      setReplacementReason('');
       await Promise.all([fetchAppState(), fetchStatus(), fetchAccount()]);
     } catch (err: unknown) {
       setAppActionError(err instanceof Error ? err.message : 'Failed to bind App installation');
@@ -663,9 +699,8 @@ export default function GitHubSettingsPanel() {
       setAccount({ connected: false });
       setStatus({ connected: false });
       setShowFullDisconnect(false);
-      // Re-fetch to confirm server state
-      fetchAccount();
-      fetchStatus();
+      // Re-fetch every authority surface to avoid stale App state.
+      await Promise.all([fetchAccount(), fetchStatus(), fetchAppState()]);
     } catch (err: unknown) {
       setFullDisconnectError(err instanceof Error ? err.message : 'Failed to disconnect');
     } finally {
@@ -825,7 +860,7 @@ export default function GitHubSettingsPanel() {
               <Shield size={18} />
               <h2 id="github-app-heading" className="text-sm font-semibold text-[var(--text)]">Repository-scoped GitHub App</h2>
               {appLoading ? <Loader2 size={13} className="animate-spin text-muted" /> : (
-                <StatusPill ok={Boolean(appState?.connected)} label={appState?.connected ? 'App active' : appState?.configured ? 'App needs attention' : 'App not bound'} warn={Boolean(appState?.configured && !appState.connected)} />
+                <StatusPill ok={appCapabilitiesReady} label={appCapabilitiesReady ? 'App active' : appState?.configured ? 'App needs attention' : 'App not bound'} warn={Boolean(appState?.configured && !appCapabilitiesReady)} />
               )}
             </div>
             <p className="mt-1 text-xs text-muted">
@@ -862,9 +897,9 @@ export default function GitHubSettingsPanel() {
           </div>
         )}
 
-        {appState?.registration && !appState.configured && (
+        {appCanBindOrReplace && registeredAppSlug && (
           <div className="space-y-3 rounded-lg border border-border bg-bg/50 p-3">
-            <p className="text-xs text-muted">Registered App: <span className="font-medium text-[var(--text)]">{appState.registration.appSlug}</span>. Enter identities copied from the selected-repository installation; the server verifies all four against GitHub before binding.</p>
+            <p className="text-xs text-muted">Registered App: <span className="font-medium text-[var(--text)]">{registeredAppSlug}</span>. Enter identities copied from the selected-repository installation; the server verifies all four against GitHub before {appState?.configured ? 'audit-replacing' : 'binding'}.</p>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 { label: 'Installation ID', value: installationId, set: setInstallationId, placeholder: '12345678' },
@@ -878,10 +913,17 @@ export default function GitHubSettingsPanel() {
                 </label>
               ))}
             </div>
+            {appState?.configured && (
+              <label className="block text-xs text-muted">Audited replacement reason
+                <input value={replacementReason} onChange={event => setReplacementReason(event.target.value)} placeholder="Why this immutable binding is being replaced"
+                  className="mt-1 w-full rounded border border-border bg-panel px-2.5 py-1.5 text-xs text-[var(--text)] focus:outline-none focus:border-accent" />
+              </label>
+            )}
             <button type="button" onClick={handleBindAppRepository}
-              disabled={appActionLoading || !installationId || !repositoryId || !appRepoOwner.trim() || !appRepoName.trim()}
+              disabled={appActionLoading || !installationId || !repositoryId || !appRepoOwner.trim() || !appRepoName.trim()
+                || Boolean(appState?.configured && replacementReason.trim().length < 8)}
               className="inline-flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50">
-              {appActionLoading ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />}Verify and bind exact repository
+              {appActionLoading ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />}{appState?.configured ? 'Verify and audit-replace exact repository' : 'Verify and bind exact repository'}
             </button>
           </div>
         )}
@@ -902,7 +944,23 @@ export default function GitHubSettingsPanel() {
             </button>
           </form>
         )}
-        {appSetup?.mode === 'bounded-import' && <p className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">{appSetup.nextAction}</p>}
+        {appSetup?.mode === 'bounded-import' && (
+          <fieldset className="space-y-3 rounded border border-amber-500/30 bg-amber-500/10 p-3">
+            <legend className="px-1 text-xs font-medium text-amber-200">One-time bounded App import</legend>
+            <p className="text-xs text-amber-200">{appSetup.nextAction} Values are sent once to the authenticated vault endpoint and are not rendered again.</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <label className="text-xs text-muted">App ID<input value={importAppId} onChange={e => setImportAppId(e.target.value)} inputMode="numeric" className="mt-1 w-full rounded border border-border bg-panel px-2 py-1.5 text-[var(--text)]" /></label>
+              <label className="text-xs text-muted">App slug<input value={importAppSlug} onChange={e => setImportAppSlug(e.target.value)} className="mt-1 w-full rounded border border-border bg-panel px-2 py-1.5 text-[var(--text)]" /></label>
+              <label className="text-xs text-muted">Client ID (optional)<input value={importClientId} onChange={e => setImportClientId(e.target.value)} className="mt-1 w-full rounded border border-border bg-panel px-2 py-1.5 text-[var(--text)]" /></label>
+            </div>
+            <label className="block text-xs text-muted">Private key PEM<textarea value={importPrivateKey} onChange={e => setImportPrivateKey(e.target.value)} rows={5} autoComplete="off" spellCheck={false} className="mt-1 w-full rounded border border-border bg-panel px-2 py-1.5 font-mono text-[var(--text)]" /></label>
+            <label className="block text-xs text-muted">Webhook secret<input type="password" value={importWebhookSecret} onChange={e => setImportWebhookSecret(e.target.value)} autoComplete="new-password" className="mt-1 w-full rounded border border-border bg-panel px-2 py-1.5 text-[var(--text)]" /></label>
+            <button type="button" onClick={handleImportApp} disabled={appActionLoading || !importAppId || !importAppSlug.trim() || !importPrivateKey || importWebhookSecret.length < 16}
+              className="inline-flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50">
+              {appActionLoading ? <Loader2 size={12} className="animate-spin" /> : <KeyRound size={12} />}Verify and vault once
+            </button>
+          </fieldset>
+        )}
         {appState?.configured && !appState.connected && (
           <button type="button" onClick={handleRevalidateAppBinding} disabled={appActionLoading}
             className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-bg disabled:opacity-50">
@@ -910,7 +968,7 @@ export default function GitHubSettingsPanel() {
           </button>
         )}
         {(appState?.nextAction || appActionError) && (
-          <div className={`flex items-start gap-2 text-xs ${appActionError ? 'text-red-400' : 'text-amber-300'}`}>
+          <div role={appActionError ? 'alert' : 'status'} aria-live="polite" className={`flex items-start gap-2 text-xs ${appActionError ? 'text-red-400' : 'text-amber-300'}`}>
             <AlertCircle size={13} className="mt-0.5 shrink-0" />{appActionError || appState?.nextAction}
           </div>
         )}
@@ -1076,7 +1134,7 @@ export default function GitHubSettingsPanel() {
                 <div className="mt-3 space-y-3">
                   <div className="flex items-center gap-2 text-xs text-muted">
                     <Webhook size={14} />
-                    Events: push, pull_request · signed ping accepted for setup health
+                    Events: push, pull_request, issues, check_run · signed ping accepted for setup health
                   </div>
                   <div className="rounded-lg border border-border bg-bg/50 p-3 space-y-2">
                     <div className="space-y-1.5 text-xs">

@@ -48,6 +48,9 @@ import { completeMatchSkillsPrompt } from '../lib/match-skills-llm';
 import { heuristicMatchSkills } from '../lib/match-skills-heuristic';
 import { getWorkspaceEnvVars } from './env-vars';
 import { score as scoreStory, type ScorerStory } from '../lib/complexity-scorer';
+import { githubRepoApiUrl, requireGithubRepositoryAuthority } from '../lib/github-repository-authority';
+import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
+import { fetchGithubWithTimeout } from '../lib/github-app-credential-provider';
 // git-hydrator imports removed — git_memory column dropped in migration 075
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
@@ -12040,11 +12043,6 @@ interface GitHubIssue {
   state: string;
 }
 
-interface GithubWebhookRow {
-  repo_owner: string;
-  repo_name: string;
-}
-
 /**
  * Fetch a page of GitHub issues by number.
  * Uses the individual issue endpoint for specific numbers,
@@ -12067,8 +12065,8 @@ async function fetchGithubIssues(
     const results = await Promise.all(
       batch.map(async (num) => {
         const res = await githubRateLimiter.execute(() =>
-          fetch(
-            `https://api.github.com/repos/${owner}/${repo}/issues/${num}`,
+          fetchGithubWithTimeout(fetch,
+            githubRepoApiUrl(owner, repo, `/issues/${num}`),
             {
               headers: {
                 'Authorization': `Bearer ${token}`,
@@ -12108,8 +12106,8 @@ async function fetchAllGithubIssues(
 
   while (true) {
     const res = await githubRateLimiter.execute(() =>
-      fetch(
-        `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`,
+      fetchGithubWithTimeout(fetch,
+        githubRepoApiUrl(owner, repo, `/issues?state=open&per_page=${perPage}&page=${page}`),
         {
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -12213,22 +12211,20 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       throw new NotFoundError('Workspace not found');
       return;
     }
-
-    // Resolve GitHub connection for this workspace
-    const ghConn = await queryOne('SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]) as GithubWebhookRow | undefined;
-
-    if (!ghConn) {
-      throw new ValidationError('No GitHub connection for this workspace. Connect via workspace settings first.');
-      return;
+    if (issueNumbers !== undefined && (!Array.isArray(issueNumbers) || issueNumbers.length > 100
+      || issueNumbers.some((value) => !Number.isSafeInteger(value) || value <= 0))) {
+      throw new ValidationError('issueNumbers must contain at most 100 positive safe integers');
     }
 
-    // Resolve GitHub token from local credentials or environment
-    const githubToken = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
-
-    if (!githubToken) {
-      throw new ValidationError('No GitHub token available. Set GITHUB_TOKEN or GH_TOKEN for repository actions.');
-      return;
-    }
+    // Resolve repository and credential through canonical exact-repository
+    // authority. Ambient process tokens are never issue-import authority.
+    const authority = await requireGithubRepositoryAuthority(workspaceId);
+    const resolvedGithub = await resolveWorkspaceGitHubToken(workspaceId, {
+      repository: { owner: authority.owner, name: authority.name }, purpose: 'issues-read',
+    });
+    if (!resolvedGithub) throw new ValidationError('No exact-repository GitHub credential is available for this workspace.');
+    const ghConn = { repo_owner: authority.owner, repo_name: authority.name };
+    const githubToken = resolvedGithub.token;
 
     // Find the spec on disk
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
@@ -12444,11 +12440,11 @@ async function fetchGithubIssuesDirect(
   const perPage = 100;
 
   while (true) {
-    let url = `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`;
+    let url = githubRepoApiUrl(owner, repo, `/issues?state=open&per_page=${perPage}&page=${page}`);
     if (milestone) url += `&milestone=${encodeURIComponent(milestone)}`;
 
     const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
+      fetchGithubWithTimeout(fetch, url, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Accept': 'application/vnd.github+json',
@@ -12498,7 +12494,7 @@ interface ImportRequestBody {
  *     tags: [Specs]
  *     summary: Unified issue import from Linear or GitHub
  *     operationId: importIssues
- *     description: Imports issues from Linear or GitHub as user stories appended to a spec. Supports preview mode. For Linear, requires an API key and optional team/project/label filters. For GitHub, requires a token, owner, and repo name. Emits an issues_imported WAL event.
+ *     description: Imports issues from Linear or the workspace's canonical exact-repository GitHub authority as user stories appended to a spec. Supports preview mode. Caller-supplied GitHub tokens/repositories are deprecated and never used as authority. Emits an issues_imported WAL event.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -12611,16 +12607,25 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
         return linearIssueToStory(issue, storyId);
       });
     } else {
-      // GitHub import
-      if (!body.githubToken || !body.githubOwner || !body.githubRepo) {
-        throw new ValidationError('Missing required fields: githubToken, githubOwner, githubRepo');
-        return;
+      // GitHub import always uses canonical App-first repository authority. Any
+      // retained owner/repo fields are accepted only as an equality assertion;
+      // caller-supplied token material is never used.
+      const expectedRepository = body.githubOwner || body.githubRepo
+        ? { owner: String(body.githubOwner ?? ''), name: String(body.githubRepo ?? '') }
+        : undefined;
+      const authority = await requireGithubRepositoryAuthority(workspaceId, { expectedRepository });
+      const resolvedGithub = await resolveWorkspaceGitHubToken(workspaceId, {
+        repository: { owner: authority.owner, name: authority.name }, purpose: 'issues-read',
+      });
+      if (!resolvedGithub) throw new ValidationError('No exact-repository GitHub credential is available for this workspace.');
+      if (body.githubMilestone !== undefined && (typeof body.githubMilestone !== 'string' || body.githubMilestone.length > 100)) {
+        throw new ValidationError('githubMilestone must be at most 100 characters');
       }
 
       const { issues, errors } = await fetchGithubIssuesDirect(
-        body.githubOwner,
-        body.githubRepo,
-        body.githubToken,
+        authority.owner,
+        authority.name,
+        resolvedGithub.token,
         body.githubMilestone,
       );
       importErrors = errors;

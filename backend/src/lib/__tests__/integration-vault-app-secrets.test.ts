@@ -10,9 +10,9 @@ jest.mock('../../db/index', () => ({
   query: jest.fn(), execute: jest.fn(),
   queryOne: jest.fn(async (sql: string, params: unknown[]) => {
     if (sql.includes('INSERT INTO integration_vault_secrets')) {
-      storedCiphertext = String(params[2]);
+      storedCiphertext = String(params[3]);
       return {
-        id: params[0], provider: 'github_app', secret_kind: params[1], encrypted_value: params[2], fingerprint: params[3],
+        id: params[0], provider: 'github_app', secret_kind: params[2], encrypted_value: params[3], fingerprint: params[4],
         created_at: '2026-07-17T12:00:00.000Z', rotated_at: null, revoked_at: null,
       };
     }

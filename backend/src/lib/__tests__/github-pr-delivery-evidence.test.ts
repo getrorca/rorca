@@ -92,6 +92,7 @@ function harness(options: {
   finalPull?: Record<string, unknown>;
   reviews?: unknown[];
   checkRuns?: unknown[];
+  statuses?: unknown[];
   policy?: typeof activePolicy | null;
 } = {}) {
   const urls: string[] = [];
@@ -126,7 +127,7 @@ function harness(options: {
       }];
       return { total_count: checkRuns.length, check_runs: checkRuns };
     }
-    if (url.includes(`/commits/${headSha}/statuses?`)) return [];
+    if (url.includes(`/commits/${headSha}/statuses?`)) return options.statuses ?? [];
     if (url.includes('/pulls/42/reviews')) {
       return options.reviews ?? [{
         id: 601, state: 'APPROVED', commit_id: headSha, submitted_at: now.toISOString(),
@@ -139,6 +140,9 @@ function harness(options: {
   return {
     urls, inserted, wal, fetchJson, client,
     overrides: {
+      resolveAuthority: jest.fn(async () => ({
+        owner: 'getrorca', name: 'rorca', autoPrTargetBranch: 'main', status: 'active', source: 'pat-oauth-fallback',
+      })),
       queryOne: jest.fn(async () => runRow()),
       resolveToken: jest.fn(async () => ({ token: 'opaque-test-token', source: 'workspace-pat' })),
       getActivePolicy: jest.fn(async () => options.policy === undefined ? activePolicy : options.policy),
@@ -186,6 +190,20 @@ describe('exact-SHA GitHub PR delivery evidence', () => {
     }, test.overrides as any)).rejects.toThrow('head SHA changed');
     expect(test.inserted).toHaveLength(0);
     expect(test.urls).toHaveLength(1);
+  });
+
+  test('manual operator status can never satisfy a required autonomous delivery check', async () => {
+    const manualPolicy = { ...activePolicy, requiredChecks: ['rorca/manual-spec-compliance'] } as unknown as typeof activePolicy;
+    const test = harness({ policy: manualPolicy, statuses: [{
+      id: 900, context: 'rorca/manual-spec-compliance', state: 'success', updated_at: now.toISOString(),
+      creator: { login: 'release-owner' },
+    }] });
+    const result = await observeGithubPrDeliveryEvidence({
+      workspaceId: 'ws-1', runId: 20260316000001, expectedHeadSha: headSha,
+      principal: { principalId: 'operator', displayLabel: 'operator@example.test' },
+    }, test.overrides as any);
+    expect(result.evidence.checks.map((check) => check.name)).not.toContain('rorca/manual-spec-compliance');
+    expect(result.evidence.checkSummary).toMatchObject({ allRequiredPassed: false, missing: ['rorca/manual-spec-compliance'] });
   });
 
   test('does not accept stale approvals or a mismatched policy base branch', async () => {

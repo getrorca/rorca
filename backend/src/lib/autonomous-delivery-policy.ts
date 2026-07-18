@@ -20,6 +20,7 @@ import type { PoolClient } from 'pg';
 import { queryOne, transaction } from '../db/index';
 import { paginateQuery, type PaginationParams } from './paginate';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from './errors';
+import { getGithubRepositoryAuthority } from './github-repository-authority';
 
 export const AUTONOMOUS_DELIVERY_POLICY_SCHEMA_VERSION = 'rorca.autonomous-delivery-policy.v1' as const;
 export const AUTONOMOUS_DELIVERY_ACTIVATION_CONFIRMATION = 'ENABLE_AUTONOMOUS_PR_DELIVERY' as const;
@@ -266,12 +267,9 @@ function assertRequestId(value: string): string {
 }
 
 async function repositoryForWorkspace(workspaceId: string): Promise<DeliveryPolicyRepository> {
-  const row = await queryOne<{ repo_owner: string; repo_name: string }>(
-    'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1',
-    [workspaceId],
-  );
-  if (!row) throw new NotFoundError('Connected GitHub repository', workspaceId);
-  return { owner: row.repo_owner, name: row.repo_name };
+  const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
+  if (!authority) throw new NotFoundError('Connected GitHub repository', workspaceId);
+  return { owner: authority.owner, name: authority.name };
 }
 
 async function insertEvent(

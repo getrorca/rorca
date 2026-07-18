@@ -68,6 +68,9 @@ import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypo
 import { replayFallbackResults } from './lib/fallback-replay';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
+import { githubRepoApiUrl } from './lib/github-repository-authority';
+import { resolveWorkspaceGitHubToken } from './lib/github-token-resolver';
+import { fetchGithubWithTimeout } from './lib/github-app-credential-provider';
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
@@ -143,7 +146,7 @@ async function _runPostMergeSmokeTest(workspaceId: string | number): Promise<{ o
 
 /**
  * Fire a GitHub Actions workflow_dispatch event if the workspace has a workflow
- * config stored in workspace_github_webhooks.workflow_config with enabled=true.
+ * config stored in credential-neutral github_repository_configs with enabled=true.
  * Non-fatal: any failure is logged to integration_audit_log and emitted as a WAL event.
  * Never throws — must not block run finalization.
  */
@@ -151,17 +154,16 @@ async function dispatchWorkflowIfConfigured(
   workspaceId: string | number,
   runId: number,
 ): Promise<void> {
-  const port = process.env.PORT || 3030;
-  const base = `http://localhost:${port}`;
-
   try {
-    // Fetch workspace webhook row to get repo details + workflow config
+    // Fetch canonical repository authority + credential-neutral workflow config
     const row = await queryOne<{
       repo_owner: string;
       repo_name: string;
       workflow_config: string | Record<string, unknown> | null;
     }>(
-      'SELECT repo_owner, repo_name, workflow_config FROM workspace_github_webhooks WHERE workspace_id = $1',
+      `SELECT repo_owner, repo_name, workflow_config
+         FROM github_workspace_repository_authority
+        WHERE workspace_id = $1 AND authority_status = 'active'`,
       [workspaceId]
     );
 
@@ -184,18 +186,22 @@ async function dispatchWorkflowIfConfigured(
       [String(workspaceId), JSON.stringify({ run_id: runId, workflow_id: cfg.workflow_id, ref: cfg.ref })]
     );
 
-    // Proxy through our own API so the OAuth token lookup + audit log happens in one place
-    const dispatchRes = await fetch(`${base}/api/workspaces/${workspaceId}/github/dispatch`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        owner: row.repo_owner,
-        repo: row.repo_name,
-        workflow_id: cfg.workflow_id,
-        ref: cfg.ref,
-        inputs: cfg.inputs ?? {},
-      }),
+    const resolved = await resolveWorkspaceGitHubToken(String(workspaceId), {
+      repository: { owner: row.repo_owner, name: row.repo_name }, purpose: 'workflow-dispatch',
     });
+    if (!resolved) throw new Error('Exact-repository GitHub credential is unavailable');
+    const dispatchRes = await fetchGithubWithTimeout(fetch,
+      githubRepoApiUrl(row.repo_owner, row.repo_name, `/actions/workflows/${encodeURIComponent(cfg.workflow_id)}/dispatches`), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resolved.token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': 'Rorca-Worker',
+        },
+        body: JSON.stringify({ ref: cfg.ref, inputs: cfg.inputs ?? {} }),
+      });
 
     if (dispatchRes.ok || dispatchRes.status === 204) {
       await execute(
@@ -2643,12 +2649,6 @@ export async function checkSingletonGuard(): Promise<boolean> {
 // Pings each connected integration's API endpoint every 5 minutes (via pg-boss cron).
 // Stores health snapshots in integration_health table for trend display.
 
-interface IntegrationTokenRow {
-  workspace_id: string;
-  provider: string;
-  encrypted_token: string;
-}
-
 /**
  * Compute health status based on thresholds from AC:
  * - healthy: error_rate < 0.05 AND rate_limit_remaining >= 500 AND consecutive_failures <= 3
@@ -2668,60 +2668,23 @@ function computeHealthStatus(
 async function runIntegrationHealthChecks(): Promise<void> {
   logger.info('[worker] integration:health-check — starting');
 
-  // Find all workspaces with connected integrations.
-  // Check github_connections (legacy) and integration_tokens (new).
-  // For GitHub: use github_connections.encrypted_token (existing pattern).
-
-  // 1. GitHub health checks via github_connections
+  // Resolve each workspace through the same canonical authority/token path used
+  // by runtime operations. This covers App-only workspaces and never fans one
+  // ambient user token across unrelated repositories.
   try {
-    const { decryptToken } = await import('./lib/auth-utils');
-
-    type GithubConnRow = { user_id: string; encrypted_token: string; github_username: string | null };
-    const ghConns = await query<GithubConnRow>(
-      `SELECT gc.user_id, gc.encrypted_token, gc.github_username
-       FROM github_connections gc
-       WHERE gc.encrypted_token IS NOT NULL`,
+    const workspaces = await query<{ workspace_id: string; repo_owner: string; repo_name: string }>(
+      `SELECT workspace_id, repo_owner, repo_name
+         FROM github_workspace_repository_authority
+        WHERE authority_status = 'active'`,
     );
-
-    // For each GitHub connection, find associated workspaces
-    for (const conn of ghConns) {
-      let token: string;
+    for (const workspace of workspaces) {
       try {
-        token = decryptToken(conn.encrypted_token);
-      } catch {
-        logger.warn({ userId: conn.user_id }, '[worker] integration:health-check — failed to decrypt GitHub token, skipping');
-        continue;
-      }
-
-      // Find workspaces with GitHub webhooks configured
-      type WsRow = { workspace_id: string };
-      const wsRows = await query<WsRow>(
-        `SELECT DISTINCT workspace_id FROM workspace_github_webhooks`,
-      );
-
-      for (const ws of wsRows) {
-        await checkGitHubHealth(ws.workspace_id, token);
-      }
-    }
-
-    // If no github_connections, check integration_tokens table
-    if (ghConns.length === 0) {
-      const tokenRows = await query<IntegrationTokenRow>(
-        `SELECT workspace_id, provider, encrypted_token
-         FROM integration_tokens
-         WHERE provider = 'github' AND token_type = 'oauth_access' AND revoked_at IS NULL`,
-      );
-
-      for (const row of tokenRows) {
-        try {
-          const { getOAuthToken } = await import('./lib/integration-vault');
-          const result = await getOAuthToken(row.workspace_id, 'github');
-          if (result) {
-            await checkGitHubHealth(row.workspace_id, result.token);
-          }
-        } catch (err) {
-          logger.warn({ err, workspaceId: row.workspace_id }, '[worker] integration:health-check — vault token check failed');
-        }
+        const resolved = await resolveWorkspaceGitHubToken(workspace.workspace_id, {
+          repository: { owner: workspace.repo_owner, name: workspace.repo_name }, purpose: 'repository-read',
+        });
+        if (resolved) await checkGitHubHealth(workspace.workspace_id, resolved.token);
+      } catch (err) {
+        logger.warn({ err, workspaceId: workspace.workspace_id }, '[worker] integration:health-check — canonical GitHub resolution failed');
       }
     }
   } catch (err) {

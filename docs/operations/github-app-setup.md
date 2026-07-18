@@ -8,9 +8,9 @@ Rorca uses one canonical GitHub App registration with any number of GitHub accou
 
 `workspace -> App -> owner installation -> repository id + owner/name`
 
-At runtime Rorca creates an RS256 App JWT and asks GitHub for a short-lived installation token constrained with exactly one `repository_ids` entry. JWTs and installation tokens live only in process memory. Private keys and webhook secrets are AES-256-GCM encrypted in the integration vault. Responses, WAL, audit details, logs, and database rows never contain plaintext secrets, JWTs, or installation tokens.
+At runtime Rorca creates an RS256 App JWT and asks GitHub for a short-lived installation token constrained with exactly one `repository_ids` entry and an operation-specific `permissions` object. Every returned token must enumerate exactly that repository and exactly the requested permission profile; broader or unknown grants fail closed. JWTs and installation tokens live only in process memory. Private keys and webhook secrets are AES-256-GCM encrypted in the integration vault. Responses, WAL, audit details, logs, and database rows never contain plaintext secrets, JWTs, or installation tokens.
 
-An active App binding is authoritative. Identity drift, suspension, expiry, permission uncertainty, or repository mismatch fails closed. Rorca does not silently replace it with a broader PAT/OAuth/environment token. Workspace PAT/OAuth remains an explicit migration fallback only for workspaces with no App binding. Rorca remains canonical for run, story, policy, decision, and Lifecycle/provider-evidence state; the App is only a credential provider.
+An active App binding is authoritative. Binding it transactionally retires the legacy repository-webhook row and marks that secret authority revoked; omission of App installation identity can never fall back to the retained row. Identity drift, suspension, expiry, permission uncertainty, or repository mismatch fails closed. Rorca does not silently replace it with a broader PAT/OAuth/environment token. Workspace PAT/OAuth remains an explicit migration fallback only for workspaces with no current App binding. Rorca remains canonical for run, story, policy, decision, and Lifecycle/provider-evidence state; the App is only a credential provider.
 
 ## Recommended GitHub App permissions
 
@@ -19,25 +19,27 @@ Repository permissions:
 | Permission | Access | Reason |
 |---|---:|---|
 | Metadata | Read | Required repository identity metadata. |
-| Actions | Read | Workflow discovery/diagnostics. |
-| Checks | **Read and write** | Exact-SHA evidence needs read; existing Rorca Check Run publishing creates/updates Check Runs, so this build needs write. Use read only if check publishing is disabled in a future build. |
-| Commit statuses | Read and write | Existing story/spec status publishing and exact-SHA status evidence. |
-| Contents | Read and write | Read supports compare/spec discovery; write is needed only for canonical PR creation/recovery paths. Remove write if those paths are disabled. |
-| Pull requests | Read and write | PR/review evidence and existing canonical PR/merge operations. |
+| Actions | **Read and write** | Workflow discovery and explicit workflow dispatch. |
+| Checks | **Read and write** | Exact-SHA evidence reads Check Runs; Rorca publishes exact-final-SHA Check Runs. |
+| Commit statuses | **Read and write** | Exact-SHA evidence reads statuses; Rorca publishes status evidence. |
+| Contents | **Read and write** | Compare/spec discovery reads contents; governed merge paths require write. |
+| Issues | Read | GitHub issue-to-story import. |
+| Pull requests | **Read and write** | PR/review evidence, PR creation/update, and governed merge operations. |
 
-Subscribe only to `push` and `pull_request`. A signed `ping` is accepted for health setup but is not subscribed as an event. Other events are rejected. Do not grant administration, organization, members, secrets, deployments, or environments permissions.
+This is an exact server-enforced ceiling, not a minimum: imported/modified Apps with unknown permissions, broader levels, missing grants, or extra events are rejected. Subscribe exactly to `check_run`, `issues`, `pull_request`, and `push`. A signed `ping` is accepted for setup health. Legacy repository webhooks retain the same event compatibility during migration. Do not grant administration, organization, members, secrets, deployments, or environments permissions.
 
 GitHub **Team plan remains separately required** for private-repository protected branches/rulesets and review governance. App installation does not substitute for the GitHub plan or branch governance.
 
 ## Preferred Manifest flow
 
-1. Configure an HTTPS `RORCA_APP_URL` for the authenticated UI callback and `RORCA_GITHUB_WEBHOOK_URL=https://hooks.rorca.ai/api/webhooks/github`.
-2. In Settings > GitHub, choose **Prepare App setup**. The admin endpoint creates a random 10-minute, one-use state bound to the authenticated operator, workspace, and current CSRF proof.
-3. Submit the returned manifest directly to GitHub. It contains no private key.
-4. On callback, choose **Complete one-time App registration**. Rorca atomically consumes the state before exchanging the one-time code. GitHub's returned private key and webhook secret are identity-checked and vaulted; they are never returned to the browser.
+1. Configure an HTTPS `RORCA_APP_URL`, `RORCA_GITHUB_WEBHOOK_URL=https://hooks.rorca.ai/api/webhooks/github`, and `RORCA_GITHUB_APP_CREATION_ORG=<organization-login>`. Configure `VAULT_KEY` (64 hex characters) or an explicit strong `JWT_SECRET` before storing credentials.
+2. In Settings > GitHub, choose **Prepare App setup**. The admin endpoint creates a random 10-minute, one-use state bound to the authenticated operator and workspace. Normal CSRF middleware protects each local POST; the callback does not depend on an in-memory CSRF value that changes across reload.
+3. Submit the returned manifest directly to the organization-owned GitHub App creation URL. Production CSP permits form submission only to the same origin and `https://github.com`; the manifest contains no private key.
+4. GitHub returns directly to `/settings/github`. After a reload or a new callback tab, choose **Complete one-time App registration**. Rorca atomically consumes the state before exchanging the one-time code. GitHub's returned private key and webhook secret are provider-profile checked and inserted in the same database transaction as the registration; they are never returned to the browser.
 5. Install the App for **selected repositories** under each desired owner/account.
 6. Copy the numeric installation id and repository id plus owner/name into **Verify and bind exact repository**. The server validates App id, installation id/account, selected-repository mode, repository id/full name, token expiry, and permissions before persisting the immutable binding.
-7. Review every capability diagnostic. A missing capability is not “connected.” No autonomous policy, merge, or deployment authority is activated by registration or binding.
+7. Review every capability diagnostic. A missing capability is not “connected.” Provider permissions, events, and exact webhook URL/configuration must all verify. No autonomous policy, merge, or deployment authority is activated by registration or binding.
+8. To replace a disabled/invalid binding, enter the new exact installation/repository identity and an audited replacement reason. Rorca preserves and permanently supersedes the old row; it never deletes or rewrites binding identity.
 
 No model may choose repository authority, grant permissions, install the App, activate policy, merge, or deploy.
 
@@ -47,7 +49,7 @@ If no public authenticated callback is available, setup returns `bounded-import`
 
 ## Rotation and incident response
 
-The current schema audit-retains bindings and secret records. Disable an invalid binding rather than deleting evidence. App private-key/webhook-secret rotation should be performed as a controlled operator change that vaults new values, updates the registration references, clears the in-memory token cache, and revalidates every binding. Until that dedicated rotation ceremony is available, use a maintenance window and do not overwrite ciphertext manually.
+The current schema audit-retains bindings, registrations, and secret records. Disable an invalid binding rather than deleting evidence. Registration identity and typed secret references are immutable; a future dedicated rotation ceremony must create an audited replacement registration/secrets, supersede affected bindings, clear in-memory token state, and revalidate every replacement. Until that ceremony exists, use a maintenance window and do not overwrite ciphertext or secret references manually.
 
 If installation or repository drift is reported:
 

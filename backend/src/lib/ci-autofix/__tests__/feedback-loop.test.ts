@@ -34,8 +34,18 @@ jest.mock('../../logger', () => ({
   },
 }));
 
-jest.mock('../../../routes/auth', () => ({
-  decryptToken: jest.fn(() => 'ghp_test_token_123'),
+jest.mock('../../github-repository-authority', () => ({
+  getGithubRepositoryAuthority: jest.fn(),
+  githubRepoApiUrl: (owner: string, repo: string, suffix: string) => `https://api.github.com/repos/${owner}/${repo}${suffix}`,
+  isFullGitObjectId: (value: unknown) => typeof value === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(value),
+}));
+
+jest.mock('../../github-token-resolver', () => ({
+  resolveWorkspaceGitHubToken: jest.fn(),
+}));
+
+jest.mock('../../github-app-credential-provider', () => ({
+  fetchGithubWithTimeout: (_fetch: typeof fetch, url: string, init?: RequestInit) => fetch(url, init),
 }));
 
 jest.mock('../../github-rate-limiter', () => ({
@@ -51,7 +61,8 @@ jest.mock('../../pg-boss', () => ({
 import { queryOne, query, execute } from '../../../db/index';
 import { broadcastAll } from '../../sse-hub';
 import { logger } from '../../logger';
-import { decryptToken } from '../../../routes/auth';
+import { getGithubRepositoryAuthority } from '../../github-repository-authority';
+import { resolveWorkspaceGitHubToken } from '../../github-token-resolver';
 import { handleRunFinished } from '../fix-orchestrator';
 import type { WalEvent } from '../../sse-hub';
 
@@ -59,7 +70,8 @@ const mockQueryOne = queryOne as jest.MockedFunction<typeof queryOne>;
 const mockQuery = query as jest.MockedFunction<typeof query>;
 const mockExecute = execute as jest.MockedFunction<typeof execute>;
 const mockBroadcastAll = broadcastAll as jest.MockedFunction<typeof broadcastAll>;
-const mockDecryptToken = decryptToken as jest.MockedFunction<typeof decryptToken>;
+const mockAuthority = getGithubRepositoryAuthority as jest.MockedFunction<typeof getGithubRepositoryAuthority>;
+const mockResolveToken = resolveWorkspaceGitHubToken as jest.MockedFunction<typeof resolveWorkspaceGitHubToken>;
 
 // Mock global fetch
 const mockFetch = jest.fn();
@@ -67,7 +79,8 @@ global.fetch = mockFetch;
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockDecryptToken.mockReturnValue('ghp_test_token_123');
+  mockAuthority.mockResolvedValue({ owner: 'myorg', name: 'myrepo' } as any);
+  mockResolveToken.mockResolvedValue({ token: 'ghp_test_token_123', source: 'workspace-pat' });
 });
 
 function makeRunFinishedEvent(runId: number, status = 'done'): WalEvent {
@@ -100,10 +113,6 @@ describe('handleRunFinished — success path', () => {
         run_id: 42,
         agent_type: 'claude',
       })
-      // workspace_github_webhooks lookup
-      .mockResolvedValueOnce({ repo_owner: 'myorg', repo_name: 'myrepo' })
-      // github_connections lookup
-      .mockResolvedValueOnce({ encrypted_token: 'encrypted_token_data' })
       // WAL event insert
       .mockResolvedValueOnce({
         id: 200,
@@ -153,7 +162,7 @@ describe('handleRunFinished — success path', () => {
     expect(mockExecute.mock.calls[0][1]).toEqual(['completed', null, 7]);
 
     // Verify WAL event emitted
-    const walInsert = mockQueryOne.mock.calls[4];
+    const walInsert = mockQueryOne.mock.calls[2];
     expect(walInsert[0]).toContain("'ci_autofix_completed'");
     const walPayload = JSON.parse(walInsert[1]![1] as string);
     expect(walPayload.runId).toBe(42);
@@ -182,8 +191,6 @@ describe('handleRunFinished — failure path', () => {
         run_id: 43,
         agent_type: 'opencode',
       })
-      .mockResolvedValueOnce({ repo_owner: 'myorg', repo_name: 'myrepo' })
-      .mockResolvedValueOnce({ encrypted_token: 'encrypted_token_data' })
       .mockResolvedValueOnce({
         id: 201,
         event_type: 'ci_autofix_completed',
@@ -211,7 +218,7 @@ describe('handleRunFinished — failure path', () => {
     expect(mockExecute.mock.calls[0][1]![2]).toBe(8);
 
     // Verify WAL payload
-    const walPayload = JSON.parse(mockQueryOne.mock.calls[4][1]![1] as string);
+    const walPayload = JSON.parse(mockQueryOne.mock.calls[2][1]![1] as string);
     expect(walPayload.success).toBe(false);
     expect(walPayload.storiesFailed).toBe(1);
     expect(walPayload.agentType).toBe('opencode');
@@ -229,8 +236,6 @@ describe('handleRunFinished — failure path', () => {
         run_id: 44,
         agent_type: 'claude',
       })
-      .mockResolvedValueOnce({ repo_owner: 'myorg', repo_name: 'myrepo' })
-      .mockResolvedValueOnce({ encrypted_token: 'encrypted_token_data' })
       .mockResolvedValueOnce({ id: 202, event_type: 'ci_autofix_completed' });
 
     // Many failed stories with long reasons
@@ -252,7 +257,7 @@ describe('handleRunFinished — failure path', () => {
 // ─── Test: No GitHub connection → warning logged, row still updated ───────
 
 describe('handleRunFinished — no GitHub connection', () => {
-  test('missing workspace_github_webhooks → logs warning, still updates ci_autofix_runs', async () => {
+  test('missing canonical repository authority → logs warning, still updates ci_autofix_runs', async () => {
     mockQueryOne
       .mockResolvedValueOnce({ id: 45, status: 'done', trigger_type: 'ci-autofix' })
       .mockResolvedValueOnce({
@@ -264,10 +269,9 @@ describe('handleRunFinished — no GitHub connection', () => {
         run_id: 45,
         agent_type: 'claude',
       })
-      // No workspace_github_webhooks row
-      .mockResolvedValueOnce(undefined)
       // WAL event insert
       .mockResolvedValueOnce({ id: 203, event_type: 'ci_autofix_completed' });
+    mockAuthority.mockResolvedValueOnce(null);
 
     mockQuery.mockResolvedValueOnce([
       { story_id: 'CAF-FIX-001', status: 'pass', reason: null },
@@ -288,10 +292,10 @@ describe('handleRunFinished — no GitHub connection', () => {
     expect(mockExecute.mock.calls[0][1]).toEqual(['completed', null, 10]);
 
     // WAL event STILL emitted
-    expect(mockQueryOne).toHaveBeenCalledTimes(4);
+    expect(mockQueryOne).toHaveBeenCalledTimes(3);
   });
 
-  test('missing github_connections token → logs warning, still updates ci_autofix_runs', async () => {
+  test('missing canonical exact-repository token → logs warning, still updates ci_autofix_runs', async () => {
     mockQueryOne
       .mockResolvedValueOnce({ id: 46, status: 'done', trigger_type: 'ci-autofix' })
       .mockResolvedValueOnce({
@@ -303,11 +307,9 @@ describe('handleRunFinished — no GitHub connection', () => {
         run_id: 46,
         agent_type: 'claude',
       })
-      .mockResolvedValueOnce({ repo_owner: 'myorg', repo_name: 'myrepo' })
-      // No github_connections row
-      .mockResolvedValueOnce(undefined)
       // WAL event insert
       .mockResolvedValueOnce({ id: 204, event_type: 'ci_autofix_completed' });
+    mockResolveToken.mockResolvedValueOnce(null);
 
     mockQuery.mockResolvedValueOnce([
       { story_id: 'CAF-FIX-001', status: 'pass', reason: null },
