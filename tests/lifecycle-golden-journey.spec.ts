@@ -186,6 +186,11 @@ async function closeDrawer(page: Page) {
   if (await close.isVisible().catch(() => false)) await close.click();
 }
 
+async function refreshLifecycle(page: Page) {
+  await page.getByRole('button', { name: 'Refresh Lifecycle Control' }).focus();
+  await page.keyboard.press('Enter');
+}
+
 async function browserMutation(page: Page, url: string, body: unknown, idempotencyKey: string) {
   return page.evaluate(async ({ mutationUrl, mutationBody, key }) => {
     const response = await fetch(mutationUrl, {
@@ -197,13 +202,21 @@ async function browserMutation(page: Page, url: string, body: unknown, idempoten
   }, { mutationUrl: url, mutationBody: body, key: idempotencyKey });
 }
 
-async function capture(page: Page, testInfo: TestInfo, name: string, width: number, height: number, screenshots: Array<{ name: string; width: number; height: number; theme: string }>) {
+async function capture(
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+  width: number,
+  height: number,
+  screenshots: Array<{ name: string; width: number; height: number; theme: string }>,
+  theme = 'light',
+) {
   await page.setViewportSize({ width, height });
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const directory = testInfo.outputPath('screenshots');
   await mkdir(directory, { recursive: true });
   await page.screenshot({ path: `${directory}/${name}`, fullPage: true, animations: 'disabled' });
-  screenshots.push({ name, width, height, theme: 'light' });
+  screenshots.push({ name, width, height, theme });
 }
 
 async function refreshForState(page: Page, transport: GoldenTransport, state: GoldenJourneyState, view: GoldenTransport['view'] = 'normal') {
@@ -221,25 +234,32 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
     const checkpoints: Array<{ segment: string; result: 'passed'; detail: string }> = [];
     const checkpoint = (segment: string, detail: string) => checkpoints.push({ segment, result: 'passed', detail });
 
-    // Segment 1: accepted intent/spec boundary, complete ownership, preflight repair, and compiled matrix.
+    // Segment 1: accepted intent/spec boundary, complete ownership, preflight repair, and compiled Explorer.
     await gotoLifecycle(page);
-    await expect(page.getByRole('rowheader', { name: /Billing anomaly alerts.*6 stories/i })).toBeVisible();
-    await expect(page.locator('tbody .lifecycle-cell')).toHaveCount(11);
+    const explorerRow = page.getByRole('article', { name: /Billing anomaly alerts/i });
+    await expect(explorerRow).toContainText('4/6 stories passed');
+    await expect(explorerRow.locator('[data-lifecycle-phase-cell="true"]')).toHaveCount(11);
     await expect(page.getByText('2 missing gates')).toBeVisible();
-    await page.getByPlaceholder('Search specs').fill('Billing anomaly');
+    await page.getByRole('combobox', { name: 'Search and filter lifecycle specs' }).fill('Billing anomaly');
     await expect.poll(() => new URL(page.url()).searchParams.get('search')).toBe('Billing anomaly');
-    await page.getByRole('button', { name: 'Blocked only' }).click();
+    await page.getByRole('button', { name: 'Blocked', exact: true }).click();
     await expect.poll(() => new URL(page.url()).searchParams.get('blocked')).toBe('true');
-    await page.getByRole('button', { name: 'Reset all' }).click();
+    await page.getByRole('button', { name: 'Clear all' }).click();
+    await expect(page.getByRole('listbox', { name: 'Lifecycle query suggestions' })).toBeHidden();
+    await capture(page, testInfo, 'explorer-default-1440x900-light.png', 1440, 900, screenshots);
+    await page.locator('html').evaluate((element) => element.setAttribute('data-theme', 'dark'));
+    await capture(page, testInfo, 'explorer-default-1440x900-dark.png', 1440, 900, screenshots, 'dark');
+    await page.locator('html').evaluate((element) => element.setAttribute('data-theme', 'light'));
+    await capture(page, testInfo, 'explorer-default-390x844-light.png', 390, 844, screenshots);
+    await explorerRow.scrollIntoViewIfNeeded();
+    await capture(page, testInfo, 'explorer-row-390x844-light.png', 390, 844, screenshots);
+    await page.setViewportSize({ width: 1440, height: 900 });
     checkpoint('intent-spec-plan', 'One governed spec, six owned stories, eleven phases, and four Validation gates are represented by canonical response types.');
 
     // Segment 2: keyboard selection, drawer traceability, evidence inspector, links, and blocked 2/4 state.
     const intake = page.getByRole('button', { name: /Billing anomaly alerts, Intake:/i });
     await intake.focus();
-    await page.keyboard.press('End');
-    await expect(page.getByRole('button', { name: /Billing anomaly alerts, Learn:/i })).toBeFocused();
-    await page.keyboard.press('Home');
-    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Tab');
     await expect(page.getByRole('button', { name: /Billing anomaly alerts, Requirements:/i })).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(page.getByRole('dialog', { name: 'Billing anomaly alerts — Requirements' })).toBeVisible();
@@ -328,7 +348,7 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
 
     // Segment 7: QA-mode result contributes evidence but cannot grant staging QA approval.
     transport.state = 'qa_evidence_only';
-    await page.getByRole('button', { name: 'Refresh Lifecycle Control' }).click();
+    await refreshLifecycle(page);
     await expect(page.getByRole('button', { name: /Billing anomaly alerts, QA: Awaiting approval/i })).toBeVisible();
     await selectPhase(page, 'QA', /Awaiting approval/i);
     await expect(page.getByText(/QA-mode evidence exists, but an authorized revision-bound approval is still required/)).toBeVisible();
@@ -341,7 +361,7 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
     await approval.getByRole('button', { name: 'Record QA approval' }).click();
     await expect.poll(() => transport.state).toBe('approved');
     await closeDrawer(page);
-    await page.getByRole('button', { name: 'Refresh Lifecycle Control' }).click();
+    await refreshLifecycle(page);
     await expect(page.getByRole('button', { name: /Billing anomaly alerts, QA: Passed/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /Billing anomaly alerts, Production: Awaiting approval/i })).toBeVisible();
     checkpoint('explicit-qa-approval', 'QA-mode evidence remained insufficient until an authorized decision bound to the source commit was recorded; no merge/deploy/send occurred.');
@@ -350,13 +370,13 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
     expect((await browserMutation(page, '/api/lifecycle/decisions/decision-qa-lfc-024/revoke', { workspaceId: GOLDEN.workspaceId, rationale: '' }, 'lfc-024-revoke-bad')).status).toBe(409);
     expect((await browserMutation(page, '/api/lifecycle/decisions/decision-qa-lfc-024/revoke', { workspaceId: GOLDEN.workspaceId, rationale: 'Approval withdrawn to prove independent evidence and decision state.' }, 'lfc-024-revoke-good')).status).toBe(200);
     expect((await browserMutation(page, '/api/lifecycle/decisions/decision-qa-lfc-024/revoke', { workspaceId: GOLDEN.workspaceId, rationale: 'Approval withdrawn to prove independent evidence and decision state.' }, 'lfc-024-revoke-good')).status).toBe(200);
-    await page.getByRole('button', { name: 'Refresh Lifecycle Control' }).click();
+    await refreshLifecycle(page);
     await expect(page.getByRole('button', { name: /Billing anomaly alerts, QA: Awaiting approval/i })).toBeVisible();
     checkpoint('decision-revocation', 'Revocation was governed and idempotent; successful QA-mode evidence remained while QA approval returned to awaiting approval.');
 
     // Re-apply the independently authorized approval for the final governed state.
     transport.state = 'approved';
-    await page.getByRole('button', { name: 'Refresh Lifecycle Control' }).click();
+    await refreshLifecycle(page);
 
     // Segment 9: replacement invalidates only dependent QA/merge/production proof.
     await refreshForState(page, transport, 'stale');
@@ -369,7 +389,7 @@ test.describe.serial('LFC-024 deterministic lifecycle golden journey', () => {
 
     // Segment 10: Learn candidate is provenance-linked, sensitive, review-only, and not auto-promoted.
     transport.state = 'approved';
-    await page.getByRole('button', { name: 'Refresh Lifecycle Control' }).click();
+    await refreshLifecycle(page);
     await selectPhase(page, 'Learn', /In progress/i);
     const learn = page.getByTestId('lifecycle-learn-closeout');
     await expect(learn).toContainText('Gotcha candidate #24024');

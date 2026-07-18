@@ -44,12 +44,56 @@ export const LIFECYCLE_SAVED_VIEWS_LIMIT = 12;
 export const LIFECYCLE_DISPLAY_PREFERENCES_KEY = 'rorca.lifecycle.displayPreferences';
 const SAVED_VIEWS_BYTE_LIMIT = 32_768;
 const DEFAULT_LIMIT = 25;
+const PORTFOLIO_CACHE_LIMIT = 16;
+const PORTFOLIO_CACHE_REUSE_MS = 5_000;
+const PORTFOLIO_CACHE_STALE_MS = 30_000;
+
+interface LifecyclePortfolioCacheEntry {
+  data: LifecyclePortfolioResponse;
+  receivedAt: number;
+}
+
+function portfolioCacheKey(
+  workspaceId: string,
+  filters: LifecyclePortfolioFilters,
+  page: number,
+  limit: number,
+  revision: number,
+): string {
+  return JSON.stringify([
+    workspaceId,
+    revision,
+    page,
+    limit,
+    filters.search ?? null,
+    filters.status ?? null,
+    filters.specStatus ?? null,
+    filters.phase ?? null,
+    filters.risk ?? null,
+    filters.owner ?? null,
+    filters.blocked ?? null,
+    filters.disposition ?? null,
+    filters.sort,
+  ]);
+}
+
+function withFilterPatch(
+  filters: LifecyclePortfolioFilters,
+  patch: Partial<LifecyclePortfolioFilters>,
+): LifecyclePortfolioFilters {
+  const next = { ...filters, ...patch } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(next)) {
+    if (value === undefined) delete next[key];
+  }
+  return { ...next, sort: typeof next.sort === 'string' ? next.sort : 'current_view' } as LifecyclePortfolioFilters;
+}
 
 export const DEFAULT_LIFECYCLE_URL_STATE: LifecycleUrlState = {
   sort: 'current_view',
   page: 1,
   limit: DEFAULT_LIMIT,
   compact: false,
+  mode: 'explorer',
   selectedSpecId: null,
   selectedPhaseId: null,
 };
@@ -77,6 +121,7 @@ export function parseLifecycleUrlState(params: URLSearchParams): LifecycleUrlSta
     page: positiveInteger(params.get('page'), 1, 10_000),
     limit: positiveInteger(params.get('limit'), DEFAULT_LIMIT, 100),
     compact: params.get('compact') === '1' || params.get('compact') === 'true',
+    mode: params.get('mode') === 'matrix' ? 'matrix' : 'explorer',
     selectedSpecId,
     selectedPhaseId: PHASES.has(selectedPhaseValue ?? '') ? selectedPhaseValue as LifecyclePhaseId : null,
   };
@@ -106,7 +151,7 @@ export function parseLifecycleUrlState(params: URLSearchParams): LifecycleUrlSta
 /** Serializes only lifecycle view state; caller-owned route parameters may be supplied as base. */
 export function serializeLifecycleUrlState(state: LifecycleUrlState, base = new URLSearchParams()): URLSearchParams {
   const params = new URLSearchParams(base);
-  for (const key of ['search', 'status', 'specStatus', 'phase', 'phaseFilter', 'risk', 'owner', 'blocked', 'disposition', 'sort', 'page', 'limit', 'compact', 'spec', 'phaseDetail']) {
+  for (const key of ['search', 'status', 'specStatus', 'phase', 'phaseFilter', 'risk', 'owner', 'blocked', 'disposition', 'sort', 'page', 'limit', 'compact', 'mode', 'spec', 'phaseDetail']) {
     params.delete(key);
   }
   if (state.search) params.set('search', state.search);
@@ -121,6 +166,7 @@ export function serializeLifecycleUrlState(state: LifecycleUrlState, base = new 
   if (state.page !== 1) params.set('page', String(state.page));
   if (state.limit !== DEFAULT_LIMIT) params.set('limit', String(state.limit));
   if (state.compact) params.set('compact', '1');
+  if (state.mode === 'matrix') params.set('mode', 'matrix');
   if (state.selectedSpecId) params.set('spec', state.selectedSpecId);
   if (state.selectedSpecId && state.selectedPhaseId) params.set('phase', state.selectedPhaseId);
   return params;
@@ -349,6 +395,31 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
   const phaseSelectionKeyRef = useRef<string | null>(null);
   const evidenceSelectionKeyRef = useRef<string | null>(null);
   const recoveryKeyRef = useRef<string | null>(null);
+  const portfolioCacheRef = useRef(new Map<string, LifecyclePortfolioCacheEntry>());
+  const portfolioPrefetchRef = useRef(new Map<string, Promise<LifecyclePortfolioResponse>>());
+
+  const readPortfolioCache = useCallback((key: string): LifecyclePortfolioCacheEntry | null => {
+    const cached = portfolioCacheRef.current.get(key);
+    if (!cached) return null;
+    if (Date.now() - cached.receivedAt > PORTFOLIO_CACHE_STALE_MS) {
+      portfolioCacheRef.current.delete(key);
+      return null;
+    }
+    // Refresh insertion order so the bounded map behaves as a small LRU cache.
+    portfolioCacheRef.current.delete(key);
+    portfolioCacheRef.current.set(key, cached);
+    return cached;
+  }, []);
+
+  const writePortfolioCache = useCallback((key: string, data: LifecyclePortfolioResponse) => {
+    portfolioCacheRef.current.delete(key);
+    portfolioCacheRef.current.set(key, { data, receivedAt: Date.now() });
+    while (portfolioCacheRef.current.size > PORTFOLIO_CACHE_LIMIT) {
+      const oldest = portfolioCacheRef.current.keys().next().value as string | undefined;
+      if (!oldest) break;
+      portfolioCacheRef.current.delete(oldest);
+    }
+  }, []);
 
   const updateUrlState = useCallback((patch: Partial<LifecycleUrlState>, replace = false) => {
     const current = parseLifecycleUrlState(searchParams);
@@ -426,23 +497,62 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     updateUrlState({ selectedSpecId: null, selectedPhaseId: null }, true);
   }, [workspaceId, updateUrlState]);
 
+  const prefetchFilters = useCallback((patch: Partial<LifecyclePortfolioFilters>): Promise<void> => {
+    if (!workspaceId) return Promise.resolve();
+    const nextFilters = withFilterPatch(filters, patch);
+    const key = portfolioCacheKey(workspaceId, nextFilters, 1, urlState.limit, revisions.portfolio);
+    if (readPortfolioCache(key)) return Promise.resolve();
+    const existing = portfolioPrefetchRef.current.get(key);
+    if (existing) return existing.then(() => undefined).catch(() => undefined);
+    const request = getLifecyclePortfolio(
+      workspaceId,
+      nextFilters,
+      { page: 1, limit: urlState.limit },
+      { silent: true },
+    ).then((data) => {
+      writePortfolioCache(key, data);
+      return data;
+    }).finally(() => {
+      portfolioPrefetchRef.current.delete(key);
+    });
+    portfolioPrefetchRef.current.set(key, request);
+    return request.then(() => undefined).catch(() => undefined);
+  }, [filters, readPortfolioCache, revisions.portfolio, urlState.limit, workspaceId, writePortfolioCache]);
+
   useEffect(() => {
     if (!workspaceId) { setPortfolio(emptyQuery()); return; }
     const generation = ++generations.current.portfolio;
+    const key = portfolioCacheKey(workspaceId, filters, urlState.page, urlState.limit, revisions.portfolio);
+    const cached = readPortfolioCache(key);
+    if (cached) {
+      const reusable = Date.now() - cached.receivedAt <= PORTFOLIO_CACHE_REUSE_MS;
+      const state = querySuccess(cached.data, cached.data.snapshotId);
+      setPortfolio(reusable ? state : { ...state, refreshing: true, stale: true });
+      setLastSuccessfulRefresh(new Date(cached.receivedAt).toISOString());
+      if (reusable) return;
+    } else {
+      setPortfolio(beginQuery);
+    }
+
     const controller = new AbortController();
-    setPortfolio(beginQuery);
-    getLifecyclePortfolio(workspaceId, filters, { page: urlState.page, limit: urlState.limit }, { signal: controller.signal, silent: true })
-      .then((data) => {
-        if (generation !== generations.current.portfolio || controller.signal.aborted) return;
-        setPortfolio(querySuccess(data, data.snapshotId));
-        setLastSuccessfulRefresh(new Date().toISOString());
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted || generation !== generations.current.portfolio) return;
-        setPortfolio((state) => queryFailure(state, asError(error)));
-      });
+    const prefetched = portfolioPrefetchRef.current.get(key);
+    const request = prefetched ?? getLifecyclePortfolio(
+      workspaceId,
+      filters,
+      { page: urlState.page, limit: urlState.limit },
+      { signal: controller.signal, silent: true },
+    );
+    request.then((data) => {
+      if (generation !== generations.current.portfolio || controller.signal.aborted) return;
+      writePortfolioCache(key, data);
+      setPortfolio(querySuccess(data, data.snapshotId));
+      setLastSuccessfulRefresh(new Date().toISOString());
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || generation !== generations.current.portfolio) return;
+      setPortfolio((state) => queryFailure(state, asError(error)));
+    });
     return () => controller.abort();
-  }, [workspaceId, filters, urlState.page, urlState.limit, revisions.portfolio]);
+  }, [workspaceId, filters, urlState.page, urlState.limit, revisions.portfolio, readPortfolioCache, writePortfolioCache]);
 
   const portfolioReady = portfolio.data !== null;
   const selectedPortfolioItem = portfolio.data?.items.find((item) => item.specId === urlState.selectedSpecId);
@@ -741,6 +851,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
     savedViews,
     updateFilters,
     updateUrlState,
+    prefetchFilters,
     selectSpec: (specId: string | null) => updateUrlState({ selectedSpecId: specId, selectedPhaseId: null }),
     selectPhase: (phaseId: LifecyclePhaseId | null) => updateUrlState({ selectedPhaseId: phaseId }),
     openEvidence,
@@ -751,6 +862,7 @@ export function useLifecycle(options: UseLifecycleOptions = {}) {
       setDisplayPreferences((current) => ({ ...current, compact }));
       if (urlState.compact) updateUrlState({ compact: false }, true);
     },
+    setMode: (mode: LifecycleUrlState['mode']) => updateUrlState({ mode }, true),
     refresh,
     mutations,
     saveView,

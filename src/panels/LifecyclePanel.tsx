@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -18,6 +18,7 @@ import LifecycleGovernedActionDialog, { type LifecycleGovernedDialog } from '../
 import SlideOver from '../components/SlideOver';
 import { LifecycleMatrixSkeleton } from '../components/skeletons';
 import { LIFECYCLE_STATUS_LABELS, LifecycleStatusIcon } from './LifecycleCell';
+import LifecycleExplorer from './LifecycleExplorer';
 import LifecycleMatrix from './LifecycleMatrix';
 import LifecycleMetrics from './LifecycleMetrics';
 import LifecycleToolbar from './LifecycleToolbar';
@@ -73,7 +74,7 @@ function lifecycleErrorState(error: Error): { title: string; explanation: string
 }
 
 export default function LifecyclePanel() {
-  const { workspaceId, selectedWorkspace } = useWorkspace();
+  const { workspaceId } = useWorkspace();
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useGlobalToast();
@@ -133,21 +134,24 @@ export default function LifecyclePanel() {
 
   useEffect(() => {
     if (!activeSelection) return;
-    const selectedCell = document.querySelector<HTMLElement>('.lifecycle-cell[data-selected="true"]');
+    const selectedCell = document.querySelector<HTMLElement>('[data-lifecycle-phase-cell="true"][data-selected="true"]');
     if (selectedCell) restoreFocusRef.current = selectedCell;
   }, [activeSelection]);
 
-  const selectCell = (specId: string, phaseId: (typeof LIFECYCLE_PHASES)[number]['id']) => {
-    if (document.activeElement instanceof HTMLElement && document.activeElement.classList.contains('lifecycle-cell')) {
+  const activeSelectionRef = useRef(activeSelection);
+  activeSelectionRef.current = activeSelection;
+  const closeEvidence = lifecycle.closeEvidence;
+  const selectCell = useCallback((specId: string, phaseId: (typeof LIFECYCLE_PHASES)[number]['id']) => {
+    if (document.activeElement instanceof HTMLElement && document.activeElement.dataset.lifecyclePhaseCell === 'true') {
       restoreFocusRef.current = document.activeElement;
     }
-    lifecycle.closeEvidence();
+    closeEvidence();
     // Selection feedback is a strict interaction budget. Commit the visible
     // highlight/drawer before React Router performs the shareable URL update.
-    const switchingOpenDrawer = Boolean(activeSelection);
+    const switchingOpenDrawer = Boolean(activeSelectionRef.current);
     flushSync(() => setOptimisticSelection({ specId, phaseId }));
-    lifecycle.updateUrlState({ selectedSpecId: specId, selectedPhaseId: phaseId }, switchingOpenDrawer);
-  };
+    updateUrlState({ selectedSpecId: specId, selectedPhaseId: phaseId }, switchingOpenDrawer);
+  }, [closeEvidence, updateUrlState]);
 
   const closeDrawer = () => {
     lifecycle.closeEvidence();
@@ -158,9 +162,9 @@ export default function LifecyclePanel() {
   };
 
   const returnTo = `${location.pathname}${location.search}`;
-  const openSpecReview = (specId: string) => {
+  const openSpecReview = useCallback((specId: string) => {
     navigate(`/specs/${encodeURIComponent(specId)}/review?tab=lifecycle&returnTo=${encodeURIComponent(returnTo)}`);
-  };
+  }, [navigate, returnTo]);
 
   const handleDrawerAction = async (action: LifecyclePermittedAction) => {
     if (!activeSelection || actionPending || governedPending) return;
@@ -326,15 +330,11 @@ export default function LifecyclePanel() {
 
   return (
     <section className="lifecycle-control h-full min-h-0 flex flex-col bg-bg" aria-labelledby="lifecycle-control-heading">
-      <header className="flex min-h-[72px] shrink-0 items-center border-b border-border bg-panel px-4 sm:px-6">
-        <ShieldCheck size={22} className="mr-3 shrink-0 text-accent" aria-hidden="true" />
+      <header className="flex min-h-16 shrink-0 items-center border-b border-border bg-panel px-4 sm:px-6">
+        <ShieldCheck size={20} className="mr-2.5 shrink-0 text-accent" aria-hidden="true" />
         <div className="min-w-0">
-          <h1 id="lifecycle-control-heading" className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</h1>
+          <h1 id="lifecycle-control-heading" className="text-base font-semibold tracking-tight text-[var(--text)] sm:text-lg">Lifecycle Control</h1>
           <p className="truncate text-xs text-muted" title="End-to-end delivery completeness and evidence">End-to-end delivery completeness and evidence</p>
-        </div>
-        <div className="ml-auto min-w-0 rounded-md border border-border bg-bg px-3 py-1.5 text-right" aria-label={`Current workspace: ${selectedWorkspace?.name ?? data.workspace.label}`}>
-          <div className="text-xs uppercase tracking-wide text-muted">Current workspace</div>
-          <div className="max-w-[240px] truncate text-xs font-medium text-[var(--text)]" title={selectedWorkspace?.name ?? data.workspace.label}>{selectedWorkspace?.name ?? data.workspace.label}</div>
         </div>
       </header>
 
@@ -374,12 +374,22 @@ export default function LifecyclePanel() {
               )}
             </div>
           </div>
-        ) : (
+        ) : lifecycle.urlState.mode === 'matrix' ? (
           <LifecycleMatrix
             items={data.items}
             selectedSpecId={activeSelection?.specId ?? null}
             selectedPhaseId={activeSelection?.phaseId ?? null}
             compact={lifecycle.urlState.compact}
+            pagination={lifecycle.pagination}
+            onSelect={selectCell}
+            onOpenSpec={openSpecReview}
+            onPageChange={lifecycle.setPage}
+          />
+        ) : (
+          <LifecycleExplorer
+            items={data.items}
+            selectedSpecId={activeSelection?.specId ?? null}
+            selectedPhaseId={activeSelection?.phaseId ?? null}
             pagination={lifecycle.pagination}
             onSelect={selectCell}
             onOpenSpec={openSpecReview}

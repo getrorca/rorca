@@ -114,6 +114,7 @@ function LifecycleCell({
     <button
       ref={buttonRef}
       type="button"
+      data-lifecycle-phase-cell="true"
       data-status={cell.status}
       data-selected={selected ? 'true' : 'false'}
       aria-label={explanation}

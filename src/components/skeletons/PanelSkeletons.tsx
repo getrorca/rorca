@@ -43,14 +43,16 @@ export function BoardSkeleton() {
   );
 }
 
-/** Lifecycle matrix skeleton: KPI cards, filters, phase headers, and rows. */
+/** Lifecycle Explorer skeleton: KPI cards, query controls, and responsive journey rows. */
 export function LifecycleMatrixSkeleton() {
   return (
     <div className="lifecycle-control h-full flex flex-col bg-bg" aria-label="Loading Lifecycle Control" role="status">
-      <div className="flex min-h-[72px] shrink-0 items-center gap-3 border-b border-border bg-panel px-4 sm:px-6">
-        <span className="text-lg font-semibold text-[var(--text)]">Lifecycle Control</span>
-        <div className="flex-1" />
-        <div className="lifecycle-skeleton-block h-9 w-32 rounded-md" />
+      <div className="flex min-h-16 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-4 sm:px-6">
+        <div className="lifecycle-skeleton-block h-5 w-5 rounded-md" />
+        <div>
+          <span className="text-base font-semibold tracking-tight text-[var(--text)] sm:text-lg">Lifecycle Control</span>
+          <div className="lifecycle-skeleton-block mt-1 h-2.5 w-52 max-w-[55vw] rounded" />
+        </div>
       </div>
       <div className="flex-1 overflow-hidden p-3 sm:p-4 space-y-3">
         <div className="grid min-h-[88px] grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
@@ -60,12 +62,17 @@ export function LifecycleMatrixSkeleton() {
           <div className="lifecycle-skeleton-block h-9 w-full rounded-md" />
         </div>
         <div className="overflow-hidden rounded-xl border border-border bg-panel">
-          <div className="overflow-hidden">
-            <div className="lifecycle-skeleton-matrix grid min-w-[1710px] grid-cols-[280px_repeat(11,130px)] gap-px bg-border">
-              {Array.from({ length: 12 }).map((_, index) => <div key={`header-${index}`} className="lifecycle-skeleton-block h-10" />)}
-              {Array.from({ length: 48 }).map((_, index) => <div key={`cell-${index}`} className="lifecycle-skeleton-block h-16" />)}
+          {Array.from({ length: 3 }).map((_, row) => (
+            <div key={row} className="border-b border-border p-3 last:border-b-0">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="lifecycle-skeleton-block h-5 w-48 max-w-[55%] rounded" />
+                <div className="lifecycle-skeleton-block h-6 w-24 rounded-full" />
+              </div>
+              <div className="lifecycle-skeleton-explorer grid grid-cols-11 gap-1">
+                {Array.from({ length: 11 }).map((_, phase) => <div key={phase} className="lifecycle-skeleton-block h-12 min-w-0 rounded-md" />)}
+              </div>
             </div>
-          </div>
+          ))}
         </div>
       </div>
       <span className="sr-only">Loading metrics, filters, and lifecycle phases.</span>

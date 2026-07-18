@@ -61,7 +61,7 @@ function lifecycleState() {
   };
   return {
     filters: { sort: 'current_view' },
-    urlState: { sort: 'current_view', page: 1, limit: 25, compact: false, selectedSpecId: 'spec-a', selectedPhaseId: 'qa' },
+    urlState: { sort: 'current_view', page: 1, limit: 25, compact: false, mode: 'explorer', selectedSpecId: 'spec-a', selectedPhaseId: 'qa' },
     portfolio: {
       data: {
         items: [item], total: 1, hasMore: false, workspace: { id: 'ws-1', label: 'Workspace' },
@@ -87,7 +87,7 @@ function lifecycleState() {
     selectedEvidenceId: null,
     pagination: { page: 1, limit: 25, total: 1, hasMore: false },
     empty: false, refreshing: false, stale: false, partialData: false, lastSuccessfulRefresh: '2026-07-15T12:00:00.000Z',
-    savedViews: [], refresh: vi.fn(), updateFilters: vi.fn(), updateUrlState: vi.fn(), setPage: vi.fn(), setCompact: vi.fn(),
+    savedViews: [], refresh: vi.fn(), updateFilters: vi.fn(), updateUrlState: vi.fn(), prefetchFilters: vi.fn().mockResolvedValue(undefined), setPage: vi.fn(), setCompact: vi.fn(), setMode: vi.fn(),
     saveView: vi.fn(), renameSavedView: vi.fn(), removeSavedView: vi.fn(), applySavedView: vi.fn(),
     mutations: { recompile: vi.fn(), recordDecision: vi.fn(), revokeDecision: vi.fn() },
     openEvidence: vi.fn(), closeEvidence: vi.fn(),
@@ -105,15 +105,30 @@ beforeEach(() => {
 });
 
 describe('LifecyclePanel', () => {
-  it('renders the phase matrix and opens a deep-linked phase drawer after spec data loads', () => {
+  it('renders the default Explorer and opens a deep-linked phase drawer after spec data loads', () => {
     render(<LifecyclePanel />);
     expect(screen.getByRole('heading', { name: 'Lifecycle Control' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Lifecycle Explorer' })).toBeInTheDocument();
+    expect(screen.queryByTestId('lifecycle-matrix-scroll')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Spec A, QA: In progress.*0 of 0 required gates passed/i })).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Spec A — QA' })).toHaveTextContent('QA is required');
     expect(screen.getByText(/No evidence has been recorded; source, time, and revision match are unknown/)).toBeInTheDocument();
   });
 
-  it('uses a matrix-shaped loading skeleton with the stable product label', () => {
+  it('switches to the expert Matrix explicitly and keeps Compact scoped to Matrix', async () => {
+    const user = userEvent.setup();
+    mocks.lifecycle.urlState.mode = 'matrix';
+    render(<LifecyclePanel />);
+    expect(screen.getByTestId('lifecycle-matrix-scroll')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Lifecycle Explorer' })).not.toBeInTheDocument();
+    expect(within(screen.getByLabelText('Lifecycle filters')).queryByRole('combobox', { name: 'Status filter' })).not.toBeInTheDocument();
+    expect(within(screen.getByLabelText('Lifecycle filters')).queryByRole('combobox', { name: 'Phase filter' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Lifecycle filters').querySelector('select')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Compact matrix' }));
+    expect(mocks.lifecycle.setCompact).toHaveBeenCalledWith(true);
+  });
+
+  it('uses an Explorer-shaped loading skeleton with the stable product label', () => {
     mocks.lifecycle.portfolio = { data: null, loading: true, error: null };
     render(<LifecyclePanel />);
     expect(screen.getByLabelText('Loading Lifecycle Control')).toHaveTextContent('Lifecycle Control');
@@ -154,28 +169,29 @@ describe('LifecyclePanel', () => {
     }
   });
 
-  it('shows workspace context and all compact API KPI totals', () => {
+  it('avoids redundant workspace chrome and shows all compact API KPI totals', () => {
     render(<LifecyclePanel />);
-    expect(screen.getByLabelText('Current workspace: Hermes')).toBeInTheDocument();
+    expect(screen.queryByText('Current workspace')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Current workspace: Hermes')).not.toBeInTheDocument();
     expect(screen.getByText('Active specs')).toBeInTheDocument();
     expect(screen.getByText('Lifecycle coverage')).toBeInTheDocument();
     expect(screen.getByText('2 missing gates')).toBeInTheDocument();
-    expect(screen.getByText('Ready for QA')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Lifecycle totals')).getByText('Ready for QA')).toBeInTheDocument();
     expect(screen.getByText('Waiting approvals')).toBeInTheDocument();
     expect(screen.getByText('Recent transitions')).toBeInTheDocument();
   });
 
-  it('applies immediate filter combinations while debouncing only search text', async () => {
+  it('applies button-based filter combinations while debouncing query text', async () => {
     const user = userEvent.setup();
     mocks.lifecycle.portfolio.data.items[0].owner = { id: 'u-1', label: 'Ada' };
     render(<LifecyclePanel />);
 
-    await user.selectOptions(screen.getByLabelText('Status filter'), 'blocked');
-    await user.selectOptions(screen.getByLabelText('Phase filter'), 'qa');
-    await user.click(screen.getByRole('button', { name: 'Blocked only' }));
-    await user.click(screen.getByRole('button', { name: 'More filters' }));
-    await user.selectOptions(screen.getByLabelText('Risk filter'), 'high');
-    await user.selectOptions(screen.getByLabelText('Owner filter'), 'u-1');
+    await user.click(screen.getByRole('button', { name: 'QA' }));
+    await user.click(screen.getByRole('button', { name: 'Blocked' }));
+    await user.click(screen.getByRole('button', { name: 'Filters' }));
+    await user.click(within(screen.getByRole('group', { name: 'Status' })).getByRole('button', { name: 'Blocked' }));
+    await user.click(within(screen.getByRole('group', { name: 'Risk' })).getByRole('button', { name: 'High' }));
+    await user.click(within(screen.getByRole('group', { name: 'Owner' })).getByRole('button', { name: 'Ada' }));
 
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ status: 'blocked' });
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ phase: 'qa' });
@@ -183,18 +199,38 @@ describe('LifecyclePanel', () => {
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ risk: 'high' });
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ owner: 'u-1' });
 
-    await user.type(screen.getByPlaceholderText('Search specs'), 'release');
-    expect(mocks.lifecycle.updateFilters).not.toHaveBeenCalledWith({ search: 'release' }, true);
-    await waitFor(() => expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ search: 'release' }, true), { timeout: 800 });
+    await user.type(screen.getByRole('combobox', { name: 'Search and filter lifecycle specs' }), 'release');
+    expect(mocks.lifecycle.updateFilters).not.toHaveBeenCalledWith(expect.objectContaining({ search: 'release' }), true);
+    await waitFor(() => expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith(expect.objectContaining({ search: 'release' }), true), { timeout: 800 });
   });
 
-  it('announces active filters and resets the complete query in one click', async () => {
+  it('supports keyboard query autocomplete and maps tokens to validated filters', async () => {
+    const user = userEvent.setup();
+    render(<LifecyclePanel />);
+    const query = screen.getByRole('combobox', { name: 'Search and filter lifecycle specs' });
+    await user.type(query, 'status:awa');
+    expect(screen.getByRole('listbox', { name: 'Lifecycle query suggestions' })).toBeInTheDocument();
+    await user.keyboard('{Enter}');
+    expect(query).toHaveValue('status:awaiting_approval ');
+    await waitFor(() => expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith(expect.objectContaining({ status: 'awaiting_approval' }), true), { timeout: 800 });
+  });
+
+  it('commits a free-text query immediately on Enter without waiting for debounce', async () => {
+    const user = userEvent.setup();
+    render(<LifecyclePanel />);
+    const query = screen.getByRole('combobox', { name: 'Search and filter lifecycle specs' });
+    await user.type(query, 'release');
+    await user.keyboard('{Enter}');
+    expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith(expect.objectContaining({ search: 'release' }), true);
+  });
+
+  it('announces active filters as removable chips and clears the complete query', async () => {
     const user = userEvent.setup();
     mocks.lifecycle.filters = { sort: 'risk_desc', status: 'blocked', phase: 'qa', risk: 'high', blocked: true };
     render(<LifecyclePanel />);
-    expect(screen.getByRole('button', { name: 'More filters (4)' })).toBeInTheDocument();
-    expect(screen.getByText('4 active filters. Status: blocked. Phase: qa. Risk: high. Blocked only')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Reset all' }));
+    expect(screen.getByRole('button', { name: 'Remove Status: Blocked filter' })).toBeInTheDocument();
+    expect(screen.getByText('5 active filters. Status: Blocked. Phase: Qa. Risk: High. Blocked. View: Risk Desc')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Clear all' }));
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith(expect.objectContaining({
       search: undefined, status: undefined, phase: undefined, risk: undefined,
       owner: undefined, blocked: undefined, sort: 'current_view',
@@ -210,14 +246,14 @@ describe('LifecyclePanel', () => {
     mocks.lifecycle.savedViews = [savedView];
     mocks.lifecycle.saveView.mockReturnValue(savedView);
     render(<LifecyclePanel />);
-    await user.click(screen.getByRole('button', { name: 'More filters' }));
+    await user.click(screen.getByRole('button', { name: 'Filters' }));
 
     const name = screen.getByLabelText('View name');
     await user.type(name, 'Risk watch');
     await user.click(screen.getByRole('button', { name: 'Save current' }));
     expect(mocks.lifecycle.saveView).toHaveBeenCalledWith('Risk watch');
 
-    await user.selectOptions(screen.getByLabelText('Saved view'), 'view-1');
+    await user.click(screen.getByRole('button', { name: 'Risk watch' }));
     expect(mocks.lifecycle.applySavedView).toHaveBeenCalledWith(savedView);
     await user.clear(name);
     await user.type(name, 'Critical watch');
@@ -236,7 +272,8 @@ describe('LifecyclePanel', () => {
     render(<LifecyclePanel />);
     expect(screen.getByRole('heading', { name: 'No specs match the active filters' })).toBeInTheDocument();
     expect(screen.getByText('status: blocked · risk: critical')).toBeInTheDocument();
-    expect(screen.getByLabelText('Status filter')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Search and filter lifecycle specs' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove Status: Blocked filter' })).toBeInTheDocument();
   });
 
   it('keeps prior KPI data on refresh failure and retries without changing selection', async () => {
@@ -250,17 +287,23 @@ describe('LifecyclePanel', () => {
     expect(mocks.lifecycle.updateUrlState).not.toHaveBeenCalled();
   });
 
-  it('operates display toggles by keyboard and never calls lifecycle mutation APIs', async () => {
+  it('operates mode and preset toggles by keyboard without lifecycle mutations', async () => {
     const user = userEvent.setup();
     render(<LifecyclePanel />);
-    const blocked = screen.getByRole('button', { name: 'Blocked only' });
+    const blocked = screen.getByRole('button', { name: 'Blocked' });
     blocked.focus();
     await user.keyboard('{Enter}');
-    const compact = screen.getByRole('button', { name: 'Compact' });
-    compact.focus();
+    const readyForQa = screen.getByRole('button', { name: 'Ready for QA' });
+    readyForQa.focus();
+    await user.keyboard('{Enter}');
+    const matrix = screen.getByRole('button', { name: 'Matrix' });
+    matrix.focus();
     await user.keyboard(' ');
+    expect(mocks.lifecycle.prefetchFilters).toHaveBeenCalledWith({ blocked: true });
+    expect(mocks.lifecycle.prefetchFilters).toHaveBeenCalledWith({ phase: 'qa', blocked: false });
     expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ blocked: true });
-    expect(mocks.lifecycle.setCompact).toHaveBeenCalledWith(true);
+    expect(mocks.lifecycle.updateFilters).toHaveBeenCalledWith({ phase: 'qa', blocked: false });
+    expect(mocks.lifecycle.setMode).toHaveBeenCalledWith('matrix');
     expect(mocks.lifecycle.mutations.recompile).not.toHaveBeenCalled();
     expect(mocks.lifecycle.mutations.recordDecision).not.toHaveBeenCalled();
     expect(mocks.lifecycle.mutations.revokeDecision).not.toHaveBeenCalled();

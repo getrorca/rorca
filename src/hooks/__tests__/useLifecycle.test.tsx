@@ -18,6 +18,7 @@ import type {
   LifecycleSpecResponse,
 } from '../../types/lifecycle';
 import {
+  DEFAULT_LIFECYCLE_URL_STATE,
   LIFECYCLE_DISPLAY_PREFERENCES_KEY,
   LIFECYCLE_SAVED_VIEWS_KEY,
   lifecycleInvalidationTargets,
@@ -147,9 +148,14 @@ beforeEach(() => {
 describe('lifecycle URL and saved display state', () => {
   it('round-trips search, filters, sort, page, compact mode, spec, and phase', () => {
     const parsed = parseLifecycleUrlState(new URLSearchParams(
-      'search=release&status=blocked&specStatus=approved&phase=security&risk=critical&owner=u1&blocked=true&disposition=required&sort=risk_desc&page=4&limit=50&compact=1&spec=spec-a&phaseDetail=qa',
+      'search=release&status=blocked&specStatus=approved&phase=security&risk=critical&owner=u1&blocked=true&disposition=required&sort=risk_desc&page=4&limit=50&compact=1&mode=matrix&spec=spec-a&phaseDetail=qa',
     ));
     expect(parseLifecycleUrlState(serializeLifecycleUrlState(parsed))).toEqual(parsed);
+  });
+
+  it('defaults to Explorer and serializes Matrix as explicit URL state', () => {
+    expect(parseLifecycleUrlState(new URLSearchParams()).mode).toBe('explorer');
+    expect(serializeLifecycleUrlState({ ...DEFAULT_LIFECYCLE_URL_STATE, mode: 'matrix' }).get('mode')).toBe('matrix');
   });
 
   it('migrates legacy local storage, bounds views, and strips lifecycle truth', () => {
@@ -274,6 +280,50 @@ describe('useLifecycle controller', () => {
     act(() => result.current.updateFilters({ phase: 'qa' }));
     await waitFor(() => expect(result.current.pagination.page).toBe(1));
     expect(result.current.filters).toEqual(expect.objectContaining({ status: 'blocked', risk: 'high', phase: 'qa' }));
+  });
+
+  it('reuses a fresh prefetched portfolio without issuing a duplicate filter request', async () => {
+    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper() });
+    await waitFor(() => expect(result.current.portfolio.data).not.toBeNull());
+    mockPortfolio.mockClear();
+    const prefetched = { ...portfolio(), total: 7 };
+    mockPortfolio.mockResolvedValueOnce(prefetched);
+
+    await act(async () => {
+      await result.current.prefetchFilters({ blocked: true });
+    });
+    expect(mockPortfolio).toHaveBeenCalledTimes(1);
+    expect(mockPortfolio).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ blocked: true }),
+      { page: 1, limit: 25 },
+      expect.objectContaining({ silent: true }),
+    );
+
+    act(() => result.current.updateFilters({ blocked: true }));
+    await waitFor(() => expect(result.current.filters.blocked).toBe(true));
+    await waitFor(() => expect(result.current.portfolio.data?.total).toBe(7));
+    expect(result.current.portfolio.refreshing).toBe(false);
+    expect(result.current.portfolio.stale).toBe(false);
+    expect(mockPortfolio).toHaveBeenCalledTimes(1);
+  });
+
+  it('deduplicates and safely contains failed best-effort prefetches', async () => {
+    const { result } = renderHook(() => useLifecycle(), { wrapper: wrapper() });
+    await waitFor(() => expect(result.current.portfolio.data).not.toBeNull());
+    mockPortfolio.mockClear();
+    const pending = deferred<LifecyclePortfolioResponse>();
+    mockPortfolio.mockImplementationOnce(() => pending.promise);
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.prefetchFilters({ status: 'awaiting_approval' });
+      second = result.current.prefetchFilters({ status: 'awaiting_approval' });
+    });
+    expect(mockPortfolio).toHaveBeenCalledTimes(1);
+    pending.reject(new Error('Prefetch unavailable'));
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
   });
 
   it('clears drawer selections on workspace switching and ignores the obsolete response', async () => {
