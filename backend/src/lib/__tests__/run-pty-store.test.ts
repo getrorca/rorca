@@ -226,6 +226,32 @@ describe('run-pty-store generations', () => {
     expect(health?.output_truncated_at).toBeNull();
   });
 
+  it('recovers mixed-version legacy PTY rows appended after migration without granting control authority', async () => {
+    await execute(
+      `INSERT INTO run_pty_sessions
+        (run_id, workspace_id, cwd, agent_type, cols, rows, status, started_at, updated_at)
+       VALUES ($1, $2, $3, 'pi', 80, 24, 'exited', NOW(), NOW())`,
+      [runId, workspaceId, process.cwd()],
+    );
+    await execute(
+      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk)
+       VALUES ($1, 1, $2), ($1, 2, $3)`,
+      [runId, Buffer.from('legacy-one'), Buffer.from('legacy-two')],
+    );
+
+    const firstRead = await getRunPtyGeneration(runId);
+    const reconnectRead = await getRunPtyGeneration(runId);
+    expect(firstRead).toMatchObject({
+      storyId: '__legacy__', attempt: 0, status: 'legacy', isActive: false,
+      source: 'legacy', replaySource: 'legacy_pty_output',
+    });
+    expect(reconnectRead).toEqual(firstRead);
+    expect(firstRead?.generationId).toMatch(/^[0-9a-f-]{36}$/);
+    await expect(getRunPtyGeneration(runId, firstRead?.generationToken)).resolves.toBeNull();
+    const replay = await listRunPtyChunks(runId, 0, 10, firstRead);
+    expect(replay.map(row => row.chunk.toString())).toEqual(['legacy-one', 'legacy-two']);
+  });
+
   it('reads untouched run-only bytes through an explicit legacy generation', async () => {
     const legacyToken = crypto.randomUUID();
     const legacy = await queryOne<{ id: string }>(

@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { createHash } from 'crypto';
 import { gunzipSync, gzipSync } from 'zlib';
 import { execute, query, queryOne, transaction } from '../db/index';
 import { ConflictError, ForbiddenError, NotFoundError } from './errors';
@@ -796,8 +797,17 @@ function decodeRunPtyChunkRows(rows: StoredRunPtyChunkRow[], generation: PtyGene
   }));
 }
 
+function deterministicLegacyUuid(runId: number, purpose: 'generation' | 'token'): string {
+  const hex = createHash('sha256').update(`rorca:pty-legacy:${purpose}:${runId}`).digest('hex').slice(0, 32);
+  // RFC 4122-shaped deterministic identifier. It is presentation identity only:
+  // legacy generations are inactive and can never authorize input/resize.
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
 /** Active generation wins; after exit the newest native generation wins; only
- * runs with no native generation fall back to their migration-created sentinel. */
+ * runs with no native generation fall back to their migration-created sentinel.
+ * A mixed-version writer can append legacy rows after the additive migration ran,
+ * so reads also synthesize a stable inactive identity without mutating evidence. */
 export async function getRunPtyGeneration(runId: number, generationToken?: string | null): Promise<PtyGenerationIdentity | null> {
   const params: unknown[] = [runId];
   const tokenFilter = generationToken ? 'AND generation_token = $2' : '';
@@ -808,7 +818,30 @@ export async function getRunPtyGeneration(runId: number, generationToken?: strin
      ORDER BY is_active DESC, (source = 'native') DESC, started_at DESC, id DESC LIMIT 1`,
     params,
   );
-  return row ? toGenerationIdentity(row) : null;
+  if (row) return toGenerationIdentity(row);
+  // A supplied credential must match a durable generation exactly. Never turn
+  // an unknown/stale token into legacy read or control authority.
+  if (generationToken) return null;
+
+  const legacy = await queryOne<{ has_pty: boolean; has_ansi: boolean }>(
+    `SELECT
+       (EXISTS (SELECT 1 FROM run_pty_sessions WHERE run_id = $1)
+        OR EXISTS (SELECT 1 FROM run_pty_output_chunks WHERE run_id = $1 AND generation_id IS NULL)) AS has_pty,
+       EXISTS (SELECT 1 FROM run_output_chunks WHERE run_id = $1) AS has_ansi`,
+    [runId],
+  );
+  if (!legacy?.has_pty && !legacy?.has_ansi) return null;
+  return {
+    generationId: deterministicLegacyUuid(runId, 'generation'),
+    generationToken: deterministicLegacyUuid(runId, 'token'),
+    runId,
+    storyId: '__legacy__',
+    attempt: 0,
+    status: 'legacy',
+    isActive: false,
+    source: 'legacy',
+    replaySource: legacy.has_pty ? 'legacy_pty_output' : 'legacy_run_output',
+  };
 }
 
 export async function listRunPtyChunks(
