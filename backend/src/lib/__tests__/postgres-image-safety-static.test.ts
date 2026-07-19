@@ -39,7 +39,7 @@ test('fresh PostgreSQL image initializes extensions only and cannot copy a seed'
 });
 
 test('Apache AGE is exact-version pinned and package-integrity verified without disabled TLS', () => {
-  expect(postgresDockerfile).toMatch(/ARG APACHE_AGE_PACKAGE_VERSION=\d+\.\d+\.\d+-[^\s]+/);
+  expect(postgresDockerfile).toMatch(/ARG APACHE_AGE_PACKAGE_VERSION=\d+\.\d+\.\d+(?:~[0-9A-Za-z.+:-]+)?-[^\s]+/);
   expect(postgresDockerfile).toContain('"postgresql-16-age=${APACHE_AGE_PACKAGE_VERSION}"');
   expect(postgresDockerfile).toContain("dpkg-query -W -f='${Version}' postgresql-16-age");
   expect(postgresDockerfile).not.toContain('GIT_SSL_NO_VERIFY');
