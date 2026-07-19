@@ -77,6 +77,10 @@
       "reason": "PTY release evidence and remaining manual gates apply to both repositories."
     },
     {
+      "path": "docs/wave-parallel-experimental-gate.md",
+      "reason": "Experimental parallel-wave safety and rollout guidance applies to both repositories."
+    },
+    {
       "path": "docs/pty-recovery-operations.md",
       "reason": "PTY recovery operations and rollback guidance apply to both repositories."
     },
