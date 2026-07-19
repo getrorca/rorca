@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { AppendPtyTranscriptEventInput } from './pty-transcript-store';
+import { isStructuredPiModeEnabled } from './pty-feature-flags';
 import type { TerminalMode } from './terminal-mode';
 
 export const PI_STRUCTURED_PROFILE = 'rpc-jsonl-v1' as const;
@@ -47,7 +48,10 @@ export function detectPiStructuredCapability(version: string | null): PiStructur
 
 /** Native PTY modes are the reviewed operator-input fallback; all other Pi runs are structured. */
 export function resolvePiExecutionProfile(terminalMode: TerminalMode, operatorKeyboardInput = false): 'structured' | 'interactive' {
-  return operatorKeyboardInput || terminalMode === 'native-pty' || terminalMode === 'pty'
+  return !isStructuredPiModeEnabled()
+    || operatorKeyboardInput
+    || terminalMode === 'native-pty'
+    || terminalMode === 'pty'
     ? 'interactive'
     : 'structured';
 }

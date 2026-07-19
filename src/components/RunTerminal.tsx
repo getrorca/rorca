@@ -1400,6 +1400,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           pty_expected_max_latency_ms?: number | null;
           cursorReset?: boolean;
           cursor_reset?: boolean;
+          active?: boolean;
         };
         const nextReplaySource = meta.outputSource ?? meta.output_source ?? meta.ptyReplaySource ?? meta.pty_replay_source;
         const nextGenerationId = meta.outputGenerationId ?? meta.output_generation_id
@@ -1445,7 +1446,30 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         }
         ptyGenerationIdRef.current = typeof nextGenerationId === 'string' ? nextGenerationId : null;
         persistReceivedGenerationId(runId, ptyGenerationIdRef.current);
-        ptyGenerationTokenRef.current = typeof nextGenerationToken === 'string' ? nextGenerationToken : null;
+        if (typeof nextGenerationToken === 'string') {
+          // Mixed-version fallback: older servers supplied this credential in
+          // run_meta. New servers keep credentials out of SSE and resolve them
+          // through the authenticated operator control endpoint below.
+          ptyGenerationTokenRef.current = nextGenerationToken;
+        }
+        const generationIsActive = meta.active === true
+          || meta.ptyGenerationActive === true
+          || meta.pty_generation_active === true;
+        if (generationIsActive && typeof nextGenerationId === 'string' && typeof nextGenerationToken !== 'string') {
+          const expectedGenerationId = nextGenerationId;
+          void apiFetch<{ generationId: string; generationToken: string }>(
+            `/api/pipeline/runs/${runId}/pty/control`,
+            { silent: true },
+          ).then(control => {
+            if (ptyGenerationIdRef.current !== expectedGenerationId
+              || control.generationId !== expectedGenerationId) return;
+            ptyGenerationTokenRef.current = control.generationToken;
+            setTerminalMeta(previous => ({ ...previous, ptyGenerationToken: control.generationToken }));
+          }).catch(() => {
+            // Legacy replay and read-only attachment remain available when the
+            // control endpoint is absent or the generation has already closed.
+          });
+        }
         if (isOutputReplaySource(nextReplaySource)) {
           outputReplaySourceRef.current = nextReplaySource;
           persistReceivedOutputSource(runId, nextReplaySource);

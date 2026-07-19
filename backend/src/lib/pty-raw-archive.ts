@@ -18,6 +18,7 @@ import {
   RawArchiveWriteError,
 } from './errors';
 import { logger } from './logger';
+import { recordPtyByteTelemetry } from './pty-operational-telemetry';
 import type { PtyGenerationRef } from './run-pty-store';
 
 export const PTY_RAW_ARCHIVE_CONTRACT_VERSION = 1 as const;
@@ -248,7 +249,7 @@ async function listSegmentRows(manifestId: string): Promise<ArchiveSegmentRow[]>
   );
 }
 
-async function persistCompleteSegment(manifestId: string, generationId: string, segment: PendingSegment): Promise<void> {
+async function persistCompleteSegment(manifest: ArchiveManifestRow, segment: PendingSegment): Promise<void> {
   const compressed = fs.readFileSync(segment.absolutePath);
   const compressedSize = compressed.length;
   const digest = hashContent(compressed);
@@ -265,16 +266,22 @@ async function persistCompleteSegment(manifestId: string, generationId: string, 
          compressed_size = EXCLUDED.compressed_size, sha256 = EXCLUDED.sha256,
          completion_state = 'complete', first_byte_at = EXCLUDED.first_byte_at,
          completed_at = NOW(), verified_at = NULL, pruned_at = NULL`,
-      [manifestId, generationId, segment.segmentIndex, segment.relativePath,
+      [manifest.id, manifest.generation_id, segment.segmentIndex, segment.relativePath,
         segment.rawStart, segment.rawEnd, rawSize, compressedSize, digest, segment.firstByteAt],
     );
     await client.query(
       `UPDATE pty_raw_archive_manifests
        SET next_raw_offset = GREATEST(next_raw_offset, $2), updated_at = NOW()
        WHERE id = $1`,
-      [manifestId, segment.rawEnd],
+      [manifest.id, segment.rawEnd],
     );
   });
+  recordPtyByteTelemetry(
+    { generationId: manifest.generation_id, runId: Number(manifest.run_id), storyId: manifest.story_id },
+    'archived',
+    'archive',
+    rawSize,
+  );
 }
 
 /** Exact synchronous file writes plus serialized asynchronous manifest commits. */
@@ -385,7 +392,7 @@ export class RawPtyArchiveWriter {
     if (!segment) return;
     this.current = null;
     this.pendingPersistence = this.pendingPersistence
-      .then(() => persistCompleteSegment(this.manifest.id, this.manifest.generation_id, segment))
+      .then(() => persistCompleteSegment(this.manifest, segment))
       .catch(async (error) => {
         this.failure = error instanceof RawArchiveWriteError
           ? error
@@ -739,8 +746,12 @@ export async function pruneExpiredRawPtyArchives(limit = 100): Promise<{ pruned:
   const boundedLimit = Math.min(500, Math.max(1, Math.floor(limit)));
   const manifests = await query<ArchiveManifestRow>(
     `SELECT m.*, w.path AS workspace_path
-     FROM pty_raw_archive_manifests m JOIN workspaces w ON w.id = m.workspace_id
-     WHERE m.retention_expires_at <= NOW() AND m.completion_state <> 'pruned'
+     FROM pty_raw_archive_manifests m
+     JOIN workspaces w ON w.id = m.workspace_id
+     JOIN pty_generations g ON g.id = m.generation_id
+     WHERE m.completed_at IS NOT NULL AND NOT m.referenced_by_manifest
+       AND g.is_active = FALSE
+       AND m.retention_expires_at <= NOW() AND m.completion_state <> 'pruned'
      ORDER BY m.retention_expires_at ASC LIMIT $1`,
     [boundedLimit],
   );

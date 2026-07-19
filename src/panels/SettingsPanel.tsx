@@ -15,7 +15,7 @@ export type SettingsTab =
   // Workspace group
   | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context' | 'github'
   // Execution group
-  | 'providers' | 'direction' | 'pipeline'
+  | 'providers' | 'direction' | 'pipeline' | 'pty-recovery'
   // FinOps group
   | 'finops'
   // System group
@@ -77,6 +77,8 @@ const KnowledgeGraphSection = lazy(() =>
   import('./settings/KnowledgeGraphSection').then((m) => ({ default: m.KnowledgeGraphSection })),
 );
 
+const PtyRecoverySettingsTab = lazy(() => import('./settings/PtyRecoverySettingsTab'));
+
 
 // ─── Loading fallback ────────────────────────────────────────────────────────
 
@@ -113,6 +115,7 @@ export default function SettingsPanel() {
           {activeTab === 'providers' && <ProviderSettingsTab />}
           {activeTab === 'direction' && <DirectionSettings.WsDirectionSection />}
           {activeTab === 'pipeline' && <DirectionSettings.WsPipelineSection />}
+          {activeTab === 'pty-recovery' && <PtyRecoverySettingsTab />}
           {/* FinOps group */}
           {activeTab === 'finops' && <FinOpsSettingsTab />}
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}

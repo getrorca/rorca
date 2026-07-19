@@ -82,6 +82,7 @@ import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, i
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
+import { isPtyGenerationReaderEnabled } from '../lib/pty-feature-flags';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
@@ -367,8 +368,6 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
   return {
     ptyGenerationId: health.generationId,
     pty_generation_id: health.generationId,
-    ptyGenerationToken: health.generationToken,
-    pty_generation_token: health.generationToken,
     ptyStoryId: health.storyId,
     pty_story_id: health.storyId,
     ptyAttempt: health.attempt,
@@ -391,8 +390,6 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_last_output_at: health.last_output_at,
     ptyLastHeartbeatAt: health.last_heartbeat_at,
     pty_last_heartbeat_at: health.last_heartbeat_at,
-    ptyCompletionMarker: health.completion_marker,
-    pty_completion_marker: health.completion_marker,
     ptyCompletionMarkerSeen: Boolean(health.completion_marker_seen_at),
     pty_completion_marker_seen: Boolean(health.completion_marker_seen_at),
     ptyCompletionMarkerSeenAt: health.completion_marker_seen_at,
@@ -401,14 +398,14 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_completion_file_seen: Boolean(health.completion_file_seen_at),
     ptyCompletionFileSeenAt: health.completion_file_seen_at,
     pty_completion_file_seen_at: health.completion_file_seen_at,
-    ptyCompletionFileError: health.completion_file_error,
-    pty_completion_file_error: health.completion_file_error,
+    ptyCompletionFileError: health.completion_file_error ? 'completion_file_invalid' : null,
+    pty_completion_file_error: health.completion_file_error ? 'completion_file_invalid' : null,
     ptyTerminalMarkerSeen: Boolean(health.terminal_marker_seen_at),
     pty_terminal_marker_seen: Boolean(health.terminal_marker_seen_at),
     ptyPromptReadinessStatus: health.prompt_readiness_status,
     pty_prompt_readiness_status: health.prompt_readiness_status,
-    ptyPromptReadinessReason: health.prompt_readiness_reason,
-    pty_prompt_readiness_reason: health.prompt_readiness_reason,
+    ptyPromptReadinessReason: health.prompt_readiness_reason ? 'readiness_state_recorded' : null,
+    pty_prompt_readiness_reason: health.prompt_readiness_reason ? 'readiness_state_recorded' : null,
     ptyPromptReadyAt: health.prompt_ready_at,
     pty_prompt_ready_at: health.prompt_ready_at,
     ptyPromptInjectedAt: health.prompt_injected_at,
@@ -419,6 +416,8 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_next_output_sequence: Number(health.next_output_sequence ?? 1),
     ptyCheckpointSequence: Number(health.checkpoint_sequence ?? 0),
     pty_checkpoint_sequence: Number(health.checkpoint_sequence ?? 0),
+    ptyCheckpointAgeMs: health.checkpoint_at ? Math.max(0, Date.now() - Date.parse(health.checkpoint_at)) : null,
+    pty_checkpoint_age_ms: health.checkpoint_at ? Math.max(0, Date.now() - Date.parse(health.checkpoint_at)) : null,
     ptyFirstRetainedSequence: Number(health.first_retained_sequence ?? 1),
     pty_first_retained_sequence: Number(health.first_retained_sequence ?? 1),
     ptyRetainedOutputBytes: Number(health.retained_output_bytes ?? 0),
@@ -6949,6 +6948,31 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/pipeline/runs/{runId}/pty/control:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Resolve the active PTY generation control credential over authenticated HTTP
+ *     operationId: getPipelinePtyControl
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "The generation credential grants terminal input/resize authority and must remain operator-only and outside SSE telemetry."
+ *     responses:
+ *       200: { description: Active generation identity and control credential }
+ *       404: { description: Run or active PTY generation not found }
+ */
+router.get('/runs/:runId/pty/control', async (req: Request, res: Response) => {
+  const runId = Number(req.params.runId);
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!isSuperUser(req.user)) throw new ForbiddenError('PTY controls require local operator admin access');
+  const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]);
+  if (!run) throw new NotFoundError('Run not found');
+  await assertPipelineWorkspaceAccess(req, run.workspace_id);
+  const generation = await getRunPtyGeneration(runId);
+  if (!generation?.isActive) throw new NotFoundError('Active PTY generation not found');
+  res.json({ generationId: generation.generationId, generationToken: generation.generationToken });
+});
+
+/**
+ * @swagger
  * /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}:
  *   get:
  *     tags: [Pipeline]
@@ -7128,7 +7152,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
   let hasResumeCursor = resumeCursor !== null;
   let lastSequence = resumeCursor?.sequence ?? 0;
-  const preselectedPtyGeneration = isPtyTerminalMode(normalizeTerminalMode(runRow.terminal_mode))
+  const generationReaderEnabled = isPtyGenerationReaderEnabled();
+  const preselectedPtyGeneration = isPtyTerminalMode(normalizeTerminalMode(runRow.terminal_mode)) && generationReaderEnabled
     ? await getRunPtyGeneration(runId, requestedGenerationToken)
     : null;
   if (requestedGenerationToken && !preselectedPtyGeneration) {
@@ -7177,7 +7202,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const requestedTerminalMode = runMetadata.terminalMode;
   const terminalStatuses = ['done', 'failed', 'partial_failure', 'cancelled'];
   const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
-  const requestedPtyMode = isPtyTerminalMode(requestedTerminalMode);
+  const configuredPtyMode = isPtyTerminalMode(requestedTerminalMode);
+  const requestedPtyMode = configuredPtyMode && generationReaderEnabled;
   let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
   const ptyStatusAtOpen = selectedPtyGeneration?.status ?? null;
   // An active PTY run is legitimately session-pending while context routing and
@@ -7210,17 +7236,21 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   } else if (hasResumeCursor) {
     lastConfirmedCursor = encodeRunOutputCursor(replaySource, outputGenerationId, lastSequence);
   }
-  const ptyFallbackActive = requestedPtyMode && !isPty;
+  const ptyFallbackActive = configuredPtyMode && !isPty;
   const ptyFallbackReason = ptyFallbackActive
-    ? PTY_AVAILABLE
-      ? 'pty-session-unavailable'
-      : 'node-pty-unavailable'
+    ? !generationReaderEnabled
+      ? 'generation-reader-disabled'
+      : PTY_AVAILABLE
+        ? 'pty-session-unavailable'
+        : 'node-pty-unavailable'
     : null;
   const ptyUnavailableHint = ptyFallbackReason === 'node-pty-unavailable'
     ? PTY_UNAVAILABLE_HINT
     : ptyFallbackReason === 'pty-session-unavailable'
       ? 'Inspect engine startup logs; the requested PTY session was never created.'
-      : null;
+      : ptyFallbackReason === 'generation-reader-disabled'
+        ? 'Legacy terminal replay is active; generation checkpoints and transcripts are temporarily unavailable.'
+        : null;
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();
     return;

@@ -1202,6 +1202,63 @@ export function sanitizeTranscriptPayload(
   };
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// 7. PTY OPERATIONAL TELEMETRY (closed, content-free labels)
+// ════════════════════════════════════════════════════════════════════════════
+
+export const PTY_BYTE_CLASSES = [
+  'observed',
+  'archived',
+  'transcripted',
+  'compacted',
+  'dropped',
+  'unrecoverable',
+] as const;
+export type PtyByteClass = typeof PTY_BYTE_CLASSES[number];
+
+export const PTY_TELEMETRY_COMPONENTS = [
+  'capture',
+  'archive',
+  'transcript',
+  'checkpoint',
+  'replay',
+  'retention',
+] as const;
+export type PtyTelemetryComponent = typeof PTY_TELEMETRY_COMPONENTS[number];
+
+export interface SafePtyTelemetryLabels {
+  byte_class: PtyByteClass;
+  component: PtyTelemetryComponent;
+}
+
+/**
+ * The sole label boundary for PTY metrics. It reconstructs a new object from
+ * closed enums rather than redacting arbitrary values, so prompts, terminal
+ * content, generation tokens, and paths can never become metric labels.
+ */
+export function safePtyTelemetryLabels(
+  byteClass: PtyByteClass,
+  component: PtyTelemetryComponent,
+): SafePtyTelemetryLabels {
+  if (!PTY_BYTE_CLASSES.includes(byteClass) || !PTY_TELEMETRY_COMPONENTS.includes(component)) {
+    throw new ValidationError('Unsupported PTY telemetry label');
+  }
+  return { byte_class: byteClass, component };
+}
+
+/** Keep only bounded numeric diagnostics suitable for logs, SSE, and JSONB. */
+export function safePtyTelemetryMeasurements(
+  input: Record<string, unknown>,
+): Record<string, number | boolean | null> {
+  const output: Record<string, number | boolean | null> = {};
+  for (const [key, value] of Object.entries(input).slice(0, 20)) {
+    if (!/^[a-z][a-z0-9_]{0,47}$/.test(key)) continue;
+    if (typeof value === 'boolean' || value === null) output[key] = value;
+    if (typeof value === 'number' && Number.isFinite(value)) output[key] = Math.max(0, value);
+  }
+  return output;
+}
+
 // ─── Compatibility exports for context-capture sidecar APIs ─────────────────
 export const CONTEXT_SAFETY_CONTRACT_VERSION = 'rorca-context-safety/v1';
 

@@ -19,6 +19,7 @@ import {
   ValidationError,
 } from './errors';
 import { logger } from './logger';
+import { recordPtyByteTelemetry } from './pty-operational-telemetry';
 import { broadcastTopic } from './sse-hub';
 import type { PtyGenerationRef } from './run-pty-store';
 
@@ -274,6 +275,12 @@ export async function appendPtyTranscriptEvent(
       event,
       rehydrateRequired: true,
     });
+    recordPtyByteTelemetry(
+      { generationId: generation.generationId, runId: generation.runId, storyId: event.storyId },
+      'transcripted',
+      'transcript',
+      event.payloadBytes,
+    );
     return event;
   } catch (error) {
     if (error instanceof ConflictError || error instanceof ValidationError || error instanceof TranscriptPersistenceError) {

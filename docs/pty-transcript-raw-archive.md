@@ -1,5 +1,7 @@
 # PTY transcript and restricted raw archive
 
+For capacity, alerts, independent retention, mixed-version rollout, repair, and non-destructive rollback, see [`pty-recovery-operations.md`](pty-recovery-operations.md).
+
 Rorca stores two independent generation-scoped terminal records:
 
 1. **Structured transcript (`v1`)** — readable model lines, structured tool calls/results, host notices, errors, and explicit gaps. Events are append-only and ordered by `(generation_id, seq)`. Terminal-normalized rows are presentation evidence and are never lifecycle authority. Story completion still comes from the completion file, process exit, merge, and validation gates.
@@ -34,6 +36,6 @@ Environment controls:
 - `RORCA_PTY_ARCHIVE_SEGMENT_BYTES`: raw bytes per segment; bounded to 4 KiB–64 MiB (default 8 MiB).
 - `RORCA_PTY_ARCHIVE_RETENTION_DAYS`: restricted-evidence retention; bounded to 1–3650 days (default 30).
 
-On startup, Rorca performs a bounded reconciliation of manifests left in `writing` after their generation closed. It scans only the contained generation directory, reconstructs byte ranges from valid gzip members, recomputes shared context-safety hashes, preserves valid earlier segments, and marks missing/corrupt ranges explicitly. A separate bounded startup prune removes expired generation directories and marks their manifests/segments `pruned`.
+On startup, Rorca performs a bounded reconciliation of manifests left in `writing` after their generation closed. It scans only the contained generation directory, reconstructs byte ranges from valid gzip members, recomputes shared context-safety hashes, preserves valid earlier segments, and marks missing/corrupt ranges explicitly. Retention is an explicit schema-gated daily operation; it independently prunes only completed, unreferenced artifacts from inactive generations and preserves generation/manifests.
 
 Writer, manifest, transcript, integrity, and prune failures use `AppError` subclasses and structured logging. They never manufacture agent completion or change the agent process/story result. Archive completion means only that the evidence writer closed successfully.

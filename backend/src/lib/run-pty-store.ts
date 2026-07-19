@@ -10,6 +10,7 @@ import { execute, query, queryOne, transaction } from '../db/index';
 import { ConflictError, ForbiddenError, NotFoundError } from './errors';
 import { logger } from './logger';
 import { PtyCheckpointCoordinator, type PtyCheckpointCoordinatorOptions } from './pty-checkpoint-store';
+import { recordPtyByteTelemetry, recordPtyReplayLatency } from './pty-operational-telemetry';
 
 const CHUNK_SIZE = 4 * 1024;
 const GZIP_COMPRESSION = 'gzip';
@@ -338,10 +339,11 @@ export async function appendRunPtyOutputBatch(
     return { chunks: [], retainedBytes: 0, retentionExceeded: false };
   }
 
-  return transaction(async (client) => {
-    const session = await client.query<RunPtyOutputSessionRow>(
+  let telemetryStoryId = 'unknown';
+  const result = await transaction(async (client) => {
+    const session = await client.query<RunPtyOutputSessionRow & { story_id: string }>(
       `SELECT total_output_bytes, dropped_output_bytes, retained_output_bytes,
-              next_output_sequence
+              next_output_sequence, story_id
        FROM pty_generations
        WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
        FOR UPDATE`,
@@ -349,6 +351,7 @@ export async function appendRunPtyOutputBatch(
     );
     const row = session.rows[0];
     if (!row) throw new ConflictError('PTY generation is no longer active');
+    telemetryStoryId = row.story_id;
 
     // The durable generation counter is authoritative after restart. Every raw
     // slice receives a logical sequence even when the delta budget is full; its
@@ -412,6 +415,13 @@ export async function appendRunPtyOutputBatch(
     );
     return { chunks: acceptedChunks, retainedBytes, retentionExceeded };
   });
+  recordPtyByteTelemetry(
+    { generationId: generation.generationId, runId: generation.runId, storyId: telemetryStoryId },
+    'observed',
+    'capture',
+    rawBytes,
+  );
+  return result;
 }
 
 export async function appendRunPtyOutput(
@@ -807,6 +817,7 @@ export async function listRunPtyChunks(
   limit = getRunPtyOutputLimits().replayBatchChunks,
   selectedGeneration?: PtyGenerationIdentity | null,
 ): Promise<RunPtyChunkRow[]> {
+  const replayStartedAt = Date.now();
   const boundedLimit = Math.min(4_096, Math.max(1, Math.floor(limit)));
   const generation = selectedGeneration ?? await getRunPtyGeneration(runId);
   if (!generation) return [];
@@ -829,7 +840,9 @@ export async function listRunPtyChunks(
          ORDER BY sequence ASC LIMIT $4`,
         [runId, generation.generationId, afterSequence, boundedLimit],
       );
-  return decodeRunPtyChunkRows(rows, generation);
+  const decoded = decodeRunPtyChunkRows(rows, generation);
+  recordPtyReplayLatency(Date.now() - replayStartedAt);
+  return decoded;
 }
 
 /** Bounded tail replay for first-time terminal attachments. */
@@ -838,6 +851,7 @@ export async function listRecentRunPtyChunks(
   limit: number,
   selectedGeneration?: PtyGenerationIdentity | null,
 ): Promise<RunPtyChunkRow[]> {
+  const replayStartedAt = Date.now();
   const generation = selectedGeneration ?? await getRunPtyGeneration(runId);
   if (!generation) return [];
   const table = generation.source === 'legacy' && generation.replaySource === 'legacy_run_output'
@@ -857,7 +871,9 @@ export async function listRecentRunPtyChunks(
      ) recent ORDER BY sequence ASC`,
     params,
   );
-  return decodeRunPtyChunkRows(rows, generation);
+  const decoded = decodeRunPtyChunkRows(rows, generation);
+  recordPtyReplayLatency(Date.now() - replayStartedAt);
+  return decoded;
 }
 
 export async function getRunPtySequence(generation: PtyGenerationRef): Promise<number> {

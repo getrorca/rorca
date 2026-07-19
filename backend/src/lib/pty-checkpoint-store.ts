@@ -7,6 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { execute, query, transaction } from '../db/index';
+import { safePtyTelemetryMeasurements } from './context-safety';
 import { CheckpointCorruptionError } from './errors';
 import { logger } from './logger';
 import {
@@ -15,6 +16,8 @@ import {
   PtyCheckpointEmulator,
   type EncodedPtyCheckpoint,
 } from './pty-checkpoint-codec';
+import { isPtyCheckpointCompactionEnabled } from './pty-feature-flags';
+import { recordPtyByteTelemetry } from './pty-operational-telemetry';
 import { broadcastTopic } from './sse-hub';
 import type { PtyGenerationRef } from './run-pty-store';
 
@@ -81,20 +84,19 @@ export function emitPtyCaptureTelemetry(
   generation: PtyGenerationRef & { storyId?: string },
   details: Record<string, unknown> = {},
 ): void {
+  const measurements = safePtyTelemetryMeasurements(details);
   const payload = {
     event,
     run_id: generation.runId,
-    generation_id: generation.generationId,
-    story_id: generation.storyId ?? 'unknown',
     occurred_at: new Date().toISOString(),
-    ...details,
+    measurements,
   };
   logger.warn({ component: 'pty-capture', ...payload }, '[pty-capture] telemetry');
   broadcastTopic(`${runPtyCheckpointTopic(generation.runId)}:telemetry`, payload);
   void execute(
     `INSERT INTO pty_capture_telemetry (generation_id, run_id, story_id, event_type, details)
      VALUES ($1, $2, $3, $4, $5::jsonb)`,
-    [generation.generationId, generation.runId, generation.storyId ?? 'unknown', event, JSON.stringify(details)],
+    [generation.generationId, generation.runId, generation.storyId ?? 'unknown', event, JSON.stringify({ measurements })],
   ).catch((error: unknown) => {
     logger.warn({ error, event, runId: generation.runId }, '[pty-capture] durable telemetry unavailable');
   });
@@ -281,6 +283,13 @@ async function persistCheckpointAndEvict(
     stage: 'checkpoint_prune', reason: error instanceof Error ? error.message : String(error),
   }));
 
+  recordPtyByteTelemetry(
+    { generationId: generation.generationId, runId: generation.runId, storyId: generation.storyId },
+    'compacted',
+    'checkpoint',
+    committed.compactedBytes,
+  );
+
   const event: PtyCheckpointReadyEvent = {
     run_id: generation.runId,
     story_id: generation.storyId,
@@ -336,7 +345,8 @@ export class PtyCheckpointCoordinator {
       this.latestSequence = Math.max(this.latestSequence, item.sequence);
     }
     this.retainedBytes = retainedBytes;
-    if (this.latestSequence > 0
+    if (isPtyCheckpointCompactionEnabled()
+      && this.latestSequence > 0
       && this.emulator.isCheckpointBoundary()
       && (retentionExceeded || retainedBytes >= this.checkpointTriggerBytes)) {
       this.requestCheckpoint(this.latestSequence);
@@ -345,7 +355,9 @@ export class PtyCheckpointCoordinator {
 
   resize(cols: number, rows: number): void {
     this.emulator.resize(cols, rows);
-    if (this.latestSequence > this.committedSequence && this.emulator.isCheckpointBoundary()) {
+    if (isPtyCheckpointCompactionEnabled()
+      && this.latestSequence > this.committedSequence
+      && this.emulator.isCheckpointBoundary()) {
       this.requestCheckpoint(this.latestSequence);
     }
   }
@@ -353,11 +365,19 @@ export class PtyCheckpointCoordinator {
   noteCaptureLoss(bytes: number, reason: 'queue_overflow' | 'database_latency'): void {
     if (bytes <= 0) return;
     emitPtyCaptureTelemetry(reason, this.generation, { lost_bytes: bytes });
-    emitPtyCaptureTelemetry('capture_loss', this.generation, { lost_bytes: bytes, reason });
+    emitPtyCaptureTelemetry('capture_loss', this.generation, { lost_bytes: bytes });
+    recordPtyByteTelemetry(
+      { generationId: this.generation.generationId, runId: this.generation.runId, storyId: this.generation.storyId },
+      'dropped',
+      'capture',
+      bytes,
+    );
   }
 
   async flush(): Promise<void> {
-    if (this.latestSequence > this.committedSequence && this.emulator.isCheckpointBoundary()) {
+    if (isPtyCheckpointCompactionEnabled()
+      && this.latestSequence > this.committedSequence
+      && this.emulator.isCheckpointBoundary()) {
       this.requestCheckpoint(this.latestSequence);
     }
     while (this.checkpointPromise) {
@@ -373,6 +393,7 @@ export class PtyCheckpointCoordinator {
   }
 
   private requestCheckpoint(sequence: number): void {
+    if (!isPtyCheckpointCompactionEnabled()) return;
     this.requestedSequence = Math.max(this.requestedSequence, sequence);
     if (this.checkpointPromise) return;
     // Calling capture immediately places the emulator snapshot barrier before

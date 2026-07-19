@@ -927,6 +927,49 @@ export function sanitizeTranscriptPayload(value, maxBytes = MAX_TRANSCRIPT_PAYLO
         truncated,
     };
 }
+// ════════════════════════════════════════════════════════════════════════════
+// 7. PTY OPERATIONAL TELEMETRY (closed, content-free labels)
+// ════════════════════════════════════════════════════════════════════════════
+export const PTY_BYTE_CLASSES = [
+    'observed',
+    'archived',
+    'transcripted',
+    'compacted',
+    'dropped',
+    'unrecoverable',
+];
+export const PTY_TELEMETRY_COMPONENTS = [
+    'capture',
+    'archive',
+    'transcript',
+    'checkpoint',
+    'replay',
+    'retention',
+];
+/**
+ * The sole label boundary for PTY metrics. It reconstructs a new object from
+ * closed enums rather than redacting arbitrary values, so prompts, terminal
+ * content, generation tokens, and paths can never become metric labels.
+ */
+export function safePtyTelemetryLabels(byteClass, component) {
+    if (!PTY_BYTE_CLASSES.includes(byteClass) || !PTY_TELEMETRY_COMPONENTS.includes(component)) {
+        throw new ValidationError('Unsupported PTY telemetry label');
+    }
+    return { byte_class: byteClass, component };
+}
+/** Keep only bounded numeric diagnostics suitable for logs, SSE, and JSONB. */
+export function safePtyTelemetryMeasurements(input) {
+    const output = {};
+    for (const [key, value] of Object.entries(input).slice(0, 20)) {
+        if (!/^[a-z][a-z0-9_]{0,47}$/.test(key))
+            continue;
+        if (typeof value === 'boolean' || value === null)
+            output[key] = value;
+        if (typeof value === 'number' && Number.isFinite(value))
+            output[key] = Math.max(0, value);
+    }
+    return output;
+}
 // ─── Compatibility exports for context-capture sidecar APIs ─────────────────
 export const CONTEXT_SAFETY_CONTRACT_VERSION = 'rorca-context-safety/v1';
 export const DEFAULT_CONTEXT_MAX_FILE_BYTES = 256 * 1024;
