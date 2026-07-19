@@ -14,10 +14,9 @@ import {
   type StoryExecutionAdapterRequest,
   type StoryExecutionAdapterResult,
 } from '../lib/story-execution-adapter';
+import { resolveWaveSafetyLimits, type WaveSafetyLimits } from '../lib/wave-execution-safety';
 
-const MAX_STREAM_BYTES = 32 * 1024;
 const TERMINATION_GRACE_MS = 150;
-const REAP_WAIT_MS = 1_500;
 const sourceRoot = fs.existsSync(path.resolve(process.cwd(), 'backend', 'src'))
   ? path.resolve(process.cwd(), 'backend', 'src')
   : path.resolve(process.cwd(), 'src');
@@ -166,14 +165,21 @@ function sanitizedFixtureEnv(root: string): NodeJS.ProcessEnv {
 
 function killProcessTree(child: ChildProcess, descendantPids: ReadonlySet<number>, signal: NodeJS.Signals): void {
   const pid = child.pid;
-  if (process.platform !== 'win32' && pid && pid > 0) {
+  if (process.platform === 'win32' && pid && pid > 0) {
+    // Windows has no POSIX process-group signal contract. taskkill /T reaches
+    // descendants even if cancellation races their first structured event.
+    const killer = spawn('taskkill', ['/PID', String(pid), '/T', ...(signal === 'SIGKILL' ? ['/F'] : [])], {
+      windowsHide: true,
+      shell: false,
+      stdio: 'ignore',
+    });
+    killer.unref();
+  } else if (pid && pid > 0) {
     try { process.kill(-pid, signal); } catch { /* process group is already gone */ }
   }
   try { child.kill(signal); } catch { /* child is already gone */ }
-  if (process.platform === 'win32') {
-    for (const descendantPid of descendantPids) {
-      try { process.kill(descendantPid, signal); } catch { /* descendant is already gone */ }
-    }
+  for (const descendantPid of descendantPids) {
+    try { process.kill(descendantPid, signal); } catch { /* descendant is already gone */ }
   }
 }
 
@@ -186,8 +192,8 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function waitForReaping(pids: number[]): Promise<number[]> {
-  const deadline = Date.now() + REAP_WAIT_MS;
+async function waitForReaping(pids: number[], cleanupMs: number): Promise<number[]> {
+  const deadline = Date.now() + cleanupMs;
   let remaining = pids.filter(processExists);
   while (remaining.length > 0 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -212,10 +218,10 @@ function statusFor(input: {
   return input.code === 0 ? 'passed' : 'failed';
 }
 
-function appendBounded(current: Buffer, chunk: Buffer): { buffer: Buffer; overflow: boolean } {
+function appendBounded(current: Buffer, chunk: Buffer, maxBytes: number): { buffer: Buffer; overflow: boolean } {
   const combined = Buffer.concat([current, chunk]);
-  if (combined.length <= MAX_STREAM_BYTES) return { buffer: combined, overflow: false };
-  return { buffer: combined.subarray(0, MAX_STREAM_BYTES), overflow: true };
+  if (combined.length <= maxBytes) return { buffer: combined, overflow: false };
+  return { buffer: combined.subarray(0, maxBytes), overflow: true };
 }
 
 /**
@@ -228,8 +234,9 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
   private readonly root: string;
   private readonly manifest = readManifest();
   private readonly active = new Map<string, ActiveExecution>();
+  private activeProcessCount = 0;
 
-  constructor(fixtureRoot: string) {
+  constructor(fixtureRoot: string, private readonly limits: Readonly<WaveSafetyLimits> = resolveWaveSafetyLimits()) {
     this.root = assertTemporaryFixtureRoot(fixtureRoot);
     if (!fs.existsSync(FIXTURE_AGENT_PATH)) throw new Error('[fixture-adapter] fixed fixture agent entrypoint is missing');
   }
@@ -245,6 +252,9 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
       ? assertOwnedDirectory(this.root, input.barrierDirectory, 'barrier directory')
       : undefined;
     const timeoutMs = input.timeoutMs ?? 2_000;
+    if (timeoutMs > this.limits.maxWaveDurationMs) {
+      throw new Error(`[fixture-adapter] timeout exceeds wave duration limit ${this.limits.maxWaveDurationMs}ms`);
+    }
     const executionId = `fixture:${input.scenarioId}:${randomUUID()}`;
     const result = await executeStoryWithAdapter(this, {
       executionId,
@@ -281,6 +291,7 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
     };
     const events: FixtureEvent[] = [];
     const descendantPids = new Set<number>();
+    let structuredTranscriptBytes = 0;
     let stdout: Buffer = Buffer.alloc(0);
     let stderr: Buffer = Buffer.alloc(0);
     let stdoutBuffer = '';
@@ -299,6 +310,12 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
       ...(request.payload.barrierDirectory ? { barrierDirectory: request.payload.barrierDirectory } : {}),
     };
     const encodedRequest = Buffer.from(JSON.stringify(childRequest)).toString('base64url');
+    const expectedProcessCount = 1 + (scenario.spawnDescendant ? 1 : 0);
+    if (this.active.size >= this.limits.maxParallelism) throw new Error('[fixture-adapter] parallelism limit reached');
+    if (this.activeProcessCount + expectedProcessCount > this.limits.maxChildProcesses) {
+      throw new Error('[fixture-adapter] child-process limit reached');
+    }
+    this.activeProcessCount += expectedProcessCount;
     const child = spawn(process.execPath, [FIXTURE_AGENT_PATH, encodedRequest], {
       cwd: request.cwd,
       env: sanitizedFixtureEnv(this.root),
@@ -329,7 +346,12 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
       if (!Number.isSafeInteger(event.sequence) || event.sequence !== events.length + 1) {
         throw new Error('fixture emitted non-monotonic event sequence');
       }
-      if (Buffer.byteLength(JSON.stringify(event)) > 4096) throw new Error('fixture event exceeded bound');
+      const eventBytes = Buffer.byteLength(JSON.stringify(event));
+      if (eventBytes > 4096) throw new Error('fixture event exceeded bound');
+      structuredTranscriptBytes += eventBytes;
+      if (structuredTranscriptBytes > this.limits.maxStructuredTranscriptBytes) {
+        throw new Error(`fixture structured transcript exceeded ${this.limits.maxStructuredTranscriptBytes} byte limit`);
+      }
       events.push(event);
       if (event.type === 'story-started') lifecycle.started = true;
       if (event.type === 'story-committed') lifecycle.committed = true;
@@ -344,6 +366,9 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
       stdoutBuffer += chunk.toString('utf8');
       const lines = stdoutBuffer.split('\n');
       stdoutBuffer = lines.pop() ?? '';
+      if (Buffer.byteLength(stdoutBuffer) > this.limits.maxPendingOutputBytes) {
+        throw new Error(`fixture pending output exceeded ${this.limits.maxPendingOutputBytes} byte limit`);
+      }
       for (const line of lines) {
         if (!line.trim()) continue;
         acceptEvent(JSON.parse(line) as FixtureEvent);
@@ -353,9 +378,11 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
     child.stdout?.on('data', (chunk: Buffer) => {
       if (settled) return;
       try {
-        const appended = appendBounded(stdout, chunk);
+        const appended = appendBounded(stdout, chunk, this.limits.maxRawCaptureBytes);
         stdout = appended.buffer;
-        if (appended.overflow) throw new Error('fixture stdout exceeded bound');
+        if (appended.overflow || stdout.length + stderr.length > this.limits.maxRawCaptureBytes) {
+          throw new Error(`fixture raw capture exceeded ${this.limits.maxRawCaptureBytes} byte limit`);
+        }
         parseStdout(chunk);
       } catch (error) {
         adapterError = error instanceof Error ? error.message : String(error);
@@ -363,10 +390,10 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      const appended = appendBounded(stderr, chunk);
+      const appended = appendBounded(stderr, chunk, this.limits.maxRawCaptureBytes);
       stderr = appended.buffer;
-      if (appended.overflow && !adapterError) {
-        adapterError = 'fixture stderr exceeded bound';
+      if ((appended.overflow || stdout.length + stderr.length > this.limits.maxRawCaptureBytes) && !adapterError) {
+        adapterError = `fixture raw capture exceeded ${this.limits.maxRawCaptureBytes} byte limit`;
         terminate('SIGTERM', 'adapter-error');
       }
     });
@@ -404,8 +431,9 @@ export class DeterministicFixtureHarness implements StoryExecutionAdapter<Fixtur
     await new Promise(resolve => setTimeout(resolve, 30));
     killProcessTree(child, descendantPids, 'SIGKILL');
     const allPids = [...(child.pid ? [child.pid] : []), ...descendantPids];
-    const unreapedPids = await waitForReaping(allPids);
+    const unreapedPids = await waitForReaping(allPids, this.limits.maxCleanupMs);
     this.active.delete(request.executionId);
+    this.activeProcessCount -= expectedProcessCount;
     settleDone();
 
     const rawCode = processExit.code ?? 1;

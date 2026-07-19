@@ -18,7 +18,9 @@ import {
   type FixtureExecutionInput,
 } from '../../test-helpers/deterministic-fixture-agent';
 
-const backendSourceDirectory = path.resolve(process.cwd(), 'backend', 'src');
+const backendSourceDirectory = fs.existsSync(path.resolve(process.cwd(), 'backend', 'src'))
+  ? path.resolve(process.cwd(), 'backend', 'src')
+  : path.resolve(process.cwd(), 'src');
 const fixturesDirectory = path.join(backendSourceDirectory, '__tests__', 'fixtures');
 const scenarioManifestPath = path.join(fixturesDirectory, 'wave-agent-scenarios.json');
 const faultCatalogPath = path.join(fixturesDirectory, 'wave-fault-points.json');
