@@ -67,6 +67,12 @@ const net=require('net'),cp=require('child_process');
 const socket=process.argv[1],command=process.argv[2],args=JSON.parse(process.argv[3]);
 const relay=net.createServer(client=>{const upstream=net.connect({path:socket});client.pipe(upstream);upstream.pipe(client);upstream.on('error',()=>client.destroy());client.on('error',()=>upstream.destroy())});
 relay.listen(3128,'127.0.0.1',()=>{const child=cp.spawn(command,args,{stdio:'inherit',env:process.env});for(const signal of ['SIGTERM','SIGINT','SIGHUP'])process.on(signal,()=>child.kill(signal));child.on('error',()=>process.exit(127));child.on('exit',(code,signal)=>{relay.close();if(signal)process.kill(process.pid,signal);else process.exit(code??1)})});`;
+const BOUNDARY_PROBE_SUPERVISOR = String.raw`
+const cp=require('child_process');
+let input='';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data',chunk=>{input+=chunk});
+process.stdin.on('end',()=>{let launch;try{launch=JSON.parse(input)}catch{process.exit(126)}const child=cp.spawnSync(launch.command,launch.args,{cwd:launch.cwd,env:launch.env,stdio:['ignore','pipe','pipe'],encoding:'utf8',timeout:15000});if(child.error)process.exit(125);if(child.signal)process.exit(124);process.exit(child.status??123)});`;
 const FORBIDDEN_TOOL_ROOTS = ['/', '/root', '/home', '/etc', '/proc', '/sys', '/dev', '/run', '/var/run'];
 let successfulProbeKey: string | null = null;
 
@@ -308,20 +314,30 @@ export function prepareAutonomousSandboxLaunch(options: AutonomousSandboxOptions
   };
 }
 
+function withoutPidIsolationForSensitivityProbe(args: readonly string[]): string[] {
+  const index = args.indexOf('--unshare-all');
+  if (index < 0) throw new Error('sandbox sensitivity probe requires canonical --unshare-all');
+  return [
+    ...args.slice(0, index),
+    '--unshare-user-try', '--unshare-ipc', '--unshare-net', '--unshare-uts', '--unshare-cgroup-try',
+    ...args.slice(index + 1),
+  ];
+}
+
 function runBoundaryProbe(cwd: string, env: NodeJS.ProcessEnv): void {
-  const marker = `rorca-ancestor-secret-${crypto.randomBytes(24).toString('hex')}`;
   const sentinelRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sandbox-credential-'));
   const sentinel = path.join(sentinelRoot, 'credentials');
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sandbox-worktree-'));
   const workspaceCredential = path.join(probeRoot, '.env');
   fs.writeFileSync(sentinel, 'must-not-be-readable', { mode: 0o600 });
-  fs.writeFileSync(workspaceCredential, marker, { mode: 0o600 });
+  fs.writeFileSync(workspaceCredential, 'must-not-be-readable', { mode: 0o600 });
   const script = String.raw`
 const fs=require('fs'),net=require('net'),cp=require('child_process');
-const marker=process.argv[1],sentinel=process.argv[2],workspaceCredential=process.argv[3],tools=JSON.parse(process.argv[4]);
-for(const pid of fs.readdirSync('/proc').filter(v=>/^\d+$/.test(v))){try{if(fs.readFileSync('/proc/'+pid+'/environ').includes(marker))process.exit(41)}catch{}}
+const sentinel=process.argv[1],workspaceCredential=process.argv[2],tools=JSON.parse(process.argv[3]);
+const ancestorMarker=Buffer.from('RORCA_ANCESTOR_SECRET_PROBE=');
+for(const pid of fs.readdirSync('/proc').filter(v=>/^\d+$/.test(v))){try{if(fs.readFileSync('/proc/'+pid+'/environ').includes(ancestorMarker))process.exit(41)}catch{}}
 try{fs.readFileSync(sentinel);process.exit(42)}catch{}
-try{if(fs.readFileSync(workspaceCredential).includes(marker))process.exit(45)}catch{}
+try{fs.readFileSync(workspaceCredential);process.exit(45)}catch{}
 for(const tool of tools){const r=cp.spawnSync(tool,['--version'],{encoding:'utf8'});if(r.status!==0)process.exit(43)}
 function denied(host,port){return new Promise((resolve,reject)=>{const s=net.connect({host,port});const t=setTimeout(()=>{s.destroy();reject(new Error('socket timeout'))},500);s.once('connect',()=>{clearTimeout(t);s.destroy();reject(new Error('socket connected'))});s.once('error',()=>{clearTimeout(t);resolve()})})}
 Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>process.exit(0),()=>process.exit(44));`;
@@ -344,25 +360,25 @@ Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>proc
     const node = tools[0];
     const launch = prepareAutonomousSandboxLaunch({
       command: node,
-      args: ['-e', script, marker, sentinel, workspaceCredential, JSON.stringify(tools)],
+      args: ['-e', script, sentinel, workspaceCredential, JSON.stringify(tools)],
       cwd: probeRoot,
       env: { PATH: '/usr/local/bin:/usr/bin:/bin' },
     });
-    const previousMarker = process.env.RORCA_ANCESTOR_SECRET_PROBE;
-    process.env.RORCA_ANCESTOR_SECRET_PROBE = marker;
-    let result: ReturnType<typeof spawnSync>;
-    try {
-      result = spawnSync(launch.command, launch.args, {
-        cwd: launch.cwd,
-        env: launch.env,
-        encoding: 'utf8', timeout: 15_000,
+    const runThroughMarkedSupervisor = (args: string[]): ReturnType<typeof spawnSync> => {
+      const marker = `rorca-ancestor-secret-${crypto.randomBytes(24).toString('hex')}`;
+      return spawnSync(process.execPath, ['-e', BOUNDARY_PROBE_SUPERVISOR], {
+        env: { ...launch.env, RORCA_ANCESTOR_SECRET_PROBE: marker },
+        input: JSON.stringify({ ...launch, args }),
+        encoding: 'utf8', timeout: 20_000,
       });
-    } finally {
-      if (previousMarker === undefined) delete process.env.RORCA_ANCESTOR_SECRET_PROBE;
-      else process.env.RORCA_ANCESTOR_SECRET_PROBE = previousMarker;
+    };
+    const sensitivity = runThroughMarkedSupervisor(withoutPidIsolationForSensitivityProbe(launch.args));
+    if (sensitivity.status !== 41) {
+      throw new Error(`autonomous sandbox PID-isolation sensitivity probe expected ancestor visibility exit 41, got ${sensitivity.status ?? sensitivity.signal ?? 'unknown'}`);
     }
+    const result = runThroughMarkedSupervisor(launch.args);
     if (result.status !== 0) {
-      throw new Error(`autonomous sandbox capability probe failed (${result.status ?? result.signal ?? 'unknown'}): ${String(result.stderr ?? '').trim()}`);
+      throw new Error(`autonomous sandbox capability probe failed (${result.status ?? result.signal ?? 'unknown'})`);
     }
   } finally {
     fs.rmSync(sentinelRoot, { recursive: true, force: true });

@@ -67,13 +67,18 @@ test('semantic, RPC, PTY, conflict resolution, and worktree-controlled host vali
   expect(gitreins).toContain('spawn(launch.command, launch.args');
 });
 
-test('boundary is topology, not PATH or environment theater', () => {
+test('boundary is topology with an exec-time ancestor marker and a no-PID-isolation sensitivity control', () => {
   for (const required of [
     "'--unshare-all'", "'--clearenv'", "'--proc', '/proc'", "'--tmpfs', '/tmp'",
     "denied('127.0.0.1',3030)", "denied('198.51.100.1',443)",
     "'/usr/local/bin/node'", "'/usr/bin/python3'", "'/usr/bin/git'", "'/usr/bin/gh'",
     "'/usr/local/bin/npm'", "'/usr/local/bin/npx'", "fs.readFileSync('/proc/'",
+    "Buffer.from('RORCA_ANCESTOR_SECRET_PROBE=')", 'BOUNDARY_PROBE_SUPERVISOR',
+    "sensitivity.status !== 41", "'--unshare-user-try'", "'--unshare-cgroup-try'",
   ]) expect(sandbox).toContain(required);
+  expect(sandbox).not.toContain('process.env.RORCA_ANCESTOR_SECRET_PROBE =');
+  expect(sandbox).not.toMatch(/args:\s*\[[^\]]*marker/);
+  expect(sandbox).not.toContain("fs.writeFileSync(workspaceCredential, marker");
   expect(sandbox).toContain('Repository Git config contains an embedded credential');
   expect(sandbox).toContain('Autonomous worktree overlaps the trusted engine installation');
   expect(sandbox).toContain('raw local-dev autonomous execution is forbidden');
