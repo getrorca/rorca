@@ -15,6 +15,10 @@ import {
   type WaveQualificationIdentity,
 } from '../wave-production-policy';
 
+const repositoryRoot = fs.existsSync(path.resolve(process.cwd(), 'backend/src'))
+  ? process.cwd()
+  : path.resolve(process.cwd(), '..');
+
 const receipt: WaveQualificationIdentity = {
   id: '41',
   reportHash: `sha256:${'a'.repeat(64)}`,
@@ -50,6 +54,10 @@ function productionInput(overrides: Partial<WavePolicyEvaluationInput> = {}): Wa
       maxActiveWaveRuns: 2,
       maxActiveWaveRunsPerWorkspace: 1,
       maxErrorRate: 0.05,
+      releaseReadinessPacketId: 'packet-71',
+      productionActivationApprovalId: 'approval-81',
+      releaseReadinessCurrent: true,
+      operatorActivationCurrent: true,
     },
     activeWaveRuns: 0,
     activeWorkspaceWaveRuns: 0,
@@ -64,7 +72,7 @@ test('production remains sequential unless mode and parallelism are both explici
   }
 });
 
-test('production requires independent exact flag, current receipt, cohort and request', () => {
+test('production requires independent exact flag, current receipt, reviews, activation, cohort and request', () => {
   const enabled = evaluateWaveProductionPolicy(productionInput());
   assert.equal(enabled.allowed, true);
   assert.equal(enabled.status, 'canary-enabled');
@@ -76,6 +84,10 @@ test('production requires independent exact flag, current receipt, cohort and re
     ['receipt omitted', { receipt: null }, 'receipt-missing'],
     ['receipt stale', { receipt: { ...receipt, current: false } }, 'receipt-stale'],
     ['revision stale', { currentRevision: 'c'.repeat(40) }, 'receipt-stale'],
+    ['review omitted', { rollout: { ...productionInput().rollout, releaseReadinessPacketId: null } }, 'review-missing'],
+    ['review stale', { rollout: { ...productionInput().rollout, releaseReadinessCurrent: false } }, 'review-missing'],
+    ['activation omitted', { rollout: { ...productionInput().rollout, productionActivationApprovalId: null } }, 'activation-missing'],
+    ['activation stale', { rollout: { ...productionInput().rollout, operatorActivationCurrent: false } }, 'activation-missing'],
     ['cohort omitted', { request: { ...productionInput().request, rolloutCohort: undefined } }, 'production-disabled'],
   ];
   for (const [name, overrides, status] of cases) {
@@ -136,9 +148,9 @@ test('NODE_ENV=production policy exercise is pure and cannot access a database o
 });
 
 test('engine and dispatch boundaries require the same governed production evidence', () => {
-  const engine = fs.readFileSync(path.resolve(process.cwd(), 'backend/src/lib/execution-engine.ts'), 'utf8');
-  const worker = fs.readFileSync(path.resolve(process.cwd(), 'backend/src/worker.ts'), 'utf8');
-  const runner = fs.readFileSync(path.resolve(process.cwd(), 'backend/src/runner/local-runner.ts'), 'utf8');
+  const engine = fs.readFileSync(path.join(repositoryRoot, 'backend/src/lib/execution-engine.ts'), 'utf8');
+  const worker = fs.readFileSync(path.join(repositoryRoot, 'backend/src/worker.ts'), 'utf8');
+  const runner = fs.readFileSync(path.join(repositoryRoot, 'backend/src/runner/local-runner.ts'), 'utf8');
   assert.match(engine, /RORCA_GOVERNED_WAVE_POLICY/);
   assert.match(engine, /RORCA_WAVE_PARALLEL_PRODUCTION_ENABLED !== 'true'/);
   assert.match(engine, /policy\.receipt\.sourceRevision !== currentRevision/);
@@ -147,7 +159,7 @@ test('engine and dispatch boundaries require the same governed production eviden
 });
 
 test('governance migration is additive and never touches pg-boss or historical run evidence', () => {
-  const migration = fs.readFileSync(path.resolve(process.cwd(), 'backend/src/db/pg-migrations/20260719104000_wave_production_governance.sql'), 'utf8');
+  const migration = fs.readFileSync(path.join(repositoryRoot, 'backend/src/db/pg-migrations/20260719104000_wave_production_governance.sql'), 'utf8');
   assert.match(migration, /ADD COLUMN IF NOT EXISTS orchestration_mode/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS wave_parallel_governance_audit/);
   assert.doesNotMatch(migration, /(?:UPDATE|DELETE FROM)\s+pipeline_runs/i);

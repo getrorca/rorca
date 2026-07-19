@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'crypto';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { execute, queryOne } from '../db/index';
@@ -17,6 +18,12 @@ import {
 } from '../lib/wave-qualification-evidence';
 import { QUALIFICATION_SCENARIOS } from '../lib/wave-qualification-model';
 import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
+import {
+  assertWaveReleaseReadinessPacket,
+  verifyWaveProductionActivation,
+  waveReleaseReadinessPacketHash,
+  type WaveReleaseReadinessPacket,
+} from '../lib/wave-release-readiness';
 
 const router = Router();
 
@@ -24,6 +31,8 @@ const RolloutControlSchema = z.object({
   workspaceId: z.string().min(1).max(256),
   enabled: z.boolean(),
   qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]),
+  releaseReadinessPacketId: z.string().uuid(),
+  productionActivationApprovalId: z.string().uuid(),
   cohort: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
   workspaceAllowlist: z.array(z.string().min(1).max(256)).max(256),
   runAllowlist: z.array(z.number().int().positive()).max(256),
@@ -36,6 +45,22 @@ const RolloutControlSchema = z.object({
   draining: z.boolean().optional().default(false),
   actor: z.string().min(1).max(256),
   rationale: z.string().min(1).max(2048),
+}).strict();
+
+const ReleaseReadinessSchema = z.object({
+  workspaceId: z.string().min(1).max(256),
+  qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]),
+  packet: z.unknown(),
+  actor: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/),
+}).strict();
+
+const ProductionActivationSchema = z.object({
+  workspaceId: z.string().min(1).max(256),
+  releaseReadinessPacketId: z.string().uuid(),
+  operatorId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/),
+  rationale: z.string().min(1).max(2048),
+  confirmation: z.literal('AUTHORIZE_WAVE_PARALLEL_PRODUCTION'),
+  authorization: z.string().regex(/^[0-9a-f]{64}$/),
 }).strict();
 
 const RolloutHealthSchema = z.object({
@@ -54,6 +79,19 @@ const RollbackSchema = z.object({
 }).strict();
 
 interface WorkspaceRow { id: string; path: string }
+interface ReleasePacketRow {
+  id: string;
+  workspace_id: string;
+  qualification_receipt_id: string;
+  report_hash: string;
+  source_revision: string;
+  implementer_id: string;
+  packet_hash: string;
+  packet: WaveReleaseReadinessPacket;
+}
+
+interface ActivationRow { id: string }
+
 interface ReceiptRow {
   id: string;
   workspace_id: string;
@@ -68,6 +106,14 @@ interface ReceiptRow {
   receipt: QualificationReceipt;
   telemetry: QualificationReport['telemetry'];
   verified_at: Date | string;
+}
+
+function productionActivationKey(): string {
+  const key = process.env.RORCA_WAVE_PRODUCTION_ACTIVATION_KEY;
+  if (!key || Buffer.byteLength(key) < 32) {
+    throw new ServiceUnavailableError('Production activation trust policy is not configured');
+  }
+  return key;
 }
 
 function trustedIssuers(): Record<string, Record<string, string>> {
@@ -324,6 +370,140 @@ router.get('/receipts/latest', async (req: Request, res: Response, next: NextFun
 
 /**
  * @swagger
+ * /api/admin/wave-qualification/release-readiness:
+ *   post:
+ *     tags: [Wave Qualification]
+ *     summary: Verify and append an immutable independent release-readiness packet
+ *     operationId: publishWaveReleaseReadiness
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Independent human review evidence and PR-only release posture are operator-only production gates."
+ *     responses:
+ *       201: { description: Review packet verified against the current receipt and PR head }
+ *       422: { description: Review packet is incomplete, stale, self-approved, or unsafe }
+ */
+router.post('/release-readiness', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const input = ReleaseReadinessSchema.parse(req.body);
+    const currentWorkspace = await workspace(input.workspaceId);
+    const receiptRow = await queryOne<ReceiptRow>(
+      'SELECT * FROM wave_qualification_receipts WHERE id = $1 AND workspace_id = $2',
+      [input.qualificationReceiptId, input.workspaceId],
+    );
+    if (!receiptRow) throw new NotFoundError('Wave qualification receipt', String(input.qualificationReceiptId));
+    const local = computeLocalQualificationIdentity(currentWorkspace.path, input.workspaceId);
+    const receipt = verifyPortable({ report: receiptRow.report, receipt: receiptRow.receipt }, local);
+    const packet = assertWaveReleaseReadinessPacket(input.packet);
+    if (packet.workspaceId !== input.workspaceId
+      || packet.qualification.receiptId !== String(input.qualificationReceiptId)
+      || packet.qualification.reportHash !== receipt.reportHash
+      || packet.qualification.sourceRevision !== receipt.sourceRevision
+      || packet.qualification.issuedAt !== receipt.issuedAt
+      || packet.qualification.expiresAt !== receipt.expiresAt
+      || packet.pullRequest.headRevision !== local.sourceRevision) {
+      throw new UnprocessableError('Release-readiness packet does not match the current workspace, receipt, or PR head', 'RELEASE_READINESS_IDENTITY_MISMATCH');
+    }
+    const packetHash = waveReleaseReadinessPacketHash(packet);
+    const row = await queryOne<ReleasePacketRow>(
+      `INSERT INTO wave_release_readiness_packets (
+         workspace_id, qualification_receipt_id, report_hash, source_revision,
+         pull_request_number, implementer_id, packet_hash, packet, approved, recorded_by
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, TRUE, $9)
+       ON CONFLICT (packet_hash) DO NOTHING
+       RETURNING *`,
+      [
+        input.workspaceId, input.qualificationReceiptId, receipt.reportHash, receipt.sourceRevision,
+        packet.pullRequest.number, packet.implementerId, packetHash, JSON.stringify(packet), input.actor,
+      ],
+    );
+    const persisted = row ?? await queryOne<ReleasePacketRow>(
+      'SELECT * FROM wave_release_readiness_packets WHERE packet_hash = $1 AND workspace_id = $2',
+      [packetHash, input.workspaceId],
+    );
+    if (!persisted) throw new UnprocessableError('Release-readiness packet publication was not durable', 'RELEASE_READINESS_PUBLICATION_FAILED');
+    res.status(row ? 201 : 200).json({
+      id: persisted.id,
+      packetHash: persisted.packet_hash,
+      sourceRevision: persisted.source_revision,
+      qualificationReceiptId: String(persisted.qualification_receipt_id),
+      productionActivated: false,
+    });
+  } catch (error) {
+    try { qualificationFailure(error); } catch (mapped) { next(mapped); }
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/wave-qualification/production-activation:
+ *   post:
+ *     tags: [Wave Qualification]
+ *     summary: Record separate explicit operator approval after all release gates pass
+ *     operationId: approveWaveProductionActivation
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Production activation is a separate append-only operator authority and is never implied by a receipt, review packet, merge, or deployment."
+ *     responses:
+ *       201: { description: Separate production activation authority recorded; rollout remains independently configured }
+ *       422: { description: Packet is stale or operator independence is not satisfied }
+ */
+router.post('/production-activation', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const input = ProductionActivationSchema.parse(req.body);
+    const currentWorkspace = await workspace(input.workspaceId);
+    const packetRow = await queryOne<ReleasePacketRow & { report: QualificationReport; receipt: QualificationReceipt }>(
+      `SELECT packet.*, receipt.report, receipt.receipt
+         FROM wave_release_readiness_packets packet
+         JOIN wave_qualification_receipts receipt ON receipt.id = packet.qualification_receipt_id
+        WHERE packet.id = $1 AND packet.workspace_id = $2`,
+      [input.releaseReadinessPacketId, input.workspaceId],
+    );
+    if (!packetRow) throw new NotFoundError('Wave release-readiness packet', input.releaseReadinessPacketId);
+    const packet = assertWaveReleaseReadinessPacket(packetRow.packet);
+    const local = computeLocalQualificationIdentity(currentWorkspace.path, input.workspaceId);
+    verifyPortable({ report: packetRow.report, receipt: packetRow.receipt }, local);
+    const reviewers = new Set(packet.reviews.map(review => review.reviewerId));
+    if (input.operatorId === packet.implementerId || reviewers.has(input.operatorId) || packet.pullRequest.headRevision !== local.sourceRevision) {
+      throw new UnprocessableError('Production activation requires a separate operator and the current reviewed PR head', 'PRODUCTION_ACTIVATION_INDEPENDENCE_REQUIRED');
+    }
+    verifyWaveProductionActivation({
+      workspaceId: input.workspaceId,
+      packetHash: packetRow.packet_hash,
+      sourceRevision: packetRow.source_revision,
+      operatorId: input.operatorId,
+      confirmation: input.confirmation,
+      authorization: input.authorization,
+      trustedKey: productionActivationKey(),
+    });
+    const authorizationDigest = `sha256:${createHash('sha256').update(input.authorization).digest('hex')}`;
+    const inserted = await queryOne<ActivationRow>(
+      `INSERT INTO wave_production_activation_approvals (
+         workspace_id, release_readiness_packet_id, source_revision,
+         operator_id, rationale, confirmation, authorization_digest
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (release_readiness_packet_id) DO NOTHING
+       RETURNING id`,
+      [
+        input.workspaceId, packetRow.id, packetRow.source_revision, input.operatorId,
+        input.rationale, input.confirmation, authorizationDigest,
+      ],
+    );
+    const approval = inserted ?? await queryOne<ActivationRow>(
+      'SELECT id FROM wave_production_activation_approvals WHERE release_readiness_packet_id = $1',
+      [packetRow.id],
+    );
+    if (!approval) throw new UnprocessableError('Production activation approval was not durable', 'PRODUCTION_ACTIVATION_PUBLICATION_FAILED');
+    res.status(inserted ? 201 : 200).json({
+      id: approval.id,
+      releaseReadinessPacketId: packetRow.id,
+      sourceRevision: packetRow.source_revision,
+      rolloutEnabled: false,
+    });
+  } catch (error) {
+    try { qualificationFailure(error); } catch (mapped) { next(mapped); }
+  }
+});
+
+/**
+ * @swagger
  * /api/admin/wave-qualification/status:
  *   get:
  *     tags: [Wave Qualification]
@@ -390,17 +570,40 @@ router.put('/rollout', async (req: Request, res: Response, next: NextFunction) =
     if (!receiptRow) throw new NotFoundError('Wave qualification receipt', String(input.qualificationReceiptId));
     const local = computeLocalQualificationIdentity(currentWorkspace.path, input.workspaceId);
     verifyPortable({ report: receiptRow.report, receipt: receiptRow.receipt }, local);
+    const authority = await queryOne<{ packet_id: string; approval_id: string }>(
+      `SELECT packet.id AS packet_id, approval.id AS approval_id
+         FROM wave_release_readiness_packets packet
+         JOIN wave_production_activation_approvals approval
+           ON approval.release_readiness_packet_id = packet.id
+        WHERE packet.id = $1
+          AND approval.id = $2
+          AND packet.workspace_id = $3
+          AND packet.qualification_receipt_id = $4
+          AND packet.report_hash = $5
+          AND packet.source_revision = $6
+          AND approval.workspace_id = packet.workspace_id
+          AND approval.source_revision = packet.source_revision
+          AND packet.approved`,
+      [
+        input.releaseReadinessPacketId, input.productionActivationApprovalId,
+        input.workspaceId, input.qualificationReceiptId, receiptRow.report_hash, local.sourceRevision,
+      ],
+    );
+    if (!authority) throw new UnprocessableError('Current independent review packet and separate operator activation are required', 'WAVE_RELEASE_AUTHORITY_REQUIRED');
 
     await execute(
       `INSERT INTO wave_parallel_rollout_controls (
-         workspace_id, enabled, qualification_receipt_id, cohort, workspace_allowlist,
+         workspace_id, enabled, qualification_receipt_id, release_readiness_packet_id,
+         production_activation_approval_id, cohort, workspace_allowlist,
          run_allowlist, max_parallelism, max_active_wave_runs,
          max_active_wave_runs_per_workspace, max_cpu_percent, max_memory_percent,
          max_error_rate, halted, draining, rationale, updated_by
-       ) VALUES ($1, $2, $3, $4, $5::text[], $6::bigint[], $7, $8, $9, $10, $11, $12, FALSE, $13, $14, $15)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::text[], $8::bigint[], $9, $10, $11, $12, $13, $14, FALSE, $15, $16, $17)
        ON CONFLICT (workspace_id) DO UPDATE SET
          enabled = EXCLUDED.enabled,
          qualification_receipt_id = EXCLUDED.qualification_receipt_id,
+         release_readiness_packet_id = EXCLUDED.release_readiness_packet_id,
+         production_activation_approval_id = EXCLUDED.production_activation_approval_id,
          cohort = EXCLUDED.cohort,
          workspace_allowlist = EXCLUDED.workspace_allowlist,
          run_allowlist = EXCLUDED.run_allowlist,
@@ -416,7 +619,8 @@ router.put('/rollout', async (req: Request, res: Response, next: NextFunction) =
          updated_by = EXCLUDED.updated_by,
          updated_at = NOW()`,
       [
-        input.workspaceId, input.enabled, input.qualificationReceiptId, input.cohort,
+        input.workspaceId, input.enabled, input.qualificationReceiptId,
+        authority.packet_id, authority.approval_id, input.cohort,
         input.workspaceAllowlist, input.runAllowlist, input.maxParallelism,
         input.maxActiveWaveRuns, input.maxActiveWaveRunsPerWorkspace,
         input.maxCpuPercent, input.maxMemoryPercent, input.maxErrorRate,

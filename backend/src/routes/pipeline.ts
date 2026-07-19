@@ -1131,6 +1131,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
+ *               forceSequential: { type: boolean, description: "Explicitly retain sequential execution even when wave options are otherwise present" }
  *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Explicit run mode; graph preview never opts a run into parallel execution" }
  *               parallelism: { type: integer, minimum: 1, maximum: 4, default: 1 }
  *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity required for production wave execution" }

@@ -61,7 +61,8 @@ export const WavePolicyEnvelopeSchema = z.object({
   }).strict(),
   status: z.enum([
     'sequential-default', 'experimental-nonproduction', 'production-disabled',
-    'receipt-missing', 'receipt-stale', 'canary-enabled', 'halted', 'draining', 'enabled',
+    'receipt-missing', 'receipt-stale', 'review-missing', 'activation-missing',
+    'canary-enabled', 'halted', 'draining', 'enabled',
   ]),
   allowed: z.boolean(),
   reason: z.string().min(1),
@@ -77,6 +78,8 @@ export const WavePolicyEnvelopeSchema = z.object({
     maxParallelism: z.number().int().min(1).max(4),
     maxActiveWaveRuns: z.number().int().min(1).max(16),
     maxActiveWaveRunsPerWorkspace: z.number().int().min(1).max(4),
+    releaseReadinessPacketId: z.string().uuid().nullable(),
+    productionActivationApprovalId: z.string().uuid().nullable(),
   }).strict(),
   fencingPolicy: z.literal('dispatch-boundary-v1'),
   fence: z.string().regex(/^sha256:[0-9a-f]{64}$/),

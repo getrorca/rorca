@@ -41,6 +41,10 @@ interface RolloutRow {
   halted: boolean;
   draining: boolean;
   rationale: string;
+  release_readiness_packet_id: string | null;
+  production_activation_approval_id: string | null;
+  release_readiness_current: boolean;
+  operator_activation_current: boolean;
 }
 
 interface ReceiptRow {
@@ -87,6 +91,10 @@ function rolloutFrom(row: RolloutRow | undefined): WaveRolloutPolicy {
     halted: row.halted,
     draining: row.draining,
     rationale: row.rationale,
+    releaseReadinessPacketId: row.release_readiness_packet_id,
+    productionActivationApprovalId: row.production_activation_approval_id,
+    releaseReadinessCurrent: row.release_readiness_current,
+    operatorActivationCurrent: row.operator_activation_current,
   };
 }
 
@@ -97,7 +105,28 @@ export async function resolveWaveProductionPolicy(input: {
   runId?: number;
 }): Promise<WavePolicyEnvelope> {
   const rolloutRow = await queryOne<RolloutRow>(
-    'SELECT * FROM wave_parallel_rollout_controls WHERE workspace_id = $1',
+    `SELECT control.*,
+            EXISTS (
+              SELECT 1
+                FROM wave_release_readiness_packets packet
+                JOIN wave_qualification_receipts receipt
+                  ON receipt.id = packet.qualification_receipt_id
+               WHERE packet.id = control.release_readiness_packet_id
+                 AND packet.workspace_id = control.workspace_id
+                 AND packet.qualification_receipt_id = control.qualification_receipt_id
+                 AND packet.report_hash = receipt.report_hash
+                 AND packet.source_revision = receipt.source_revision
+                 AND packet.approved
+            ) AS release_readiness_current,
+            EXISTS (
+              SELECT 1
+                FROM wave_production_activation_approvals approval
+               WHERE approval.id = control.production_activation_approval_id
+                 AND approval.workspace_id = control.workspace_id
+                 AND approval.release_readiness_packet_id = control.release_readiness_packet_id
+            ) AS operator_activation_current
+       FROM wave_parallel_rollout_controls control
+      WHERE control.workspace_id = $1`,
     [input.workspaceId],
   );
   const rollout = rolloutFrom(rolloutRow);

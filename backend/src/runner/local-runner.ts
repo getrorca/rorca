@@ -174,11 +174,16 @@ async function runJob(job: any): Promise<void> {
   }
   await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/running`, { runnerId });
 
+  const {
+    RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON: _qualificationTrust,
+    RORCA_WAVE_PRODUCTION_ACTIVATION_KEY: _activationKey,
+    ...inheritedEnv
+  } = process.env;
   const child = spawn(command, args, {
     cwd: workspacePath,
     stdio: 'inherit',
     env: {
-      ...process.env,
+      ...inheritedEnv,
       RORCA_ENGINE_API_BASE_URL: engineApiBaseUrl,
       ...(payload.envOverrides ?? {}),
       ...(embeddedPolicy ? { RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(embeddedPolicy) } : {}),

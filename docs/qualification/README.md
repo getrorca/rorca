@@ -177,6 +177,8 @@ The machine-checkable invariant and scenario mapping is [`wave-parallel-invarian
 
 Portable reports are generated after the stress child as a separate blocking phase. Terminal output is never passed to the builder. Trusted publication recomputes current repository/workspace and engine/policy/compiler/invariant/test/configuration identities before appending a receipt; stale history remains visible but cannot enable production.
 
+Production release readiness is a separate gate. See [`wave-parallel-release-checklist.md`](./wave-parallel-release-checklist.md) for the independent architecture, security/red-team, database/queue, Git, SRE, QA and operator-UX reviews; PR-head check mapping; non-production canary/soak; rollback rehearsal; and explicit protected-production non-mutation attestation. A receipt cannot substitute for this packet or for the later separate operator activation.
+
 Validate these contracts with:
 
 ```sh

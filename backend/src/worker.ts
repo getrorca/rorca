@@ -775,6 +775,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     delete env.CLAUDE_CODE_ENTRYPOINT;
     delete env.CLAUDE_AGENT_SDK_VERSION;
     delete env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+    delete env.RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON;
+    delete env.RORCA_WAVE_PRODUCTION_ACTIVATION_KEY;
 
     logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Revalidating governed mode immediately before spawn');
     try {
@@ -1736,7 +1738,15 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     // 5. Spawn execution-engine with pipe stdio for chunk capture
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
     // Strip the 4 Claude vars that must not propagate to nested invocations.
-    const { CLAUDECODE: _a, CLAUDE_CODE_ENTRYPOINT: _b, CLAUDE_AGENT_SDK_VERSION: _c, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: _d, ...inheritedEnvRetry } = process.env as Record<string, string>;
+    const {
+      CLAUDECODE: _a,
+      CLAUDE_CODE_ENTRYPOINT: _b,
+      CLAUDE_AGENT_SDK_VERSION: _c,
+      CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: _d,
+      RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON: _qualificationTrust,
+      RORCA_WAVE_PRODUCTION_ACTIVATION_KEY: _activationKey,
+      ...inheritedEnvRetry
+    } = process.env as Record<string, string>;
     const resolvedSecrets = await resolveExecutionSecrets(secretReferences);
     const env = {
       ...inheritedEnvRetry,

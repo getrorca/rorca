@@ -692,7 +692,7 @@ async function ensurePlaywrightMcpServer(headless = true): Promise<string | null
     const mcpProc = spawn(
       'npx',
       ['@playwright/mcp', '--port', String(PLAYWRIGHT_MCP_PORT), ...(headless ? ['--headless'] : [])],
-      { detached: true, stdio: 'ignore', env: { ...process.env } },
+      { detached: true, stdio: 'ignore', env: buildCleanEnv() },
     );
     mcpProc.unref();
     _playwrightMcpServerPid = mcpProc.pid ?? null;
@@ -869,7 +869,7 @@ async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
     const stdioTransport = new StdioClientTransport({
       command: chromeMcpCmd,
       args: chromeMcpArgs,
-      env: { ...process.env } as Record<string, string>,
+      env: buildCleanEnv(),
     });
     const client = new Client({ name: 'rorca-chrome-bridge', version: '1.0.0' });
     await client.connect(stdioTransport);
@@ -1241,7 +1241,10 @@ async function postStoryResult(
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+    if (v !== undefined
+      && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)
+      && k !== 'RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON'
+      && k !== 'RORCA_WAVE_PRODUCTION_ACTIVATION_KEY') {
       env[k] = v;
     }
   }

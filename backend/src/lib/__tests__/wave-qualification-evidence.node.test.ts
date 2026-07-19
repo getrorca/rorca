@@ -212,8 +212,8 @@ test('publication storage is append-only and every operator endpoint is explicit
   assert.doesNotMatch(migration, /(?:CREATE|ALTER|DROP|DELETE|UPDATE|INSERT)[^;]*pgboss\./i);
 
   const route = fs.readFileSync(path.join(repositoryRoot, 'backend', 'src', 'routes', 'wave-qualification.ts'), 'utf8');
-  assert.equal((route.match(/router\.(?:get|post)\(/g) ?? []).length, 3);
-  assert.equal((route.match(/x-rorca-tier: admin/g) ?? []).length, 3);
-  assert.equal((route.match(/x-rorca-rationale:/g) ?? []).length, 3);
+  assert.equal((route.match(/router\.(?:get|post|put)\(/g) ?? []).length, 9);
+  assert.equal((route.match(/x-rorca-tier: admin/g) ?? []).length, 9);
+  assert.equal((route.match(/x-rorca-rationale:/g) ?? []).length, 9);
   assert.doesNotMatch(route, /res\.json\([^)]*(?:path|human_report|signingKey)/);
 });

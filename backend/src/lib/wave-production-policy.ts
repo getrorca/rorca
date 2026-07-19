@@ -15,6 +15,8 @@ export type WaveOperatorStatus =
   | 'production-disabled'
   | 'receipt-missing'
   | 'receipt-stale'
+  | 'review-missing'
+  | 'activation-missing'
   | 'canary-enabled'
   | 'halted'
   | 'draining'
@@ -52,6 +54,10 @@ export interface WaveRolloutPolicy {
   halted: boolean;
   draining: boolean;
   rationale: string;
+  releaseReadinessPacketId: string | null;
+  productionActivationApprovalId: string | null;
+  releaseReadinessCurrent: boolean;
+  operatorActivationCurrent: boolean;
 }
 
 export interface WavePolicyEnvironment {
@@ -101,6 +107,8 @@ export interface WavePolicyEnvelope {
     maxParallelism: number;
     maxActiveWaveRuns: number;
     maxActiveWaveRunsPerWorkspace: number;
+    releaseReadinessPacketId: string | null;
+    productionActivationApprovalId: string | null;
   };
   fencingPolicy: typeof WAVE_FENCING_POLICY;
   fence: string;
@@ -144,6 +152,10 @@ export function defaultWaveRolloutPolicy(): WaveRolloutPolicy {
     halted: false,
     draining: false,
     rationale: 'Sequential production default',
+    releaseReadinessPacketId: null,
+    productionActivationApprovalId: null,
+    releaseReadinessCurrent: false,
+    operatorActivationCurrent: false,
   };
 }
 
@@ -209,6 +221,12 @@ export function evaluateWaveProductionPolicy(input: WavePolicyEvaluationInput): 
     } else if (!input.receipt.current || !input.receipt.productionEnableAvailable || input.receipt.sourceRevision !== input.currentRevision) {
       status = 'receipt-stale';
       reason = 'receipt_identity_or_revision_stale';
+    } else if (!input.rollout.releaseReadinessPacketId || !input.rollout.releaseReadinessCurrent) {
+      status = 'review-missing';
+      reason = 'current_independent_release_review_required';
+    } else if (!input.rollout.productionActivationApprovalId || !input.rollout.operatorActivationCurrent) {
+      status = 'activation-missing';
+      reason = 'separate_operator_production_activation_required';
     } else if (!requestedCohort || requestedCohort !== input.rollout.cohort || !inCohort(input)) {
       status = 'production-disabled';
       reason = 'workspace_or_run_not_in_rollout_cohort';
@@ -229,6 +247,8 @@ export function evaluateWaveProductionPolicy(input: WavePolicyEvaluationInput): 
     else if (!input.receipt) status = 'receipt-missing';
     else if (!input.rollout.enabled) status = 'production-disabled';
     else if (!input.receipt.current || input.receipt.sourceRevision !== input.currentRevision) status = 'receipt-stale';
+    else if (!input.rollout.releaseReadinessPacketId || !input.rollout.releaseReadinessCurrent) status = 'review-missing';
+    else if (!input.rollout.productionActivationApprovalId || !input.rollout.operatorActivationCurrent) status = 'activation-missing';
     else if (!inCohort(input)) status = 'production-disabled';
     else status = input.rollout.cohort === 'all' ? 'enabled' : 'canary-enabled';
   }
@@ -257,6 +277,8 @@ export function evaluateWaveProductionPolicy(input: WavePolicyEvaluationInput): 
       maxParallelism: input.rollout.maxParallelism,
       maxActiveWaveRuns: input.rollout.maxActiveWaveRuns,
       maxActiveWaveRunsPerWorkspace: input.rollout.maxActiveWaveRunsPerWorkspace,
+      releaseReadinessPacketId: input.rollout.releaseReadinessPacketId,
+      productionActivationApprovalId: input.rollout.productionActivationApprovalId,
     },
     fencingPolicy: WAVE_FENCING_POLICY,
   };
