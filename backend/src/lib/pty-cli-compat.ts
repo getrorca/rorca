@@ -15,8 +15,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentType } from './config';
 
-export const PTY_CLI_PROBE_TIMEOUT_MS = 3_000;
+export const PTY_CLI_PROBE_TIMEOUT_MS = 15_000;
 const PTY_CLI_CACHE_TTL_MS = 30_000;
+const PI_SAFE_PROBE_PREFIX = ['--no-extensions', '--offline'] as const;
 
 export type PtyCliCapability =
   | 'permissionBypass'
@@ -202,6 +203,13 @@ function outputAdvertisesFlag(helpOutput: string, flag: string): boolean {
   return new RegExp(`(^|[\\s,])${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s=,<])`, 'm').test(helpOutput);
 }
 
+function probeArgs(agentType: AgentType, flag: '--version' | '--help'): string[] {
+  // Pi extensions may initialize network bridges or other user integrations.
+  // Compatibility probes must stay isolated from those startup paths so a
+  // transient extension cannot make a healthy Pi executable look unavailable.
+  return agentType === 'pi' ? [...PI_SAFE_PROBE_PREFIX, flag] : [flag];
+}
+
 /** Probe one CLI synchronously, with short bounded non-interactive commands. */
 export function probePtyCliCompatibility(agentType: AgentType, opts: PtyCliProbeOptions = {}): PtyCliCompatibility {
   const env = opts.env ?? process.env;
@@ -223,12 +231,11 @@ export function probePtyCliCompatibility(agentType: AgentType, opts: PtyCliProbe
         action: `Install/configure ${agentType}, or set ${ENV_KEY[agentType]} to its executable path.`,
       }],
     };
-    if (env === process.env) cache.set(agentType, { at: Date.now(), result });
     return result;
   }
 
-  const version = runProbe(binaryPath, ['--version'], env, timeoutMs);
-  const help = runProbe(binaryPath, ['--help'], env, timeoutMs);
+  const version = runProbe(binaryPath, probeArgs(agentType, '--version'), env, timeoutMs);
+  const help = runProbe(binaryPath, probeArgs(agentType, '--help'), env, timeoutMs);
   if (!version.ok) diagnostics.push({
     code: 'version_probe_failed',
     message: `${agentType} at ${binaryPath} did not complete --version${version.timedOut ? ` within ${timeoutMs}ms` : ''}.`,
@@ -257,7 +264,9 @@ export function probePtyCliCompatibility(agentType: AgentType, opts: PtyCliProbe
     probes: { version: toPublicProbe(version), help: toPublicProbe(help) },
     diagnostics,
   };
-  if (env === process.env) cache.set(agentType, { at: Date.now(), result });
+  // A failed probe is intentionally not cached. Story-level retries must get a
+  // fresh bounded probe instead of replaying one transient timeout until TTL.
+  if (env === process.env && result.ready) cache.set(agentType, { at: Date.now(), result });
   return result;
 }
 
@@ -331,8 +340,8 @@ export async function probePtyCliCompatibilityAsync(agentType: AgentType, opts: 
   }
 
   const [version, help] = await Promise.all([
-    runProbeAsync(binaryPath, ['--version'], env, timeoutMs),
-    runProbeAsync(binaryPath, ['--help'], env, timeoutMs),
+    runProbeAsync(binaryPath, probeArgs(agentType, '--version'), env, timeoutMs),
+    runProbeAsync(binaryPath, probeArgs(agentType, '--help'), env, timeoutMs),
   ]);
   if (!version.ok) diagnostics.push({
     code: 'version_probe_failed',
