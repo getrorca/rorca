@@ -12,6 +12,9 @@ import { commitGuardedMerge } from './story-worktree-lifecycle';
 export const WAVE_INTEGRATION_STATES = [
   'prepared',
   'integrating',
+  'conflicted',
+  'resolution_pending',
+  'aborted',
   'integrated',
   'integrated_validated',
   'finalized',
@@ -52,6 +55,33 @@ export interface WaveIntegrationTransition {
   revision: string;
 }
 
+export type WaveConflictKind = 'content' | 'add_add' | 'rename_delete' | 'binary' | 'generated' | 'unsupported';
+
+export interface WaveConflictingFileIdentity {
+  /** UTF-8 path prefix, bounded to avoid turning Git output into unbounded evidence. */
+  path: string;
+  pathHash: string;
+  kind: WaveConflictKind;
+  stages: number[];
+  modes: string[];
+}
+
+export interface WaveConflictEvidence {
+  schemaVersion: 1;
+  conflictingFiles: WaveConflictingFileIdentity[];
+  conflictingFilesTruncated: boolean;
+  sourceCommit: string;
+  expectedParentHead: string;
+  actualParentHead: string;
+  preMergeHead: string;
+  postAbortHead: string | null;
+  resolver: {
+    policy: 'disabled';
+    identity: null;
+    resolutionDiffHash: null;
+  };
+}
+
 export interface WaveIntegrationRecord extends WaveContributionIdentity {
   protocolVersion: 'rorca.wave-integration.v1';
   ledgerKey: string;
@@ -59,6 +89,7 @@ export interface WaveIntegrationRecord extends WaveContributionIdentity {
   resultingHead: string | null;
   validationIdentity: WaveValidationIdentity | null;
   finalizationIdentity: WaveFinalizationIdentity | null;
+  conflictEvidence: WaveConflictEvidence | null;
   failureReason: string | null;
   transitions: WaveIntegrationTransition[];
 }
@@ -68,9 +99,12 @@ export interface PrepareWaveContributionInput extends WaveContributionIdentity {
 const OID = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const SAFE_STORY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const MAX_CONFLICT_FILES = 32;
+const MAX_CONFLICT_PATH_BYTES = 512;
 const ACTIVE_GIT_OPERATIONS = [
   'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'BISECT_LOG',
 ];
+const GENERATED_PATH = /(?:^|\/)(?:dist|build|generated|coverage)(?:\/|$)|(?:\.generated\.|-lock\.(?:json|yaml|yml)$)/i;
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
@@ -94,6 +128,116 @@ function canonicalJson(value: unknown): string {
 
 function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function boundedUtf8(value: string, maxBytes: number): string {
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.length <= maxBytes) return value;
+  let end = maxBytes;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString('utf8');
+}
+
+interface UnmergedStage {
+  path: string;
+  mode: string;
+  oid: string;
+  stage: number;
+}
+
+function readUnmergedStages(cwd: string): UnmergedStage[] {
+  const output = execFileSync('git', ['ls-files', '-u', '-z'], {
+    cwd,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return output.split('\0').filter(Boolean).map(line => {
+    const match = /^(\d{6}) ([0-9a-f]{40}) ([123])\t([\s\S]+)$/.exec(line);
+    if (!match) throw new Error('[wave-integration] malformed unmerged index entry');
+    return { mode: match[1], oid: match[2], stage: Number(match[3]), path: match[4] };
+  });
+}
+
+function blobLooksBinary(cwd: string, oid: string): boolean {
+  const size = Number(git(cwd, ['cat-file', '-s', oid]));
+  if (!Number.isSafeInteger(size) || size < 0 || size > 1024 * 1024) return true;
+  const blob = execFileSync('git', ['cat-file', 'blob', oid], {
+    cwd,
+    encoding: null,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 1024 * 1024,
+  });
+  return blob.includes(0);
+}
+
+function conflictFileIdentities(cwd: string, stages: readonly UnmergedStage[]): {
+  files: WaveConflictingFileIdentity[];
+  truncated: boolean;
+} {
+  const paths = [...new Set(stages.map(item => item.path))].sort((left, right) => left.localeCompare(right));
+  const files = paths.slice(0, MAX_CONFLICT_FILES).map(filePath => {
+    const entries = stages.filter(item => item.path === filePath);
+    const stageNumbers = entries.map(item => item.stage).sort();
+    const modes = [...new Set(entries.map(item => item.mode))].sort();
+    let kind: WaveConflictKind = 'content';
+    if (modes.some(mode => mode === '160000' || !['100644', '100755', '120000'].includes(mode))) kind = 'unsupported';
+    else if (entries.some(entry => blobLooksBinary(cwd, entry.oid))) kind = 'binary';
+    else if (GENERATED_PATH.test(filePath)) kind = 'generated';
+    else if (!stageNumbers.includes(1) && stageNumbers.includes(2) && stageNumbers.includes(3)) kind = 'add_add';
+    else if (stageNumbers.includes(1) && (!stageNumbers.includes(2) || !stageNumbers.includes(3))) kind = 'rename_delete';
+    return {
+      path: boundedUtf8(filePath, MAX_CONFLICT_PATH_BYTES),
+      pathHash: sha256(filePath),
+      kind,
+      stages: stageNumbers,
+      modes,
+    };
+  });
+  return { files, truncated: paths.length > files.length };
+}
+
+class WaveConflictAbort extends Error {
+  constructor(readonly ledgerKey: string) {
+    super('merge conflict was durably attributed and aborted');
+  }
+}
+
+function assertConflictEvidence(record: WaveIntegrationRecord): void {
+  const conflictState = ['conflicted', 'resolution_pending', 'aborted'].includes(record.state);
+  const evidence = record.conflictEvidence;
+  if (!evidence) {
+    if (conflictState) throw new Error('[wave-integration] conflict record is missing evidence');
+    return;
+  }
+  if (
+    evidence.schemaVersion !== 1
+    || evidence.sourceCommit !== record.sourceCommit
+    || evidence.expectedParentHead !== record.expectedParentHead
+    || !OID.test(evidence.actualParentHead)
+    || !OID.test(evidence.preMergeHead)
+    || (evidence.postAbortHead !== null && !OID.test(evidence.postAbortHead))
+    || (record.state === 'aborted' && evidence.postAbortHead === null)
+    || evidence.resolver?.policy !== 'disabled'
+    || evidence.resolver.identity !== null
+    || evidence.resolver.resolutionDiffHash !== null
+    || !Array.isArray(evidence.conflictingFiles)
+    || evidence.conflictingFiles.length === 0
+    || evidence.conflictingFiles.length > MAX_CONFLICT_FILES
+  ) throw new Error('[wave-integration] conflict evidence is malformed');
+  for (const file of evidence.conflictingFiles) {
+    if (
+      !file.path
+      || Buffer.byteLength(file.path, 'utf8') > MAX_CONFLICT_PATH_BYTES
+      || !HASH.test(file.pathHash)
+      || !['content', 'add_add', 'rename_delete', 'binary', 'generated', 'unsupported'].includes(file.kind)
+      || !Array.isArray(file.stages)
+      || file.stages.some(stage => ![1, 2, 3].includes(stage))
+      || !Array.isArray(file.modes)
+      || file.modes.some(mode => !/^\d{6}$/.test(mode))
+    ) throw new Error('[wave-integration] conflicting file identity is malformed');
+  }
 }
 
 function assertRegularFile(filePath: string, label: string): void {
@@ -139,6 +283,26 @@ export function deterministicWaveIntegrationOrder<T extends Pick<WaveContributio
   return [...items].sort((left, right) => left.waveIndex - right.waveIndex || left.storyId.localeCompare(right.storyId));
 }
 
+export type WaveStoryReconciliationState =
+  | 'never_attempted'
+  | 'integrating'
+  | 'integrated'
+  | 'conflicted'
+  | 'resolution_pending'
+  | 'aborted'
+  | 'failed';
+
+/** Stable restart projection; transitions retain conflict attribution after abort. */
+export function waveStoryReconciliationState(record: WaveIntegrationRecord | null): WaveStoryReconciliationState {
+  if (!record || record.state === 'prepared') return 'never_attempted';
+  if (record.state === 'integrating') return 'integrating';
+  if (record.state === 'conflicted') return 'conflicted';
+  if (record.state === 'resolution_pending') return 'resolution_pending';
+  if (record.state === 'aborted') return 'aborted';
+  if (record.state === 'failed') return 'failed';
+  return 'integrated';
+}
+
 /**
  * Atomic, restart-readable Git integration protocol. The PostgreSQL
  * `story_integration_ledger` table mirrors this record and provides the
@@ -181,6 +345,7 @@ export class WaveIntegrationLedger {
       resultingHead: null,
       validationIdentity: null,
       finalizationIdentity: null,
+      conflictEvidence: null,
       failureReason: null,
       transitions: [{ sequence: 1, state: 'prepared', revision: input.expectedParentHead }],
     };
@@ -202,7 +367,9 @@ export class WaveIntegrationLedger {
     this.assertFrozenManifest(record);
     record = this.reconcile(record);
     if (['integrating', 'integrated', 'integrated_validated', 'finalized'].includes(record.state)) return record;
-    if (record.state === 'failed') throw new Error(`[wave-integration] contribution is failed: ${record.failureReason ?? 'unspecified'}`);
+    if (['conflicted', 'resolution_pending', 'aborted', 'failed'].includes(record.state)) {
+      throw new Error(`[wave-integration] contribution cannot integrate from ${record.state}: ${record.failureReason ?? 'unspecified'}`);
+    }
     if (record.state !== 'prepared') throw new Error('[wave-integration] contribution is not prepared');
     this.assertIntegrationPreconditions(record);
     return this.transition(record, 'integrating', record.expectedParentHead);
@@ -232,11 +399,41 @@ export class WaveIntegrationLedger {
       // If application had already advanced HEAD, reconcile() above recognized
       // only the exact two-parent merge for this source commit.
       this.assertIntegrationPreconditions(record);
-      execFileSync('git', ['merge', '--no-ff', '--no-commit', record.sourceCommit], {
-        cwd: this.repositoryPath,
-        env: process.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      const preMergeHead = git(this.repositoryPath, ['rev-parse', 'HEAD']);
+      try {
+        execFileSync('git', ['merge', '--no-ff', '--no-commit', record.sourceCommit], {
+          cwd: this.repositoryPath,
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (mergeError) {
+        const unmerged = readUnmergedStages(this.repositoryPath);
+        if (unmerged.length === 0) throw mergeError;
+        const identities = conflictFileIdentities(this.repositoryPath, unmerged);
+        const evidence: WaveConflictEvidence = {
+          schemaVersion: 1,
+          conflictingFiles: identities.files,
+          conflictingFilesTruncated: identities.truncated,
+          sourceCommit: record.sourceCommit,
+          expectedParentHead: record.expectedParentHead,
+          actualParentHead: preMergeHead,
+          preMergeHead,
+          postAbortHead: null,
+          resolver: { policy: 'disabled', identity: null, resolutionDiffHash: null },
+        };
+        record = this.transition({
+          ...record,
+          conflictEvidence: evidence,
+          failureReason: `merge conflict in ${identities.files.length}${identities.truncated ? '+' : ''} bounded file identities; automatic resolution disabled`,
+        }, 'conflicted', preMergeHead);
+        this.abortPartialMerge(preMergeHead);
+        const postAbortHead = git(this.repositoryPath, ['rev-parse', 'HEAD']);
+        record = this.transition({
+          ...record,
+          conflictEvidence: { ...evidence, postAbortHead },
+        }, 'aborted', postAbortHead);
+        throw new WaveConflictAbort(record.ledgerKey);
+      }
       const resultingHead = commitGuardedMerge(
         this.repositoryPath,
         `merge(wave-${record.waveIndex}): ${record.storyId} attempt ${record.attempt}`,
@@ -245,7 +442,10 @@ export class WaveIntegrationLedger {
       record = { ...record, resultingHead };
       return this.transition(record, 'integrated', resultingHead);
     } catch (error) {
-      try { execFileSync('git', ['merge', '--abort'], { cwd: this.repositoryPath, stdio: 'ignore' }); } catch { /* no merge remains */ }
+      if (error instanceof WaveConflictAbort) {
+        throw new Error(`[wave-integration] merge conflict aborted and failed closed (${error.ledgerKey.slice(0, 12)})`);
+      }
+      try { this.abortPartialMerge(git(this.repositoryPath, ['rev-parse', 'HEAD'])); } catch { /* failure remains durable below */ }
       const failed = this.transition({
         ...record,
         failureReason: error instanceof Error ? error.message.slice(0, 512) : 'integration failed',
@@ -312,9 +512,39 @@ export class WaveIntegrationLedger {
   }
 
   private reconcile(record: WaveIntegrationRecord): WaveIntegrationRecord {
+    if (record.state === 'conflicted' || record.state === 'resolution_pending') {
+      const preMergeHead = record.conflictEvidence?.preMergeHead ?? record.expectedParentHead;
+      this.abortPartialMerge(preMergeHead);
+      const postAbortHead = git(this.repositoryPath, ['rev-parse', 'HEAD']);
+      return this.transition({
+        ...record,
+        conflictEvidence: record.conflictEvidence ? { ...record.conflictEvidence, postAbortHead } : null,
+        failureReason: record.failureReason ?? 'incomplete conflict recovery was aborted during restart reconciliation',
+      }, 'aborted', postAbortHead);
+    }
     if (record.state !== 'integrating') return record;
     const currentHead = git(this.repositoryPath, ['rev-parse', 'HEAD']);
     if (currentHead === record.expectedParentHead) {
+      const unmerged = readUnmergedStages(this.repositoryPath);
+      if (unmerged.length > 0) {
+        const identities = conflictFileIdentities(this.repositoryPath, unmerged);
+        const conflicted = this.transition({
+          ...record,
+          conflictEvidence: {
+            schemaVersion: 1,
+            conflictingFiles: identities.files,
+            conflictingFilesTruncated: identities.truncated,
+            sourceCommit: record.sourceCommit,
+            expectedParentHead: record.expectedParentHead,
+            actualParentHead: currentHead,
+            preMergeHead: currentHead,
+            postAbortHead: null,
+            resolver: { policy: 'disabled', identity: null, resolutionDiffHash: null },
+          },
+          failureReason: `merge conflict in ${identities.files.length}${identities.truncated ? '+' : ''} bounded file identities; recovered after interrupted apply`,
+        }, 'conflicted', currentHead);
+        return this.reconcile(conflicted);
+      }
       this.assertCleanAndIdle();
       return record;
     }
@@ -326,6 +556,16 @@ export class WaveIntegrationLedger {
     }
     const reconciled = { ...record, resultingHead: currentHead };
     return this.transition(reconciled, 'integrated', currentHead);
+  }
+
+  private abortPartialMerge(expectedHead: string): void {
+    const mergeHead = path.resolve(this.repositoryPath, git(this.repositoryPath, ['rev-parse', '--git-path', 'MERGE_HEAD']));
+    if (fs.existsSync(mergeHead)) {
+      execFileSync('git', ['merge', '--abort'], { cwd: this.repositoryPath, env: process.env, stdio: 'ignore' });
+    }
+    const currentHead = git(this.repositoryPath, ['rev-parse', 'HEAD']);
+    if (currentHead !== expectedHead) throw new Error('[wave-integration] abort changed or failed to restore the target head');
+    this.assertCleanAndIdle();
   }
 
   private assertIntegrationPreconditions(identity: WaveContributionIdentity): void {
@@ -449,14 +689,21 @@ export class WaveIntegrationLedger {
     if (!fs.existsSync(recordPath)) return null;
     assertRegularFile(recordPath, 'ledger record');
     const parsed = JSON.parse(fs.readFileSync(recordPath, 'utf8')) as WaveIntegrationRecord;
+    // v1 records written before conflict recovery had no conflictEvidence key.
+    if (parsed.conflictEvidence === undefined) parsed.conflictEvidence = null;
     if (
       parsed.protocolVersion !== 'rorca.wave-integration.v1'
       || parsed.ledgerKey !== ledgerKey
       || !WAVE_INTEGRATION_STATES.includes(parsed.state)
       || !Array.isArray(parsed.transitions)
-      || parsed.transitions.some((item, index) => item.sequence !== index + 1)
+      || parsed.transitions.some((item, index) => (
+        item.sequence !== index + 1
+        || !WAVE_INTEGRATION_STATES.includes(item.state)
+        || !OID.test(item.revision)
+      ))
     ) throw new Error('[wave-integration] ledger record is malformed');
     assertIdentity(parsed);
+    assertConflictEvidence(parsed);
     return parsed;
   }
 

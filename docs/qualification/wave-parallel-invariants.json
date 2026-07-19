@@ -78,6 +78,11 @@
       "id": "WPE-Q-008",
       "name": "post-commit-rejection-preserves-independent-sibling",
       "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-003", "WPE-INV-004", "WPE-INV-005", "WPE-INV-006", "WPE-INV-007"]
+    },
+    {
+      "id": "WPE-Q-009",
+      "name": "merge-conflict-is-recoverable-and-non-authoritative",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-003", "WPE-INV-004", "WPE-INV-005", "WPE-INV-006", "WPE-INV-007"]
     }
   ]
 }

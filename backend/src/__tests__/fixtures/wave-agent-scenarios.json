@@ -108,6 +108,22 @@
       "commitMessage": "test(fixture): deterministic conflict right",
       "spawnDescendant": false
     },
+    "merge-conflict-concurrent-left": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-006",
+      "file": "shared-conflict.txt",
+      "commitMessage": "test(fixture): concurrent conflict left",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "merge-conflict-concurrent-right": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-006",
+      "file": "shared-conflict.txt",
+      "commitMessage": "test(fixture): concurrent conflict right",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
     "timeout": {
       "behavior": "timeout",
       "faultPoint": "WPE-FP-002",

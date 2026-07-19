@@ -81,8 +81,9 @@ runs with bounds two and four and must produce the same accepted IDs, integratio
 order, source files, and final tree hash.
 
 The integration linearization protocol is `wave-integration-protocol.ts`. Its
-atomic restart record progresses only through `prepared`, `integrating`,
-`integrated`, `integrated_validated`, `finalized`, or `failed`, and binds each
+atomic restart record progresses through `prepared`, `integrating`,
+`conflicted`, `resolution_pending`, `aborted`, `integrated`,
+`integrated_validated`, `finalized`, or `failed`, and binds each
 transition to run/story/attempt, source/base commits, expected parent, frozen
 manifest hash, resulting revision, validation identity, and finalization receipt.
 Before every apply it rejects dirty or busy Git state, a moved source ref, broken
@@ -97,6 +98,40 @@ trace only after durable finalization. A separately implemented JavaScript trace
 checker consumes the normalized trace as a subprocess and must agree with the
 TypeScript engine-facing assertions on order, state chains, projection timing,
 and final run revision.
+
+## Conflicted-story recovery and partial-wave semantics
+
+`conflicted-wave-integration.node.test.ts` creates two real concurrent fixture
+branches that edit the same existing hunk. Agent completion arrival is permuted,
+but integration is always serialized by wave index and canonical story ID. The
+first contribution and an independent sibling remain finalized exactly once;
+the second conflict makes the overall run and authoritative `run_closeout`
+failed. Dependents of that story block. This is intentionally **not** wave-level
+atomicity: already accepted independent history is neither rolled back nor
+retroactively failed.
+
+Before aborting, the ledger durably records bounded path prefixes plus full path
+hashes, conflict class, source commit, expected and actual parent, and pre-merge
+head. It then runs `git merge --abort`, verifies a clean idle target at the same
+head, records the post-abort head, and transitions to `aborted`. Restart
+projection distinguishes never-attempted, integrating, conflicted,
+resolution-pending, aborted, failed, and integrated attempts. A conflicted or
+aborted record cannot enter integrated validation or canonical pass
+finalization.
+
+Automatic conflict resolution is disabled. Resolver identity and resolution
+diff are therefore explicitly null in durable evidence; binary, generated,
+rename/delete, add/add, gitlink/unsupported, ambiguous, and resolver-crash paths
+all fail closed rather than selecting a side or dropping source. Any future
+resolver must introduce an explicit bounded policy, durable identity and diff,
+and mandatory integrated validation before finalization.
+
+Rejected conflict worktrees are snapshotted through the owned cleanup protocol,
+removed, and retained by a content-addressed recovery ref. The run branch,
+successful sibling commits, unrelated refs, ledger evidence, and recovery ref
+remain. Qualification inventory requires no merge/cherry-pick/rebase head,
+unmerged index entry, mutation lock, owned temporary source ref, or extra
+worktree after every conflict scenario.
 
 ## Rejected-story fail-closed gate
 
