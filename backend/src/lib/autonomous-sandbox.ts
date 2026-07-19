@@ -99,7 +99,9 @@ function assertSafeToolRoot(root: string): string {
 
 function toolRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const configured = String(env.RORCA_AUTONOMOUS_TOOL_ROOTS ?? '').trim();
-  const roots = configured ? configured.split(':').filter(Boolean) : DEFAULT_TOOL_ROOTS;
+  const roots = configured
+    ? configured.split(':').filter(Boolean)
+    : DEFAULT_TOOL_ROOTS.filter(root => realExisting(root) !== null);
   return [...new Set(roots.map(assertSafeToolRoot))];
 }
 
