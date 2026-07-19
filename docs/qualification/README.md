@@ -98,6 +98,34 @@ checker consumes the normalized trace as a subprocess and must agree with the
 TypeScript engine-facing assertions on order, state chains, projection timing,
 and final run revision.
 
+## Rejected-story fail-closed gate
+
+`rejected-wave-closeout.node.test.ts` runs a post-commit rejection and an
+independent sibling behind the same two-process barrier. Once rejection is
+accounted, the dispatch fence prevents every unstarted story and later wave from
+starting. An independent sibling that was already running is not killed between
+unsafe phases: it may drain only through its current host validation,
+integration, and canonical closeout boundary. Direct and transitive dependents
+are computed from exact compiled-DAG story IDs, persisted with `blockedBy`, and
+never receive a fixture process, worktree, queue claim, commit, validation, or
+merge.
+
+Rejected, failed, and processed accounting precedes dependency analysis. Spec,
+run, WAL, story-result, and local-diagnostic projections are all attempted with
+`Promise.allSettled`; any missing channel sets an evidence gap and remains
+semantic failure. Process success, independent-story success, or cleanup success
+cannot supersede the authoritative failed `run_closeout`, and no process-level
+`run_finished` success is accepted after rejection.
+
+`rejected-wave-closeout.ts` is the portable evidence boundary. API/WAL reason
+and stack fields are valid UTF-8, byte-bounded, and secret/POSIX/Windows-path
+redacted for Error, string, object, primitive, oversized multibyte, circular,
+and serialization-failure values. The raw local diagnostic is separately
+bounded, mode 0600, marked non-portable, and must never be copied to an API or
+WAL. A rejected committed worktree is removed normally while its commit remains
+available through the owned recovery ref; the successful sibling finalizes and
+integrates exactly once and has both temporary worktree and branch removed.
+
 ## Cleanup and evidence
 
 Filesystem cleanup requires canonical realpath containment, root and repository ownership markers, exact repository identity, a complete owned-worktree list, and a symlink-free tree. Any missing/mismatched marker, traversal, symlink, swapped repository, or unrelated worktree rejects cleanup without deletion.

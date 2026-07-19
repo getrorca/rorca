@@ -76,6 +76,7 @@ import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentTyp
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
+import { normalizeRejectedStoryEvidence, sanitizeStoredRejectedStoryEvidence, type PortableRejectionEvidence } from '../lib/rejected-wave-closeout';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
   getRunPtySessionHealth,
@@ -7359,6 +7360,7 @@ async function recordTokenUsage(
  *               blockedBy: { type: array, items: { type: string }, nullable: true }
  *               activeSkills: { type: array, items: { type: string }, nullable: true }
  *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
+ *               rejectionEvidence: { description: "Arbitrary rejected value; accepted only for fail outcomes and stored as bounded, secret/path-redacted portable evidence." }
  *     responses:
  *       201: { description: "Story result recorded" }
  *       400: { description: "Missing required fields or invalid status" }
@@ -7369,7 +7371,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey,
+      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey, rejectionEvidence,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
@@ -7377,6 +7379,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
       completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
+      rejectionEvidence?: unknown;
     };
 
     if (!runId || !storyId || !status) {
@@ -7395,6 +7398,17 @@ router.post('/story-result', async (req: Request, res: Response) => {
     if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
       throw new ValidationError('completionPacket must be an object');
     }
+    if (rejectionEvidence !== undefined && status !== 'fail') {
+      throw new ValidationError('rejectionEvidence is valid only for fail outcomes');
+    }
+    const portableRejection = rejectionEvidence === undefined
+      ? undefined
+      : normalizeRejectedStoryEvidence(storyId, rejectionEvidence);
+    const safeCompletionPacket = completionPacket ? { ...completionPacket } : undefined;
+    if (safeCompletionPacket) delete safeCompletionPacket.rejectionEvidence;
+    const persistedCompletionPacket = portableRejection
+      ? { ...(safeCompletionPacket ?? {}), rejectionEvidence: portableRejection }
+      : safeCompletionPacket;
 
     const projection = await queryOne<{
       workspace_id: string;
@@ -7444,7 +7458,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
       activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
-      completionPacket ? JSON.stringify(completionPacket) : null,
+      persistedCompletionPacket ? JSON.stringify(persistedCompletionPacket) : null,
       specId,
       projection.spec_revision,
       projection.story_revision,
@@ -7601,6 +7615,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
  *                 failureReason: { type: string, nullable: true }
  *                 failureAttempts: { type: integer, nullable: true }
  *                 blockedBy: { type: array, items: { type: string }, nullable: true }
+ *                 rejectionEvidence: { type: object, nullable: true, description: "Bounded portable rejection reason and stack; secrets and host paths are redacted." }
  *                 output: { type: array, items: { type: string } }
  *                 lineCount: { type: integer }
  *       400: { description: "Invalid runId" }
@@ -7632,6 +7647,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
     let blockedBy: string[] | null = null;
+    let rejectionEvidence: PortableRejectionEvidence | null = null;
     if (walEvent?.payload) {
       try {
         const payload = typeof walEvent.payload === 'string' ? JSON.parse(walEvent.payload) : walEvent.payload;
@@ -7639,6 +7655,14 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
         failureAttempts = payload.attempts ?? null;
         if (Array.isArray(payload.blockedBy)) blockedBy = payload.blockedBy;
       } catch { /* ignore */ }
+    }
+
+    const completionPacket = (storyResult as any).completion_packet as Record<string, unknown> | string | null;
+    if (completionPacket) {
+      try {
+        const parsed = typeof completionPacket === 'string' ? JSON.parse(completionPacket) : completionPacket;
+        rejectionEvidence = sanitizeStoredRejectedStoryEvidence(storyId, parsed?.rejectionEvidence);
+      } catch { /* malformed historical completion packet has no portable rejection projection */ }
     }
 
     // Also check story_results.blocked_by
@@ -7725,6 +7749,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
       failureReason,
       failureAttempts,
       blockedBy,
+      rejectionEvidence,
       output: outputLines,
       lineCount: outputLines.length,
     });

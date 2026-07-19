@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(fs.readFileSync(path.join(here, 'wave-agent-scenarios.json'), 'utf8'));
 const allowedBehaviors = new Set([
-  'pass', 'reject-before-commit', 'reject-after-commit', 'dirty-worktree-rejection',
+  'pass', 'reject-before-commit', 'reject-after-commit', 'barrier-reject-after-commit', 'dirty-worktree-rejection',
   'bounded-sleep', 'barrier-pass', 'timeout', 'cancellation', 'abrupt-exit', 'restart-resume',
 ]);
 const sensitiveKey = /(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|DATABASE|PGHOST|AWS|AZURE|GOOGLE|GITHUB|GITLAB|ANTHROPIC|CLAUDE|OPENAI|OPENROUTER)/i;
@@ -205,7 +205,9 @@ if (process.argv[2] === '--descendant') {
       await sleep(scenario.sleepMs);
       emit('bounded-sleep-completed', { configuredMs: scenario.sleepMs });
     }
-    if (scenario.behavior === 'barrier-pass') await waitAtBarrier(scenario.barrier);
+    if (scenario.behavior === 'barrier-pass' || scenario.behavior === 'barrier-reject-after-commit') {
+      await waitAtBarrier(scenario.barrier);
+    }
 
     if (scenario.behavior === 'restart-resume') {
       const checkpoint = path.join(process.cwd(), `.fixture-${request.scenarioId}.checkpoint.json`);
@@ -229,7 +231,7 @@ if (process.argv[2] === '--descendant') {
     }
 
     commitSource();
-    if (scenario.behavior === 'reject-after-commit') {
+    if (scenario.behavior === 'reject-after-commit' || scenario.behavior === 'barrier-reject-after-commit') {
       emit('story-rejected', { phase: 'after-commit' });
       process.exit(31);
     }

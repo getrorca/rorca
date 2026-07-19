@@ -23,6 +23,22 @@
       "commitMessage": "test(fixture): deterministic post-commit rejection",
       "spawnDescendant": true
     },
+    "same-wave-post-commit-rejection": {
+      "behavior": "barrier-reject-after-commit",
+      "faultPoint": "WPE-FP-004",
+      "file": "fixture-output/same-wave-rejected.txt",
+      "commitMessage": "test(fixture): same-wave post-commit rejection",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "same-wave-independent-sibling": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/same-wave-sibling.txt",
+      "commitMessage": "test(fixture): same-wave independent sibling",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
     "dirty-worktree-rejection": {
       "behavior": "dirty-worktree-rejection",
       "faultPoint": "WPE-FP-004",
