@@ -538,6 +538,91 @@ describe('RunViewPanel', () => {
     expect(screen.queryByText(/^Skills matched$/i)).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['process finish before closeout', [
+      { event_type: 'run_finished', story_id: null, ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 88, status: 'done', exit_code: 0 }) },
+      { event_type: 'run_closeout', story_id: null, ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 88, status: 'failed' }) },
+    ]],
+    ['process finish after closeout', [
+      { event_type: 'run_closeout', story_id: null, ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 88, status: 'failed' }) },
+      { event_type: 'run_finished', story_id: null, ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 88, status: 'done', exit_code: 0 }) },
+    ]],
+  ])('renders failed semantic closeout when %s', async (_label, events) => {
+    const closeoutRun = createMockRun({ id: 88, status: 'done', workspace_id: 'ws-1' });
+    mockUsePipelineSSE.mockReturnValue(events);
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes('/api/pipeline/runs/88')) {
+        return {
+          run: closeoutRun,
+          stories: [],
+          specStories: [{ id: 'US-001', title: 'No accepted result' }],
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(<RunViewPanel runId={88} onBack={vi.fn()} onNavigate={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByTestId('run-semantic-status')).toHaveTextContent('Failed'));
+    expect(screen.queryByText('Passed')).not.toBeInTheDocument();
+  });
+
+  it('renders terminal success without story evidence as Incomplete, never Passed', async () => {
+    const incompleteRun = createMockRun({ id: 89, status: 'done', workspace_id: 'ws-1' });
+    mockUsePipelineSSE.mockReturnValue([
+      { event_type: 'run_finished', story_id: null, ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 89, status: 'done', exit_code: 0 }) },
+      { event_type: 'run_closeout', story_id: null, ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 89, status: 'done' }) },
+    ]);
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes('/api/pipeline/runs/89')) {
+        return {
+          run: incompleteRun,
+          stories: [],
+          specStories: Array.from({ length: 12 }, (_, index) => ({ id: `TAX-${String(index + 1).padStart(3, '0')}`, title: `Story ${index + 1}` })),
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(<RunViewPanel runId={89} onBack={vi.fn()} onNavigate={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByTestId('run-semantic-status')).toHaveTextContent('Incomplete'));
+    expect(screen.queryByText('Passed')).not.toBeInTheDocument();
+  });
+
+  it('labels a successful scoped retry without full-spec evidence as Scope passed', async () => {
+    const retryRun = {
+      ...createMockRun({ id: 90, status: 'done', workspace_id: 'ws-1' }),
+      retried_from_run_id: 87,
+    };
+    mockUsePipelineSSE.mockReturnValue([
+      { event_type: 'story_passed', story_id: 'US-002', ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 90 }) },
+      { event_type: 'run_finished', story_id: null, ts: new Date().toISOString(), payload: JSON.stringify({ run_id: 90, original_run_id: 87, source: 'worker_retry', status: 'done', retry_scope_complete: true, full_spec_complete: false }) },
+    ]);
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes('/api/pipeline/runs/90')) {
+        return {
+          run: retryRun,
+          stories: [{ story_id: 'US-002', status: 'pass', elapsed_seconds: 12, started_at: null, finished_at: new Date().toISOString() }],
+          specStories: [
+            { id: 'US-001', title: 'Prior story' },
+            { id: 'US-002', title: 'Retried story' },
+            { id: 'US-003', title: 'Remaining story' },
+          ],
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(<RunViewPanel runId={90} onBack={vi.fn()} onNavigate={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByTestId('run-semantic-status')).toHaveTextContent('Scope passed'));
+    expect(screen.queryByText(/^Passed$/)).not.toBeInTheDocument();
+  });
+
   it('handles API error gracefully', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;

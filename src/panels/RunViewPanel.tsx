@@ -25,6 +25,7 @@ import RunMetadataPanel, { type EffectiveRunOptions } from '../components/RunMet
 import AgentBadge from '../components/AgentBadge';
 import { getAgentModelDisplayName, normalizeAgentType } from '../lib/agent-display';
 import { normalizeRunTokenTelemetry, type RunTokenTelemetry } from '../lib/run-metadata';
+import { reconcileRunCloseout, type RunViewStatus } from '../lib/run-closeout-reconciliation';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
@@ -60,6 +61,7 @@ interface PipelineRun {
   include_graph?: boolean;
   terminal_mode?: 'ansi-html' | 'pty' | 'native-pty';
   effective_options?: EffectiveRunOptions | null;
+  retried_from_run_id?: number | null;
 }
 
 interface StoryResultSeed {
@@ -155,17 +157,19 @@ const TABS: { id: RunViewTab; label: string; icon: typeof ScrollText }[] = [
 
 // ─── Status styling ─────────────────────────────────────────────────────────
 
-const STATUS_BADGE_STYLES: Record<string, string> = {
-  running: 'bg-blue-500/10 text-blue-500',
-  paused: 'bg-yellow-500/10 text-yellow-500',
-  blocked: 'bg-amber-500/10 text-amber-500',
-  done: 'bg-emerald-500/10 text-emerald-500',
-  failed: 'bg-red-500/10 text-red-500',
-  partial_failure: 'bg-orange-500/10 text-orange-500',
-  cancelled: 'bg-gray-500/10 text-gray-400',
+const STATUS_BADGE_STYLES: Record<RunViewStatus, string> = {
+  running: 'bg-accent/10 text-accent',
+  paused: 'bg-warning/10 text-warning',
+  blocked: 'bg-warning/10 text-warning',
+  done: 'bg-success/10 text-success',
+  failed: 'bg-error/10 text-error',
+  partial_failure: 'bg-warning/10 text-warning',
+  cancelled: 'bg-muted/10 text-muted',
+  scope_passed: 'bg-success/10 text-success',
+  incomplete: 'bg-warning/10 text-warning',
 };
 
-const STATUS_BADGE_LABELS: Record<string, string> = {
+const STATUS_BADGE_LABELS: Record<RunViewStatus, string> = {
   running: 'Running',
   paused: 'Paused',
   blocked: 'Blocked',
@@ -173,6 +177,8 @@ const STATUS_BADGE_LABELS: Record<string, string> = {
   failed: '\u2717 Failed',
   partial_failure: 'Partial',
   cancelled: 'Cancelled',
+  scope_passed: 'Scope passed',
+  incomplete: 'Incomplete',
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -224,6 +230,7 @@ function extractStoryId(message: string): string | null {
  * wave group visualization, and keyboard navigation (j/k).
  * Kept here temporarily for rollback safety — remove once RunStoryList is confirmed stable.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- retained as documented rollback fallback
 function StoriesListTab({ dbStories, specStories, liveStatuses, contextComparison, storyTokenBreakdown }: {
   dbStories: StoryResultSeed[];
   specStories: { id: string; title: string; suggestedSkills?: Array<{ name: string; relevance: number; reason: string }> }[];
@@ -685,7 +692,7 @@ interface MergeInfo {
 
 // ─── MergeStatusSection ─────────────────────────────────────────────────────
 
-function MergeStatusSection({ mergeInfo, runId, onRetry }: {
+function MergeStatusSection({ mergeInfo, runId: _runId, onRetry }: {
   mergeInfo: MergeInfo;
   runId: number;
   onRetry: () => void;
@@ -988,12 +995,18 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   // SSE for live status updates — scoped to workspace
   const walEvents = usePipelineSSE(String(runId), workspaceId);
 
+  const runReconciliation = useMemo(() => reconcileRunCloseout({
+    runId,
+    persistedStatus: run?.status ?? 'running',
+    runStartedAt: run?.started_at,
+    retriedFromRunId: run?.retried_from_run_id,
+    events: walEvents,
+    storyResults: dbStories,
+    specStories,
+    runState,
+  }), [runId, run, walEvents, dbStories, specStories, runState]);
+
   const resumeSummary = useMemo<ResumeSummary | null>(() => {
-    const finishedIds = new Set([
-      ...(runState?.completedStories ?? []).map((story) => story.storyId),
-      ...(runState?.failedStories ?? []).map((story) => story.storyId),
-      ...(runState?.skippedStories ?? []).map((story) => story.storyId),
-    ]);
     const lastStartedStoryId = [...walEvents]
       .reverse()
       .find((event) => event.event_type === 'story_started' && event.story_id)?.story_id ?? null;
@@ -1004,40 +1017,19 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       ? Object.keys(contextComparison.actual)[0] ?? null
       : null;
 
-    let carriedForwardCount = runState?.completedStories.length ?? 0;
-    let continueFromId = runState?.currentStory
+    const carriedForwardCount = runReconciliation.carriedForwardStoryIds.size;
+    const continueFromId = runState?.currentStory
       ?? lastStartedStoryId
       ?? latestDbStoryId
       ?? actualContextStoryId
       ?? null;
-    let resumedAfterId = runState?.resumedFromStory ?? null;
-
-    if ((!runState || carriedForwardCount === 0) && continueFromId && specStories.length > 0) {
-      const continueIndex = specStories.findIndex((story) => story.id === continueFromId);
-      if (continueIndex > 0) {
-        carriedForwardCount = continueIndex;
-        resumedAfterId = resumedAfterId ?? specStories[continueIndex - 1]?.id ?? null;
-      }
-    }
+    const resumedAfterId = runState?.resumedFromStory ?? null;
 
     if (!continueFromId && !resumedAfterId && carriedForwardCount === 0) return null;
     return { continueFromId, resumedAfterId, carriedForwardCount };
-  }, [runState, specStories, walEvents, dbStories, contextComparison]);
+  }, [runState, walEvents, dbStories, contextComparison, runReconciliation.carriedForwardStoryIds]);
 
-  // Derive effective status from SSE events
-  const effectiveStatus = useMemo(() => {
-    if (!run) return 'running';
-    let status = run.status;
-    for (const evt of walEvents) {
-      if (evt.event_type === 'run_finished') status = 'done';
-      else if (evt.event_type === 'run_failed') status = 'failed';
-      else if (evt.event_type === 'run_paused') status = 'paused';
-      else if (evt.event_type === 'run_blocked') status = 'blocked';
-      else if (evt.event_type === 'run_resumed') status = 'running';
-      else if (evt.event_type === 'run_cancelled') status = 'cancelled';
-    }
-    return status;
-  }, [run, walEvents]);
+  const effectiveStatus = runReconciliation.status;
 
   // Derive setup phase state for wave parallel runs (worktree creation before stories start)
   const { isInSetupPhase, setupStoryCount } = useMemo(() => {
@@ -1089,8 +1081,20 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         map.set(id, { storyId: id, status: 'skipped', startedAt: null, elapsed: '' });
       }
     }
+
+    // Semantic closeout settles stale running graph nodes from explicit evidence.
+    if (runReconciliation.terminal) {
+      for (const [id, status] of runReconciliation.storyStatuses) {
+        const graphStatus = status === 'pass' ? 'passed'
+          : status === 'fail' || status === 'blocked' ? 'failed'
+          : status === 'skip' || status === 'excluded' ? 'skipped'
+          : 'pending';
+        const previous = map.get(id);
+        map.set(id, { storyId: id, status: graphStatus, startedAt: previous?.startedAt ?? null, elapsed: previous?.elapsed ?? '' });
+      }
+    }
     return map;
-  }, [walEvents, seedStatuses]);
+  }, [walEvents, seedStatuses, runReconciliation]);
 
   // CTM-004: Per-story context map for the Stories accordion. Combines:
   //   - skills from spec suggestedSkills (relevance/reason) ∪ executed active_skills
@@ -1404,6 +1408,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
   // Count currently-active stories (started but not completed) for parallel banner
   const activeStoryCount = useMemo(() => {
+    if (!isActive) return 0;
     const active = new Set<string>();
     for (const evt of walEvents) {
       if (!evt.story_id) continue;
@@ -1418,7 +1423,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       }
     }
     return active.size;
-  }, [walEvents]);
+  }, [walEvents, isActive]);
 
   const handlePauseResume = useCallback(async () => {
     if (!isActive) return;
@@ -1464,35 +1469,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     }
   }, [runId, hitlContext, fetchRun]);
 
-  // Derive failed story IDs from WAL events
-  const failedStoryIds = useMemo(() => {
-    const failed = new Set<string>();
-    const passed = new Set<string>();
-    for (const evt of walEvents) {
-      if (!evt.story_id) continue;
-      if (evt.event_type === 'story_failed') {
-        failed.add(evt.story_id);
-        passed.delete(evt.story_id);
-      } else if (evt.event_type === 'story_passed') {
-        passed.add(evt.story_id);
-        failed.delete(evt.story_id);
-      }
-    }
-    return failed;
-  }, [walEvents]);
+  const failedStoryIds = useMemo(() => new Set(
+    [...runReconciliation.storyStatuses]
+      .filter(([, status]) => status === 'fail')
+      .map(([storyId]) => storyId),
+  ), [runReconciliation.storyStatuses]);
 
   const failedStoryCount = failedStoryIds.size;
-
-  // Derive passed story count
-  const passedStoryCount = useMemo(() => {
-    const passed = new Set<string>();
-    for (const evt of walEvents) {
-      if (!evt.story_id) continue;
-      if (evt.event_type === 'story_passed') passed.add(evt.story_id);
-      else if (evt.event_type === 'story_failed') passed.delete(evt.story_id);
-    }
-    return passed.size;
-  }, [walEvents]);
+  const passedStoryCount = runReconciliation.counts.passed;
 
   // Derive root cause analysis for wave failure banner:
   // rootCause = the story(s) that actually ran and failed (not blocked)
@@ -1543,7 +1527,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     } finally {
       setRetryLoading(false);
     }
-  }, [runId, failedStoryIds, failedStoryCount, workspaceId]);
+  }, [runId, failedStoryIds, failedStoryCount, workspaceId, handleTabChange]);
 
   const handleViewErrorDetail = useCallback(() => {
     // Switch to terminal tab and scroll to the last failed story
@@ -1612,6 +1596,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                   <RunStoryList
                     runId={run.id}
                     walEvents={walEvents}
+                    runStatus={effectiveStatus}
                     runState={runState}
                     resumeSummary={resumeSummary}
                     onStoryClick={useMultiPane ? undefined : (storyId) => terminalRef.current?.scrollToStory(storyId)}
@@ -1621,7 +1606,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                   />
                 </div>
                 <RunMetadataPanel
-                  run={run}
+                  run={{ ...run, status: effectiveStatus }}
                   tokenSummary={tokenSummary}
                   specModel={specModel}
                   totalStories={totalStories}
@@ -1639,6 +1624,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           <RunStoryList
             runId={run.id}
             walEvents={walEvents}
+            runStatus={effectiveStatus}
             runState={runState}
             resumeSummary={resumeSummary}
             onStoryClick={(storyId) => {
@@ -1707,8 +1693,13 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
               {specLabel(run.spec_path)}
             </h1>
             <span className="text-[10px] md:text-xs text-muted font-mono shrink-0">#{run.id}</span>
-            <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
-              {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
+            <span
+              className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus]}`}
+              role="status"
+              aria-live="polite"
+              data-testid="run-semantic-status"
+            >
+              {STATUS_BADGE_LABELS[effectiveStatus]}
             </span>
             {run.parallelism != null && run.parallelism > 1 && !isMobile && (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-purple-500/10 text-purple-500">
@@ -1918,7 +1909,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       </div>
 
       {/* Wave setup phase banner — shown while worktrees are being created */}
-      {isInSetupPhase && (
+      {isActive && isInSetupPhase && (
         <div className="shrink-0 border-b border-blue-500/30 bg-blue-500/10" role="status" aria-live="polite">
           <div className="px-4 py-2.5 flex items-center gap-2">
             <Loader2 size={16} className="text-blue-400 shrink-0 animate-spin" />
