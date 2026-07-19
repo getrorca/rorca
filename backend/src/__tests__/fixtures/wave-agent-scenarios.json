@@ -46,6 +46,38 @@
       "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
       "spawnDescendant": false
     },
+    "parallel-a": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-a.txt",
+      "commitMessage": "test(fixture): deterministic parallel A",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "parallel-b": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-b.txt",
+      "commitMessage": "test(fixture): deterministic parallel B",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "parallel-c": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-c.txt",
+      "commitMessage": "test(fixture): deterministic parallel C",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "parallel-d": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-d.txt",
+      "commitMessage": "test(fixture): deterministic parallel D",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
     "merge-conflict-left": {
       "behavior": "pass",
       "faultPoint": "WPE-FP-006",

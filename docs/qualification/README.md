@@ -71,6 +71,33 @@ It is never part of `test:wave-qualification`: provider availability, credential
 rate limits, terminal rendering, and model output cannot satisfy or block the
 authoritative result.
 
+## Successful exactly-once integration gate
+
+`successful-wave-integration.node.test.ts` executes four independent fixture
+stories in owned temporary worktrees. Deliberately duplicated queue deliveries
+are claimed once, while two-process barriers prove actual overlap. Contributions
+are serialized by compiled wave index and story-ID tie-breaking; the same wave
+runs with bounds two and four and must produce the same accepted IDs, integration
+order, source files, and final tree hash.
+
+The integration linearization protocol is `wave-integration-protocol.ts`. Its
+atomic restart record progresses only through `prepared`, `integrating`,
+`integrated`, `integrated_validated`, `finalized`, or `failed`, and binds each
+transition to run/story/attempt, source/base commits, expected parent, frozen
+manifest hash, resulting revision, validation identity, and finalization receipt.
+Before every apply it rejects dirty or busy Git state, a moved source ref, broken
+source ancestry, an unexpected target head, or a changed manifest. An
+`integrating` restart recognizes only the exact expected-parent/source two-parent
+merge; everything else fails closed.
+
+The PostgreSQL mirror is `story_integration_ledger`, keyed by
+`(run_id, story_id, attempt)`, with unique integration order and finalization
+idempotency constraints. Result/spec/run/WAL pass projections occur in the proof
+trace only after durable finalization. A separately implemented JavaScript trace
+checker consumes the normalized trace as a subprocess and must agree with the
+TypeScript engine-facing assertions on order, state chains, projection timing,
+and final run revision.
+
 ## Cleanup and evidence
 
 Filesystem cleanup requires canonical realpath containment, root and repository ownership markers, exact repository identity, a complete owned-worktree list, and a symlink-free tree. Any missing/mismatched marker, traversal, symlink, swapped repository, or unrelated worktree rejects cleanup without deletion.

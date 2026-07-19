@@ -87,8 +87,11 @@ async function waitAtBarrier(barrier) {
   const barrierDirectory = fs.realpathSync(request.barrierDirectory);
   if (!strictlyContained(fixtureRoot, barrierDirectory)) fail('barrier escaped the fixture root');
   const arrival = path.join(barrierDirectory, `${request.executionId}.arrival.json`);
-  fs.writeFileSync(arrival, `${JSON.stringify({ executionId: request.executionId, pid: process.pid })}\n`, { flag: 'wx', mode: 0o600 });
+  // Publish the evidence before making this participant visible to peers. This
+  // preserves the semantic guarantee that no release can be observed before
+  // every participant's arrival event, even under scheduler preemption.
   emit('barrier-arrived', { participantCount: barrier.participants });
+  fs.writeFileSync(arrival, `${JSON.stringify({ executionId: request.executionId, pid: process.pid })}\n`, { flag: 'wx', mode: 0o600 });
   const deadline = Date.now() + barrier.maxWaitMs;
   while (Date.now() <= deadline) {
     const arrivals = fs.readdirSync(barrierDirectory).filter(name => name.endsWith('.arrival.json'));

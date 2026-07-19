@@ -68,6 +68,11 @@
       "id": "WPE-Q-006",
       "name": "integration-state-machine-qualification",
       "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-003", "WPE-INV-005", "WPE-INV-006"]
+    },
+    {
+      "id": "WPE-Q-007",
+      "name": "successful-concurrent-exactly-once-closeout",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-004", "WPE-INV-005", "WPE-INV-006", "WPE-INV-007"]
     }
   ]
 }
