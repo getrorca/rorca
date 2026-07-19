@@ -13,6 +13,11 @@ import {
   hasOperatorCapability,
   setOperatorCapability,
 } from '../apiFetch';
+import {
+  isBrowserProviderMutation,
+  PROVIDER_MUTATION_ROUTES,
+  providerMutationApiTemplate,
+} from '../../../shared/contracts/provider-mutation-routes';
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -62,6 +67,35 @@ describe('memory-only operator capability transport', () => {
     expect(String(fetchMock.mock.calls[1]?.[0])).not.toContain('operator-preimage');
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
+  });
+
+  it('derives exact browser allowlisting from the canonical route manifest and rejects path variants', () => {
+    const browserRoutes = PROVIDER_MUTATION_ROUTES.filter((route) => route.browserExposed);
+    expect(browserRoutes.map((route) => route.id)).toContain('workspace-github-oauth-disconnect');
+    expect(browserRoutes.map((route) => route.id)).toContain('delivery-evidence-observe');
+
+    for (const route of browserRoutes) {
+      const canonical = providerMutationApiTemplate(route)
+        .replace(':id', 'ws-1')
+        .replace(':policyId', 'policy-1');
+      expect(isBrowserProviderMutation(route.method, canonical), route.id).toBe(true);
+      expect(isBrowserProviderMutation(route.method, `${canonical}/`), route.id).toBe(false);
+      expect(isBrowserProviderMutation(route.method, canonical.replace('/github', '/GITHUB')), route.id).toBe(false);
+      expect(isBrowserProviderMutation(route.method, canonical.replace('/github', '/%67ithub')), route.id).toBe(false);
+      expect(isBrowserProviderMutation(route.method, canonical.replace('/github', '//github')), route.id).toBe(false);
+      expect(isBrowserProviderMutation(route.method, canonical.replace('/ws-1/', '/../')), route.id).toBe(false);
+    }
+  });
+
+  it('protects exact OAuth disconnect through the dedicated capability transport', async () => {
+    setOperatorCapability('operator-preimage');
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ token: 'csrf-token' }))
+      .mockResolvedValueOnce(jsonResponse({ disconnected: true }));
+
+    await apiFetchProviderMutation('/api/workspaces/ws-1/github/disconnect-oauth', { method: 'POST' });
+    const headers = new Headers(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(headers.get('X-Rorca-Operator-Capability')).toBe('operator-preimage');
   });
 
   it('fails locally when locked and clears rejected capabilities without echoing them', async () => {

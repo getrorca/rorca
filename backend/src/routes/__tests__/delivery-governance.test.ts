@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'node:crypto';
 import express from 'express';
 import request from 'supertest';
 
@@ -38,6 +39,7 @@ jest.mock('../../lib/autonomous-pr-delivery', () => ({
 import deliveryGovernanceRouter from '../delivery-governance';
 import { errorHandler } from '../../lib/error-handler';
 
+const OPERATOR_CAPABILITY = 'delivery-governance-test-operator';
 const admin: Express.UserShape = {
   id: 'operator-1',
   email: 'operator@example.test',
@@ -49,6 +51,10 @@ function app(user?: Express.UserShape) {
   const instance = express();
   instance.use(express.json());
   if (user) instance.use((req, _res, next) => { req.user = user; next(); });
+  instance.use((req, _res, next) => {
+    req.headers['x-rorca-operator-capability'] = OPERATOR_CAPABILITY;
+    next();
+  });
   instance.use('/api/workspaces', deliveryGovernanceRouter);
   instance.use(errorHandler);
   return instance;
@@ -74,6 +80,8 @@ function policyDraft(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  process.env.AUTH_REQUIRED = 'false';
+  process.env.RORCA_OPERATOR_CAPABILITY_SHA256 = crypto.createHash('sha256').update(OPERATOR_CAPABILITY).digest('hex');
   mockCreatePolicy.mockResolvedValue({ policy: { id: 'policy-1', status: 'disabled', deploymentAllowed: false }, replayed: false });
   mockActivatePolicy.mockResolvedValue({ policy: { id: 'policy-1', status: 'active' }, replayed: false });
   mockRevokePolicy.mockResolvedValue({ policy: { id: 'policy-1', status: 'revoked' }, replayed: false });
@@ -82,6 +90,11 @@ beforeEach(() => {
   mockListEvidence.mockResolvedValue({ items: [] });
   mockQueueDelivery.mockResolvedValue({ queued: true, deliveryId: 'delivery-1', reason: null, replayed: false });
   mockListDeliveries.mockResolvedValue([]);
+});
+
+afterAll(() => {
+  delete process.env.AUTH_REQUIRED;
+  delete process.env.RORCA_OPERATOR_CAPABILITY_SHA256;
 });
 
 describe('autonomous delivery governance routes', () => {

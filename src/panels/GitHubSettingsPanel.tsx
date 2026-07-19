@@ -330,6 +330,13 @@ export default function GitHubSettingsPanel() {
   const [showOAuthDisconnect, setShowOAuthDisconnect] = useState(false);
   const [oauthDisconnectError, setOauthDisconnectError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!providerChangesUnlocked) {
+      setShowOAuthDisconnect(false);
+      setOauthDisconnectError(null);
+    }
+  }, [providerChangesUnlocked]);
+
   // Full disconnect (unified — DELETE /api/workspaces/:id/github)
   const [showFullDisconnect, setShowFullDisconnect] = useState(false);
   const [fullDisconnecting, setFullDisconnecting] = useState(false);
@@ -645,11 +652,11 @@ export default function GitHubSettingsPanel() {
   }
 
   async function handleDisconnectOAuth() {
-    if (!workspaceId) return;
+    if (!workspaceId || !providerChangesUnlocked) return;
     setDisconnectingOAuth(true);
     setOauthDisconnectError(null);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/disconnect-oauth`, { method: 'POST' });
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/disconnect-oauth`, { method: 'POST' });
       setAccount({ connected: false });
       setShowOAuthDisconnect(false);
       // Re-fetch to confirm server state
@@ -996,7 +1003,9 @@ export default function GitHubSettingsPanel() {
                 {account.source !== 'github-app-installation' && (!showOAuthDisconnect ? (
                   <button
                     onClick={() => setShowOAuthDisconnect(true)}
-                    className="px-2.5 py-1.5 text-xs rounded text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors flex items-center gap-1.5"
+                    disabled={!providerChangesUnlocked}
+                    title={providerChangesUnlocked ? undefined : 'Unlock provider changes before disconnecting the credential'}
+                    className="px-2.5 py-1.5 text-xs rounded text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors flex items-center gap-1.5 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Unlink size={12} />
                     Disconnect
@@ -1005,7 +1014,7 @@ export default function GitHubSettingsPanel() {
                   <div className="flex items-center gap-1.5">
                     <button
                       onClick={handleDisconnectOAuth}
-                      disabled={disconnectingOAuth}
+                      disabled={disconnectingOAuth || !providerChangesUnlocked}
                       className="px-2.5 py-1.5 text-xs rounded bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 transition-colors"
                     >
                       {disconnectingOAuth ? <Loader2 size={12} className="animate-spin" /> : 'Confirm'}

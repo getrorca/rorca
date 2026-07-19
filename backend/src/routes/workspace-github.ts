@@ -22,8 +22,9 @@ import {
   githubRepoApiUrl,
 } from '../lib/github-repository-authority';
 import { renderPrTemplate, SAMPLE_PR_TEMPLATE_DATA, type PrTemplateData } from '../lib/github/pr-template';
+import { requireProviderMutationAuthority } from '../lib/provider-mutation-authority';
 
-const router = Router();
+const router = Router({ strict: true, caseSensitive: true });
 
 interface WorkspaceRow {
   id: string;
@@ -447,7 +448,7 @@ router.get('/:id/github/account', async (req: Request, res: Response, next: Next
  *     responses:
  *       200: { description: Connected }
  */
-router.post('/:id/github/connect', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
+router.post('/:id/github/connect', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
     const repoOwner = String(req.body.repoOwner || '').trim();
@@ -586,7 +587,7 @@ router.post('/:id/github/test-connection', async (req: Request, res: Response, n
  *       200: { description: OAuth credential revoked }
  *       403: { description: Workspace admin required }
  */
-router.post('/:id/github/disconnect-oauth', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
+router.post('/:id/github/disconnect-oauth', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
     await revokeToken(String(req.params.id), 'github');
@@ -623,7 +624,7 @@ router.post('/:id/github/disconnect-oauth', requireWorkspaceAdmin(), async (req:
  *       200: { description: Legacy webhook disconnected }
  *       403: { description: Workspace admin required }
  */
-router.post('/:id/github/disconnect', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
+router.post('/:id/github/disconnect', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
     const row = await getGithubRow(String(req.params.id));
@@ -670,7 +671,7 @@ router.post('/:id/github/disconnect', requireWorkspaceAdmin(), async (req: Reque
  *       200: { description: Current authority disabled }
  *       403: { description: Workspace admin required }
  */
-router.delete('/:id/github', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
+router.delete('/:id/github', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const workspaceId = String(req.params.id);
     await requireWorkspace(workspaceId);
@@ -834,7 +835,7 @@ router.get('/:id/github/workflows', async (req: Request, res: Response, next: Ne
  *     responses:
  *       200: { description: Ping sent }
  */
-router.post('/:id/github/webhook-ping', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
+router.post('/:id/github/webhook-ping', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await requireWorkspace(String(req.params.id));
     const row = await getGithubRow(String(req.params.id));

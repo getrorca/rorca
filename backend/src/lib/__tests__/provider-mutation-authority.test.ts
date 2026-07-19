@@ -7,11 +7,7 @@
 
 import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
-import {
-  guardWorkspaceProviderMutations,
-  isWorkspaceProviderMutation,
-  requireProviderMutationAuthority,
-} from '../provider-mutation-authority';
+import { requireProviderMutationAuthority } from '../provider-mutation-authority';
 
 function req(overrides: Partial<Request> = {}): Request {
   return {
@@ -77,37 +73,17 @@ test('AUTH_REQUIRED mode rejects local and internal principals but accepts a rea
   expect(next).toHaveBeenCalledTimes(1);
 });
 
-test('workspace matcher gates semantic provider authority only and preserves read-only/local UI operations', () => {
-  for (const [method, requestPath] of [
-    ['GET', '/ws-one/github'],
-    ['GET', '/ws-one/github/workflows'],
-    ['POST', '/ws-one/github/test-connection'],
-    ['POST', '/ws-one/github/pr-template-preview'],
-    ['POST', '/ws-one/github/app/setup/start'],
-    ['PUT', '/ws-one/github/auto-pr'],
-    ['POST', '/ws-one/github/dispatch'],
-    ['POST', '/ws-one/scaffold'],
-  ]) {
-    expect(isWorkspaceProviderMutation(method, requestPath)).toBe(false);
-    guardWorkspaceProviderMutations(req({ method, path: requestPath }), response, next);
-  }
-  expect(next).toHaveBeenCalledTimes(8);
-
+test('authority middleware is path-agnostic and always fails closed when attached without local configuration', () => {
   for (const [method, requestPath] of [
     ['POST', '/ws-one/github/connect'],
-    ['POST', '/ws-one/github/disconnect'],
+    ['POST', '/ws-one/github/disconnect-oauth'],
     ['DELETE', '/ws-one/github'],
-    ['POST', '/ws-one/github/webhook-ping'],
-    ['POST', '/ws-one/github/app/setup/exchange'],
-    ['POST', '/ws-one/github/app/import'],
-    ['POST', '/ws-one/github/app/revalidate'],
-    ['POST', '/ws-one/github/app/bind'],
-    ['POST', '/ws-one/github/delivery-policies'],
-    ['POST', '/ws-one/github/delivery-policies/policy-1/activate'],
-    ['POST', '/ws-one/github/autonomous-deliveries'],
+    ['POST', '/ws-one/github/delivery-evidence'],
+    ['POST', '/api/github/checks/abc'],
+    ['POST', '/api/webhooks/dlq/1/retry'],
   ]) {
-    expect(isWorkspaceProviderMutation(method, requestPath)).toBe(true);
-    expect(() => guardWorkspaceProviderMutations(req({ method, path: requestPath }), response, next))
+    expect(() => requireProviderMutationAuthority(req({ method, path: requestPath }), response, next))
       .toThrow(/disabled in local mode/);
   }
+  expect(next).not.toHaveBeenCalled();
 });

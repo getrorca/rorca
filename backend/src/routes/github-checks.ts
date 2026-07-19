@@ -15,8 +15,9 @@ import { requireWorkspaceAdmin } from '../lib/auth-utils';
 import { requireGithubRepositoryAuthority, githubRepoApiUrl } from '../lib/github-repository-authority';
 import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
 import { fetchGithubWithTimeout } from '../lib/github-app-credential-provider';
+import { requireProviderMutationAuthority } from '../lib/provider-mutation-authority';
 
-const router = Router();
+const router = Router({ strict: true, caseSensitive: true });
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
 interface RunBindingRow {
@@ -61,7 +62,7 @@ interface RunBindingRow {
  *       422: { description: Exact repository credential unavailable }
  *       502: { description: Failed to post status to GitHub }
  */
-router.post('/:sha', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
+router.post('/:sha', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const sha = String(req.params.sha || '').toLowerCase();
     const { state, description, workspaceId } = req.body ?? {};

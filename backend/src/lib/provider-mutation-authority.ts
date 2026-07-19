@@ -59,32 +59,3 @@ export function requireProviderMutationAuthority(
   }
   next();
 }
-
-/**
- * Match only provider/release-authority mutations. Read-only provider probes,
- * local previews, setup-state creation, and retired compatibility routes remain
- * usable without ever receiving the capability preimage.
- */
-export function isWorkspaceProviderMutation(method: string, requestPath: string): boolean {
-  const normalizedMethod = method.toUpperCase();
-  if (normalizedMethod === 'DELETE' && /^\/[^/]+\/github$/.test(requestPath)) return true;
-  if (normalizedMethod !== 'POST') return false;
-  return [
-    /^\/[^/]+\/github\/(?:connect|disconnect|webhook-ping)$/,
-    /^\/[^/]+\/github\/app\/(?:setup\/exchange|import|revalidate|bind)$/,
-    /^\/[^/]+\/github\/delivery-policies(?:\/[^/]+\/(?:activate|revoke))?$/,
-    /^\/[^/]+\/github\/autonomous-deliveries$/,
-  ].some((pattern) => pattern.test(requestPath));
-}
-
-export function guardWorkspaceProviderMutations(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void {
-  if (!isWorkspaceProviderMutation(req.method, req.path)) {
-    next();
-    return;
-  }
-  requireProviderMutationAuthority(req, res, next);
-}

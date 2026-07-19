@@ -7,10 +7,21 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+  PROVIDER_MUTATION_ROUTES,
+  providerMutationApiTemplate,
+} from '../../../../shared/contracts/provider-mutation-routes';
 
 const src = path.resolve(__dirname, '..', '..');
 const server = fs.readFileSync(path.join(src, 'server.ts'), 'utf8');
-const workspaceGithub = fs.readFileSync(path.join(src, 'routes', 'workspace-github.ts'), 'utf8');
+const routeSources = new Map([
+  ['workspace-github', fs.readFileSync(path.join(src, 'routes', 'workspace-github.ts'), 'utf8')],
+  ['workspace-github-app', fs.readFileSync(path.join(src, 'routes', 'workspace-github-app.ts'), 'utf8')],
+  ['delivery-governance', fs.readFileSync(path.join(src, 'routes', 'delivery-governance.ts'), 'utf8')],
+  ['github-checks', fs.readFileSync(path.join(src, 'routes', 'github-checks.ts'), 'utf8')],
+  ['webhooks', fs.readFileSync(path.join(src, 'routes', 'webhooks.ts'), 'utf8')],
+]);
+const workspaceGithub = routeSources.get('workspace-github')!;
 const worktrees = fs.readFileSync(path.join(src, 'routes', 'worktrees.ts'), 'utf8');
 const webhookHandlers = fs.readFileSync(path.join(src, 'routes', 'webhook-handlers.ts'), 'utf8');
 const webhooks = fs.readFileSync(path.join(src, 'routes', 'webhooks.ts'), 'utf8');
@@ -20,6 +31,9 @@ const authUtils = fs.readFileSync(path.join(src, 'lib', 'auth-utils.ts'), 'utf8'
 const providerAuthority = fs.readFileSync(path.join(src, 'lib', 'provider-mutation-authority.ts'), 'utf8');
 const releaseAuthority = fs.readFileSync(path.join(src, 'lib', 'release-authority.ts'), 'utf8');
 const deliveryEvidence = fs.readFileSync(path.join(src, 'lib', 'github-pr-delivery-evidence.ts'), 'utf8');
+const frontendRoot = path.resolve(src, '..', '..', 'src');
+const githubSettingsPanel = fs.readFileSync(path.join(frontendRoot, 'panels', 'GitHubSettingsPanel.tsx'), 'utf8');
+const autonomousDeliverySettings = fs.readFileSync(path.join(frontendRoot, 'components', 'AutonomousDeliverySettings.tsx'), 'utf8');
 
 function routeSlice(source: string, startNeedle: string, endNeedle: string): string {
   const start = source.indexOf(startNeedle);
@@ -39,16 +53,83 @@ test('internal service authentication is cryptographic/configured and can never 
   expect(providerAuthority).toContain("endsWith('@rorca.internal')");
 });
 
-test('semantic workspace GitHub/provider mutations and manual checks cross the operator capability boundary', () => {
-  const guard = server.indexOf("app.use('/api/workspaces', guardWorkspaceProviderMutations)");
-  const githubRoutes = server.indexOf("app.use('/api/workspaces', workspaceGithubRouter)");
-  const appRoutes = server.indexOf("app.use('/api/workspaces', workspaceGithubAppRouter)");
-  const deliveryRoutes = server.indexOf("app.use('/api/workspaces', deliveryGovernanceRouter)");
-  expect(guard).toBeGreaterThan(-1);
-  expect(guard).toBeLessThan(githubRoutes);
-  expect(guard).toBeLessThan(appRoutes);
-  expect(guard).toBeLessThan(deliveryRoutes);
-  expect(server).toContain("app.use('/api/github/checks', requireProviderMutationAuthority, githubChecksRouter)");
+test('canonical provider manifest is complete and every live mutation attaches the guard route-locally', () => {
+  expect(PROVIDER_MUTATION_ROUTES.map((route) => route.id)).toEqual([
+    'workspace-github-connect',
+    'workspace-github-oauth-disconnect',
+    'workspace-github-legacy-disconnect',
+    'workspace-github-disconnect',
+    'workspace-github-webhook-ping',
+    'workspace-github-app-exchange',
+    'workspace-github-app-import',
+    'workspace-github-app-revalidate',
+    'workspace-github-app-bind',
+    'delivery-policy-create',
+    'delivery-policy-activate',
+    'delivery-policy-revoke',
+    'delivery-evidence-observe',
+    'autonomous-delivery-start',
+    'github-manual-check-status',
+    'webhook-dlq-replay',
+  ]);
+
+  for (const route of PROVIDER_MUTATION_ROUTES) {
+    const source = routeSources.get(route.routerModule)!;
+    const declaration = `${route.routerSymbol}.${route.method.toLowerCase()}('${route.routePath}', requireProviderMutationAuthority,`;
+    expect(source).toContain(declaration);
+    expect(providerMutationApiTemplate(route)).toMatch(/^\/api\//);
+  }
+
+  const allRouteLocalDeclarations = [...routeSources.values()].flatMap((source) => (
+    [...source.matchAll(/(?:router|webhookAdminRouter)\.(?:post|delete)\('([^']+)', requireProviderMutationAuthority,/g)]
+      .map((match) => match[1])
+  ));
+  expect(allRouteLocalDeclarations).toHaveLength(PROVIDER_MUTATION_ROUTES.length);
+
+  const intentionallyCapabilityFreePosts = [...routeSources.entries()].flatMap(([moduleName, source]) => (
+    [...source.matchAll(/router\.post\('([^']+)',([^\n]*)/g)]
+      .filter((match) => !match[2].includes('requireProviderMutationAuthority'))
+      .map((match) => `${moduleName}:${match[1]}`)
+  ));
+  expect(intentionallyCapabilityFreePosts).toEqual([
+    'workspace-github:/:id/github/test-connection',
+    'workspace-github:/:id/github/pr-template-preview',
+    'workspace-github:/:id/github/dispatch',
+    'workspace-github-app:/:id/github/app/setup/start',
+  ]);
+
+  expect(server).not.toContain('guardWorkspaceProviderMutations');
+  expect(server).toContain("app.use('/api/github/checks', githubChecksRouter)");
+});
+
+test('every browser-exposed manifest operation has a dedicated capability transport call', () => {
+  for (const route of PROVIDER_MUTATION_ROUTES.filter((entry) => entry.browserExposed)) {
+    const endpoint = providerMutationApiTemplate(route)
+      .replace(':id', '${workspaceId}')
+      .replace(':policyId', '${policy.id}');
+    const source = route.routerModule === 'delivery-governance'
+      ? autonomousDeliverySettings
+      : githubSettingsPanel;
+    const endpointIndexes = [...source.matchAll(new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))]
+      .map((match) => match.index);
+    expect(endpointIndexes.length).toBeGreaterThan(0);
+    expect(endpointIndexes.some((endpointIndex) => (
+      source.slice(Math.max(0, endpointIndex - 220), endpointIndex).includes('apiFetchProviderMutation')
+    ))).toBe(true);
+  }
+  const oauthDisconnectHandler = routeSlice(githubSettingsPanel, 'async function handleDisconnectOAuth()', 'async function handleFullDisconnect()');
+  const evidenceObservationHandler = routeSlice(autonomousDeliverySettings, 'const observeEvidence = async () =>', 'if (!connected) return null');
+  expect(oauthDisconnectHandler).not.toContain('await apiFetch(');
+  expect(evidenceObservationHandler).not.toContain('await apiFetch(');
+});
+
+test('authority routers and the application use strict case-sensitive routing', () => {
+  expect(server).toContain("app.enable('case sensitive routing')");
+  expect(server).toContain("app.enable('strict routing')");
+  expect(server).toContain("'X-Rorca-Operator-Capability'");
+  for (const source of routeSources.values()) {
+    expect(source).toContain('strict: true, caseSensitive: true');
+  }
 });
 
 test('legacy Auto-PR, workflow config/YAML, and dispatch routes are inert compatibility conflicts', () => {

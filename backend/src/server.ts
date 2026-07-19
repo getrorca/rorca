@@ -82,10 +82,6 @@ import { publicReviewRouter, specReviewRouter } from './routes/review';
 import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
 import { csrfProtection } from './lib/csrf';
-import {
-  guardWorkspaceProviderMutations,
-  requireProviderMutationAuthority,
-} from './lib/provider-mutation-authority';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
@@ -155,6 +151,10 @@ if (agentType === 'opencode') {
 }
 
 const app = express();
+// Canonical API paths are case-sensitive and do not accept an implicit trailing
+// slash. Security boundaries and Express therefore share one routing contract.
+app.enable('case sensitive routing');
+app.enable('strict routing');
 const PORT = process.env.PORT || 3030;
 const BACKGROUND_RUNTIME_ENABLED =
   process.env.NODE_ENV !== 'test' &&
@@ -233,7 +233,7 @@ app.use(cors({
   origin: corsOrigin,
   credentials: allowCredentials,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key', 'Idempotency-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key', 'X-Rorca-Operator-Capability', 'Idempotency-Key'],
   maxAge: 86400,
 }));
 
@@ -454,14 +454,13 @@ app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
-// Provider-facing operator routes have a real HTTP capability boundary even in
-// unauthenticated local mode. Autonomous children cannot turn localhost access
-// into host App/PAT/vault authority; command wrappers are defense in depth only.
-app.use('/api/workspaces', guardWorkspaceProviderMutations);
+// Provider-facing mutations attach the capability boundary on each exact route
+// before its handler. Autonomous children cannot turn localhost access into host
+// App/PAT/vault authority; command wrappers are defense in depth only.
 app.use('/api/workspaces', workspaceGithubRouter);
 app.use('/api/workspaces', workspaceGithubAppRouter);
 app.use('/api/workspaces', deliveryGovernanceRouter);
-app.use('/api/github/checks', requireProviderMutationAuthority, githubChecksRouter);
+app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/finops/billing-profiles', finopsSettingsRouter);

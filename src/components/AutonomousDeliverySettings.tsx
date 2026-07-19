@@ -289,7 +289,7 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
     }
     setObserving(true);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/delivery-evidence`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/delivery-evidence`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ runId: numericRunId, expectedHeadSha: expectedHeadSha.trim().toLowerCase() }),

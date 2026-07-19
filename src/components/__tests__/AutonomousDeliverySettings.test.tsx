@@ -128,7 +128,7 @@ describe('AutonomousDeliverySettings', () => {
     await user.click(screen.getByRole('button', { name: 'Observe' }));
 
     await waitFor(() => {
-      const observation = mockApiFetch.mock.calls.find(([url, init]) => url.endsWith('/delivery-evidence') && init?.method === 'POST');
+      const observation = mockApiFetchProviderMutation.mock.calls.find(([url, init]) => url.endsWith('/delivery-evidence') && init?.method === 'POST');
       expect(observation).toBeDefined();
       expect(JSON.parse(String(observation?.[1]?.body))).toEqual({
         runId: 20260316000001,

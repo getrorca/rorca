@@ -8,6 +8,10 @@
 import { getMcpToolDefinitions } from '../mcp-http';
 import { swaggerSpec } from '../swagger';
 import { getRorcaTier } from '../tier-auth';
+import {
+  PROVIDER_MUTATION_ROUTES,
+  providerMutationApiTemplate,
+} from '../../../../shared/contracts/provider-mutation-routes';
 
 const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head']);
 const paths = (swaggerSpec as any).paths as Record<string, Record<string, any>>;
@@ -76,27 +80,14 @@ test('every exposed placeholder is declared and reaches generated MCP input; eve
   }
 });
 
-test('semantic GitHub provider writes are admin/default-denied and absent from MCP', () => {
-  const providerWrites = [
-    ['post', '/api/workspaces/{id}/github/connect'],
-    ['post', '/api/workspaces/{id}/github/disconnect'],
-    ['delete', '/api/workspaces/{id}/github'],
-    ['post', '/api/workspaces/{id}/github/webhook-ping'],
-    ['post', '/api/workspaces/{id}/github/app/setup/exchange'],
-    ['post', '/api/workspaces/{id}/github/app/import'],
-    ['post', '/api/workspaces/{id}/github/app/revalidate'],
-    ['post', '/api/workspaces/{id}/github/app/bind'],
-    ['post', '/api/workspaces/{id}/github/delivery-policies'],
-    ['post', '/api/workspaces/{id}/github/delivery-policies/{policyId}/activate'],
-    ['post', '/api/workspaces/{id}/github/delivery-policies/{policyId}/revoke'],
-    ['post', '/api/workspaces/{id}/github/autonomous-deliveries'],
-  ] as const;
-
-  for (const [method, pathname] of providerWrites) {
+test('canonical provider mutations have OpenAPI parity, remain admin/default-denied, and are absent from MCP', () => {
+  for (const route of PROVIDER_MUTATION_ROUTES) {
+    const method = route.method.toLowerCase();
+    const pathname = providerMutationApiTemplate(route).replace(/:([A-Za-z][A-Za-z0-9]*)/g, '{$1}');
     const op = operation(method, pathname);
     expect(['admin', 'denied']).toContain(getRorcaTier(op).tier);
     expect(definitions.some((candidate) => (
-      candidate.capturedMethod === method.toUpperCase() && candidate.capturedPath === pathname
+      candidate.capturedMethod === route.method && candidate.capturedPath === pathname
     ))).toBe(false);
   }
 });

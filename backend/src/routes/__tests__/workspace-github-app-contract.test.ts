@@ -25,8 +25,9 @@ test('setup/import/binding routes are admin-tier and read state is auth-tier', (
 });
 
 test('process-global registration ceremonies require platform authority in addition to workspace administration', () => {
-  for (const endpoint of ['setup/start', 'setup/exchange', 'import']) {
-    expect(route).toContain(`router.post('/:id/github/app/${endpoint}', requireWorkspaceAdmin(), requirePlatformAdmin()`);
+  expect(route).toContain("router.post('/:id/github/app/setup/start', requireWorkspaceAdmin(), requirePlatformAdmin()");
+  for (const endpoint of ['setup/exchange', 'import']) {
+    expect(route).toContain(`router.post('/:id/github/app/${endpoint}', requireProviderMutationAuthority, requireWorkspaceAdmin(), requirePlatformAdmin()`);
   }
   expect(route).toContain('providerApp.owner?.login?.toLowerCase()');
   expect(route).toContain('RORCA_GITHUB_APP_OWNER');

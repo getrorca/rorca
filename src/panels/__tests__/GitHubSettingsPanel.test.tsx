@@ -287,6 +287,35 @@ describe('GitHubSettingsPanel', () => {
     });
   });
 
+  it('keeps exact OAuth disconnect unusable while locked and sends it through capability transport after unlock', async () => {
+    mockWorkspaceApi({
+      status: MOCK_CONNECTED_STATUS,
+      account: { ...MOCK_CONNECTED_ACCOUNT, source: 'workspace-oauth' },
+      onRequest: (path, init) => path.endsWith('/github/disconnect-oauth') && init?.method === 'POST'
+        ? { disconnected: true }
+        : undefined,
+    });
+    renderWithProviders(<GitHubSettingsPanel />);
+
+    const disconnect = await screen.findByRole('button', { name: 'Disconnect' });
+    expect(disconnect).toBeDisabled();
+    await unlockProviderChanges();
+    expect(disconnect).toBeEnabled();
+    fireEvent.click(disconnect);
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => {
+      expect(mockProviderMutation).toHaveBeenCalledWith(
+        '/api/workspaces/ws-1/github/disconnect-oauth',
+        expect.objectContaining({ method: 'POST' }),
+      );
+      expect(mockApiFetch).not.toHaveBeenCalledWith(
+        '/api/workspaces/ws-1/github/disconnect-oauth',
+        expect.anything(),
+      );
+    });
+  });
+
   it('refetches App authority after full disconnect', async () => {
     mockWorkspaceApi({
       status: { ...MOCK_CONNECTED_STATUS, credentialSource: 'github-app-installation' },

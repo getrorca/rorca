@@ -25,8 +25,9 @@ import {
 import { extractGithubProviderError, isAuthoritativeGithubFailure } from '../lib/github-provider-error';
 import { assertGithubRepositoryIdentity } from '../lib/github-repository-authority';
 import { getIntegrationSecret, insertPreparedIntegrationSecret, prepareIntegrationSecret } from '../lib/integration-vault';
+import { requireProviderMutationAuthority } from '../lib/provider-mutation-authority';
 
-const router = Router();
+const router = Router({ strict: true, caseSensitive: true });
 const SETUP_TTL_MS = 10 * 60_000;
 const APP_SLUG = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/;
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -284,7 +285,7 @@ router.post('/:id/github/app/setup/start', requireWorkspaceAdmin(), requirePlatf
  *       403: { description: Workspace administration plus platform/superuser authority required }
  *       409: { description: State expired, consumed, or owned by another operator }
  */
-router.post('/:id/github/app/setup/exchange', requireWorkspaceAdmin(), requirePlatformAdmin(), async (req, res, next) => {
+router.post('/:id/github/app/setup/exchange', requireProviderMutationAuthority, requireWorkspaceAdmin(), requirePlatformAdmin(), async (req, res, next) => {
   try {
     const workspaceId = String(req.params.id);
     const state = typeof req.body?.state === 'string' ? req.body.state : '';
@@ -335,7 +336,7 @@ router.post('/:id/github/app/setup/exchange', requireWorkspaceAdmin(), requirePl
  *       403: { description: Workspace administration plus platform/superuser authority required }
  *       409: { description: Active registration replacement is explicitly blocked }
  */
-router.post('/:id/github/app/import', requireWorkspaceAdmin(), requirePlatformAdmin(), async (req, res, next) => {
+router.post('/:id/github/app/import', requireProviderMutationAuthority, requireWorkspaceAdmin(), requirePlatformAdmin(), async (req, res, next) => {
   try {
     await requireWorkspace(String(req.params.id));
     const registered = await registerApp({ id: Number(req.body?.appId), slug: String(req.body?.appSlug ?? ''),
@@ -363,7 +364,7 @@ router.post('/:id/github/app/import', requireWorkspaceAdmin(), requirePlatformAd
  *     responses:
  *       200: { description: Binding revalidated without returning a token }
  */
-router.post('/:id/github/app/revalidate', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/app/revalidate', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspaceId = String(req.params.id); await requireWorkspace(workspaceId);
     const registration = await activeRegistration();
@@ -416,7 +417,7 @@ router.post('/:id/github/app/revalidate', requireWorkspaceAdmin(), async (req, r
  *       200: { description: Provider-verified exact repository binding created }
  *       409: { description: Replacement rationale missing or provider identity conflicts }
  */
-router.post('/:id/github/app/bind', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/app/bind', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspaceId = String(req.params.id); await requireWorkspace(workspaceId);
     const installationId = Number(req.body?.installationId); const repositoryId = Number(req.body?.repositoryId);

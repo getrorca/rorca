@@ -5,6 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { isBrowserProviderMutation } from '../../shared/contracts/provider-mutation-routes';
+
 // When served by Express (rorca start), use same-origin (empty base URL).
 // In dev mode (Vite on :5210), use the backend URL on :3030.
 export const BASE_URL = import.meta.env.VITE_API_URL
@@ -40,18 +42,6 @@ function notifyError(message: string) {
 const OPERATOR_CAPABILITY_HEADER = 'X-Rorca-Operator-Capability';
 const OPERATOR_CAPABILITY_LOCKED_EVENT = 'rorca:operator-capability-locked';
 let operatorCapability: string | null = null;
-
-function isProviderMutationPath(path: string, method: string): boolean {
-  const pathname = path.split(/[?#]/, 1)[0];
-  if (method === 'DELETE' && /^\/api\/workspaces\/[^/]+\/github$/.test(pathname)) return true;
-  if (method !== 'POST') return false;
-  return [
-    /^\/api\/workspaces\/[^/]+\/github\/(?:connect|disconnect|webhook-ping)$/,
-    /^\/api\/workspaces\/[^/]+\/github\/app\/(?:setup\/exchange|import|revalidate|bind)$/,
-    /^\/api\/workspaces\/[^/]+\/github\/delivery-policies(?:\/[^/]+\/(?:activate|revoke))?$/,
-    /^\/api\/workspaces\/[^/]+\/github\/autonomous-deliveries$/,
-  ].some((pattern) => pattern.test(pathname));
-}
 
 export function setOperatorCapability(capability: string): void {
   if (!capability || capability.length > 1024) {
@@ -177,7 +167,7 @@ export async function apiFetch<T>(path: string, opts?: ApiFetchOptions): Promise
 
 export async function apiFetchProviderMutation<T>(path: string, opts: ApiFetchOptions): Promise<T> {
   const method = (opts.method || 'GET').toUpperCase();
-  if (!isProviderMutationPath(path, method)) {
+  if (!isBrowserProviderMutation(method, path)) {
     throw new ApiError(400, 'NOT_PROVIDER_MUTATION', 'Operator capability may only be used for an approved provider mutation');
   }
   if (!operatorCapability) {

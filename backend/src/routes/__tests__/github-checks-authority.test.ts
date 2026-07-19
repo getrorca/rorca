@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'node:crypto';
 import express from 'express';
 import request from 'supertest';
 
@@ -40,15 +41,22 @@ jest.mock('../../lib/sse-hub', () => ({ broadcastAll: jest.fn() }));
 import githubChecksRouter from '../github-checks';
 
 const SHA = 'a'.repeat(40);
+const OPERATOR_CAPABILITY = 'github-checks-test-operator';
 function app() {
   const instance = express();
   instance.use(express.json());
+  instance.use((req, _res, next) => {
+    req.headers['x-rorca-operator-capability'] = OPERATOR_CAPABILITY;
+    next();
+  });
   instance.use('/api/github/checks', githubChecksRouter);
   return instance;
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  process.env.AUTH_REQUIRED = 'false';
+  process.env.RORCA_OPERATOR_CAPABILITY_SHA256 = crypto.createHash('sha256').update(OPERATOR_CAPABILITY).digest('hex');
   queryOne.mockImplementation(async (sql: string) => sql.includes('FROM pipeline_runs')
     ? { id: 7, workspace_id: 'ws-1', pr_number: 12, branch_name: 'run/secure' }
     : { id: 1 });
@@ -59,6 +67,11 @@ beforeEach(() => {
     json: async () => ({ number: 12, head: { sha: SHA, ref: 'run/secure', repo: { full_name: 'acme/widgets' } } }),
   });
   postCommitStatus.mockResolvedValue(true);
+});
+
+afterAll(() => {
+  delete process.env.AUTH_REQUIRED;
+  delete process.env.RORCA_OPERATOR_CAPABILITY_SHA256;
 });
 
 test('manual status requires workspace-admin authority before database or provider access', async () => {
