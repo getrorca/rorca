@@ -415,6 +415,8 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_prompt_injected_at: health.prompt_injected_at,
     ptyTotalOutputBytes: totalOutputBytes,
     pty_total_output_bytes: totalOutputBytes,
+    ptyNextOutputSequence: Number(health.next_output_sequence ?? 1),
+    pty_next_output_sequence: Number(health.next_output_sequence ?? 1),
     ptyCheckpointSequence: Number(health.checkpoint_sequence ?? 0),
     pty_checkpoint_sequence: Number(health.checkpoint_sequence ?? 0),
     ptyFirstRetainedSequence: Number(health.first_retained_sequence ?? 1),
@@ -7321,6 +7323,14 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     }
   }
   if (!recoveryFrameEmitted && (cursorReset || recoverTerminal || !hasResumeCursor)) {
+    // A refreshed browser owns an empty xterm. If no valid checkpoint exists,
+    // a persisted cursor cannot reconstruct that viewport; replay a bounded
+    // current-generation tail instead of resuming after invisible bytes.
+    if (recoverTerminal) {
+      hasResumeCursor = false;
+      lastSequence = 0;
+      lastConfirmedCursor = null;
+    }
     const accepted = outputSink.send({
       event: 'terminal_reset',
       data: JSON.stringify({

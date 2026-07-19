@@ -110,7 +110,18 @@ describe('PTY evidence routes', () => {
     expect(verifyArchiveMock).not.toHaveBeenCalled();
   });
 
-  it('streams only preverified contained segment bytes for an authorized member', async () => {
+  it('requires operator admin access for raw archive bytes', async () => {
+    queryOneMock
+      .mockResolvedValueOnce({ workspace_id: 'ws-1' })
+      .mockResolvedValueOnce({ role: 'member' });
+    const response = await request(appFor('user'))
+      .get(`/runs/77/generations/${GENERATION_ID}/raw-archive`);
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('FORBIDDEN');
+    expect(verifyArchiveMock).not.toHaveBeenCalled();
+  });
+
+  it('streams only preverified contained segment bytes for an operator admin', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-route-archive-'));
     const segmentPath = path.join(dir, 'segment.gz');
     const bytes = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02, 0x03]);
@@ -154,10 +165,8 @@ describe('PTY evidence routes', () => {
     });
 
     try {
-      queryOneMock
-        .mockResolvedValueOnce({ workspace_id: 'ws-1' })
-        .mockResolvedValueOnce({ role: 'member' });
-      const response = await request(appFor('user'))
+      queryOneMock.mockResolvedValueOnce({ workspace_id: 'ws-1' });
+      const response = await request(appFor('admin'))
         .get(`/runs/77/generations/${GENERATION_ID}/raw-archive`)
         .buffer(true)
         .parse((res, callback) => {
@@ -174,10 +183,8 @@ describe('PTY evidence routes', () => {
         '.rorca/pty-archives',
         `${GENERATION_ID}/segment-000000.gz`,
       );
-      queryOneMock
-        .mockResolvedValueOnce({ workspace_id: 'ws-1' })
-        .mockResolvedValueOnce({ role: 'member' });
-      const ranged = await request(appFor('user'))
+      queryOneMock.mockResolvedValueOnce({ workspace_id: 'ws-1' });
+      const ranged = await request(appFor('admin'))
         .get(`/runs/77/generations/${GENERATION_ID}/raw-archive`)
         .set('Range', 'bytes=2-4')
         .buffer(true)

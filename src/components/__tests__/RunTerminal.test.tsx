@@ -123,6 +123,8 @@ class TestEventSource {
 let lastEventSource: TestEventSource | null = null;
 const PTY_GENERATION_ID = '11111111-1111-4111-8111-111111111111';
 const PTY_GENERATION_TOKEN = '22222222-2222-4222-8222-222222222222';
+const ptyCursorKey = (generationId = PTY_GENERATION_ID) => `rorca:terminal-output-cursor:77:run_pty_output_chunks:${generationId}`;
+const ansiCursorKey = 'rorca:terminal-output-cursor:77:run_output_chunks:legacy';
 
 type ResizeObserverCallbackForTest = ConstructorParameters<typeof ResizeObserver>[0];
 
@@ -179,7 +181,7 @@ describe('RunTerminal PTY fallback UI', () => {
       }));
     });
 
-    expect(await screen.findByText('Degraded')).toBeInTheDocument();
+    expect(await screen.findByText('Unavailable')).toBeInTheDocument();
     expect(screen.getByText('PTY unavailable · ANSI transcript')).toBeInTheDocument();
     expect(screen.getByText('PTY unavailable — ANSI transcript')).toBeInTheDocument();
     expect(screen.getAllByText(/live ANSI transcript/).length).toBeGreaterThan(0);
@@ -244,15 +246,21 @@ describe('RunTerminal PTY fallback UI', () => {
         requestedTerminalMode: 'pty',
         isPty: true,
         ptyAvailable: true,
+        outputSource: 'run_pty_output_chunks',
+        ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationActive: true,
       }));
     });
 
-    expect(await screen.findByText('Live')).toBeInTheDocument();
+    expect(await screen.findByText('Reconnecting')).toBeInTheDocument();
+    expect(screen.getByText('No current terminal viewport yet')).toBeInTheDocument();
     expect(screen.getByText('PTY terminal · click to focus')).toBeInTheDocument();
-    expect(screen.getByText(/real xterm\.js terminal with stdin\/stdout/)).toBeInTheDocument();
+    expect(screen.getByText(/Terminal view follows the exact active generation/)).toBeInTheDocument();
 
     act(() => {
       lastEventSource!.emit('pty_health', JSON.stringify({
+        ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationActive: true,
         ptySessionStatus: 'active',
         ptyProcessAlive: true,
         ptyLastOutputAt: new Date().toISOString(),
@@ -264,7 +272,13 @@ describe('RunTerminal PTY fallback UI', () => {
     });
 
     expect(screen.getByText('Connection diagnostics')).toBeInTheDocument();
+    expect(screen.getByLabelText(/Terminal connection: Reconnecting/)).toBeInTheDocument();
+    expect(screen.getByText('No current terminal viewport yet')).toBeInTheDocument();
+    act(() => {
+      lastEventSource!.emit('chunk', Buffer.from('current generation viewport').toString('base64'), `v1|run_pty_output_chunks|${PTY_GENERATION_ID}|1`);
+    });
     expect(screen.getByText('Live')).toBeInTheDocument();
+    expect(screen.queryByText('No current terminal viewport yet')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Raw/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Terminal/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Semantic/i })).toBeInTheDocument();
@@ -284,6 +298,9 @@ describe('RunTerminal PTY fallback UI', () => {
         ptyAvailable: true,
         ptyGenerationId: PTY_GENERATION_ID,
         ptyGenerationToken: PTY_GENERATION_TOKEN,
+        ptyGenerationActive: true,
+        ptySessionStatus: 'active',
+        ptyProcessAlive: true,
       }));
     });
 
@@ -296,6 +313,7 @@ describe('RunTerminal PTY fallback UI', () => {
 
     fireEvent.focusIn(pane);
     expect(await screen.findByText('PTY terminal · focused')).toBeInTheDocument();
+    expect(pane.style.boxShadow).toContain('var(--terminal-focus-ring)');
     fireEvent.focusOut(pane);
     expect(await screen.findByText('PTY terminal · click to focus')).toBeInTheDocument();
 
@@ -332,6 +350,7 @@ describe('RunTerminal PTY fallback UI', () => {
         terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
         outputSource: 'run_pty_output_chunks',
         ptyGenerationId: PTY_GENERATION_ID, ptyGenerationToken: PTY_GENERATION_TOKEN,
+        ptyGenerationActive: true, ptySessionStatus: 'active', ptyProcessAlive: true,
       }));
       lastEventSource!.emit('chunk', Buffer.from('prior story bytes', 'utf8').toString('base64'), '17');
       lastEventSource!.emit('run_meta', JSON.stringify({
@@ -340,7 +359,7 @@ describe('RunTerminal PTY fallback UI', () => {
         ptyGenerationId: replacementGenerationId,
         ptyGenerationToken: replacementGenerationToken,
         ptyStoryId: 'PTY-002', ptyAttempt: 1,
-        ptyGenerationStatus: 'active', ptyGenerationActive: true,
+        ptyGenerationStatus: 'active', ptyGenerationActive: true, ptySessionStatus: 'active', ptyProcessAlive: true,
         ptyGenerationSource: 'native', ptyGenerationReplaySource: 'generation',
       }));
       terminal.emitData('new story input\n');
@@ -349,6 +368,8 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(terminal.reset).toHaveBeenCalledTimes(1);
     expect(sessionStorage.getItem('rorca:terminal-output-generation:77')).toBe(replacementGenerationId);
     expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBeNull();
+    expect(sessionStorage.getItem(ptyCursorKey())).toBe('17');
+    expect(sessionStorage.getItem(ptyCursorKey(replacementGenerationId))).toBeNull();
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
       '/api/pipeline/runs/77/input',
       expect.objectContaining({
@@ -375,9 +396,9 @@ describe('RunTerminal PTY fallback UI', () => {
       lastEventSource!.emit('replay_truncated', JSON.stringify({ fromSequence: 25, maxChunks: 2048 }));
     });
 
-    expect(await screen.findByText(/bounded recent replay from output sequence 25/i)).toBeInTheDocument();
-    expect(screen.getByText(/Earlier output is not loaded in this fresh terminal/i)).toBeInTheDocument();
-    expect(screen.getByText(/reconnects resume after the received cursor/i)).toBeInTheDocument();
+    expect(await screen.findByText(/bounded replay begins at output sequence 25/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Earlier viewport history was compacted/i).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /Open complete Transcript/i })).toBeInTheDocument();
   });
 
   it('resumes a refreshed terminal with the persisted durable chunk sequence', async () => {
@@ -394,7 +415,7 @@ describe('RunTerminal PTY fallback UI', () => {
       }));
       lastEventSource!.emit('chunk', Buffer.from('first durable chunk', 'utf8').toString('base64'), '17');
     });
-    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('17');
+    expect(sessionStorage.getItem(ptyCursorKey())).toBe('17');
     expect(sessionStorage.getItem('rorca:terminal-output-source:77')).toBe('run_pty_output_chunks');
 
     first.unmount();
@@ -440,7 +461,7 @@ describe('RunTerminal PTY fallback UI', () => {
     await waitFor(() => expect(terminal.reset).toHaveBeenCalledTimes(1));
     expect(terminal.resize).toHaveBeenCalledWith(100, 30);
     expect(new TextDecoder().decode(terminal.write.mock.calls[0][0] as Uint8Array)).toBe('serialized terminal state');
-    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('41');
+    expect(sessionStorage.getItem(ptyCursorKey())).toBe('41');
     expect(lastEventSource!.url).toContain('recoverTerminal=true');
   });
 
@@ -450,6 +471,10 @@ describe('RunTerminal PTY fallback UI', () => {
     await waitFor(() => expect(lastEventSource).not.toBeNull());
     const terminal = xtermMockState.instances[0];
     act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+      }));
       lastEventSource!.emit('checkpoint_ready', JSON.stringify({
         checkpoint_id: '55555555-5555-4555-8555-555555555555',
         checkpoint_seq: 40,
@@ -458,7 +483,7 @@ describe('RunTerminal PTY fallback UI', () => {
       }));
       lastEventSource!.emit('chunk', Buffer.from('newest survives').toString('base64'), '41');
     });
-    await waitFor(() => expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('41'));
+    await waitFor(() => expect(sessionStorage.getItem(ptyCursorKey())).toBe('41'));
     expect(terminal.reset).not.toHaveBeenCalled();
   });
 
@@ -486,10 +511,11 @@ describe('RunTerminal PTY fallback UI', () => {
       lastEventSource!.emit('run_meta', JSON.stringify({
         terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
         outputSource: 'run_pty_output_chunks', cursorReset: false,
+        ptyGenerationId: PTY_GENERATION_ID,
       }));
       lastEventSource!.emit('chunk', Buffer.from('pty bytes', 'utf8').toString('base64'), '17');
     });
-    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('17');
+    expect(sessionStorage.getItem(ptyCursorKey())).toBe('17');
     expect(sessionStorage.getItem('rorca:terminal-output-source:77')).toBe('run_pty_output_chunks');
 
     act(() => {
@@ -503,7 +529,7 @@ describe('RunTerminal PTY fallback UI', () => {
     });
 
     expect(await screen.findByText(/ansi fallback preserved/)).toBeInTheDocument();
-    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('1');
+    expect(sessionStorage.getItem(ansiCursorKey)).toBe('1');
     expect(sessionStorage.getItem('rorca:terminal-output-source:77')).toBe('run_output_chunks');
   });
 
@@ -523,6 +549,10 @@ describe('RunTerminal PTY fallback UI', () => {
     while (frames.length > 0) frames.shift()!(0);
     const bytes = Buffer.from('A🙂B', 'utf8');
     act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+      }));
       lastEventSource!.emit('chunk', bytes.subarray(0, 3).toString('base64'), '31');
       lastEventSource!.emit('chunk', bytes.subarray(3).toString('base64'), '32');
     });
@@ -533,7 +563,7 @@ describe('RunTerminal PTY fallback UI', () => {
       .map(([chunk]) => new TextDecoder().decode(chunk as Uint8Array))
       .join('');
     expect(rendered).toBe('A🙂B');
-    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('32');
+    expect(sessionStorage.getItem(ptyCursorKey())).toBe('32');
   });
 
   it('closes and replays from the prior cursor when xterm backpressure rejects a chunk', async () => {
@@ -542,27 +572,36 @@ describe('RunTerminal PTY fallback UI', () => {
     const source = lastEventSource!;
 
     act(() => {
+      source.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+      }));
       source.emit('chunk', Buffer.from('accepted').toString('base64'), '41');
       source.emit('chunk', Buffer.alloc(1024 * 1024, 0x61).toString('base64'), '42');
     });
 
     expect(source.readyState).toBe(TestEventSource.CLOSED);
-    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('41');
+    expect(sessionStorage.getItem(ptyCursorKey())).toBe('41');
     expect(screen.getByText(/Output was paused and will resume from the durable cursor/i)).toBeInTheDocument();
   });
 
-  it('reports Live plus CLI silence when PTY heartbeats continue without bytes', async () => {
+  it('reports Waiting rather than Live when heartbeats continue without generation output', async () => {
     renderTerminal('pty');
     await waitFor(() => expect(lastEventSource).not.toBeNull());
     act(() => {
-      lastEventSource!.emit('run_meta', JSON.stringify({ terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true }));
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationActive: true,
+      }));
       lastEventSource!.emit('pty_health', JSON.stringify({
+        ptyGenerationId: PTY_GENERATION_ID, ptyGenerationActive: true,
         ptySessionStatus: 'active', ptyProcessAlive: true, ptyLastHeartbeatAt: new Date().toISOString(), ptyTotalOutputBytes: 0,
       }));
     });
 
-    expect(screen.getByLabelText(/Terminal connection: Live/)).toBeInTheDocument();
-    expect(screen.getByText(/PTY terminal · CLI silent never/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Terminal connection: Waiting/)).toBeInTheDocument();
+    expect(screen.getByText(/PTY terminal · waiting · last byte never/)).toBeInTheDocument();
   });
 
   it('does not send keyboard input for terminal runs even if archived PTY health says active', async () => {
@@ -620,6 +659,77 @@ describe('RunTerminal PTY fallback UI', () => {
       expect(source.readyState).toBe(TestEventSource.CLOSED);
       expect(terminal.dispose).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('does not clear a visible same-generation viewport for a reconnect replay boundary', async () => {
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    const terminal = xtermMockState.instances[0];
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationToken: PTY_GENERATION_TOKEN, ptyGenerationActive: true,
+        ptySessionStatus: 'active', ptyProcessAlive: true,
+      }));
+      lastEventSource!.emit('chunk', Buffer.from('visible viewport').toString('base64'), `v1|run_pty_output_chunks|${PTY_GENERATION_ID}|1`);
+      lastEventSource!.emit('terminal_reset', JSON.stringify({
+        reason: 'terminal_recovery', generationId: PTY_GENERATION_ID,
+      }));
+    });
+
+    expect(terminal.reset).not.toHaveBeenCalled();
+    expect(screen.queryByText('No current terminal viewport yet')).not.toBeInTheDocument();
+  });
+
+  it('distinguishes true capture loss with byte and sequence ranges', async () => {
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationActive: true,
+      }));
+      lastEventSource!.emit('pty_health', JSON.stringify({
+        ptyGenerationId: PTY_GENERATION_ID, ptyGenerationActive: true,
+        ptySessionStatus: 'active', ptyProcessAlive: true,
+        ptyLastHeartbeatAt: new Date().toISOString(), ptyTotalOutputBytes: 4096,
+        ptyDroppedOutputBytes: 128, ptyNextOutputSequence: 18, ptyOutputTruncated: true,
+      }));
+    });
+
+    expect(screen.getByLabelText(/Terminal connection: Gap/)).toBeInTheDocument();
+    const warning = screen.getByRole('alert');
+    expect(warning).toHaveTextContent('128 bytes');
+    expect(warning).toHaveTextContent('byte offsets 0–4095');
+    expect(warning).toHaveTextContent('sequences 1–17');
+  });
+
+  it('announces reconnect and ended replay while leaving archived controls disabled', async () => {
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    const source = lastEventSource!;
+    const terminal = xtermMockState.instances[0];
+    act(() => {
+      source.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+        ptyGenerationToken: PTY_GENERATION_TOKEN, ptyGenerationActive: true,
+        ptySessionStatus: 'active', ptyProcessAlive: true,
+      }));
+      source.fail();
+    });
+    expect(screen.getByText(/connection interrupted. Reconnecting from the current source and generation cursor/)).toHaveClass('sr-only');
+
+    act(() => { source.emit('done'); });
+    expect(screen.getByLabelText(/Terminal connection: Ended/)).toBeInTheDocument();
+    expect(document.querySelector('[data-terminal-input-enabled="false"]')).toBeTruthy();
+    vi.mocked(apiFetch).mockClear();
+    act(() => { terminal.emitData('blocked-after-end'); });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(apiFetch).not.toHaveBeenCalledWith('/api/pipeline/runs/77/input', expect.anything());
   });
 
   it('forwards initial and debounced PTY resize payloads to the backend', async () => {

@@ -63,6 +63,12 @@ async function assertEvidenceAccess(req: Request): Promise<EvidenceIdentity> {
   return { ...identity, workspaceId: generation.workspace_id };
 }
 
+function assertRawArchiveOperator(req: Request): void {
+  if (!isSuperUser(req.user)) {
+    throw new ForbiddenError('Raw PTY archive download requires local operator admin access');
+  }
+}
+
 function handleEvidenceRouteError(res: Response, error: unknown, context: string, fallback: AppError): void {
   // Unknown database/filesystem messages may contain infrastructure paths or
   // connection details. Evidence endpoints expose only bounded AppError shapes.
@@ -199,8 +205,8 @@ router.get(
  *     tags: [Pipeline]
  *     summary: Stream a verified raw PTY archive as concatenated gzip segments
  *     operationId: downloadRawPtyArchive
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "User-owned local raw run evidence is workspace-authorized and read-only; containment, integrity verification, byte ranges, and streaming backpressure make authenticated recovery and MCP downloads safe."
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Exact raw terminal bytes can contain secrets and operator input; download is restricted to an explicit local operator action and excluded from MCP."
  *     parameters:
  *       - { in: path, name: runId, required: true, schema: { type: integer, minimum: 1 } }
  *       - { in: path, name: generationId, required: true, schema: { type: string, format: uuid } }
@@ -219,6 +225,7 @@ router.get(
   async (req: Request, res: Response) => {
     try {
       const identity = await assertEvidenceAccess(req);
+      assertRawArchiveOperator(req);
       const archive = await verifyRawPtyArchive(identity.runId, identity.generationId);
       const representationLength = archive.segments.reduce((sum, segment) => sum + segment.compressedSize, 0);
       const range = parseArchiveRange(req.get('Range'), representationLength);
