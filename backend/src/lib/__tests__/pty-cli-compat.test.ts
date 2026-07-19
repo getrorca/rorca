@@ -22,7 +22,9 @@ import {
 function writeFakeCli(dir: string, name: string, help: string, version = 'fake 1.2.3'): string {
   const file = path.join(dir, name);
   fs.writeFileSync(file, `#!/bin/sh
-case "$1" in
+last=''
+for arg in "$@"; do last="$arg"; done
+case "$last" in
   --version) echo '${version}' ;;
   --help) cat <<'EOF'
 ${help}
@@ -99,6 +101,48 @@ describe('PTY CLI compatibility probes', () => {
     // A CLI may use a non-semver version string, but both bounded probes must
     // succeed before the interactive adapter is permitted to launch.
     expect(() => assertPtyCliCompatible('claude', ['model'], status)).not.toThrow();
+  });
+
+  it('isolates Pi probes from extensions and online startup paths', () => {
+    const fake = writeFakeCli(tempDir, 'pi', '--mode MODE\n--no-extensions\n--model MODEL', 'pi 0.80.6');
+    const status = probePtyCliCompatibility('pi', {
+      force: true,
+      env: { ...process.env, PI_BIN: fake },
+    });
+
+    expect(status.ready).toBe(true);
+    expect(status.version).toBe('0.80.6');
+    expect(status.probes.version?.args).toEqual(['--no-extensions', '--offline', '--version']);
+    expect(status.probes.help?.args).toEqual(['--no-extensions', '--offline', '--help']);
+    expect(status.capabilities).toMatchObject({ textMode: true, noExtensions: true, model: true });
+  });
+
+  it('does not cache a transient failed probe across story retries', () => {
+    const fake = path.join(tempDir, 'flaky-pi');
+    const marker = path.join(tempDir, 'first-version-failed');
+    fs.writeFileSync(fake, `#!/bin/sh
+last=''
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  --version)
+    if [ ! -f '${marker}' ]; then touch '${marker}'; exit 1; fi
+    echo 'pi 0.80.6'
+    ;;
+  --help) echo '--mode MODE --no-extensions --model MODEL' ;;
+esac
+`, { mode: 0o755 });
+    const previousPiBin = process.env.PI_BIN;
+    process.env.PI_BIN = fake;
+    try {
+      const first = probePtyCliCompatibility('pi', { timeoutMs: 250 });
+      const second = probePtyCliCompatibility('pi', { timeoutMs: 250 });
+
+      expect(first.ready).toBe(false);
+      expect(second.ready).toBe(true);
+    } finally {
+      if (previousPiBin === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = previousPiBin;
+    }
   });
 
   it('times out a hung wrapper within the configured bound instead of launching it interactively', () => {
