@@ -169,6 +169,10 @@ Database cleanup permits only one exact equality predicate over an approved name
 
 Output records only SHA-256 identity labels and before/after sentinel digests. Credentials, full database URLs, private absolute paths, scenario payloads, and production records are never printed.
 
+The repeated seeded model, CI/soak profiles, leak sentinel, versioned performance
+budgets, and failure evidence contract are documented in
+[`wave-stress.md`](./wave-stress.md).
+
 The machine-checkable invariant and scenario mapping is [`wave-parallel-invariants.json`](./wave-parallel-invariants.json). Validate it with:
 
 ```sh
