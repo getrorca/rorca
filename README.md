@@ -338,7 +338,12 @@ contract). You can also pick a mode explicitly in the onboarding wizard and in
 #### Docker Postgres with AGE (recommended)
 
 The smoothest path to Full Graph. The bundled `docker-compose.yml` builds a
-PostgreSQL 16 image with Apache AGE compiled in.
+PostgreSQL 16 image with Apache AGE compiled in. AGE PG16 1.5.0 is built in a
+separate stage from Apache's immutable commit
+`0048900f372d4dfd5c236f78b8a8453bcdbb458e`; the TLS-fetched source archive and
+generated extension SQL are SHA-256 pinned, and compiler dependencies do not
+enter the runtime image. Keeping extension version 1.5.0 also preserves
+compatibility with existing managed clusters created by earlier Rorca images.
 
 ```bash
 rorca db start        # provision/start the managed Docker Postgres (AGE included)

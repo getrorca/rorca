@@ -38,12 +38,34 @@ test('fresh PostgreSQL image initializes extensions only and cannot copy a seed'
   expect(initSql).not.toMatch(/pgboss\s*\./i);
 });
 
-test('Apache AGE is exact-version pinned and package-integrity verified without disabled TLS', () => {
-  expect(postgresDockerfile).toMatch(/ARG APACHE_AGE_PACKAGE_VERSION=\d+\.\d+\.\d+(?:~[0-9A-Za-z.+:-]+)?-[^\s]+/);
-  expect(postgresDockerfile).toContain('"postgresql-16-age=${APACHE_AGE_PACKAGE_VERSION}"');
-  expect(postgresDockerfile).toContain("dpkg-query -W -f='${Version}' postgresql-16-age");
+test('Apache AGE PG16 1.5.0 is reproducibly built for both image architectures without runtime build dependencies', () => {
+  expect(postgresDockerfile).toContain('FROM pgvector/pgvector:pg16 AS age-builder');
+  expect(postgresDockerfile).toContain('ARG APACHE_AGE_COMMIT=0048900f372d4dfd5c236f78b8a8453bcdbb458e');
+  expect(postgresDockerfile).toContain('ARG APACHE_AGE_SOURCE_SHA256=bc2836b3588178b123095b4c8cf9398ad6174f571bcd975bbb844ffdebd2709a');
+  expect(postgresDockerfile).toContain('https://codeload.github.com/apache/age/tar.gz/${APACHE_AGE_COMMIT}');
+  expect(postgresDockerfile).toContain("--proto '=https' --tlsv1.2");
+  expect(postgresDockerfile).toContain('sha256sum --check --strict');
+  expect(postgresDockerfile).toContain('amd64:*x86-64*|arm64:*aarch64*');
+  expect(postgresDockerfile).toContain('age--1.5.0.sql');
+  expect(postgresDockerfile).toContain("default_version = '1.5.0'");
+  expect(postgresDockerfile).toContain("! ldd /usr/lib/postgresql/16/lib/age.so | grep -q 'not found'");
+  expect(postgresDockerfile).toContain('COPY --from=age-builder');
+  expect(postgresDockerfile.match(/^FROM pgvector\/pgvector:pg16/gm)).toHaveLength(2);
+  const runtimeStage = postgresDockerfile.slice(postgresDockerfile.lastIndexOf('FROM pgvector/pgvector:pg16'));
+  expect(runtimeStage).not.toMatch(/apt-get\s+install|postgresql-16-age/);
+  expect(runtimeStage).toContain('for package in build-essential bison flex postgresql-server-dev-16');
   expect(postgresDockerfile).not.toContain('GIT_SSL_NO_VERIFY');
   expect(postgresDockerfile).not.toMatch(/git\s+clone|--branch\s+release\//);
+});
+
+test('AGE image preserves dirty-cluster extversion and application migrations do not attempt a version transition', () => {
+  expect(postgresDockerfile).not.toContain('age--1.6.0.sql');
+  const migrationDir = path.join(root, 'backend/src/db/pg-migrations');
+  const migrationSql = fs.readdirSync(migrationDir)
+    .filter((name) => name.endsWith('.sql'))
+    .map((name) => fs.readFileSync(path.join(migrationDir, name), 'utf8'))
+    .join('\n');
+  expect(migrationSql).not.toMatch(/ALTER\s+EXTENSION\s+age\s+UPDATE/i);
 });
 
 test('PostgreSQL and root image contexts reject database exports and archives', () => {
