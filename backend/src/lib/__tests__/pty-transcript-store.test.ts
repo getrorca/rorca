@@ -13,7 +13,7 @@ jest.mock('../../db/index', () => ({
   transaction: (...args: unknown[]) => transcriptTransactionMock(...args),
 }));
 
-import { ValidationError } from '../errors';
+import { ConflictError, ValidationError } from '../errors';
 import {
   PtyTranscriptNormalizer,
   PtyTranscriptRecorder,
@@ -31,7 +31,7 @@ describe('PTY transcript contract primitives', () => {
     const cursor = encodeTranscriptCursor(GENERATION_ID, 42);
     expect(decodeTranscriptCursor(cursor, GENERATION_ID)).toBe(42);
     expect(() => decodeTranscriptCursor(cursor, '223e4567-e89b-42d3-a456-426614174000'))
-      .toThrow(ValidationError);
+      .toThrow(ConflictError);
     expect(() => decodeTranscriptCursor('not-a-cursor', GENERATION_ID)).toThrow(ValidationError);
   });
 

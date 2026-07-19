@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { randomUUID } from 'crypto';
 import type { Response } from 'express';
 
 export interface WalEvent {
@@ -129,7 +130,107 @@ export function attachSSE(res: Response): () => void {
  */
 export function attachTopicSSE<T = unknown>(topic: string, res: Response, eventName = 'message'): () => void {
   const unsubscribe = subscribeTopic<T>(topic, (event) => {
+    if (!canWriteSse(res)) return;
     res.write(`event: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`);
   });
   return unsubscribe;
+}
+
+export interface SseFrame {
+  event?: string;
+  data?: string;
+  id?: string;
+  retryMs?: number;
+  comment?: string;
+}
+
+export interface BoundedTopicSseSink {
+  send(frame: SseFrame, lastConfirmedCursor?: string | null): boolean;
+  end(frame?: SseFrame): void;
+  close(): void;
+}
+
+interface SinkEnvelope {
+  frame: SseFrame;
+  lastConfirmedCursor: string | null;
+  deliver: (accepted: boolean) => void;
+}
+
+function canWriteSse(res: Response): boolean {
+  return !res.destroyed && !res.writableEnded && (res.socket === null || res.socket.writable);
+}
+
+function formatSseFrame(frame: SseFrame): string {
+  const lines: string[] = [];
+  if (frame.retryMs !== undefined) lines.push(`retry: ${Math.max(0, Math.floor(frame.retryMs))}`);
+  if (frame.comment !== undefined) lines.push(`: ${frame.comment.replace(/[\r\n]/g, ' ')}`);
+  if (frame.id !== undefined) lines.push(`id: ${frame.id.replace(/[\r\n]/g, '')}`);
+  if (frame.event !== undefined) lines.push(`event: ${frame.event.replace(/[\r\n]/g, '')}`);
+  if (frame.data !== undefined) {
+    for (const line of frame.data.split(/\r?\n/)) lines.push(`data: ${line}`);
+  }
+  return `${lines.join('\n')}\n\n`;
+}
+
+/**
+ * Per-response bounded publisher. Every live frame traverses the hub's exact
+ * topic filter before touching the socket. A high-water-mark refusal causes one
+ * bounded cursor-preserving retry frame and an immediate disconnect; callers
+ * never queue another frame or wait on an overlapping drain promise.
+ */
+export function createBoundedTopicSseSink(res: Response, retryMs = 1_000): BoundedTopicSseSink {
+  const topic = `response-sse:${randomUUID()}`;
+  let closed = false;
+  const unsubscribe = subscribeTopic<SinkEnvelope>(topic, ({ frame, lastConfirmedCursor, deliver }) => {
+    if (closed || !canWriteSse(res)) {
+      deliver(false);
+      return;
+    }
+    const accepted = res.write(formatSseFrame(frame));
+    if (!accepted) {
+      // One final bounded frame communicates the last cursor known to have been
+      // admitted before pressure. No ID is attached, so reconnect semantics are
+      // governed by the last complete chunk event the client actually parsed.
+      if (canWriteSse(res)) {
+        res.write(formatSseFrame({
+          retryMs,
+          event: 'stream_disconnect',
+          data: JSON.stringify({ retryable: true, reason: 'backpressure', cursor: lastConfirmedCursor }),
+        }));
+      }
+      closed = true;
+      unsubscribe();
+      if (!res.writableEnded && !res.destroyed) res.end();
+    }
+    deliver(accepted);
+  });
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    unsubscribe();
+  };
+
+  return {
+    send(frame, lastConfirmedCursor = null): boolean {
+      if (closed || !canWriteSse(res)) return false;
+      let delivered = false;
+      let accepted = false;
+      broadcastTopic<SinkEnvelope>(topic, {
+        frame,
+        lastConfirmedCursor,
+        deliver(result) {
+          delivered = true;
+          accepted = result;
+        },
+      });
+      return delivered && accepted;
+    },
+    end(frame): void {
+      if (frame && !closed) this.send(frame);
+      close();
+      if (!res.writableEnded && !res.destroyed) res.end();
+    },
+    close,
+  };
 }

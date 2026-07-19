@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": "src",
+    "types": ["node", "jest"]
+  },
+  "include": [
+    "src/types/**/*.d.ts",
+    "src/routes/__tests__/pipeline-pty-attachment.test.ts",
+    "src/routes/__tests__/pipeline-output-parity.test.ts",
+    "src/routes/__tests__/pty-evidence.test.ts",
+    "src/lib/__tests__/pty-transcript-store.test.ts",
+    "src/lib/__tests__/pty-raw-archive.test.ts",
+    "src/lib/__tests__/run-output-contract.test.ts",
+    "src/lib/__tests__/sse-hub-bounded.test.ts"
+  ],
+  "exclude": ["src/db/bun-sqlite-shim.ts"]
+}

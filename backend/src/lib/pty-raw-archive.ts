@@ -156,13 +156,14 @@ export function resolveRawArchiveSegmentPath(
 ): string {
   const workspaceRoot = path.resolve(workspacePath);
   const archiveRoot = path.resolve(workspaceRoot, archiveRootRelative);
-  const expectedWorkspacePrefix = `${workspaceRoot}${path.sep}`;
-  if (archiveRoot !== workspaceRoot && !archiveRoot.startsWith(expectedWorkspacePrefix)) {
+  const workspaceRelative = path.relative(workspaceRoot, archiveRoot);
+  if (workspaceRelative.startsWith('..') || path.isAbsolute(workspaceRelative)) {
     throw new ForbiddenError('Raw archive root escapes its workspace');
   }
 
   const candidate = path.resolve(archiveRoot, segmentRelativePath);
-  if (candidate === archiveRoot || !candidate.startsWith(`${archiveRoot}${path.sep}`)) {
+  const archiveRelative = path.relative(archiveRoot, candidate);
+  if (!archiveRelative || archiveRelative.startsWith('..') || path.isAbsolute(archiveRelative)) {
     throw new ForbiddenError('Raw archive segment path escapes its archive root');
   }
 
@@ -178,7 +179,8 @@ export function resolveRawArchiveSegmentPath(
         cause: error instanceof Error && 'code' in error ? String((error as NodeJS.ErrnoException).code) : 'unavailable',
       });
     }
-    if (!realCandidate.startsWith(`${realRoot}${path.sep}`)) {
+    const realRelative = path.relative(realRoot, realCandidate);
+    if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
       throw new ForbiddenError('Raw archive segment resolves outside its archive root');
     }
     return realCandidate;

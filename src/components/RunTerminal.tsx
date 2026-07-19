@@ -344,7 +344,9 @@ function persistReceivedSequence(runId: number, sequence: number): void {
 }
 
 function readChunkSequence(event: MessageEvent): number | null {
-  const sequence = Number(event.lastEventId);
+  const raw = event.lastEventId;
+  const scoped = /^v1\|(?:run_pty_output_chunks|run_output_chunks)\|(?:legacy|[0-9a-f-]{36})\|(\d+)$/i.exec(raw);
+  const sequence = Number(scoped?.[1] ?? raw);
   return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : null;
 }
 
@@ -1391,6 +1393,22 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         }));
         applyPtyHealthMeta(meta);
       } catch { /* ignore */ }
+    });
+
+    es.addEventListener('terminal_reset', () => {
+      markSseEvent();
+      // Metadata always arrives first, so this reset is scoped to the newly
+      // selected source/generation and completes before any following delta.
+      xtermRef.current?.reset();
+      pendingPtyChunksRef.current = [];
+      pendingPtyBytesRef.current = 0;
+      seenChunkIdsRef.current.clear();
+      ptyDisplayScrubberRef.current = createPtyDisplayScrubberState();
+      ptyDisplayDecoderRef.current = new TextDecoder();
+      ansiDisplayDecoderRef.current = new TextDecoder();
+      lastReceivedSequenceRef.current = 0;
+      clearReceivedSequence(runId);
+      if (preRef.current) preRef.current.innerHTML = '';
     });
 
     es.addEventListener('pty_health', (e: MessageEvent) => {

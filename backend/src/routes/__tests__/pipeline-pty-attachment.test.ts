@@ -183,6 +183,15 @@ async function streamOutput(runId: number): Promise<string> {
 }
 
 describe('PTY attachment trigger and fallback discrimination', () => {
+  test('rejects output attachment through a different workspace identity before SSE headers', async () => {
+    const runId = await seedRun('done', 'pty');
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=another-workspace`)
+      .set('Authorization', `Bearer ${authToken}`);
+    expect(response.status).toBe(403);
+    expect(response.headers['content-type']).toContain('application/json');
+  });
+
   test('trigger accepts camelCase terminalMode=pty, persists the run mode, and forwards the pg-boss payload', async () => {
     seedSpec('trigger-pty-payload');
     const pgBossMock = jest.requireMock('../../lib/pg-boss');
@@ -270,6 +279,18 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     const body = await streamOutput(runId);
 
     expect(body).toContain('event: run_meta');
+    expect(body).toContain('"contractVersion":2');
+    expect(body).toContain(`"outputGenerationId":"${generation.generationId}"`);
+    expect(body).toContain('"storyId":"US-001"');
+    expect(body).toContain('"attempt":1');
+    expect(body).toContain('"checkpointSequence":0');
+    expect(body).toContain('"firstRetainedSequence":1');
+    expect(body).toContain('"active":false');
+    expect(body).toContain('"transcriptAvailable":false');
+    expect(body).toContain('"archiveAvailable":false');
+    expect(body).toContain('event: terminal_reset');
+    expect(body.indexOf('event: run_meta')).toBeLessThan(body.indexOf('event: terminal_reset'));
+    expect(body.indexOf('event: terminal_reset')).toBeLessThan(body.indexOf('event: chunk'));
     expect(body).toContain('"terminalMode":"pty"');
     expect(body).toContain('"lifecycleStatus":"finished"');
     expect(body).toContain('"isPty":true');
@@ -349,6 +370,72 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 
       const replayBody = await streamOutput(runId);
       expect(extractChunkPayloads(replayBody)).toEqual(expectedPayloads);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test('active-generation rollover emits metadata then reset before current deltas', async () => {
+    const runId = await seedRun('running', 'pty');
+    const previous = await seedPtyGeneration(runId);
+    const previousChunk = Buffer.from('previous-generation\n');
+    const currentChunk = Buffer.from('current-generation\n');
+    await db.execute(
+      'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 1, $3)',
+      [runId, previous.generationId, previousChunk],
+    );
+
+    const server = app.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const body = await new Promise<string>((resolve, reject) => {
+        let received = '';
+        let replacementStarted = false;
+        const clientReq = http.get({
+          port,
+          path: `/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`,
+          headers: { Authorization: `Bearer ${authToken}` },
+        }, (clientRes) => {
+          clientRes.setEncoding('utf8');
+          clientRes.on('data', (chunk: string) => {
+            received += chunk;
+            if (!replacementStarted && received.includes(previousChunk.toString('base64'))) {
+              replacementStarted = true;
+              void (async () => {
+                const current = await startRunPtySession({
+                  runId, workspaceId: 'ws-pty-attach', storyId: 'US-002', attempt: 2,
+                  cwd: wsDir, agentType: 'claude', cols: 80, rows: 24, childPid: null,
+                });
+                await db.execute(
+                  'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 1, $3)',
+                  [runId, current.generationId, currentChunk],
+                );
+                await completeRunPtySession({
+                  runId, generationId: current.generationId, generationToken: current.generationToken,
+                }, 'exited', 0, null);
+                await db.execute("UPDATE pipeline_runs SET status = 'done', finished_at = NOW() WHERE id = $1", [runId]);
+              })().catch(reject);
+            }
+            if (received.includes(currentChunk.toString('base64')) && received.includes('event: done')) resolve(received);
+          });
+        });
+        clientReq.on('error', (error) => {
+          if (received.includes(currentChunk.toString('base64'))) resolve(received);
+          else reject(error);
+        });
+        clientReq.setTimeout(8_000, () => {
+          clientReq.destroy();
+          reject(new Error(`Timed out during generation rollover: ${received}`));
+        });
+      });
+
+      const currentMeta = body.lastIndexOf('"storyId":"US-002"');
+      const reset = body.indexOf('event: terminal_reset', currentMeta);
+      const currentDelta = body.indexOf(currentChunk.toString('base64'));
+      expect(currentMeta).toBeGreaterThan(-1);
+      expect(reset).toBeGreaterThan(currentMeta);
+      expect(currentDelta).toBeGreaterThan(reset);
+      expect(extractChunkPayloads(body)).toEqual([previousChunk.toString('base64'), currentChunk.toString('base64')]);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -459,6 +546,27 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(response.text).toContain(Buffer.from('resume-here\n').toString('base64'));
   });
 
+  test('a scoped EventSource cursor resumes exactly once in its matching generation', async () => {
+    const runId = await seedRun('done', 'pty');
+    const generation = await seedPtyGeneration(runId, 'exited');
+    await db.execute(
+      `INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES
+       ($1, $2, 1, $3), ($1, $2, 2, $4)`,
+      [runId, generation.generationId, Buffer.from('scoped-seen\n'), Buffer.from('scoped-resume\n')],
+    );
+
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Last-Event-ID', `v1|run_pty_output_chunks|${generation.generationId}|1`);
+
+    expect(response.status).toBe(200);
+    expect(response.text).not.toContain('event: terminal_reset');
+    expect(response.text).not.toContain(Buffer.from('scoped-seen\n').toString('base64'));
+    expect(extractChunkPayloads(response.text)).toEqual([Buffer.from('scoped-resume\n').toString('base64')]);
+    expect(response.text).toContain(`id: v1|run_pty_output_chunks|${generation.generationId}|2`);
+  });
+
   test('explicit afterSequence refresh cursor overrides Last-Event-ID and never replays from zero', async () => {
     const runId = await seedRun('done', 'pty');
     const generation = await seedPtyGeneration(runId, 'exited');
@@ -494,7 +602,60 @@ describe('PTY attachment trigger and fallback discrimination', () => {
 
     expect(response.status).toBe(200);
     expect(response.text).toContain('"cursorReset":true');
+    expect(response.text).toContain('event: terminal_reset');
+    expect(response.text).toContain('"reason":"cursor_scope_changed"');
     expect(response.text).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
+  });
+
+  test('resets a cursor from an older PTY generation before replaying current sequence one', async () => {
+    const runId = await seedRun('done', 'pty');
+    const currentChunk = Buffer.from('current-generation-sequence-one\n');
+    const generation = await seedPtyGeneration(runId, 'exited');
+    await db.execute(
+      'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 1, $3)',
+      [runId, generation.generationId, currentChunk],
+    );
+    const staleGenerationId = crypto.randomUUID();
+
+    const response = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output?workspaceId=ws-pty-attach`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Last-Event-ID', `v1|run_pty_output_chunks|${staleGenerationId}|999`);
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('"cursorReset":true');
+    expect(response.text).toContain('event: terminal_reset');
+    expect(response.text).toContain(`"outputGenerationId":"${generation.generationId}"`);
+    expect(extractChunkPayloads(response.text)).toEqual([currentChunk.toString('base64')]);
+  });
+
+  test('does not let a corrupt checkpoint suppress retained deltas', async () => {
+    const runId = await seedRun('done', 'pty');
+    const generation = await seedPtyGeneration(runId, 'exited');
+    const retained = Buffer.from('retained-after-corrupt-checkpoint\n');
+    await db.execute(
+      `INSERT INTO pty_checkpoints
+        (id, generation_id, run_id, story_id, checkpoint_seq, first_retained_seq,
+         compressed_blob, checksum, version, terminal_cols, terminal_rows)
+       VALUES ($1, $2, $3, 'US-001', 4, 5, $4, $5, 1, 80, 24)`,
+      [crypto.randomUUID(), generation.generationId, runId, Buffer.from('not-a-valid-checkpoint'), '0'.repeat(64)],
+    );
+    await db.execute(
+      `UPDATE pty_generations SET checkpoint_sequence = 4, first_retained_sequence = 5
+       WHERE id = $1`,
+      [generation.generationId],
+    );
+    await db.execute(
+      'INSERT INTO run_pty_output_chunks (run_id, generation_id, sequence, chunk) VALUES ($1, $2, 5, $3)',
+      [runId, generation.generationId, retained],
+    );
+
+    const body = await streamOutput(runId);
+    expect(body).toContain('"checkpointSequence":4');
+    expect(body).not.toContain('event: checkpoint_ready');
+    expect(body).toContain('event: terminal_reset');
+    expect(body).toContain('event: replay_truncated');
+    expect(extractChunkPayloads(body)).toEqual([retained.toString('base64')]);
   });
 
   test('native PTY-backed replay preserves requested native mode and reads PTY chunks', async () => {

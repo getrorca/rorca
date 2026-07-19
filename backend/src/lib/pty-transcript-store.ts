@@ -152,20 +152,23 @@ export function encodeTranscriptCursor(generationId: string, seq: number): strin
 }
 
 export function decodeTranscriptCursor(cursor: string, expectedGenerationId: string): number {
+  let decoded: Partial<TranscriptCursorPayload>;
   try {
-    const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<TranscriptCursorPayload>;
-    if (
-      decoded.v !== 1
-      || decoded.generationId !== expectedGenerationId
-      || !Number.isSafeInteger(decoded.seq)
-      || Number(decoded.seq) < 0
-    ) {
-      throw new Error('cursor identity mismatch');
-    }
-    return Number(decoded.seq);
+    decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<TranscriptCursorPayload>;
   } catch {
-    throw new ValidationError('Invalid or stale PTY transcript cursor');
+    throw new ValidationError('Malformed PTY transcript cursor');
   }
+  if (decoded.v !== 1 || !UUID_PATTERN.test(String(decoded.generationId ?? ''))
+    || !Number.isSafeInteger(decoded.seq) || Number(decoded.seq) < 0) {
+    throw new ValidationError('Malformed PTY transcript cursor');
+  }
+  if (decoded.generationId !== expectedGenerationId) {
+    throw new ConflictError('PTY transcript cursor belongs to another generation', {
+      cursorGenerationId: decoded.generationId,
+      expectedGenerationId,
+    });
+  }
+  return Number(decoded.seq);
 }
 
 function validateTranscriptInput(input: AppendPtyTranscriptEventInput): void {

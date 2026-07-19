@@ -29,6 +29,7 @@ jest.mock('../../lib/pty-raw-archive', () => ({
   resolveRawArchiveSegmentPath: (...args: unknown[]) => resolveSegmentMock(...args),
 }));
 
+import { ConflictError } from '../../lib/errors';
 import router from '../pty-evidence';
 
 const GENERATION_ID = '123e4567-e89b-42d3-a456-426614174000';
@@ -78,6 +79,17 @@ describe('PTY evidence routes', () => {
     expect(response.body.items).toEqual([]);
   });
 
+  it('returns conflict when a transcript cursor belongs to another generation', async () => {
+    queryOneMock
+      .mockResolvedValueOnce({ workspace_id: 'ws-1' })
+      .mockResolvedValueOnce({ role: 'member' });
+    listTranscriptMock.mockRejectedValueOnce(new ConflictError('cursor generation mismatch'));
+    const response = await request(appFor('user'))
+      .get(`/runs/77/generations/${GENERATION_ID}/transcript?cursor=stale-generation`);
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('CONFLICT');
+  });
+
   it('does not expose another workspace transcript', async () => {
     queryOneMock
       .mockResolvedValueOnce({ workspace_id: 'other-workspace' })
@@ -88,15 +100,17 @@ describe('PTY evidence routes', () => {
     expect(listTranscriptMock).not.toHaveBeenCalled();
   });
 
-  it('requires an administrator before resolving restricted raw evidence', async () => {
+  it('does not expose another workspace raw archive', async () => {
+    queryOneMock
+      .mockResolvedValueOnce({ workspace_id: 'other-workspace' })
+      .mockResolvedValueOnce(undefined);
     const response = await request(appFor('user'))
       .get(`/runs/77/generations/${GENERATION_ID}/raw-archive`);
     expect(response.status).toBe(403);
-    expect(queryOneMock).not.toHaveBeenCalled();
     expect(verifyArchiveMock).not.toHaveBeenCalled();
   });
 
-  it('streams only preverified contained segment bytes for an administrator', async () => {
+  it('streams only preverified contained segment bytes for an authorized member', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-route-archive-'));
     const segmentPath = path.join(dir, 'segment.gz');
     const bytes = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02, 0x03]);
@@ -140,7 +154,10 @@ describe('PTY evidence routes', () => {
     });
 
     try {
-      const response = await request(appFor('admin'))
+      queryOneMock
+        .mockResolvedValueOnce({ workspace_id: 'ws-1' })
+        .mockResolvedValueOnce({ role: 'member' });
+      const response = await request(appFor('user'))
         .get(`/runs/77/generations/${GENERATION_ID}/raw-archive`)
         .buffer(true)
         .parse((res, callback) => {
@@ -151,11 +168,27 @@ describe('PTY evidence routes', () => {
       expect(response.status).toBe(200);
       expect(Buffer.from(response.body).equals(bytes)).toBe(true);
       expect(response.headers['content-type']).toBe('application/gzip');
+      expect(response.headers['accept-ranges']).toBe('bytes');
       expect(resolveSegmentMock).toHaveBeenCalledWith(
         dir,
         '.rorca/pty-archives',
         `${GENERATION_ID}/segment-000000.gz`,
       );
+      queryOneMock
+        .mockResolvedValueOnce({ workspace_id: 'ws-1' })
+        .mockResolvedValueOnce({ role: 'member' });
+      const ranged = await request(appFor('user'))
+        .get(`/runs/77/generations/${GENERATION_ID}/raw-archive`)
+        .set('Range', 'bytes=2-4')
+        .buffer(true)
+        .parse((res, callback) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+          res.on('end', () => callback(null, Buffer.concat(chunks)));
+        });
+      expect(ranged.status).toBe(206);
+      expect(ranged.headers['content-range']).toBe(`bytes 2-4/${bytes.length}`);
+      expect(Buffer.from(ranged.body).equals(bytes.subarray(2, 5))).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
