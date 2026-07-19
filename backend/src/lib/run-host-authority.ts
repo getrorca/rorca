@@ -7,6 +7,7 @@
 
 /** Frozen-scope, host-only run result authority for completion and release. */
 
+import { createHash } from 'crypto';
 import * as path from 'path';
 import { query, queryOne } from '../db/index';
 import { assertExactTrustedWalRow, type TrustedWalRow } from './trusted-wal';
@@ -27,6 +28,17 @@ interface RunAuthorityRow {
   finished_at: string | null;
   branch_name: string | null;
   worktree_path: string | null;
+  execution_workspace_path: string | null;
+  execution_worktree_path: string | null;
+  retried_from_run_id: number | string | null;
+  predecessor_pass_story_ids: string[];
+  predecessor_authority_hash: string | null;
+  terminal_checkout_sha: string | null;
+  terminal_checkout_attested_at: string | null;
+  release_authorized_sha: string | null;
+  release_execution_workspace_path: string | null;
+  release_execution_worktree_path: string | null;
+  release_identity_hash: string | null;
   workspace_path: string;
 }
 
@@ -53,7 +65,12 @@ interface ResultAuthorityRow {
   projected_commit_branch: string | null;
   projected_commit_source: string | null;
   commit_count: number | string;
+  worktree_path: string | null;
   attestation_count: number | string;
+  attestation_id: string | null;
+  attestation_digest: string | null;
+  attestation_passed_at: string | null;
+  attestation_expires_at: string | null;
   attestation_revoked_at: string | null;
   accounting_required: boolean;
   accounting_model: string | null;
@@ -84,6 +101,20 @@ export interface HostStoryAuthority {
   finishedAt: string | null;
   resultId: number;
   commitSha: string | null;
+}
+
+export interface LinkedPredecessorPass {
+  storyId: string;
+  resultId: number;
+  commitSha: string;
+}
+
+export function linkedPredecessorAuthorityHash(runId: number, passes: readonly LinkedPredecessorPass[]): string {
+  return createHash('sha256').update(JSON.stringify({
+    contractVersion: 'linked-predecessor-host-authority-v1',
+    runId,
+    passes: [...passes].sort((a, b) => a.storyId.localeCompare(b.storyId)),
+  })).digest('hex');
 }
 
 export interface RunHostAuthority {
@@ -117,8 +148,8 @@ function emptyInvalid(run: RunAuthorityRow, reason: string): RunHostAuthority {
     lifecycleStatus: run.lifecycle_status,
     finishedAt: run.finished_at,
     branchName: run.branch_name ?? '',
-    checkoutPath: path.resolve(run.worktree_path ?? run.workspace_path),
-    repositoryTopLevel: path.resolve(run.workspace_path),
+    checkoutPath: path.resolve(run.execution_worktree_path ?? run.worktree_path ?? run.workspace_path),
+    repositoryTopLevel: path.resolve(run.execution_workspace_path ?? run.workspace_path),
     expectedStoryIds: expected,
     excludedStoryIds: excluded,
     stories: [],
@@ -128,6 +159,12 @@ function emptyInvalid(run: RunAuthorityRow, reason: string): RunHostAuthority {
     releaseEligible: false,
     invalidReason: reason,
   };
+}
+
+function exactTimestamp(left: unknown, right: unknown): boolean {
+  const leftMs = Date.parse(String(left ?? ''));
+  const rightMs = Date.parse(String(right ?? ''));
+  return Number.isFinite(leftMs) && leftMs === rightMs;
 }
 
 function parseWalPayload(event: TrustedWalRow): Record<string, unknown> | null {
@@ -175,6 +212,7 @@ function exactHostPass(row: ResultAuthorityRow, run: RunAuthorityRow, specId: st
     && row.commit_author === 'rorca-execution-engine'
     && row.commit_observed_source === 'worktree_branch'
     && row.commit_branch === run.branch_name
+    && row.worktree_path === run.execution_worktree_path
     && Number(row.commit_count) === 1
     && row.projected_commit_sha?.toLowerCase() === row.commit_sha?.toLowerCase()
     && row.projected_commit_message === row.commit_message
@@ -182,6 +220,11 @@ function exactHostPass(row: ResultAuthorityRow, run: RunAuthorityRow, specId: st
     && row.projected_commit_branch === row.commit_branch
     && row.projected_commit_source === row.commit_observed_source
     && Number(row.attestation_count) === 1
+    && Boolean(row.attestation_id)
+    && /^[0-9a-f]{64}$/.test(row.attestation_digest ?? '')
+    && Boolean(row.attestation_passed_at)
+    && Boolean(row.attestation_expires_at)
+    && Date.parse(row.attestation_expires_at!) > Date.now()
     && row.attestation_revoked_at === null
     && exactAccounting(row);
 }
@@ -199,9 +242,20 @@ async function loadRun(runId: number): Promise<RunAuthorityRow | undefined> {
   return queryOne<RunAuthorityRow>(`
     SELECT pr.id, pr.workspace_id, pr.spec_path, pr.status, pr.lifecycle_status,
            pr.expected_story_ids, COALESCE(pr.excluded_story_ids, '{}'::text[]) AS excluded_story_ids,
-           pr.finished_at, pr.branch_name, pr.worktree_path, ws.path AS workspace_path
+           pr.finished_at, pr.branch_name, pr.worktree_path,
+           pr.execution_workspace_path, pr.execution_worktree_path,
+           pr.retried_from_run_id,
+           COALESCE(pr.predecessor_pass_story_ids, '{}'::text[]) AS predecessor_pass_story_ids,
+           pr.predecessor_authority_hash,
+           pr.terminal_checkout_sha, pr.terminal_checkout_attested_at,
+           ri.authorized_sha AS release_authorized_sha,
+           ri.execution_workspace_path AS release_execution_workspace_path,
+           ri.execution_worktree_path AS release_execution_worktree_path,
+           ri.identity_hash AS release_identity_hash,
+           ws.path AS workspace_path
       FROM pipeline_runs pr
       JOIN workspaces ws ON ws.id = pr.workspace_id
+      LEFT JOIN pipeline_run_release_intents ri ON ri.run_id = pr.id
      WHERE pr.id = $1
   `, [runId]);
 }
@@ -212,6 +266,7 @@ async function loadLatestHostResults(run: RunAuthorityRow, storyIds: string[]): 
     SELECT DISTINCT ON (sr.story_id)
            sr.id, sr.story_id, sr.status, sr.reason, sr.finished_at, sr.spec_id,
            sr.integrated, sr.commit_sha, sr.commit_message, sr.commit_author,
+           sr.worktree_path,
            sr.commit_branch, sr.commit_observed_source, sr.closeout_decision_id,
            sr.manifest_hash, sr.result_provenance, sr.result_source,
            sr.accounting_required, sr.accounting_model, sr.accounting_input_tokens,
@@ -241,6 +296,22 @@ async function loadLatestHostResults(run: RunAuthorityRow, storyIds: string[]): 
              WHERE a.workspace_id = pr.workspace_id AND a.run_id = sr.run_id
                AND a.story_id = sr.story_id AND a.branch_name = sr.commit_branch
                AND a.checkpoint_sha = sr.commit_sha AND a.validation_gate = 'execution-engine') AS attestation_count,
+           (SELECT MIN(a.id::text) FROM checkpoint_validation_attestations a
+             WHERE a.workspace_id = pr.workspace_id AND a.run_id = sr.run_id
+               AND a.story_id = sr.story_id AND a.branch_name = sr.commit_branch
+               AND a.checkpoint_sha = sr.commit_sha AND a.validation_gate = 'execution-engine') AS attestation_id,
+           (SELECT MIN(a.evidence_digest) FROM checkpoint_validation_attestations a
+             WHERE a.workspace_id = pr.workspace_id AND a.run_id = sr.run_id
+               AND a.story_id = sr.story_id AND a.branch_name = sr.commit_branch
+               AND a.checkpoint_sha = sr.commit_sha AND a.validation_gate = 'execution-engine') AS attestation_digest,
+           (SELECT MIN(a.passed_at) FROM checkpoint_validation_attestations a
+             WHERE a.workspace_id = pr.workspace_id AND a.run_id = sr.run_id
+               AND a.story_id = sr.story_id AND a.branch_name = sr.commit_branch
+               AND a.checkpoint_sha = sr.commit_sha AND a.validation_gate = 'execution-engine') AS attestation_passed_at,
+           (SELECT MIN(a.expires_at) FROM checkpoint_validation_attestations a
+             WHERE a.workspace_id = pr.workspace_id AND a.run_id = sr.run_id
+               AND a.story_id = sr.story_id AND a.branch_name = sr.commit_branch
+               AND a.checkpoint_sha = sr.commit_sha AND a.validation_gate = 'execution-engine') AS attestation_expires_at,
            (SELECT MAX(a.revoked_at) FROM checkpoint_validation_attestations a
              WHERE a.workspace_id = pr.workspace_id AND a.run_id = sr.run_id
                AND a.story_id = sr.story_id AND a.branch_name = sr.commit_branch
@@ -295,7 +366,11 @@ async function verifyPassOutboxes(run: RunAuthorityRow, specId: string, passing:
       || payload.story_id !== row.story_id
       || Number(payload.story_result_id) !== Number(row.id)
       || String(payload.commit_sha).toLowerCase() !== row.commit_sha?.toLowerCase()
-      || payload.closeout_decision_id !== row.closeout_decision_id) return false;
+      || payload.closeout_decision_id !== row.closeout_decision_id
+      || payload.checkpoint_attestation_id !== row.attestation_id
+      || String(payload.checkpoint_attestation_digest).toLowerCase() !== row.attestation_digest?.toLowerCase()
+      || !exactTimestamp(payload.checkpoint_attestation_passed_at, row.attestation_passed_at)
+      || !exactTimestamp(payload.checkpoint_attestation_expires_at, row.attestation_expires_at)) return false;
   }
   return true;
 }
@@ -304,8 +379,12 @@ async function verifyPassOutboxes(run: RunAuthorityRow, specId: string, passing:
  * Inspect current run authority without consulting the mutable spec projection.
  * Compatibility/recovery-proposal rows are deliberately absent from the query.
  */
-export async function inspectRunHostAuthority(runId: number): Promise<RunHostAuthority | null> {
-  if (!Number.isSafeInteger(runId) || runId <= 0) return null;
+export async function inspectRunHostAuthority(
+  runId: number,
+  seen: ReadonlySet<number> = new Set<number>(),
+): Promise<RunHostAuthority | null> {
+  if (!Number.isSafeInteger(runId) || runId <= 0 || seen.has(runId)) return null;
+  const nextSeen = new Set(seen).add(runId);
   const run = await loadRun(runId);
   if (!run) return null;
   const expected = run.expected_story_ids ?? [];
@@ -349,24 +428,72 @@ export async function inspectRunHostAuthority(runId: number): Promise<RunHostAut
     invalidReason = 'one or more integrated passes lack exactly one released host outbox';
   }
 
+  let predecessorCommitShas: string[] = [];
+  if (!invalidReason && run.retried_from_run_id != null) {
+    const predecessorRunId = Number(run.retried_from_run_id);
+    const linkedIds = run.predecessor_pass_story_ids ?? [];
+    if (!Number.isSafeInteger(predecessorRunId) || predecessorRunId <= 0
+      || (linkedIds.length === 0) !== (run.predecessor_authority_hash === null)) {
+      invalidReason = 'retry run lacks exact linked predecessor host authority';
+    } else if (linkedIds.length > 0) {
+      const predecessor = await inspectRunHostAuthority(predecessorRunId, nextSeen);
+      const linked = linkedIds.map(storyId => predecessor?.stories.find(story =>
+        story.storyId === storyId && story.status === 'pass' && story.commitSha));
+      if (!predecessor || linked.some(story => !story)
+        || linked.some(story => !predecessor.authoritativePassedStoryIds.includes(story!.storyId))) {
+        invalidReason = 'linked predecessor pass set is unavailable or non-authoritative';
+      } else {
+        const exactLinked = linked.map(story => ({
+          storyId: story!.storyId,
+          resultId: story!.resultId,
+          commitSha: story!.commitSha!,
+        }));
+        if (linkedPredecessorAuthorityHash(predecessorRunId, exactLinked) !== run.predecessor_authority_hash) {
+          invalidReason = 'linked predecessor authority digest does not match exact host rows';
+        } else {
+          predecessorCommitShas = [...exactLinked]
+            .sort((left, right) => left.resultId - right.resultId)
+            .map(pass => pass.commitSha);
+        }
+      }
+    }
+  } else if (!invalidReason && (run.predecessor_pass_story_ids?.length > 0 || run.predecessor_authority_hash)) {
+    invalidReason = 'predecessor authority exists without an exact linked run';
+  }
+
   const complete = !invalidReason && expected.every(storyId => byStory.has(storyId));
   const allExpectedPassed = complete && expected.every(storyId => byStory.get(storyId)?.status === 'pass');
   let finalCommitSha: string | null = null;
   if (!invalidReason && passing.length > 0) {
     const ordered = [...passing].sort((left, right) => Number(left.id) - Number(right.id));
     try {
-      const checkout = assertCanonicalRunCheckout({
-        cwd: run.worktree_path ?? run.workspace_path,
-        repositoryTopLevel: run.workspace_path,
-        branchName: run.branch_name,
-      });
-      assertOrderedCommitAncestry(checkout.cwd, ordered.map(row => String(row.commit_sha)), checkout.headSha);
       finalCommitSha = ordered.at(-1)?.commit_sha?.toLowerCase() ?? null;
+      const checkout = assertCanonicalRunCheckout({
+        cwd: run.execution_worktree_path ?? run.worktree_path ?? run.workspace_path,
+        repositoryTopLevel: run.execution_workspace_path ?? run.workspace_path,
+        branchName: run.branch_name,
+        ...(allExpectedPassed && finalCommitSha ? { expectedHead: finalCommitSha } : {}),
+      });
+      assertOrderedCommitAncestry(
+        checkout.cwd,
+        [...predecessorCommitShas, ...ordered.map(row => String(row.commit_sha))],
+        checkout.headSha,
+      );
       if (allExpectedPassed && finalCommitSha !== checkout.headSha) {
         invalidReason = 'latest integrated pass is not the exact canonical run-branch HEAD';
       }
     } catch (error) {
-      invalidReason = error instanceof Error ? error.message : String(error);
+      finalCommitSha = ordered.at(-1)?.commit_sha?.toLowerCase() ?? null;
+      const immutableTerminal = Boolean(allExpectedPassed && finalCommitSha
+        && run.terminal_checkout_attested_at
+        && run.terminal_checkout_sha?.toLowerCase() === finalCommitSha
+        && run.release_authorized_sha?.toLowerCase() === finalCommitSha
+        && run.release_execution_workspace_path === run.execution_workspace_path
+        && run.release_execution_worktree_path === run.execution_worktree_path
+        && /^[0-9a-f]{64}$/.test(run.release_identity_hash ?? ''));
+      if (!immutableTerminal) {
+        invalidReason = error instanceof Error ? error.message : String(error);
+      }
     }
   }
 
@@ -381,8 +508,8 @@ export async function inspectRunHostAuthority(runId: number): Promise<RunHostAut
     lifecycleStatus: run.lifecycle_status,
     finishedAt: run.finished_at,
     branchName: run.branch_name,
-    checkoutPath: path.resolve(run.worktree_path ?? run.workspace_path),
-    repositoryTopLevel: path.resolve(run.workspace_path),
+    checkoutPath: path.resolve(run.execution_worktree_path ?? run.worktree_path ?? run.workspace_path),
+    repositoryTopLevel: path.resolve(run.execution_workspace_path ?? run.workspace_path),
     expectedStoryIds: expected,
     excludedStoryIds: excluded,
     stories,

@@ -52,9 +52,12 @@ interface RecoveryCandidate {
   result_manifest_hash: string | null;
   result_provenance: string;
   result_source: string;
+  result_worktree_path: string | null;
   run_workspace_id: string;
   run_spec_path: string;
   run_worktree_path: string | null;
+  run_execution_workspace_path: string | null;
+  run_execution_worktree_path: string | null;
   run_branch_name: string | null;
   run_auto_worktree: boolean | null;
   run_retried_from_id: number | string | null;
@@ -114,6 +117,11 @@ interface RecoveryChainRow {
   commit_count: number | string;
   outbox_count: number | string;
   attestation_count: number | string;
+  attestation_id: string | null;
+  attestation_digest: string | null;
+  attestation_passed_at: string | null;
+  attestation_expires_at: string | null;
+  attestation_revoked_at: string | null;
 }
 
 export interface PassRecoveryOptions {
@@ -158,8 +166,8 @@ async function assertExactRepositorySuccessorState(candidate: RecoveryCandidate)
     throw new Error('integrated pass branch differs from pipeline run authority');
   }
   const checkout = assertCanonicalRunCheckout({
-    cwd: candidate.run_worktree_path ?? candidate.workspace_path,
-    repositoryTopLevel: candidate.workspace_path,
+    cwd: candidate.run_execution_worktree_path ?? candidate.run_worktree_path ?? candidate.workspace_path,
+    repositoryTopLevel: candidate.run_execution_workspace_path ?? candidate.workspace_path,
     branchName: candidate.run_branch_name,
   });
   const chain = await query<RecoveryChainRow>(`
@@ -180,8 +188,27 @@ async function assertExactRepositorySuccessorState(candidate: RecoveryCandidate)
            (SELECT COUNT(*) FROM checkpoint_validation_attestations exact_a
              WHERE exact_a.workspace_id = pr.workspace_id AND exact_a.run_id = sr.run_id
                AND exact_a.story_id = sr.story_id AND exact_a.branch_name = sr.commit_branch
-               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine'
-               AND exact_a.revoked_at IS NULL) AS attestation_count
+               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine') AS attestation_count,
+           (SELECT MIN(exact_a.id::text) FROM checkpoint_validation_attestations exact_a
+             WHERE exact_a.workspace_id = pr.workspace_id AND exact_a.run_id = sr.run_id
+               AND exact_a.story_id = sr.story_id AND exact_a.branch_name = sr.commit_branch
+               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine') AS attestation_id,
+           (SELECT MIN(exact_a.evidence_digest) FROM checkpoint_validation_attestations exact_a
+             WHERE exact_a.workspace_id = pr.workspace_id AND exact_a.run_id = sr.run_id
+               AND exact_a.story_id = sr.story_id AND exact_a.branch_name = sr.commit_branch
+               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine') AS attestation_digest,
+           (SELECT MIN(exact_a.passed_at) FROM checkpoint_validation_attestations exact_a
+             WHERE exact_a.workspace_id = pr.workspace_id AND exact_a.run_id = sr.run_id
+               AND exact_a.story_id = sr.story_id AND exact_a.branch_name = sr.commit_branch
+               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine') AS attestation_passed_at,
+           (SELECT MIN(exact_a.expires_at) FROM checkpoint_validation_attestations exact_a
+             WHERE exact_a.workspace_id = pr.workspace_id AND exact_a.run_id = sr.run_id
+               AND exact_a.story_id = sr.story_id AND exact_a.branch_name = sr.commit_branch
+               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine') AS attestation_expires_at,
+           (SELECT MAX(exact_a.revoked_at) FROM checkpoint_validation_attestations exact_a
+             WHERE exact_a.workspace_id = pr.workspace_id AND exact_a.run_id = sr.run_id
+               AND exact_a.story_id = sr.story_id AND exact_a.branch_name = sr.commit_branch
+               AND exact_a.checkpoint_sha = sr.commit_sha AND exact_a.validation_gate = 'execution-engine') AS attestation_revoked_at
       FROM story_results sr
       JOIN pipeline_runs pr ON pr.id = sr.run_id
       LEFT JOIN story_closeout_decisions scd ON scd.decision_id = sr.closeout_decision_id
@@ -206,7 +233,11 @@ async function assertExactRepositorySuccessorState(candidate: RecoveryCandidate)
       || row.projected_commit_sha !== row.commit_sha
       || row.projected_commit_branch !== row.commit_branch
       || Number(row.commit_count) !== 1 || Number(row.outbox_count) !== 1
-      || Number(row.attestation_count) !== 1) {
+      || Number(row.attestation_count) !== 1
+      || !row.attestation_id || !/^[0-9a-f]{64}$/.test(row.attestation_digest ?? '')
+      || !row.attestation_passed_at || !row.attestation_expires_at
+      || Date.parse(row.attestation_expires_at) <= Date.now()
+      || row.attestation_revoked_at !== null) {
       throw new Error('ordered host successor state is incomplete or inconsistent');
     }
   }
@@ -230,7 +261,11 @@ async function assertExactRepositorySuccessorState(candidate: RecoveryCandidate)
       || Number(exact[0].canonical_run_id) !== Number(candidate.canonical_run_id)
       || Number(payload.story_result_id) !== Number(row.id)
       || String(payload.commit_sha).toLowerCase() !== row.commit_sha.toLowerCase()
-      || payload.closeout_decision_id !== row.closeout_decision_id) {
+      || payload.closeout_decision_id !== row.closeout_decision_id
+      || payload.checkpoint_attestation_id !== row.attestation_id
+      || String(payload.checkpoint_attestation_digest).toLowerCase() !== row.attestation_digest?.toLowerCase()
+      || Date.parse(String(payload.checkpoint_attestation_passed_at)) !== Date.parse(row.attestation_passed_at!)
+      || Date.parse(String(payload.checkpoint_attestation_expires_at)) !== Date.parse(row.attestation_expires_at!)) {
       throw new Error('ordered host successor outbox identity is inconsistent');
     }
   }
@@ -255,6 +290,9 @@ function assertCandidateIdentity(candidate: RecoveryCandidate): void {
     || candidate.result_integrated !== true
     || candidate.result_provenance !== 'host'
     || candidate.result_source !== 'execution-engine'
+    || !candidate.run_execution_workspace_path
+    || !candidate.run_execution_worktree_path
+    || candidate.result_worktree_path !== candidate.run_execution_worktree_path
     || !isSupportedGitCommitSha(sha)
     || candidate.result_commit_author !== 'rorca-execution-engine'
     || candidate.result_commit_source !== 'worktree_branch'
@@ -274,6 +312,10 @@ function assertCandidateIdentity(candidate: RecoveryCandidate): void {
     || payload.story_id !== candidate.story_id
     || Number(payload.story_result_id) !== resultId
     || String(payload.commit_sha).toLowerCase() !== sha
+    || payload.checkpoint_attestation_id !== candidate.attestation_id
+    || String(payload.checkpoint_attestation_digest).toLowerCase() !== candidate.attestation_digest?.toLowerCase()
+    || Date.parse(String(payload.checkpoint_attestation_passed_at)) !== Date.parse(candidate.attestation_passed_at ?? '')
+    || Date.parse(String(payload.checkpoint_attestation_expires_at)) !== Date.parse(candidate.attestation_expires_at ?? '')
     || Number(candidate.commit_count) !== 1
     || candidate.commit_sha?.toLowerCase() !== sha
     || candidate.commit_message !== candidate.result_commit_message
@@ -303,8 +345,8 @@ function runSpecPath(candidate: RecoveryCandidate): string {
   return deriveRunSpecPath({
     runId: Number(candidate.canonical_run_id),
     sourceSpecPath: source,
-    workspacePath: candidate.workspace_path,
-    worktreePath: candidate.run_worktree_path,
+    workspacePath: candidate.run_execution_workspace_path ?? candidate.workspace_path,
+    worktreePath: candidate.run_execution_worktree_path ?? candidate.run_worktree_path,
     retry: candidate.run_retried_from_id !== null,
   });
 }
@@ -324,9 +366,12 @@ async function loadCandidates(options: { runId?: number; limit: number }): Promi
            sr.commit_observed_source AS result_commit_source,
            sr.closeout_decision_id AS result_closeout_id,
            sr.manifest_hash AS result_manifest_hash,
-           sr.result_provenance, sr.result_source,
+           sr.result_provenance, sr.result_source, sr.worktree_path AS result_worktree_path,
            pr.workspace_id AS run_workspace_id, pr.spec_path AS run_spec_path,
-           pr.worktree_path AS run_worktree_path, pr.branch_name AS run_branch_name,
+           pr.worktree_path AS run_worktree_path,
+           pr.execution_workspace_path AS run_execution_workspace_path,
+           pr.execution_worktree_path AS run_execution_worktree_path,
+           pr.branch_name AS run_branch_name,
            pr.auto_worktree AS run_auto_worktree,
            pr.retried_from_run_id AS run_retried_from_id,
            pr.expected_story_ids AS run_expected_story_ids,

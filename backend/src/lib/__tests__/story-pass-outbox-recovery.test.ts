@@ -9,6 +9,8 @@ const transaction = jest.fn();
 const queryOne = jest.fn();
 const execute = jest.fn();
 
+jest.mock('../run-git-authority', () => ({ assertCanonicalRunCheckout: jest.fn() }));
+
 jest.mock('../../db/index', () => ({
   transaction: (...args: unknown[]) => transaction(...args),
   queryOne: (...args: unknown[]) => queryOne(...args),
@@ -19,6 +21,7 @@ jest.mock('../../db/index', () => ({
 import {
   EXECUTION_ENGINE_RESULT_AUTHORITY,
   persistCanonicalStoryResult,
+  verifyReleasedHostResultProposal,
 } from '../story-result-persistence';
 import { relayTrustedWalEvent, type TrustedWalRow } from '../trusted-wal';
 
@@ -37,6 +40,8 @@ const client = {
         workspace_id: 'ws-recovery',
         spec_path: 'forge/specs/approved/recovery-spec.json',
         branch_name: 'run/recovery',
+        execution_workspace_path: process.cwd(),
+        execution_worktree_path: process.cwd(),
         manifest_hash: `sha256:${'1'.repeat(64)}`,
         spec_revision: `sha256:${'2'.repeat(64)}`,
         story_revision: `sha256:${'3'.repeat(64)}`,
@@ -136,6 +141,7 @@ function input() {
     storyId: 'US-RECOVERY-001',
     status: 'pass' as const,
     integrated: true,
+    worktreePath: process.cwd(),
     worktreeBranch: 'run/recovery',
     commitSha: SHA,
     commitMessage: 'integrated story(US-RECOVERY-001): exact recovery head',
@@ -174,6 +180,30 @@ test('rejects 64-hex commit identities before any host transaction/finalization'
     ...input(), commitSha: 'a'.repeat(64),
   }, EXECUTION_ENGINE_RESULT_AUTHORITY)).rejects.toThrow('full 40-hex Git/GitHub object id');
   expect(transaction).not.toHaveBeenCalled();
+});
+
+test('production worker can verify only an exact existing immutable host result', async () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalRole = process.env.RORCA_PROCESS_ROLE;
+  try {
+    await persistCanonicalStoryResult(input(), EXECUTION_ENGINE_RESULT_AUTHORITY);
+    if (state.wal) state.wal.outbox_ready_at = '2026-07-18T10:02:00.000Z';
+    process.env.NODE_ENV = 'production';
+    process.env.RORCA_PROCESS_ROLE = 'worker';
+    await expect(verifyReleasedHostResultProposal(input())).resolves.toBe(true);
+
+    const near = input();
+    near.commitMessage = 'near match must not verify';
+    await expect(verifyReleasedHostResultProposal(near)).rejects.toThrow(/different immutable payload/);
+
+    const existing = state.result;
+    delete state.result;
+    await expect(verifyReleasedHostResultProposal(input())).resolves.toBe(false);
+    state.result = existing;
+  } finally {
+    process.env.NODE_ENV = originalNodeEnv;
+    process.env.RORCA_PROCESS_ROLE = originalRole;
+  }
 });
 
 test('crash after local pass before relay is recovered by duplicate re-finalization', async () => {

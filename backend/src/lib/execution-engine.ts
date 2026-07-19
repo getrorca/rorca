@@ -4329,12 +4329,9 @@ function gitCommitStory(
       { cwd, env, stdio: 'pipe' },
     );
 
-    try {
-      execSync('git push origin HEAD', { cwd, env, stdio: 'pipe', timeout: 60_000 });
-    } catch {
-      logger.info('  Push failed (will retry next iteration)');
-    }
-
+    // Story commits are intentionally local. Only the host-owned release seam
+    // may resolve repository authority and perform a remote effect after the
+    // complete run has exact durable authority.
     return {
       committed: true,
       meaningfulFiles: stagedFiles,
@@ -4789,13 +4786,20 @@ export function resolveIntegratedRunHead(
   return { sha: checkout.headSha, branch: checkout.branchName };
 }
 
+interface IntegratedCheckpointAttestation {
+  id: string;
+  evidenceDigest: string;
+  passedAt: string;
+  expiresAt: string;
+}
+
 async function recordIntegratedCheckpointAttestation(
   config: EngineConfig,
   workspaceId: string,
   pending: PendingIntegratedPass,
   integratedHead: IntegratedRunHead,
-): Promise<void> {
-  if (config.dryRun) return;
+): Promise<IntegratedCheckpointAttestation | null> {
+  if (config.dryRun) return null;
   const checkpointSha = integratedHead.sha;
   const branch = integratedHead.branch;
   const passedAt = new Date();
@@ -4810,9 +4814,15 @@ async function recordIntegratedCheckpointAttestation(
     checkpointSha,
     agentType: pending.agentType,
   })).digest('hex');
-  const { recordCheckpointValidationAttestation } = await import('./checkpoint-reconciliation');
+  const id = randomUUID();
+  const passedAtIso = passedAt.toISOString();
+  const expiresAt = new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const {
+    getCheckpointAttestationReference,
+    recordCheckpointValidationAttestation,
+  } = await import('./checkpoint-reconciliation');
   await recordCheckpointValidationAttestation({
-    id: randomUUID(),
+    id,
     workspaceId,
     runId: config.runId,
     storyId: pending.story.id,
@@ -4820,9 +4830,25 @@ async function recordIntegratedCheckpointAttestation(
     checkpointSha,
     validationGate: 'execution-engine',
     evidenceDigest,
-    passedAt: passedAt.toISOString(),
-    expiresAt: new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    passedAt: passedAtIso,
+    expiresAt,
   });
+  const persisted = await getCheckpointAttestationReference({
+    workspaceId,
+    runId: config.runId,
+    storyId: pending.story.id,
+    branch,
+    checkpointSha,
+  });
+  if (!persisted || persisted.validationGate !== 'execution-engine') {
+    throw new Error('exact integrated checkpoint attestation is unavailable');
+  }
+  return {
+    id: persisted.attestationId,
+    evidenceDigest: persisted.attestationDigest,
+    passedAt: persisted.passedAt,
+    expiresAt: persisted.expiresAt,
+  };
 }
 
 async function finalizeIntegratedStoryPass(
@@ -4846,7 +4872,9 @@ async function finalizeIntegratedStoryPass(
   // Persist trusted crash-recovery evidence after run-branch integration but
   // before canonical pass mutation. If the process dies between these steps,
   // reconciliation can later prove the exact integrated branch head.
-  if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending, integratedHead);
+  const checkpointAttestation = workspaceId
+    ? await recordIntegratedCheckpointAttestation(config, workspaceId, pending, integratedHead)
+    : null;
 
   const passPayload = {
     run_id: config.runId,
@@ -4861,6 +4889,12 @@ async function finalizeIntegratedStoryPass(
     integrated_branch: integratedHead.branch,
     origin_commit_sha: pending.originCommitSha,
     origin_branch: pending.originBranch,
+    ...(checkpointAttestation ? {
+      checkpoint_attestation_id: checkpointAttestation.id,
+      checkpoint_attestation_digest: checkpointAttestation.evidenceDigest,
+      checkpoint_attestation_passed_at: checkpointAttestation.passedAt,
+      checkpoint_attestation_expires_at: checkpointAttestation.expiresAt,
+    } : {}),
     ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
     ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
   };
@@ -4875,6 +4909,9 @@ async function finalizeIntegratedStoryPass(
       ...pending.storyResultExtra,
       ...pending.activeSkillsExtra,
       ...pending.tokenPayload,
+      // Integrated authority is the canonical run checkout, never a temporary
+      // per-story worktree which may already have been removed after merge.
+      worktreePath: config.cwd,
       commitSha: integratedHead.sha,
       commitMessage: `integrated story(${pending.story.id}): ${pending.story.title}`,
       worktreeBranch: integratedHead.branch,

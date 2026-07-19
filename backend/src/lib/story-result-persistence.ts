@@ -7,10 +7,12 @@
 
 /** Canonical atomic persistence for execution-engine story-result projections. */
 
+import * as fs from 'fs';
 import * as path from 'path';
 import type { PoolClient } from 'pg';
 import { transaction } from '../db/index';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
+import { assertCanonicalRunCheckout } from './run-git-authority';
 import {
   assertExactTrustedWalRow,
   insertTrustedWalEvent,
@@ -91,6 +93,8 @@ interface RunProjectionRow {
   workspace_id: string;
   spec_path: string;
   branch_name: string | null;
+  execution_workspace_path: string | null;
+  execution_worktree_path: string | null;
   manifest_hash: string | null;
   spec_revision: string | null;
   story_revision: string | null;
@@ -250,6 +254,7 @@ function assertNonNegativeFinite(name: string, value: number | undefined): void 
 function validateInput(
   input: CanonicalStoryResultInput,
   authority: StoryResultPersistenceAuthority,
+  options: { requireWriteRole?: boolean } = { requireWriteRole: true },
 ): void {
   if (!Number.isSafeInteger(input.runId) || input.runId <= 0) throw new ValidationError('runId must be a positive integer');
   if (typeof input.storyId !== 'string' || !input.storyId) throw new ValidationError('storyId is required');
@@ -320,7 +325,7 @@ function validateInput(
     || (authority.source === 'compatibility-http' && authority.provenance !== 'compatibility')) {
     throw new ValidationError('Story result persistence authority is invalid');
   }
-  if (process.env.NODE_ENV !== 'test' && authority.provenance === 'host') {
+  if (options.requireWriteRole !== false && process.env.NODE_ENV !== 'test' && authority.provenance === 'host') {
     const requiredRole = authority.source === 'worker' ? 'worker' : 'engine';
     if (process.env.RORCA_PROCESS_ROLE !== requiredRole) {
       throw new ValidationError(`Host story result source ${authority.source} requires ${requiredRole} process authority`);
@@ -362,6 +367,28 @@ function normalizedCommit(
   if (!branchName || !canonicalBranch || branchName !== canonicalBranch) {
     throw new ConflictError('Integrated pass branch must exactly match pipeline run authority');
   }
+  if (!input.worktreePath || !projection.execution_workspace_path || !projection.execution_worktree_path) {
+    throw new ConflictError('Integrated pass requires DB-frozen workspace/worktree identity');
+  }
+  let inputWorktree: string;
+  let frozenWorkspace: string;
+  let frozenWorktree: string;
+  try {
+    inputWorktree = fs.realpathSync(input.worktreePath);
+    frozenWorkspace = fs.realpathSync(projection.execution_workspace_path);
+    frozenWorktree = fs.realpathSync(projection.execution_worktree_path);
+  } catch {
+    throw new ConflictError('Integrated pass workspace/worktree realpath is unavailable');
+  }
+  if (inputWorktree !== frozenWorktree) {
+    throw new ConflictError('Integrated pass worktree differs from DB-frozen run identity');
+  }
+  assertCanonicalRunCheckout({
+    cwd: frozenWorktree,
+    repositoryTopLevel: frozenWorkspace,
+    branchName,
+    expectedHead: input.commitSha,
+  });
   return {
     storyId: input.storyId,
     specId,
@@ -554,6 +581,7 @@ function assertSameAccounting(
 async function loadRunProjection(client: PoolClient, input: CanonicalStoryResultInput): Promise<RunProjectionRow> {
   const projection = rows(await client.query<RunProjectionRow>(`
     SELECT pr.workspace_id, pr.spec_path, pr.branch_name,
+           pr.execution_workspace_path, pr.execution_worktree_path,
            sem.manifest_hash, sem.spec_revision, sem.story_revision,
            scd.decision_id AS closeout_decision_id,
            scd.status AS closeout_status
@@ -822,7 +850,11 @@ export async function persistCanonicalStoryResult(
 export async function verifyReleasedHostResultProposal(
   input: CanonicalStoryResultInput,
 ): Promise<boolean> {
-  validateInput(input, EXECUTION_ENGINE_RESULT_AUTHORITY);
+  // Read-only duplicate comparison validates the immutable host-shaped payload
+  // but deliberately does not acquire engine write authority. The transaction
+  // below has no INSERT/UPDATE path, so a production worker can only recognize
+  // an already persisted exact row.
+  validateInput(input, EXECUTION_ENGINE_RESULT_AUTHORITY, { requireWriteRole: false });
   if (!input.idempotencyKey) return false;
   return transaction(async (client) => {
     const projection = await loadRunProjection(client, input);

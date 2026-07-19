@@ -66,7 +66,6 @@ import notificationsRouter from './routes/notifications';
 import settingsRouter from './routes/settings';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
-import { registerDraftPrSubscriber } from './lib/draft-pr-subscriber';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
@@ -507,7 +506,7 @@ if (BACKGROUND_RUNTIME_ENABLED) {
   startNotificationDispatcher();
 
   // US-034: Subscribe draft PR lifecycle to update PR body on story completions
-  registerDraftPrSubscriber();
+  // Draft/PR provider mutations are terminal release effects owned by the worker seam.
 
   // RQ-002: Subscribe queue consumer to auto-trigger next run on completion
   startQueueConsumer();

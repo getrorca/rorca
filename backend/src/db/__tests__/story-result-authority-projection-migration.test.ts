@@ -15,7 +15,7 @@ const sql = fs.readFileSync(path.join(migrations, filename), 'utf8');
 test('host result provenance and terminal Check Run projection are schema-enforced', () => {
   const names = fs.readdirSync(migrations).filter(name => name.endsWith('.sql')).sort();
   expect(names).toContain(filename);
-  expect(names.at(-1)).toBe('20260718150000_github_run_authority_remediation.sql');
+  expect(names.at(-1)).toBe('20260718160000_host_release_authority.sql');
   expect(sql).toContain("result_provenance IN ('host', 'compatibility', 'recovery_proposal', 'legacy')");
   expect(sql).toContain("result_provenance = 'host' AND result_source = 'execution-engine'");
   expect(sql).toContain("result_provenance = 'legacy' AND result_source = 'legacy'");

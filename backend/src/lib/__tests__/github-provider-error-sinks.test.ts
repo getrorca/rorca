@@ -11,9 +11,7 @@ import path from 'node:path';
 const LIB = path.resolve(__dirname, '..');
 const BACKEND_SRC = path.resolve(LIB, '..');
 const providerCallers = [
-  path.join(LIB, 'github-pr-creator.ts'),
-  path.join(LIB, 'github-draft-pr.ts'),
-  path.join(BACKEND_SRC, 'worker.ts'),
+  path.join(LIB, 'release-authority.ts'),
   path.join(LIB, 'check-run-poster.ts'),
   path.join(LIB, 'github-checks.ts'),
   path.join(LIB, 'ci-autofix', 'fix-orchestrator.ts'),
@@ -30,16 +28,11 @@ test('durable/logging GitHub callers never read arbitrary provider response bodi
   }
 });
 
-test('durable error fields are fed bounded formatted errors rather than thrown/provider body messages', () => {
-  const prCreator = fs.readFileSync(providerCallers[0], 'utf8');
-  const draftPr = fs.readFileSync(providerCallers[1], 'utf8');
-  const worker = fs.readFileSync(providerCallers[2], 'utf8');
-  const autonomousDelivery = fs.readFileSync(providerCallers[6], 'utf8');
-  expect(prCreator).toContain('const errMsg = formatGithubProviderError(providerError)');
-  expect(prCreator).toContain('await storeResult(runId, null, errMsg)');
-  expect(draftPr).toContain('const errMsg = formatGithubProviderError(providerError)');
-  expect(worker).toContain('error: errorMessage');
-  expect(worker).not.toContain('error: err.message');
+test('durable error fields are bounded and provider merge errors remain sanitized', () => {
+  const release = fs.readFileSync(providerCallers[0], 'utf8');
+  const autonomousDelivery = fs.readFileSync(path.join(LIB, 'autonomous-pr-delivery.ts'), 'utf8');
+  expect(release).toContain('message.slice(0, 512)');
+  expect(release).toContain('githubProviderError');
   expect(autonomousDelivery).toContain("extractGithubProviderError(response, 'GITHUB_EXACT_SHA_MERGE_FAILED')");
   expect(autonomousDelivery).toContain('formatGithubProviderError(providerError)');
   expect(autonomousDelivery).not.toContain('raw.message');

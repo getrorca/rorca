@@ -80,6 +80,10 @@ beforeEach(() => {
   git(repo, 'commit', '-q', '-m', 'verified integration');
   // Use the real repository SHA in the candidate.
   const sha = git(repo, 'rev-parse', 'HEAD');
+  const attestationId = '00000000-0000-4000-8000-000000000001';
+  const attestationDigest = 'c'.repeat(64);
+  const attestationPassedAt = new Date(Date.now() - 1_000).toISOString();
+  const attestationExpiresAt = new Date(Date.now() + 60_000).toISOString();
   const snapshot = path.join(repo, '.rorca', 'run-specs', 'run-51.json');
   fs.mkdirSync(path.dirname(snapshot), { recursive: true });
   fs.writeFileSync(snapshot, JSON.stringify({ userStories: [{ id: 'US-RECOVERY-001', passes: false }] }));
@@ -92,7 +96,13 @@ beforeEach(() => {
     spec_id: 'recovery-spec',
     story_id: 'US-RECOVERY-001',
     actor: 'rorca-host',
-    payload: { ...walPayload(), commit_sha: sha },
+    payload: {
+      ...walPayload(), commit_sha: sha,
+      checkpoint_attestation_id: attestationId,
+      checkpoint_attestation_digest: attestationDigest,
+      checkpoint_attestation_passed_at: attestationPassedAt,
+      checkpoint_attestation_expires_at: attestationExpiresAt,
+    },
     ingest_key: 'trusted-wal:v1:recovery',
     trust_provenance: 'host',
     trusted_source: 'story-result',
@@ -112,9 +122,12 @@ beforeEach(() => {
     result_manifest_hash: `sha256:${'1'.repeat(64)}`,
     result_provenance: 'host',
     result_source: 'execution-engine',
+    result_worktree_path: repo,
     run_workspace_id: 'ws-recovery',
     run_spec_path: 'forge/specs/approved/recovery-spec.json',
     run_worktree_path: repo,
+    run_execution_workspace_path: workspace,
+    run_execution_worktree_path: repo,
     run_branch_name: 'run/recovery',
     run_auto_worktree: true,
     run_retried_from_id: null,
@@ -134,10 +147,10 @@ beforeEach(() => {
     commit_source: 'worktree_branch',
     commit_count: 1,
     outbox_count: 1,
-    attestation_id: '00000000-0000-4000-8000-000000000001',
-    attestation_digest: 'c'.repeat(64),
-    attestation_passed_at: new Date(Date.now() - 1_000).toISOString(),
-    attestation_expires_at: new Date(Date.now() + 60_000).toISOString(),
+    attestation_id: attestationId,
+    attestation_digest: attestationDigest,
+    attestation_passed_at: attestationPassedAt,
+    attestation_expires_at: attestationExpiresAt,
     attestation_revoked_at: null,
     attestation_count: 1,
   };
@@ -148,7 +161,9 @@ beforeEach(() => {
     closeout_manifest_hash: `sha256:${'1'.repeat(64)}`,
     manifest_hash: `sha256:${'1'.repeat(64)}`, projected_commit_sha: sha,
     projected_commit_branch: 'run/recovery', commit_count: 1, outbox_count: 1,
-    attestation_count: 1,
+    attestation_count: 1, attestation_id: attestationId,
+    attestation_digest: attestationDigest, attestation_passed_at: attestationPassedAt,
+    attestation_expires_at: attestationExpiresAt, attestation_revoked_at: null,
   }];
   query.mockImplementation(async (sqlValue: unknown) => {
     const sql = String(sqlValue);
@@ -158,7 +173,11 @@ beforeEach(() => {
       workspace_id: 'ws-recovery', spec_id: 'recovery-spec', story_id: row.story_id,
       actor: 'rorca-host', payload: JSON.stringify({ run_id: 51, story_id: row.story_id,
         story_result_id: row.id, commit_sha: row.commit_sha,
-        closeout_decision_id: row.closeout_decision_id }),
+        closeout_decision_id: row.closeout_decision_id,
+        checkpoint_attestation_id: row.attestation_id,
+        checkpoint_attestation_digest: row.attestation_digest,
+        checkpoint_attestation_passed_at: row.attestation_passed_at,
+        checkpoint_attestation_expires_at: row.attestation_expires_at }),
       ingest_key: `trusted-wal:v1:${row.id}`, trust_provenance: 'host',
       trusted_source: 'story-result', canonical_run_id: 51, story_result_id: row.id,
       event_identity_hash: 'b'.repeat(64), outbox_ready_at: null, outbox_relayed_at: null,

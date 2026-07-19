@@ -19,7 +19,7 @@ Repository permissions:
 | Permission | Access | Reason |
 |---|---:|---|
 | Metadata | Read | Required repository identity metadata. |
-| Actions | **Read and write** | Workflow discovery and explicit workflow dispatch. |
+| Actions | **Read and write** | Reserved for separately authorized host operations. Autonomous run deployment/workflow dispatch is disabled by the release seam. |
 | Checks | **Read and write** | Exact-SHA evidence reads Check Runs; Rorca publishes exact-final-SHA Check Runs. |
 | Commit statuses | **Read and write** | Exact-SHA evidence reads statuses; only explicit admin manual/non-governing statuses are published. Per-story trusted-WAL status projection is disabled. |
 | Contents | **Read and write** | Compare/spec discovery reads contents; governed merge paths require write. |
@@ -39,6 +39,15 @@ GitHub **Team plan remains separately required** for private-repository protecte
 5. Install the App for **selected repositories** under each desired owner/account.
 6. Copy the numeric installation id and repository id plus owner/name into **Verify and bind exact repository**. The server validates App id, installation id/account, selected-repository mode, repository id/full name, token expiry, and permissions before persisting the immutable binding.
 7. Review credential readiness separately from webhook health. Provider permissions, events, active state, and exact webhook URL/configuration must verify (and remain within the 24-hour freshness window) before credential readiness is connected. A new binding truthfully shows **Awaiting signed delivery**; the first valid signed App ping/event promotes observed webhook health without being required to authenticate that initial delivery. No autonomous policy, merge, or deployment authority is activated by registration or binding.
+
+## Host-owned release authority
+
+- Execution-engine story commits remain local. Agent/model shells cannot use `git push`, `gh`, network Git/SSH, `curl`, `wget`, or ambient credential helpers.
+- The worker persists one immutable release intent containing the exact authorized 40-hex SHA, branch, DB-frozen workspace/worktree realpaths, and exact repository/App installation identity before any external effect or public `done` state.
+- Every merge, push, PR create/finalize, and reviewed exact-SHA merge reacquires canonical repository authority under a local run/repository lock, resolves a purpose-scoped credential last, and repeats HEAD validation immediately before actuation.
+- App authority never downgrades. Workspace PAT/OAuth is usable only when the canonical authority view explicitly selects `pat-oauth-fallback` because no App binding exists. There is no `gh` or SSH fallback.
+- `direct`, `pr`, `draft-pr`, and authorized `branch-only` retain their distinct behavior. Deployment/workflow dispatch remains disabled. ANSI, PTY, and native-PTY execution transport is unchanged.
+- Terminal intent and exact SHA are durable before `done`; startup reconciles pending release intents through the existing worker boundary. Worktree cleanup is separate mutable state and never erases immutable execution identity.
 8. To replace a disabled/invalid binding, enter the new exact installation/repository identity and an audited replacement reason. Rorca preserves and permanently supersedes the old row; it never deletes or rewrites binding identity.
 
 No model may choose repository authority, grant permissions, install the App, activate policy, merge, or deploy.

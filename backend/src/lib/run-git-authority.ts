@@ -21,6 +21,13 @@ export interface CanonicalRunCheckoutInput {
   expectedHead?: string;
 }
 
+export interface FrozenRunExecutionIdentityInput {
+  payloadWorkspacePath: string;
+  payloadWorktreePath: string | null;
+  frozenWorkspacePath: string | null;
+  frozenWorktreePath: string | null;
+}
+
 export interface CanonicalRunCheckout {
   cwd: string;
   repositoryTopLevel: string;
@@ -62,6 +69,24 @@ function parseWorktrees(cwd: string): Array<{ worktree: string; head: string; br
     }
   }
   return records;
+}
+
+/** Bind an untrusted queue payload to the exact DB-frozen realpaths. */
+export function assertFrozenRunExecutionIdentity(input: FrozenRunExecutionIdentityInput): {
+  workspacePath: string;
+  worktreePath: string;
+} {
+  if (!input.frozenWorkspacePath || !input.frozenWorktreePath) {
+    throw new Error('run has no DB-frozen workspace/worktree realpath identity');
+  }
+  const payloadWorkspace = realDirectory(input.payloadWorkspacePath, 'payload workspace');
+  const payloadWorktree = realDirectory(input.payloadWorktreePath ?? input.payloadWorkspacePath, 'payload worktree');
+  const frozenWorkspace = realDirectory(input.frozenWorkspacePath, 'frozen workspace');
+  const frozenWorktree = realDirectory(input.frozenWorktreePath, 'frozen worktree');
+  if (payloadWorkspace !== frozenWorkspace || payloadWorktree !== frozenWorktree) {
+    throw new Error('queue payload workspace/worktree differs from DB-frozen run identity');
+  }
+  return { workspacePath: frozenWorkspace, worktreePath: frozenWorktree };
 }
 
 /**

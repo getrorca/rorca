@@ -100,6 +100,11 @@ import {
   durableAtomicWriteFile,
   prepareRunSpecSnapshot,
 } from '../lib/run-spec-snapshot';
+import { frozenRunStoryScope } from '../lib/run-story-scope';
+import {
+  inspectRunHostAuthority,
+  linkedPredecessorAuthorityHash,
+} from '../lib/run-host-authority';
 import {
   buildGovernedRetrySpec,
   compareRetryPlanToPreview,
@@ -454,30 +459,6 @@ function acceptanceCriteriaForManifest(story: DispatchManifestStory): string[] {
   return typeof story.acceptance === 'string'
     ? story.acceptance.split('\n').map((line) => line.replace(/^[-*]\s*/, '').trim()).filter(Boolean)
     : [];
-}
-
-function frozenRunStoryScope(
-  specJson: Record<string, unknown>,
-  specificStory?: string,
-): { expectedStoryIds: string[]; excludedStoryIds: string[] } {
-  const phaseStories = Array.isArray(specJson.phases)
-    ? (specJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap(phase => phase.stories ?? [])
-    : [];
-  const stories = Array.isArray(specJson.userStories)
-    ? specJson.userStories as DispatchManifestStory[]
-    : phaseStories;
-  const normalized = stories
-    .map(story => ({ story, id: typeof story.id === 'string' ? story.id.trim() : '' }))
-    .filter((entry): entry is { story: DispatchManifestStory; id: string } => Boolean(entry.id));
-  const excludedStoryIds = [...new Set(normalized
-    .filter(({ story }) => story.excluded === true)
-    .map(({ id }) => id))].sort();
-  const expectedStoryIds = [...new Set(normalized
-    .filter(({ story, id }) => story.excluded !== true
-      && story.passes !== true
-      && (!specificStory || id === specificStory))
-    .map(({ id }) => id))].sort();
-  return { expectedStoryIds, excludedStoryIds };
 }
 
 /** Resolve historical/null run metadata to a valid engine without changing public Unknown telemetry. */
@@ -2259,9 +2240,41 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const dispatchSpec = JSON.parse(fs.readFileSync(runSpecPath, 'utf8')) as Record<string, unknown>;
     const { expectedStoryIds, excludedStoryIds } = frozenRunStoryScope(dispatchSpec, storyId);
     if (expectedStoryIds.length === 0) throw new ValidationError('Runnable spec must freeze at least one non-excluded expected story');
+
+    // A run-owned spec is a projection, not predecessor authority. Clear forged
+    // or stale pass flags for every selected story so the engine executes the
+    // complete frozen scope. Explicit story-only selection remains independent.
+    const expectedSet = new Set(expectedStoryIds);
+    const clearSelectedPasses = (stories: unknown): void => {
+      if (!Array.isArray(stories)) return;
+      for (const candidate of stories) {
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+        const story = candidate as Record<string, unknown>;
+        if (typeof story.id === 'string' && expectedSet.has(story.id.trim())) {
+          story.passes = false;
+          if (story.status === 'passed') story.status = 'pending';
+        }
+      }
+    };
+    clearSelectedPasses(dispatchSpec.userStories);
+    if (Array.isArray(dispatchSpec.phases)) {
+      for (const phase of dispatchSpec.phases) {
+        if (phase && typeof phase === 'object' && !Array.isArray(phase)) {
+          clearSelectedPasses((phase as Record<string, unknown>).stories);
+        }
+      }
+    }
+    durableAtomicWriteFile(runSpecPath, JSON.stringify(dispatchSpec, null, 2) + '\n');
+    startFromStoryId = undefined;
+
+    const executionWorkspacePath = fs.realpathSync(workspace.path);
+    const executionWorktreePath = fs.realpathSync(worktreePath ?? workspace.path);
     await execute(
-      'UPDATE pipeline_runs SET expected_story_ids = $1::text[], excluded_story_ids = $2::text[] WHERE id = $3',
-      [expectedStoryIds, excludedStoryIds, runId],
+      `UPDATE pipeline_runs
+          SET expected_story_ids = $1::text[], excluded_story_ids = $2::text[],
+              execution_workspace_path = $3, execution_worktree_path = $4
+        WHERE id = $5`,
+      [expectedStoryIds, excludedStoryIds, executionWorkspacePath, executionWorktreePath, runId],
     );
     const manifestBundle = await resolveAndPersistDispatchManifests({
       workspaceId: workspace.id,
@@ -5620,9 +5633,21 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         && reconciliation?.status === 'consistent-not-passed'
         && !reconciliation.reasonCodes.includes('EXCLUDED_STORY');
     });
+    const predecessorAuthority = await inspectRunHostAuthority(originalRunId);
+    const exactPredecessorPasses = new Map((predecessorAuthority?.stories ?? [])
+      .filter(story => story.status === 'pass' && story.commitSha
+        && predecessorAuthority?.authoritativePassedStoryIds.includes(story.storyId))
+      .map(story => [story.storyId, story]));
+    const projectedPassedIds = Array.from(latestByStory.values())
+      .filter(s => reconciliationByStory.get(s.story_id)?.status === 'consistent-passed')
+      .map(s => s.story_id);
+    if (projectedPassedIds.some(storyId => !exactPredecessorPasses.has(storyId))) {
+      throw new ConflictError('Retry cannot omit a prior pass without exact linked predecessor host authority');
+    }
     const passedStories = Array.from(latestByStory.values()).filter((s) => {
       const reconciliation = reconciliationByStory.get(s.story_id);
-      return s.status === 'pass' && reconciliation?.status === 'consistent-passed';
+      return s.status === 'pass' && reconciliation?.status === 'consistent-passed'
+        && exactPredecessorPasses.has(s.story_id);
     });
 
     if (failedStories.length === 0) {
@@ -5938,9 +5963,12 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
        retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
-       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options)
+       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options,
+       expected_story_ids, excluded_story_ids, execution_workspace_path, execution_worktree_path,
+       predecessor_pass_story_ids, predecessor_authority_hash)
       VALUES ($1, $2, 'queued', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15::jsonb)
+              $11, $12, $13, $14, $15::jsonb, $16::text[], '{}'::text[], $17, $18,
+              $19::text[], $20)
       RETURNING id`, [
       originalRun.spec_path,
       originalRun.workspace_id,
@@ -5957,6 +5985,17 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       approvedPreview.options.includeGraph,
       approvedPreview.options.merge.strategy,
       JSON.stringify(retryEffectiveOptions),
+      storiesToRetry.map(story => story.story_id),
+      fs.realpathSync(workspace.path),
+      fs.realpathSync(approvedPreview.options.worktree.path ?? workspace.path),
+      [...exactPredecessorPasses.keys()].sort(),
+      exactPredecessorPasses.size > 0
+        ? linkedPredecessorAuthorityHash(originalRunId, [...exactPredecessorPasses.values()].map(story => ({
+          storyId: story.storyId,
+          resultId: story.resultId,
+          commitSha: story.commitSha!,
+        })))
+        : null,
     ]);
     const newRunId = normalizeWorkerRunId(newRunResult!.id);
     await execute(

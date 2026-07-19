@@ -85,7 +85,7 @@ describe('autonomous-command-guard', () => {
         env: {
           ...process.env,
           DATABASE_URL: 'postgres://rorca:rorca@127.0.0.1:5433/rorca',
-          DATABASE_URL_TEST: '',
+          DATABASE_URL_TEST: 'postgres://guard:guard@127.0.0.1:1/guard_test',
         } as Record<string, string>,
       });
 
@@ -96,7 +96,7 @@ describe('autonomous-command-guard', () => {
       });
 
       expect(routed.status).toBe(0);
-      const expectedTestUrl = new URL(process.env.RORCA_TEST_DATABASE_URL!);
+      const expectedTestUrl = new URL('postgres://guard:guard@127.0.0.1:1/guard_test');
       expect(routed.stdout).toContain(`PGUSER=${expectedTestUrl.username}`);
       expect(routed.stdout).toContain(`PGDATABASE=${expectedTestUrl.pathname.slice(1)}`);
       expect(routed.stdout).toContain('NODE_ENV=test');
@@ -110,12 +110,12 @@ describe('autonomous-command-guard', () => {
     }
   });
 
-  test('conflict-resolution profile blocks agent-owned network and remote git operations', () => {
+  test.each(['general', 'conflict-resolution'] as const)('%s profile blocks network, gh, and remote git operations', (profile) => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-conflict-guard-ws-'));
     const guarded = createAutonomousCommandGuard({
       cwd: workspace,
       env: process.env as Record<string, string>,
-      profile: 'conflict-resolution',
+      profile,
     });
     try {
       for (const [command, args] of [

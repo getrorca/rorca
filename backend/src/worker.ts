@@ -46,8 +46,6 @@ import {
   PipelineMergeJobPayload,
 } from './lib/pg-boss-schemas';
 
-import simpleGit from 'simple-git';
-import { performMerge } from './lib/merge-handler';
 // Worker DB access intentionally uses the shared service-role pool helpers, not
 // withUserClient(). This process runs with RORCA_PROCESS_ROLE=worker and spawns
 // RORCA_PROCESS_ROLE=engine children to perform system-owned orchestration jobs,
@@ -67,8 +65,6 @@ import {
   relayUnacknowledgedTrustedRunEvents,
 } from './lib/trusted-wal';
 import { advanceQueue } from './lib/run-queue';
-import { createOrUpdateAutoPr } from './lib/github-pr-creator';
-import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import {
@@ -92,24 +88,21 @@ import {
 } from './lib/story-pass-recovery';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
-import { githubRepoApiUrl } from './lib/github-repository-authority';
 import { resolveWorkspaceGitHubToken } from './lib/github-token-resolver';
-import { fetchGithubWithTimeout } from './lib/github-app-credential-provider';
-import {
-  extractGithubProviderError,
-  formatGithubProviderError,
-  sanitizeGithubProviderException,
-} from './lib/github-provider-error';
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
 import { reconcilePendingCheckRunProjections } from './lib/check-run-poster';
 import { inspectRunHostAuthority, type RunHostAuthority } from './lib/run-host-authority';
+import { assertFrozenRunExecutionIdentity } from './lib/run-git-authority';
 import {
-  queueAutonomousPrDeliveryForRun,
+  prepareRunReleaseIntent,
+  reconcilePendingRunReleases,
+  reconcileRunReleaseIntent,
+} from './lib/release-authority';
+import {
   reconcilePendingAutonomousPrDeliveryMerges,
   registerAutonomousPrDeliveryWorker,
-  resumeAutonomousDeliveryAfterRecoveryRun,
 } from './lib/autonomous-pr-delivery';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
@@ -141,151 +134,7 @@ function resolveExecutionEngineLauncher(entrypoint: { path: string; extension: '
   return { bin: findTsxBin(), args: [entrypoint.path] };
 }
 
-// ── Post-merge smoke test ─────────────────────────────────────────────────────
-
-/**
- * Verify core API endpoints return 200 after a worktree merge.
- * Catches bugs introduced by merged code (e.g. search_path poisoning,
- * broken migrations) before the merge is marked as complete.
- */
-async function _runPostMergeSmokeTest(workspaceId: string | number): Promise<{ ok: boolean; failures: string[] }> {
-  const port = process.env.PORT || 3030;
-  const base = `http://localhost:${port}`;
-  const endpoints = [
-    `/api/workspaces/${workspaceId}`,
-    `/api/workspaces/${workspaceId}/health`,
-    `/api/workspaces/${workspaceId}/pipeline-config`,
-    `/api/specs/kanban?workspaceId=${workspaceId}`,
-  ];
-
-  const failures: string[] = [];
-  for (const ep of endpoints) {
-    try {
-      const res = await fetch(`${base}${ep}`);
-      if (!res.ok) {
-        failures.push(`${ep} → ${res.status}`);
-      }
-    } catch (err: any) {
-      failures.push(`${ep} → ${err.message}`);
-    }
-  }
-
-  return { ok: failures.length === 0, failures };
-}
-
-// ── GitHub Actions workflow dispatch on run completion (US-026) ───────────────
-
-/**
- * Fire a GitHub Actions workflow_dispatch event if the workspace has a workflow
- * config stored in credential-neutral github_repository_configs with enabled=true.
- * Non-fatal: any failure is logged to integration_audit_log and emitted as a WAL event.
- * Never throws — must not block run finalization.
- */
-async function dispatchWorkflowIfConfigured(
-  workspaceId: string | number,
-  runId: number,
-): Promise<void> {
-  try {
-    // Fetch canonical repository authority + credential-neutral workflow config
-    const row = await queryOne<{
-      repo_owner: string;
-      repo_name: string;
-      workflow_config: string | Record<string, unknown> | null;
-    }>(
-      `SELECT repo_owner, repo_name, workflow_config
-         FROM github_workspace_repository_authority
-        WHERE workspace_id = $1 AND authority_status = 'active'`,
-      [workspaceId]
-    );
-
-    if (!row || !row.workflow_config) return;
-
-    const cfg = (typeof row.workflow_config === 'string'
-      ? JSON.parse(row.workflow_config)
-      : row.workflow_config) as {
-        enabled?: boolean;
-        workflow_id?: string;
-        ref?: string;
-        inputs?: Record<string, string>;
-      };
-
-    if (!cfg.enabled || !cfg.workflow_id || !cfg.ref) return;
-
-    // Emit SSE: "Triggering workflow..."
-    await execute(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatching', $1, $2)`,
-      [String(workspaceId), JSON.stringify({ run_id: runId, workflow_id: cfg.workflow_id, ref: cfg.ref })]
-    );
-
-    const resolved = await resolveWorkspaceGitHubToken(String(workspaceId), {
-      repository: { owner: row.repo_owner, name: row.repo_name }, purpose: 'workflow-dispatch',
-    });
-    if (!resolved) throw new Error('Exact-repository GitHub credential is unavailable');
-    const dispatchRes = await fetchGithubWithTimeout(fetch,
-      githubRepoApiUrl(row.repo_owner, row.repo_name, `/actions/workflows/${encodeURIComponent(cfg.workflow_id)}/dispatches`), {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${resolved.token}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'Rorca-Worker',
-        },
-        body: JSON.stringify({ ref: cfg.ref, inputs: cfg.inputs ?? {} }),
-      });
-
-    if (dispatchRes.ok || dispatchRes.status === 204) {
-      await execute(
-        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatched', $1, $2)`,
-        [String(workspaceId), JSON.stringify({
-          run_id: runId,
-          workflow_id: cfg.workflow_id,
-          ref: cfg.ref,
-          owner: row.repo_owner,
-          repo: row.repo_name,
-        })]
-      );
-      logger.info({ runId, workflow_id: cfg.workflow_id }, '[worker] GitHub workflow dispatch succeeded');
-    } else {
-      const providerError = extractGithubProviderError(dispatchRes, 'GITHUB_WORKFLOW_DISPATCH_FAILED');
-      const errorMessage = formatGithubProviderError(providerError);
-      await execute(
-        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
-        [String(workspaceId), JSON.stringify({
-          run_id: runId,
-          workflow_id: cfg.workflow_id,
-          error: errorMessage,
-          status_code: dispatchRes.status,
-          provider_request_id: providerError.requestId,
-        })]
-      );
-      // Also log to integration_audit_log for the Run View amber banner
-      await execute(
-        `INSERT INTO integration_audit_log (workspace_id, provider, action, actor_type, actor_id, details)
-         VALUES ($1, 'github', 'api_call_failed', 'system', NULL, $2)`,
-        [String(workspaceId), JSON.stringify({
-          run_id: runId,
-          workflow_id: cfg.workflow_id,
-          status_code: dispatchRes.status,
-          provider_request_id: providerError.requestId,
-          error: errorMessage,
-        })]
-      ).catch(() => { /* non-fatal */ });
-      logger.warn({ runId, workflow_id: cfg.workflow_id, providerError }, '[worker] GitHub workflow dispatch failed');
-    }
-  } catch (err: unknown) {
-    const providerError = sanitizeGithubProviderException(err, 'GITHUB_WORKFLOW_DISPATCH_FAILED');
-    const errorMessage = formatGithubProviderError(providerError);
-    logger.error({ providerError, runId }, '[worker] dispatchWorkflowIfConfigured threw unexpectedly');
-    // Emit failure WAL event so the UI can show the amber banner
-    try {
-      await execute(
-        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
-        [String(workspaceId), JSON.stringify({ run_id: runId, error: errorMessage })]
-      );
-    } catch { /* double-fault, ignore */ }
-  }
-}
+// Workflow/deployment dispatch is intentionally disabled for autonomous runs.
 
 // ── Worker identity (stable for the lifetime of this process) ────────────────
 
@@ -526,46 +375,7 @@ async function synthesizeInterruptedStoryFailure(params: {
   }
 }
 
-async function getRunPrNumber(runId: number): Promise<number | null> {
-  const row = await queryOne<{ pr_number: number | null }>(
-    'SELECT pr_number FROM pipeline_runs WHERE id = $1',
-    [runId],
-  );
-  return row?.pr_number ?? null;
-}
-
-async function persistGhCliPrMetadata(
-  runId: number,
-  workspaceId: string | number,
-  worktreePath: string,
-  branchName: string,
-  eventType: 'pr_created' | 'pr_draft_created',
-): Promise<number | null> {
-  try {
-    const raw = execSync(
-      `gh pr list --head "${branchName}" --json number,url --limit 1`,
-      { cwd: worktreePath, encoding: 'utf8', stdio: 'pipe', timeout: 30_000 },
-    );
-    const parsed = JSON.parse(raw) as Array<{ number?: number; url?: string }>;
-    const pr = Array.isArray(parsed) ? parsed[0] : undefined;
-    if (!pr?.number) return null;
-
-    await execute(
-      'UPDATE pipeline_runs SET pr_number = $1, pr_creating = FALSE, pr_creation_error = NULL WHERE id = $2',
-      [pr.number, runId],
-    );
-    await emitWalEvent(eventType, workspaceId, {
-      run_id: runId,
-      pr_number: pr.number,
-      pr_url: pr.url ?? null,
-      branch: branchName,
-      source: 'gh_cli_fallback',
-    });
-    return pr.number;
-  } catch {
-    return null;
-  }
-}
+// Remote PR discovery/creation is release-authority owned; no gh CLI fallback.
 
 // Final base integration is delegated to merge-handler.performMerge.
 
@@ -598,12 +408,18 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
 
-    // Determine effective working directory (worktree or main workspace)
-    const cwd = worktreePath ?? workspacePath;
-
-    // Look up workspaceId for WAL events
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; branch_name: string | null }>(
-      'SELECT workspace_id, parallelism, branch_name FROM pipeline_runs WHERE id = $1',
+    // Look up host-frozen execution identity before deriving a cwd or spawning.
+    const runRow = await queryOne<{
+      workspace_id: string;
+      parallelism: number;
+      branch_name: string | null;
+      worktree_path: string | null;
+      execution_workspace_path: string | null;
+      execution_worktree_path: string | null;
+    }>(
+      `SELECT workspace_id, parallelism, branch_name, worktree_path,
+              execution_workspace_path, execution_worktree_path
+         FROM pipeline_runs WHERE id = $1`,
       [runId],
     );
     if (!runRow) {
@@ -612,6 +428,16 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
     if (!runRow.branch_name) throw new Error('Pipeline run has no frozen canonical branch');
+    if ((worktreePath ?? null) !== (runRow.worktree_path ?? null)) {
+      throw new Error('Queue payload worktreePath differs from pipeline_runs.worktree_path');
+    }
+    const frozenExecution = assertFrozenRunExecutionIdentity({
+      payloadWorkspacePath: workspacePath,
+      payloadWorktreePath: worktreePath,
+      frozenWorkspacePath: runRow.execution_workspace_path,
+      frozenWorktreePath: runRow.execution_worktree_path,
+    });
+    const cwd = frozenExecution.worktreePath;
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
@@ -934,10 +760,32 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           source: 'worker',
         });
 
-        await execute(
-          `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
-          [status, runId],
-        );
+        // Successful runs cross one durable host release/terminal intent before
+        // any public done state or external effect. Failures/cancellation retain
+        // the existing terminal path and never prepare release authority.
+        const hostReleaseOwned = status === 'done' && hostAuthority?.releaseEligible === true;
+        if (hostReleaseOwned) {
+          await prepareRunReleaseIntent({
+            hostAuthority: hostAuthority!,
+            mergeStrategy: payload.mergeStrategy ?? 'direct',
+            autoMerge: payload.autoMerge === true,
+            externalSend: payload.safetyOptions.externalSend === true,
+          });
+          const release = await reconcileRunReleaseIntent(runId, {
+            agent: payload.agent,
+            model: payload.model,
+            thinkingEnabled: payload.thinkingEnabled,
+            thinkingBudget: payload.thinkingBudget,
+            effortLevel: payload.effortLevel,
+            source: 'run',
+          }, { ...resolvedSecrets, ...payload.envOverrides });
+          status = release.status === 'completed' ? 'done' : 'failed';
+        } else {
+          await execute(
+            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
+            [status, runId],
+          );
+        }
 
         if (wasCancelled) {
           await emitWalEvent('run_cancelled', workspaceId, {
@@ -957,215 +805,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             logger.info({ runId, specPath, hostAuthority }, '[worker] Skipping post-run routing — frozen host release authority is incomplete');
           }
 
-          if (worktreePath && payload.branchName && allSpecStoriesPassed) {
-            const mergeLog = (msg: string) => logger.info({ runId }, msg);
+          // Release effects are owned exclusively by release-authority.ts. The
+          // legacy inline merge/push/PR router was removed so there is one
+          // exact-SHA actuator and no ambient git/gh fallback.
 
-            switch (effectiveMergeStrategy) {
-              case 'direct': {
-                // Final base merges are opt-in. Internal wave merges have already
-                // assembled the isolated run branch and are intentionally separate.
-                if (payload.autoMerge !== true) {
-                  mergeLog('[merge-strategy:direct] autoMerge=false — preserving worktree branch');
-                  try { await execute(`UPDATE pipeline_runs SET merge_status = 'not_requested' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                  break;
-                }
-                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                try {
-                  // Reuse the canonical merge lifecycle service. It owns merge
-                  // state, containment and failure evidence for both auto and retry.
-                  const mergeResult = await performMerge(
-                    runId,
-                    payload.branchName,
-                    workspacePath,
-                    { agent: payload.agent, model: payload.model, thinkingEnabled: payload.thinkingEnabled, thinkingBudget: payload.thinkingBudget, effortLevel: payload.effortLevel, source: 'run' },
-                    { ...resolvedSecrets, ...payload.envOverrides },
-                  );
-                  mergeLog(mergeResult.success
-                    ? '[merge-strategy:direct] Final base integration completed'
-                    : `[merge-strategy:direct] Final base integration failed: ${mergeResult.error ?? 'unknown'}`);
-                  if (mergeResult.success) {
-                    const smoke = await _runPostMergeSmokeTest(workspaceId);
-                    if (!smoke.ok) mergeLog(`[merge-strategy:direct] Post-merge smoke failures: ${smoke.failures.join(', ')}`);
-                  }
-                  // Push main to remote after successful merge
-                  const mergeStatus = await queryOne<{ merge_status: string }>('SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId]);
-                  if (mergeStatus?.merge_status === 'merged') {
-                    try {
-                      const git = simpleGit(workspacePath);
-                      await git.push('origin', 'HEAD');
-                      mergeLog('[merge-strategy:direct] Pushed main to remote');
-                    } catch (pushErr: any) {
-                      mergeLog(`[merge-strategy:direct] Push failed (non-fatal): ${pushErr.message}`);
-                    }
-                  }
-                } catch (mergeErr: any) {
-                  logger.error({ err: mergeErr, runId }, '[worker] performMerge threw unexpectedly');
-                }
-                break;
-              }
-
-              case 'pr': {
-                // Push branch (already pushed per-story, but ensure) + create PR
-                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                try {
-                  const git = simpleGit(worktreePath);
-                  await git.push('origin', payload.branchName, ['--set-upstream']);
-                  mergeLog(`[merge-strategy:pr] Branch pushed: ${payload.branchName}`);
-                } catch (pushErr: any) {
-                  mergeLog(`[merge-strategy:pr] Branch push failed: ${pushErr.message}`);
-                }
-                try {
-                  await createOrUpdateAutoPr({
-                    runId,
-                    workspaceId,
-                    branchName: payload.branchName,
-                    workspacePath,
-                    force: true,
-                  });
-                  const prNumber = await getRunPrNumber(runId);
-                  if (!prNumber) {
-                    throw new Error('GitHub PR integration did not persist a pr_number');
-                  }
-                  mergeLog(`[merge-strategy:pr] PR created (#${prNumber})`);
-                } catch (prErr: any) {
-                  // Fallback: try gh CLI if GitHub API integration isn't configured
-                  mergeLog(`[merge-strategy:pr] GitHub integration failed: ${prErr.message}; trying gh CLI fallback`);
-                  try {
-                    const specSlug = path.basename(specPath, '.json');
-                    execSync(
-                      `gh pr create --title "feat: ${specSlug}" --body "Automated spec execution via Rorca.\n\nRun #${runId} completed — all stories passed." --base main`,
-                      { cwd: worktreePath, stdio: 'pipe', timeout: 30_000 },
-                    );
-                    const prNumber = await persistGhCliPrMetadata(runId, workspaceId, worktreePath, payload.branchName, 'pr_created');
-                    if (prNumber) {
-                      mergeLog(`[merge-strategy:pr] PR created via gh CLI fallback (#${prNumber})`);
-                    } else {
-                      mergeLog('[merge-strategy:pr] gh CLI reported success but no PR metadata could be recovered');
-                    }
-                  } catch (ghErr: any) {
-                    mergeLog(`[merge-strategy:pr] PR creation failed (gh CLI fallback also failed): ${ghErr.message}`);
-                    // Graceful degradation to branch-only
-                    mergeLog('[merge-strategy:pr] Falling back to branch-only — branch is on remote for manual PR creation');
-                  }
-                }
-                const readyPrNumber = await getRunPrNumber(runId);
-                if (readyPrNumber) {
-                  // `pr` means ready-for-review. Draft strategies remain a
-                  // separate, explicitly human-controlled mode.
-                  await finalizeDraftPr({
-                    runId,
-                    workspaceId,
-                    branchName: payload.branchName,
-                    workspacePath,
-                    status: 'done',
-                  });
-                  const delivery = await queueAutonomousPrDeliveryForRun({
-                    workspaceId: String(workspaceId),
-                    runId,
-                  });
-                  mergeLog(delivery.queued
-                    ? `[merge-strategy:pr] Autonomous reviewed delivery queued (${delivery.deliveryId})`
-                    : `[merge-strategy:pr] Autonomous reviewed delivery not queued: ${delivery.reason ?? 'not eligible'}`);
-                }
-                break;
-              }
-
-              case 'draft-pr': {
-                // Push branch + create draft PR
-                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                try {
-                  const git = simpleGit(worktreePath);
-                  await git.push('origin', payload.branchName, ['--set-upstream']);
-                  mergeLog(`[merge-strategy:draft-pr] Branch pushed: ${payload.branchName}`);
-                } catch (pushErr: any) {
-                  mergeLog(`[merge-strategy:draft-pr] Branch push failed: ${pushErr.message}`);
-                }
-                try {
-                  // Read spec for title and story count
-                  let draftSpecTitle = path.basename(specPath, '.json');
-                  let draftTotalStories = 0;
-                  try {
-                    const draftSpec = JSON.parse(fs.readFileSync(engineSpecPath, 'utf-8'));
-                    draftSpecTitle = draftSpec.title ?? draftSpecTitle;
-                    draftTotalStories = (draftSpec.userStories ?? []).length;
-                  } catch { /* use defaults */ }
-                  await createDraftPr({
-                    runId,
-                    workspaceId,
-                    branchName: payload.branchName,
-                    workspacePath,
-                    specTitle: draftSpecTitle,
-                    totalStories: draftTotalStories,
-                    force: true,
-                  });
-                  const prNumber = await getRunPrNumber(runId);
-                  if (!prNumber) {
-                    throw new Error('GitHub draft PR integration did not persist a pr_number');
-                  }
-                  mergeLog(`[merge-strategy:draft-pr] Draft PR created (#${prNumber})`);
-                } catch (prErr: any) {
-                  // Fallback: try gh CLI
-                  mergeLog(`[merge-strategy:draft-pr] GitHub integration failed: ${prErr.message}; trying gh CLI fallback`);
-                  try {
-                    const specSlug = path.basename(specPath, '.json');
-                    execSync(
-                      `gh pr create --draft --title "WIP: ${specSlug}" --body "Draft PR for review.\n\nRun #${runId} completed — all stories passed." --base main`,
-                      { cwd: worktreePath, stdio: 'pipe', timeout: 30_000 },
-                    );
-                    const prNumber = await persistGhCliPrMetadata(runId, workspaceId, worktreePath, payload.branchName, 'pr_draft_created');
-                    if (prNumber) {
-                      mergeLog(`[merge-strategy:draft-pr] Draft PR created via gh CLI fallback (#${prNumber})`);
-                    } else {
-                      mergeLog('[merge-strategy:draft-pr] gh CLI reported success but no PR metadata could be recovered');
-                    }
-                  } catch (ghErr: any) {
-                    mergeLog(`[merge-strategy:draft-pr] Draft PR creation failed: ${ghErr.message}`);
-                    mergeLog('[merge-strategy:draft-pr] Falling back to branch-only — branch is on remote for manual PR creation');
-                  }
-                }
-                break;
-              }
-
-              case 'branch-only': {
-                // Locked autonomous safety retains the branch locally. It cannot
-                // push or create any other external-send side effect.
-                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                if (!payload.safetyOptions.externalSend) {
-                  mergeLog(`[merge-strategy:branch-only] Branch retained locally: ${payload.branchName}. External send is disabled by enforced run policy.`);
-                  break;
-                }
-                try {
-                  const git = simpleGit(worktreePath);
-                  await git.push('origin', payload.branchName, ['--set-upstream']);
-                  mergeLog(`[merge-strategy:branch-only] Branch pushed: ${payload.branchName}. No PR created — awaiting manual action.`);
-                } catch (pushErr: any) {
-                  mergeLog(`[merge-strategy:branch-only] Push failed: ${pushErr.message}`);
-                }
-                break;
-              }
-            }
-          }
-
-          // US-034: Finalize existing draft PR on run completion (for runs that started with a draft PR).
-          if (payload.safetyOptions.externalSend && payload.branchName && effectiveMergeStrategy === 'direct') {
-            try {
-              const prRow = await queryOne<{ pr_number: number | null }>(
-                'SELECT pr_number FROM pipeline_runs WHERE id = $1',
-                [runId],
-              );
-              if (prRow?.pr_number) {
-                await finalizeDraftPr({
-                  runId,
-                  workspaceId,
-                  branchName: payload.branchName,
-                  workspacePath,
-                  status,
-                });
-              }
-            } catch (prErr: any) {
-              logger.error({ err: prErr, runId }, '[worker] Draft PR finalization threw unexpectedly');
-            }
-          }
+          // Existing PR finalization is part of the same host release seam.
 
           // A direct merge is a final gate, not optional presentation metadata.
           // Closeout distinguishes successful branch work from base integration.
@@ -1182,26 +826,19 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]);
             logger.error({ runId }, '[worker] required direct merge failed; run outcome changed to failed');
           }
-          await emitWalEvent('run_closeout', workspaceId, {
-            run_id: runId,
-            status,
-            completion_scope: worktreePath ? (mergeStatusAtCloseout === 'merged' ? 'base_integrated' : 'run_branch') : 'base_integrated',
-            base_integrated: !worktreePath || mergeStatusAtCloseout === 'merged',
-            branch_name: payload.branchName ?? null,
-            merge_strategy: effectiveMergeStrategy,
-            merge_status: mergeStatusAtCloseout,
-          });
-
-          // A bounded CI-recovery child resumes the original reviewed-delivery
-          // state machine only after its branch push/closeout is durable.
-          await resumeAutonomousDeliveryAfterRecoveryRun(runId, status);
-
-          // Workflow dispatch (US-026)
-          if (status === 'done' && payload.safetyOptions.deploy && payload.safetyOptions.externalSend) {
-            await dispatchWorkflowIfConfigured(workspaceId, runId);
-          } else if (status === 'done' && (!payload.safetyOptions.deploy || !payload.safetyOptions.externalSend)) {
-            logger.info({ runId, safetyOptions: payload.safetyOptions }, '[worker] workflow dispatch skipped by enforced run safety policy');
+          if (!hostReleaseOwned) {
+            await emitWalEvent('run_closeout', workspaceId, {
+              run_id: runId,
+              status,
+              completion_scope: worktreePath ? (mergeStatusAtCloseout === 'merged' ? 'base_integrated' : 'run_branch') : 'base_integrated',
+              base_integrated: !worktreePath || mergeStatusAtCloseout === 'merged',
+              branch_name: payload.branchName ?? null,
+              merge_strategy: effectiveMergeStrategy,
+              merge_status: mergeStatusAtCloseout,
+            });
           }
+
+          // Autonomous deployment/workflow authority is disabled.
 
           // Learn closeout is non-authoritative for delivery status. It runs only
           // after release routing has persisted its final lineage/outcome fields.
@@ -1223,7 +860,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (status === 'done' ? 'finished' : 'failed'), {
           owner: 'worker', outcome: status, mergeGate: payload.mergeStrategy ?? 'direct',
         });
-        if (!wasCancelled) {
+        if (!wasCancelled && !hostReleaseOwned) {
           await emitWalEvent('run_finished', workspaceId, {
             run_id: runId,
             status,
@@ -1357,12 +994,21 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     } = payload;
     const approvedPreview = approvedPreviewRaw as unknown as RetryPreviewPacket;
 
-    // Effective working directory (worktree or main workspace)
-    const cwd = worktreePath ?? workspacePath;
-
-    // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string; spec_path: string }>(
-      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path FROM pipeline_runs WHERE id = $1',
+    // 2. Load the DB-frozen workspace/worktree identity before deriving cwd.
+    const runRow = await queryOne<{
+      workspace_id: string;
+      parallelism: number;
+      terminal_mode: string | null;
+      branch_name: string | null;
+      status: string;
+      spec_path: string;
+      worktree_path: string | null;
+      execution_workspace_path: string | null;
+      execution_worktree_path: string | null;
+    }>(
+      `SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path,
+              worktree_path, execution_workspace_path, execution_worktree_path
+         FROM pipeline_runs WHERE id = $1`,
       [runId],
     );
     if (!runRow) {
@@ -1370,6 +1016,16 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
+    if ((worktreePath ?? null) !== (runRow.worktree_path ?? null)) {
+      throw new Error('Retry payload worktreePath differs from pipeline_runs.worktree_path');
+    }
+    const frozenRetryExecution = assertFrozenRunExecutionIdentity({
+      payloadWorkspacePath: workspacePath,
+      payloadWorktreePath: worktreePath,
+      frozenWorkspacePath: runRow.execution_workspace_path,
+      frozenWorktreePath: runRow.execution_worktree_path,
+    });
+    const cwd = frozenRetryExecution.worktreePath;
     const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
     if (['done', 'failed', 'partial_failure'].includes(runRow.status)) {
       // A batch-level pg-boss retry after terminal event persistence failed must
@@ -2004,18 +1660,16 @@ async function handlePipelineMerge(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
 
-    logger.info({ runId, branch, workspacePath: workspace.path, agent: manualPosture.agent, source: manualPosture.source }, '[worker] Executing performMerge');
-
-    const result = await performMerge(runId, branch, workspace.path, {
+    logger.info({ runId, branch, workspacePath: workspace.path, agent: manualPosture.agent, source: manualPosture.source }, '[worker] Reconciling host-owned direct release');
+    const release = await reconcileRunReleaseIntent(runId, {
       agent: manualPosture.agent,
       model: manualPosture.model,
       source: 'manual-retry',
     });
-
-    if (result.success) {
-      logger.info({ runId, mergeCommitSha: result.mergeCommitSha }, '[worker] pipeline:merge completed successfully');
+    if (release.status === 'completed') {
+      logger.info({ runId }, '[worker] pipeline:merge release completed successfully');
     } else {
-      logger.warn({ runId, error: result.error, conflictFiles: result.conflictFiles }, '[worker] pipeline:merge failed');
+      logger.warn({ runId, error: release.error }, '[worker] pipeline:merge release remains blocked');
     }
   }
 }
@@ -3003,12 +2657,24 @@ async function start(): Promise<void> {
     logger.error({ error }, '[worker] startup integrated pass/journal refinalization deferred');
   }
 
-  // 3a. Recover stale jobs left by a previously crashed worker instance.
+  // 3a. Resume durable exact-SHA release/terminal intents before stale-run
+  // classification. This uses the existing worker boundary; no second
+  // orchestrator or queue is introduced.
+  try {
+    const reconciledReleases = await reconcilePendingRunReleases();
+    if (reconciledReleases > 0) {
+      logger.info({ reconciledReleases }, '[worker] startup release/terminal reconciliation complete');
+    }
+  } catch (error) {
+    logger.error({ error }, '[worker] startup release reconciliation deferred');
+  }
+
+  // 3b. Recover stale jobs left by a previously crashed worker instance.
   // Must run after initBoss() (pg-boss schema exists) but before boss.work()
   // (so freed slots are available when handlers start polling).
   await recoverStaleJobs();
 
-  // 3b. Sweep orphan processes — execution-engine subprocesses left running
+  // 3c. Sweep orphan processes — execution-engine subprocesses left running
   // by a previous worker that crashed without a graceful shutdown.
   // Must complete before boss.work() — do not race sweep against new job pickup.
   // Error-isolated: a sweep failure must NOT prevent job handler registration.

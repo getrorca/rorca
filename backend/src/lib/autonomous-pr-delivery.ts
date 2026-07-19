@@ -12,7 +12,6 @@
  */
 
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import simpleGit from 'simple-git';
 import type PgBoss from 'pg-boss';
@@ -23,13 +22,14 @@ import {
   getGithubPrDeliveryEvidenceById,
   observeGithubPrDeliveryEvidence,
   type GithubPrDeliveryEvidence,
-  type NormalizedGithubCheck,
 } from './github-pr-delivery-evidence';
 import {
   bridgeGithubEvidenceToLifecycle,
   type DeliveryLifecycleBridgeResult,
 } from './autonomous-delivery-lifecycle';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { loadRunReleaseIdentity } from './release-authority';
+import { revalidateRunReleaseIdentity, withGithubReleaseActuation } from './release-identity';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { isFullGitObjectId } from './github-repository-authority';
 import { githubRateLimiter } from './github-rate-limiter';
@@ -40,14 +40,8 @@ import {
 } from './github-provider-error';
 import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 import { validateReusableWorktree } from './worktree-freshness';
-import { resolveMergeConflict } from './merge-conflict-resolver';
-import {
-  createExecutionSecretReferences,
-  resolveExecutionSecrets,
-} from './execution-secret-references';
 import {
   AutonomousPrDeliveryJobPayload,
-  PipelineRunJobPayload,
 } from './pg-boss-schemas';
 import { logger } from './logger';
 import { paginateQuery, type PaginationParams } from './paginate';
@@ -612,14 +606,16 @@ async function providerMerge(
   delivery: DeliveryRow,
   evidence: GithubPrDeliveryEvidence,
 ): Promise<{ mergedSha: string; responseHash: `sha256:${string}`; mergedAt: string }> {
-  const resolved = await resolveWorkspaceGitHubToken(delivery.workspace_id, {
-    repository: { owner: delivery.repo_owner, name: delivery.repo_name },
-    purpose: 'merge',
-  });
-  if (!resolved) throw new UnprocessableError('Workspace GitHub credential is unavailable', 'GITHUB_CREDENTIAL_UNAVAILABLE');
+  const releaseIdentity = await loadRunReleaseIdentity(Number(delivery.run_id), delivery.current_head_sha);
+  return withGithubReleaseActuation(releaseIdentity, 'merge', async ({ authority, credential }) => {
+  await revalidateRunReleaseIdentity(releaseIdentity);
+  if (authority.owner !== delivery.repo_owner || authority.name !== delivery.repo_name) {
+    throw new ConflictError('Reviewed delivery repository differs from canonical release authority');
+  }
+  const token = credential.token;
   const prUrl = `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`;
   const preflight = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch, prUrl, {
-    headers: { Authorization: `Bearer ${resolved.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
   }));
   const currentPr = await preflight.json().catch(() => ({})) as {
     state?: string; draft?: boolean; merged?: boolean; mergeable?: boolean; mergeable_state?: string;
@@ -634,13 +630,14 @@ async function providerMerge(
   }
   const url = `${prUrl}/merge`;
   const body = { sha: delivery.current_head_sha, merge_method: delivery.merge_method };
+  await revalidateRunReleaseIdentity(releaseIdentity);
   let response: Response | null = null;
   let transportError: unknown = null;
   try {
     response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch, url, {
       method: 'PUT',
       headers: {
-        Authorization: `Bearer ${resolved.token}`,
+        Authorization: `Bearer ${token}`,
         Accept: 'application/vnd.github+json',
         'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28',
@@ -662,7 +659,7 @@ async function providerMerge(
   // never issue an unconditional second merge with a different head.
   const check = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
     `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`,
-    { headers: { Authorization: `Bearer ${resolved.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
   ));
   const pr = await check.json().catch(() => ({})) as { merged?: boolean; merged_at?: string; merge_commit_sha?: string; head?: { sha?: string } };
   if (check.ok && pr.merged === true && pr.head?.sha?.toLowerCase() === delivery.current_head_sha
@@ -674,6 +671,7 @@ async function providerMerge(
     ? extractGithubProviderError(response, 'GITHUB_EXACT_SHA_MERGE_FAILED')
     : sanitizeGithubProviderException(transportError, 'GITHUB_EXACT_SHA_MERGE_FAILED');
   throw new ConflictError(`GitHub exact-SHA merge could not be proven: ${formatGithubProviderError(providerError)}`);
+  });
 }
 
 function dependencies(overrides: Partial<AutonomousDeliveryJobDependencies>): AutonomousDeliveryJobDependencies {
@@ -845,352 +843,23 @@ export async function processAutonomousPrDelivery(
   }
 }
 
-async function fetchFailureAnnotations(delivery: DeliveryRow, checks: NormalizedGithubCheck[]): Promise<Array<{ path: string; line: number; message: string }>> {
-  const failing = checks.filter((check) => check.source === 'check_run' && check.conclusion === 'failure').slice(0, 10);
-  if (failing.length === 0) return [];
-  const resolved = await resolveWorkspaceGitHubToken(delivery.workspace_id, {
-    repository: { owner: delivery.repo_owner, name: delivery.repo_name },
-    purpose: 'reviewed-delivery',
-  });
-  if (!resolved) return [];
-  const output: Array<{ path: string; line: number; message: string }> = [];
-  for (const check of failing) {
-    if (!/^\d+$/.test(check.id)) return [];
-    const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
-      `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/check-runs/${check.id}/annotations?per_page=100`,
-      { headers: { Authorization: `Bearer ${resolved.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
-    ));
-    if (!response.ok) return [];
-    const annotations = await response.json().catch(() => []) as Array<Record<string, unknown>>;
-    for (const annotation of annotations.slice(0, 100)) {
-      if (annotation.annotation_level !== 'failure') continue;
-      const file = String(annotation.path ?? '').replace(/^\/+/, '');
-      if (!file || file.includes('..') || file.startsWith('.github/workflows/')) return [];
-      output.push({
-        path: file.slice(0, 512),
-        line: Math.max(1, Number(annotation.start_line ?? 1) || 1),
-        message: String(annotation.message ?? '').slice(0, 1_024),
-      });
-      if (output.length >= 50) return output;
-    }
-  }
-  return output;
+async function startCiRecovery(_delivery: DeliveryRow, _evidence: GithubPrDeliveryEvidence): Promise<boolean> {
+  // Recovery that changes the released branch requires a new canonical run and
+  // immutable release identity initiated by an operator. Reviewed delivery is
+  // not a second execution/release orchestrator.
+  return false;
 }
 
-async function addRuntimeExclude(git: ReturnType<typeof simpleGit>, worktreePath: string): Promise<void> {
-  const raw = (await git.raw(['rev-parse', '--git-path', 'info/exclude'])).trim();
-  const excludePath = path.isAbsolute(raw) ? raw : path.join(worktreePath, raw);
-  fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-  const pattern = '.rorca/runtime/delivery-recovery/';
-  const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf8') : '';
-  if (!existing.split(/\r?\n/).includes(pattern)) fs.appendFileSync(excludePath, `${existing.endsWith('\n') || !existing ? '' : '\n'}${pattern}\n`);
+async function recoverConflict(_delivery: DeliveryRow): Promise<string> {
+  // A reviewed-delivery retry may observe and wait, but it may not advance the
+  // immutable host release SHA or perform a second remote push orchestrator.
+  throw new ConflictError('Conflict recovery requires a new explicitly authorized run/release identity');
 }
 
-async function startCiRecovery(delivery: DeliveryRow, evidence: GithubPrDeliveryEvidence): Promise<boolean> {
-  const annotations = await fetchFailureAnnotations(delivery, evidence.checks);
-  if (annotations.length === 0) return false;
-  const binding = await bindingForRun(delivery.workspace_id, number(delivery.run_id));
-  if (!binding.worktree_path || !binding.branch_name || !binding.agent_type) return false;
-  const validation = validateReusableWorktree({
-    workspacePath: binding.workspace_path,
-    worktreePath: binding.worktree_path,
-    expectedBranchName: binding.branch_name,
-  });
-  if (!validation.ok) return false;
-  const git = simpleGit(binding.worktree_path);
-  const status = await git.status();
-  if (status.files.length > 0) return false;
-  await addRuntimeExclude(git, binding.worktree_path);
-  const attemptNumber = number(delivery.recovery_attempts) + 1;
-  const specPath = `.rorca/runtime/delivery-recovery/${delivery.id}-${attemptNumber}.json`;
-  const absolute = path.join(binding.worktree_path, specPath);
-  fs.mkdirSync(path.dirname(absolute), { recursive: true });
-  const checks = evidence.checkSummary.failing.slice(0, 20).join(', ');
-  fs.writeFileSync(absolute, JSON.stringify({
-    title: `Repair reviewed PR CI failures for run ${delivery.run_id}`,
-    userStories: [{
-      id: `ADR-CI-${attemptNumber}`,
-      title: 'Repair exact-SHA CI failures without weakening controls',
-      description: [
-        `Repair only the root causes of failed required checks (${checks}) on branch ${delivery.branch_name} at ${delivery.current_head_sha}.`,
-        'Do not modify workflow files, suppress diagnostics, skip tests, lower thresholds, change review policy, or merge the pull request.',
-        ...annotations.map((item) => `- ${item.path}:${item.line} — ${item.message}`),
-      ].join('\n'),
-      acceptanceCriteria: [
-        'Every listed failure is fixed at its root cause.',
-        'Relevant local validation passes without disabling or weakening any check.',
-        'No deployment, merge, force push, workflow edit, or secret mutation occurs.',
-      ],
-      dependsOn: [],
-      passes: false,
-    }],
-    generatedAt: new Date().toISOString(),
-    model: binding.agent_model,
-    agentOverride: binding.agent_type,
-  }, null, 2));
-
-  const child = await queryOne<{ id: number }>(`
-    INSERT INTO pipeline_runs (
-      spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type,
-      agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via,
-      auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment,
-      pr_number
-    ) VALUES ($1, $2, 'queued', 'autonomous-delivery-recovery', 1, $3, $3, $4,
-              NOW(), $5, $6, FALSE, 'run_now', TRUE, FALSE, 'branch-only', $7,
-              'remote-rorca', $8)
-    RETURNING id
-  `, [specPath, delivery.workspace_id, binding.agent_type, binding.agent_model,
-    binding.branch_name, binding.worktree_path, binding.terminal_mode ?? 'ansi-html', delivery.pr_number]);
-  if (!child) return false;
-  const attemptId = crypto.randomUUID();
-  await transaction(async (client) => {
-    await client.query(`
-      INSERT INTO autonomous_pr_delivery_recovery_attempts (
-        id, delivery_id, attempt_number, recovery_kind, status,
-        head_sha_before, child_run_id, classification
-      ) VALUES ($1, $2, $3, 'ci', 'started', $4, $5, 'required_check_annotations')
-    `, [attemptId, delivery.id, attemptNumber, delivery.current_head_sha, child.id]);
-    await client.query(`
-      UPDATE autonomous_pr_deliveries
-      SET status = 'recovering_ci', recovery_attempts = $2, updated_at = NOW()
-      WHERE id = $1
-    `, [delivery.id, attemptNumber]);
-  });
-  await event({ delivery, eventType: 'recovery_started', evidenceId: evidence.id, detail: { kind: 'ci', attemptNumber, childRunId: child.id } });
-  const payload = PipelineRunJobPayload.parse({
-    runId: child.id,
-    specPath,
-    workspacePath: binding.workspace_path,
-    agent: binding.agent_type,
-    model: binding.agent_model,
-    worktreePath: binding.worktree_path,
-    branchName: binding.branch_name,
-    terminalMode: binding.terminal_mode ?? 'ansi-html',
-    executionEnvironment: 'remote-rorca',
-    autoWorktree: true,
-    autoMerge: false,
-    mergeStrategy: 'branch-only',
-    safetyOptions: { deploy: false, externalSend: true, policyLocked: true },
-    envOverrides: { RORCA_AUTONOMOUS_GUARD_PROFILE: 'conflict-resolution' },
-    secretReferences: createExecutionSecretReferences({
-      workspaceId: delivery.workspace_id,
-      includeWorkspaceEnv: false,
-    }),
-    triggeredVia: 'run_now',
-    includeGraph: false,
-    ...(binding.thinking_enabled ? { thinkingEnabled: true } : {}),
-    ...(binding.thinking_budget ? { thinkingBudget: binding.thinking_budget } : {}),
-    ...(binding.effort_level ? { effortLevel: binding.effort_level } : {}),
-  });
-  const jobId = await getBoss().send('pipeline:run', payload, { retryLimit: 0, expireInSeconds: 300 });
-  if (!jobId) {
-    await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [child.id]);
-    await execute(`
-      UPDATE autonomous_pr_delivery_recovery_attempts
-      SET status = 'failed', failure_reason = 'pgboss_queue_unavailable', finished_at = NOW()
-      WHERE id = $1 AND status = 'started'
-    `, [attemptId]);
-    return false;
-  }
-  return true;
-}
-
-async function recoverConflict(delivery: DeliveryRow): Promise<string> {
-  const binding = await bindingForRun(delivery.workspace_id, number(delivery.run_id));
-  if (!binding.worktree_path || !binding.branch_name || !binding.agent_type) {
-    throw new UnprocessableError('Conflict recovery lacks the persisted configured-agent worktree posture', 'RECOVERY_POSTURE_UNAVAILABLE');
-  }
-  const validation = validateReusableWorktree({
-    workspacePath: binding.workspace_path,
-    worktreePath: binding.worktree_path,
-    expectedBranchName: binding.branch_name,
-  });
-  if (!validation.ok) throw new ConflictError(`Conflict recovery worktree guard failed: ${validation.reason}`);
-  const git = simpleGit(binding.worktree_path);
-  const status = await git.status();
-  if (status.files.length > 0) throw new ConflictError('Conflict recovery requires a clean isolated worktree');
-  const current = (await git.revparse(['HEAD'])).trim().toLowerCase();
-  if (current !== delivery.current_head_sha) throw new ConflictError('Conflict recovery worktree SHA changed before recovery');
-  const attemptNumber = number(delivery.recovery_attempts) + 1;
-  const attemptId = crypto.randomUUID();
-  await transaction(async (client) => {
-    await client.query(`
-      INSERT INTO autonomous_pr_delivery_recovery_attempts (
-        id, delivery_id, attempt_number, recovery_kind, status,
-        head_sha_before, classification
-      ) VALUES ($1, $2, $3, 'conflict', 'started', $4, 'base_branch_conflict')
-    `, [attemptId, delivery.id, attemptNumber, delivery.current_head_sha]);
-    await client.query(`
-      UPDATE autonomous_pr_deliveries
-      SET status = 'recovering_conflict', recovery_attempts = $2, updated_at = NOW()
-      WHERE id = $1
-    `, [delivery.id, attemptNumber]);
-  });
-  await event({ delivery, eventType: 'recovery_started', detail: { kind: 'conflict', attemptNumber } });
-  try {
-    await git.fetch('origin', delivery.base_branch);
-    let conflicts: string[] = [];
-    try {
-      await git.merge([`origin/${delivery.base_branch}`, '--no-ff', '--no-commit']);
-    } catch {
-      conflicts = (await git.raw(['diff', '--name-only', '--diff-filter=U'])).trim().split('\n').filter(Boolean);
-      if (conflicts.length === 0) throw new ConflictError('Base merge failed without bounded conflict paths');
-      const env = await resolveExecutionSecrets(createExecutionSecretReferences({
-        workspaceId: delivery.workspace_id,
-        includeWorkspaceEnv: false,
-      }));
-      const resolved = await resolveMergeConflict({
-        runId: number(delivery.run_id),
-        workspaceId: delivery.workspace_id,
-        cwd: binding.worktree_path,
-        branchName: binding.branch_name,
-        conflictFiles: conflicts,
-        logPath: path.join(binding.worktree_path, '.rorca', 'logs', `delivery_${delivery.id}_conflict_${attemptNumber}.log`),
-        posture: {
-          agent: binding.agent_type,
-          model: binding.agent_model,
-          thinkingEnabled: binding.thinking_enabled ?? undefined,
-          thinkingBudget: binding.thinking_budget ?? undefined,
-          effortLevel: binding.effort_level ?? undefined,
-          source: 'autonomous-delivery',
-        },
-        env,
-      });
-      if (!resolved.ok) throw new ConflictError(`Configured-agent conflict recovery failed: ${resolved.reason}`);
-    }
-    const afterMerge = await git.status();
-    if (afterMerge.conflicted.length > 0) throw new ConflictError('Configured-agent recovery left unresolved conflict paths');
-    await git.commit(`merge: refresh ${delivery.branch_name} from ${delivery.base_branch} for reviewed delivery`);
-    const nextHead = (await git.revparse(['HEAD'])).trim().toLowerCase();
-    if (nextHead === delivery.current_head_sha || !isFullGitObjectId(nextHead)) {
-      throw new ConflictError('Conflict recovery did not produce a new full Git SHA');
-    }
-    await git.push('origin', delivery.branch_name);
-    await transaction(async (client) => {
-      await client.query(`
-        UPDATE autonomous_pr_delivery_recovery_attempts
-        SET status = 'completed', head_sha_after = $2, finished_at = NOW()
-        WHERE id = $1 AND status = 'started'
-      `, [attemptId, nextHead]);
-      await client.query(`
-        UPDATE autonomous_pr_deliveries
-        SET status = 'queued', current_head_sha = $2,
-            last_evidence_id = NULL, merge_decision_id = NULL,
-            authorization_snapshot_id = NULL, authorization_evidence_hwm = NULL,
-            authorization_decision_hwm = NULL, authorized_at = NULL,
-            updated_at = NOW()
-        WHERE id = $1
-      `, [delivery.id, nextHead]);
-    });
-    await event({ delivery: { ...delivery, current_head_sha: nextHead }, eventType: 'recovery_completed', detail: { kind: 'conflict', attemptNumber } });
-    return nextHead;
-  } catch (error) {
-    try { await git.merge(['--abort']); } catch { /* already clean */ }
-    const reason = error instanceof Error ? error.message.slice(0, 1_024) : 'conflict_recovery_failed';
-    await execute(`
-      UPDATE autonomous_pr_delivery_recovery_attempts
-      SET status = 'failed', failure_reason = $2, finished_at = NOW()
-      WHERE id = $1 AND status = 'started'
-    `, [attemptId, reason]);
-    await updateStatus(delivery.id, 'queued');
-    await event({ delivery, eventType: 'recovery_failed', detail: { kind: 'conflict', attemptNumber, reason: reason.slice(0, 256) } });
-    throw error;
-  }
-}
-
-export async function resumeAutonomousDeliveryAfterRecoveryRun(childRunId: number, childStatus: string): Promise<boolean> {
-  const row = await queryOne<{
-    attempt_id: string;
-    delivery_id: string;
-    attempt_number: number;
-    head_sha_before: string;
-    worktree_path: string | null;
-    branch_name: string | null;
-    workspace_id: string;
-  }>(`
-    SELECT a.id AS attempt_id, a.delivery_id, a.attempt_number, a.head_sha_before,
-           r.worktree_path, r.branch_name, d.workspace_id
-    FROM autonomous_pr_delivery_recovery_attempts a
-    JOIN autonomous_pr_deliveries d ON d.id = a.delivery_id
-    JOIN pipeline_runs r ON r.id = a.child_run_id
-    WHERE a.child_run_id = $1 AND a.recovery_kind = 'ci' AND a.status = 'started'
-  `, [childRunId]);
-  if (!row) return false;
-  let nextHead: string | null = null;
-  let failure: string | null = null;
-  if (childStatus === 'done' && row.worktree_path && row.branch_name) {
-    try {
-      const git = simpleGit(row.worktree_path);
-      nextHead = (await git.revparse(['HEAD'])).trim().toLowerCase();
-      if (!isFullGitObjectId(nextHead) || nextHead === row.head_sha_before) {
-        failure = 'ci_recovery_produced_no_new_revision';
-        nextHead = null;
-      } else {
-        const changedPaths = (await git.diff(['--name-only', `${row.head_sha_before}..${nextHead}`]))
-          .split('\n').map((item) => item.trim()).filter(Boolean);
-        const mergeCommitCount = Number((await git.raw([
-          'rev-list', '--count', '--merges', `${row.head_sha_before}..${nextHead}`,
-        ])).trim());
-        const status = await git.status();
-        const remote = await git.listRemote(['--heads', 'origin', `refs/heads/${row.branch_name}`]);
-        const remoteHead = remote.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
-        if (!ciRecoveryRevisionIsAllowed(changedPaths, mergeCommitCount)) {
-          failure = 'ci_recovery_revision_violated_change_policy';
-          nextHead = null;
-        } else if (status.files.length > 0) {
-          failure = 'ci_recovery_worktree_not_clean';
-          nextHead = null;
-        } else if (remoteHead !== nextHead) {
-          failure = 'ci_recovery_remote_revision_not_proven';
-          nextHead = null;
-        }
-      }
-    } catch {
-      failure = 'ci_recovery_head_or_remote_unavailable';
-      nextHead = null;
-    }
-  } else {
-    failure = `ci_recovery_run_${childStatus}`;
-  }
-  if (nextHead) {
-    await transaction(async (client) => {
-      await client.query(`
-        UPDATE autonomous_pr_delivery_recovery_attempts
-        SET status = 'completed', head_sha_after = $2, finished_at = NOW()
-        WHERE id = $1 AND status = 'started'
-      `, [row.attempt_id, nextHead]);
-      await client.query(`
-        UPDATE autonomous_pr_deliveries
-        SET status = 'queued', current_head_sha = $2,
-            last_evidence_id = NULL, merge_decision_id = NULL,
-            authorization_snapshot_id = NULL, authorization_evidence_hwm = NULL,
-            authorization_decision_hwm = NULL, authorized_at = NULL,
-            updated_at = NOW()
-        WHERE id = $1 AND status = 'recovering_ci'
-      `, [row.delivery_id, nextHead]);
-    });
-  } else {
-    await transaction(async (client) => {
-      await client.query(`
-        UPDATE autonomous_pr_delivery_recovery_attempts
-        SET status = 'failed', failure_reason = $2, finished_at = NOW()
-        WHERE id = $1 AND status = 'started'
-      `, [row.attempt_id, failure]);
-      await client.query(`
-        UPDATE autonomous_pr_deliveries SET status = 'queued', updated_at = NOW()
-        WHERE id = $1 AND status = 'recovering_ci'
-      `, [row.delivery_id]);
-    });
-  }
-  const delivery = await latestDelivery(row.delivery_id);
-  await event({
-    delivery,
-    eventType: nextHead ? 'recovery_completed' : 'recovery_failed',
-    detail: { kind: 'ci', attemptNumber: row.attempt_number, childRunId, ...(failure ? { reason: failure } : {}) },
-  });
-  const jobId = await defaultSchedule(delivery.id, delivery.current_head_sha, nextHead ? 0 : AUTONOMOUS_PR_DELIVERY_POLL_SECONDS);
-  if (!jobId) await terminateDelivery(delivery, 'blocked', 'pgboss_queue_unavailable');
-  return true;
+export async function resumeAutonomousDeliveryAfterRecoveryRun(_childRunId: number, _childStatus: string): Promise<boolean> {
+  // Legacy child recovery cannot prove the immutable release SHA without
+  // ambient remote inspection. New work requires a new explicit run/release.
+  return false;
 }
 
 export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Promise<boolean> {

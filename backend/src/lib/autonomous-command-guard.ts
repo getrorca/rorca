@@ -15,7 +15,9 @@ const AUTONOMOUS_SECRET_ENV_KEYS = new Set([
   'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE',
   'JWT_SECRET', 'VAULT_KEY', 'SUPABASE_SERVICE_ROLE_KEY',
   'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET',
-  'GITHUB_TOKEN', 'GH_TOKEN', 'RORCA_MCP_TOKEN', 'RORCA_MCP_ADMIN_TOKEN',
+  'GITHUB_TOKEN', 'GH_TOKEN', 'GIT_ASKPASS', 'SSH_ASKPASS', 'SSH_AUTH_SOCK',
+  'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_SSH', 'GIT_SSH_COMMAND',
+  'RORCA_MCP_TOKEN', 'RORCA_MCP_ADMIN_TOKEN',
 ]);
 
 export interface AutonomousCommandGuardOptions {
@@ -109,22 +111,39 @@ pwd_now="$(pwd -P)"
 args_joined=" $* "
 profile=${shellQuote(profile)}
 
-if [[ "$profile" == "conflict-resolution" ]]; then
-  case "$cmd_name" in
-    gh|curl|wget|ssh|scp|rsync)
-      echo "[Rorca autonomous command guard] External/network command blocked during conflict resolution." >&2
+case "$cmd_name" in
+  npm|npx|yarn|pnpm)
+    if [[ "$args_joined" =~ (^|[[:space:]])(gh|git|ssh|scp|sftp|rsync|curl|wget)([[:space:]]|$) ]]; then
+      echo "[Rorca autonomous command guard] Package-runner remote command bypass is blocked." >&2
       exit 126
-      ;;
-    git)
-      case "\${1:-}" in
-        push|fetch|pull|remote|commit|merge|rebase|checkout|switch|reset|clean|worktree|tag)
+    fi
+    ;;
+  gh|ssh|scp|sftp|rsync)
+    echo "[Rorca autonomous command guard] Remote mutation command is host-owned and blocked." >&2
+    exit 126
+    ;;
+  curl|wget)
+    # Autonomous shells do not receive general network mutation authority.
+    # Read-only HTTP is also denied because method inference, redirects, upload
+    # flags, and credential-helper state make a shell-level allowlist unsafe.
+    echo "[Rorca autonomous command guard] Network command is blocked; use a host-owned capability." >&2
+    exit 126
+    ;;
+  git)
+    case "\${1:-}" in
+      push|fetch|pull|remote|send-pack|receive-pack|ls-remote|submodule)
+        echo "[Rorca autonomous command guard] Remote git operation is host-owned and blocked." >&2
+        exit 126
+        ;;
+      commit|merge|rebase|checkout|switch|reset|clean|worktree|tag)
+        if [[ "$profile" == "conflict-resolution" ]]; then
           echo "[Rorca autonomous command guard] Host-owned git operation blocked during conflict resolution." >&2
           exit 126
-          ;;
-      esac
-      ;;
-  esac
-fi
+        fi
+        ;;
+    esac
+    ;;
+esac
 
 is_backend_dir=0
 if [[ -n "$workspace_root" ]]; then
@@ -193,9 +212,12 @@ export function sanitizeAutonomousAgentEnv(env: Record<string, string>): Record<
 export function createAutonomousCommandGuard(options: AutonomousCommandGuardOptions): AutonomousCommandGuardResult {
   const guardBinDir = fs.mkdtempSync(path.join(os.tmpdir(), GUARD_DIR_PREFIX));
   const profile = options.profile ?? 'general';
-  const commands = profile === 'conflict-resolution'
-    ? ['npm', 'npx', 'jest', 'yarn', 'pnpm', 'git', 'gh', 'curl', 'wget', 'ssh', 'scp', 'rsync']
-    : ['npm', 'npx', 'jest', 'yarn', 'pnpm'];
+  // Both profiles deny ambient provider/network authority. Conflict resolution
+  // additionally denies host-owned local history mutation.
+  const commands = [
+    'npm', 'npx', 'jest', 'yarn', 'pnpm',
+    'git', 'gh', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync',
+  ];
 
   for (const command of commands) {
     writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command), profile));
@@ -211,6 +233,16 @@ export function createAutonomousCommandGuard(options: AutonomousCommandGuardOpti
       PATH: `${guardBinDir}${path.delimiter}${sanitizedEnv.PATH ?? process.env.PATH ?? ''}`,
       RORCA_AUTONOMOUS_COMMAND_GUARD: '1',
       RORCA_AUTONOMOUS_WORKSPACE_ROOT: fs.realpathSync(options.cwd),
+      // Prevent git from consulting user/system helpers even for commands not
+      // covered by a future wrapper version. Host release code supplies its own
+      // isolated config and one-shot askpass environment.
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: os.devNull,
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_ASKPASS: path.join(guardBinDir, 'ssh'),
+      GIT_SSH_COMMAND: path.join(guardBinDir, 'ssh'),
+      GCM_INTERACTIVE: 'Never',
+      GH_CONFIG_DIR: guardBinDir,
       ...(autonomousBackendJestEnv
         ? {
           // The only database credential exposed to an autonomous CLI is a

@@ -23,6 +23,11 @@ import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 import { resolveMergeConflict, type MergeResolutionPosture } from './merge-conflict-resolver';
+import {
+  revalidateRunReleaseIdentity,
+  withRunReleaseLock,
+  type RunReleaseIdentity,
+} from './release-identity';
 
 // ── Tracking-only files that are always safe to resolve with --theirs ────────
 const TRACKING_PATTERNS = [
@@ -69,6 +74,31 @@ export async function performMerge(
   workspacePath: string,
   resolverPosture?: MergeResolutionPosture,
   resolverEnv: Record<string, string> = {},
+  releaseIdentity?: RunReleaseIdentity,
+): Promise<MergeResult> {
+  if (!releaseIdentity) {
+    return { success: false, error: 'Host release identity is required for final base merge' };
+  }
+  if (Number(runId) !== releaseIdentity.runId
+    || branchName !== releaseIdentity.branchName
+    || fs.realpathSync(workspacePath) !== releaseIdentity.workspaceRealpath) {
+    return { success: false, error: 'Merge arguments differ from immutable host release identity' };
+  }
+  return withRunReleaseLock(releaseIdentity, async () => {
+    await revalidateRunReleaseIdentity(releaseIdentity);
+    return performMergeLocked(
+      runId, branchName, workspacePath, resolverPosture, resolverEnv, releaseIdentity,
+    );
+  });
+}
+
+async function performMergeLocked(
+  runId: number | string,
+  branchName: string,
+  workspacePath: string,
+  resolverPosture: MergeResolutionPosture | undefined,
+  resolverEnv: Record<string, string>,
+  releaseIdentity: RunReleaseIdentity,
 ): Promise<MergeResult> {
   const normalizedRunId = Number(runId);
   if (!Number.isSafeInteger(normalizedRunId) || normalizedRunId <= 0) {
@@ -134,7 +164,7 @@ export async function performMerge(
   let result: MergeResult;
 
   try {
-    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, normalizedRunId, resolverPosture, resolverEnv);
+    result = await executeMerge(git, effectiveBranch, worktreePath, workspacePath, workspaceId, normalizedRunId, resolverPosture, resolverEnv, releaseIdentity);
   } finally {
     // Always restore stash
     if (stashed) {
@@ -164,10 +194,12 @@ async function executeMerge(
   workspacePath: string,
   workspaceId: string,
   runId: number,
-  resolverPosture?: MergeResolutionPosture,
-  resolverEnv: Record<string, string> = {},
+  resolverPosture: MergeResolutionPosture | undefined,
+  resolverEnv: Record<string, string>,
+  releaseIdentity: RunReleaseIdentity,
 ): Promise<MergeResult> {
   // 2. Safety pre-check: dry-run merge
+  await revalidateRunReleaseIdentity(releaseIdentity);
   let preCheckConflictFiles: string[] = [];
   let preCheckIsClean = false;
   let semanticResolved = false;
@@ -258,7 +290,9 @@ async function executeMerge(
     return { success: false, error: 'Pre-check did not pass' };
   }
 
-  // 3. Execute the real merge
+  // 3. Execute the real merge. Repeat the exact run-branch HEAD assertion in
+  // the callee while the local release lock is held, immediately before merge.
+  await revalidateRunReleaseIdentity(releaseIdentity);
   let mergeSuccess = semanticResolved;
   try {
     if (!semanticResolved) {
@@ -320,20 +354,12 @@ async function executeMerge(
   );
   if (walEvent) broadcastAll(walEvent);
 
-  // 6. Remove the worktree directory if it still exists
-  if (worktreePath && fs.existsSync(worktreePath)) {
-    try {
-      await git.raw(['worktree', 'remove', '--force', worktreePath]);
-      logger.info({ runId, worktree: path.basename(worktreePath) }, '[merge-handler] Worktree removed');
-    } catch (rmErr: any) {
-      logger.warn({ err: rmErr, runId }, '[merge-handler] Worktree removal skipped');
-    }
-  }
-
-  // 7. Clear worktree_path from pipeline_runs so UI knows it's merged
-  try {
-    await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]);
-  } catch { /* non-fatal */ }
+  // Cleanup is a separate durable release step. The immutable execution
+  // worktree/HEAD attestation must survive terminal projection and restart.
+  await execute(
+    `UPDATE pipeline_runs SET worktree_cleanup_status = 'pending' WHERE id = $1`,
+    [runId],
+  );
 
   return { success: true, mergeCommitSha };
 }

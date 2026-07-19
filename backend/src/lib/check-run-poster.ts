@@ -40,6 +40,13 @@ interface PipelineRunRow {
   worktree_path: string | null;
   workspace_id: string;
   branch_name: string | null;
+  execution_workspace_path: string | null;
+  execution_worktree_path: string | null;
+  terminal_checkout_sha: string | null;
+  release_authorized_sha: string | null;
+  release_execution_workspace_path: string | null;
+  release_execution_worktree_path: string | null;
+  release_identity_hash: string | null;
   workspace_path: string;
 }
 
@@ -134,18 +141,33 @@ function parseProjectionPayload(value: ProjectionRow['desired_payload']): Projec
 
 async function resolveBranchHead(runId: number, workspaceId: string): Promise<string | null> {
   const run = await queryOne<PipelineRunRow>(`
-    SELECT pr.worktree_path, pr.workspace_id, pr.branch_name, ws.path AS workspace_path
+    SELECT pr.worktree_path, pr.workspace_id, pr.branch_name,
+           pr.execution_workspace_path, pr.execution_worktree_path,
+           pr.terminal_checkout_sha, ri.authorized_sha AS release_authorized_sha,
+           ri.execution_workspace_path AS release_execution_workspace_path,
+           ri.execution_worktree_path AS release_execution_worktree_path,
+           ri.identity_hash AS release_identity_hash, ws.path AS workspace_path
       FROM pipeline_runs pr JOIN workspaces ws ON ws.id = pr.workspace_id
+      LEFT JOIN pipeline_run_release_intents ri ON ri.run_id = pr.id
      WHERE pr.id = $1 AND pr.workspace_id = $2
   `, [runId, workspaceId]);
   if (!run?.branch_name) return null;
   try {
     return assertCanonicalRunCheckout({
-      cwd: run.worktree_path ?? run.workspace_path,
-      repositoryTopLevel: run.workspace_path,
+      cwd: run.execution_worktree_path ?? run.worktree_path ?? run.workspace_path,
+      repositoryTopLevel: run.execution_workspace_path ?? run.workspace_path,
       branchName: run.branch_name,
     }).headSha;
-  } catch { return null; }
+  } catch {
+    const terminal = run.terminal_checkout_sha?.toLowerCase();
+    return terminal
+      && terminal === run.release_authorized_sha?.toLowerCase()
+      && run.release_execution_workspace_path === run.execution_workspace_path
+      && run.release_execution_worktree_path === run.execution_worktree_path
+      && /^[0-9a-f]{64}$/.test(run.release_identity_hash ?? '')
+      ? terminal
+      : null;
+  }
 }
 
 function buildSummaryTable(stories: StoryProgress[]): string {
@@ -442,23 +464,33 @@ async function discoverCheckRun(
   token: string,
   claim: ProjectionClaim,
 ): Promise<number | null> {
-  const suffix = `/commits/${claim.head_sha}/check-runs?check_name=${encodeURIComponent(CHECK_RUN_NAME)}&filter=all&per_page=100`;
-  const response = await providerFetch(
-    githubRepoApiUrl(owner, repo, suffix),
-    { method: 'GET', headers: headers(token) },
-    'GITHUB_CHECK_RUN_RECONCILE_FAILED',
-  );
-  let body: { check_runs?: Array<{ id?: number; external_id?: string; head_sha?: string }> };
-  try { body = await response.json() as typeof body; }
-  catch {
-    throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup response was unreadable');
-  }
-  const matches = (body.check_runs ?? []).filter(check =>
-    check.external_id === claim.external_id
-      && check.head_sha?.toLowerCase() === claim.head_sha
-      && Number.isSafeInteger(check.id));
-  if (matches.length > 1) {
-    throw new ProjectionProviderError('GITHUB_CHECK_RUN_IDENTITY_AMBIGUOUS', false, false, response.status, safeRequestId(response), 'Multiple provider Check Runs share one Rorca external identity');
+  const matches: Array<{ id?: number; external_id?: string; head_sha?: string }> = [];
+  const maxPages = 10;
+  for (let page = 1; page <= maxPages; page++) {
+    const suffix = `/commits/${claim.head_sha}/check-runs?check_name=${encodeURIComponent(CHECK_RUN_NAME)}&filter=all&per_page=100&page=${page}`;
+    const response = await providerFetch(
+      githubRepoApiUrl(owner, repo, suffix),
+      { method: 'GET', headers: headers(token) },
+      'GITHUB_CHECK_RUN_RECONCILE_FAILED',
+    );
+    let body: { total_count?: number; check_runs?: Array<{ id?: number; external_id?: string; head_sha?: string }> };
+    try { body = await response.json() as typeof body; }
+    catch {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup response was unreadable');
+    }
+    const pageRows = body.check_runs ?? [];
+    matches.push(...pageRows.filter(check =>
+      check.external_id === claim.external_id
+        && check.head_sha?.toLowerCase() === claim.head_sha
+        && Number.isSafeInteger(check.id)));
+    if (matches.length > 1) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_IDENTITY_AMBIGUOUS', false, false, response.status, safeRequestId(response), 'Multiple provider Check Runs share one Rorca external identity');
+    }
+    const total = Number(body.total_count ?? pageRows.length);
+    if (pageRows.length < 100 || page * 100 >= total) return matches[0]?.id ?? null;
+    if (page === maxPages) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_DISCOVERY_TRUNCATED', true, true, response.status, safeRequestId(response), 'GitHub Check Run discovery exceeded its deterministic page bound');
+    }
   }
   return matches[0]?.id ?? null;
 }

@@ -518,6 +518,34 @@ describe('check run terminal completeness authority', () => {
     expect(projection?.projection_status).toBe('completed');
   });
 
+  test('provider-uncertain discovery deterministically paginates beyond the first 100', async () => {
+    currentRun = {
+      ...currentRun,
+      status: 'done', lifecycle_status: 'finished', expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [acceptedRow('US-001', 1, FINAL_SHA, '2026-07-18T10:02:00.000Z')];
+    providerFetch.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.includes('/commits/') && init.method === 'GET') {
+        if (url.includes('page=2')) return response({ total_count: 101, check_runs: [
+          { id: 910, external_id: 'rorca:pipeline-run:41:v1', head_sha: FINAL_SHA },
+        ] });
+        return response({ total_count: 101, check_runs: Array.from({ length: 100 }, (_, id) => ({
+          id: id + 1, external_id: `other:${id}`, head_sha: FINAL_SHA,
+        })) });
+      }
+      if (url.endsWith('/check-runs/910') && init.method === 'PATCH') return response({}, 200);
+      return response({ id: 999 }, 201);
+    });
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    expect(providerFetch.mock.calls.some(([url]: [string]) => url.includes('page=2'))).toBe(true);
+    expect(providerFetch.mock.calls.filter(([url, init]: [string, RequestInit]) =>
+      url.endsWith('/check-runs') && init.method === 'POST')).toHaveLength(0);
+    expect(projection?.check_run_id).toBe(910);
+  });
+
   test('a failed terminal run cannot publish neutral or success merely because its last story passed', async () => {
     currentRun = {
       ...currentRun,

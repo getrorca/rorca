@@ -28,23 +28,19 @@ test('uses one strict existing-worker queue with no authority or secret payload'
   expect(worker).toContain('registerAutonomousPrDeliveryWorker(boss)');
 });
 
-test('only ready PR routing auto-enqueues; draft/direct paths remain distinct', () => {
-  const prStart = worker.indexOf("case 'pr':");
-  const draftStart = worker.indexOf("case 'draft-pr':", prStart);
-  const directStart = worker.indexOf("case 'direct':");
-  const prBlock = worker.slice(prStart, draftStart);
-  const directBlock = worker.slice(directStart, prStart);
-  expect(prBlock).toContain('queueAutonomousPrDeliveryForRun');
-  expect(prBlock).toContain('finalizeDraftPr');
-  expect(directBlock).not.toContain('queueAutonomousPrDeliveryForRun');
-  expect(worker.slice(draftStart, worker.indexOf("case 'branch-only':", draftStart)))
-    .not.toContain('queueAutonomousPrDeliveryForRun');
+test('run release routing has one host-owned seam and no inline PR/push fallback', () => {
+  expect(worker).toContain('prepareRunReleaseIntent({');
+  expect(worker).toContain('reconcileRunReleaseIntent(runId');
+  expect(worker).not.toContain("case 'pr':");
+  expect(worker).not.toContain('gh pr');
+  expect(worker).not.toContain("git.push('origin'");
 });
 
 test('GitHub PR actuation never calls the local direct-merge handler or dispatches deployment', () => {
   expect(delivery).not.toContain('performMerge');
   expect(delivery).not.toContain('dispatchWorkflowIfConfigured');
-  expect(delivery).toContain("safetyOptions: { deploy: false, externalSend: true, policyLocked: true }");
-  expect(delivery).toContain('includeWorkspaceEnv: false');
-  expect(delivery).toContain("source: 'autonomous-delivery'");
+  expect(delivery).toContain('Reviewed delivery is');
+  expect(delivery).toContain('not a second execution/release orchestrator');
+  expect(delivery).toContain("withGithubReleaseActuation(releaseIdentity, 'merge'");
+  expect(delivery).toContain('Conflict recovery requires a new explicitly authorized run/release identity');
 });
