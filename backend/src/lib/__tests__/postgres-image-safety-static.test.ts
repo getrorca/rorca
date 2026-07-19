@@ -54,6 +54,8 @@ test('Apache AGE PG16 1.5.0 is reproducibly built for both image architectures w
   const runtimeStage = postgresDockerfile.slice(postgresDockerfile.lastIndexOf('FROM pgvector/pgvector:pg16'));
   expect(runtimeStage).not.toMatch(/apt-get\s+install|postgresql-16-age/);
   expect(runtimeStage).toContain('for package in build-essential bison flex postgresql-server-dev-16');
+  expect(runtimeStage).toContain("-f='${db:Status-Abbrev}'");
+  expect(runtimeStage).toContain("test \"$status\" != 'ii '");
   expect(postgresDockerfile).not.toContain('GIT_SSL_NO_VERIFY');
   expect(postgresDockerfile).not.toMatch(/git\s+clone|--branch\s+release\//);
 });

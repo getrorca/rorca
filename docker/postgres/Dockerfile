@@ -46,7 +46,8 @@ RUN grep --quiet --line-regexp "default_version = '1.5.0'" /usr/share/postgresql
     test "$(find /usr/share/postgresql/16/extension -maxdepth 1 -type f -name 'age--*.sql' -printf '%f\n')" = 'age--1.5.0.sql' && \
     ! ldd /usr/lib/postgresql/16/lib/age.so | grep -q 'not found' && \
     for package in build-essential bison flex postgresql-server-dev-16; do \
-      ! dpkg-query -W "$package" >/dev/null 2>&1 || exit 1; \
+      status="$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)"; \
+      test "$status" != 'ii ' || exit 1; \
     done
 
 # A fresh cluster receives extensions only. Rorca owns application migrations
