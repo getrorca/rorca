@@ -168,6 +168,24 @@ export class UnprocessableError extends AppError {
   }
 }
 
+/** 422 — a durable PTY checkpoint failed integrity/version validation */
+export class CheckpointCorruptionError extends AppError {
+  readonly statusCode = 422 as const;
+
+  constructor(message = 'PTY checkpoint is corrupt', details?: Record<string, unknown>) {
+    super(message, 'CHECKPOINT_CORRUPTION', details);
+  }
+}
+
+/** 507 — a terminal state cannot be serialized inside its configured bound */
+export class RetentionBudgetExhaustedError extends AppError {
+  readonly statusCode = 507 as const;
+
+  constructor(message = 'PTY retention budget exhausted', details?: Record<string, unknown>) {
+    super(message, 'RETENTION_BUDGET_EXHAUSTED', details);
+  }
+}
+
 /** 503 — service unavailable (upstream down, circuit breaker open) */
 export class ServiceUnavailableError extends AppError {
   readonly statusCode = 503 as const;

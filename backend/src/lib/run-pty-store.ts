@@ -9,6 +9,7 @@ import { gunzipSync, gzipSync } from 'zlib';
 import { execute, query, queryOne, transaction } from '../db/index';
 import { ConflictError, ForbiddenError, NotFoundError } from './errors';
 import { logger } from './logger';
+import { PtyCheckpointCoordinator, type PtyCheckpointCoordinatorOptions } from './pty-checkpoint-store';
 
 const CHUNK_SIZE = 4 * 1024;
 const GZIP_COMPRESSION = 'gzip';
@@ -144,6 +145,9 @@ export interface RunPtySessionHealth extends PtyGenerationIdentity {
   last_input_request_id: string | number | null;
   last_resize_request_id: string | number | null;
   checkpoint_sequence: string | number;
+  first_retained_sequence: string | number;
+  retained_output_bytes: string | number;
+  compacted_byte_count: string | number;
   checkpoint_at: string | null;
   checkpoint_reference: string | null;
   archive_reference: string | null;
@@ -305,6 +309,14 @@ interface AppendRunPtyOutputOptions {
 interface RunPtyOutputSessionRow {
   total_output_bytes: string | number;
   dropped_output_bytes: string | number;
+  retained_output_bytes: string | number;
+  next_output_sequence: string | number;
+}
+
+export interface AppendRunPtyOutputResult {
+  chunks: Array<{ sequence: number; chunk: Buffer }>;
+  retainedBytes: number;
+  retentionExceeded: boolean;
 }
 
 /**
@@ -318,15 +330,18 @@ export async function appendRunPtyOutputBatch(
   buffers: readonly Buffer[],
   sequenceRef: { value: number },
   options: AppendRunPtyOutputOptions = {},
-): Promise<void> {
+): Promise<AppendRunPtyOutputResult> {
   const maxCaptureBytes = options.maxCaptureBytes ?? getRunPtyOutputLimits().maxCaptureBytes;
   const queueDroppedBytes = options.droppedBytes ?? 0;
   const rawBytes = buffers.reduce((total, buffer) => total + buffer.length, 0);
-  if (rawBytes === 0 && queueDroppedBytes === 0) return;
+  if (rawBytes === 0 && queueDroppedBytes === 0) {
+    return { chunks: [], retainedBytes: 0, retentionExceeded: false };
+  }
 
-  await transaction(async (client) => {
+  return transaction(async (client) => {
     const session = await client.query<RunPtyOutputSessionRow>(
-      `SELECT total_output_bytes, dropped_output_bytes
+      `SELECT total_output_bytes, dropped_output_bytes, retained_output_bytes,
+              next_output_sequence
        FROM pty_generations
        WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE
        FOR UPDATE`,
@@ -335,51 +350,54 @@ export async function appendRunPtyOutputBatch(
     const row = session.rows[0];
     if (!row) throw new ConflictError('PTY generation is no longer active');
 
-    const totalOutputBytes = Number(row.total_output_bytes) || 0;
-    const droppedOutputBytes = Number(row.dropped_output_bytes) || 0;
-    const capturedBytes = Math.max(0, totalOutputBytes - droppedOutputBytes);
-    let remainingCaptureBytes = Math.max(0, maxCaptureBytes - capturedBytes);
-    let acceptedBytes = 0;
+    // The durable generation counter is authoritative after restart. Every raw
+    // slice receives a logical sequence even when the delta budget is full; its
+    // bytes still enter the emulator and the next checkpoint covers that range.
+    sequenceRef.value = Math.max(sequenceRef.value, Number(row.next_output_sequence) || 1);
+    let retainedBytes = Number(row.retained_output_bytes) || 0;
     let storedBytes = 0;
-
-    // Coalesce callback-sized fragments before the durable 4 KiB split. This
-    // preserves byte order while preventing a small-chunk flood from creating
-    // one PostgreSQL row per keystroke/terminal callback.
+    let retentionExceeded = false;
+    const acceptedChunks: Array<{ sequence: number; chunk: Buffer }> = [];
     const combined = buffers.length === 1 ? buffers[0] : Buffer.concat(buffers, rawBytes);
     let offset = 0;
-    while (offset < combined.length && remainingCaptureBytes > 0) {
-      const length = Math.min(CHUNK_SIZE, combined.length - offset, remainingCaptureBytes);
-      const slice = combined.subarray(offset, offset + length);
-      const compressed = compressRunPtyChunk(slice);
-      await client.query(
-        `INSERT INTO run_pty_output_chunks
-          (run_id, generation_id, sequence, chunk, compression, byte_length, stored_byte_length)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT DO NOTHING`,
-        [generation.runId, generation.generationId, sequenceRef.value, compressed.chunk,
-          compressed.compression, slice.length, compressed.chunk.length],
-      );
-      sequenceRef.value += 1;
-      acceptedBytes += slice.length;
-      storedBytes += compressed.chunk.length;
-      remainingCaptureBytes -= slice.length;
+    while (offset < combined.length) {
+      const length = Math.min(CHUNK_SIZE, combined.length - offset);
+      const slice = Buffer.from(combined.subarray(offset, offset + length));
+      const sequence = sequenceRef.value++;
+      acceptedChunks.push({ sequence, chunk: slice });
+      if (retainedBytes + slice.length <= maxCaptureBytes) {
+        const compressed = compressRunPtyChunk(slice);
+        const inserted = await client.query(
+          `INSERT INTO run_pty_output_chunks
+            (run_id, generation_id, sequence, chunk, compression, byte_length, stored_byte_length)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT DO NOTHING RETURNING id`,
+          [generation.runId, generation.generationId, sequence, compressed.chunk,
+            compressed.compression, slice.length, compressed.chunk.length],
+        );
+        if (inserted.rows[0]) {
+          retainedBytes += slice.length;
+          storedBytes += compressed.chunk.length;
+        }
+      } else {
+        retentionExceeded = true;
+      }
       offset += length;
     }
 
-    const captureDroppedBytes = rawBytes - acceptedBytes;
-    const droppedBytes = queueDroppedBytes + captureDroppedBytes;
     await client.query(
       `UPDATE pty_generations
        SET total_output_bytes = total_output_bytes + $4,
            total_stored_bytes = total_stored_bytes + $5,
-           dropped_output_bytes = dropped_output_bytes + $6,
-           next_output_sequence = GREATEST(next_output_sequence, $7),
-           output_truncated_at = CASE WHEN $6 > 0 THEN COALESCE(output_truncated_at, NOW()) ELSE output_truncated_at END,
-           last_output_at = CASE WHEN $4 > $6 THEN NOW() ELSE last_output_at END,
+           retained_output_bytes = $6,
+           dropped_output_bytes = dropped_output_bytes + $7,
+           next_output_sequence = GREATEST(next_output_sequence, $8),
+           output_truncated_at = CASE WHEN $7 > 0 THEN COALESCE(output_truncated_at, NOW()) ELSE output_truncated_at END,
+           last_output_at = CASE WHEN $4 > $7 THEN NOW() ELSE last_output_at END,
            updated_at = NOW()
        WHERE run_id = $1 AND id = $2 AND generation_token = $3 AND is_active = TRUE`,
       [generation.runId, generation.generationId, generation.generationToken,
-        rawBytes + queueDroppedBytes, storedBytes, droppedBytes, sequenceRef.value],
+        rawBytes + queueDroppedBytes, storedBytes, retainedBytes, queueDroppedBytes, sequenceRef.value],
     );
     await client.query(
       `UPDATE run_pty_sessions
@@ -390,8 +408,9 @@ export async function appendRunPtyOutputBatch(
            last_output_at = CASE WHEN $2 > $4 THEN NOW() ELSE last_output_at END,
            updated_at = NOW()
        WHERE run_id = $1`,
-      [generation.runId, rawBytes + queueDroppedBytes, storedBytes, droppedBytes],
+      [generation.runId, rawBytes + queueDroppedBytes, storedBytes, queueDroppedBytes],
     );
+    return { chunks: acceptedChunks, retainedBytes, retentionExceeded };
   });
 }
 
@@ -405,6 +424,7 @@ export async function appendRunPtyOutput(
 
 export interface RunPtyOutputBatcher {
   enqueue(data: Buffer): void;
+  resize(cols: number, rows: number): void;
   drain(): Promise<void>;
   getPendingBytes(): number;
 }
@@ -419,12 +439,21 @@ export function createRunPtyOutputBatcher(
   generation: PtyGenerationRef,
   sequenceRef: { value: number },
   limits: Partial<RunPtyOutputLimits> = {},
+  checkpointOptions: Partial<PtyCheckpointCoordinatorOptions> & Pick<PtyCheckpointCoordinatorOptions, 'storyId'> = { storyId: 'unknown' },
 ): RunPtyOutputBatcher {
   const defaults = getRunPtyOutputLimits();
   const maxPendingBytes = limits.maxPendingBytes ?? defaults.maxPendingBytes;
   const batchBytes = limits.batchBytes ?? defaults.batchBytes;
   const batchChunks = limits.batchChunks ?? defaults.batchChunks;
   const maxCaptureBytes = limits.maxCaptureBytes ?? defaults.maxCaptureBytes;
+  const checkpointCoordinator = new PtyCheckpointCoordinator(generation, {
+    cols: checkpointOptions.cols ?? 120,
+    rows: checkpointOptions.rows ?? 36,
+    storyId: checkpointOptions.storyId,
+    checkpointTriggerBytes: checkpointOptions.checkpointTriggerBytes ?? Math.min(maxCaptureBytes, 8 * 1024 * 1024),
+    scrollback: checkpointOptions.scrollback,
+    maxCheckpointBytes: checkpointOptions.maxCheckpointBytes,
+  });
   const pending: Buffer[] = [];
   let pendingBytes = 0;
   let pendingDroppedBytes = 0;
@@ -454,11 +483,14 @@ export function createRunPtyOutputBatcher(
       const droppedBytes = pendingDroppedBytes;
       pendingDroppedBytes = 0;
       try {
-        await appendRunPtyOutputBatch(generation, batch, sequenceRef, { maxCaptureBytes, droppedBytes });
+        const committed = await appendRunPtyOutputBatch(generation, batch, sequenceRef, { maxCaptureBytes, droppedBytes });
+        checkpointCoordinator.accept(committed.chunks, committed.retainedBytes, committed.retentionExceeded);
       } catch (err) {
         // Do not put failed raw buffers back into the queue: doing so defeats
         // the memory bound. Persist their loss on a later successful batch.
-        pendingDroppedBytes += droppedBytes + batch.reduce((total, buffer) => total + buffer.length, 0);
+        const lostBytes = droppedBytes + batch.reduce((total, buffer) => total + buffer.length, 0);
+        pendingDroppedBytes += lostBytes;
+        checkpointCoordinator.noteCaptureLoss(lostBytes, 'database_latency');
         retryRequired = true;
         logger.warn({ err, runId: generation.runId, generationId: generation.generationId, pendingBytes, pendingDroppedBytes }, '[run-pty-store] PTY output batch persistence failed; capture will retry as truncation metadata');
         return;
@@ -476,20 +508,43 @@ export function createRunPtyOutputBatcher(
   return {
     enqueue(data: Buffer): void {
       if (data.length === 0) return;
-      const available = Math.max(0, maxPendingBytes - pendingBytes);
-      const accepted = Math.min(data.length, available);
-      if (accepted > 0) {
-        pending.push(Buffer.from(data.subarray(0, accepted)));
-        pendingBytes += accepted;
+      // Queue pressure is rolling-newest, never prefix-only. Evict the oldest
+      // not-yet-persisted bytes so a slow PostgreSQL transaction cannot put the
+      // live process into a permanent drop-all-new-output state.
+      let overflowBytes = Math.max(0, pendingBytes + data.length - maxPendingBytes);
+      const bytesToEvict = overflowBytes;
+      while (overflowBytes > 0 && pending.length > 0) {
+        const oldest = pending[0];
+        const drop = Math.min(oldest.length, overflowBytes);
+        pendingBytes -= drop;
+        overflowBytes -= drop;
+        if (drop === oldest.length) pending.shift();
+        else pending[0] = oldest.subarray(drop);
       }
-      pendingDroppedBytes += data.length - accepted;
+      const keepBytes = Math.min(data.length, maxPendingBytes);
+      if (keepBytes > 0) {
+        pending.push(Buffer.from(data.subarray(data.length - keepBytes)));
+        pendingBytes += keepBytes;
+      }
+      pendingDroppedBytes += bytesToEvict;
+      if (bytesToEvict > 0) checkpointCoordinator.noteCaptureLoss(bytesToEvict, 'queue_overflow');
       schedulePump();
     },
+    resize(cols: number, rows: number): void {
+      checkpointCoordinator.resize(cols, rows);
+    },
     async drain(): Promise<void> {
-      do {
+      let retries = 0;
+      while (pending.length > 0 || pendingDroppedBytes > 0) {
         schedulePump();
         await pumping;
-      } while (!retryRequired && (pending.length > 0 || pendingDroppedBytes > 0));
+        if (!retryRequired) continue;
+        retries += 1;
+        if (retries >= 3) break;
+        await new Promise<void>(resolve => setTimeout(resolve, retries * 25));
+      }
+      await checkpointCoordinator.flush();
+      checkpointCoordinator.dispose();
     },
     getPendingBytes(): number {
       return pendingBytes;
@@ -826,7 +881,8 @@ export async function getRunPtySessionHealth(runId: number, generationToken?: st
     `SELECT id, generation_token, run_id, story_id, attempt, status, is_active, source, replay_source,
             workspace_id, cwd, agent_type, child_pid, cols, rows, next_output_sequence,
             total_stored_bytes, pending_input_bytes, last_input_request_id,
-            last_resize_request_id, checkpoint_sequence, checkpoint_at,
+            last_resize_request_id, checkpoint_sequence, first_retained_sequence,
+            retained_output_bytes, compacted_byte_count, checkpoint_at,
             checkpoint_reference, archive_reference, archive_checksum, archived_at,
             started_at, superseded_at, exited_at, exit_code, exit_signal,
             last_output_at, last_heartbeat_at, completion_marker,
@@ -842,7 +898,14 @@ export async function getRunPtySessionHealth(runId: number, generationToken?: st
 }
 
 export async function initializeRunPtySequence(generation: PtyGenerationRef): Promise<{ value: number }> {
-  return { value: (await getRunPtySequence(generation)) + 1 };
+  const row = await queryOne<{ next_output_sequence: number | string }>(
+    `SELECT next_output_sequence FROM pty_generations
+     WHERE run_id = $1 AND id = $2 AND generation_token = $3`,
+    [generation.runId, generation.generationId, generation.generationToken],
+  );
+  // The generation counter survives complete delta eviction; MAX(chunk.sequence)
+  // does not. This preserves monotonic logical sequencing after restart.
+  return { value: Number(row?.next_output_sequence ?? 1) || 1 };
 }
 
 export async function pruneExpiredRunPtyCaptures(retentionDays = getRunPtyRetentionDays()): Promise<number> {

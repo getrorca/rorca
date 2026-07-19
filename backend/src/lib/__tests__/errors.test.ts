@@ -13,6 +13,8 @@ import {
   NotFoundError,
   ConflictError,
   UnprocessableError,
+  CheckpointCorruptionError,
+  RetentionBudgetExhaustedError,
 } from '../errors';
 import { errorHandler } from '../error-handler';
 import type { Request, Response, NextFunction } from 'express';
@@ -77,6 +79,20 @@ describe('Error classes', () => {
     expect(err.statusCode).toBe(422);
     expect(err.code).toBe('UNPROCESSABLE');
     expect(err.details).toEqual({ hookCommand: 'lint', exitCode: 1 });
+  });
+
+  test('PTY checkpoint errors preserve integrity and retention failure codes', () => {
+    const corruption = new CheckpointCorruptionError('checksum mismatch', { checkpointId: 'cp-1' });
+    expect(corruption).toBeInstanceOf(AppError);
+    expect(corruption.statusCode).toBe(422);
+    expect(corruption.code).toBe('CHECKPOINT_CORRUPTION');
+    expect(corruption.details).toEqual({ checkpointId: 'cp-1' });
+
+    const exhausted = new RetentionBudgetExhaustedError(undefined, { maxBytes: 1024 });
+    expect(exhausted).toBeInstanceOf(AppError);
+    expect(exhausted.statusCode).toBe(507);
+    expect(exhausted.code).toBe('RETENTION_BUDGET_EXHAUSTED');
+    expect(exhausted.details).toEqual({ maxBytes: 1024 });
   });
 
   test('toJSON produces standard { error, code?, details? } shape', () => {

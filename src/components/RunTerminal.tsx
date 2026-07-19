@@ -703,6 +703,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const esRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamKeyRef = useRef<string | null>(null);
+  const recoverTerminalOnNextConnectRef = useRef(true);
   const lastReceivedSequenceRef = useRef(0);
   const outputReplaySourceRef = useRef<OutputReplaySource | null>(null);
   const ptyGenerationIdRef = useRef<string | null>(null);
@@ -1142,6 +1143,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const isNewTerminal = streamKeyRef.current !== streamKey;
     if (isNewTerminal) {
       streamKeyRef.current = streamKey;
+      recoverTerminalOnNextConnectRef.current = true;
       pendingTextRef.current = '';
       accumulatedHtmlRef.current = '';
       seenStoryIdsRef.current = new Set();
@@ -1189,6 +1191,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setSseState(reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
     const outputParams = new URLSearchParams();
     if (workspaceId) outputParams.set('workspaceId', workspaceId);
+    if (recoverTerminalOnNextConnectRef.current && isPtyTerminalMode(rendererMode)) {
+      // A browser refresh creates an empty xterm even when sessionStorage has a
+      // durable cursor. Ask for checkpoint-plus-delta reconstruction instead of
+      // silently resuming into a blank terminal.
+      outputParams.set('recoverTerminal', 'true');
+    }
     if (lastReceivedSequenceRef.current > 0) {
       outputParams.set('afterSequence', String(lastReceivedSequenceRef.current));
       if (outputReplaySourceRef.current) outputParams.set('outputSource', outputReplaySourceRef.current);
@@ -1196,6 +1204,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     }
     const outputUrl = `${BASE_URL}/api/pipeline/runs/${runId}/output${outputParams.toString() ? '?' + outputParams : ''}`;
     const es = new EventSource(outputUrl);
+    recoverTerminalOnNextConnectRef.current = false;
     esRef.current = es;
     let disposed = false;
     let receivedDone = false;
@@ -1402,8 +1411,33 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       } catch { /* ignore malformed replay metadata */ }
     });
 
-    es.addEventListener('chunk', (e: MessageEvent) => {
-      markSseEvent();
+    type CheckpointReadyPayload = {
+      checkpoint_id?: unknown;
+      checkpoint_seq?: unknown;
+      first_retained_seq?: unknown;
+      generation_id?: unknown;
+    };
+    type CheckpointResponse = {
+      checkpointId: string;
+      generationId: string;
+      checkpointSeq: number;
+      firstRetainedSeq: number;
+      compactedByteCount: number;
+      version: number;
+      checksum: string;
+      terminalCols: number;
+      terminalRows: number;
+      dataBase64: string;
+    };
+    let checkpointRecovery: {
+      checkpointId: string;
+      generationId: string;
+      checkpointSequence: number;
+      queued: MessageEvent[];
+    } | null = null;
+    let lastAppliedCheckpointSequence = 0;
+
+    const processChunkEvent = (e: MessageEvent) => {
       const sequence = readChunkSequence(e);
       if (sequence !== null && sequence <= lastReceivedSequenceRef.current) return;
       try {
@@ -1426,40 +1460,107 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         }
 
         const text = ansiDisplayDecoderRef.current.decode(bytes, { stream: true });
-
-        // Split into lines for semantic parsing and stream-json formatting.
         lineBufferRef.current += text;
         const parts = lineBufferRef.current.split('\n');
         lineBufferRef.current = parts.pop() ?? '';
-
         const displayLines: string[] = [];
         const newSteps: SemanticStep[] = [];
-
         for (const part of parts) {
           const step = parseVerboseLine(part);
           if (step) newSteps.push(step);
-
           if (!isPtyChunk) {
             const formatted = formatStreamJsonForDisplay(part);
-            if (formatted !== null) {
-              displayLines.push(formatted);
-            }
+            if (formatted !== null) displayLines.push(formatted);
           }
         }
-
         if (!isPtyChunk && displayLines.length > 0) {
           const displayText = displayLines.join('\n') + '\n';
           if (pendingTextRef.current.length + displayText.length > MAX_PENDING_ANSI_CHARS) flushBuffer();
           pendingTextRef.current += displayText;
           scheduleFlush();
         }
-
         if (newSteps.length > 0) {
           setLastSemanticAt(Date.now());
           setSteps(prev => mergeSemanticSteps(prev, newSteps));
         }
         commitChunkSequence(e);
       } catch { /* ignore malformed chunk */ }
+    };
+
+    es.addEventListener('checkpoint_ready', (e: MessageEvent) => {
+      markSseEvent();
+      try {
+        const payload = JSON.parse(e.data) as CheckpointReadyPayload;
+        const checkpointId = typeof payload.checkpoint_id === 'string' ? payload.checkpoint_id : '';
+        const generationId = typeof payload.generation_id === 'string' ? payload.generation_id : '';
+        const checkpointSequence = Number(payload.checkpoint_seq);
+        if (!checkpointId || !generationId || !Number.isSafeInteger(checkpointSequence) || checkpointSequence <= lastAppliedCheckpointSequence) return;
+        const recovery = { checkpointId, generationId, checkpointSequence, queued: [] as MessageEvent[] };
+        checkpointRecovery = recovery;
+        void apiFetch<CheckpointResponse>(`/api/pipeline/runs/${runId}/pty/checkpoints/${checkpointId}`, { silent: true })
+          .then(checkpoint => {
+            if (disposed || checkpointRecovery !== recovery) return;
+            if (checkpoint.checkpointId !== checkpointId
+              || checkpoint.generationId !== generationId
+              || checkpoint.checkpointSeq !== checkpointSequence
+              || checkpoint.version !== 1) {
+              throw new Error('PTY checkpoint response identity mismatch');
+            }
+            const terminal = xtermRef.current;
+            if (!terminal) throw new Error('PTY terminal is unavailable');
+            const serializedState = decodeBase64Chunk(checkpoint.dataBase64);
+            // The backend has already verified checksum/decompression. Reset only
+            // after that successful response; corruption can never erase the
+            // currently visible terminal.
+            terminal.reset();
+            pendingPtyChunksRef.current = [];
+            pendingPtyBytesRef.current = 0;
+            seenChunkIdsRef.current.clear();
+            ptyDisplayScrubberRef.current = createPtyDisplayScrubberState();
+            ptyDisplayDecoderRef.current = new TextDecoder();
+            ansiDisplayDecoderRef.current = new TextDecoder();
+            if (typeof terminal.resize === 'function') {
+              terminal.resize(checkpoint.terminalCols, checkpoint.terminalRows);
+            }
+            terminal.write(serializedState as Parameters<Terminal['write']>[0], () => {
+              // Deserialize at the checkpoint's recorded dimensions, then fit
+              // the recovered screen to the currently attached viewport.
+              fitAddonRef.current?.fit();
+            });
+            lastAppliedCheckpointSequence = checkpointSequence;
+            lastReceivedSequenceRef.current = checkpointSequence;
+            persistReceivedSequence(runId, checkpointSequence);
+            setReplayTruncatedFrom(null);
+            checkpointRecovery = null;
+            for (const queued of recovery.queued) processChunkEvent(queued);
+          })
+          .catch(() => {
+            if (checkpointRecovery !== recovery) return;
+            checkpointRecovery = null;
+            const firstRetained = Number(payload.first_retained_seq);
+            if (Number.isSafeInteger(firstRetained) && firstRetained > 1) setReplayTruncatedFrom(firstRetained);
+            // Keep the existing terminal intact and admit newer deltas. The next
+            // valid checkpoint event can recover it without blocking live output.
+            for (const queued of recovery.queued) processChunkEvent(queued);
+          });
+      } catch { /* ignore malformed checkpoint signal */ }
+    });
+
+    es.addEventListener('chunk', (e: MessageEvent) => {
+      markSseEvent();
+      const sequence = readChunkSequence(e);
+      const recovery = checkpointRecovery;
+      if (recovery && sequence !== null) {
+        if (sequence <= recovery.checkpointSequence) return;
+        const queuedBytes = recovery.queued.reduce((sum, item) => sum + item.data.length, 0);
+        if (queuedBytes + e.data.length > MAX_PENDING_PTY_BYTES * 2) {
+          scheduleReconnect();
+          return;
+        }
+        recovery.queued.push(e);
+        return;
+      }
+      processChunkEvent(e);
     });
 
     // Also accept structured semantic_step events from backend if available

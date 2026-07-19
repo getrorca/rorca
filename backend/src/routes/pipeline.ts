@@ -15,7 +15,7 @@ import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { validateBody } from '../lib/validate';
-import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
+import { broadcastAll, broadcastTopic, attachSSE, attachTopicSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
 import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
@@ -86,6 +86,11 @@ import {
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
+import {
+  getLatestValidRunPtyCheckpoint,
+  getValidRunPtyCheckpointById,
+  runPtyCheckpointTopic,
+} from '../lib/pty-checkpoint-store';
 import { sweepOrphanProcesses } from '../worker';
 import { safelyRefreshReusableWorktree, validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 import { PipelineRetryJobPayload } from '../lib/pg-boss-schemas';
@@ -399,6 +404,14 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_prompt_injected_at: health.prompt_injected_at,
     ptyTotalOutputBytes: totalOutputBytes,
     pty_total_output_bytes: totalOutputBytes,
+    ptyCheckpointSequence: Number(health.checkpoint_sequence ?? 0),
+    pty_checkpoint_sequence: Number(health.checkpoint_sequence ?? 0),
+    ptyFirstRetainedSequence: Number(health.first_retained_sequence ?? 1),
+    pty_first_retained_sequence: Number(health.first_retained_sequence ?? 1),
+    ptyRetainedOutputBytes: Number(health.retained_output_bytes ?? 0),
+    pty_retained_output_bytes: Number(health.retained_output_bytes ?? 0),
+    ptyCompactedByteCount: Number(health.compacted_byte_count ?? 0),
+    pty_compacted_byte_count: Number(health.compacted_byte_count ?? 0),
     ptyDroppedOutputBytes: Number(health.dropped_output_bytes ?? 0),
     pty_dropped_output_bytes: Number(health.dropped_output_bytes ?? 0),
     ptyOutputTruncated: Boolean(health.output_truncated_at),
@@ -6886,6 +6899,63 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Fetch a validated PTY terminal-state checkpoint
+ *     operationId: getPipelinePtyCheckpoint
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only, checksummed terminal recovery state for local run reattachment."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: checkpointId
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Validated terminal checkpoint with base64 serialized xterm state }
+ *       404: { description: Run or checkpoint not found }
+ *       422: { description: Checkpoint failed checksum, version, or compression validation }
+ */
+router.get('/runs/:runId/pty/checkpoints/:checkpointId', async (req: Request, res: Response) => {
+  const runId = Number(req.params.runId);
+  const checkpointId = String(req.params.checkpointId);
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(checkpointId)) {
+    throw new ValidationError('checkpointId must be a UUID');
+  }
+  const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]);
+  if (!run) throw new NotFoundError('Run not found');
+  await assertPipelineWorkspaceAccess(req, run.workspace_id);
+  const generation = await getRunPtyGeneration(runId);
+  if (!generation) throw new NotFoundError('PTY generation not found');
+  const checkpoint = await getValidRunPtyCheckpointById({
+    runId,
+    generationId: generation.generationId,
+    generationToken: generation.generationToken,
+    storyId: generation.storyId,
+  }, checkpointId);
+  res.json({
+    checkpointId: checkpoint.id,
+    generationId: checkpoint.generationId,
+    checkpointSeq: checkpoint.checkpointSequence,
+    firstRetainedSeq: checkpoint.firstRetainedSequence,
+    compactedByteCount: checkpoint.compactedByteCount,
+    version: checkpoint.version,
+    checksum: checkpoint.checksum,
+    terminalCols: checkpoint.terminalCols,
+    terminalRows: checkpoint.terminalRows,
+    dataBase64: checkpoint.serializedState.toString('base64'),
+    createdAt: checkpoint.createdAt,
+  });
+});
+
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
 // Streams raw stdout/stderr (with ANSI codes) to the active terminal renderer.
 // ANSI/HTML runs replay from run_output_chunks; PTY runs replay from run_pty_output_chunks.
@@ -6922,6 +6992,11 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *         required: false
  *         schema: { type: string, format: uuid }
  *         description: Generation identity paired with afterSequence; mismatch resets the cursor to the always-current generation.
+ *       - in: query
+ *         name: recoverTerminal
+ *         required: false
+ *         schema: { type: boolean }
+ *         description: Request checkpoint-plus-delta reconstruction for a newly created terminal, even when a persisted sequence cursor exists.
  *       - in: query
  *         name: generationToken
  *         required: false
@@ -6981,6 +7056,11 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   };
   const requestedGenerationToken = parseOptionalUuidQuery('generationToken');
   const cursorGenerationId = parseOptionalUuidQuery('outputGenerationId');
+  const recoverTerminalValue = req.query.recoverTerminal;
+  if (Array.isArray(recoverTerminalValue) || (recoverTerminalValue !== undefined && recoverTerminalValue !== 'true' && recoverTerminalValue !== 'false')) {
+    throw new ValidationError('recoverTerminal must be true or false');
+  }
+  const recoverTerminal = recoverTerminalValue === 'true';
   const lastEventId = req.get('Last-Event-ID');
   const resumeSource = afterSequence !== null ? 'afterSequence' : lastEventId !== undefined ? 'Last-Event-ID' : null;
   let hasResumeCursor = resumeSource !== null;
@@ -7009,6 +7089,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
   let unsubscribeOutputWakeup: (() => void) | null = null;
+  let unsubscribeCheckpointEvents: (() => void) | null = null;
   const cleanupOutputStream = () => {
     if (streamClosed) return;
     streamClosed = true;
@@ -7019,6 +7100,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     }
     unsubscribeOutputWakeup?.();
     unsubscribeOutputWakeup = null;
+    unsubscribeCheckpointEvents?.();
+    unsubscribeCheckpointEvents = null;
   };
   req.on('close', cleanupOutputStream);
 
@@ -7105,6 +7188,35 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     ...(ptyHealthPayloadAtOpen ?? {}),
   })}\n\n`);
   writePtyHealthEvent(res, ptyHealthPayloadAtOpen);
+
+  // Checkpoint events are always routed through the shared SSE hub. The route
+  // publishes the newest durable row for initial recovery and polling also
+  // republishes newly observed rows, covering worker/server process separation.
+  unsubscribeCheckpointEvents = attachTopicSSE(runPtyCheckpointTopic(runId), res, 'checkpoint_ready');
+  let latestCheckpointSequenceEmitted = 0;
+  if (usePtyCapture && selectedPtyGeneration) {
+    const checkpointGeneration = {
+      runId,
+      generationId: selectedPtyGeneration.generationId,
+      generationToken: selectedPtyGeneration.generationToken,
+      storyId: selectedPtyGeneration.storyId,
+    };
+    const checkpoint = await getLatestValidRunPtyCheckpoint(checkpointGeneration);
+    const needsCheckpoint = checkpoint && (recoverTerminal || !hasResumeCursor || lastSequence < checkpoint.firstRetainedSequence);
+    if (checkpoint && needsCheckpoint) {
+      latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+      lastSequence = checkpoint.checkpointSequence;
+      hasResumeCursor = true;
+      broadcastTopic(runPtyCheckpointTopic(runId), {
+        run_id: runId,
+        story_id: checkpoint.storyId,
+        generation_id: checkpoint.generationId,
+        checkpoint_id: checkpoint.id,
+        checkpoint_seq: checkpoint.checkpointSequence,
+        first_retained_seq: checkpoint.firstRetainedSequence,
+      });
+    }
+  }
 
   // ── Replay existing chunks (late-join/reconnect support) ──────────────────
   // EventSource sends Last-Event-ID automatically after a disconnect. The
@@ -7209,6 +7321,26 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
               cursor_reset: true,
               ...(generationHealth ?? {}),
             })}\n\n`);
+          }
+        }
+        if (selectedPtyGeneration) {
+          const checkpoint = await getLatestValidRunPtyCheckpoint({
+            runId,
+            generationId: selectedPtyGeneration.generationId,
+            generationToken: selectedPtyGeneration.generationToken,
+            storyId: selectedPtyGeneration.storyId,
+          });
+          if (checkpoint && checkpoint.checkpointSequence > latestCheckpointSequenceEmitted) {
+            latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+            lastSequence = Math.max(lastSequence, checkpoint.checkpointSequence);
+            broadcastTopic(runPtyCheckpointTopic(runId), {
+              run_id: runId,
+              story_id: checkpoint.storyId,
+              generation_id: checkpoint.generationId,
+              checkpoint_id: checkpoint.id,
+              checkpoint_seq: checkpoint.checkpointSequence,
+              first_retained_seq: checkpoint.firstRetainedSequence,
+            });
           }
         }
         const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS, selectedPtyGeneration);

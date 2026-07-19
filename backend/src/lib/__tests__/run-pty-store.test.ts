@@ -203,6 +203,12 @@ describe('run-pty-store generations', () => {
     writer.enqueue(Buffer.from('keep'));
     writer.enqueue(Buffer.from('drop'));
     await writer.drain();
+    const rollingReplay = await listRunPtyChunks(runId, 0, 10, first);
+    expect(Buffer.concat(rollingReplay.map(row => row.chunk)).toString()).toBe('drop');
+    const firstHealth = await getRunPtySessionHealth(runId, first.generationToken);
+    expect(Number(firstHealth?.dropped_output_bytes)).toBe(4);
+    expect(Number(firstHealth?.checkpoint_sequence)).toBeGreaterThan(0);
+    expect(Number(firstHealth?.retained_output_bytes)).toBeLessThanOrEqual(4);
     await markRunPtyCompletionMarkerSeen(firstRef, '__DONE__');
     await recordRunPtyHeartbeat(firstRef);
 

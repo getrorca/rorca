@@ -2406,7 +2406,11 @@ async function spawnAgentViaPty(
         generationToken: generation.generationToken,
       };
       sequenceRef = await initializeRunPtySequence(generationRef);
-      outputBatcher = createRunPtyOutputBatcher(generationRef, sequenceRef);
+      outputBatcher = createRunPtyOutputBatcher(generationRef, sequenceRef, {}, {
+        storyId: ptyOptions.storyId,
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+      });
       completionState = createPtyCompletionState(completionMarker);
       readinessState = createPtyReadinessState(ptyOptions.agentType);
       adapter = buildInteractivePtyAgentAdapter(
@@ -2484,6 +2488,7 @@ async function spawnAgentViaPty(
             const resize = await claimLatestRunPtyResize(generationRef);
             if (resize) {
               pty.resize(resize.cols, resize.rows);
+              outputBatcher?.resize(resize.cols, resize.rows);
             }
           } catch (err: unknown) {
             logRunPtyStoreError('Failed to apply PTY resize request', ptyOptions.runId, err);

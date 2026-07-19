@@ -29,6 +29,8 @@
     "@types/helmet": "^0.0.48",
     "@types/multer": "^2.0.0",
     "@types/ws": "^8.18.1",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "chokidar": "^5.0.0",
     "chrome-devtools-mcp": "^1.6.0",
     "commander": "^12.1.0",

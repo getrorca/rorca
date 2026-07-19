@@ -22,6 +22,7 @@ const xtermMockState = vi.hoisted(() => ({
     writeln: ReturnType<typeof vi.fn>;
     clear: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
+    resize: ReturnType<typeof vi.fn>;
     focus: ReturnType<typeof vi.fn>;
     dispose: ReturnType<typeof vi.fn>;
     onData: ReturnType<typeof vi.fn>;
@@ -40,6 +41,10 @@ vi.mock('@xterm/xterm', () => ({
     writeln = vi.fn();
     clear = vi.fn();
     reset = vi.fn();
+    resize = vi.fn((cols: number, rows: number) => {
+      this.cols = cols;
+      this.rows = rows;
+    });
     focus = vi.fn();
     dispose = vi.fn();
     private dataListener: ((data: string) => void) | null = null;
@@ -398,6 +403,63 @@ describe('RunTerminal PTY fallback UI', () => {
     expect(lastEventSource!.url).toContain('afterSequence=17');
     expect(lastEventSource!.url).toContain('outputSource=run_pty_output_chunks');
     expect(lastEventSource!.url).toContain(`outputGenerationId=${PTY_GENERATION_ID}`);
+  });
+
+  it('applies a validated checkpoint before queued deltas on a fresh terminal', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      checkpointId: '55555555-5555-4555-8555-555555555555',
+      generationId: PTY_GENERATION_ID,
+      checkpointSeq: 40,
+      firstRetainedSeq: 41,
+      compactedByteCount: 262_144_000,
+      version: 1,
+      checksum: 'a'.repeat(64),
+      terminalCols: 100,
+      terminalRows: 30,
+      dataBase64: Buffer.from('serialized terminal state', 'utf8').toString('base64'),
+    } as never);
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    const terminal = xtermMockState.instances[0];
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        outputSource: 'run_pty_output_chunks', ptyGenerationId: PTY_GENERATION_ID,
+      }));
+      lastEventSource!.emit('checkpoint_ready', JSON.stringify({
+        checkpoint_id: '55555555-5555-4555-8555-555555555555',
+        checkpoint_seq: 40,
+        first_retained_seq: 41,
+        generation_id: PTY_GENERATION_ID,
+      }));
+      // This arrives while checkpoint fetch is unresolved and must chain after it.
+      lastEventSource!.emit('chunk', Buffer.from('new delta').toString('base64'), '41');
+    });
+
+    await waitFor(() => expect(terminal.reset).toHaveBeenCalledTimes(1));
+    expect(terminal.resize).toHaveBeenCalledWith(100, 30);
+    expect(new TextDecoder().decode(terminal.write.mock.calls[0][0] as Uint8Array)).toBe('serialized terminal state');
+    expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('41');
+    expect(lastEventSource!.url).toContain('recoverTerminal=true');
+  });
+
+  it('does not reset the visible terminal when checkpoint validation fetch fails', async () => {
+    vi.mocked(apiFetch).mockRejectedValueOnce(new Error('checksum mismatch'));
+    renderTerminal('pty');
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    const terminal = xtermMockState.instances[0];
+    act(() => {
+      lastEventSource!.emit('checkpoint_ready', JSON.stringify({
+        checkpoint_id: '55555555-5555-4555-8555-555555555555',
+        checkpoint_seq: 40,
+        first_retained_seq: 41,
+        generation_id: PTY_GENERATION_ID,
+      }));
+      lastEventSource!.emit('chunk', Buffer.from('newest survives').toString('base64'), '41');
+    });
+    await waitFor(() => expect(sessionStorage.getItem('rorca:terminal-output-sequence:77')).toBe('41'));
+    expect(terminal.reset).not.toHaveBeenCalled();
   });
 
   it('reconnects with afterSequence after an SSE failure instead of replaying the fresh tail', async () => {
