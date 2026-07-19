@@ -84,7 +84,7 @@ describe('GitHub authority × parallel-wave reconciliation collisions', () => {
     expect(parallel).toContain('evidenceFailureIds');
   });
 
-  test('public done follows durable closeout while local runner exit remains non-terminal', () => {
+  test('public done follows durable closeout while retired local-user transport terminates failed', () => {
     const reconcile = RELEASE.slice(RELEASE.indexOf('export async function reconcileRunReleaseIntent('));
     const closeout = reconcile.indexOf("VALUES ('run_closeout'");
     const terminal = reconcile.indexOf('terminal = await persistTerminalIntent(row)', closeout);
@@ -100,8 +100,9 @@ describe('GitHub authority × parallel-wave reconciliation collisions', () => {
       RUNNER_JOBS.indexOf('export async function completeRunnerJob('),
       RUNNER_JOBS.indexOf('export async function cancelRunnerJobForRun('),
     );
-    expect(completion).toContain("? 'release_pending'");
-    expect(completion).toContain('local_runner_host_closeout_required');
+    expect(completion).toContain("input.status === 'cancelled' ? 'cancelled' : 'failed'");
+    expect(completion).toContain('local_user_execution_unavailable');
+    expect(completion).not.toContain("? 'release_pending'");
     expect(completion).not.toContain("? 'done'");
   });
 

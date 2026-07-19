@@ -5,17 +5,24 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { useState, useEffect, useCallback, useDeferredValue } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue, useRef } from 'react';
 import {
   Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
-  Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
-  RefreshCw, GitPullRequest, Users, X, Plus, Zap, KeyRound,
-  RadioTower, GitBranch, Lock, Copy,
+  Webhook, FileText, RotateCcw, Shield, ExternalLink,
+  RefreshCw, KeyRound, RadioTower, Lock, Copy,
 } from 'lucide-react';
 import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
-import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
+import {
+  apiFetch,
+  apiFetchProviderMutation,
+  clearOperatorCapability,
+  hasOperatorCapability,
+  onOperatorCapabilityLocked,
+  setOperatorCapability,
+  BASE_URL,
+} from '../lib/apiFetch';
 import AutonomousDeliverySettings from '../components/AutonomousDeliverySettings';
 
 // ─── PR Template (duplicated from backend/src/lib/github/pr-template.ts) ──────
@@ -64,7 +71,7 @@ const DEFAULT_PR_TEMPLATE = `## Summary
 
 const SAMPLE_DATA: Record<string, string> = {
   'spec.title': 'rorca-go-to-market-v1',
-  'spec.brief': 'Add GitHub integration with auto-PR creation and PR description templates.',
+  'spec.brief': 'Add repository-scoped GitHub integration and immutable per-run PR release templates.',
   'run.id': '42',
   'run.storiesPassed': '8',
   'run.storiesTotal': '10',
@@ -105,11 +112,6 @@ interface GithubStatus {
   signedDeliveryObserved?: boolean;
   lastWebhookAt?: string | null;
   connectedAt?: string | null;
-  autoPr?: {
-    enabled: boolean;
-    targetBranch: string;
-    reviewers: string[];
-  };
 }
 
 interface GithubAccount {
@@ -151,15 +153,6 @@ interface GithubAppSetupResult {
   nextAction: string;
 }
 
-interface GithubWorkflow {
-  id: number;
-  name: string;
-  path: string;
-  state: string;
-  htmlUrl?: string;
-  badgeUrl?: string;
-}
-
 interface PrTemplatePreviewResult {
   rendered: string;
   source: 'latest-run' | 'sample';
@@ -183,7 +176,6 @@ interface TestResult {
 const REQUIRED_CAPABILITIES = [
   { key: 'repo', label: 'Repository access', scopes: ['repo'] },
   { key: 'admin:repo_hook', label: 'Webhook management', scopes: ['admin:repo_hook', 'write:repo_hook'] },
-  { key: 'workflow', label: 'Workflow dispatch', scopes: ['workflow'] },
 ];
 
 const PR_TEMPLATE_VARIABLES = [
@@ -254,6 +246,45 @@ function LockedPanel({ title, message }: { title: string; message: string }) {
 export default function GitHubSettingsPanel() {
   const { workspaceId } = useWorkspace();
   const { show: showToast } = useGlobalToast();
+  const capabilityInputRef = useRef<HTMLInputElement>(null);
+  const [providerChangesUnlocked, setProviderChangesUnlocked] = useState(false);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // A provider capability is scoped to this visible Settings visit only.
+    clearOperatorCapability();
+    setProviderChangesUnlocked(false);
+    const lockForNavigation = () => clearOperatorCapability();
+    const unsubscribe = onOperatorCapabilityLocked(() => setProviderChangesUnlocked(false));
+    window.addEventListener('hashchange', lockForNavigation);
+    window.addEventListener('pagehide', lockForNavigation);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('hashchange', lockForNavigation);
+      window.removeEventListener('pagehide', lockForNavigation);
+      clearOperatorCapability();
+    };
+  }, [workspaceId]);
+
+  function handleUnlockProviderChanges() {
+    const capability = capabilityInputRef.current?.value ?? '';
+    try {
+      setOperatorCapability(capability);
+      if (capabilityInputRef.current) capabilityInputRef.current.value = '';
+      setProviderChangesUnlocked(hasOperatorCapability());
+      setCapabilityError(null);
+    } catch (error) {
+      setProviderChangesUnlocked(false);
+      setCapabilityError(error instanceof Error ? error.message : 'Enter a valid operator capability');
+    }
+  }
+
+  function handleLockProviderChanges() {
+    clearOperatorCapability();
+    if (capabilityInputRef.current) capabilityInputRef.current.value = '';
+    setProviderChangesUnlocked(false);
+    setCapabilityError(null);
+  }
 
   // Workspace repo connection
   const [status, setStatus] = useState<GithubStatus | null>(null);
@@ -308,14 +339,6 @@ export default function GitHubSettingsPanel() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
 
-  // Auto-PR
-  const [autoPrEnabled, setAutoPrEnabled] = useState(false);
-  const [autoPrBranch, setAutoPrBranch] = useState('main');
-  const [autoPrReviewers, setAutoPrReviewers] = useState<string[]>([]);
-  const [newReviewer, setNewReviewer] = useState('');
-  const [savingAutoPr, setSavingAutoPr] = useState(false);
-  const [savedAutoPr, setSavedAutoPr] = useState(false);
-
   // PR template
   const [prTemplate, setPrTemplate] = useState('');
   const [prTemplateSaving, setPrTemplateSaving] = useState(false);
@@ -328,19 +351,6 @@ export default function GitHubSettingsPanel() {
   // Deferred so the preview update doesn't block keystrokes
   const deferredPrTemplate = useDeferredValue(prTemplate);
   const previewText = prTemplatePreview?.rendered ?? renderPreview(deferredPrTemplate);
-
-  // Workflow dispatch config (US-026)
-  const [workflowEnabled, setWorkflowEnabled] = useState(false);
-  const [workflowId, setWorkflowId] = useState('');
-  const [workflowRef, setWorkflowRef] = useState('main');
-  const [workflowInputsRaw, setWorkflowInputsRaw] = useState('{}');
-  const [workflowConfigLoaded, setWorkflowConfigLoaded] = useState(false);
-  const [savingWorkflow, setSavingWorkflow] = useState(false);
-  const [savedWorkflow, setSavedWorkflow] = useState(false);
-  const [workflowInputsError, setWorkflowInputsError] = useState<string | null>(null);
-  const [workflows, setWorkflows] = useState<GithubWorkflow[]>([]);
-  const [workflowsLoading, setWorkflowsLoading] = useState(false);
-  const [workflowsError, setWorkflowsError] = useState<string | null>(null);
 
   // Webhook health
   const [pingingWebhook, setPingingWebhook] = useState(false);
@@ -355,11 +365,6 @@ export default function GitHubSettingsPanel() {
     try {
       const data = await apiFetch<GithubStatus>(`/api/workspaces/${workspaceId}/github`);
       setStatus(data);
-      if (data.autoPr) {
-        setAutoPrEnabled(data.autoPr.enabled);
-        setAutoPrBranch(data.autoPr.targetBranch);
-        setAutoPrReviewers(data.autoPr.reviewers);
-      }
     } catch {
       setStatus({ connected: false });
     } finally {
@@ -409,47 +414,6 @@ export default function GitHubSettingsPanel() {
       .catch(() => { setPrTemplateLoaded(true); });
   }, [workspaceId, prTemplateLoaded]);
 
-  // ─── Fetch workflow config (US-026) ──────────────────────────────────────
-
-  useEffect(() => {
-    if (!workspaceId || workflowConfigLoaded) return;
-    apiFetch<{ workflowConfig: { enabled?: boolean; workflow_id?: string; ref?: string; inputs?: Record<string, string> } | null }>(
-      `/api/workspaces/${workspaceId}/github/workflow-config`
-    )
-      .then(data => {
-        const cfg = data.workflowConfig;
-        if (cfg) {
-          setWorkflowEnabled(cfg.enabled ?? false);
-          setWorkflowId(cfg.workflow_id ?? '');
-          setWorkflowRef(cfg.ref ?? 'main');
-          setWorkflowInputsRaw(cfg.inputs && Object.keys(cfg.inputs).length > 0
-            ? JSON.stringify(cfg.inputs, null, 2)
-            : '{}');
-        }
-        setWorkflowConfigLoaded(true);
-      })
-      .catch(() => { setWorkflowConfigLoaded(true); });
-  }, [workspaceId, workflowConfigLoaded]);
-
-  const fetchWorkflows = useCallback(async () => {
-    if (!workspaceId || !status?.connected) return;
-    setWorkflowsLoading(true);
-    setWorkflowsError(null);
-    try {
-      const data = await apiFetch<{ workflows: GithubWorkflow[] }>(`/api/workspaces/${workspaceId}/github/workflows`);
-      setWorkflows(data.workflows || []);
-    } catch (err: unknown) {
-      setWorkflowsError(err instanceof Error ? err.message : 'Failed to load workflows');
-      setWorkflows([]);
-    } finally {
-      setWorkflowsLoading(false);
-    }
-  }, [workspaceId, status?.connected]);
-
-  useEffect(() => {
-    if (status?.connected) fetchWorkflows();
-  }, [status?.connected, fetchWorkflows]);
-
   useEffect(() => {
     if (!workspaceId || !prTemplatePreviewVisible || !prTemplateLoaded) return;
     let cancelled = false;
@@ -494,8 +458,6 @@ export default function GitHubSettingsPanel() {
     && (usesGithubApp
       ? Boolean(appWebhookObserved || status?.signedDeliveryObserved)
       : Boolean(status?.signedDeliveryObserved ?? status?.lastWebhookAt));
-  const workflowOk = repoOk && workflowEnabled && !!workflowId.trim();
-  const autoPrOk = repoOk && autoPrEnabled;
   // ─── Handlers ────────────────────────────────────────────────────────────
 
   async function handleStartAppSetup() {
@@ -520,7 +482,7 @@ export default function GitHubSettingsPanel() {
     setAppActionLoading(true);
     setAppActionError(null);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/app/setup/exchange`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/app/setup/exchange`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state, code }),
       });
       window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
@@ -537,7 +499,7 @@ export default function GitHubSettingsPanel() {
     setAppActionLoading(true);
     setAppActionError(null);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/app/import`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/app/import`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ appId: Number(importAppId), appSlug: importAppSlug.trim(), clientId: importClientId.trim() || undefined,
           privateKeyPem: importPrivateKey, webhookSecret: importWebhookSecret }),
@@ -558,7 +520,7 @@ export default function GitHubSettingsPanel() {
     setAppActionLoading(true);
     setAppActionError(null);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/app/revalidate`, { method: 'POST' });
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/app/revalidate`, { method: 'POST' });
       await Promise.all([fetchAppState(), fetchStatus(), fetchAccount()]);
     } catch (err: unknown) {
       setAppActionError(err instanceof Error ? err.message : 'Failed to revalidate App binding');
@@ -572,7 +534,7 @@ export default function GitHubSettingsPanel() {
     setAppActionLoading(true);
     setAppActionError(null);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/app/bind`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/app/bind`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ installationId: Number(installationId), repositoryId: Number(repositoryId), repoOwner: appRepoOwner.trim(), repoName: appRepoName.trim(),
           replacementReason: appState?.configured ? replacementReason.trim() : undefined }),
@@ -592,7 +554,7 @@ export default function GitHubSettingsPanel() {
     setConnectError(null);
     setConnectSuccess(false);
     try {
-      const data = await apiFetch<GithubStatus & { error?: string; manualSetupUrl?: string }>(
+      const data = await apiFetchProviderMutation<GithubStatus & { error?: string; manualSetupUrl?: string }>(
         `/api/workspaces/${workspaceId}/github/connect`,
         {
           method: 'POST',
@@ -625,7 +587,7 @@ export default function GitHubSettingsPanel() {
     setDisconnecting(true);
     setDisconnectError(null);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/disconnect`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/disconnect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ githubToken: disconnectToken.trim() }),
@@ -672,7 +634,7 @@ export default function GitHubSettingsPanel() {
     setPingingWebhook(true);
     setWebhookPingResult(null);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/webhook-ping`, { method: 'POST' });
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/webhook-ping`, { method: 'POST' });
       setWebhookPingResult({ ok: true, message: 'Ping sent — GitHub should deliver a ping event shortly.' });
       fetchStatus();
     } catch (err: unknown) {
@@ -704,7 +666,7 @@ export default function GitHubSettingsPanel() {
     setFullDisconnecting(true);
     setFullDisconnectError(null);
     try {
-      await apiFetch<{ disconnected: boolean }>(`/api/workspaces/${workspaceId}/github`, {
+      await apiFetchProviderMutation<{ disconnected: boolean }>(`/api/workspaces/${workspaceId}/github`, {
         method: 'DELETE',
       });
       setAccount({ connected: false });
@@ -716,24 +678,6 @@ export default function GitHubSettingsPanel() {
       setFullDisconnectError(err instanceof Error ? err.message : 'Failed to disconnect');
     } finally {
       setFullDisconnecting(false);
-    }
-  }
-
-  async function handleSaveAutoPr() {
-    if (!workspaceId || savingAutoPr) return;
-    setSavingAutoPr(true);
-    try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/auto-pr`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: autoPrEnabled, targetBranch: autoPrBranch, reviewers: autoPrReviewers }),
-      });
-      setSavedAutoPr(true);
-      setTimeout(() => setSavedAutoPr(false), 2000);
-    } catch {
-      // silent
-    } finally {
-      setSavingAutoPr(false);
     }
   }
 
@@ -764,48 +708,6 @@ export default function GitHubSettingsPanel() {
     }
   }
 
-  function addReviewer() {
-    const r = newReviewer.trim();
-    if (r && !autoPrReviewers.includes(r)) {
-      setAutoPrReviewers([...autoPrReviewers, r]);
-      setNewReviewer('');
-    }
-  }
-
-  async function handleSaveWorkflowConfig() {
-    if (!workspaceId || savingWorkflow) return;
-    // Validate inputs JSON
-    let inputs: Record<string, string> = {};
-    if (workflowInputsRaw.trim() && workflowInputsRaw.trim() !== '{}') {
-      try {
-        inputs = JSON.parse(workflowInputsRaw);
-        setWorkflowInputsError(null);
-      } catch {
-        setWorkflowInputsError('Invalid JSON in inputs field');
-        return;
-      }
-    }
-    setSavingWorkflow(true);
-    try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/workflow-config`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          enabled: workflowEnabled,
-          workflow_id: workflowId.trim(),
-          ref: workflowRef.trim() || 'main',
-          inputs,
-        }),
-      });
-      setSavedWorkflow(true);
-      setTimeout(() => setSavedWorkflow(false), 2000);
-    } catch {
-      // silent
-    } finally {
-      setSavingWorkflow(false);
-    }
-  }
-
   // ─── Render ──────────────────────────────────────────────────────────────
 
   if (!workspaceId) {
@@ -831,7 +733,7 @@ export default function GitHubSettingsPanel() {
               <h1 className="text-xl font-semibold text-[var(--text)]">GitHub Integration</h1>
             </div>
             <p className="max-w-2xl text-sm text-muted">
-              Connect local Rorca to a GitHub repository, then monitor credential health, webhook delivery, workflow dispatch, and auto-PR readiness from one place.
+              Connect local Rorca to one exact GitHub repository and inspect credential, webhook, and immutable release diagnostics. PR creation is selected per run; workflow/deployment actuation is disabled.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -839,17 +741,14 @@ export default function GitHubSettingsPanel() {
             <StatusPill ok={repoOk} label={repoOk ? 'Repository connected' : 'Repository disconnected'} />
             <StatusPill ok={webhookOk} warn={repoOk && webhookConfigured && !webhookOk}
               label={webhookOk ? 'Signed webhook observed' : webhookConfigured ? 'Webhook configured; no delivery observed' : repoOk ? 'Webhook needs configuration' : 'Webhook locked'} />
-            <StatusPill ok={workflowOk} label={workflowOk ? 'Workflow enabled' : 'Workflow idle'} />
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-5">
+        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
           {[
             { icon: KeyRound, title: 'Credential', value: credentialOk ? account?.username ? `@${account.username}` : 'Connected' : 'Add PAT', tone: credentialOk ? 'text-emerald-300' : 'text-muted' },
             { icon: Github, title: 'Repository', value: repoOk ? `${status?.repoOwner}/${status?.repoName}` : 'Not connected', tone: repoOk ? 'text-emerald-300' : 'text-muted' },
             { icon: RadioTower, title: 'Webhook', value: repoOk ? timeAgo(status?.lastWebhookAt) : 'Locked', tone: webhookOk ? 'text-emerald-300' : repoOk ? 'text-amber-300' : 'text-muted' },
-            { icon: GitBranch, title: 'Workflow', value: workflowOk ? workflowId : workflowsLoading ? 'Loading…' : `${workflows.length} discovered`, tone: workflowOk ? 'text-emerald-300' : 'text-muted' },
-            { icon: GitPullRequest, title: 'Auto PR', value: autoPrOk ? `to ${autoPrBranch}` : 'Disabled', tone: autoPrOk ? 'text-emerald-300' : 'text-muted' },
           ].map(item => {
             const Icon = item.icon;
             return (
@@ -863,6 +762,56 @@ export default function GitHubSettingsPanel() {
             );
           })}
         </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-panel p-4 space-y-3" aria-labelledby="github-operator-capability-heading">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <Lock size={16} />
+              <h2 id="github-operator-capability-heading" className="text-sm font-semibold text-[var(--text)]">Provider changes lock</h2>
+              <StatusPill
+                ok={providerChangesUnlocked}
+                label={providerChangesUnlocked ? 'Unlocked for this visit' : 'Locked'}
+              />
+            </div>
+            <p className="mt-1 max-w-2xl text-xs text-muted">
+              Read-only GitHub diagnostics stay available while locked. Enter the local operator capability only when you intend to change provider or release authority. The value is retained in memory only, attached only to approved provider-mutation requests, and cleared on navigation, rejection, sign-out, or explicit lock.
+            </p>
+          </div>
+          {providerChangesUnlocked && (
+            <button type="button" onClick={handleLockProviderChanges}
+              className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-bg">
+              <Lock size={12} />Lock provider changes
+            </button>
+          )}
+        </div>
+        {!providerChangesUnlocked && (
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <label className="min-w-0 flex-1 text-xs text-muted">Local operator capability
+              <input
+                ref={capabilityInputRef}
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                data-1p-ignore="true"
+                data-lpignore="true"
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    handleUnlockProviderChanges();
+                  }
+                }}
+                className="mt-1 w-full rounded border border-border bg-bg px-3 py-1.5 font-mono text-sm text-[var(--text)] focus:outline-none focus:border-accent"
+              />
+            </label>
+            <button type="button" onClick={handleUnlockProviderChanges}
+              className="inline-flex items-center justify-center gap-1.5 rounded bg-accent px-3 py-2 text-xs text-white">
+              <KeyRound size={12} />Unlock provider changes
+            </button>
+          </div>
+        )}
+        {capabilityError && <p role="alert" className="text-xs text-red-400">{capabilityError}</p>}
       </section>
 
       <section className="rounded-lg border border-border bg-panel p-4 space-y-4" aria-labelledby="github-app-heading">
@@ -1277,7 +1226,7 @@ export default function GitHubSettingsPanel() {
         ) : (
           <div className="rounded-lg border border-border bg-panel p-4 space-y-3">
             <p className="text-sm text-muted">
-              Connect the repository Rorca should watch and operate on. This unlocks webhook health, workflow discovery, PR templates, and auto-PR settings.
+              Connect the exact repository Rorca should observe and use only through immutable per-run release intents. This unlocks webhook health and PR template previews.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1340,7 +1289,7 @@ export default function GitHubSettingsPanel() {
                 </div>
               )}
               <p className="text-xs text-muted">
-                Stored locally and encrypted for this workspace. Required capabilities: repo, admin/write repo hook, and workflow for dispatch.
+                Stored locally and encrypted for this workspace. Required legacy fallback capabilities: repository access and webhook administration. Workflow dispatch is not supported.
               </p>
             </div>
 
@@ -1382,309 +1331,15 @@ export default function GitHubSettingsPanel() {
         </div>
       </section>
 
-      {/* ─── Section 3: Auto-PR Settings ──────────────────────────────── */}
-      {status?.connected ? (
-        <section className="border-t border-border pt-6">
-          <div className="flex items-center gap-2 mb-4">
-            <GitPullRequest size={20} strokeWidth={1.5} />
-            <h2 className="text-base font-semibold text-[var(--text)]">Auto-PR Settings</h2>
-          </div>
-
-          <div className="rounded-lg border border-border bg-panel p-4 space-y-4">
-            {/* Enable toggle */}
-            <label className="flex items-center gap-3 cursor-pointer">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={autoPrEnabled}
-                onClick={() => setAutoPrEnabled(!autoPrEnabled)}
-                onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setAutoPrEnabled(!autoPrEnabled); } }}
-                aria-label="Automatically create pull requests on run completion"
-                className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 ${
-                  autoPrEnabled ? 'bg-accent' : 'bg-border'
-                }`}
-              >
-                <span
-                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-switch-knob shadow-sm transition-transform ${
-                    autoPrEnabled ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-              <span className="text-sm text-[var(--text)]">
-                Automatically create pull requests on run completion
-              </span>
-            </label>
-
-            {autoPrEnabled && (
-              <>
-                {/* Target branch */}
-                <label className="block text-xs text-muted">
-                  Target branch
-                  <input
-                    type="text"
-                    value={autoPrBranch}
-                    onChange={e => setAutoPrBranch(e.target.value)}
-                    placeholder="main"
-                    className="mt-1 w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
-                  />
-                </label>
-
-                {/* Reviewers */}
-                <div>
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <Users size={14} className="text-muted" />
-                    <span className="text-xs font-medium text-muted">Reviewers</span>
-                  </div>
-
-                  {autoPrReviewers.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mb-2">
-                      {autoPrReviewers.map(r => (
-                        <span
-                          key={r}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-accent/10 text-accent"
-                        >
-                          @{r}
-                          <button
-                            onClick={() => setAutoPrReviewers(autoPrReviewers.filter(x => x !== r))}
-                            className="hover:text-red-400 transition-colors"
-                          >
-                            <X size={10} />
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={newReviewer}
-                      onChange={e => setNewReviewer(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addReviewer(); } }}
-                      placeholder="GitHub username"
-                      className="flex-1 px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
-                    />
-                    <button
-                      onClick={addReviewer}
-                      disabled={!newReviewer.trim()}
-                      className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors disabled:opacity-50 flex items-center gap-1"
-                    >
-                      <Plus size={12} /> Add
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Save button */}
-            <button
-              onClick={handleSaveAutoPr}
-              disabled={savingAutoPr}
-              className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
-            >
-              {savingAutoPr ? <Loader2 size={14} className="animate-spin" /> : null}
-              {savedAutoPr ? 'Saved!' : 'Save Auto-PR Settings'}
-            </button>
-          </div>
-        </section>
-      ) : (
-        <section className="border-t border-border pt-6">
-          <div className="flex items-center gap-2 mb-4">
-            <GitPullRequest size={20} strokeWidth={1.5} />
-            <h2 className="text-base font-semibold text-[var(--text)]">Auto-PR Settings</h2>
-          </div>
-          <LockedPanel
-            title="Connect a repository to enable Auto-PRs"
-            message="Rorca needs repository metadata and a GitHub credential before it can create pull requests after successful runs."
-          />
-        </section>
-      )}
-
-      {/* ─── Section 4: GitHub Actions YAML ───────────────────────────── */}
-      <section className="border-t border-border pt-6">
+      <section className="border-t border-border pt-6 pb-6" aria-labelledby="github-release-behavior-heading">
         <div className="flex items-center gap-2 mb-3">
-          <Download size={18} />
-          <h2 className="text-sm font-semibold text-[var(--text)]">GitHub Actions Workflow</h2>
+          <Shield size={18} />
+          <h2 id="github-release-behavior-heading" className="text-sm font-semibold text-[var(--text)]">Release behavior</h2>
         </div>
-        <p className="text-xs text-muted mb-3">
-          Download a GitHub Actions workflow that triggers Rorca pipeline runs on push to main.
-          Place the file at <code className="bg-surface px-1 rounded">.github/workflows/rorca-pipeline.yml</code> in your repository.
-        </p>
-        <p className="text-xs text-muted mb-3">
-          Required repository secrets:{' '}
-          <code className="bg-surface px-1 rounded">RORCA_API_URL</code>,{' '}
-          <code className="bg-surface px-1 rounded">RORCA_API_TOKEN</code>,{' '}
-          <code className="bg-surface px-1 rounded">WORKSPACE_ID</code>
-        </p>
-        <button
-          onClick={async () => {
-            if (!workspaceId) return;
-            try {
-              const token = await getAccessToken();
-              const res = await fetch(`${BASE_URL}/api/workspaces/${workspaceId}/github/actions-yaml`, {
-                headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-              });
-              if (!res.ok) throw new Error(`${res.status}`);
-              const text = await res.text();
-              const blob = new Blob([text], { type: 'application/x-yaml' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = 'rorca-pipeline.yml';
-              a.click();
-              URL.revokeObjectURL(url);
-            } catch (err) {
-              console.error('[GitHubSettings] YAML download error:', err);
-            }
-          }}
-          className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 transition-opacity flex items-center gap-1.5"
-        >
-          <Download size={14} />
-          Download Actions YAML
-        </button>
-      </section>
-
-      {/* ─── Section 5: Workflow Dispatch (US-026) ───────────────────── */}
-      <section className="border-t border-border pt-6 pb-6">
-        <div className="flex items-center gap-2 mb-3">
-          <Zap size={18} />
-          <h2 className="text-sm font-semibold text-[var(--text)]">Workflows</h2>
+        <div className="rounded-lg border border-border bg-panel p-4 space-y-2 text-xs text-muted">
+          <p>Repository-level Auto-PR and workflow-dispatch settings are retired. Rorca does not generate or dispatch autonomous GitHub Actions workflows.</p>
+          <p>Choose <code className="bg-bg px-1 rounded">pr</code>, <code className="bg-bg px-1 rounded">draft-pr</code>, <code className="bg-bg px-1 rounded">branch-only</code>, or <code className="bg-bg px-1 rounded">direct</code> on each pipeline run. The chosen strategy, exact SHA, base branch, and repository identity are frozen in that run&apos;s immutable release intent.</p>
         </div>
-
-        {!status?.connected ? (
-          <LockedPanel
-            title="Connect a repository to enable workflows"
-            message="Rorca will discover GitHub Actions workflows from the connected repo and let you choose a workflow_dispatch target."
-          />
-        ) : (
-          <div className="space-y-4">
-            <p className="text-xs text-muted">
-              Automatically trigger a GitHub Actions workflow when a pipeline run completes successfully.
-              The workflow must have a <code className="bg-surface px-1 rounded">workflow_dispatch</code> trigger.
-              Requires the <code className="bg-surface px-1 rounded">workflow</code> PAT scope.
-            </p>
-
-            {/* Enable toggle */}
-            <label className="flex items-center gap-3 cursor-pointer">
-              <div
-                role="switch"
-                aria-checked={workflowEnabled}
-                tabIndex={0}
-                onClick={() => setWorkflowEnabled(v => !v)}
-                onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') setWorkflowEnabled(v => !v); }}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-1 ${workflowEnabled ? 'bg-accent' : 'bg-border'}`}
-              >
-                <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${workflowEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
-              </div>
-              <span className="text-sm text-[var(--text)]">Enable workflow dispatch on run completion</span>
-            </label>
-
-            {workflowEnabled && (
-              <div className="space-y-3 pl-0">
-                {/* Workflow file */}
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <label className="block text-xs font-medium text-muted">Workflow</label>
-                    <button
-                      type="button"
-                      onClick={fetchWorkflows}
-                      disabled={workflowsLoading}
-                      className="text-xs text-muted hover:text-[var(--text)] transition-colors flex items-center gap-1 disabled:opacity-50"
-                    >
-                      {workflowsLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                      Refresh
-                    </button>
-                  </div>
-                  {workflows.length > 0 ? (
-                    <select
-                      value={workflowId}
-                      onChange={e => setWorkflowId(e.target.value)}
-                      className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
-                    >
-                      <option value="">Select workflow…</option>
-                      {workflows.map(workflow => (
-                        <option key={workflow.id} value={workflow.path || String(workflow.id)}>
-                          {workflow.name} · {workflow.path} · {workflow.state}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type="text"
-                      value={workflowId}
-                      onChange={e => setWorkflowId(e.target.value)}
-                      placeholder="deploy.yml"
-                      className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
-                    />
-                  )}
-                  {workflowsError ? (
-                    <p className="text-[11px] text-amber-300 mt-1">{workflowsError}. You can still enter a workflow filename manually.</p>
-                  ) : (
-                    <p className="text-[11px] text-muted mt-1">
-                      Choose a discovered workflow, or enter a filename/numeric ID manually if discovery is unavailable.
-                    </p>
-                  )}
-                  {workflowId && workflows.find(w => (w.path || String(w.id)) === workflowId)?.htmlUrl && (
-                    <a
-                      href={workflows.find(w => (w.path || String(w.id)) === workflowId)?.htmlUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-1 inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
-                    >
-                      <ExternalLink size={11} /> Open workflow in GitHub
-                    </a>
-                  )}
-                </div>
-
-                {/* Branch ref */}
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">Branch / ref</label>
-                  <input
-                    type="text"
-                    value={workflowRef}
-                    onChange={e => setWorkflowRef(e.target.value)}
-                    placeholder="main"
-                    className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
-                  />
-                  <p className="text-[11px] text-muted mt-1">Branch or tag to run the workflow on.</p>
-                </div>
-
-                {/* Inputs */}
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">Inputs (JSON)</label>
-                  <textarea
-                    value={workflowInputsRaw}
-                    onChange={e => { setWorkflowInputsRaw(e.target.value); setWorkflowInputsError(null); }}
-                    rows={4}
-                    placeholder='{}'
-                    className={`w-full px-3 py-2 rounded bg-bg border text-sm font-mono text-[var(--text)] focus:outline-none resize-y ${workflowInputsError ? 'border-red-500' : 'border-border focus:border-accent'}`}
-                  />
-                  {workflowInputsError && (
-                    <p className="text-[11px] text-red-400 mt-1">{workflowInputsError}</p>
-                  )}
-                  <p className="text-[11px] text-muted mt-1">
-                    Optional key-value pairs passed as workflow inputs. Must be valid JSON object.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {!workflowEnabled && !workflowId && (
-              <p className="text-xs text-muted italic">
-                No workflow configured — add a GitHub Actions workflow to trigger on run completion.
-              </p>
-            )}
-
-            <button
-              onClick={handleSaveWorkflowConfig}
-              disabled={savingWorkflow}
-              className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
-            >
-              {savingWorkflow ? <Loader2 size={14} className="animate-spin" /> : null}
-              {savedWorkflow ? 'Saved!' : 'Save Workflow Config'}
-            </button>
-          </div>
-        )}
       </section>
 
       {/* ─── Section 6: PR Template ───────────────────────────────────── */}
@@ -1705,7 +1360,7 @@ export default function GitHubSettingsPanel() {
 
         <div className="mb-3 space-y-2">
           <p className="text-xs text-muted">
-            Customize the PR description used by auto-PR creation. Unrecognized variables are left as-is.
+            Customize the PR description used when a run explicitly selects the immutable <code className="bg-bg px-1 rounded">pr</code> or <code className="bg-bg px-1 rounded">draft-pr</code> release strategy. Unrecognized variables are left as-is.
           </p>
           <details className="rounded-lg border border-border bg-panel/50 px-3 py-2 text-xs text-muted">
             <summary className="cursor-pointer select-none text-[var(--text)]">Supported template variables</summary>

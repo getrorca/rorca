@@ -13,7 +13,10 @@ describe('execution environments routes', () => {
   it('lists default environments with readiness', async () => {
     const res = await request(app).get('/api/execution-environments');
     expect(res.status).toBe(200);
-    expect(res.body.environments.map((env: any) => env.id)).toEqual(expect.arrayContaining(['remote-rorca', 'local-user']));
+    expect(res.body.environments.map((env: any) => env.id)).toEqual(['remote-rorca']);
+    expect(res.body.unavailable).toContainEqual({
+      id: 'local-user', deprecated: true, reason: 'LOCAL_USER_EXECUTION_UNAVAILABLE',
+    });
   });
 
   it('pairs runner token, accepts heartbeat, then exposes local readiness', async () => {

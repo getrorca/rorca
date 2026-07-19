@@ -58,7 +58,7 @@ function runRow(overrides: Record<string, unknown> = {}) {
     pr_number: 42,
     repo_owner: 'getrorca',
     repo_name: 'rorca',
-    auto_pr_target_branch: 'main',
+    release_base_branch: 'main',
     ...overrides,
   };
 }
@@ -148,7 +148,7 @@ function harness(options: {
     urls, inserted, wal, fetchJson, client,
     overrides: {
       resolveAuthority: jest.fn(async () => ({
-        owner: 'getrorca', name: 'rorca', autoPrTargetBranch: 'main', status: 'active', source: 'pat-oauth-fallback',
+        owner: 'getrorca', name: 'rorca', status: 'active', source: 'pat-oauth-fallback',
       })),
       queryOne: jest.fn(async () => runRow()),
       resolveToken: jest.fn(async () => ({ token: 'opaque-test-token', source: 'workspace-pat' })),

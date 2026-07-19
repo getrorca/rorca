@@ -522,6 +522,11 @@ router.get('/capability', (_req, res) => res.json({ captureCapability: captureCa
  *     summary: Get always-on capture control status
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Includes operator-only queue, audit, ignore, and redaction policy state."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Capture status }
  */
@@ -546,6 +551,11 @@ function readDaemonStatus(workspacePath: string): Record<string, unknown> {
  *     summary: Get aggregate always-on capture monitoring
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Aggregated queue, distillation, audit, daemon, and worker health is operator-only diagnostics."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Monitoring signals }
  */
@@ -575,6 +585,11 @@ router.get('/:workspaceId/monitoring', async (req, res) => {
  *     summary: Stream capture status updates
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Streams operator-only local capture state through the shared SSE hub."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Capture SSE stream }
  */
@@ -595,6 +610,11 @@ router.get('/:workspaceId/stream', async (req, res) => {
  *     summary: Update explicit capture policy
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Changing telemetry policy or integrations is operator-only configuration."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Policy updated }
  */
@@ -618,6 +638,11 @@ for (const action of ['pause', 'resume'] as const) {
    *     summary: Pause always-on capture
    *     x-rorca-tier: admin
    *     x-rorca-rationale: "Pause is an operator-only privacy control."
+   *     parameters:
+   *       - in: path
+   *         name: workspaceId
+   *         required: true
+   *         schema: { type: string }
    *     responses:
    *       200: { description: Capture paused }
    */
@@ -629,6 +654,11 @@ for (const action of ['pause', 'resume'] as const) {
    *     summary: Resume always-on capture
    *     x-rorca-tier: admin
    *     x-rorca-rationale: "Resume re-enables operator-configured telemetry under explicit policy."
+   *     parameters:
+   *       - in: path
+   *         name: workspaceId
+   *         required: true
+   *         schema: { type: string }
    *     responses:
    *       200: { description: Capture resumed }
    */
@@ -649,6 +679,11 @@ for (const action of ['pause', 'resume'] as const) {
  *     summary: Disable capture and cancel pending capture jobs
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Uninstall is an operator-only privacy action that disables integrations and cancels queued telemetry through pg-boss APIs."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Capture disabled }
  */
@@ -675,6 +710,11 @@ router.post('/:workspaceId/uninstall', async (req, res) => {
  *     summary: Import external memory exports as pending candidates
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Bulk local imports create review candidates and can expose code context, so they are operator-only."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Import preview or staged candidates }
  */
@@ -704,6 +744,11 @@ router.post('/imports/:workspaceId', async (req, res) => {
  *     summary: Get distillation settings
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Distillation and auto-approval settings are operator-only automation controls."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Distillation settings }
  */
@@ -719,6 +764,11 @@ router.get('/distillation/:workspaceId/config', async (req, res) => {
  *     summary: Update distillation settings
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Changing candidate automation or auto-approval is operator-only configuration."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Updated distillation settings }
  */

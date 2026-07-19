@@ -243,7 +243,10 @@ export async function getExecutionEnvironmentReadiness(id: string): Promise<Envi
 
   let ready = env.enabled;
   let reason: string | undefined;
-  if (!env.enabled) {
+  if (env.id === 'local-user') {
+    ready = false;
+    reason = 'LOCAL_USER_EXECUTION_UNAVAILABLE';
+  } else if (!env.enabled) {
     ready = false;
     reason = 'execution_environment_disabled';
   } else if (env.kind !== 'remote-rorca' && !heartbeatFresh(env.last_heartbeat_at)) {

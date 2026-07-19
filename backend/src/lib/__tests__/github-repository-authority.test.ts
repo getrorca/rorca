@@ -44,7 +44,6 @@ test('canonical authority rejects requested repository confusion', async () => {
     authority_source: 'github-app-installation', authority_status: 'active',
     binding_id: 'binding-1', installation_id: 77, repository_id: 99,
     webhook_configured: true, signed_delivery_observed: false, connected_at: null, last_webhook_at: null,
-    auto_pr_enabled: false, auto_pr_target_branch: 'main', auto_pr_reviewers: [], workflow_config: null,
   });
   await expect(getGithubRepositoryAuthority('ws-1', {
     requireActive: true,

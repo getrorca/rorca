@@ -223,6 +223,11 @@ router.post('/recompile', async (req, res, next) => {
  *     operationId: previewLifecycleRetry
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Retry scope and run policy are sensitive workspace metadata; authenticated preview is read-only and cannot enqueue work."
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer, minimum: 1 }
  *     responses:
  *       200: { description: Exact self-verifying retry packet and unexpired identity }
  *       401: { description: Authentication required }
@@ -256,6 +261,10 @@ router.post('/runs/:runId/retry-preview', async (req, res, next) => {
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Dispatch creates a workspace-owned retry run only after exact packet, expiry, policy, and replay validation."
  *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer, minimum: 1 }
  *       - in: header
  *         name: Idempotency-Key
  *         required: true

@@ -322,7 +322,9 @@ export default function TriggerPopover({
   useEffect(() => {
     apiFetch<{ environments: ExecutionEnvironmentReadiness[] }>('/api/execution-environments')
       .then((data) => {
-        const environments = data.environments ?? [];
+        // local-user is a deprecated compatibility input and must not appear in
+        // the normal trigger UI until a signed host closeout protocol exists.
+        const environments = (data.environments ?? []).filter((environment) => environment.id === 'remote-rorca');
         setExecutionEnvironments(environments);
         if (!environments.some((env) => env.id === executionEnvironment)) {
           setExecutionEnvironment(environments.find((env) => env.ready)?.id ?? environments[0]?.id ?? 'remote-rorca');

@@ -14,11 +14,11 @@ describe('execution-environment-registry', () => {
     expect(envs.map((env) => env.id)).toEqual(expect.arrayContaining(['remote-rorca', 'local-user']));
   });
 
-  it('fails local-user closed until a runner heartbeat is present', async () => {
+  it('marks deprecated local-user unavailable regardless of runner heartbeat', async () => {
     await execute(`UPDATE execution_environments SET last_heartbeat_at = NULL, metadata = '{}'::jsonb WHERE id = 'local-user'`);
     const readiness = await getExecutionEnvironmentReadiness('local-user');
     expect(readiness.ready).toBe(false);
-    expect(readiness.reason).toBe('execution_runner_not_connected');
+    expect(readiness.reason).toBe('LOCAL_USER_EXECUTION_UNAVAILABLE');
   });
 
   it('hashes runner tokens deterministically without returning the token', () => {

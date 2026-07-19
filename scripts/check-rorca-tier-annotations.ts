@@ -42,7 +42,7 @@ const EXPECTED_PAID_CAPABILITIES: Record<string, PlanCapability> = {};
 
 type Operation = {
   summary?: string;
-  parameters?: Array<{ name: string; in: string; required?: boolean }>;
+  parameters?: Array<{ name: string; in: string; required?: boolean; schema?: { type?: string } }>;
   requestBody?: {
     content?: {
       'application/json'?: {
@@ -109,6 +109,7 @@ function main(): void {
   const errors: string[] = [];
 
   for (const [key, operation] of operations) {
+    const pathname = key.slice(key.indexOf(' ') + 1);
     const rawTier = operation['x-rorca-tier'];
     if (rawTier !== undefined && !isValidTier(rawTier)) {
       errors.push(`Route ${key} has invalid x-rorca-tier '${rawTier}'`);
@@ -125,6 +126,19 @@ function main(): void {
 
     if (!metadata.rationale) {
       errors.push(`Route ${key} is missing x-rorca-rationale`);
+    }
+
+    const placeholders = [...pathname.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1]);
+    const pathParameters = new Map(
+      (operation.parameters ?? [])
+        .filter((parameter) => parameter.in === 'path')
+        .map((parameter) => [parameter.name, parameter]),
+    );
+    for (const placeholder of placeholders) {
+      const parameter = pathParameters.get(placeholder);
+      if (!parameter || parameter.required !== true || !parameter.schema?.type) {
+        errors.push(`Exposed route ${key} is missing required path parameter schema for {${placeholder}}`);
+      }
     }
 
     if (metadata.tier !== 'public' && metadata.publicApi === true) {

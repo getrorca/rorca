@@ -12,10 +12,12 @@ describe('execution-environment', () => {
     expect(resolution.localBridgeUrl).toBeNull();
   });
 
-  it('accepts explicit local-user at parse time; registry readiness performs fail-closed gating', async () => {
-    const resolution = resolveExecutionEnvironment('local-user', {});
-    expect(resolution.effective).toBe('local-user');
-    await expect(assertExecutionEnvironmentReady(resolution)).resolves.toBeUndefined();
+  it('retains local-user parsing compatibility but rejects it before readiness/mutation', async () => {
+    expect(() => resolveExecutionEnvironment('local-user', {})).toThrow(expect.objectContaining({
+      statusCode: 422,
+      code: 'LOCAL_USER_EXECUTION_UNAVAILABLE',
+    }));
+    await expect(assertExecutionEnvironmentReady(resolveExecutionEnvironment('remote-rorca', {}))).resolves.toBeUndefined();
   });
 
   it('rejects invalid execution environments', () => {

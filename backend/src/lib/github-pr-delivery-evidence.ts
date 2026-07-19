@@ -136,7 +136,7 @@ interface RunBindingRow {
   pr_number: number | string | null;
   repo_owner: string;
   repo_name: string;
-  auto_pr_target_branch: string;
+  release_base_branch: string;
 }
 
 interface EvidenceRow {
@@ -500,10 +500,13 @@ export async function observeGithubPrDeliveryEvidence(
   const authority = await deps.resolveAuthority(input.workspaceId);
   const run = await deps.queryOne<RunBindingRow>(
     `SELECT r.id, r.workspace_id, r.spec_path, r.branch_name, r.pr_number,
-            $3::text AS repo_owner, $4::text AS repo_name, $5::text AS auto_pr_target_branch
+            $3::text AS repo_owner, $4::text AS repo_name,
+            i.base_branch AS release_base_branch
        FROM pipeline_runs r
+       JOIN pipeline_run_release_intents i
+         ON i.run_id = r.id AND i.workspace_id = r.workspace_id
       WHERE r.id = $1 AND r.workspace_id = $2`,
-    [input.runId, input.workspaceId, authority.owner, authority.name, authority.autoPrTargetBranch],
+    [input.runId, input.workspaceId, authority.owner, authority.name],
   );
   if (!run) throw new NotFoundError('GitHub-bound pipeline run', String(input.runId));
   if (!run.pr_number) throw new UnprocessableError('Run has no canonical pull request binding', 'PR_BINDING_REQUIRED');
@@ -528,7 +531,7 @@ export async function observeGithubPrDeliveryEvidence(
   if (pr.html_url !== expectedPrUrl) throw new ConflictError('GitHub returned an unexpected pull request URL');
   if (pr.number !== prNumber) throw new ConflictError('GitHub returned a different pull request identity');
   if (pr.head.ref !== run.branch_name) throw new ConflictError('Pull request head branch does not match the canonical run branch');
-  if (pr.base.ref !== run.auto_pr_target_branch) throw new ConflictError('Pull request base branch does not match the canonical workspace target branch');
+  if (pr.base.ref !== run.release_base_branch) throw new ConflictError('Pull request base branch does not match the immutable run release intent');
   if (headSha !== expectedHeadSha) {
     throw new ConflictError('Pull request head SHA changed; observe again using the current immutable SHA', {
       expectedHeadSha,

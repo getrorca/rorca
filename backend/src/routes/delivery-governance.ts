@@ -250,6 +250,11 @@ router.post('/:id/github/delivery-policies/:policyId/revoke', requireWorkspaceAd
  *     operationId: observeGithubPrDeliveryEvidence
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Provider observation writes immutable release evidence and must remain an operator-only, non-MCP action."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     requestBody:
  *       required: true
  *       content:
@@ -292,6 +297,10 @@ router.post('/:id/github/delivery-evidence', requireWorkspaceAdmin(), async (req
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "PR review/check evidence is release-governance metadata and intentionally remains operator-only."
  *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *       - in: query
  *         name: runId
  *         schema: { type: integer }

@@ -250,8 +250,10 @@ export async function prepareRunReleaseIntent(input: PrepareRunReleaseInput): Pr
     };
   }
 
+  // The canonical checked-out base is frozen per run. Retired repository-level
+  // Auto-PR settings are not release authority and cannot redirect a PR/merge.
   const localBaseBranch = git(workspaceRealpath, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  const targetBaseBranch = canonicalRepository?.autoPrTargetBranch || localBaseBranch;
+  const targetBaseBranch = localBaseBranch;
   assertGithubRef(targetBaseBranch);
   let frozenBaseSha = git(workspaceRealpath, ['rev-parse', `refs/heads/${targetBaseBranch}^{commit}`]).toLowerCase();
   if (!isGitSha(frozenBaseSha)) throw new Error('local base is not an exact 40-hex commit');

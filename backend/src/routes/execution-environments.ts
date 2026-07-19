@@ -98,9 +98,13 @@ async function authenticateRunnerRequest(req: Request) {
  */
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const environments = await listExecutionEnvironments();
+    const environments = (await listExecutionEnvironments())
+      .filter((environment) => environment.id === 'remote-rorca');
     const readiness = await Promise.all(environments.map((env) => getExecutionEnvironmentReadiness(env.id)));
-    res.json({ environments: readiness });
+    res.json({
+      environments: readiness,
+      unavailable: [{ id: 'local-user', deprecated: true, reason: 'LOCAL_USER_EXECUTION_UNAVAILABLE' }],
+    });
   } catch (err) {
     handleRouteError(res, err);
   }

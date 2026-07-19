@@ -17,7 +17,6 @@ import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
 import { fetchGithubWithTimeout, getWorkspaceGithubAppBinding, githubAppBindingHasVerifiedProfile } from '../lib/github-app-credential-provider';
 import { extractGithubProviderError } from '../lib/github-provider-error';
 import {
-  assertGithubRef,
   assertGithubRepositoryIdentity,
   getGithubRepositoryAuthority,
   githubRepoApiUrl,
@@ -39,10 +38,6 @@ interface GithubWebhookRow {
   webhook_id: number | null;
   encrypted_webhook_secret: string;
   last_webhook_at: string | null;
-  auto_pr_enabled: boolean;
-  auto_pr_target_branch: string;
-  auto_pr_reviewers: string[] | string;
-  workflow_config?: Record<string, unknown> | string | null;
   created_at: string;
 }
 
@@ -209,7 +204,7 @@ async function buildLatestPrTemplatePreview(workspace: WorkspaceRow): Promise<{ 
       duration: formatDuration(latestRun.started_at, latestRun.finished_at),
       agentType: latestRun.agent_type || 'claude',
       model: latestRun.agent_model || 'default',
-      diffStats: 'Diff stats are attached when an auto-PR is created.',
+      diffStats: 'Diff stats are attached when the run uses a PR release strategy.',
       diffSummary: `Latest ${latestRun.status || 'pipeline'} run for ${spec.title}`,
     },
   };
@@ -302,7 +297,7 @@ async function deleteWebhook(owner: string, repo: string, webhookId: number, tok
 async function getGithubRow(workspaceId: string): Promise<GithubWebhookRow | null> {
   const row = (await queryOne<GithubWebhookRow>(
     `SELECT workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret, last_webhook_at,
-            auto_pr_enabled, auto_pr_target_branch, auto_pr_reviewers, workflow_config, created_at
+            created_at
        FROM workspace_github_webhooks
       WHERE workspace_id = $1 AND authority_status = 'active'`,
     [workspaceId],
@@ -319,8 +314,14 @@ router.use('/:id/github', requireWorkspaceMember());
  *   get:
  *     tags: [GitHub]
  *     summary: Get workspace GitHub repository status
+ *     operationId: getWorkspaceGithubRepositoryStatus
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Workspace GitHub wiring is user-owned integration metadata and should require authenticated access."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: OK }
  */
@@ -351,7 +352,6 @@ router.get('/:id/github', async (req: Request, res: Response, next: NextFunction
       signedDeliveryObserved: authority.signedDeliveryObserved,
       connectedAt: authority.connectedAt,
       nextAction: connected ? null : 'Provider capability revalidation is required; fallback is blocked while an App binding exists.',
-      autoPr: { enabled: authority.autoPrEnabled, targetBranch: authority.autoPrTargetBranch, reviewers: authority.autoPrReviewers },
     });
   } catch (err) {
     next(err);
@@ -364,8 +364,14 @@ router.get('/:id/github', async (req: Request, res: Response, next: NextFunction
  *   get:
  *     tags: [GitHub]
  *     summary: Get stored GitHub credential status for a workspace
+ *     operationId: getWorkspaceGithubAccountStatus
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Workspace-scoped GitHub credential metadata is user-owned integration state and should require authenticated access."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: OK }
  */
@@ -430,8 +436,14 @@ router.get('/:id/github/account', async (req: Request, res: Response, next: Next
  *   post:
  *     tags: [GitHub]
  *     summary: Connect a workspace to a GitHub repository using a PAT
+ *     operationId: connectWorkspaceGithubPatFallback
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "PAT fallback connection grants repository authority and is an explicit administrator-only migration operation excluded from MCP."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Connected }
  */
@@ -696,57 +708,24 @@ router.delete('/:id/github', requireWorkspaceAdmin(), async (req: Request, res: 
  * /api/workspaces/{id}/github/auto-pr:
  *   put:
  *     tags: [GitHub]
- *     summary: Update credential-neutral auto-PR settings
+ *     summary: Legacy repository-level Auto-PR settings are retired
  *     operationId: updateWorkspaceGithubAutoPr
+ *     deprecated: true
  *     x-rorca-tier: admin
- *     x-rorca-rationale: "Auto-PR configuration controls repository writes and requires an administrator."
+ *     x-rorca-mcp: false
+ *     x-rorca-rationale: "Compatibility endpoint is hard-disabled; immutable per-run release strategy is the only PR creation authority."
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: string }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [enabled, targetBranch, reviewers]
- *             properties:
- *               enabled: { type: boolean }
- *               targetBranch: { type: string, minLength: 1, maxLength: 255 }
- *               reviewers: { type: array, maxItems: 50, items: { type: string } }
  *     responses:
- *       200: { description: Auto-PR settings updated }
+ *       409: { description: Retired; choose pr or draft-pr on the pipeline run }
  */
-router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    await requireWorkspace(String(req.params.id));
-    const enabled = !!req.body.enabled;
-    const targetBranch = String(req.body.targetBranch || 'main').trim() || 'main';
-    const reviewers: string[] = Array.isArray(req.body.reviewers)
-      ? req.body.reviewers.filter((value: unknown): value is string => typeof value === 'string').map((value: string) => value.trim()).filter(Boolean)
-      : [];
-
-    const workspaceId = String(req.params.id);
-    const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
-    if (!authority) throw new ValidationError('No GitHub repository connected for this workspace');
-    assertGithubRef(targetBranch);
-    reviewers.forEach((reviewer) => {
-      if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(reviewer)) throw new ValidationError('Invalid GitHub reviewer login');
-    });
-    await execute(
-      `UPDATE github_repository_configs
-          SET auto_pr_enabled = $2, auto_pr_target_branch = $3,
-              auto_pr_reviewers = $4::jsonb, updated_at = NOW()
-        WHERE workspace_id = $1`,
-      [workspaceId, enabled, targetBranch, JSON.stringify(reviewers)],
-    );
-
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
+router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (_req: Request, _res: Response, next: NextFunction) => {
+  // Compatibility only. PR creation is selected per run and frozen in the
+  // immutable release intent; repository-level Auto-PR settings are retired.
+  next(new ConflictError('Legacy Auto-PR settings are retired; choose pr or draft-pr for each pipeline run'));
 });
 
 /**
@@ -754,26 +733,20 @@ router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (req: Request, 
  * /api/workspaces/{id}/github/workflow-config:
  *   get:
  *     tags: [GitHub]
- *     summary: Read workspace workflow dispatch configuration
+ *     summary: Legacy workflow dispatch configuration is retired
  *     operationId: getWorkspaceGithubWorkflowConfig
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workspace members may inspect non-secret workflow configuration."
+ *     deprecated: true
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: string }
  *     responses:
- *       200: { description: Workflow configuration }
+ *       409: { description: Workflow dispatch configuration is retired }
  */
-router.get('/:id/github/workflow-config', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    await requireWorkspace(String(req.params.id));
-    const authority = await getGithubRepositoryAuthority(String(req.params.id));
-    res.json({ workflowConfig: authority?.workflowConfig ?? null });
-  } catch (err) {
-    next(err);
-  }
+router.get('/:id/github/workflow-config', async (_req: Request, _res: Response, next: NextFunction) => {
+  next(new ConflictError('GitHub workflow dispatch configuration is retired and unavailable'));
 });
 
 /**
@@ -781,53 +754,22 @@ router.get('/:id/github/workflow-config', async (req: Request, res: Response, ne
  * /api/workspaces/{id}/github/workflow-config:
  *   put:
  *     tags: [GitHub]
- *     summary: Update workspace workflow dispatch configuration
+ *     summary: Legacy workflow dispatch configuration is retired
  *     operationId: updateWorkspaceGithubWorkflowConfig
+ *     deprecated: true
  *     x-rorca-tier: admin
- *     x-rorca-rationale: "Workflow dispatch configuration controls provider-side execution and requires an administrator."
+ *     x-rorca-mcp: false
+ *     x-rorca-rationale: "Compatibility endpoint is hard-disabled and cannot persist or dispatch workflows."
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: string }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [enabled, workflow_id, ref]
- *             properties:
- *               enabled: { type: boolean }
- *               workflow_id: { type: string, maxLength: 255 }
- *               ref: { type: string, minLength: 1, maxLength: 255 }
- *               inputs: { type: object, additionalProperties: { type: string } }
  *     responses:
- *       200: { description: Workflow configuration updated }
+ *       409: { description: Workflow dispatch configuration is retired }
  */
-router.put('/:id/github/workflow-config', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    await requireWorkspace(String(req.params.id));
-    const authority = await getGithubRepositoryAuthority(String(req.params.id), { requireActive: true });
-    if (!authority) throw new ValidationError('No GitHub repository connected for this workspace');
-
-    const body = req.body ?? {};
-    const workflowConfig = typeof body.workflowConfig === 'object' && body.workflowConfig !== null && !Array.isArray(body.workflowConfig)
-      ? body.workflowConfig
-      : body;
-    if (typeof workflowConfig !== 'object' || Array.isArray(workflowConfig)) {
-      throw new ValidationError('workflow config body must be an object');
-    }
-
-    await execute(
-      'UPDATE github_repository_configs SET workflow_config = $2::jsonb, updated_at = NOW() WHERE workspace_id = $1',
-      [String(req.params.id), JSON.stringify(workflowConfig)],
-    );
-
-    res.json({ ok: true, workflowConfig });
-  } catch (err) {
-    next(err);
-  }
+router.put('/:id/github/workflow-config', requireWorkspaceAdmin(), async (_req: Request, _res: Response, next: NextFunction) => {
+  next(new ConflictError('GitHub workflow dispatch configuration is retired and unavailable'));
 });
 
 /**
@@ -836,8 +778,14 @@ router.put('/:id/github/workflow-config', requireWorkspaceAdmin(), async (req: R
  *   get:
  *     tags: [GitHub]
  *     summary: List GitHub Actions workflows for the connected repository
+ *     operationId: listWorkspaceGithubWorkflows
  *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workflow discovery reads user-owned GitHub integration metadata and requires workspace access."
+ *     x-rorca-rationale: "Workflow discovery is read-only repository diagnostics and requires workspace access."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: OK }
  */
@@ -873,9 +821,16 @@ router.get('/:id/github/workflows', async (req: Request, res: Response, next: Ne
  * /api/workspaces/{id}/github/webhook-ping:
  *   post:
  *     tags: [GitHub]
- *     summary: Send a ping event to the configured GitHub webhook
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Webhook ping mutates only workspace-owned integration health state and requires workspace admin access."
+ *     summary: Send a provider-side ping event to the configured GitHub webhook
+ *     operationId: pingWorkspaceGithubWebhook
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Webhook ping performs a real provider POST and requires explicit operator capability plus workspace administration; it is excluded from MCP."
+ *     x-rorca-mcp: false
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Ping sent }
  */
@@ -917,8 +872,14 @@ router.post('/:id/github/webhook-ping', requireWorkspaceAdmin(), async (req: Req
  *   post:
  *     tags: [GitHub]
  *     summary: Render a PR template preview using the latest local run where available
+ *     operationId: previewWorkspaceGithubPrTemplate
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Template preview reads local workspace run/spec metadata and returns user-owned derived content."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Preview rendered }
  */
@@ -942,55 +903,20 @@ router.post('/:id/github/pr-template-preview', async (req: Request, res: Respons
  * /api/workspaces/{id}/github/actions-yaml:
  *   get:
  *     tags: [GitHub]
- *     summary: Render the workspace GitHub Actions example
+ *     summary: Autonomous GitHub Actions workflow generation is retired
  *     operationId: getWorkspaceGithubActionsYaml
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workspace members may read the non-secret generated workflow example."
+ *     deprecated: true
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: string }
  *     responses:
- *       200:
- *         description: GitHub Actions YAML
- *         content:
- *           application/x-yaml:
- *             schema: { type: string }
+ *       409: { description: Autonomous workflow generation is retired }
  */
-router.get('/:id/github/actions-yaml', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const workspace = await requireWorkspace(String(req.params.id));
-    const yaml = `name: Rorca Pipeline
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-jobs:
-  trigger-rorca:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Rorca run
-        env:
-          RORCA_API_URL: \${{ secrets.RORCA_API_URL }}
-          RORCA_API_TOKEN: \${{ secrets.RORCA_API_TOKEN }}
-          WORKSPACE_ID: \${{ secrets.WORKSPACE_ID }}
-        run: |
-          curl -fsSL -X POST "$RORCA_API_URL/api/pipeline/trigger" \
-            -H "Authorization: Bearer $RORCA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "workspaceId": "${workspace.id}",
-              "specPath": "forge/specs/approved/your-spec.json",
-              "triggerType": "scheduled"
-            }'
-`;
-    res.type('application/x-yaml').send(yaml);
-  } catch (err) {
-    next(err);
-  }
+router.get('/:id/github/actions-yaml', async (_req: Request, _res: Response, next: NextFunction) => {
+  next(new ConflictError('Autonomous GitHub Actions workflow generation is retired and unavailable'));
 });
 
 /**

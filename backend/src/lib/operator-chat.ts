@@ -214,7 +214,7 @@ function renderModelChangeCapabilityAnswer(request: OperatorChatRequest, runtime
     'Yes — but there are two different scopes, and this read-only answer did not change either one.',
     '',
     '1. Per-run execution model/backend: yes, Hermes can preview a governed Rorca run with an explicit backend/model override from Slack.',
-    '- Example: `run <spec> with pi model deepseek-v4-pro xhigh effort local-user worktree sequential draft-pr`',
+    '- Example: `run <spec> with pi model deepseek-v4-pro xhigh effort remote-rorca worktree sequential draft-pr`',
     '- That selects the execution backend/model for that requested run path, then still requires the normal policy/readiness gates and explicit approval before real execution.',
     '',
     '2. Persistent Hermes/Rorca defaults: not from this read-only operator-chat lane.',

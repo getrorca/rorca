@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import {
   guardWorkspaceProviderMutations,
+  isWorkspaceProviderMutation,
   requireProviderMutationAuthority,
 } from '../provider-mutation-authority';
 
@@ -76,9 +77,37 @@ test('AUTH_REQUIRED mode rejects local and internal principals but accepts a rea
   expect(next).toHaveBeenCalledTimes(1);
 });
 
-test('workspace matcher gates all provider mutations but preserves read-only local UI', () => {
-  guardWorkspaceProviderMutations(req({ method: 'GET' }), response, next);
-  guardWorkspaceProviderMutations(req({ method: 'POST', path: '/ws-one/scaffold' }), response, next);
-  expect(next).toHaveBeenCalledTimes(2);
-  expect(() => guardWorkspaceProviderMutations(req(), response, next)).toThrow(/disabled in local mode/);
+test('workspace matcher gates semantic provider authority only and preserves read-only/local UI operations', () => {
+  for (const [method, requestPath] of [
+    ['GET', '/ws-one/github'],
+    ['GET', '/ws-one/github/workflows'],
+    ['POST', '/ws-one/github/test-connection'],
+    ['POST', '/ws-one/github/pr-template-preview'],
+    ['POST', '/ws-one/github/app/setup/start'],
+    ['PUT', '/ws-one/github/auto-pr'],
+    ['POST', '/ws-one/github/dispatch'],
+    ['POST', '/ws-one/scaffold'],
+  ]) {
+    expect(isWorkspaceProviderMutation(method, requestPath)).toBe(false);
+    guardWorkspaceProviderMutations(req({ method, path: requestPath }), response, next);
+  }
+  expect(next).toHaveBeenCalledTimes(8);
+
+  for (const [method, requestPath] of [
+    ['POST', '/ws-one/github/connect'],
+    ['POST', '/ws-one/github/disconnect'],
+    ['DELETE', '/ws-one/github'],
+    ['POST', '/ws-one/github/webhook-ping'],
+    ['POST', '/ws-one/github/app/setup/exchange'],
+    ['POST', '/ws-one/github/app/import'],
+    ['POST', '/ws-one/github/app/revalidate'],
+    ['POST', '/ws-one/github/app/bind'],
+    ['POST', '/ws-one/github/delivery-policies'],
+    ['POST', '/ws-one/github/delivery-policies/policy-1/activate'],
+    ['POST', '/ws-one/github/autonomous-deliveries'],
+  ]) {
+    expect(isWorkspaceProviderMutation(method, requestPath)).toBe(true);
+    expect(() => guardWorkspaceProviderMutations(req({ method, path: requestPath }), response, next))
+      .toThrow(/disabled in local mode/);
+  }
 });

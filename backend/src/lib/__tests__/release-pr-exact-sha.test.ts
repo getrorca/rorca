@@ -15,7 +15,7 @@ jest.mock('../release-identity', () => ({
   withRunReleaseLock: async (_identity: unknown, fn: () => Promise<unknown>) => fn(),
   withGithubReleaseActuation: async (identity: unknown, _purpose: unknown, fn: (value: unknown) => Promise<unknown>) => fn({
     identity,
-    authority: { owner: 'getrorca', name: 'rorca', autoPrTargetBranch: 'main' },
+    authority: { owner: 'getrorca', name: 'rorca' },
     credential: { token: 'memory-only', source: 'github-app-installation' },
   }),
 }));

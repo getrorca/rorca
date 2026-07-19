@@ -137,7 +137,6 @@ import {
 } from '../lib/resolve-execution-options';
 import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
-import { createRunnerJob } from '../lib/execution-runner-jobs';
 import { getRecoveryTelemetry } from '../lib/recovery-telemetry';
 import {
   createExecutionSecretReferences,
@@ -1257,6 +1256,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
     const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
+    // Compatibility parsing is intentionally before the first workspace/DB read.
+    // local-user is unavailable until a signed host closeout protocol exists.
+    const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1268,7 +1270,6 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
     assertTerminalModeAvailable(resolvedTerminalMode);
-    const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
     await assertExecutionEnvironmentReady(resolvedExecutionEnvironment);
 
     // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
@@ -2376,32 +2377,21 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
     };
 
-    let runnerJobId: string | undefined;
-    if (resolvedExecutionEnvironment.effective === 'local-user') {
-      const runnerJob = await createRunnerJob({
-        runId,
-        environmentId: resolvedExecutionEnvironment.effective,
-        payload: jobPayload,
-      });
-      runnerJobId = runnerJob.id;
-      logger.info(`[Pipeline] Enqueued local runner job for runId=${runId}`);
-    } else {
-      const boss = getBoss();
-      if (typeof boss.createQueue === 'function') {
-        await boss.createQueue('pipeline:run');
-      }
-      const jobId = await boss.send('pipeline:run', jobPayload, {
-        retryLimit: 0,
-        expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
-      });
-
-      if (jobId === null) {
-        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
-        throw new ServiceUnavailableError('Failed to enqueue pipeline:run job: pg-boss returned null (queue may be missing or not started)');
-      }
-
-      logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
+    const boss = getBoss();
+    if (typeof boss.createQueue === 'function') {
+      await boss.createQueue('pipeline:run');
     }
+    const jobId = await boss.send('pipeline:run', jobPayload, {
+      retryLimit: 0,
+      expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
+    });
+
+    if (jobId === null) {
+      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
+      throw new ServiceUnavailableError('Failed to enqueue pipeline:run job: pg-boss returned null (queue may be missing or not started)');
+    }
+
+    logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
 
     // Determine queue position for response (count jobs queued before this one)
     const queuePos = (await queryOne<{ count: string }>(
@@ -2432,7 +2422,6 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       lifecyclePhase: 'queued',
       lifecycle_phase: 'queued',
       executionEnvironment: resolvedExecutionEnvironment.effective,
-      ...(runnerJobId ? { runnerJobId } : {}),
       ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
       ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
       ...(effectiveTaskManifestArtifacts ? { artifacts: effectiveTaskManifestArtifacts } : {}),
@@ -2757,11 +2746,11 @@ function resolveTaskManifestExecutionEnvironment(
   const bridgeSupported = hasExecutionEnvironmentSupport();
   const requestedEnvironment = body.executionEnvironment ?? manifest.execution.executionEnvironment ?? 'remote-rorca';
   const requestedEnvironmentId = body.executionEnvironmentId ?? manifest.execution.executionEnvironmentId;
-  const supportedEnvironment = requestedEnvironment === 'remote-rorca' || requestedEnvironment === 'local-user';
+  const resolved = resolveExecutionEnvironment(requestedEnvironment);
 
   return {
-    supported: bridgeSupported && supportedEnvironment,
-    executionEnvironment: requestedEnvironment === 'local-user' ? 'local-user' : 'remote-rorca',
+    supported: bridgeSupported,
+    executionEnvironment: resolved.effective,
     ...(requestedEnvironmentId ? { executionEnvironmentId: requestedEnvironmentId } : {}),
   };
 }
@@ -3190,6 +3179,12 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       );
     }
 
+    // Reject deprecated local-user execution before workspace reads, artifact
+    // writes, idempotency reservations, run insertion, or queue dispatch.
+    const executionEnvironmentResolution = resolveTaskManifestExecutionEnvironment(requestBody, manifest);
+    const resolvedExecutionEnvironment = executionEnvironmentResolution.executionEnvironment;
+    const resolvedExecutionEnvironmentId = executionEnvironmentResolution.executionEnvironmentId;
+
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [requestWorkspaceId]) as
       { id: string; label: string; path: string; domain?: string } | undefined;
     if (!workspace) {
@@ -3205,9 +3200,6 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     const resolvedAgentOverride = requestBody.agentOverride ?? manifest.execution.agentOverride;
     const resolvedModelOverride = requestBody.modelOverride ?? manifest.execution.modelOverride;
     const resolvedEffortLevel = requestBody.effortLevel ?? manifest.execution.effortLevel;
-    const executionEnvironmentResolution = resolveTaskManifestExecutionEnvironment(requestBody, manifest);
-    const resolvedExecutionEnvironment = executionEnvironmentResolution.executionEnvironment;
-    const resolvedExecutionEnvironmentId = executionEnvironmentResolution.executionEnvironmentId;
 
     const taskManifestUser = await getEffectiveUser(req);
     const taskManifestWfConfig = await resolveWorkflowConfig('pipeline_execution', taskManifestUser?.id);
@@ -6536,8 +6528,9 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     summary: Stream raw terminal output (SSE)
  *     operationId: streamPipelineOutput
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
+ *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for REST/CLI reattachment; streaming responses are not MCP tools."
  *     x-rorca-public-api: true
+ *     x-rorca-mcp: false
  *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store. Committed PostgreSQL notifications wake streams immediately, durable sequence replay supports reconnects, and bounded polling recovers from notification loss.
  *     parameters:
  *       - in: path

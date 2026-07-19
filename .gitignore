@@ -31,8 +31,26 @@ progress.txt
 .rorca/memory/MEMORY.md
 .rorca/memory/MEMORY_ARCHIVE.md
 
-# Postgres backup files (auto-generated, not for git)
+# Database exports are incident/backup artifacts, never source inputs.
 backend/backups/
+**/backups/
+**/dumps/
+docker/postgres/seed*
+*.dump
+*.pgdump
+*.backup
+*.bak
+*.sql.gz
+*.sql.bz2
+*.sql.xz
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.zip
+*.7z
+*.rar
 
 # Bun binary build artifacts
 bin/.generated/

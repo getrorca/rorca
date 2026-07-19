@@ -29,10 +29,6 @@ export interface GithubRepositoryAuthority {
   signedDeliveryObserved: boolean;
   connectedAt: string | null;
   lastWebhookAt: string | null;
-  autoPrEnabled: boolean;
-  autoPrTargetBranch: string;
-  autoPrReviewers: string[];
-  workflowConfig: Record<string, unknown> | null;
 }
 
 interface AuthorityRow {
@@ -48,31 +44,6 @@ interface AuthorityRow {
   signed_delivery_observed: boolean;
   connected_at: string | null;
   last_webhook_at: string | null;
-  auto_pr_enabled: boolean;
-  auto_pr_target_branch: string;
-  auto_pr_reviewers: string[] | string;
-  workflow_config: Record<string, unknown> | string | null;
-}
-
-function parseArray(value: string[] | string): string[] {
-  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseObject(value: Record<string, unknown> | string | null): Record<string, unknown> | null {
-  if (!value) return null;
-  if (typeof value !== 'string') return value as Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
-  } catch {
-    return null;
-  }
 }
 
 export function assertGithubRepositoryIdentity(owner: string, name: string): void {
@@ -107,8 +78,7 @@ export async function getGithubRepositoryAuthority(
   const row = await queryOne<AuthorityRow>(
     `SELECT workspace_id, repo_owner, repo_name, authority_source, authority_status,
             binding_id, installation_id, repository_id, webhook_configured,
-            signed_delivery_observed, connected_at, last_webhook_at, auto_pr_enabled, auto_pr_target_branch,
-            auto_pr_reviewers, workflow_config
+            signed_delivery_observed, connected_at, last_webhook_at
        FROM github_workspace_repository_authority
       WHERE workspace_id = $1`,
     [workspaceId],
@@ -128,10 +98,6 @@ export async function getGithubRepositoryAuthority(
     signedDeliveryObserved: row.signed_delivery_observed,
     connectedAt: row.connected_at,
     lastWebhookAt: row.last_webhook_at,
-    autoPrEnabled: row.auto_pr_enabled,
-    autoPrTargetBranch: row.auto_pr_target_branch,
-    autoPrReviewers: parseArray(row.auto_pr_reviewers),
-    workflowConfig: parseObject(row.workflow_config),
   };
   if (options.expectedRepository
     && (authority.owner.toLowerCase() !== options.expectedRepository.owner.toLowerCase()

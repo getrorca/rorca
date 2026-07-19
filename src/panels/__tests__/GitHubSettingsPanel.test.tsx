@@ -18,6 +18,11 @@ vi.mock('../../components/AutonomousDeliverySettings', () => ({
 
 vi.mock('../../lib/apiFetch', () => ({
   apiFetch: vi.fn(),
+  apiFetchProviderMutation: vi.fn(),
+  clearOperatorCapability: vi.fn(),
+  hasOperatorCapability: vi.fn(() => true),
+  onOperatorCapabilityLocked: vi.fn(() => () => {}),
+  setOperatorCapability: vi.fn(),
   BASE_URL: 'http://localhost:3030',
   onApiFetchError: vi.fn(() => () => {}),
   setTokens: vi.fn(),
@@ -26,8 +31,10 @@ vi.mock('../../lib/apiFetch', () => ({
   getRefreshToken: vi.fn(() => null),
 }));
 
-import { apiFetch } from '../../lib/apiFetch';
+import { apiFetch, apiFetchProviderMutation, setOperatorCapability } from '../../lib/apiFetch';
 const mockApiFetch = vi.mocked(apiFetch);
+const mockProviderMutation = vi.mocked(apiFetchProviderMutation);
+const mockSetOperatorCapability = vi.mocked(setOperatorCapability);
 
 const WORKSPACE_ROW = { id: 'ws-1', label: 'My Repo', path: '/tmp/repo', domains: [] };
 const WORKSPACE_RESPONSE = { items: [WORKSPACE_ROW], total: 1, hasMore: false };
@@ -45,11 +52,6 @@ const MOCK_CONNECTED_STATUS = {
   repoOwner: 'testorg',
   repoName: 'test-repo',
   webhookId: 12345,
-  autoPr: {
-    enabled: false,
-    targetBranch: 'main',
-    reviewers: [],
-  },
 };
 
 const MOCK_CONNECTED_ACCOUNT = {
@@ -83,7 +85,7 @@ function mockWorkspaceApi(overrides?: {
   throwGithub?: boolean;
   onRequest?: (path: string, init?: RequestInit) => unknown | Promise<unknown>;
 }) {
-  mockApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+  const implementation = async (path: string, init?: RequestInit) => {
     const extra = await overrides?.onRequest?.(path, init);
     if (extra !== undefined) return extra;
     if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
@@ -104,7 +106,16 @@ function mockWorkspaceApi(overrides?: {
       return { workflowConfig: overrides?.workflowConfig ?? null };
     }
     return {};
-  });
+  };
+  mockApiFetch.mockImplementation(implementation);
+  mockProviderMutation.mockImplementation(implementation);
+}
+
+async function unlockProviderChanges(capability = 'operator-preimage'): Promise<HTMLInputElement> {
+  const input = await screen.findByLabelText('Local operator capability') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: capability } });
+  fireEvent.click(screen.getByRole('button', { name: 'Unlock provider changes' }));
+  return input;
 }
 
 describe('GitHubSettingsPanel', () => {
@@ -116,6 +127,19 @@ describe('GitHubSettingsPanel', () => {
     await waitFor(() => {
       expect(document.body).toBeInTheDocument();
     });
+  });
+
+  it('keeps provider changes explicitly locked and never persists the entered preimage', async () => {
+    mockWorkspaceApi();
+    renderWithProviders(<GitHubSettingsPanel />);
+
+    expect(await screen.findByText('Provider changes lock')).toBeInTheDocument();
+    const input = await unlockProviderChanges('memory-only-preimage');
+    expect(mockSetOperatorCapability).toHaveBeenCalledWith('memory-only-preimage');
+    expect(screen.getByText('Unlocked for this visit')).toBeInTheDocument();
+    expect(localStorage.getItem('memory-only-preimage')).toBeNull();
+    expect(sessionStorage.getItem('memory-only-preimage')).toBeNull();
+    expect(input.value).toBe('');
   });
 
   it('shows disconnected state when not connected', async () => {
@@ -147,6 +171,10 @@ describe('GitHubSettingsPanel', () => {
       expect(document.body.textContent).toContain('Ping webhook');
       expect(document.body.textContent).toContain('Preview latest run');
       expect(document.body.textContent).toContain('Autonomous delivery connected');
+      expect(document.body.textContent).toContain('Repository-level Auto-PR and workflow-dispatch settings are retired');
+      expect(screen.queryByRole('button', { name: 'Save Auto-PR Settings' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Save Workflow Config' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Download Actions YAML' })).not.toBeInTheDocument();
       expect(document.querySelector('a[href$="/settings/hooks/12345"]')).toBeInTheDocument();
     });
   });
@@ -219,9 +247,10 @@ describe('GitHubSettingsPanel', () => {
     });
     renderWithProviders(<GitHubSettingsPanel />);
 
+    await unlockProviderChanges();
     fireEvent.click(await screen.findByRole('button', { name: 'Complete one-time App registration' }));
     await waitFor(() => {
-      const call = mockApiFetch.mock.calls.find(([path]) => path === '/api/workspaces/ws-1/github/app/setup/exchange');
+      const call = mockProviderMutation.mock.calls.find(([path]) => path === '/api/workspaces/ws-1/github/app/setup/exchange');
       expect(call).toBeDefined();
       expect(JSON.parse(String(call?.[1]?.body))).toEqual({ state: 'reload-safe-state', code: 'manifest-code' });
       expect(window.location.search).toBe('');
@@ -242,6 +271,7 @@ describe('GitHubSettingsPanel', () => {
     });
     renderWithProviders(<GitHubSettingsPanel />);
 
+    await unlockProviderChanges();
     fireEvent.change(await screen.findByLabelText('Installation ID'), { target: { value: '78' } });
     fireEvent.change(screen.getByLabelText('Repository ID'), { target: { value: '100' } });
     fireEvent.change(screen.getByLabelText('Owner'), { target: { value: 'acme' } });
@@ -250,7 +280,7 @@ describe('GitHubSettingsPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Verify and audit-replace exact repository' }));
 
     await waitFor(() => {
-      const call = mockApiFetch.mock.calls.find(([path]) => path === '/api/workspaces/ws-1/github/app/bind');
+      const call = mockProviderMutation.mock.calls.find(([path]) => path === '/api/workspaces/ws-1/github/app/bind');
       expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({
         installationId: 78, repositoryId: 100, repoOwner: 'acme', repoName: 'new-repo', replacementReason: 'installation moved',
       });
@@ -270,6 +300,7 @@ describe('GitHubSettingsPanel', () => {
     });
     renderWithProviders(<GitHubSettingsPanel />);
 
+    await unlockProviderChanges();
     fireEvent.click((await screen.findAllByRole('button', { name: 'Disconnect GitHub' }))[0]);
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm Disconnect' }));
     await waitFor(() => {

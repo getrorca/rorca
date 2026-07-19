@@ -2,6 +2,18 @@
 
 This is an operator runbook, not deployment or repository authority. Do not create an App, install it, bind a repository, activate policy, merge, or deploy without explicit human authorization.
 
+## Supported deployment and operator model
+
+OSS Rorca is a private, local single-operator application. The supported Compose topology keeps `AUTH_REQUIRED=false`, binds the combined API/UI to loopback by default, and does not advertise a production login/token flow. Do not publish the normal API/UI through Traefik, nginx, or a tunnel. The only supported public ingress is the exact signed callback `POST /api/webhooks/github`, using the reviewed OVH host/path/method/body-limit configuration. Read-only GitHub Settings diagnostics remain usable without provider-mutation authority.
+
+Provider changes use a narrow capability ceremony rather than a broad auth system:
+
+1. Generate a high-entropy operator secret outside the repository and browser storage.
+2. Configure only its lowercase SHA-256 digest as `RORCA_OPERATOR_CAPABILITY_SHA256` on the API process. Credential rotation/configuration is an operator action outside this source change.
+3. In Settings > GitHub, enter the preimage in **Provider changes lock** immediately before an intended provider/release-authority mutation.
+4. The browser retains the preimage in memory only and sends `X-Rorca-Operator-Capability` only for approved provider/release-authority mutations. It is not placed in local/session storage, URLs, logs, analytics, repository files, the database, Compose, worker state, or autonomous child environments.
+5. Explicitly lock after the operation. Navigation, sign-out, capability rejection, and provider-authority configuration errors also clear it. A missing server digest produces a safe disabled message; a wrong preimage is rejected and cleared.
+
 ## Authority model
 
 Rorca uses one canonical GitHub App registration with any number of GitHub account/owner installations. Each installation must use **selected repositories**. Rorca persists an immutable mapping:
@@ -33,7 +45,7 @@ GitHub **Team plan remains separately required** for private-repository protecte
 ## Preferred Manifest flow
 
 1. Configure an HTTPS `RORCA_APP_URL`, `RORCA_GITHUB_WEBHOOK_URL=https://hooks.rorca.ai/api/webhooks/github`, and `RORCA_GITHUB_APP_CREATION_ORG=<organization-login>`. Configure `VAULT_KEY` (64 hex characters) or an explicit strong `JWT_SECRET` before storing credentials.
-2. In Settings > GitHub, choose **Prepare App setup** as an explicit platform/superuser operator who is also authorized for the workspace. An ordinary workspace administrator receives 403 for process-global setup, exchange, and import. The endpoint creates a random 10-minute, one-use state bound to the authenticated operator and workspace. Normal CSRF middleware protects each local POST; the callback does not depend on an in-memory CSRF value that changes across reload.
+2. In the private local Settings > GitHub UI, choose **Prepare App setup** as the local platform/workspace operator. The endpoint creates a random 10-minute, one-use state bound to that operator and workspace. Before exchange/import/bind/revalidation, explicitly unlock provider changes as described above. Normal CSRF middleware protects each local POST; the callback does not depend on an in-memory CSRF value that changes across reload.
 3. Submit the returned manifest directly to the organization-owned GitHub App creation URL. Both Express/Helmet and the checked-in static nginx document CSP permit form submission only to the same origin and exact `https://github.com` origin; the manifest contains no private key.
 4. GitHub returns directly to `/settings/github`. After a reload or a new callback tab, choose **Complete one-time App registration**. Rorca atomically consumes the state before exchanging the one-time code. GitHub's returned private key and webhook secret are provider-profile checked and inserted in the same database transaction as the registration; they are never returned to the browser.
 5. Install the App for **selected repositories** under each desired owner/account.
@@ -41,6 +53,8 @@ GitHub **Team plan remains separately required** for private-repository protecte
 7. Review credential readiness separately from webhook health. Provider permissions, events, active state, and exact webhook URL/configuration must verify (and remain within the 24-hour freshness window) before credential readiness is connected. A new binding truthfully shows **Awaiting signed delivery**; the first valid signed App ping/event promotes observed webhook health without being required to authenticate that initial delivery. No autonomous policy, merge, or deployment authority is activated by registration or binding.
 
 ## Host-owned release authority
+
+Repository-level Auto-PR settings, workflow-dispatch configuration, and downloadable trigger workflows are retired compatibility surfaces and return conflict without persistence, credential resolution, or provider calls. PR behavior is chosen explicitly on each run (`pr`, `draft-pr`, `branch-only`, or `direct`) and frozen with exact SHA/base/repository identity in that run's immutable release intent. Workflow/deployment actuation remains disabled.
 
 - Execution-engine story commits remain local. PATH wrappers deny common remote commands only as defense in depth; they are not the capability boundary. Compose drops every API/worker container capability and adds back only `SYS_ADMIN` to those already trusted processes so Docker seccomp/AppArmor permit namespace construction; `no-new-privileges` and PID limits remain set. API drafting CLIs plus worker semantic/RPC/PTY/conflict-resolution/GitReins/Hilo/hook/validation children then run through `bubblewrap` with fresh PID/proc, user, mount, IPC, UTS, cgroup, and network namespaces and drop **all** capabilities before their executable; a private HOME/tmp; curated root-owned runtime mounts; exact writable workspace/Git metadata mounts; masked workspace credential files; and a cleared allowlisted environment. The child namespace has no direct interface/default route, so absolute Node/Python/Git/`gh`, package runners, `env -i`, and arbitrary sockets cannot reach PostgreSQL, GitHub, localhost, or the Rorca control plane or inspect trusted ancestor processes/files.
 - Cloud-model inference uses separate trusted API/worker Unix-socket CONNECT brokers mounted into autonomous namespaces through loopback relays. They accept only `CONNECT` to port 443 for exact names in `RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS`, resolve/pin public addresses, and reject IP literals, wildcards, private/mixed DNS answers, GitHub, DB, localhost, and arbitrary ports. Model API keys may enter a child only under this network confinement; DB/vault/App/PAT/internal/operator capabilities and credential homes never do. If namespace, required absolute-tool, credential-mask, socket-denial, ancestor-environment, or broker preflight fails, launch is refused and no host release can be prepared.
@@ -58,7 +72,7 @@ No model may choose repository authority, grant permissions, install the App, ac
 
 ## Bounded import fallback
 
-If no public authenticated callback is available, setup returns `bounded-import` instead of pretending Manifest exchange completed. Create the App manually using the permission/event table above, then call the platform/superuser-only import endpoint once (with workspace authority also required) using `appId`, `appSlug`, PEM private key, and webhook secret. The server verifies `GET /app` with the supplied key and, when `RORCA_GITHUB_APP_OWNER` or `RORCA_GITHUB_APP_CREATION_ORG` is configured, requires the exact provider App owner before vaulting it. It never echoes secret fields. Prefer a local operator browser/API client; do not put secrets in shell history, JSON files, tickets, chat, logs, or screenshots. Proceed with selected-repository installation and exact binding as above.
+If no public callback URL is available, setup returns `bounded-import` instead of pretending Manifest exchange completed. Create the App manually using the permission/event table above, then call the platform/superuser-only import endpoint once (with workspace authority also required) using `appId`, `appSlug`, PEM private key, and webhook secret. The server verifies `GET /app` with the supplied key and, when `RORCA_GITHUB_APP_OWNER` or `RORCA_GITHUB_APP_CREATION_ORG` is configured, requires the exact provider App owner before vaulting it. It never echoes secret fields. Prefer a local operator browser/API client; do not put secrets in shell history, JSON files, tickets, chat, logs, or screenshots. Proceed with selected-repository installation and exact binding as above.
 
 ## Rotation and incident response
 

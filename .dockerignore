@@ -6,6 +6,30 @@ backend/dist
 *.db-wal
 *.db-shm
 *.log
+
+# Database exports and compressed archives must never enter any image build
+# context, including intermediate stages and cache layers.
+**/backups
+**/backups/**
+**/dumps
+**/dumps/**
+docker/postgres/seed*
+**/*.dump
+**/*.pgdump
+**/*.backup
+**/*.bak
+**/*.sql.gz
+**/*.sql.bz2
+**/*.sql.xz
+**/*.tar
+**/*.tar.gz
+**/*.tar.bz2
+**/*.tar.xz
+**/*.tgz
+**/*.zip
+**/*.7z
+**/*.rar
+
 .git
 .env
 .env.*

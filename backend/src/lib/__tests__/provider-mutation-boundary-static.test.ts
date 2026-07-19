@@ -18,6 +18,8 @@ const tokenResolver = fs.readFileSync(path.join(src, 'lib', 'github-token-resolv
 const credentialProvider = fs.readFileSync(path.join(src, 'lib', 'github-app-credential-provider.ts'), 'utf8');
 const authUtils = fs.readFileSync(path.join(src, 'lib', 'auth-utils.ts'), 'utf8');
 const providerAuthority = fs.readFileSync(path.join(src, 'lib', 'provider-mutation-authority.ts'), 'utf8');
+const releaseAuthority = fs.readFileSync(path.join(src, 'lib', 'release-authority.ts'), 'utf8');
+const deliveryEvidence = fs.readFileSync(path.join(src, 'lib', 'github-pr-delivery-evidence.ts'), 'utf8');
 
 function routeSlice(source: string, startNeedle: string, endNeedle: string): string {
   const start = source.indexOf(startNeedle);
@@ -37,7 +39,7 @@ test('internal service authentication is cryptographic/configured and can never 
   expect(providerAuthority).toContain("endsWith('@rorca.internal')");
 });
 
-test('all workspace GitHub mutations and manual checks cross the operator capability boundary', () => {
+test('semantic workspace GitHub/provider mutations and manual checks cross the operator capability boundary', () => {
   const guard = server.indexOf("app.use('/api/workspaces', guardWorkspaceProviderMutations)");
   const githubRoutes = server.indexOf("app.use('/api/workspaces', workspaceGithubRouter)");
   const appRoutes = server.indexOf("app.use('/api/workspaces', workspaceGithubAppRouter)");
@@ -47,6 +49,24 @@ test('all workspace GitHub mutations and manual checks cross the operator capabi
   expect(guard).toBeLessThan(appRoutes);
   expect(guard).toBeLessThan(deliveryRoutes);
   expect(server).toContain("app.use('/api/github/checks', requireProviderMutationAuthority, githubChecksRouter)");
+});
+
+test('legacy Auto-PR, workflow config/YAML, and dispatch routes are inert compatibility conflicts', () => {
+  const autoPr = routeSlice(workspaceGithub, "router.put('/:id/github/auto-pr'", '/**\n * @swagger\n * /api/workspaces/{id}/github/workflow-config:');
+  const workflowConfig = routeSlice(workspaceGithub, "router.get('/:id/github/workflow-config'", '/**\n * @swagger\n * /api/workspaces/{id}/github/workflows:');
+  const actionsYaml = routeSlice(workspaceGithub, "router.get('/:id/github/actions-yaml'", '/**\n * @swagger\n * /api/workspaces/{id}/github/dispatch:');
+  for (const route of [autoPr, workflowConfig, actionsYaml]) {
+    expect(route).toMatch(/retired|unavailable/);
+    expect(route).toContain('ConflictError');
+    expect(route).not.toContain('resolveWorkspaceGitHubToken');
+    expect(route).not.toContain('fetchGithubWithTimeout');
+    expect(route).not.toContain('await execute');
+  }
+
+  expect(releaseAuthority).toContain('const targetBaseBranch = localBaseBranch');
+  expect(releaseAuthority).not.toContain('canonicalRepository?.autoPrTargetBranch');
+  expect(deliveryEvidence).toContain('JOIN pipeline_run_release_intents i');
+  expect(deliveryEvidence).toContain('i.base_branch AS release_base_branch');
 });
 
 test('workflow dispatch compatibility route resolves no credential and performs no provider call', () => {
