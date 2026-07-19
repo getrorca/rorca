@@ -192,6 +192,8 @@ function TokenBar({ global, scoped, tagged, budget }: { global: number; scoped: 
 
 export interface TriggerOptions {
   forceSequential?: boolean;
+  orchestrationMode?: 'sequential' | 'wave-parallel';
+  parallelism?: number;
   autoMerge?: boolean;
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   includeGraph?: boolean;
@@ -260,7 +262,7 @@ export default function TriggerPopover({
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const [driftData, setDriftData] = useState<DriftReportData | null>(null);
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
-  const [forceSequential, setForceSequential] = useState(false);
+  const [forceSequential, setForceSequential] = useState(true);
   const [includeGraph, setIncludeGraph] = useState(false);
   const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty' | 'native-pty'>('pty');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
@@ -451,6 +453,7 @@ export default function TriggerPopover({
   const showDriftWarning = driftCheckEnabled && driftErrors.length > 0;
 
   const isWaveParallel = orchestration?.mode === 'wave-parallel';
+  const waveParallelSelectable = Boolean(isWaveParallel && terminalMode === 'ansi-html');
 
   // Reasoning cost multipliers for the current model (used in ThinkingControls and dry-run preview)
   const reasoningCostMultipliers = getReasoningCostMultipliers(agentConfig?.agentModel ?? null);
@@ -845,18 +848,21 @@ export default function TriggerPopover({
             {/* Wave Parallel pill */}
             <button
               type="button"
-              onClick={() => { if (isWaveParallel) setForceSequential(false); }}
-              disabled={!isWaveParallel}
+              onClick={() => { if (waveParallelSelectable) setForceSequential(false); }}
+              disabled={!waveParallelSelectable}
               className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-[11px] font-medium transition-colors border ${
-                isWaveParallel && !forceSequential
+                waveParallelSelectable && !forceSequential
                   ? 'bg-accent text-white border-accent'
-                  : isWaveParallel
+                  : waveParallelSelectable
                     ? 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'
                     : 'bg-[var(--bg)] text-muted/40 border-border/40 cursor-not-allowed'
               }`}
             >
               <Layers size={11} className="shrink-0" />
               <span>Wave Parallel</span>
+              {waveParallelSelectable && (
+                <span className="text-[8px] opacity-70">experimental</span>
+              )}
               {!isWaveParallel && orchestration && (
                 <span className="text-[9px] opacity-60 italic">no parallel stories</span>
               )}
@@ -865,6 +871,12 @@ export default function TriggerPopover({
               )}
             </button>
           </div>
+
+          {waveParallelSelectable && (
+            <p className="text-[9px] leading-tight text-amber-400/90">
+              Experimental non-production validation only; production requests are refused.
+            </p>
+          )}
 
           {/* Context below the segmented control */}
           {isWaveParallel && !forceSequential && orchestration && (
@@ -1013,7 +1025,7 @@ export default function TriggerPopover({
               onChange={(event) => {
                 const nextMode = event.target.value as 'ansi-html' | 'pty' | 'native-pty';
                 setTerminalMode(nextMode);
-                if (nextMode === 'native-pty') setForceSequential(true);
+                if (nextMode !== 'ansi-html') setForceSequential(true);
               }}
               className="shrink-0 rounded-md border border-border bg-[var(--bg-elevated)] px-2 py-1 text-[11px] text-[var(--text)]"
             >
@@ -1058,8 +1070,11 @@ export default function TriggerPopover({
             const isClaude = agentConfig?.agentType === 'claude';
             const m = agentConfig?.agentModel?.toLowerCase() ?? '';
             const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+            const waveRequested = waveParallelSelectable && !forceSequential;
             onTrigger(effectiveWorktree, {
-              forceSequential: forceSequential || terminalMode === 'native-pty' || undefined,
+              forceSequential: !waveRequested || undefined,
+              orchestrationMode: waveRequested ? 'wave-parallel' : 'sequential',
+              parallelism: waveRequested ? orchestration?.parallelism ?? 2 : 1,
               autoMerge: effectiveWorktree ? autoMerge : undefined,
               mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
@@ -1089,8 +1104,11 @@ export default function TriggerPopover({
               const isClaude = agentConfig?.agentType === 'claude';
               const m = agentConfig?.agentModel?.toLowerCase() ?? '';
               const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+              const waveRequested = waveParallelSelectable && !forceSequential;
               onAddToQueue(effectiveWorktree, {
-                forceSequential: forceSequential || terminalMode === 'native-pty' || undefined,
+                forceSequential: !waveRequested || undefined,
+                orchestrationMode: waveRequested ? 'wave-parallel' : 'sequential',
+                parallelism: waveRequested ? orchestration?.parallelism ?? 2 : 1,
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
                 mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,

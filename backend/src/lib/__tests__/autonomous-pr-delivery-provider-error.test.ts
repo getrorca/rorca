@@ -25,6 +25,41 @@ jest.mock('../github-token-resolver', () => ({
   resolveWorkspaceGitHubToken: jest.fn(async () => ({ token: 'opaque-test-token', source: 'github-app-installation' })),
 }));
 
+// Provider-error redaction is isolated from the separately covered release
+// identity database contract. Supply one exact immutable actuation capability
+// so this fixture reaches the intended failed GitHub response seam.
+jest.mock('../release-authority', () => ({
+  loadRunReleaseIdentity: jest.fn(async () => ({
+    runId: 42,
+    workspaceId: 'ws-provider-error',
+    specId: 'provider-error',
+    authorizedSha: 'a'.repeat(40),
+    branchName: 'run/provider-error',
+    workspaceRealpath: '/tmp/provider-error',
+    worktreeRealpath: '/tmp/provider-error-worktree',
+    baseBranch: 'main',
+    baseSha: 'b'.repeat(40),
+    providerReleaseRef: 'rorca/release/run-42-aaaaaaaaaaaa',
+    integrationCheckoutPath: '/tmp/provider-error-integration',
+    repository: {
+      owner: 'getrorca', name: 'rorca', source: 'github-app-installation',
+      bindingId: 'binding-provider-error', installationId: 7, repositoryId: 9,
+    },
+  })),
+}));
+
+jest.mock('../release-identity', () => ({
+  revalidateRunReleaseIdentity: jest.fn(async () => undefined),
+  withGithubReleaseActuation: jest.fn(async (
+    _identity: unknown,
+    _purpose: unknown,
+    callback: (capability: Record<string, unknown>) => Promise<unknown>,
+  ) => callback({
+    authority: { owner: 'getrorca', name: 'rorca' },
+    credential: { token: 'opaque-test-token', source: 'github-app-installation' },
+  })),
+}));
+
 import { processAutonomousPrDelivery } from '../autonomous-pr-delivery';
 import type { GithubPrDeliveryEvidence } from '../github-pr-delivery-evidence';
 

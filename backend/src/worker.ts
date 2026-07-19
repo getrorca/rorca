@@ -107,6 +107,12 @@ import {
   reconcilePendingAutonomousPrDeliveryMerges,
   registerAutonomousPrDeliveryWorker,
 } from './lib/autonomous-pr-delivery';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveDispatchConsistency,
+  WaveParallelPolicyError,
+  type WaveExecutionMode,
+} from './lib/wave-parallel-policy';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -309,6 +315,47 @@ async function emitWalEvent(
   }
 }
 
+async function enforceWorkerWavePolicy(input: {
+  runId: number;
+  workspaceId: string;
+  rowParallelism: number | null;
+  payloadMode: WaveExecutionMode;
+  payloadParallelism: number;
+  triggerOptions?: Record<string, unknown>;
+  source: 'worker-run' | 'worker-retry';
+}): Promise<boolean> {
+  try {
+    enforceWaveDispatchConsistency({
+      source: input.source,
+      payloadMode: input.payloadMode,
+      payloadParallelism: input.payloadParallelism,
+      rowParallelism: input.rowParallelism,
+      triggerOptions: input.triggerOptions,
+      environment: currentWaveParallelPolicyEnvironment(),
+    });
+    return true;
+  } catch (error) {
+    if (!(error instanceof WaveParallelPolicyError)) throw error;
+    logger.error({ runId: input.runId, policy: error.toJSON() }, '[worker] wave-parallel dispatch refused');
+    await execute(
+      `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'wave_parallel_policy_denied' WHERE id = $1`,
+      [input.runId],
+    );
+    await transitionRunLifecycle(input.runId, 'failed', {
+      owner: input.source,
+      process: 'wave_parallel_policy',
+      reason: error.code,
+    });
+    await emitWalEvent('run_finished', input.workspaceId, {
+      run_id: input.runId,
+      status: 'failed',
+      reason: 'wave_parallel_policy_denied',
+      policy: error.toJSON(),
+    });
+    return false;
+  }
+}
+
 async function synthesizeInterruptedStoryFailure(params: {
   runId: number;
   workspaceId: string | number;
@@ -399,7 +446,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, runSpecPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const {
+      runId, specPath, runSpecPath, workspacePath, agent, model, worktreePath,
+      executionManifestPath, envOverrides, secretReferences, startFromStoryId,
+      specificStory, includeGraph, terminalMode, executionEnvironment,
+      orchestrationMode, parallelism: payloadParallelism, triggerOptions,
+      thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort,
+    } = payload;
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -441,6 +494,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       frozenWorktreePath: runRow.execution_worktree_path,
     });
     const cwd = frozenExecution.worktreePath;
+    if (!await enforceWorkerWavePolicy({
+      runId,
+      workspaceId,
+      rowParallelism: parallelism,
+      payloadMode: orchestrationMode,
+      payloadParallelism,
+      triggerOptions,
+      source: 'worker-run',
+    })) return;
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
@@ -558,7 +620,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       '--run-id', String(runId),
       '--workspace-id', workspaceId,
       '--port', backendPort,
-      '--parallelism', String(parallelism ?? 1),
+      '--parallelism', String(payloadParallelism),
       '--agent', agent,
       '--terminal-mode', terminalMode,
     ];
@@ -699,6 +761,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     });
 
     child.on('close', async () => {
+      let semanticCloseoutCompleted = false;
       try {
         await flushPending();
         // The engine flushes its bounded telemetry queue before process close.
@@ -772,9 +835,19 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           source: 'worker',
         });
 
+        // Process exit is transport evidence only. Completion subscribers must
+        // wait for the durable release/semantic-closeout seam below.
+        await emitWalEvent('run_process_finished', workspaceId, {
+          run_id: runId,
+          status,
+          exit_code: code,
+          exit_signal: signal,
+          source: 'worker',
+        });
+
         // Successful runs cross one durable host release/terminal intent before
         // any public done state or external effect. Failures/cancellation retain
-        // the existing terminal path and never prepare release authority.
+        // the semantic closeout path below and never prepare release authority.
         const hostReleaseOwned = status === 'done' && hostAuthority?.releaseEligible === true;
         if (hostReleaseOwned) {
           await prepareRunReleaseIntent({
@@ -799,6 +872,16 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           );
         }
 
+        const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
+        let mergeStatusAtCloseout: string | null = null;
+        if (worktreePath) {
+          try {
+            mergeStatusAtCloseout = (await queryOne<{ merge_status: string | null }>(
+              'SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId],
+            ))?.merge_status ?? null;
+          } catch { /* closeout evidence remains best effort */ }
+        }
+
         if (wasCancelled) {
           await emitWalEvent('run_cancelled', workspaceId, {
             run_id: runId,
@@ -806,81 +889,72 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             source: 'worker',
           });
         } else {
-          // ── Post-run merge strategy routing ─────────────────────────────────
-          // Resolve effective merge strategy from payload (set by pipeline trigger).
-          const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
           // External release routing is reachable only from frozen host result,
           // closeout, commit, attestation, accounting, released-outbox, branch,
-          // terminal-HEAD, and exact file-projection authority.
-          const allSpecStoriesPassed = status === 'done' && hostAuthority?.releaseEligible === true;
-          if (!allSpecStoriesPassed) {
-            logger.info({ runId, specPath, hostAuthority }, '[worker] Skipping post-run routing — frozen host release authority is incomplete');
-          }
-
-          // Release effects are owned exclusively by release-authority.ts. The
-          // legacy inline merge/push/PR router was removed so there is one
-          // exact-SHA actuator and no ambient git/gh fallback.
-
-          // Existing PR finalization is part of the same host release seam.
-
-          // A direct merge is a final gate, not optional presentation metadata.
-          // Closeout distinguishes successful branch work from base integration.
-          let mergeStatusAtCloseout: string | null = null;
-          if (worktreePath) {
-            try {
-              mergeStatusAtCloseout = (await queryOne<{ merge_status: string | null }>(
-                'SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId],
-              ))?.merge_status ?? null;
-            } catch { /* closeout evidence remains best effort */ }
-          }
-          if (status === 'done' && worktreePath && effectiveMergeStrategy === 'direct' && mergeStatusAtCloseout === 'failed') {
-            status = 'failed';
-            await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]);
-            logger.error({ runId }, '[worker] required direct merge failed; run outcome changed to failed');
+          // terminal-HEAD, and exact file-projection authority. Spec flags are
+          // presentation state and can never promote a rejected wave.
+          if (status !== 'done' && hostAuthority?.releaseEligible === true) {
+            logger.error(
+              { runId, specPath, status, code, signal },
+              '[worker] Refusing to promote non-zero engine closeout despite complete-looking host authority',
+            );
           }
           if (!hostReleaseOwned) {
-            await emitWalEvent('run_closeout', workspaceId, {
-              run_id: runId,
-              status,
-              completion_scope: worktreePath ? (mergeStatusAtCloseout === 'merged' ? 'base_integrated' : 'run_branch') : 'base_integrated',
-              base_integrated: !worktreePath || mergeStatusAtCloseout === 'merged',
-              branch_name: payload.branchName ?? null,
-              merge_strategy: effectiveMergeStrategy,
-              merge_status: mergeStatusAtCloseout,
-            });
+            logger.info({ runId, specPath, hostAuthority }, '[worker] Skipping release routing — frozen host release authority is incomplete');
           }
+        }
 
-          // Autonomous deployment/workflow authority is disabled.
+        // release-authority owns successful exact-SHA closeout and its trusted
+        // terminal outbox. Failure/cancellation still cross the same event order:
+        // durable terminal row -> run_closeout -> trusted run_finished.
+        if (!hostReleaseOwned) {
+          const semanticCloseoutPayload = {
+            run_id: runId,
+            status,
+            completion_scope: worktreePath ? 'run_branch' : 'base_integrated',
+            base_integrated: false,
+            branch_name: payload.branchName ?? null,
+            merge_strategy: effectiveMergeStrategy,
+            merge_status: mergeStatusAtCloseout,
+            exit_code: code,
+            exit_signal: signal,
+            source: 'worker',
+            semantic_closeout: true,
+          };
+          await emitWalEvent('run_closeout', workspaceId, semanticCloseoutPayload);
+          await emitWalEvent('run_finished', workspaceId, semanticCloseoutPayload);
+          semanticCloseoutCompleted = true;
+        } else if (status === 'done') {
+          // reconcileRunReleaseIntent atomically committed public done with the
+          // exact trusted terminal event ready, after durable run_closeout.
+          semanticCloseoutCompleted = true;
+        }
 
-          // Learn closeout is non-authoritative for delivery status. It runs only
-          // after release routing has persisted its final lineage/outcome fields.
-          const learnCloseout = await tryGenerateLearnCloseoutCandidates({
-            workspaceId: String(workspaceId),
-            runId,
-            specId: path.basename(specPath, '.json'),
-          });
-          await emitWalEvent('lifecycle_changed', workspaceId, {
-            workspaceId: String(workspaceId),
-            specId: path.basename(specPath, '.json'),
-            phaseId: 'learn',
-            runId,
-            changeKind: 'evidence_persisted',
-            learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
-          });
+        if (status === 'done') {
+          // Learn closeout is non-authoritative and cannot regress an already
+          // durable release/terminal decision.
+          try {
+            const learnCloseout = await tryGenerateLearnCloseoutCandidates({
+              workspaceId: String(workspaceId),
+              runId,
+              specId: path.basename(specPath, '.json'),
+            });
+            await emitWalEvent('lifecycle_changed', workspaceId, {
+              workspaceId: String(workspaceId),
+              specId: path.basename(specPath, '.json'),
+              phaseId: 'learn',
+              runId,
+              changeKind: 'evidence_persisted',
+              learnCloseoutStatus: learnCloseout?.status ?? 'blocked',
+            });
+          } catch (learnError) {
+            logger.warn({ learnError, runId }, '[worker] non-authoritative learn closeout failed after terminal release');
+          }
         }
 
         if (status !== 'release_pending') {
           await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : (status === 'done' ? 'finished' : 'failed'), {
-            owner: 'worker', outcome: status, mergeGate: payload.mergeStrategy ?? 'direct',
-          });
-        }
-        if (!wasCancelled && !hostReleaseOwned) {
-          await emitWalEvent('run_finished', workspaceId, {
-            run_id: runId,
-            status,
-            exit_code: code,
-            exit_signal: signal,
-            source: 'worker',
+            owner: 'worker', outcome: status, mergeGate: effectiveMergeStrategy,
           });
         }
 
@@ -890,6 +964,34 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         );
       } catch (err) {
         logger.error({ err, runId }, '[worker] close handler failed');
+        if (!semanticCloseoutCompleted) {
+          try {
+            await execute(
+              `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'worker_closeout_failed' WHERE id = $1`,
+              [runId],
+            );
+            await transitionRunLifecycle(runId, 'failed', {
+              owner: 'worker',
+              outcome: 'failed',
+              reason: 'worker_closeout_failed',
+            });
+            const failedCloseout = {
+              run_id: runId,
+              status: 'failed',
+              reason: 'worker_closeout_failed',
+              source: 'worker',
+              semantic_closeout: true,
+            };
+            await emitWalEvent('run_closeout', workspaceId, failedCloseout);
+            await emitWalEvent('run_finished', workspaceId, failedCloseout);
+            semanticCloseoutCompleted = true;
+          } catch (closeoutErr) {
+            logger.error({ err: closeoutErr, runId }, '[worker] failed to persist fail-closed semantic closeout');
+          }
+          advanceQueue(String(workspaceId)).catch(queueErr =>
+            logger.error({ err: queueErr, runId, workspaceId }, '[worker] advanceQueue failed after closeout failure'),
+          );
+        }
       }
     });
 
@@ -998,6 +1100,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       secretReferences,
       includeGraph,
       terminalMode: payloadTerminalMode,
+      orchestrationMode,
+      parallelism: payloadParallelism,
+      triggerOptions,
       thinkingEnabled,
       thinkingBudget,
       effortLevel,
@@ -1070,6 +1175,15 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
       return;
     }
+    if (!await enforceWorkerWavePolicy({
+      runId,
+      workspaceId,
+      rowParallelism: parallelism,
+      payloadMode: orchestrationMode,
+      payloadParallelism,
+      triggerOptions,
+      source: 'worker-retry',
+    })) return;
     const previewRow = await queryOne<{ status: string }>(
       `SELECT status FROM pipeline_retry_previews WHERE preview_hash = $1 AND retry_run_id = $2`,
       [previewHash, runId],
@@ -1197,7 +1311,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       '--run-id', String(runId),
       '--workspace-id', workspaceId,
       '--port', backendPort,
-      '--parallelism', String(parallelism ?? 1),
+      '--parallelism', String(payloadParallelism),
       '--agent', agent,
       '--terminal-mode', effectiveTerminalMode,
     ];

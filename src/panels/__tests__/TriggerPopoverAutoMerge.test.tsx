@@ -115,6 +115,22 @@ describe('TriggerPopover — autoMerge checkbox', () => {
     expect(options?.autoMerge).toBe(true);
   });
 
+  it('defaults ordinary Run Now requests to truthful sequential options', () => {
+    const onTrigger = vi.fn();
+    render(
+      <TriggerPopover loading={false} onTrigger={onTrigger} onClose={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /run now/i }));
+
+    const [, options] = onTrigger.mock.calls[0];
+    expect(options).toEqual(expect.objectContaining({
+      forceSequential: true,
+      orchestrationMode: 'sequential',
+      parallelism: 1,
+    }));
+  });
+
   it('requests native PTY mode and sequential execution when the interactive terminal is selected', () => {
     const onTrigger = vi.fn();
     render(

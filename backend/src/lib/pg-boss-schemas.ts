@@ -48,6 +48,7 @@ export type MergeStrategy = z.infer<typeof MergeStrategyEnum>;
 
 export const PipelineRunJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
+  workspaceId: z.string().min(1).optional(),
   specPath: z.string().min(1),
   runSpecPath: z.string().min(1),
   workspacePath: z.string().min(1),
@@ -74,6 +75,8 @@ export const PipelineRunJobPayload = z.object({
   startFromStoryId: z.string().optional(),
   specificStory: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
+  orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional().default('sequential'),
+  parallelism: z.number().int().min(1).max(10).optional().default(1),
   includeGraph: z.boolean().optional().default(false),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
@@ -122,6 +125,9 @@ export const PipelineRetryJobPayload = z.object({
   secretReferences: ExecutionSecretReferencesSchema.optional(),
   includeGraph: z.boolean().optional().default(false),
   terminalMode: TerminalModeSchema.optional().default('ansi-html'),
+  orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional().default('sequential'),
+  parallelism: z.number().int().min(1).max(10).optional().default(1),
+  triggerOptions: z.record(z.string(), z.unknown()).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),

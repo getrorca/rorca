@@ -651,7 +651,12 @@ async function persistTerminalIntent(row: ReleaseIntentRow): Promise<TrustedWalR
     payload: {
       run_id: Number(row.run_id), status: 'done', source: 'host-release-closeout',
       authorized_sha: row.authorized_sha, release_identity_hash: row.identity_hash,
-      merge_strategy: row.merge_strategy, deployment_allowed: false,
+      merge_strategy: row.merge_strategy,
+      completion_scope: row.merge_strategy === 'direct' && row.auto_merge ? 'base_integrated' : 'run_branch',
+      base_integrated: row.merge_strategy === 'direct' && row.auto_merge,
+      branch_name: row.branch_name,
+      semantic_closeout: true,
+      deployment_allowed: false,
     },
   });
   const updated = await execute('UPDATE pipeline_run_release_intents SET terminal_event_id = $2, updated_at = NOW() WHERE run_id = $1 AND (terminal_event_id IS NULL OR terminal_event_id = $2)', [Number(row.run_id), terminal.reference.id]);

@@ -9,6 +9,10 @@ import { Router, Request, Response } from 'express';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { handleRouteError } from '../lib/async-handler';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveParallelPolicy,
+} from '../lib/wave-parallel-policy';
 
 const router = Router();
 
@@ -150,7 +154,9 @@ router.get('/status', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Add a spec to the run queue
  *     operationId: enqueueRun
- *     description: Adds a new entry to the run queue for a workspace. The entry is appended at the end of the queue (max position + 1).
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Direct run-queue mutation is an operator control-plane action; public automation should use the governed pipeline trigger endpoint."
+ *     description: Adds a new entry to the run queue for a workspace. The entry is appended at the end of the queue (max position + 1) and defaults to effective sequential execution.
  *     requestBody:
  *       required: true
  *       content:
@@ -162,7 +168,7 @@ router.get('/status', async (req: Request, res: Response) => {
  *               workspaceId: { type: string, description: "Workspace ID" }
  *               specId: { type: string, description: "Spec slug identifier" }
  *               specPath: { type: string, description: "Relative spec path within the workspace" }
- *               parallelism: { type: integer, default: 1, description: "Number of parallel story executions" }
+ *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Effective story parallelism. Values above 1 are experimental and refused in production." }
  *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
  *     responses:
  *       201:
@@ -180,6 +186,7 @@ router.get('/status', async (req: Request, res: Response) => {
  *                 status: { type: string }
  *       400: { description: "Missing required fields (workspaceId, specId, specPath)" }
  *       404: { description: "Workspace not found" }
+ *       422: { description: "Wave-parallel execution denied by policy" }
  *       500: { description: "Internal server error" }
  */
 router.post('/', async (req: Request, res: Response) => {
@@ -190,6 +197,16 @@ router.post('/', async (req: Request, res: Response) => {
       throw new ValidationError('workspaceId, specId, and specPath are required');
       return;
     }
+
+    const requestedParallelism = Number(parallelism ?? 1);
+    if (!Number.isInteger(requestedParallelism) || requestedParallelism < 1 || requestedParallelism > 10) {
+      throw new ValidationError('parallelism must be an integer between 1 and 10');
+    }
+    const wavePolicy = enforceWaveParallelPolicy({
+      source: 'run-queue-api',
+      requestedMode: requestedParallelism > 1 ? 'wave-parallel' : 'sequential',
+      requestedParallelism,
+    }, currentWaveParallelPolicyEnvironment());
 
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
@@ -207,7 +224,7 @@ router.post('/', async (req: Request, res: Response) => {
     const inserted = await queryOne<{ id: number }>(
       `INSERT INTO run_queue (workspace_id, spec_id, spec_path, parallelism, auto_worktree, position)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [workspaceId, specId, specPath, parallelism ?? 1, autoWorktree ? 1 : 0, nextPosition]
+      [workspaceId, specId, specPath, wavePolicy.parallelism, autoWorktree ? 1 : 0, nextPosition]
     );
 
     const entry = await queryOne('SELECT * FROM run_queue WHERE id = $1', [inserted?.id]);

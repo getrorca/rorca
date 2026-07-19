@@ -26,6 +26,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { hasAgentCredentials } from '../lib/secret-resolver';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveDispatchConsistency,
+  WaveParallelPolicyError,
+} from '../lib/wave-parallel-policy';
 
 const apiUrl = (process.env.RORCA_API_URL ?? 'http://localhost:3030/api').replace(/\/$/, '');
 const environmentId = process.env.RORCA_RUNNER_ENVIRONMENT_ID ?? 'local-user';
@@ -121,25 +126,108 @@ function resolveEnginePath(): string {
   return found;
 }
 
+function resolveTsxPath(): string {
+  const candidates = [
+    path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx'),
+    path.join(process.cwd(), 'node_modules', '.bin', 'tsx'),
+  ];
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) throw new Error(`trusted tsx launcher not found. Tried: ${candidates.join(', ')}`);
+  return fs.realpathSync(found);
+}
+
+function resolveRunnerPayloadPath(input: {
+  value: unknown;
+  label: string;
+  executionRoot: string;
+  payloadRoot: unknown;
+}): string {
+  if (typeof input.value !== 'string' || !path.isAbsolute(input.value)) {
+    throw new Error(`${input.label} must be an absolute host-frozen path`);
+  }
+  let candidate = path.resolve(input.value);
+  if (workspacePathOverride) {
+    if (typeof input.payloadRoot !== 'string' || !path.isAbsolute(input.payloadRoot)) {
+      throw new Error(`${input.label} cannot be remapped without an absolute payload execution root`);
+    }
+    const relative = path.relative(path.resolve(input.payloadRoot), candidate);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`${input.label} escaped the frozen payload execution root`);
+    }
+    candidate = path.resolve(input.executionRoot, relative);
+  }
+  const root = fs.realpathSync(input.executionRoot);
+  const resolved = fs.realpathSync(candidate);
+  const relative = path.relative(root, resolved);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${input.label} escaped the local execution root`);
+  }
+  return resolved;
+}
+
 async function runJob(job: any): Promise<void> {
   const payload = job.payload ?? {};
   await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/running`, { runnerId });
 
-  const workspacePath = workspacePathOverride || payload.worktreePath || payload.workspacePath;
+  let wavePolicy;
+  try {
+    const payloadParallelism = Number(payload.parallelism ?? 1);
+    wavePolicy = enforceWaveDispatchConsistency({
+      source: 'local-runner-job',
+      payloadMode: payload.orchestrationMode === 'wave-parallel' ? 'wave-parallel' : 'sequential',
+      payloadParallelism,
+      rowParallelism: payloadParallelism,
+      triggerOptions: payload.triggerOptions,
+      environment: currentWaveParallelPolicyEnvironment(),
+    });
+  } catch (error) {
+    if (!(error instanceof WaveParallelPolicyError)) throw error;
+    await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/complete`, {
+      runnerId,
+      status: 'failed',
+      result: { policy: error.toJSON() },
+      error: 'wave_parallel_policy_denied',
+    });
+    return;
+  }
+
+  const payloadExecutionRoot = payload.worktreePath || payload.workspacePath;
+  if (workspacePathOverride && payload.worktreePath) {
+    throw new Error('Local workspace remapping cannot prove a distinct frozen worktree/base identity');
+  }
+  const workspacePath = workspacePathOverride || payloadExecutionRoot;
   if (!workspacePath || typeof workspacePath !== 'string') {
     throw new Error('Runner workspace path missing. Set RORCA_RUNNER_WORKSPACE_PATH or include workspacePath in job payload.');
   }
-  const specPath = String(payload.specPath);
-  const jsonPath = path.join(workspacePath, specPath);
+  const executionRoot = fs.realpathSync(workspacePath);
+  const repositoryRoot = workspacePathOverride
+    ? executionRoot
+    : fs.realpathSync(String(payload.workspacePath));
+  const jsonPath = resolveRunnerPayloadPath({
+    value: payload.runSpecPath,
+    label: 'runSpecPath',
+    executionRoot,
+    payloadRoot: payloadExecutionRoot,
+  });
+  const executionManifestPath = resolveRunnerPayloadPath({
+    value: payload.executionManifestPath,
+    label: 'executionManifestPath',
+    executionRoot,
+    payloadRoot: payloadExecutionRoot,
+  });
   const enginePath = resolveEnginePath();
-  const command = enginePath.endsWith('.ts') ? 'npx' : 'node';
-  const args = enginePath.endsWith('.ts') ? ['tsx', enginePath] : [enginePath];
+  const command = enginePath.endsWith('.ts') ? resolveTsxPath() : process.execPath;
+  const args = [enginePath];
 
   args.push('--json', jsonPath);
   args.push('--cwd', workspacePath);
   args.push('--run-id', String(payload.runId));
+  if (typeof payload.workspaceId !== 'string' || !payload.workspaceId.trim()) {
+    throw new Error('Local runner payload lacks frozen workspaceId');
+  }
+  args.push('--workspace-id', payload.workspaceId);
   args.push('--port', String(engineApiPort));
-  args.push('--parallelism', String(payload.parallelism ?? 1));
+  args.push('--parallelism', String(wavePolicy.parallelism));
   args.push('--agent', String(payload.agent ?? 'claude'));
   if (payload.model) args.push('--model', String(payload.model));
   if (payload.specificStory) args.push('--story', String(payload.specificStory));
@@ -147,13 +235,16 @@ async function runJob(job: any): Promise<void> {
   if (payload.includeGraph) args.push('--include-graph');
   if (payload.terminalMode) args.push('--terminal-mode', String(payload.terminalMode));
   if (payload.branchName) args.push('--branch-name', String(payload.branchName));
+  args.push('--execution-manifests', executionManifestPath);
+  if (payload.worktreePath) args.push('--worktree-path', executionRoot);
+  args.push('--workspace-path', repositoryRoot);
   if (payload.thinkingEnabled) args.push('--thinking-enabled', String(payload.thinkingEnabled));
   if (payload.thinkingBudget) args.push('--thinking-budget', String(payload.thinkingBudget));
   if (payload.effortLevel) args.push('--effort-level', String(payload.effortLevel));
   if (payload.reasoningEffort) args.push('--reasoning-effort', String(payload.reasoningEffort));
 
   const child = spawn(command, args, {
-    cwd: workspacePath,
+    cwd: executionRoot,
     stdio: 'inherit',
     env: {
       ...process.env,

@@ -49,6 +49,7 @@ import {
   type StoryChangePolicy,
 } from '../lib/story-execution-packet';
 import { persistStoryExecutionManifest } from '../lib/story-closeout';
+import { requiresPerStoryWorktree } from '../lib/parallel-wave-core';
 import { inspectApprovedSpecPasses, reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
 import { classifyRunLiveness } from '../lib/ssdlc-liveness';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
@@ -145,6 +146,12 @@ import {
 } from '../lib/execution-secret-references';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import { fallbackReplayBlocksCompletion, replayFallbackResults } from '../lib/fallback-replay';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveParallelPolicy,
+  type EffectiveWaveParallelPolicy,
+  type WaveExecutionMode,
+} from '../lib/wave-parallel-policy';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -226,6 +233,61 @@ function autoSelectOrchestration(userStories: WaveUserStory[]): {
     mode: 'wave-parallel', parallelism: maxWaveSize,
     reason: `max wave size: ${maxWaveSize}, stories: ${totalStories}`,
     waveCount, maxWaveSize, totalStories, waves: waveSummary,
+  };
+}
+
+function resolveTriggerWavePolicy(input: {
+  workspacePath: string;
+  stories: WaveUserStory[];
+  requestedMode?: WaveExecutionMode;
+  requestedParallelism?: number;
+  forceSequential?: boolean;
+  terminalMode: TerminalMode;
+  specificStory?: string;
+}): {
+  policy: EffectiveWaveParallelPolicy;
+  orchestration: ReturnType<typeof autoSelectOrchestration>;
+} {
+  const analysis = autoSelectOrchestration(input.stories);
+  let workspaceParallelRequested = false;
+  try {
+    const configPath = path.join(input.workspacePath, '.rorca', 'config.json');
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { execution?: { waveParallelism?: boolean } };
+      workspaceParallelRequested = config.execution?.waveParallelism === true;
+    }
+  } catch {
+    // Invalid/missing config is never authority to broaden execution.
+  }
+
+  const explicitlyParallel = input.requestedMode === 'wave-parallel'
+    || (input.requestedParallelism ?? 1) > 1;
+  const forcedSequential = input.forceSequential === true
+    || isPtyTerminalMode(input.terminalMode)
+    || Boolean(input.specificStory);
+  const parallelRequested = explicitlyParallel
+    || (workspaceParallelRequested && !forcedSequential);
+  const policy = enforceWaveParallelPolicy({
+    source: 'pipeline-trigger',
+    requestedMode: input.requestedMode ?? (parallelRequested ? 'wave-parallel' : 'sequential'),
+    requestedParallelism: parallelRequested
+      ? (input.requestedParallelism ?? Math.max(2, analysis.parallelism))
+      : 1,
+    forceSequential: forcedSequential,
+  }, currentWaveParallelPolicyEnvironment());
+
+  return {
+    policy,
+    orchestration: {
+      ...analysis,
+      mode: policy.mode,
+      parallelism: policy.parallelism,
+      reason: policy.mode === 'wave-parallel'
+        ? `experimental opt-in; ${analysis.reason}`
+        : forcedSequential
+          ? 'sequential execution explicitly or terminal/story scoped'
+          : 'safe control-plane default',
+    },
   };
 }
 
@@ -442,6 +504,7 @@ interface DispatchManifestProfile {
 
 interface DispatchManifestStory extends CapabilityStory {
   acceptance?: string;
+  dependsOn?: string[];
   excluded?: boolean;
   passes?: boolean;
   model?: string;
@@ -492,6 +555,27 @@ async function resolveAndPersistDispatchManifests(input: {
   const specRevision = deriveStoryContractRevision(input.specJson);
   const manifests: ImmutableStoryExecutionManifest[] = [];
   const dispatchAgent = resolveDispatchAgent(input.agent);
+  const isolatedStoryIds = new Set<string>();
+  if (input.parallelism > 1 && input.terminalMode !== 'pty') {
+    const compiled = compileWaves(stories.map((story) => ({
+      id: story.id,
+      title: story.title,
+      description: story.description,
+      acceptanceCriteria: acceptanceCriteriaForManifest(story),
+      dependsOn: story.dependsOn ?? [],
+      passes: story.passes,
+      excluded: story.excluded,
+    })));
+    if (isCycleError(compiled)) {
+      throw new UnprocessableError(
+        `PARALLEL_WAVE_MANIFEST_CYCLE: cannot freeze safe story working directories for ${compiled.involvedIds.join(', ')}`,
+      );
+    }
+    for (const wave of compiled) {
+      if (!requiresPerStoryWorktree(wave.stories.length)) continue;
+      for (const waveStory of wave.stories) isolatedStoryIds.add(waveStory.id);
+    }
+  }
 
   for (const story of stories.filter((item) => !item.excluded)) {
     const packet = buildStoryExecutionPacket(input.cwd, story, mode);
@@ -513,7 +597,11 @@ async function resolveAndPersistDispatchManifests(input: {
         resolvedStoryAgent = findCapableEngine(detectRequiredTools(story), resolvedStoryAgent) ?? resolvedStoryAgent;
       }
     }
-    const storyIsolated = input.parallelism > 1 && input.terminalMode !== 'pty';
+    // Only genuinely concurrent waves need per-story branches. A singleton wave
+    // executes directly on the run branch, so its immutable host-validation and
+    // command-safety authority are frozen against input.cwd rather than a branch
+    // which the engine must never create.
+    const storyIsolated = isolatedStoryIds.has(story.id);
     const storyWorktreePath = storyIsolated
       ? path.resolve(input.cwd, '..', `${path.basename(input.cwd)}-${story.id}-run-${input.runId}`)
       : input.cwd;
@@ -1042,6 +1130,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
+ *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated." }
+ *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Requested effective story parallelism. Values above 1 require the non-production experimental gate." }
+ *               forceSequential: { type: boolean, default: false, description: "Force effective sequential execution." }
  *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi], description: "Override the execution agent for this run" }
  *               modelOverride: { type: string, description: "Override the execution model for this run" }
@@ -1082,6 +1173,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                     activeRunId: { type: integer }
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "Spec is not executable or wave-parallel execution was denied by policy" }
  */
 const PipelineTriggerSchema = z.object({
   specPath: z.string().min(1),
@@ -1091,6 +1183,8 @@ const PipelineTriggerSchema = z.object({
   mergeStrategy: z.enum(['direct', 'pr', 'draft-pr', 'branch-only']).optional(),
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
+  orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional(),
+  parallelism: z.number().int().min(1).max(10).optional(),
   forceSequential: z.boolean().optional(),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
@@ -1161,7 +1255,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1311,6 +1405,26 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         dispatchStory.effort ?? resolvedReasoningEffort,
       );
     }
+
+    const waveStories: WaveUserStory[] = storiesForPreflight.map((story) => ({
+      id: story.id,
+      title: story.title ?? '',
+      description: story.description ?? '',
+      acceptanceCriteria: story.acceptanceCriteria ?? [],
+      dependsOn: (story as DispatchManifestStory & { dependsOn?: string[] }).dependsOn ?? [],
+      passes: story.passes,
+      excluded: story.excluded,
+    }));
+    const { policy: waveExecutionPolicy, orchestration } = resolveTriggerWavePolicy({
+      workspacePath: workspace.path,
+      stories: waveStories,
+      requestedMode: orchestrationMode,
+      requestedParallelism,
+      forceSequential,
+      terminalMode: resolvedTerminalMode,
+      specificStory: storyId,
+    });
+    const parallelism = waveExecutionPolicy.parallelism;
 
     // Lock initial SSDLC safety before the first mutation. Prose/_notes cannot
     // weaken these values; retries consume the persisted structured options.
@@ -1569,7 +1683,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // optional external orchestration mode would bypass its cleanup/closeout seam.
     const useExternalPiOrchestration = resolvedAgentType === 'pi'
       && isPiExternalOrchestrationEnabled()
-      && !autonomousSafety.policyLocked;
+      && !autonomousSafety.policyLocked
+      && waveExecutionPolicy.mode === 'sequential';
 
     if (!queuedRunId && !reservedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
@@ -1587,8 +1702,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
+        const queuedNeedsWorktree = effectiveAutoWorktreeRequest || waveExecutionPolicy.mode === 'wave-parallel';
         const queuedSpecSlug = path.basename(specPath, '.json').replace(/[^a-z0-9-]/gi, '-');
-        const queuedBranchName = effectiveAutoWorktreeRequest ? `feat/${queuedSpecSlug}` : null;
+        const queuedBranchName = queuedNeedsWorktree ? `feat/${queuedSpecSlug}` : null;
         const queuedWorktreePath = queuedBranchName
           ? path.resolve(workspace.path, '..', `${path.basename(workspace.path)}-${queuedBranchName.replace(/\//g, '-')}`)
           : null;
@@ -1601,7 +1717,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const queuedEffectiveOptions = buildEffectiveRunOptions({
           model: finalAgentModel,
           effort: resolvedReasoningEffort,
-          autoWorktree: effectiveAutoWorktreeRequest,
+          autoWorktree: queuedNeedsWorktree,
           worktreePath: queuedWorktreePath,
           branchName: queuedBranchName,
           mergeStrategy: queuedMergeStrategy,
@@ -1614,11 +1730,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         });
         const queuedBaseTriggerOptions = Object.fromEntries(
           Object.entries({
-            autoWorktree: effectiveAutoWorktreeRequest,
+            autoWorktree: queuedNeedsWorktree,
             autoMerge: queuedAutoMerge,
             mergeStrategy: queuedMergeStrategy,
             triggerType: triggerType === 'scheduled' ? 'scheduled' : 'manual',
-            forceSequential,
+            forceSequential: waveExecutionPolicy.mode === 'sequential',
+            orchestrationMode: waveExecutionPolicy.mode,
+            parallelism: waveExecutionPolicy.parallelism,
+            orchestration,
             agentOverride,
             modelOverride,
             storyId,
@@ -1636,21 +1755,22 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
             executionEnvironment: resolvedExecutionEnvironment.effective,
           }).filter(([, value]) => value !== undefined)
         );
-        const queuedTriggerOptions = JSON.stringify({ ...queuedBaseTriggerOptions, ...(triggerOptions ?? {}) });
+        const queuedTriggerOptions = JSON.stringify({ ...(triggerOptions ?? {}), ...queuedBaseTriggerOptions });
         const queuedTaskManifestArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
         const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
-          (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via,
+          (spec_path, workspace_id, status, trigger_type, parallelism, queued_at, queue_position, triggered_via,
            auto_worktree, auto_merge, merge_strategy, include_graph, agent, agent_type, agent_model,
            terminal_mode, execution_environment, branch_name, worktree_path, effective_options,
            idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-          VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11,
-                  $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20::jsonb)
+          VALUES ($1, $2, 'queued', $3, $4, NOW(), $5, 'queue', $6, $7, $8, $9, $10, $11, $12,
+                  $13, $14, $15, $16, $17::jsonb, $18, $19, $20::jsonb, $21::jsonb)
           RETURNING id`, [
           specPath,
           workspaceId,
           triggerType === 'scheduled' ? 'scheduled' : 'manual',
+          waveExecutionPolicy.parallelism,
           position,
-          effectiveAutoWorktreeRequest,
+          queuedNeedsWorktree,
           queuedAutoMerge,
           queuedMergeStrategy,
           includeGraph ?? false,
@@ -1679,6 +1799,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           terminal_mode: resolvedTerminalMode,
           executionEnvironment: resolvedExecutionEnvironment.effective,
           effectiveOptions: queuedEffectiveOptions,
+          orchestration,
           ...(idempotencyKey ? { idempotencyKey } : {}),
           ...(manifestId ? { manifestId } : {}),
           ...(taskManifestArtifacts ? { artifacts: taskManifestArtifacts } : {}),
@@ -1734,7 +1855,13 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     if (useExternalPiOrchestration) {
       const specId = path.basename(specPath, '.json');
       const serializedExternalArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
-      const serializedExternalTriggerOptions = triggerOptions ? JSON.stringify(triggerOptions) : null;
+      const externalTriggerOptions = {
+        ...(triggerOptions ?? {}),
+        orchestrationMode: waveExecutionPolicy.mode,
+        parallelism: waveExecutionPolicy.parallelism,
+        orchestration,
+      };
+      const serializedExternalTriggerOptions = JSON.stringify(externalTriggerOptions);
       let runId: number;
       if (existingRunId) {
         await execute(
@@ -1742,7 +1869,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
               SET spec_path = $1, workspace_id = $2, status = 'pi_native', trigger_type = $3,
                   agent = $4, agent_type = $5, agent_model = $6, started_at = NULL,
                   finished_at = NULL, pid = NULL, triggered_via = $7, terminal_mode = $8,
-                  execution_environment = $9, idempotency_key = COALESCE($10, idempotency_key),
+                  execution_environment = $9, parallelism = 1, idempotency_key = COALESCE($10, idempotency_key),
                   task_manifest_id = COALESCE($11, task_manifest_id),
                   task_manifest_artifacts = COALESCE($12::jsonb, task_manifest_artifacts),
                   trigger_options = COALESCE($13::jsonb, trigger_options)
@@ -1754,7 +1881,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const runResult = await queryOne<{ id: number }>(
           `INSERT INTO pipeline_runs
              (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-           VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12::jsonb, COALESCE($13::jsonb, '{}'::jsonb))
+           VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)
            RETURNING id`,
           [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions],
         );
@@ -1831,64 +1958,16 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         executionManifestPath: piNativeManifests.path,
         executionManifestHashes: piNativeManifests.manifests.map((manifest) => manifest.manifestHash),
         effectiveOptions: piNativeEffectiveOptions,
+        orchestration,
         specReadiness: (req as any)._specReadiness,
       });
       return;
     }
 
-    // 4b. Auto-select orchestration mode (sequential vs wave-parallel)
-    // IMPORTANT: Respect waveParallelism from .rorca/config.json — if false, force sequential
-    let parallelism = 1;
-    let orchestration: ReturnType<typeof autoSelectOrchestration> | null = null;
-    try {
-      const specJsonForOrch = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-      const orchStories: WaveUserStory[] = (specJsonForOrch.userStories ?? []).map((s: any) => ({
-        id: s.id,
-        title: s.title ?? '',
-        description: s.description ?? '',
-        acceptanceCriteria: s.acceptanceCriteria ?? [],
-        dependsOn: s.dependsOn ?? [],
-        passes: s.passes,
-        excluded: s.excluded,
-      }));
-      orchestration = autoSelectOrchestration(orchStories);
-
-      // Check forceSequential from trigger request (UI toggle) or .rorca/config.json
-      if (forceSequential) {
-        parallelism = 1;
-        logger.info(`[orchestration] Forced sequential (user selected sequential in UI)`);
-      } else {
-        let waveParallelismEnabled = true;
-        try {
-          const rorcaConfigPath = path.join(workspace.path, '.rorca', 'config.json');
-          if (fs.existsSync(rorcaConfigPath)) {
-            const rorcaConfig = JSON.parse(fs.readFileSync(rorcaConfigPath, 'utf8'));
-            if (rorcaConfig?.execution?.waveParallelism === false) {
-              waveParallelismEnabled = false;
-            }
-          }
-        } catch { /* config parse error — use default */ }
-
-        if (!waveParallelismEnabled) {
-          parallelism = 1;
-          logger.info(`[orchestration] Forced sequential (waveParallelism: false in .rorca/config.json)`);
-        } else {
-          parallelism = orchestration.parallelism;
-          logger.info(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
-        }
-      }
-    } catch {
-      // Spec parse error — fall back to sequential
-      logger.info('[orchestration] Using sequential (spec parse error, fallback)');
-    }
-
-    if (isPtyTerminalMode(resolvedTerminalMode) && parallelism > 1) {
-      parallelism = 1;
-      logger.info('[orchestration] Forced sequential because PTY sessions are run-scoped interactive terminals');
-    }
+    logger.info(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
 
     // 5. Determine CWD — main workspace or new worktree
-    const needsWorktree = effectiveAutoWorktreeRequest || orchestration?.mode === 'wave-parallel';
+    const needsWorktree = effectiveAutoWorktreeRequest || waveExecutionPolicy.mode === 'wave-parallel';
     let cwd = workspace.path;
     let branchName: string | null = null;
     let worktreePath: string | null = null;
@@ -2003,7 +2082,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         autoMerge: computedAutoMerge,
         mergeStrategy: resolvedMergeStrategy,
         triggerType: validTriggerType,
-        forceSequential,
+        forceSequential: waveExecutionPolicy.mode === 'sequential',
+        orchestrationMode: waveExecutionPolicy.mode,
+        parallelism: waveExecutionPolicy.parallelism,
         agentOverride,
         modelOverride,
         storyId,
@@ -2035,9 +2116,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const effectiveTaskManifestArtifacts = taskManifestArtifacts ?? persistedArtifacts;
     const effectiveTaskManifestArtifactRefs = taskManifestArtifactRefs ?? getStoredArtifactRefsFromTriggerOptions(existingTriggerOptions);
     const effectiveTriggerOptions = {
-      ...requestedTriggerOptions,
       ...(existingTriggerOptions ?? {}),
       ...(triggerOptions ?? {}),
+      ...requestedTriggerOptions,
+      orchestrationMode: waveExecutionPolicy.mode,
+      parallelism: waveExecutionPolicy.parallelism,
+      orchestration,
     };
 
     const serializedTaskManifestArtifacts = effectiveTaskManifestArtifacts
@@ -2251,6 +2335,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     const jobPayload = {
       runId,
+      workspaceId,
       specPath,
       runSpecPath,
       workspacePath: workspace.path,
@@ -2274,6 +2359,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
       ...(storyId ? { specificStory: storyId } : {}),
       triggeredVia,
+      orchestrationMode: waveExecutionPolicy.mode,
+      parallelism: waveExecutionPolicy.parallelism,
       includeGraph: effectiveIncludeGraph,
       ...(agentOverride ? { agentOverride } : {}),
       ...(resolvedThinkingEnabled !== undefined ? { thinkingEnabled: resolvedThinkingEnabled } : {}),
@@ -5351,11 +5438,23 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       || replayedOptions.safety.deploy
       || replayedOptions.safety.externalSend;
     const highRisk = destructiveReplay || Boolean(worktreePreflight && worktreePreflight.classification !== 'fresh');
+    const retryParallelRequested = forceSequential === false && (originalRun.parallelism ?? 1) > 1;
+    const retryWavePolicy = enforceWaveParallelPolicy({
+      source: 'pipeline-retry',
+      requestedMode: retryParallelRequested ? 'wave-parallel' : 'sequential',
+      requestedParallelism: retryParallelRequested ? (originalRun.parallelism ?? 1) : 1,
+      forceSequential: forceSequential !== false || highRisk || isPtyTerminalMode(originalRun.terminal_mode),
+    }, currentWaveParallelPolicyEnvironment());
+    const retryOrchestration = {
+      mode: retryWavePolicy.mode,
+      parallelism: retryWavePolicy.parallelism,
+      experimental: retryWavePolicy.experimental,
+    };
     const retryPreview = createRetryPreview({
       originalRunId,
       scope: retryScope,
       options: replayedOptions,
-      forceSequential: Boolean(forceSequential || highRisk),
+      forceSequential: retryWavePolicy.mode === 'sequential',
       requiresApproval: destructiveReplay || unsafeWorktree,
     });
     const scopeHash = retryHash(retryPreview.scope.executable.map((entry) => entry.storyId));
@@ -5501,9 +5600,14 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     // 7. Create a NEW pipeline_run linked to the original while preserving the
     // host-enforced model, effort, worktree, merge, graph, terminal, and safety options.
     const retryTerminalMode = normalizeTerminalMode(approvedPreview.options.terminalMode);
-    const retryParallelism = isPtyTerminalMode(retryTerminalMode)
-      ? 1
-      : approvedPreview.forceSequential ? 1 : (originalRun.parallelism ?? 1);
+    const retryParallelism = retryWavePolicy.parallelism;
+    const retryTriggerOptions = {
+      orchestrationMode: retryWavePolicy.mode,
+      parallelism: retryWavePolicy.parallelism,
+      orchestration: retryOrchestration,
+      forceSequential: retryWavePolicy.mode === 'sequential',
+      retriedFromRunId: originalRunId,
+    };
     const retryEffectiveOptions: EffectiveRunOptions = {
       ...originalEffectiveOptions,
       model: approvedPreview.options.model,
@@ -5517,12 +5621,12 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
        retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
-       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options,
+       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options, trigger_options,
        expected_story_ids, excluded_story_ids, execution_workspace_path, execution_worktree_path,
        predecessor_pass_story_ids, predecessor_authority_hash)
       VALUES ($1, $2, 'queued', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15::jsonb, $16::text[], '{}'::text[], $17, $18,
-              $19::text[], $20)
+              $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17::text[], '{}'::text[], $18, $19,
+              $20::text[], $21)
       RETURNING id`, [
       originalRun.spec_path,
       originalRun.workspace_id,
@@ -5539,6 +5643,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       approvedPreview.options.includeGraph,
       approvedPreview.options.merge.strategy,
       JSON.stringify(retryEffectiveOptions),
+      JSON.stringify(retryTriggerOptions),
       storiesToRetry.map(story => story.story_id),
       fs.realpathSync(workspace.path),
       fs.realpathSync(approvedPreview.options.worktree.path ?? workspace.path),
@@ -5713,6 +5818,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       worktreePath: approvedPreview.options.worktree.path,
       branchName: approvedPreview.options.worktree.branch,
       terminalMode: normalizeTerminalMode(approvedPreview.options.terminalMode),
+      orchestrationMode: retryWavePolicy.mode,
+      parallelism: retryWavePolicy.parallelism,
+      triggerOptions: retryTriggerOptions,
       sequenceOffset,
       executionManifestPath: retryManifests.path,
       envOverrides,
@@ -5758,6 +5866,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       retriedStories: retriedStoryInfo,
       copiedStories: passedStories.map(s => s.story_id),
       effectiveOptions: retryEffectiveOptions,
+      orchestration: retryOrchestration,
       passReconciliation,
     });
   } catch (error: any) {

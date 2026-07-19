@@ -29,10 +29,14 @@ const ENGINE_PATH = path.resolve(__dirname, '..', 'execution-engine.ts');
 const PIPELINE_PATH = path.resolve(__dirname, '..', '..', 'routes', 'pipeline.ts');
 const STORY_RESULT_PERSISTENCE_PATH = path.resolve(__dirname, '..', 'story-result-persistence.ts');
 const WAL_LISTENER_PATH = path.resolve(__dirname, '..', 'wal-listener.ts');
+const WORKER_PATH = path.resolve(__dirname, '..', '..', 'worker.ts');
+const RELEASE_AUTHORITY_PATH = path.resolve(__dirname, '..', 'release-authority.ts');
 const ENGINE_SOURCE = fs.readFileSync(ENGINE_PATH, 'utf8');
 const PIPELINE_SOURCE = fs.readFileSync(PIPELINE_PATH, 'utf8');
 const STORY_RESULT_PERSISTENCE_SOURCE = fs.readFileSync(STORY_RESULT_PERSISTENCE_PATH, 'utf8');
 const WAL_LISTENER_SOURCE = fs.readFileSync(WAL_LISTENER_PATH, 'utf8');
+const WORKER_SOURCE = fs.readFileSync(WORKER_PATH, 'utf8');
+const RELEASE_AUTHORITY_SOURCE = fs.readFileSync(RELEASE_AUTHORITY_PATH, 'utf8');
 const SHA = 'a'.repeat(40);
 const BASE_SHA = 'b'.repeat(40);
 const CWD = '/tmp/rorca-closeout-story';
@@ -246,12 +250,13 @@ describe('execution-engine closeout architecture', () => {
     expect(ENGINE_SOURCE).not.toContain('initializeRunFallbackContext(effectiveCwd');
     expect(ENGINE_SOURCE).not.toContain('setFallbackContext(effectiveCwd');
     expect(ENGINE_SOURCE).toContain('Execution-engine fallback context cannot be rebound after run initialization');
-    expect(ENGINE_SOURCE).toContain('failedIds.add(rejectedStory.id)');
-    expect(ENGINE_SOURCE).toContain('processedIds.add(rejectedStory.id)');
+    expect(ENGINE_SOURCE).toContain("settlement: 'rejected'");
+    expect(ENGINE_SOURCE).toContain('accountWaveSettlement({');
+    expect(ENGINE_SOURCE).toContain('pendingIntegratedPasses.delete(storyId)');
   });
 
   test('covers direct/retry finalization and sequential/parallel worktree integration through one exact-head seam', () => {
-    expect(ENGINE_SOURCE.match(/await finalizeIntegratedStoryPass\(/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(ENGINE_SOURCE.match(/await finalizeIntegratedStoryPass\(/g)).toHaveLength(2);
     expect(ENGINE_SOURCE).toContain('Single-story wave — direct merge');
     expect(ENGINE_SOURCE).toContain('await mergeWave(');
     expect(ENGINE_SOURCE).toContain('story, config, mode, playbook, logDir, workspaceId, retryCounts');
@@ -275,16 +280,97 @@ describe('execution-engine closeout architecture', () => {
       expect(adapter).not.toContain(providerOrMode);
     }
     expect(ENGINE_SOURCE).not.toMatch(/else\s*\{\s*await markStoryPassed\(/);
-    expect(ENGINE_SOURCE).toContain("if (result === 'closeout_blocked' && wt)");
+    expect(ENGINE_SOURCE).toContain("settled.value === 'closeout_blocked' && execution.wt");
     expect(ENGINE_SOURCE).toContain('Preserving blocked worktree for inspection');
   });
 
   test('retains ANSI waves and makes the existing PTY contract explicitly sequential', () => {
-    expect(ENGINE_SOURCE).toContain("config.parallelism > 1 && config.terminalMode !== 'pty' && !config.specificStory");
-    expect(PIPELINE_SOURCE).toContain("const storyIsolated = input.parallelism > 1 && input.terminalMode !== 'pty'");
+    expect(ENGINE_SOURCE).toContain('config.parallelism > 1 && !isPtyTerminalMode(config.terminalMode) && !config.specificStory');
+    expect(PIPELINE_SOURCE).toContain('const storyIsolated = isolatedStoryIds.has(story.id)');
     expect(ENGINE_SOURCE).toContain('compileWaves(waveStories)');
-    expect(ENGINE_SOURCE).toContain('runWithBoundedConcurrency(tasks, config.parallelism)');
-    expect(ENGINE_SOURCE).toContain('computeBlockedStories(allStories, failedIds, processedIds)');
+    expect(ENGINE_SOURCE).toContain('runWithBoundedConcurrency(waveExecutions.map(item => item.task), config.parallelism)');
+    expect(ENGINE_SOURCE).toContain('computeTransitivelyBlockedStories(currentStories, failedIds, processedIds)');
+    expect(ENGINE_SOURCE).toContain('Single-story wave — executing directly on the run branch (no per-story worktree)');
+    expect(PIPELINE_SOURCE).toContain('if (!requiresPerStoryWorktree(wave.stories.length)) continue');
+  });
+
+  test('turns rejected wave promises into durable failure evidence before blocking and cleanup', () => {
+    const parallelStart = ENGINE_SOURCE.indexOf('async function runParallel(');
+    const parallel = ENGINE_SOURCE.slice(parallelStart);
+    const rejectedAccounting = parallel.indexOf("settlement: 'rejected'");
+    const durableFailure = parallel.indexOf("reasonCode: 'wave_promise_rejected'", rejectedAccounting);
+    const dependencyBlocking = parallel.indexOf('await persistNewlyBlockedStories(wave.index)', durableFailure);
+    const cleanup = parallel.indexOf('selectWaveWorktreeCleanup(', dependencyBlocking);
+
+    expect(rejectedAccounting).toBeGreaterThan(0);
+    expect(durableFailure).toBeGreaterThan(rejectedAccounting);
+    expect(dependencyBlocking).toBeGreaterThan(durableFailure);
+    expect(cleanup).toBeGreaterThan(dependencyBlocking);
+    expect(parallel).toContain('pendingIntegratedPasses.delete(storyId)');
+    expect(parallel).toContain('Rejected executor promises:');
+    expect(parallel).toContain('pendingCloseoutIds: new Set(pendingIntegratedPasses.keys())');
+    expect(WORKER_SOURCE).not.toContain('promoting execution closeout to done');
+    expect(WORKER_SOURCE).toContain('Refusing to promote non-zero engine closeout despite complete-looking host authority');
+    expect(WORKER_SOURCE).toContain("const hostReleaseOwned = status === 'done' && hostAuthority?.releaseEligible === true");
+    expect(WORKER_SOURCE).toContain('await prepareRunReleaseIntent({');
+    expect(WORKER_SOURCE).not.toContain('shouldRouteCompletedRunWorktree({');
+
+    const persistenceStart = ENGINE_SOURCE.indexOf('async function recordParallelStoryInfrastructureFailure(');
+    const persistenceEnd = ENGINE_SOURCE.indexOf('// ─── CA-011', persistenceStart);
+    const persistence = ENGINE_SOURCE.slice(persistenceStart, persistenceEnd);
+    expect(persistence).toContain("label: 'spec-story-failure'");
+    expect(persistence).toContain("label: 'run-state-failure'");
+    expect(persistence).toContain("label: 'story_failed-wal'");
+    expect(persistence).toContain("label: 'story-result-failure'");
+    expect(persistence).toContain('error_message: diagnostic.message');
+    expect(persistence).toContain('error_stack: diagnostic.stack');
+    expect(persistence).toContain('worktree_preserved: true');
+    expect(ENGINE_SOURCE).toContain("fs.chmodSync(diagnosticPath, 0o600)");
+    expect(persistence.match(/diagnostic\.rawDiagnostic/g)).toHaveLength(1);
+    expect(persistence).not.toContain('error_raw');
+    expect(persistence).not.toContain('diagnostic_log:');
+    expect(persistence).not.toContain('logPath: diagnosticPath');
+
+    const rejectedMutationStart = ENGINE_SOURCE.indexOf('async function markStoryPromiseRejected(');
+    const rejectedMutationEnd = ENGINE_SOURCE.indexOf('/** Revert a story', rejectedMutationStart);
+    const rejectedMutation = ENGINE_SOURCE.slice(rejectedMutationStart, rejectedMutationEnd);
+    expect(rejectedMutation).toContain("story.status = 'failed'");
+    expect(rejectedMutation).toContain('delete story.skipped');
+    expect(rejectedMutation).not.toContain('story.skipped = true');
+  });
+
+  test('publishes broad run completion only after authoritative semantic closeout', () => {
+    const handlerStart = WORKER_SOURCE.indexOf('async function handlePipelineRun(');
+    const handlerEnd = WORKER_SOURCE.indexOf('// ── Job handler: pipeline:retry', handlerStart);
+    const handler = WORKER_SOURCE.slice(handlerStart, handlerEnd);
+    const processFinished = handler.indexOf("emitWalEvent('run_process_finished'");
+    const releasePreparation = handler.indexOf('await prepareRunReleaseIntent({', processFinished);
+    const releaseReconciliation = handler.indexOf('await reconcileRunReleaseIntent(', releasePreparation);
+    const failureCloseout = handler.indexOf("emitWalEvent('run_closeout'", releaseReconciliation);
+    const failureFinished = handler.indexOf("emitWalEvent('run_finished'", failureCloseout);
+
+    expect(processFinished).toBeGreaterThan(0);
+    expect(releasePreparation).toBeGreaterThan(processFinished);
+    expect(releaseReconciliation).toBeGreaterThan(releasePreparation);
+    expect(failureCloseout).toBeGreaterThan(releaseReconciliation);
+    expect(failureFinished).toBeGreaterThan(failureCloseout);
+    expect(handler.slice(processFinished, failureCloseout)).not.toContain("emitWalEvent('run_finished'");
+    expect(handler).toContain('semantic_closeout: true');
+    expect(handler).toContain("status = release.status === 'completed' ? 'done' : 'release_pending'");
+    expect(handler).toContain("summary = 'worker_closeout_failed'");
+    expect(handler).toContain("reason: 'worker_closeout_failed'");
+
+    const releaseStart = RELEASE_AUTHORITY_SOURCE.indexOf('export async function reconcileRunReleaseIntent(');
+    const release = RELEASE_AUTHORITY_SOURCE.slice(releaseStart);
+    const durableCloseout = release.indexOf("VALUES ('run_closeout'");
+    const terminalIntent = release.indexOf('terminal = await persistTerminalIntent(row)', durableCloseout);
+    const publicDone = release.indexOf('await commitPublicDoneAndTerminalReady(row, terminal)', terminalIntent);
+    const terminalRelay = release.indexOf('await relayTrustedWalEvent(terminal)', publicDone);
+    expect(durableCloseout).toBeGreaterThan(0);
+    expect(terminalIntent).toBeGreaterThan(durableCloseout);
+    expect(publicDone).toBeGreaterThan(terminalIntent);
+    expect(terminalRelay).toBeGreaterThan(publicDone);
+    expect(RELEASE_AUTHORITY_SOURCE).toContain('semantic_closeout: true');
   });
 
   test('keeps retry/restart identity and timeout/cancellation paths fail closed', () => {

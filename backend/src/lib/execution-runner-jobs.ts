@@ -121,7 +121,15 @@ export async function completeRunnerJob(input: {
   result?: Record<string, unknown>;
   error?: string;
 }): Promise<RunnerJobRow> {
-  const pipelineStatus = input.status === 'succeeded' ? 'done' : input.status === 'cancelled' ? 'cancelled' : 'failed';
+  // A runner exit is transport evidence only. The remote worker's exact host
+  // authority/release seam cannot be bypassed by a local runner completion call.
+  // Keep successful transport non-terminal until a future signed local closeout
+  // protocol can prove result, integrated SHA, checkout/base identity, and outbox.
+  const pipelineStatus = input.status === 'succeeded'
+    ? 'release_pending'
+    : input.status === 'cancelled'
+      ? 'cancelled'
+      : 'failed';
   const row = await queryOne<RunnerJobRow>(
     `UPDATE execution_runner_jobs
         SET status = $3,
@@ -136,7 +144,13 @@ export async function completeRunnerJob(input: {
   if (!row) throw new NotFoundError('Runner job', input.jobId);
   await execute(
     `UPDATE pipeline_runs
-        SET status = $2, finished_at = NOW(), last_heartbeat = NOW()
+        SET status = $2,
+            finished_at = CASE WHEN $2 = 'release_pending' THEN NULL ELSE NOW() END,
+            last_heartbeat = NOW(),
+            summary = CASE WHEN $2 = 'release_pending'
+              THEN 'local_runner_host_closeout_required'
+              ELSE summary
+            END
       WHERE id = $1`,
     [row.run_id, pipelineStatus],
   );
