@@ -36,7 +36,7 @@
  *   --attach <addr>         OpenCode server socket address (passed by pipeline.ts)
  */
 
-import { spawn, execSync, type ChildProcess } from 'child_process';
+import { spawn, execFileSync, execSync, type ChildProcess } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import * as fs from 'fs';
@@ -202,6 +202,8 @@ import {
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
+import { ensureAutonomousModelEgress } from './autonomous-model-egress';
 import { resolveMergeConflict, resolvePostureConsensus, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
@@ -674,6 +676,10 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
  * Returns the server URL on success, null on failure (caller handles gracefully — never throws).
  */
 async function ensurePlaywrightMcpServer(headless = true): Promise<string | null> {
+  if (process.env.RORCA_AUTONOMOUS_ISOLATION === 'linux-bwrap') {
+    process.stdout.write('[BrowserMCP] Disabled: isolated agents cannot access the local control plane.\n');
+    return null;
+  }
   // Health-check: if we think the server is ready, verify it's still alive.
   if (_playwrightMcpReady) {
     try {
@@ -745,6 +751,10 @@ async function ensurePlaywrightMcpServer(headless = true): Promise<string | null
  * Returns the server URL on success, null on failure (never throws).
  */
 async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
+  if (process.env.RORCA_AUTONOMOUS_ISOLATION === 'linux-bwrap') {
+    process.stdout.write('[ChromeMCP] Disabled: isolated agents cannot access the local control plane.\n');
+    return null;
+  }
   // Health-check: if we think the server is ready, verify it's still alive.
   // Processes can die between stories — reset state and restart if needed.
   if (_chromeMcpReady) {
@@ -1312,6 +1322,13 @@ function buildCleanEnv(): Record<string, string> {
       env[k] = v;
     }
   }
+  // Host-owned Git must never execute hooks written from the autonomous
+  // worktree or consult credential helpers. Sandboxed Git is networkless too.
+  env.GIT_CONFIG_COUNT = '2';
+  env.GIT_CONFIG_KEY_0 = 'core.hooksPath';
+  env.GIT_CONFIG_VALUE_0 = os.devNull;
+  env.GIT_CONFIG_KEY_1 = 'credential.helper';
+  env.GIT_CONFIG_VALUE_1 = '';
   return env;
 }
 
@@ -1320,6 +1337,15 @@ function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = bui
     ? 'conflict-resolution' as const
     : 'general' as const;
   return createAutonomousCommandGuard({ cwd, env: baseEnv, profile }).env;
+}
+
+function isolatedAgentLaunch(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env: Record<string, string>,
+) {
+  return prepareAutonomousSandboxLaunch({ command, args, cwd, env });
 }
 
 function serializeJsonLine(value: unknown): string {
@@ -1395,9 +1421,10 @@ async function startPiRpcServer(
   if (mcpServers?.playwright) env.RORCA_PI_PLAYWRIGHT_MCP_URL = mcpServers.playwright;
   if (mcpServers?.['chrome-devtools']) env.RORCA_PI_CHROME_MCP_URL = mcpServers['chrome-devtools'];
   const detachedProcessGroup = process.platform !== 'win32';
-  const child = spawn(PI_BIN, args, {
-    cwd,
-    env,
+  const launch = isolatedAgentLaunch(PI_BIN, args, cwd, env);
+  const child = spawn(launch.command, launch.args, {
+    cwd: launch.cwd,
+    env: launch.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: detachedProcessGroup,
   });
@@ -2146,8 +2173,9 @@ export function buildPtyCommand(
           void url;
         }
         if (hasStdioServers) {
-          mcpConfigPath = path.join(os.tmpdir(), `rorca-claude-mcp-${Date.now()}.json`);
-          fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+          mcpConfigPath = path.join(cwd, '.rorca', 'runtime', `rorca-claude-mcp-${Date.now()}.json`);
+          fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
+          fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
         }
       }
       return {
@@ -2489,12 +2517,13 @@ async function spawnAgentViaPty(
         storyId: storyIdForMarker,
       });
       const nodePty = loadNodePty();
-      pty = nodePty.spawn(ptyCommand.command, ptyCommand.args, {
+      const launch = isolatedAgentLaunch(ptyCommand.command, ptyCommand.args, cwd, ptyCommand.env);
+      pty = nodePty.spawn(launch.command, launch.args, {
         name: 'xterm-256color',
         cols: ptyOptions.cols,
         rows: ptyOptions.rows,
-        cwd,
-        env: ptyCommand.env,
+        cwd: launch.cwd,
+        env: launch.env,
         encoding: null,
       });
       await startRunPtySession({
@@ -2927,8 +2956,9 @@ function spawnClaude(
       }
 
       if (hasStdioServers) {
-        mcpConfigPath = path.join(os.tmpdir(), `rorca-claude-mcp-${Date.now()}.json`);
-        fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+        mcpConfigPath = path.join(cwd, '.rorca', 'runtime', `rorca-claude-mcp-${Date.now()}.json`);
+        fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
+        fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
       }
     }
 
@@ -2946,9 +2976,10 @@ function spawnClaude(
     ];
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd,
-      env,
+    const launch = isolatedAgentLaunch(CLAUDE_BIN, args, cwd, env);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -3201,9 +3232,10 @@ function spawnOpenCode(
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     // stdin: pipe (to send prompt), stdout: pipe (tee to log + process.stdout), stderr: pipe (capture)
-    const child = spawn(bin, args, {
-      cwd,
-      env,
+    const launch = isolatedAgentLaunch(bin, args, cwd, env);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -3370,7 +3402,8 @@ function spawnCodex(
     const startTime = Date.now();
 
     const codexMcpRegisteredNames: string[] = [];
-    if (mcpServers && Object.keys(mcpServers).length > 0) {
+    if (process.env.RORCA_AUTONOMOUS_ISOLATION !== 'linux-bwrap'
+      && mcpServers && Object.keys(mcpServers).length > 0) {
       for (const [name, url] of Object.entries(mcpServers)) {
         try {
           execSync(`${CODEX_BIN} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
@@ -3388,9 +3421,10 @@ function spawnCodex(
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     // stdin: pipe (to send prompt), stdout: pipe (tee to log + process.stdout), stderr: pipe (capture)
-    const child = spawn(CODEX_BIN, args, {
-      cwd,
-      env,
+    const launch = isolatedAgentLaunch(CODEX_BIN, args, cwd, env);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -4392,7 +4426,10 @@ function runGate(
     } else {
       logger.info('  [gate] Running tsc --noEmit...');
       try {
-        execSync('npx tsc --noEmit', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
+        const launch = isolatedAgentLaunch('npx', ['tsc', '--noEmit'], cwd, buildGuardedAgentEnv(cwd, env));
+        execFileSync(launch.command, launch.args, {
+          cwd: launch.cwd, env: launch.env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS,
+        });
         logger.info('  [gate] tsc passed');
       } catch (err: unknown) {
         const stderr = (err as { stderr?: Buffer })?.stderr?.toString('utf8') ?? '';
@@ -7616,6 +7653,8 @@ async function main(): Promise<void> {
     logger.info('[Pi-native] External Pi orchestration enabled — execution engine standing by');
     process.exit(0);
   }
+
+  await ensureAutonomousModelEgress();
 
   // Report our own PID to the parent worker via IPC so it can update pipeline_runs.pid
   // with the real Node.js engine PID (tsx wrapper PID becomes stale within ~1-2s).

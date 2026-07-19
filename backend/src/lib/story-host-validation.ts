@@ -20,6 +20,7 @@ import {
   type StoryValidationRequirement,
 } from './story-execution-packet';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
 import { sanitizeCapturePayload } from './context-safety';
 import {
   createHostValidationObservation,
@@ -157,9 +158,15 @@ export function runHostValidationRequirement(
     branch = gitValue(actualCwd, ['branch', '--show-current'], branch);
     const guard = createAutonomousCommandGuard({ cwd: actualCwd, env: baseEnv });
     guardBinDir = guard.guardBinDir;
-    const result = spawnSync(requirement.command, [...requirement.args], {
+    const launch = prepareAutonomousSandboxLaunch({
+      command: requirement.command,
+      args: requirement.args,
       cwd: actualCwd,
       env: guard.env,
+    });
+    const result = spawnSync(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       encoding: 'utf8',
       timeout: requirement.timeoutMs,
       maxBuffer: HOST_VALIDATION_MAX_BUFFER,

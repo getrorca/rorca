@@ -13,6 +13,8 @@ import { spawn, execFileSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
+import { ensureAutonomousModelEgress } from './autonomous-model-egress';
 import { getClaudeAuthState } from './claude-auth';
 import { getCodexAuthState } from './codex-auth';
 import { detectOpenCode } from './opencode-detector';
@@ -211,6 +213,7 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
   }
 
   fs.mkdirSync(path.dirname(request.logPath), { recursive: true });
+  await ensureAutonomousModelEgress();
   const env = createAutonomousCommandGuard({
     cwd: request.cwd,
     env: buildCleanResolverEnv(request.env),
@@ -220,15 +223,21 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
   if (posture.agent === 'opencode' && request.attachAddr) {
     command.args.splice(3, 0, '--attach', request.attachAddr);
   }
+  const launch = prepareAutonomousSandboxLaunch({
+    command: command.command,
+    args: command.args,
+    cwd: request.cwd,
+    env,
+  });
   const log = fs.createWriteStream(request.logPath, { flags: 'a' });
   log.write(`[merge-resolver] agent=${posture.agent} model=${posture.model ?? 'default'} source=${posture.source} files=${request.conflictFiles.join(',')}\n`);
 
   return new Promise<MergeResolutionResult>((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(command.command, command.args, {
-        cwd: request.cwd,
-        env,
+      child = spawn(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
         stdio: ['pipe', 'pipe', 'pipe'],
         // Group ownership lets timeout cleanup kill tools/tests spawned by the resolver.
         detached: process.platform !== 'win32',

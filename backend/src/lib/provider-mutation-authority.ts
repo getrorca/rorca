@@ -17,7 +17,7 @@
 import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { ForbiddenError, ServiceUnavailableError } from './errors';
-import { LOCAL_ADMIN } from './auth-utils';
+import { INTERNAL_SERVICE_USER_ID, LOCAL_ADMIN } from './auth-utils';
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const HEADER = 'x-rorca-operator-capability';
@@ -35,8 +35,12 @@ export function requireProviderMutationAuthority(
   // With mandatory auth enabled, the authenticated non-local principal is the
   // capability. Workspace/platform role middleware still applies afterward.
   if (process.env.AUTH_REQUIRED === 'true') {
-    const user = (req as Request & { user?: { id?: string } }).user;
-    if (!user?.id || user.id === LOCAL_ADMIN.id) {
+    const user = (req as Request & { user?: { id?: string; email?: string; supabaseId?: string } }).user;
+    const internalPrincipal = user?.id === INTERNAL_SERVICE_USER_ID
+      || user?.id === 'system'
+      || user?.supabaseId === '00000000-0000-0000-0000-000000000000'
+      || user?.email?.toLowerCase().endsWith('@rorca.internal') === true;
+    if (!user?.id || user.id === LOCAL_ADMIN.id || internalPrincipal) {
       throw new ForbiddenError('Authenticated operator authority is required for provider mutation');
     }
     next();

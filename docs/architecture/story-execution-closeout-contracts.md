@@ -12,7 +12,7 @@ The closeout gate does **not** evaluate or write lifecycle phase state, approve 
 
 ## Host authority
 
-Required commands run through the existing autonomous command guard in the manifest-bound story worktree. The guard is command-policy/defense-in-depth, not a security boundary; stripped child authority and host-only release/provider capabilities provide that boundary. A host observation records:
+Required commands run through the autonomous command guard in the manifest-bound story worktree. The guard is command-policy/defense-in-depth, not the security boundary. On shipped Linux workers, the same concrete `bubblewrap` launch seam contains semantic/RPC/PTY agents, conflict resolvers, and worktree-controlled validation in fresh PID/proc/user/mount/network namespaces. It mounts only root-owned tool roots plus the exact worktree/Git metadata, masks credential files, supplies private HOME/tmp and a reconstructed environment, and exposes no direct network. A trusted worker-owned Unix-socket CONNECT broker permits exact configured public model hosts on 443 only; DB, GitHub, localhost/control-plane, arbitrary ports/hosts, ancestor environments, and host credential stores remain unreachable. Boundary preflight occurs before a run becomes running. A host observation records:
 
 - canonical executable/argument hash;
 - guarded working directory;

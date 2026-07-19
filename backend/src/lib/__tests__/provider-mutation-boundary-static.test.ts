@@ -16,6 +16,8 @@ const webhookHandlers = fs.readFileSync(path.join(src, 'routes', 'webhook-handle
 const webhooks = fs.readFileSync(path.join(src, 'routes', 'webhooks.ts'), 'utf8');
 const tokenResolver = fs.readFileSync(path.join(src, 'lib', 'github-token-resolver.ts'), 'utf8');
 const credentialProvider = fs.readFileSync(path.join(src, 'lib', 'github-app-credential-provider.ts'), 'utf8');
+const authUtils = fs.readFileSync(path.join(src, 'lib', 'auth-utils.ts'), 'utf8');
+const providerAuthority = fs.readFileSync(path.join(src, 'lib', 'provider-mutation-authority.ts'), 'utf8');
 
 function routeSlice(source: string, startNeedle: string, endNeedle: string): string {
   const start = source.indexOf(startNeedle);
@@ -24,6 +26,16 @@ function routeSlice(source: string, startNeedle: string, endNeedle: string): str
   expect(end).toBeGreaterThan(start);
   return source.slice(start, end);
 }
+
+test('internal service authentication is cryptographic/configured and can never become provider authority', () => {
+  expect(authUtils).toContain('RORCA_INTERNAL_SERVICE_TOKEN is required in production');
+  expect(authUtils).toContain("crypto.randomBytes(32).toString('base64url')");
+  expect(authUtils).toContain('crypto.timingSafeEqual');
+  expect(authUtils).not.toContain('rorca-internal-${process.pid}');
+  expect(providerAuthority).toContain("user?.id === INTERNAL_SERVICE_USER_ID");
+  expect(providerAuthority).toContain("user?.id === 'system'");
+  expect(providerAuthority).toContain("endsWith('@rorca.internal')");
+});
 
 test('all workspace GitHub mutations and manual checks cross the operator capability boundary', () => {
   const guard = server.indexOf("app.use('/api/workspaces', guardWorkspaceProviderMutations)");

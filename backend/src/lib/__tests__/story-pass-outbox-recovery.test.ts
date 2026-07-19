@@ -5,6 +5,10 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
 const transaction = jest.fn();
 const queryOne = jest.fn();
 const execute = jest.fn();
@@ -23,6 +27,8 @@ import {
   persistCanonicalStoryResult,
   verifyReleasedHostResultProposal,
 } from '../story-result-persistence';
+import { createEngineResultDeliveryContext, deliverEngineStoryResult } from '../engine-result-delivery';
+import { replayFallbackResults } from '../fallback-replay';
 import { relayTrustedWalEvent, type TrustedWalRow } from '../trusted-wal';
 
 const SHA = 'a'.repeat(40);
@@ -146,6 +152,7 @@ function input() {
     commitSha: SHA,
     commitMessage: 'integrated story(US-RECOVERY-001): exact recovery head',
     idempotencyKey: 'story-result:integrated-pass-v1:recovery',
+    finishedAt: '2026-07-18T10:00:00.000Z',
     expectedWorkspaceId: 'ws-recovery',
     trustedPassOutbox: {
       payload: {
@@ -169,6 +176,9 @@ beforeEach(() => {
   transaction.mockImplementation(async (fn: (db: typeof client) => Promise<unknown>) => fn(client));
   queryOne.mockImplementation(async (sqlValue: unknown) => {
     const sql = String(sqlValue);
+    if (sql.includes('FROM pipeline_runs')) return {
+      id: 51, workspace_id: 'ws-recovery', spec_path: 'forge/specs/approved/recovery-spec.json',
+    };
     if (sql.includes('SELECT w.*')) return state.wal;
     if (sql.includes('UPDATE wal_events w')) {
       if (state.wal) state.wal.outbox_ready_at = '2026-07-18T10:02:00.000Z';
@@ -222,6 +232,76 @@ test('production worker can verify only an exact existing immutable host result'
     delete state.result;
     await expect(verifyReleasedHostResultProposal(input())).resolves.toBe(false);
     state.result = existing;
+  } finally {
+    process.env.NODE_ENV = originalNodeEnv;
+    process.env.RORCA_PROCESS_ROLE = originalRole;
+  }
+});
+
+function transportFailure(): Error & { code: string } {
+  return Object.assign(new Error('connection terminated after production-worker delivery'), { code: '08006' });
+}
+
+async function journalAndReplayOutboxProposal(
+  mutate?: (payload: Record<string, unknown>) => void,
+): Promise<Awaited<ReturnType<typeof replayFallbackResults>>> {
+  const exact = input();
+  // Model the production transport ambiguity: the engine-authorized transaction
+  // committed, then its acknowledgement was lost and the worker later replays.
+  process.env.RORCA_PROCESS_ROLE = 'engine';
+  await persistCanonicalStoryResult(exact, EXECUTION_ENGINE_RESULT_AUTHORITY);
+  process.env.RORCA_PROCESS_ROLE = 'worker';
+  if (state.wal) state.wal.outbox_ready_at = '2026-07-18T10:02:00.000Z';
+  const proposal = input();
+  if (mutate) mutate(proposal.trustedPassOutbox.payload);
+  const { runId: _runId, expectedWorkspaceId: _workspaceId, ...engineProposal } = proposal;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-production-worker-journal-'));
+  try {
+    await expect(deliverEngineStoryResult(
+      createEngineResultDeliveryContext(51, 'ws-recovery', root),
+      engineProposal,
+      { persist: async () => { throw transportFailure(); } },
+    )).rejects.toThrow(/connection terminated/);
+    return await replayFallbackResults(root, 'ws-recovery');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('production-worker delivery ambiguity journals and replays an exact immutable ready outbox read-only', async () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalRole = process.env.RORCA_PROCESS_ROLE;
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.RORCA_PROCESS_ROLE = 'worker';
+    await expect(journalAndReplayOutboxProposal()).resolves.toMatchObject({
+      total: 1, inserted: 0, duplicates: 1, invalid: 0, retained: false, blocksCompletion: false,
+    });
+    expect(client.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO story_results'))).toHaveLength(1);
+    expect(client.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO wal_events'))).toHaveLength(1);
+  } finally {
+    process.env.NODE_ENV = originalNodeEnv;
+    process.env.RORCA_PROCESS_ROLE = originalRole;
+  }
+});
+
+test.each([
+  ['missing id', (payload: Record<string, unknown>) => { delete payload.checkpoint_attestation_id; }],
+  ['changed id', (payload: Record<string, unknown>) => { payload.checkpoint_attestation_id = 7002; }],
+  ['changed digest', (payload: Record<string, unknown>) => { payload.checkpoint_attestation_digest = `sha256:${'8'.repeat(64)}`; }],
+  ['changed passedAt', (payload: Record<string, unknown>) => { payload.checkpoint_attestation_passed_at = '2026-07-18T09:58:00.000Z'; }],
+  ['changed expiresAt', (payload: Record<string, unknown>) => { payload.checkpoint_attestation_expires_at = '2026-07-18T12:00:00.000Z'; }],
+] as const)('production-worker journal replay rejects %s without insertion or promotion', async (_label, mutate) => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalRole = process.env.RORCA_PROCESS_ROLE;
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.RORCA_PROCESS_ROLE = 'worker';
+    await expect(journalAndReplayOutboxProposal(mutate)).resolves.toMatchObject({
+      total: 1, inserted: 0, duplicates: 0, invalid: 1, retained: true, blocksCompletion: true,
+    });
+    expect(client.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO story_results'))).toHaveLength(1);
+    expect(client.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO wal_events'))).toHaveLength(1);
   } finally {
     process.env.NODE_ENV = originalNodeEnv;
     process.env.RORCA_PROCESS_ROLE = originalRole;

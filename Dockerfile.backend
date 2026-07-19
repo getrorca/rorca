@@ -21,6 +21,10 @@ RUN npx tsc && npm prune --omit=dev
 # ── Stage 2: Production runtime ──
 FROM node:20-alpine
 
+# Keep this backend-only image aligned with the canonical Linux worker image:
+# autonomous children require a real namespace boundary and absolute tool probes.
+RUN apk add --no-cache bash bubblewrap git github-cli python3 ripgrep
+
 WORKDIR /app
 
 # Reuse the verified, production-only native addon. Running npm ci here would
@@ -37,6 +41,9 @@ COPY backend/src/db/pg-migrations/ dist/db/pg-migrations/
 
 ENV DATABASE_URL=postgres://rorca:rorca@db:5432/rorca
 ENV NODE_ENV=production
+ENV RORCA_AUTONOMOUS_ISOLATION=linux-bwrap
+ENV RORCA_BWRAP_BIN=/usr/bin/bwrap
+ENV RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS=api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com
 ENV PORT=3030
 
 EXPOSE 3030

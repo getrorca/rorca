@@ -248,6 +248,14 @@ async function replayStoryResult(
   const blockedBy = optionalStringArray(payload.blockedBy);
   const activeSkills = optionalStringArray(payload.activeSkills);
   const completionPacket = payload.completionPacket;
+  const trustedPassOutbox = payload.trustedPassOutbox;
+  const validTrustedPassOutbox = trustedPassOutbox === undefined
+    || (trustedPassOutbox !== null
+      && !Array.isArray(trustedPassOutbox)
+      && typeof trustedPassOutbox === 'object'
+      && (trustedPassOutbox as Record<string, unknown>).payload !== null
+      && !Array.isArray((trustedPassOutbox as Record<string, unknown>).payload)
+      && typeof (trustedPassOutbox as Record<string, unknown>).payload === 'object');
 
   if (!Number.isSafeInteger(runId) || runId <= 0 || runId !== entry.runId
     || typeof storyId !== 'string' || storyId.length === 0 || storyId !== entry.storyId
@@ -258,7 +266,7 @@ async function replayStoryResult(
     || worktreePath === null || worktreeBranch === null || commitSha === null || commitMessage === null
     || inputTokens === null || outputTokens === null || reasoningTokens === null
     || modelUsed === null || costUsd === null || logPath === null || reason === null
-    || blockedBy === null || activeSkills === null
+    || blockedBy === null || activeSkills === null || !validTrustedPassOutbox
     || (commitSha !== undefined && !/^[0-9a-f]{40}$/i.test(commitSha))
     || (completionPacket !== undefined && (completionPacket === null
       || Array.isArray(completionPacket) || typeof completionPacket !== 'object'))) {
@@ -284,6 +292,9 @@ async function replayStoryResult(
     blockedBy,
     activeSkills,
     completionPacket: completionPacket as Record<string, unknown> | undefined,
+    // Untrusted evidence is forwarded only to the read-only immutable duplicate
+    // comparator below. This function never calls the canonical writer.
+    trustedPassOutbox: trustedPassOutbox as CanonicalStoryResultInput['trustedPassOutbox'],
     idempotencyKey: ingestKey,
     finishedAt: entry.ts,
     expectedWorkspaceId: workspaceId,

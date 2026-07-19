@@ -85,21 +85,30 @@ describe('run-scoped engine result delivery', () => {
     expect(fs.existsSync(path.join(root, '.rorca-results.jsonl'))).toBe(true);
   });
 
-  test('transient pass fallback cannot mint a trusted outbox from the untrusted journal', async () => {
+  test('transient pass fallback preserves complete outbox evidence without minting authority', async () => {
     const context = createEngineResultDeliveryContext(79, 'ws-untrusted-journal', root);
+    const trustedPassOutbox = { payload: {
+      story_title: 'Host-only pass',
+      checkpoint_attestation_id: 7001,
+      checkpoint_attestation_digest: `sha256:${'7'.repeat(64)}`,
+      checkpoint_attestation_passed_at: '2026-07-18T09:59:00.000Z',
+      checkpoint_attestation_expires_at: '2026-07-18T11:59:00.000Z',
+    } };
     await expect(deliverEngineStoryResult(context, {
       storyId: 'US-PASS',
       status: 'pass',
       integrated: true,
       commitSha: 'a'.repeat(40),
       idempotencyKey: 'story-result:pass-outage',
-      trustedPassOutbox: { payload: { story_title: 'Host-only pass' } },
+      trustedPassOutbox,
     }, {
       persist: async () => { throw transportFailure(); },
     })).rejects.toThrow('connection terminated');
     await flushFallbackWrites(root);
     const [entry] = readFallbackResults(root);
-    expect(entry.payload).not.toHaveProperty('trustedPassOutbox');
+    expect(entry.payload.trustedPassOutbox).toEqual(trustedPassOutbox);
+    // The journal callback receives data only; it has no canonical persistence
+    // or trusted-WAL authority and the failed DB acknowledgement still rejects.
   });
 
   test('permanent canonical conflicts throw without creating a replay record', async () => {

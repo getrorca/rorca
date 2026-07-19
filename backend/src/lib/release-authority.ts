@@ -165,14 +165,14 @@ function needsRepository(input: PrepareRunReleaseInput): boolean {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=', ...args], {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
   }).trim();
 }
 
 function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
+  const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=', ...args], { cwd, encoding: 'utf8', timeout: 30_000 });
   return { ok: result.status === 0, stdout: String(result.stdout ?? '').trim() };
 }
 
@@ -429,13 +429,20 @@ export async function createOrFinalizePullRequestForTests(row: ReleaseIntentRow,
     const existing = await lookup.json().catch(() => null) as Array<{ number?: number; draft?: boolean; state?: string; head?: { sha?: string; ref?: string } }> | null;
     if (!Array.isArray(existing)) throw new Error('pull request lookup response shape was indeterminate');
     const owned = existing.filter((pr) => pr.head?.ref === exact.providerReleaseRef && Number.isSafeInteger(pr.number));
-    if (owned.length > 1) throw new Error('multiple pull requests share the unique release ref');
-    let pr = owned[0];
+    if (owned.some((pr) => pr.state !== 'open' && pr.state !== 'closed')) {
+      throw new Error('run-owned pull request state was indeterminate');
+    }
+    // Closed/quarantined PRs are immutable audit history. Recovery binds only
+    // the one currently open PR for the run-owned ref, so a crash after a
+    // replacement create/verify converges without forgetting prior attempts.
+    const open = owned.filter((pr) => pr.state === 'open');
+    if (open.length > 1) throw new Error('multiple open pull requests share the unique release ref');
+    let pr = open[0];
     if (pr && pr.head?.sha?.toLowerCase() !== exact.authorizedSha) {
       await quarantinePullRequest(authority, credential.token, Number(pr.number));
       throw new Error('provider head raced before PR create/finalize; pull request quarantined');
     }
-    if (!pr || pr.state === 'closed') {
+    if (!pr) {
       await assertExactProviderHead(exact, authority, credential); // immediately before mutation
       const created = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
         githubRepoApiUrl(authority.owner, authority.name, '/pulls'), {
@@ -537,18 +544,25 @@ export async function updateLocalBaseExactForTests(exact: RunReleaseIdentity, me
     const symbolic = git(exact.workspaceRealpath, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
     if (symbolic !== exact.baseBranch) throw new Error('canonical base branch switched before local CAS');
     if (current === mergeSha) {
-      // Crash recovery after update-ref but before reset is safe only when the
-      // index still equals the frozen base tree and the worktree has no
-      // unstaged/untracked operator changes. Never hard-reset uncertainty.
+      // Two exact crash states are admissible: update-ref completed while the
+      // untouched index/worktree still has the frozen tree (repair with reset),
+      // or reset completed and the clean index/worktree already has mergeSha's
+      // tree (the effect is complete). Every other tree or dirty state is
+      // operator uncertainty and must never be hard-reset.
       const indexTree = git(exact.workspaceRealpath, ['write-tree']).toLowerCase();
       const frozenBaseTree = git(exact.workspaceRealpath, ['rev-parse', `${exact.baseSha}^{tree}`]).toLowerCase();
+      const mergeTree = git(exact.workspaceRealpath, ['rev-parse', `${mergeSha}^{tree}`]).toLowerCase();
       const unstagedClean = tryGit(exact.workspaceRealpath, ['diff-files', '--quiet']).ok;
       const untracked = git(exact.workspaceRealpath, ['ls-files', '--others', '--exclude-standard']);
-      if (indexTree !== frozenBaseTree || !unstagedClean || untracked !== '') {
+      if (!unstagedClean || untracked !== '') {
         throw new Error('canonical local base recovery found operator worktree changes');
       }
-      git(exact.workspaceRealpath, ['reset', '--hard', mergeSha]);
-      return;
+      if (indexTree === mergeTree) return;
+      if (indexTree === frozenBaseTree) {
+        git(exact.workspaceRealpath, ['reset', '--hard', mergeSha]);
+        return;
+      }
+      throw new Error('canonical local base recovery found operator worktree changes');
     }
     if (current !== exact.baseSha || git(exact.workspaceRealpath, ['status', '--porcelain']) !== '') {
       throw new Error('canonical local base advanced before CAS');

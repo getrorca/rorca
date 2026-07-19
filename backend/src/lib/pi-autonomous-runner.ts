@@ -333,9 +333,12 @@ export function buildPiAutonomousRunnerSkillMarkdown(): string {
   ].join('\n');
 }
 
-export function writePiAutonomousRunnerSkill(runId: number, storyId?: string): string {
+export function writePiAutonomousRunnerSkill(runId: number, storyId?: string, cwd = os.tmpdir()): string {
   const storySuffix = storyId ? `-${storyId.replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
-  const filePath = path.join(os.tmpdir(), `rorca-pi-autonomous-runner-${runId}${storySuffix}.md`);
+  // Production sandboxes mount only the exact worktree and curated runtime
+  // roots. Keep generated guidance inside the run worktree rather than exposing
+  // the host's shared /tmp namespace.
+  const filePath = path.join(cwd, '.rorca', 'runtime', `rorca-pi-autonomous-runner-${runId}${storySuffix}.md`);
   atomicWriteFile(filePath, buildPiAutonomousRunnerSkillMarkdown());
   return filePath;
 }
@@ -349,7 +352,7 @@ export function resolveWorkspacePiSkillFile(cwd: string): string | undefined {
 }
 
 export function buildPiServerSkillFiles(cwd: string, runId: number, storyId?: string): PiServerSkillFilesResult {
-  const generatedSkillFile = writePiAutonomousRunnerSkill(runId, storyId);
+  const generatedSkillFile = writePiAutonomousRunnerSkill(runId, storyId, cwd);
   const registry = new SkillRegistry().discoverFilesystem(cwd);
   const workspaceSkillFiles = registry.getAll()
     .filter(skill => skill.source === 'rorca-skills' && skill.filePath.length > 0)

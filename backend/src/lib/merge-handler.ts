@@ -42,14 +42,14 @@ export interface MergeResult {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=', ...args], {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
   }).trim();
 }
 
 function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
-  const result = spawnSync('git', args, {
+  const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=', ...args], {
     cwd, encoding: 'utf8', timeout: 30_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
   });

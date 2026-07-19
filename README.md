@@ -246,6 +246,10 @@ Rorca is easiest to understand as **three local processes**:
 - **backend** — the Express API, MCP surface, and retrieval control plane
 - **worker** — the separate pg-boss job runner that executes queued pipeline/spec jobs
 
+Production Linux has a fourth **security boundary, not an orchestrator**: each model CLI and worktree-controlled validation process is launched by the worker/engine through `bubblewrap` with separate PID/proc/user/mount/network namespaces. It receives only curated tools, the exact worktree/Git metadata, private HOME/tmp, masked credential files, and a reconstructed environment. Model inference can leave the namespace only through an exact-host CONNECT broker; PostgreSQL, GitHub, localhost/control-plane, credential homes, and trusted worker/engine ancestors remain unreachable. Missing kernel/runtime support fails before a run becomes running and prevents host release.
+
+For local source development, set `RORCA_AUTONOMOUS_ISOLATION=local-dev` explicitly. This bypass is rejected in production, for external/provider-capable runs, or when GitHub/vault/operator/SSH authority is present. Use provider-inert/branch-only options in this posture. App-backed/provider-capable autonomous runs require the Linux boundary. Trusted server/worker HTTP also requires an independent unpredictable `RORCA_INTERNAL_SERVICE_TOKEN` (at least 32 bytes); internal principals cannot mutate providers.
+
 #### Start the full dev stack
 
 ```bash

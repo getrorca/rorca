@@ -35,6 +35,7 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      RORCA_INTERNAL_SERVICE_TOKEN: ${RORCA_INTERNAL_SERVICE_TOKEN:-}
       AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
     env_file:
       - path: .env
@@ -67,12 +68,32 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      RORCA_INTERNAL_SERVICE_TOKEN: ${RORCA_INTERNAL_SERVICE_TOKEN:-}
+      RORCA_AUTONOMOUS_ISOLATION: linux-bwrap
+      RORCA_BWRAP_BIN: /usr/bin/bwrap
+      # Exact CONNECT destinations for model inference only. The autonomous
+      # namespace has no direct interface/default route and cannot reach DB,
+      # GitHub, localhost, or the Rorca control plane.
+      RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS: ${RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS:-api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com}
     env_file:
       - path: .env
         required: false
     depends_on:
       db:
         condition: service_healthy
+    # The trusted worker alone receives the one capability needed to create the
+    # bwrap mount/user/PID/network namespaces. Docker's default seccomp permits
+    # the namespace syscalls when SYS_ADMIN is present; AppArmor must not block
+    # those mount operations. The sandbox drops ALL capabilities before the
+    # model command and has no host network/PID/mount view.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined
+    pids_limit: 512
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'worker.js' > /dev/null"]

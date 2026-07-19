@@ -68,16 +68,39 @@ function simulateCrashAfterRefCas(): void {
   expect(fs.existsSync(path.join(workspace, 'merged.txt'))).toBe(false);
 }
 
-test('crash after local ref CAS repairs an untouched base index/worktree exactly', async () => {
+function simulateCrashAfterResetBeforeDurableStep(): void {
+  git(workspace, 'update-ref', 'refs/heads/main', merged, base);
+  git(workspace, 'reset', '--hard', merged);
+  expect(git(workspace, 'rev-parse', 'HEAD')).toBe(merged);
+  expect(fs.readFileSync(path.join(workspace, 'merged.txt'), 'utf8')).toBe('merged\n');
+  expect(git(workspace, 'status', '--porcelain')).toBe('');
+}
+
+test('crash after local ref CAS repairs an untouched frozen-base index/worktree exactly', async () => {
   simulateCrashAfterRefCas();
   await expect(updateLocalBaseExactForTests(identity, merged)).resolves.toBeUndefined();
   expect(fs.readFileSync(path.join(workspace, 'merged.txt'), 'utf8')).toBe('merged\n');
   expect(git(workspace, 'status', '--porcelain')).toBe('');
 });
 
-test('local CAS recovery preserves and fails closed on operator changes', async () => {
-  simulateCrashAfterRefCas();
-  fs.writeFileSync(path.join(workspace, 'operator.txt'), 'do not delete\n');
+test('actual crash after reset before durable local-base step accepts the exact clean merge tree', async () => {
+  simulateCrashAfterResetBeforeDurableStep();
+  await expect(updateLocalBaseExactForTests(identity, merged)).resolves.toBeUndefined();
+  expect(git(workspace, 'rev-parse', 'HEAD')).toBe(merged);
+  expect(git(workspace, 'status', '--porcelain')).toBe('');
+});
+
+test.each([
+  ['untracked', () => fs.writeFileSync(path.join(workspace, 'operator.txt'), 'do not delete\n')],
+  ['unstaged', () => fs.writeFileSync(path.join(workspace, 'merged.txt'), 'operator edit\n')],
+  ['different staged tree', () => {
+    fs.writeFileSync(path.join(workspace, 'staged.txt'), 'operator staged\n');
+    git(workspace, 'add', 'staged.txt');
+  }],
+] as const)('local CAS recovery rejects and preserves %s state', async (_label, mutate) => {
+  simulateCrashAfterResetBeforeDurableStep();
+  mutate();
+  const before = git(workspace, 'status', '--porcelain');
   await expect(updateLocalBaseExactForTests(identity, merged)).rejects.toThrow(/operator worktree changes/);
-  expect(fs.readFileSync(path.join(workspace, 'operator.txt'), 'utf8')).toBe('do not delete\n');
+  expect(git(workspace, 'status', '--porcelain')).toBe(before);
 });

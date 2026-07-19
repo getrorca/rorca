@@ -95,6 +95,8 @@ import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execut
 import { reconcilePendingCheckRunProjections } from './lib/check-run-poster';
 import { inspectRunHostAuthority, type RunHostAuthority } from './lib/run-host-authority';
 import { assertFrozenRunExecutionIdentity } from './lib/run-git-authority';
+import { assertAutonomousExecutionBoundary } from './lib/autonomous-sandbox';
+import { ensureAutonomousModelEgress } from './lib/autonomous-model-egress';
 import {
   drainPendingRunReleases,
   prepareRunReleaseIntent,
@@ -169,6 +171,24 @@ let _lastReconciliationErrors = 0;
 
 let pgBossHealthFailures = 0;
 const PG_BOSS_HEALTH_MAX_FAILURES = 3;
+
+async function assertLocalDevHasNoDurableProviderAuthority(): Promise<void> {
+  if (process.env.RORCA_AUTONOMOUS_ISOLATION !== 'local-dev') return;
+  const authority = await queryOne<{ present: boolean }>(`
+    SELECT (
+      EXISTS (
+        SELECT 1 FROM integration_vault_secrets
+         WHERE provider = 'github_app' AND revoked_at IS NULL
+      ) OR EXISTS (
+        SELECT 1 FROM integration_tokens
+         WHERE provider = 'github' AND revoked_at IS NULL
+      )
+    ) AS present
+  `);
+  if (!authority || authority.present) {
+    throw new Error('local-dev autonomous isolation cannot coexist with durable provider authority');
+  }
+}
 
 async function pgBossHealthCheck(): Promise<void> {
   try {
@@ -502,6 +522,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
 
+    // Prove the process/filesystem/network boundary before the run can become
+    // running. In explicit local-dev posture provider-capable jobs are refused.
+    assertAutonomousExecutionBoundary({
+      cwd,
+      providerCapable: payload.safetyOptions.externalSend,
+    });
+    await assertLocalDevHasNoDurableProviderAuthority();
+    await ensureAutonomousModelEgress();
+
     // Backend/engine own lifecycle phase; legacy status remains for existing
     // queue/result consumers and must not be used by UI to infer phase.
     await transitionRunLifecycle(runId, 'starting', {
@@ -588,9 +617,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       engineArgs.push('--reasoning-effort', reasoningEffort);
     }
 
-    // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
-    // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
-    // Then strip the 4 Claude vars that must not propagate to nested invocations.
+    // 4. Spawn the trusted execution engine with host DB/result authority. It
+    // inherits service credentials by design; model/tool subprocesses never do
+    // and must cross autonomous-sandbox.ts's PID/mount/network boundary.
+    // Strip the 4 Claude vars that must not propagate to nested invocations.
     const resolvedSecrets = await resolveExecutionSecrets(secretReferences);
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
@@ -1133,6 +1163,13 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
 
     // Retry runs use the same authoritative lifecycle as fresh runs.
+    assertAutonomousExecutionBoundary({
+      cwd,
+      providerCapable: approvedPreview.options.safety.externalSend,
+    });
+    await assertLocalDevHasNoDurableProviderAuthority();
+    await ensureAutonomousModelEgress();
+
     await transitionRunLifecycle(runId, 'starting', {
       owner: 'worker_retry',
       transport: isPtyTerminalMode(effectiveTerminalMode) ? 'pty_pending' : 'pipe',
@@ -1210,9 +1247,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     engineArgs.push('--workspace-path', workspacePath);
     if (worktreePath) engineArgs.push('--worktree-path', worktreePath);
 
-    // 5. Spawn execution-engine with pipe stdio for chunk capture
-    // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
-    // Strip the 4 Claude vars that must not propagate to nested invocations.
+    // 5. Spawn the trusted execution engine with host DB/result authority. The
+    // nested model/tool subprocess is separately namespace-contained and gets
+    // no worker/engine capability. Strip nested-Claude state here.
     const { CLAUDECODE: _a, CLAUDE_CODE_ENTRYPOINT: _b, CLAUDE_AGENT_SDK_VERSION: _c, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: _d, ...inheritedEnvRetry } = process.env as Record<string, string>;
     const resolvedSecrets = await resolveExecutionSecrets(secretReferences);
     const env = {

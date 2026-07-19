@@ -69,6 +69,38 @@ test('exact unique provider ref creates and verifies one PR', async () => {
   expect(providerFetch.mock.calls.filter(([, init]) => (init as RequestInit).method === 'POST')).toHaveLength(1);
 });
 
+test('closed replacement create/verify crash converges to the one exact open PR on restart', async () => {
+  const closed = { number: 17, state: 'closed', draft: false, head: { sha: A, ref: releaseRef } };
+  const replacement = { number: 18, state: 'open', draft: false, head: { sha: A, ref: releaseRef } };
+  providerFetch
+    // First attempt: replacement is created and verified, then the fixture
+    // models a crash before pipeline_runs/step_state persistence by simply
+    // calling the provider reconciler again.
+    .mockResolvedValueOnce(ref(A))
+    .mockResolvedValueOnce(response([closed]))
+    .mockResolvedValueOnce(ref(A))
+    .mockResolvedValueOnce(response({ number: 18, draft: false }))
+    .mockResolvedValueOnce(response(replacement))
+    // Restart: retain the closed PR as history and select the exact open one.
+    .mockResolvedValueOnce(ref(A))
+    .mockResolvedValueOnce(response([closed, replacement]));
+
+  await expect(createOrFinalizePullRequestForTests(row as never, false)).resolves.toBe(18);
+  await expect(createOrFinalizePullRequestForTests(row as never, false)).resolves.toBe(18);
+  expect(providerFetch.mock.calls.filter(([, init]) => (init as RequestInit).method === 'POST')).toHaveLength(1);
+});
+
+test('multiple exact open PRs for the run-owned ref remain ambiguous and are rejected', async () => {
+  providerFetch
+    .mockResolvedValueOnce(ref(A))
+    .mockResolvedValueOnce(response([
+      { number: 17, state: 'open', draft: false, head: { sha: A, ref: releaseRef } },
+      { number: 18, state: 'open', draft: false, head: { sha: A, ref: releaseRef } },
+    ]));
+  await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/multiple open pull requests/);
+  expect(providerFetch.mock.calls.some(([, init]) => (init as RequestInit).method === 'POST')).toBe(false);
+});
+
 test('A-to-B advance before create blocks provider mutation', async () => {
   providerFetch.mockResolvedValueOnce(ref(B));
   await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/provider release ref differs/);

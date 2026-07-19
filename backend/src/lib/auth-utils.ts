@@ -57,7 +57,33 @@ export function decryptToken(encryptedStr: string): string {
   return decipher.update(ciphertext) + decipher.final('utf8');
 }
 
-export const INTERNAL_SERVICE_TOKEN = `rorca-internal-${process.pid}`;
+export const INTERNAL_SERVICE_USER_ID = 'rorca-internal-service';
+
+function resolveInternalServiceToken(): string {
+  const configured = String(process.env.RORCA_INTERNAL_SERVICE_TOKEN ?? '').trim();
+  if (configured) {
+    if (Buffer.byteLength(configured, 'utf8') < 32
+      || /^rorca-internal-(?:\d+|change-me|default)$/i.test(configured)) {
+      throw new Error('RORCA_INTERNAL_SERVICE_TOKEN must be an unpredictable secret of at least 32 bytes');
+    }
+    return configured;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('RORCA_INTERNAL_SERVICE_TOKEN is required in production');
+  }
+  // Non-production processes get an unpredictable process-local token. It is
+  // intentionally not derivable from PID and cannot authenticate another process.
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+export const INTERNAL_SERVICE_TOKEN = resolveInternalServiceToken();
+
+function sameInternalToken(supplied: unknown): boolean {
+  if (typeof supplied !== 'string') return false;
+  const expected = Buffer.from(INTERNAL_SERVICE_TOKEN, 'utf8');
+  const actual = Buffer.from(supplied, 'utf8');
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
 
 function getDeveloperSuperuserEmails(): Set<string> {
   const configured = (process.env.RORCA_SUPERUSER_EMAILS || process.env.DEV_SUPERUSER_EMAILS || '')
@@ -163,9 +189,9 @@ export async function resolveAuthUserFromToken(token: string): Promise<AuthUser 
 }
 
 export async function authRequired(req: Request, res: Response, next: NextFunction): Promise<void> {
-  if (req.headers['x-rorca-internal'] === INTERNAL_SERVICE_TOKEN) {
+  if (sameInternalToken(req.headers['x-rorca-internal'])) {
     req.user = {
-      id: '00000000-0000-0000-0000-000000000000',
+      id: INTERNAL_SERVICE_USER_ID,
       email: 'scheduler@rorca.internal',
       supabaseId: '00000000-0000-0000-0000-000000000000',
       role: 'admin',

@@ -59,11 +59,19 @@ test('explicit digest preimage authorizes only the provider boundary', () => {
   expect(next).toHaveBeenCalledTimes(1);
 });
 
-test('AUTH_REQUIRED mode rejects injected local admin and accepts a real authenticated principal', () => {
+test('AUTH_REQUIRED mode rejects local and internal principals but accepts a real authenticated operator', () => {
   process.env.AUTH_REQUIRED = 'true';
-  expect(() => requireProviderMutationAuthority({
-    ...req(), user: { id: 'local-admin' },
-  } as Request, response, next)).toThrow(/Authenticated operator authority/);
+  for (const user of [
+    { id: 'local-admin' },
+    { id: 'rorca-internal-service' },
+    { id: 'system' },
+    { id: 'hermes-service', email: 'hermes@rorca.internal' },
+    { id: 'scheduler-alias', supabaseId: '00000000-0000-0000-0000-000000000000' },
+  ]) {
+    expect(() => requireProviderMutationAuthority({
+      ...req(), user,
+    } as unknown as Request, response, next)).toThrow(/Authenticated operator authority/);
+  }
   requireProviderMutationAuthority({ ...req(), user: { id: 'user-1' } } as Request, response, next);
   expect(next).toHaveBeenCalledTimes(1);
 });
