@@ -24,6 +24,8 @@ describe('PTY generation migration contract', () => {
     expect(sql).toContain("'__legacy__'");
     expect(sql).not.toMatch(/UPDATE\s+run_output_chunks/i);
     expect(sql).not.toMatch(/UPDATE\s+run_pty_output_chunks/i);
+    // pipeline_runs has started_at/finished_at but never had created_at.
+    expect(sql).not.toContain('pr.created_at');
   });
 
   it('enforces immutable identity, one active generation, and ordered replay indexes', () => {

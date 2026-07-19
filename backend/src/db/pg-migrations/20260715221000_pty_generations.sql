@@ -181,12 +181,12 @@ SELECT
   ps.prompt_injected_at,
   ps.exit_code,
   ps.exit_signal,
-  COALESCE(ps.started_at, pr.started_at, pr.created_at, NOW()),
+  COALESCE(ps.started_at, pr.started_at, NOW()),
   ps.last_output_at,
   ps.last_heartbeat_at,
   ps.output_truncated_at,
   ps.exited_at,
-  COALESCE(ps.updated_at, pr.finished_at, pr.started_at, pr.created_at, NOW())
+  COALESCE(ps.updated_at, pr.finished_at, pr.started_at, NOW())
 FROM pipeline_runs pr
 JOIN workspaces w ON w.id = pr.workspace_id
 LEFT JOIN run_pty_sessions ps ON ps.run_id = pr.id
