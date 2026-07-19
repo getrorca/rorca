@@ -77,6 +77,12 @@ This makes failures interpretable and prevents undocumented local machine timing
 from becoming the threshold. Baseline changes require a new version and review;
 they must not be rewritten to bless a failing run.
 
+## Portable reports and receipts
+
+Every stress invocation runs `build-wave-qualification-evidence.ts` as a separate blocking phase and writes canonical JSON, deterministic Markdown, and a strict authenticated receipt under the owned `.rorca/qualification/<digest>/` namespace. The builder receives only normalized status and seeded model inputs, never captured terminal output. Report generation, signing, telemetry, or publication failure fails the launcher.
+
+The provider-free stress profile cannot by itself provide durable database/WAL, Git integration, or independent-checker proof, so its receipt accurately leaves production enable unavailable. The complete production qualification must attach those authoritative classes and pass local receipt verification described in [`wave-parallel-v1/qualification.md`](./wave-parallel-v1/qualification.md).
+
 ## Failure evidence
 
 On failure the launcher preserves a mode-0600 JSON report under the explicitly

@@ -105,15 +105,72 @@ if (!profile) {
   clearTimeout(timer);
   if (forceTimer) clearTimeout(forceTimer);
 
+  // Report generation is a separate blocking phase. Child terminal output is never
+  // accepted as evidence and is not supplied to the builder.
+  const testPassed = exit.code === 0 && !timedOut && !captureOverflow;
+  const artifactId = createHash('sha256').update(`${startedAt}:${seed}:${profileName}`).digest('hex').slice(0, 16);
+  const artifactDirectory = path.join('.rorca', 'qualification', artifactId);
+  const evidenceBuilder = path.join(root, 'backend', 'src', 'scripts', 'build-wave-qualification-evidence.ts');
+  const evidenceEnv = { ...childEnv };
+  for (const key of ['RORCA_QUALIFICATION_SIGNING_KEY', 'RORCA_QUALIFICATION_ISSUER_ID', 'RORCA_QUALIFICATION_KEY_ID', 'RORCA_QUALIFICATION_POSTGRES_VERSION', 'RORCA_QUALIFICATION_TEST_DATABASE_IDENTITY_HASH']) {
+    if (process.env[key]) evidenceEnv[key] = process.env[key];
+  }
+  const evidenceChild = spawn(tsx, [
+    evidenceBuilder,
+    `--output=${artifactDirectory}`,
+    `--issued-at=${startedAt}`,
+    `--seed=${seed}`,
+    `--test-verdict=${testPassed ? 'passed' : 'failed'}`,
+  ], {
+    cwd: root,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: evidenceEnv,
+  });
+  let evidenceOutput = Buffer.alloc(0);
+  let evidenceOverflow = false;
+  evidenceChild.stdout.on('data', chunk => {
+    evidenceOutput = Buffer.concat([evidenceOutput, chunk]);
+    if (evidenceOutput.length > 16 * 1024) {
+      evidenceOverflow = true;
+      try { evidenceChild.kill('SIGKILL'); } catch { /* already exited */ }
+    }
+  });
+  let evidenceTimedOut = false;
+  const evidenceTimer = setTimeout(() => {
+    evidenceTimedOut = true;
+    try { evidenceChild.kill('SIGKILL'); } catch { /* already exited */ }
+  }, 30_000);
+  evidenceTimer.unref?.();
+  const evidenceExit = await new Promise(resolve => {
+    evidenceChild.once('error', () => resolve(1));
+    evidenceChild.once('close', code => resolve(code ?? 1));
+  });
+  clearTimeout(evidenceTimer);
+  let evidenceSummary;
+  try {
+    evidenceSummary = evidenceOverflow ? undefined : JSON.parse(evidenceOutput.toString('utf8'));
+  } catch {
+    evidenceSummary = undefined;
+  }
+  const evidencePassed = evidenceExit === 0
+    && !evidenceTimedOut
+    && evidenceSummary?.schemaVersion === 1
+    && typeof evidenceSummary?.artifactDigest === 'string';
+
   const firstAttempt = true;
   const summary = {
     schemaVersion: 1,
     profile: profileName,
     firstAttempt: true,
-    passed: exit.code === 0 && !timedOut && !captureOverflow,
+    passed: testPassed && evidencePassed,
     exitCode: exit.code,
     timedOut,
     captureOverflow,
+    evidencePublicationPassed: evidencePassed,
+    artifactDigest: evidencePassed ? evidenceSummary.artifactDigest : null,
+    productionEnableAvailable: evidencePassed ? evidenceSummary.productionEnableAvailable === true : false,
+    portableArtifact: evidencePassed ? artifactDirectory : null,
     seedCount: profile.seeds,
     scenario: scenario === 'all' ? 'versioned-matrix' : scenario,
     parallelism,

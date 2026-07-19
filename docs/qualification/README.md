@@ -173,7 +173,11 @@ The repeated seeded model, CI/soak profiles, leak sentinel, versioned performanc
 budgets, and failure evidence contract are documented in
 [`wave-stress.md`](./wave-stress.md).
 
-The machine-checkable invariant and scenario mapping is [`wave-parallel-invariants.json`](./wave-parallel-invariants.json). Validate it with:
+The machine-checkable invariant and scenario mapping is [`wave-parallel-invariants.json`](./wave-parallel-invariants.json). The versioned production evidence architecture, state machine, qualification, threat model, operations, rollout, recovery, and requirement cross-reference are indexed in [`wave-parallel-v1/README.md`](./wave-parallel-v1/README.md).
+
+Portable reports are generated after the stress child as a separate blocking phase. Terminal output is never passed to the builder. Trusted publication recomputes current repository/workspace and engine/policy/compiler/invariant/test/configuration identities before appending a receipt; stale history remains visible but cannot enable production.
+
+Validate these contracts with:
 
 ```sh
 npm run check:wave-invariants
