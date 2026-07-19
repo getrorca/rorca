@@ -26,6 +26,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { hasAgentCredentials } from '../lib/secret-resolver';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveDispatchConsistency,
+  WaveParallelPolicyError,
+} from '../lib/wave-parallel-policy';
 
 const apiUrl = (process.env.RORCA_API_URL ?? 'http://localhost:3030/api').replace(/\/$/, '');
 const environmentId = process.env.RORCA_RUNNER_ENVIRONMENT_ID ?? 'local-user';
@@ -129,6 +134,28 @@ async function runJob(job: any): Promise<void> {
   const payload = job.payload ?? {};
   await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/running`, { runnerId });
 
+  let wavePolicy;
+  try {
+    const payloadParallelism = Number(payload.parallelism ?? 1);
+    wavePolicy = enforceWaveDispatchConsistency({
+      source: 'local-runner-job',
+      payloadMode: payload.orchestrationMode === 'wave-parallel' ? 'wave-parallel' : 'sequential',
+      payloadParallelism,
+      rowParallelism: payloadParallelism,
+      triggerOptions: payload.triggerOptions,
+      environment: currentWaveParallelPolicyEnvironment(),
+    });
+  } catch (error) {
+    if (!(error instanceof WaveParallelPolicyError)) throw error;
+    await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/complete`, {
+      runnerId,
+      status: 'failed',
+      result: { policy: error.toJSON() },
+      error: 'wave_parallel_policy_denied',
+    });
+    return;
+  }
+
   const workspacePath = workspacePathOverride || payload.worktreePath || payload.workspacePath;
   if (!workspacePath || typeof workspacePath !== 'string') {
     throw new Error('Runner workspace path missing. Set RORCA_RUNNER_WORKSPACE_PATH or include workspacePath in job payload.');
@@ -143,7 +170,7 @@ async function runJob(job: any): Promise<void> {
   args.push('--cwd', workspacePath);
   args.push('--run-id', String(payload.runId));
   args.push('--port', String(engineApiPort));
-  args.push('--parallelism', String(payload.parallelism ?? 1));
+  args.push('--parallelism', String(wavePolicy.parallelism));
   args.push('--agent', String(payload.agent ?? 'claude'));
   if (payload.model) args.push('--model', String(payload.model));
   if (payload.specificStory) args.push('--story', String(payload.specificStory));

@@ -189,6 +189,17 @@ import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
 import { sanitizeCapturePayload } from './context-safety';
+import {
+  accountWaveSettlement,
+  assertSingleStoryWaveDirectExecution,
+  computeTransitivelyBlockedStories,
+  attemptCompleteFailureEvidence,
+  normalizeWaveRejection,
+  parallelRunExitCode,
+  requiresPerStoryWorktree,
+  selectWaveWorktreeCleanup,
+  type WaveAccountingState,
+} from './parallel-wave-core';
 import { runHostValidationRequirement } from './story-host-validation';
 import {
   adaptStoryCloseoutEvidence,
@@ -3993,6 +4004,22 @@ async function markStorySkipped(jsonPath: string, storyId: string): Promise<void
   });
 }
 
+/** A rejected executor promise is an explicit failed lifecycle state, never an unobserved gap. */
+async function markStoryPromiseRejected(jsonPath: string, storyId: string, reason: string): Promise<void> {
+  await withSpecLock(jsonPath, () => {
+    const raw = fs.readFileSync(jsonPath, 'utf8');
+    const spec: SpecJson = JSON.parse(raw);
+    const story = getStories(spec).find(item => item.id === storyId);
+    if (!story) throw new Error(`Cannot persist rejected wave story ${storyId}: story not found`);
+    story.passes = false;
+    story.status = 'failed';
+    delete story.skipped;
+    story.notes = `${reason} — preserved for inspection and safe retry`;
+    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+    logger.info(`Marked ${storyId} as failed after ${reason}`);
+  });
+}
+
 /** Revert a story's passes:true when its sub-worktree merge fails.
  *  Without this, the next run sees passes:true and skips the story even
  *  though its code never made it to the parent branch. */
@@ -5181,6 +5208,135 @@ function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
     execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
   } catch { /* branch may already be gone */ }
   logger.info(`  [worktree] Removed ${wt.worktreePath}`);
+}
+
+function writeParallelFailureDiagnostic(
+  logDir: string,
+  storyId: string,
+  reasonCode: string,
+  runId: number,
+  waveIndex: number,
+  rawDiagnostic: string,
+): string {
+  const safeStoryId = storyId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'unknown-story';
+  const suffix = createHash('sha256').update(`${runId}:${waveIndex}:${storyId}:${reasonCode}`).digest('hex').slice(0, 10);
+  const diagnosticPath = path.join(logDir, `${safeStoryId}_${reasonCode}_${suffix}.log`);
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(diagnosticPath, rawDiagnostic, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(diagnosticPath, 0o600);
+  return diagnosticPath;
+}
+
+/**
+ * Persist every projection of an infrastructure-level story failure. Raw error
+ * material stays in the local mode-0600 log; only bounded redacted fields cross
+ * the WAL/story-result boundary.
+ */
+async function recordParallelStoryInfrastructureFailure(input: {
+  config: EngineConfig;
+  workspaceId: string | null;
+  logDir: string;
+  story: UserStory;
+  reasonCode: 'wave_promise_rejected' | 'pending_closeout_unresolved';
+  reason: unknown;
+  waveIndex: number;
+  worktree?: StoryWorktree;
+}): Promise<string[]> {
+  const diagnostic = normalizeWaveRejection(input.reason);
+  let diagnosticPath: string | undefined;
+  const localWriteFailures: Array<{ label: string; error: unknown }> = [];
+  try {
+    diagnosticPath = writeParallelFailureDiagnostic(
+      input.logDir,
+      input.story.id,
+      input.reasonCode,
+      input.config.runId,
+      input.waveIndex,
+      diagnostic.rawDiagnostic,
+    );
+  } catch (error: unknown) {
+    localWriteFailures.push({ label: 'raw-local-diagnostic', error });
+  }
+
+  logger.error({
+    runId: input.config.runId,
+    storyId: input.story.id,
+    wave: input.waveIndex,
+    reason: input.reasonCode,
+    message: diagnostic.message,
+    stack: diagnostic.stack,
+    diagnosticRef: diagnosticPath ? path.basename(diagnosticPath) : null,
+  }, '[engine] wave story failed outside the normal executor outcome contract');
+
+  const finishedAt = new Date().toISOString();
+  const evidenceFailures = await attemptCompleteFailureEvidence([
+    {
+      label: 'spec-story-failure',
+      run: () => markStoryPromiseRejected(input.config.jsonPath, input.story.id, input.reasonCode),
+    },
+    {
+      label: 'run-state-failure',
+      run: () => {
+        rsMarkStoryFailed(input.config.cwd, {
+          storyId: input.story.id,
+          title: input.story.title,
+          status: 'failed',
+          startedAt: finishedAt,
+          finishedAt,
+          agentType: input.config.agentType,
+          failReason: input.reasonCode,
+        });
+        writeProgressTxt(input.config.cwd);
+      },
+    },
+    ...(input.workspaceId ? [{
+      label: 'story_failed-wal',
+      run: () => emitWalEvent(input.config.port, 'story_failed', input.workspaceId!, {
+        run_id: input.config.runId,
+        story_id: input.story.id,
+        reason: input.reasonCode,
+        wave: input.waveIndex,
+        error_message: diagnostic.message,
+        error_stack: diagnostic.stack,
+        // The raw diagnostic may contain secrets. Its mode-0600 local path is
+        // deliberately not persisted because story output APIs dereference
+        // story-result log paths and would otherwise expose the raw material.
+        diagnostic_raw_local_only: true,
+        diagnostic_raw_truncated: diagnostic.rawTruncated,
+        ...(input.worktree ? {
+          worktree_path: input.worktree.worktreePath,
+          worktree_branch: input.worktree.branchName,
+          worktree_preserved: true,
+        } : {}),
+      }, input.story.id),
+    }] : []),
+    {
+      label: 'story-result-failure',
+      run: () => postStoryResult(input.config.port, {
+        runId: input.config.runId,
+        storyId: input.story.id,
+        status: 'fail',
+        reason: input.reasonCode,
+        ...(input.worktree ? {
+          worktreePath: input.worktree.worktreePath,
+          worktreeBranch: input.worktree.branchName,
+        } : {}),
+      }),
+    },
+  ]);
+
+  const failures = [...localWriteFailures, ...evidenceFailures];
+  for (const failure of failures) {
+    const normalized = normalizeWaveRejection(failure.error);
+    logger.error({
+      runId: input.config.runId,
+      storyId: input.story.id,
+      evidenceStep: failure.label,
+      message: normalized.message,
+      stack: normalized.stack,
+    }, '[engine] failed to persist complete wave rejection evidence');
+  }
+  return failures.map(failure => failure.label);
 }
 
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
@@ -7407,37 +7563,6 @@ async function runWithBoundedConcurrency<T>(
   return results;
 }
 
-// ─── Transitive Blocking ────────────────────────────────────────────────────
-
-function computeBlockedStories(
-  allStories: UserStory[],
-  failedIds: Set<string>,
-  alreadyProcessed: Set<string>,
-): Map<string, string[]> {
-  const blocked = new Map<string, string[]>();
-  const unprocessed = allStories.filter(s =>
-    !alreadyProcessed.has(s.id) && !failedIds.has(s.id) && !s.excluded && !s.skipped && !isPassed(s)
-  );
-
-  const allBlockedIds = new Set<string>(failedIds);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const story of unprocessed) {
-      if (allBlockedIds.has(story.id)) continue;
-      const deps = story.dependsOn ?? [];
-      const blockers = deps.filter(dep => allBlockedIds.has(dep));
-      if (blockers.length > 0) {
-        allBlockedIds.add(story.id);
-        blocked.set(story.id, blockers);
-        changed = true;
-      }
-    }
-  }
-
-  return blocked;
-}
-
 // ─── Main Loop ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -7821,10 +7946,49 @@ async function runParallel(
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
+  const rejectedIds = new Set<string>();
+  const evidenceFailureIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
   const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
+
+  const persistNewlyBlockedStories = async (waveIndex: number): Promise<void> => {
+    const currentStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
+    const newlyBlocked = computeTransitivelyBlockedStories(currentStories, failedIds, processedIds);
+    for (const [blockedId, blockers] of newlyBlocked) {
+      if (processedIds.has(blockedId)) continue;
+      const blockedStory = currentStories.find(story => story.id === blockedId);
+      logger.info(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
+      failedIds.add(blockedId);
+      processedIds.add(blockedId);
+      await markStorySkipped(config.jsonPath, blockedId);
+      rsMarkStorySkipped(config.cwd, {
+        storyId: blockedId,
+        title: blockedStory?.title ?? blockedId,
+        status: 'skipped',
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: config.agentType,
+        failReason: `blocked_by: ${blockers.join(', ')}`,
+      });
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId,
+          story_id: blockedId,
+          reason: 'blocked_by',
+          blockedBy: blockers,
+          wave: waveIndex,
+        }, blockedId);
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: blockedId,
+          status: 'skip',
+          blockedBy: blockers,
+        });
+      }
+    }
+  };
 
   for (const wave of waves) {
     logger.info('==========================================');
@@ -7835,6 +7999,8 @@ async function runParallel(
     for (const waveStory of wave.stories) {
       const original = stories.find(s => s.id === waveStory.id);
       if (!original) continue;
+
+      if (processedIds.has(original.id)) continue;
 
       if (original.excluded || original.skipped) {
         processedIds.add(original.id);
@@ -7847,7 +8013,7 @@ async function runParallel(
         logger.info(`  ${original.id} BLOCKED by: ${blockers.join(', ')}`);
         failedIds.add(original.id);
         processedIds.add(original.id);
-        markStorySkipped(config.jsonPath, original.id);
+        await markStorySkipped(config.jsonPath, original.id);
         rsMarkStorySkipped(config.cwd, {
           storyId: original.id, title: original.title, status: 'skipped',
           startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
@@ -7873,70 +8039,189 @@ async function runParallel(
     }
 
     const worktreeMap = new Map<string, StoryWorktree>();
+    const preserveWorktreeIds = new Set<string>();
+    const cleanupWorktreeIds = new Set<string>();
+    const directSingleStoryWave = !requiresPerStoryWorktree(wave.stories.length);
 
-    for (const story of executableStories) {
-      const wt = createStoryWorktree(
-        config.cwd,
-        specSlug,
-        story.id,
-        config.executionManifests.get(story.id)?.execution.worktree,
-      );
-      if (wt) {
-        worktreeMap.set(story.id, wt);
-      } else {
-        failedIds.add(story.id);
-        processedIds.add(story.id);
-        markStorySkipped(config.jsonPath, story.id);
-        rsMarkStoryFailed(config.cwd, {
-          storyId: story.id, title: story.title, status: 'failed',
-          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
-          agentType: config.agentType, failReason: 'worktree_create_failed',
-        });
+    if (!directSingleStoryWave) {
+      for (const story of executableStories) {
+        const wt = createStoryWorktree(
+          config.cwd,
+          specSlug,
+          story.id,
+          config.executionManifests.get(story.id)?.execution.worktree,
+        );
+        if (wt) {
+          worktreeMap.set(story.id, wt);
+        } else {
+          failedIds.add(story.id);
+          processedIds.add(story.id);
+          await markStorySkipped(config.jsonPath, story.id);
+          rsMarkStoryFailed(config.cwd, {
+            storyId: story.id, title: story.title, status: 'failed',
+            startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+            agentType: config.agentType, failReason: 'worktree_create_failed',
+          });
 
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
-          }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
+            }, story.id);
+            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
+          }
         }
       }
+    } else {
+      logger.info('  [wave] Single-story wave — executing directly on the run branch (no per-story worktree)');
     }
 
-    const storiesWithWorktrees = executableStories.filter(s => worktreeMap.has(s.id));
-
-    const tasks = storiesWithWorktrees.map(story => {
-      const wt = worktreeMap.get(story.id)!;
-      return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index, specForBrowserMcp, pendingIntegratedPasses)
-          .then(result => ({ storyId: story.id, result }));
+    const scheduledStories = directSingleStoryWave
+      ? executableStories
+      : executableStories.filter(story => worktreeMap.has(story.id));
+    const waveExecutions = scheduledStories.map(story => {
+      const wt = worktreeMap.get(story.id);
+      return {
+        story,
+        wt,
+        task: async (): Promise<StoryExecutionOutcome> => {
+          if (directSingleStoryWave) {
+            assertSingleStoryWaveDirectExecution(
+              story.id,
+              config.cwd,
+              config.executionManifests.get(story.id)?.commandSafety.guardedWorkingDirectory,
+            );
+          }
+          return executeStory(
+            story,
+            config,
+            mode,
+            playbook,
+            logDir,
+            workspaceId,
+            retryCounts,
+            wt?.worktreePath ?? config.cwd,
+            wt,
+            undefined,
+            stories,
+            undefined,
+            undefined,
+            personaRegistry,
+            wave.index,
+            specForBrowserMcp,
+            pendingIntegratedPasses,
+          );
+        },
+      };
     });
 
-    const results = await runWithBoundedConcurrency(tasks, config.parallelism);
-
+    const results = await runWithBoundedConcurrency(waveExecutions.map(item => item.task), config.parallelism);
+    const accountingState: WaveAccountingState = {
+      failedIds,
+      processedIds,
+      rejectedIds,
+      preserveWorktreeIds,
+      cleanupWorktreeIds,
+    };
     const passedInWave: StoryWorktree[] = [];
-    const failedInWave: StoryWorktree[] = [];
 
-    for (const settled of results) {
+    for (let resultIndex = 0; resultIndex < results.length; resultIndex++) {
+      const settled = results[resultIndex];
+      const execution = waveExecutions[resultIndex];
+      const storyId = execution.story.id;
       if (settled.status === 'fulfilled') {
-        const { storyId, result } = settled.value;
-        processedIds.add(storyId);
-        const wt = worktreeMap.get(storyId);
-        if (result !== 'passed') {
-          failedIds.add(storyId);
-          if (result === 'closeout_blocked' && wt) {
-            logger.info(`  [closeout] Preserving blocked worktree for inspection: ${wt.worktreePath}`);
-          } else if (wt) {
-            failedInWave.push(wt);
-          }
-        } else if (wt) {
-          passedInWave.push(wt);
+        accountWaveSettlement({
+          storyId,
+          settlement: 'fulfilled',
+          outcome: settled.value,
+          hasWorktree: Boolean(execution.wt),
+        }, accountingState);
+        if (settled.value === 'closeout_blocked' && execution.wt) {
+          logger.info(`  [closeout] Preserving blocked worktree for inspection: ${execution.wt.worktreePath}`);
+        } else if (settled.value === 'passed' && execution.wt) {
+          passedInWave.push(execution.wt);
         }
-      } else {
-        logger.error(`[engine] Unexpected rejection in wave ${wave.index}:`, settled.reason);
+        continue;
+      }
+
+      // Settlement order is stable, so the rejected promise remains correlated
+      // with its input story even though it never returned a storyId value.
+      accountWaveSettlement({
+        storyId,
+        settlement: 'rejected',
+        hasWorktree: Boolean(execution.wt),
+      }, accountingState);
+      pendingIntegratedPasses.delete(storyId);
+      const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+        config,
+        workspaceId,
+        logDir,
+        story: execution.story,
+        reasonCode: 'wave_promise_rejected',
+        reason: settled.reason,
+        waveIndex: wave.index,
+        worktree: execution.wt,
+      });
+      if (evidenceFailures.length > 0) evidenceFailureIds.add(storyId);
+      if (execution.wt) {
+        logger.info(`  [worktree] Preserving rejected story worktree for inspection: ${execution.wt.worktreePath}`);
       }
     }
 
-    // Post-wave: merge passed worktrees
+    // Rejecting a story immediately closes every direct/transitive dependent
+    // before potentially expensive merge work begins.
+    await persistNewlyBlockedStories(wave.index);
+
+    const finalizeMergedWorktree = async (wt: StoryWorktree): Promise<boolean> => {
+      const pendingPass = pendingIntegratedPasses.get(wt.storyId);
+      if (!pendingPass) {
+        failedIds.add(wt.storyId);
+        processedIds.add(wt.storyId);
+        preserveWorktreeIds.add(wt.storyId);
+        const story = stories.find(item => item.id === wt.storyId) ?? {
+          id: wt.storyId,
+          title: wt.storyId,
+          description: 'Missing accepted closeout handoff',
+        };
+        const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+          config,
+          workspaceId,
+          logDir,
+          story,
+          reasonCode: 'pending_closeout_unresolved',
+          reason: new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`),
+          waveIndex: wave.index,
+          worktree: wt,
+        });
+        if (evidenceFailures.length > 0) evidenceFailureIds.add(wt.storyId);
+        return false;
+      }
+
+      try {
+        await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+        pendingIntegratedPasses.delete(wt.storyId);
+        cleanupWorktreeIds.add(wt.storyId);
+        return true;
+      } catch (reason: unknown) {
+        failedIds.add(wt.storyId);
+        processedIds.add(wt.storyId);
+        preserveWorktreeIds.add(wt.storyId);
+        const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+          config,
+          workspaceId,
+          logDir,
+          story: pendingPass.story,
+          reasonCode: 'pending_closeout_unresolved',
+          reason,
+          waveIndex: wave.index,
+          worktree: wt,
+        });
+        if (evidenceFailures.length > 0) evidenceFailureIds.add(wt.storyId);
+        return false;
+      }
+    };
+
+    // Post-wave: merge passed worktrees. A singleton *compiled* wave never
+    // reaches this block because it executed directly on the run branch.
     if (passedInWave.length > 0) {
       if (passedInWave.length === 1) {
         logger.info(`  [worktree] Single-story wave — direct merge`);
@@ -7946,15 +8231,11 @@ async function runParallel(
         if (!merged) {
           logger.error(`  [worktree] ${wt.storyId} passed implementation but merge failed — marking as merge_conflict`);
           failedIds.add(wt.storyId);
+          preserveWorktreeIds.add(wt.storyId);
           await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
           logger.info(`  [worktree] Preserving failed merge worktree for inspection: ${wt.worktreePath}`);
         } else {
-          if (!pendingPass) {
-            throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
-          }
-          await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-          pendingIntegratedPasses.delete(wt.storyId);
-          removeStoryWorktree(config.cwd, wt);
+          await finalizeMergedWorktree(wt);
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
@@ -7969,15 +8250,7 @@ async function runParallel(
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
           // Advance each story only after its contribution reached the run branch.
-          for (const wt of passedInWave) {
-            const pendingPass = pendingIntegratedPasses.get(wt.storyId);
-            if (!pendingPass) {
-              throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
-            }
-            await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-            pendingIntegratedPasses.delete(wt.storyId);
-          }
-          for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
+          for (const wt of passedInWave) await finalizeMergedWorktree(wt);
         } else {
           // Some merges failed — add only the specific failed stories to failedIds
           const failures = mergeResult.mergeFailures || (mergeResult.blocked ? [mergeResult.blocked] : []);
@@ -7986,6 +8259,7 @@ async function runParallel(
           for (const failure of failures) {
             logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
             failedIds.add(failure.storyId);
+            preserveWorktreeIds.add(failure.storyId);
             const wt = worktreeMap.get(failure.storyId);
             if (wt) {
               await recordStoryMergeConflict(
@@ -8001,17 +8275,9 @@ async function runParallel(
             }
           }
 
-          // Finalize and clean up successfully merged worktrees (those NOT in the failure set).
+          // Finalize successfully integrated worktrees (those NOT in the failure set).
           for (const wt of passedInWave) {
-            if (!failedStoryIds.has(wt.storyId)) {
-              const pendingPass = pendingIntegratedPasses.get(wt.storyId);
-              if (!pendingPass) {
-                throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
-              }
-              await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-              pendingIntegratedPasses.delete(wt.storyId);
-              removeStoryWorktree(config.cwd, wt);
-            }
+            if (!failedStoryIds.has(wt.storyId)) await finalizeMergedWorktree(wt);
           }
 
           logger.info(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}. Continuing run — remaining waves unaffected.`);
@@ -8020,35 +8286,58 @@ async function runParallel(
       }
     }
 
-    for (const wt of failedInWave) removeStoryWorktree(config.cwd, wt);
-
-    const allStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
-    const newlyBlocked = computeBlockedStories(allStories, failedIds, processedIds);
-
-    for (const [blockedId, blockers] of newlyBlocked) {
-      if (!processedIds.has(blockedId)) {
-        logger.info(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
-        failedIds.add(blockedId);
-        processedIds.add(blockedId);
-        markStorySkipped(config.jsonPath, blockedId);
-        rsMarkStorySkipped(config.cwd, {
-          storyId: blockedId, title: blockedId, status: 'skipped',
-          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
-          agentType: config.agentType, failReason: `blocked_by: ${blockers.join(', ')}`,
-        });
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: blockedId,
-            reason: 'blocked_by', blockedBy: blockers,
-          }, blockedId);
-          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip', blockedBy: blockers });
-        }
-      }
+    const cleanupSelection = selectWaveWorktreeCleanup(
+      worktreeMap.keys(),
+      cleanupWorktreeIds,
+      preserveWorktreeIds,
+    );
+    for (const storyId of cleanupSelection.cleanupIds) {
+      const wt = worktreeMap.get(storyId);
+      if (wt) removeStoryWorktree(config.cwd, wt);
     }
+    for (const storyId of cleanupSelection.preservedIds) {
+      const wt = worktreeMap.get(storyId);
+      if (wt) logger.info(`  [worktree] Preserved ${storyId} for inspection: ${wt.worktreePath}`);
+    }
+
+    // Merge failures can introduce additional blockers after the immediate
+    // rejected-settlement pass above.
+    await persistNewlyBlockedStories(wave.index);
 
     logger.info('');
     await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+
+  // A pending implementation handoff without canonical pass finalization is
+  // never semantic success. Merge-failed stories already have canonical failure
+  // evidence; any otherwise-unaccounted handoff gets explicit failure evidence.
+  for (const [storyId, pending] of pendingIntegratedPasses) {
+    if (failedIds.has(storyId)) {
+      logger.error(`  [closeout] ${storyId} remains pending after an already-recorded story failure`);
+      continue;
+    }
+    failedIds.add(storyId);
+    processedIds.add(storyId);
+    const worktreePath = typeof pending.storyResultExtra.worktreePath === 'string'
+      ? pending.storyResultExtra.worktreePath
+      : undefined;
+    const worktreeBranch = typeof pending.storyResultExtra.worktreeBranch === 'string'
+      ? pending.storyResultExtra.worktreeBranch
+      : undefined;
+    const worktree = worktreePath && worktreeBranch
+      ? { storyId, worktreePath, branchName: worktreeBranch }
+      : undefined;
+    const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+      config,
+      workspaceId,
+      logDir,
+      story: pending.story,
+      reasonCode: 'pending_closeout_unresolved',
+      reason: new Error(`Story ${storyId} ended wave execution with an unresolved pending closeout`),
+      waveIndex: waves.length,
+      worktree,
+    });
+    if (evidenceFailures.length > 0) evidenceFailureIds.add(storyId);
   }
 
   const finalSpec: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
@@ -8056,13 +8345,19 @@ async function runParallel(
   const finalProgress = getProgress(finalStories);
   logger.info('');
   logger.info(`All waves complete! ${finalProgress.passed}/${finalProgress.total} stories passed`);
-  if (failedIds.size > 0) {
-    logger.info(`Failed/blocked: ${[...failedIds].join(', ')}`);
-  }
+  if (failedIds.size > 0) logger.info(`Failed/blocked: ${[...failedIds].join(', ')}`);
+  if (rejectedIds.size > 0) logger.error(`Rejected executor promises: ${[...rejectedIds].join(', ')}`);
+  if (pendingIntegratedPasses.size > 0) logger.error(`Unresolved pending closeouts: ${[...pendingIntegratedPasses.keys()].join(', ')}`);
+  if (evidenceFailureIds.size > 0) logger.error(`Incomplete durable failure evidence: ${[...evidenceFailureIds].join(', ')}`);
   // CIE-007: Archive run-state.json and write final progress.txt
   writeProgressTxt(config.cwd);
   archiveRunState(config.cwd, config.runId);
-  return failedIds.size > 0 ? 1 : 0;
+  return parallelRunExitCode({
+    failedIds,
+    rejectedIds,
+    pendingCloseoutIds: new Set(pendingIntegratedPasses.keys()),
+    evidenceFailureIds,
+  });
 }
 
 // ─── Workspace Resolver ─────────────────────────────────────────────────────

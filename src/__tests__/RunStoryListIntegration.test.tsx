@@ -72,9 +72,11 @@ const mockApiFetch = vi.mocked(apiFetch);
 const WORKSPACE = createMockWorkspace({ id: 'ws-1', label: 'Test Repo', path: '/tmp/test' });
 const WORKSPACE_RESPONSE = { items: [WORKSPACE], total: 1, hasMore: false };
 
+let nextWalId = 1;
+
 function makeWalEvent(overrides: Partial<WalEvent> & { event_type: string }): WalEvent {
   return {
-    id: Math.floor(Math.random() * 100000),
+    id: nextWalId++,
     ts: new Date().toISOString(),
     workspace_id: 'ws-1',
     spec_id: 'test-spec',
@@ -134,6 +136,7 @@ afterAll(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   scrollToIndexSpy.mockClear();
+  nextWalId = 1;
   localStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.setItem('rorca_workspaceId', 'ws-1');
 });
@@ -480,6 +483,91 @@ describe('RunStoryList Integration', () => {
     expect(screen.queryByText('Wave 0')).not.toBeInTheDocument();
     expect(screen.getByText('1 pending · no runtime wave yet')).toBeInTheDocument();
     expect(screen.getByText('US-003')).toBeInTheDocument();
+  });
+
+  it('settles orphaned running rows to No result at terminal closeout', async () => {
+    const specStories = [
+      makeSpecStory('US-001', 'Started without completion'),
+      makeSpecStory('US-002', 'Never started'),
+    ];
+    setupRunApiFetch(42, [], specStories, 'done');
+
+    const startedEvent = makeWalEvent({ event_type: 'story_started', story_id: 'US-001' });
+    const closeoutEvent = makeWalEvent({
+      event_type: 'run_closeout',
+      payload: JSON.stringify({ run_id: 42, status: 'failed' }),
+    });
+
+    renderWithProviders(
+      <RunStoryList runId={42} walEvents={[startedEvent, closeoutEvent]} runStatus="failed" />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('story-row-US-001')).toBeInTheDocument());
+    expect(screen.getByTestId('story-row-US-001')).toHaveAttribute('data-story-status', 'no_result');
+    expect(screen.getByTestId('story-row-US-002')).toHaveAttribute('data-story-status', 'no_result');
+    expect(screen.getByText('2 no result')).toBeInTheDocument();
+    expect(screen.queryByText('Running')).not.toBeInTheDocument();
+  });
+
+  it('uses explicit terminal story evidence while settling an unfinished sibling', async () => {
+    const specStories = [
+      makeSpecStory('US-001', 'Accepted pass'),
+      makeSpecStory('US-002', 'Explicit failure'),
+      makeSpecStory('US-003', 'Orphaned start'),
+    ];
+    setupRunApiFetch(42, [], specStories, 'done');
+
+    const events = [
+      makeWalEvent({ event_type: 'story_started', story_id: 'US-001' }),
+      makeWalEvent({ event_type: 'story_passed', story_id: 'US-001' }),
+      makeWalEvent({ event_type: 'story_started', story_id: 'US-002' }),
+      makeWalEvent({ event_type: 'story_failed', story_id: 'US-002' }),
+      makeWalEvent({ event_type: 'story_started', story_id: 'US-003' }),
+      makeWalEvent({ event_type: 'run_closeout', payload: JSON.stringify({ run_id: 42, status: 'failed' }) }),
+    ];
+
+    renderWithProviders(<RunStoryList runId={42} walEvents={events} runStatus="failed" />);
+
+    await waitFor(() => expect(screen.getByTestId('story-row-US-001')).toBeInTheDocument());
+    expect(screen.getByTestId('story-row-US-001')).toHaveAttribute('data-story-status', 'pass');
+    expect(screen.getByTestId('story-row-US-002')).toHaveAttribute('data-story-status', 'fail');
+    expect(screen.getByTestId('story-row-US-003')).toHaveAttribute('data-story-status', 'no_result');
+    expect(screen.getByText('1 passed')).toBeInTheDocument();
+    expect(screen.getByText('1 failed')).toBeInTheDocument();
+  });
+
+  it('does not infer positional passes from a continuation target', async () => {
+    const specStories = [
+      makeSpecStory('US-001', 'No evidence one'),
+      makeSpecStory('US-002', 'No evidence two'),
+      makeSpecStory('US-003', 'Current story'),
+    ];
+    setupRunApiFetch(42, [], specStories, 'running');
+
+    renderWithProviders(
+      <RunStoryList
+        runId={42}
+        walEvents={[]}
+        runStatus="running"
+        runState={{
+          specId: 'test-spec',
+          runId: 42,
+          startedAt: new Date().toISOString(),
+          lastUpdatedAt: new Date().toISOString(),
+          completedStories: [],
+          failedStories: [],
+          skippedStories: [],
+          currentStory: 'US-003',
+        }}
+        resumeSummary={{ continueFromId: 'US-003', resumedAfterId: null, carriedForwardCount: 0 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('story-row-US-001')).toBeInTheDocument());
+    expect(screen.getByTestId('story-row-US-001')).toHaveAttribute('data-story-status', 'pending');
+    expect(screen.getByTestId('story-row-US-002')).toHaveAttribute('data-story-status', 'pending');
+    expect(screen.getByTestId('story-row-US-003')).toHaveAttribute('data-story-status', 'running');
+    expect(screen.getByText('0 passed')).toBeInTheDocument();
   });
 
   it('shows empty state message when no stories exist', async () => {

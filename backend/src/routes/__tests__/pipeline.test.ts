@@ -85,6 +85,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  process.env.NODE_ENV = 'test';
+  delete process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL;
   // Reset all mocks to clear call counts from previous tests
   jest.clearAllMocks();
 
@@ -144,6 +146,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   delete process.env.NODE_ENV;
+  delete process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL;
 });
 
 /** Seed a spec JSON file in the workspace */
@@ -331,6 +334,102 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.status).toBe(201);
     expect(res.body.ok).toBe(true);
     expect(res.body.runId).toBeDefined();
+  });
+
+  test('defaults Run Now to sequential and persists truthful trigger options', async () => {
+    await seedRunnableSpec('safe-sequential-default');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/safe-sequential-default.json', workspaceId: 'ws-pipe' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.orchestration).toEqual(expect.objectContaining({ mode: 'sequential', parallelism: 1 }));
+    const run = await queryOne<{ parallelism: number; trigger_options: Record<string, unknown> }>(
+      'SELECT parallelism, trigger_options FROM pipeline_runs WHERE id = $1',
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      parallelism: 1,
+      trigger_options: expect.objectContaining({ orchestrationMode: 'sequential', parallelism: 1 }),
+    }));
+    expect(mockSend).toHaveBeenCalledWith('pipeline:run', expect.objectContaining({
+      orchestrationMode: 'sequential',
+      parallelism: 1,
+      triggerOptions: expect.objectContaining({ orchestrationMode: 'sequential', parallelism: 1 }),
+    }), expect.any(Object));
+  });
+
+  test('rejects an explicit parallel request with an actionable typed policy error', async () => {
+    await seedRunnableSpec('parallel-refused');
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/parallel-refused.json',
+        workspaceId: 'ws-pipe',
+        orchestrationMode: 'wave-parallel',
+        parallelism: 2,
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('WAVE_PARALLEL_POLICY_DENIED');
+    expect(res.body.details).toEqual(expect.objectContaining({
+      reason: 'experimental_opt_in_required',
+      action: expect.stringContaining('RORCA_EXPERIMENTAL_WAVE_PARALLEL=true'),
+    }));
+    expect(await queryOne('SELECT id FROM pipeline_runs WHERE spec_path = $1', ['forge/specs/approved/parallel-refused.json'])).toBeUndefined();
+  });
+
+  test('allows explicit wave-parallel execution only with the non-production experimental opt-in', async () => {
+    process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL = 'true';
+    await seedRunnableSpec('parallel-experiment');
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/parallel-experiment.json',
+        workspaceId: 'ws-pipe',
+        orchestrationMode: 'wave-parallel',
+        parallelism: 2,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.orchestration).toEqual(expect.objectContaining({ mode: 'wave-parallel', parallelism: 2 }));
+    const run = await queryOne<{ parallelism: number; trigger_options: Record<string, unknown> }>(
+      'SELECT parallelism, trigger_options FROM pipeline_runs WHERE id = $1',
+      [res.body.runId],
+    );
+    expect(run).toEqual(expect.objectContaining({
+      parallelism: 2,
+      trigger_options: expect.objectContaining({ orchestrationMode: 'wave-parallel', parallelism: 2 }),
+    }));
+  });
+
+  test('production refuses explicit parallel execution even when the experiment variable is set', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL = 'true';
+    await seedRunnableSpec('parallel-production-refused');
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/parallel-production-refused.json',
+        workspaceId: 'ws-pipe',
+        orchestrationMode: 'wave-parallel',
+        parallelism: 2,
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('WAVE_PARALLEL_POLICY_DENIED');
+    expect(res.body.details).toEqual(expect.objectContaining({
+      reason: 'production_forbidden',
+      experimentalOptInIgnored: true,
+    }));
   });
 
   test('blocks when another pipeline run is already active for the same spec', async () => {
