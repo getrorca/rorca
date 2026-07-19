@@ -190,6 +190,7 @@ import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
 import { sanitizeCapturePayload } from './context-safety';
 import { runHostValidationRequirement } from './story-host-validation';
+import { executeStoryWithAdapter, type StoryExecutionAdapter } from './story-execution-adapter';
 import {
   adaptStoryCloseoutEvidence,
   createStoryAttemptResult,
@@ -6084,25 +6085,48 @@ async function executeStory(
             storyId: story.id,
           } satisfies PtyRunOptions
         : undefined;
-      const result = await runAgent(
-        effectiveAgent,
-        attemptPrompt,
-        effectiveCwd,
-        timeoutMin * 60 * 1000,
-        storyLogFile,
-        currentModel,
-        effectiveAttach,
-        tokenUpdateCallback,
-        config.thinkingEnabled,
-        config.thinkingBudget,
-        currentEffort,
-        Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-        piRetryContext,
-        effectiveAgent === 'pi' ? emitStoryStarted : undefined,
-        piServerSkillFiles,
-        piSessionOptions,
-        ptyOptions,
-      );
+      const productionAdapter: StoryExecutionAdapter<{ prompt: string }, AgentResult> = {
+        name: `production-${effectiveAgent}`,
+        async execute(request) {
+          const startedAt = new Date().toISOString();
+          const output = await runAgent(
+            effectiveAgent,
+            request.payload.prompt,
+            request.cwd,
+            request.timeoutMs,
+            storyLogFile,
+            currentModel,
+            effectiveAttach,
+            tokenUpdateCallback,
+            config.thinkingEnabled,
+            config.thinkingBudget,
+            currentEffort,
+            Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+            piRetryContext,
+            effectiveAgent === 'pi' ? emitStoryStarted : undefined,
+            piServerSkillFiles,
+            piSessionOptions,
+            ptyOptions,
+          );
+          return {
+            executionId: request.executionId,
+            storyId: request.storyId,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            exitCode: output.exitCode,
+            exitSignal: null,
+            output,
+          };
+        },
+      };
+      const execution = await executeStoryWithAdapter(productionAdapter, {
+        executionId: `story:${config.runId}:${randomUUID()}`,
+        storyId: story.id,
+        cwd: effectiveCwd,
+        timeoutMs: timeoutMin * 60 * 1000,
+        payload: { prompt: attemptPrompt },
+      });
+      const result = execution.output;
       logger.info({
         component: 'execution-engine',
         event: 'story_agent_stage_completed',

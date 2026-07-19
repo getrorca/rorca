@@ -34,7 +34,7 @@
     "test:reboot-smoke": "node --test scripts/__tests__/always-on-reboot-smoke.test.mjs",
     "test:final-macos-recert": "node scripts/wave3-macos-recert-lifecycle.mjs",
     "test:health-operations": "node --test scripts/__tests__/always-on-monitor.test.mjs scripts/__tests__/log-retention.test.mjs scripts/__tests__/restart-safety.test.mjs",
-    "test:wave-qualification": "node --test scripts/__tests__/wave-qualification-launcher.test.mjs && backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/qualification-isolation.node.test.ts",
+    "test:wave-qualification": "node --test scripts/__tests__/wave-qualification-launcher.test.mjs && backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/qualification-isolation.node.test.ts backend/src/lib/__tests__/deterministic-fixture-agent.node.test.ts",
     "qualify:wave": "node scripts/run-wave-qualification.mjs",
     "check:wave-invariants": "node scripts/check-wave-qualification-invariants.mjs",
     "test:packaging": "node scripts/test-packed-capture-lifecycle.mjs",
