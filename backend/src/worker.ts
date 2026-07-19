@@ -65,6 +65,7 @@ import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
+import { shouldRouteCompletedRunWorktree } from './lib/parallel-wave-core';
 import { replayFallbackResults } from './lib/fallback-replay';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
@@ -879,9 +880,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
           let allSpecStoriesPassed = false;
 
-          // Check spec JSON for story completion — regardless of exit code.
-          // The engine may exit non-zero (timeout, signal) while all stories
-          // actually passed across multiple incremental runs on the same worktree.
+          // Check run-branch spec completion only to gate successful post-run
+          // routing. The engine process outcome remains closeout authority; a
+          // non-zero exit is never promoted from spec flags alone.
           if (worktreePath && payload.branchName) {
             try {
               // Completion is first established on the isolated run branch.
@@ -890,9 +891,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
               allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
               if (allSpecStoriesPassed && status !== 'done') {
-                logger.info({ runId, specPath, completionScope: 'run_branch' }, '[worker] All stories passed on the run branch despite exit status=%s — promoting execution closeout to done', status);
-                try { await execute(`UPDATE pipeline_runs SET status = 'done' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                status = 'done';
+                // The engine process outcome is closeout authority. A rejected
+                // wave or unresolved pending handoff deliberately exits non-zero;
+                // stale/spec-only pass flags must never promote that failure.
+                logger.error({ runId, specPath, completionScope: 'run_branch', status, code, signal }, '[worker] Refusing to promote non-zero engine closeout despite complete-looking spec state');
               }
               if (!allSpecStoriesPassed) {
                 logger.info({ runId, specPath }, '[worker] Skipping post-run routing — spec not fully complete (not all stories passed)');
@@ -913,7 +915,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             }
           }
 
-          if (worktreePath && payload.branchName && allSpecStoriesPassed) {
+          if (worktreePath && payload.branchName && shouldRouteCompletedRunWorktree({
+            status,
+            hasWorktreePath: true,
+            hasBranchName: true,
+            allSpecStoriesPassed,
+          })) {
             const mergeLog = (msg: string) => logger.info({ runId }, msg);
 
             switch (effectiveMergeStrategy) {

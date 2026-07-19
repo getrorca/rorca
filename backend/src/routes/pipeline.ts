@@ -51,6 +51,7 @@ import {
   type StoryChangePolicy,
 } from '../lib/story-execution-packet';
 import { persistStoryExecutionManifest } from '../lib/story-closeout';
+import { requiresPerStoryWorktree } from '../lib/parallel-wave-core';
 import { inspectApprovedSpecPasses, reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
 import { classifyRunLiveness } from '../lib/ssdlc-liveness';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
@@ -430,6 +431,7 @@ interface DispatchManifestProfile {
 
 interface DispatchManifestStory extends CapabilityStory {
   acceptance?: string;
+  dependsOn?: string[];
   excluded?: boolean;
   passes?: boolean;
   model?: string;
@@ -480,6 +482,27 @@ async function resolveAndPersistDispatchManifests(input: {
   const specRevision = deriveStoryContractRevision(input.specJson);
   const manifests: ImmutableStoryExecutionManifest[] = [];
   const dispatchAgent = resolveDispatchAgent(input.agent);
+  const isolatedStoryIds = new Set<string>();
+  if (input.parallelism > 1 && input.terminalMode !== 'pty') {
+    const compiled = compileWaves(stories.map((story) => ({
+      id: story.id,
+      title: story.title,
+      description: story.description,
+      acceptanceCriteria: acceptanceCriteriaForManifest(story),
+      dependsOn: story.dependsOn ?? [],
+      passes: story.passes,
+      excluded: story.excluded,
+    })));
+    if (isCycleError(compiled)) {
+      throw new UnprocessableError(
+        `PARALLEL_WAVE_MANIFEST_CYCLE: cannot freeze safe story working directories for ${compiled.involvedIds.join(', ')}`,
+      );
+    }
+    for (const wave of compiled) {
+      if (!requiresPerStoryWorktree(wave.stories.length)) continue;
+      for (const waveStory of wave.stories) isolatedStoryIds.add(waveStory.id);
+    }
+  }
 
   for (const story of stories.filter((item) => !item.excluded)) {
     const packet = buildStoryExecutionPacket(input.cwd, story, mode);
@@ -501,7 +524,11 @@ async function resolveAndPersistDispatchManifests(input: {
         resolvedStoryAgent = findCapableEngine(detectRequiredTools(story), resolvedStoryAgent) ?? resolvedStoryAgent;
       }
     }
-    const storyIsolated = input.parallelism > 1 && input.terminalMode !== 'pty';
+    // Only genuinely concurrent waves need per-story branches. A singleton wave
+    // executes directly on the run branch, so its immutable host-validation and
+    // command-safety authority are frozen against input.cwd rather than a branch
+    // which the engine must never create.
+    const storyIsolated = isolatedStoryIds.has(story.id);
     const storyWorktreePath = storyIsolated
       ? path.resolve(input.cwd, '..', `${path.basename(input.cwd)}-${story.id}-run-${input.runId}`)
       : input.cwd;

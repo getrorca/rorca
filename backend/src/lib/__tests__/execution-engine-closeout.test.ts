@@ -21,8 +21,10 @@ import {
 
 const ENGINE_PATH = path.resolve(__dirname, '..', 'execution-engine.ts');
 const PIPELINE_PATH = path.resolve(__dirname, '..', '..', 'routes', 'pipeline.ts');
+const WORKER_PATH = path.resolve(__dirname, '..', '..', 'worker.ts');
 const ENGINE_SOURCE = fs.readFileSync(ENGINE_PATH, 'utf8');
 const PIPELINE_SOURCE = fs.readFileSync(PIPELINE_PATH, 'utf8');
+const WORKER_SOURCE = fs.readFileSync(WORKER_PATH, 'utf8');
 const SHA = 'a'.repeat(40);
 const BASE_SHA = 'b'.repeat(40);
 const CWD = '/tmp/rorca-closeout-story';
@@ -155,16 +157,52 @@ describe('execution-engine closeout architecture', () => {
       expect(adapter).not.toContain(providerOrMode);
     }
     expect(ENGINE_SOURCE).not.toMatch(/else\s*\{\s*await markStoryPassed\(/);
-    expect(ENGINE_SOURCE).toContain("if (result === 'closeout_blocked' && wt)");
+    expect(ENGINE_SOURCE).toContain("settled.value === 'closeout_blocked' && execution.wt");
     expect(ENGINE_SOURCE).toContain('Preserving blocked worktree for inspection');
   });
 
   test('retains ANSI waves and makes the existing PTY contract explicitly sequential', () => {
     expect(ENGINE_SOURCE).toContain("config.parallelism > 1 && config.terminalMode !== 'pty' && !config.specificStory");
-    expect(PIPELINE_SOURCE).toContain("const storyIsolated = input.parallelism > 1 && input.terminalMode !== 'pty'");
+    expect(PIPELINE_SOURCE).toContain('const storyIsolated = isolatedStoryIds.has(story.id)');
     expect(ENGINE_SOURCE).toContain('compileWaves(waveStories)');
-    expect(ENGINE_SOURCE).toContain('runWithBoundedConcurrency(tasks, config.parallelism)');
-    expect(ENGINE_SOURCE).toContain('computeBlockedStories(allStories, failedIds, processedIds)');
+    expect(ENGINE_SOURCE).toContain('runWithBoundedConcurrency(waveExecutions.map(item => item.task), config.parallelism)');
+    expect(ENGINE_SOURCE).toContain('computeTransitivelyBlockedStories(currentStories, failedIds, processedIds)');
+    expect(ENGINE_SOURCE).toContain('Single-story wave — executing directly on the run branch (no per-story worktree)');
+    expect(PIPELINE_SOURCE).toContain('if (!requiresPerStoryWorktree(wave.stories.length)) continue');
+  });
+
+  test('turns rejected wave promises into durable failure evidence before blocking and cleanup', () => {
+    const parallelStart = ENGINE_SOURCE.indexOf('async function runParallel(');
+    const parallel = ENGINE_SOURCE.slice(parallelStart);
+    const rejectedAccounting = parallel.indexOf("settlement: 'rejected'");
+    const durableFailure = parallel.indexOf("reasonCode: 'wave_promise_rejected'", rejectedAccounting);
+    const dependencyBlocking = parallel.indexOf('await persistNewlyBlockedStories(wave.index)', durableFailure);
+    const cleanup = parallel.indexOf('selectWaveWorktreeCleanup(', dependencyBlocking);
+
+    expect(rejectedAccounting).toBeGreaterThan(0);
+    expect(durableFailure).toBeGreaterThan(rejectedAccounting);
+    expect(dependencyBlocking).toBeGreaterThan(durableFailure);
+    expect(cleanup).toBeGreaterThan(dependencyBlocking);
+    expect(parallel).toContain('pendingIntegratedPasses.delete(storyId)');
+    expect(parallel).toContain('Rejected executor promises:');
+    expect(parallel).toContain('pendingCloseoutIds: new Set(pendingIntegratedPasses.keys())');
+    expect(WORKER_SOURCE).not.toContain('promoting execution closeout to done');
+    expect(WORKER_SOURCE).toContain('Refusing to promote non-zero engine closeout despite complete-looking spec state');
+    expect(WORKER_SOURCE).toContain('if (worktreePath && payload.branchName && shouldRouteCompletedRunWorktree({');
+
+    const persistenceStart = ENGINE_SOURCE.indexOf('async function recordParallelStoryInfrastructureFailure(');
+    const persistenceEnd = ENGINE_SOURCE.indexOf('// ─── CA-011', persistenceStart);
+    const persistence = ENGINE_SOURCE.slice(persistenceStart, persistenceEnd);
+    expect(persistence).toContain("label: 'spec-story-failure'");
+    expect(persistence).toContain("label: 'run-state-failure'");
+    expect(persistence).toContain("label: 'story_failed-wal'");
+    expect(persistence).toContain("label: 'story-result-failure'");
+    expect(persistence).toContain('error_message: diagnostic.message');
+    expect(persistence).toContain('error_stack: diagnostic.stack');
+    expect(persistence).toContain('worktree_preserved: true');
+    expect(ENGINE_SOURCE).toContain("fs.chmodSync(diagnosticPath, 0o600)");
+    expect(persistence.match(/diagnostic\.rawDiagnostic/g)).toHaveLength(1);
+    expect(persistence).not.toContain('error_raw');
   });
 
   test('keeps retry/restart identity and timeout/cancellation paths fail closed', () => {
