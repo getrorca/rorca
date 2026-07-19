@@ -183,6 +183,14 @@ import {
   getResumeContext,
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
+import {
+  assertExpectedParentHead,
+  assertSingletonRunWorktree,
+  cleanupOwnedStoryWorktree,
+  commitGuardedMerge,
+  createOwnedStoryWorktree,
+  type StoryWorktreeOwnership,
+} from './story-worktree-lifecycle';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
 import { resolveMergeConflict, resolvePostureConsensus, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
@@ -4571,6 +4579,7 @@ interface StoryWorktree {
   storyId: string;
   worktreePath: string;
   branchName: string;
+  ownership: StoryWorktreeOwnership;
   /** Immutable effective posture captured when this story actually executed. */
   resolverPosture?: MergeResolutionPosture;
 }
@@ -4615,6 +4624,19 @@ function getIntegrationCandidateFiles(cwd: string): string[] {
     return readGitLines(cwd, 'git diff --name-only HEAD');
   } catch {
     return [];
+  }
+}
+
+function hasMergeHead(cwd: string): boolean {
+  try {
+    execSync('git rev-parse -q --verify MERGE_HEAD', {
+      cwd,
+      env: buildCleanEnv(),
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -4814,32 +4836,36 @@ async function recordStoryMergeConflict(
 }
 
 function createStoryWorktree(
-  workspaceCwd: string,
+  config: EngineConfig,
   specSlug: string,
   storyId: string,
+  waveIndex: number,
   resolved?: StoryManifestWorktreeOptions,
+  attempt = 1,
 ): StoryWorktree | null {
-  const ts = Date.now();
-  const branchName = resolved?.branch ?? `feat/${specSlug}-${storyId}-${ts}`;
-  const repoName = path.basename(workspaceCwd);
-  const worktreePath = resolved?.path ?? path.resolve(workspaceCwd, '..', `${repoName}-${storyId}-${ts}`);
+  const nonce = `${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const safeStoryId = storyId.replace(/[^A-Za-z0-9._-]+/g, '-');
+  const branchName = resolved?.branch
+    ?? `rorca/tmp/run-${config.runId}/wave-${waveIndex}/${safeStoryId}/attempt-${attempt}/${nonce}`;
+  const repoName = path.basename(config.cwd);
+  const worktreePath = resolved?.path ?? path.resolve(config.cwd, '..', `${repoName}-${specSlug}-${safeStoryId}-${nonce}`);
+  const qualificationNamespace = process.env.RORCA_QUALIFICATION_RUN_ID ?? `run-${config.runId}`;
 
+  let ownership: StoryWorktreeOwnership | undefined;
   try {
-    if (fs.existsSync(worktreePath)) {
-      const existingBranch = execSync('git branch --show-current', {
-        cwd: worktreePath,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }).trim();
-      if (existingBranch !== branchName) throw new Error(`existing worktree branch ${existingBranch} does not match ${branchName}`);
-      return { storyId, worktreePath, branchName };
-    }
-    execSync(
-      `git worktree add -b "${branchName}" "${worktreePath}" "${resolved?.baseRevision ?? 'HEAD'}"`,
-      { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
-    );
+    ownership = createOwnedStoryWorktree({
+      repositoryPath: config.cwd,
+      worktreePath,
+      branchName,
+      runId: config.runId,
+      waveIndex,
+      storyId,
+      attempt,
+      baseRevision: resolved?.baseRevision ?? 'HEAD',
+      qualificationNamespace,
+    });
 
-    const runtimeSupport = ensureWorktreeRuntimeSupport(workspaceCwd, worktreePath);
+    const runtimeSupport = ensureWorktreeRuntimeSupport(config.cwd, ownership.worktreeRealpath);
     for (const rel of runtimeSupport.linkedDirs) {
       logger.info(`  [worktree] Linked ${rel} into story worktree`);
     }
@@ -4847,11 +4873,22 @@ function createStoryWorktree(
       logger.info(`  [worktree] Copied ${rel} to story worktree`);
     }
 
-    logger.info(`  [worktree] Created ${worktreePath} (${branchName})`);
-    return { storyId, worktreePath, branchName };
+    logger.info(`  [worktree] Created owned ${ownership.worktreeRealpath} (${branchName}, ${ownership.ownershipId.slice(0, 12)})`);
+    return { storyId, worktreePath: ownership.worktreeRealpath, branchName, ownership };
   } catch (err: unknown) {
     const msg = (err as Error).message ?? String(err);
-    logger.error(`  [worktree] FAILED to create worktree for ${storyId}: ${msg}`);
+    logger.error(`  [worktree] FAILED to create owned worktree for ${storyId}: ${msg}`);
+    if (ownership) {
+      const cleanup = cleanupOwnedStoryWorktree({
+        repositoryPath: config.cwd,
+        ownership,
+        currentWaveAllowlist: new Set([ownership.ownershipId]),
+        expectedBaseRevision: ownership.baseRevision,
+        preserve: false,
+        outcome: 'rejected',
+      });
+      if (!cleanup.ok) logger.error(`  [worktree] Setup-failure cleanup preserved ${storyId}: ${cleanup.diagnostics.join('; ')}`);
+    }
     return null;
   }
 }
@@ -4872,7 +4909,13 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
     logger.warn(`  [worktree] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
   }
 
+  const expectedParentHead = getGitHead(workspaceCwd);
+  if (!expectedParentHead) {
+    logger.error(`  [worktree] Cannot guard integration without an expected parent head`);
+    return false;
+  }
   try {
+    assertExpectedParentHead(workspaceCwd, expectedParentHead);
     execSync(
       `git merge --no-ff --no-commit "${wt.branchName}"`,
       { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 120_000 },
@@ -4887,11 +4930,12 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
     }
 
     try {
-      execSync(`git commit -m "merge: ${wt.storyId} from worktree"`, { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 30_000 });
-    } catch {
+      commitGuardedMerge(workspaceCwd, `merge: ${wt.storyId} from worktree`, expectedParentHead);
+    } catch (error: unknown) {
+      if (hasMergeHead(workspaceCwd) || getGitHead(workspaceCwd) !== expectedParentHead) throw error;
       logger.info(`  [worktree] ${wt.storyId} merge produced no new commit`);
     }
-    logger.info(`  [worktree] Merged ${wt.branchName} into workspace`);
+    logger.info(`  [worktree] Merged ${wt.branchName} into workspace from guarded parent ${expectedParentHead.slice(0, 12)}`);
     return true;
   } catch (mergeErr: unknown) {
     // Check if all conflicts are on runtime-only files (spec JSON, run-state.json).
@@ -4922,10 +4966,12 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
           return false;
         }
 
-        execSync(`git commit -m "merge: ${wt.storyId} from worktree (runtime conflicts auto-resolved)"`, {
-          cwd: workspaceCwd, env, stdio: 'pipe',
-        });
-        logger.info(`  [worktree] Merged ${wt.branchName} (runtime conflicts auto-resolved)`);
+        commitGuardedMerge(
+          workspaceCwd,
+          `merge: ${wt.storyId} from worktree (runtime conflicts auto-resolved)`,
+          expectedParentHead,
+        );
+        logger.info(`  [worktree] Merged ${wt.branchName} from guarded parent ${expectedParentHead.slice(0, 12)} (runtime conflicts auto-resolved)`);
         return true;
       }
     } catch {
@@ -5062,8 +5108,15 @@ async function mergeWave(
   for (const wt of sorted) {
     logger.info(`  [merge] Merging ${wt.branchName} (${wt.storyId})...`);
 
+    const expectedParentHead = getGitHead(cwd);
+    if (!expectedParentHead) {
+      mergeFailures.push({ storyId: wt.storyId, conflictingFiles: [] });
+      logger.error(`  [merge] Cannot guard ${wt.storyId} integration without an expected parent head`);
+      continue;
+    }
     let mergeClean: boolean;
     try {
+      assertExpectedParentHead(cwd, expectedParentHead);
       execSync(
         `git merge --no-ff --no-commit "${wt.branchName}"`,
         { cwd, env, stdio: 'pipe', timeout: 120_000 },
@@ -5085,10 +5138,11 @@ async function mergeWave(
       }
 
       try {
-        execSync(`git commit -m "merge: ${wt.storyId}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
-        logger.info(`  [merge] ${wt.storyId} merged cleanly`);
+        commitGuardedMerge(cwd, `merge: ${wt.storyId}`, expectedParentHead);
+        logger.info(`  [merge] ${wt.storyId} merged cleanly from guarded parent ${expectedParentHead.slice(0, 12)}`);
         if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
-      } catch {
+      } catch (error: unknown) {
+        if (hasMergeHead(cwd) || getGitHead(cwd) !== expectedParentHead) throw error;
         logger.info(`  [merge] ${wt.storyId} merged (no changes to commit)`);
       }
       continue;
@@ -5113,35 +5167,22 @@ async function mergeWave(
           mergeFailures.push({ storyId: wt.storyId, conflictingFiles: validation.files });
           continue;
         }
-        execSync(
-          `git commit -m "${commitMsg}"`,
-          { cwd, env, stdio: 'pipe', timeout: 30_000 },
-        );
+        commitGuardedMerge(cwd, commitMsg, expectedParentHead);
         totalConflictsResolved += resolution.resolvedFiles.length;
         logger.info(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
         if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch (commitErr: unknown) {
-        // Fallback: try git merge --continue
-        logger.warn(`  [merge] git commit failed, trying merge --continue: ${(commitErr as Error).message}`);
+        logger.error(`  [merge] Guarded commit after resolution failed for ${wt.storyId}: ${(commitErr as Error).message}`);
+        try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+
+        let conflictingFiles: string[] = [];
         try {
-          execSync('git -c core.editor=true merge --continue', { cwd, env, stdio: 'pipe', timeout: 30_000 });
-          totalConflictsResolved += resolution.resolvedFiles.length;
-          logger.info(`  [merge] ${wt.storyId} merged via --continue with ${resolution.resolvedFiles.length} conflict(s) resolved`);
-          if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
-        } catch (contErr: unknown) {
-          logger.error(`  [merge] Commit after resolution failed for ${wt.storyId}: ${(contErr as Error).message}`);
-          try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+          const output = execSync('git diff --name-only --diff-filter=U', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+          conflictingFiles = output.trim().split('\n').filter(Boolean);
+        } catch { /* empty */ }
 
-          let conflictingFiles: string[] = [];
-          try {
-            const output = execSync('git diff --name-only --diff-filter=U', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-            conflictingFiles = output.trim().split('\n').filter(Boolean);
-          } catch { /* empty */ }
-
-          // Continue to next story instead of returning immediately
-          mergeFailures.push({ storyId: wt.storyId, conflictingFiles });
-          continue;
-        }
+        mergeFailures.push({ storyId: wt.storyId, conflictingFiles });
+        continue;
       }
     } else {
       logger.error(`  [merge] Auto-resolution failed for ${wt.storyId} — continuing with other stories`);
@@ -5174,14 +5215,29 @@ async function mergeWave(
   return { success: true, conflictsResolved: totalConflictsResolved };
 }
 
-function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
-  try {
-    execSync(`git worktree remove --force "${wt.worktreePath}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 });
-  } catch { /* already removed */ }
-  try {
-    execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
-  } catch { /* branch may already be gone */ }
-  logger.info(`  [worktree] Removed ${wt.worktreePath}`);
+function removeStoryWorktree(
+  workspaceCwd: string,
+  wt: StoryWorktree,
+  currentWaveAllowlist: ReadonlySet<string>,
+  outcome: 'integrated' | 'rejected',
+  preserve = false,
+): void {
+  const result = cleanupOwnedStoryWorktree({
+    repositoryPath: workspaceCwd,
+    ownership: wt.ownership,
+    currentWaveAllowlist,
+    expectedBaseRevision: wt.ownership.baseRevision,
+    preserve,
+    outcome,
+  });
+  if (!result.ok) {
+    throw new Error(`Owned worktree cleanup failed for ${wt.storyId}; preserved=${result.preserved}; ${result.diagnostics.join('; ')}`);
+  }
+  if (result.preserved) {
+    logger.warn(`  [worktree] Preserved ${wt.worktreePath}: ${result.diagnostics.join('; ')}`);
+  } else {
+    logger.info(`  [worktree] Removed owned ${wt.worktreePath}${result.recoveryRef ? `; recovery=${result.recoveryRef}` : ''}`);
+  }
 }
 
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
@@ -7897,50 +7953,88 @@ async function runParallel(
     }
 
     const worktreeMap = new Map<string, StoryWorktree>();
+    const currentWaveAllowlist = new Set<string>();
+    const singletonCompiledWave = wave.stories.length === 1 && executableStories.length === 1;
 
-    for (const story of executableStories) {
-      const wt = createStoryWorktree(
-        config.cwd,
-        specSlug,
-        story.id,
-        config.executionManifests.get(story.id)?.execution.worktree,
-      );
-      if (wt) {
-        worktreeMap.set(story.id, wt);
-      } else {
-        failedIds.add(story.id);
-        processedIds.add(story.id);
-        markStorySkipped(config.jsonPath, story.id);
-        rsMarkStoryFailed(config.cwd, {
-          storyId: story.id, title: story.title, status: 'failed',
-          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
-          agentType: config.agentType, failReason: 'worktree_create_failed',
-        });
+    if (!singletonCompiledWave) {
+      for (const story of executableStories) {
+        const manifest = config.executionManifests.get(story.id);
+        const wt = createStoryWorktree(
+          config,
+          specSlug,
+          story.id,
+          wave.index,
+          manifest?.execution.worktree,
+          manifest?.identity.attempt ?? 1,
+        );
+        if (wt) {
+          worktreeMap.set(story.id, wt);
+          currentWaveAllowlist.add(wt.ownership.ownershipId);
+        } else {
+          failedIds.add(story.id);
+          processedIds.add(story.id);
+          markStorySkipped(config.jsonPath, story.id);
+          rsMarkStoryFailed(config.cwd, {
+            storyId: story.id, title: story.title, status: 'failed',
+            startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+            agentType: config.agentType, failReason: 'worktree_create_failed',
+          });
 
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
-          }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
+            }, story.id);
+            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
+          }
         }
       }
+    } else {
+      logger.info(`  [worktree] Singleton compiled wave executes on the run worktree`);
     }
 
-    const storiesWithWorktrees = executableStories.filter(s => worktreeMap.has(s.id));
+    const dispatchStories = singletonCompiledWave
+      ? executableStories
+      : executableStories.filter(story => worktreeMap.has(story.id));
 
-    const tasks = storiesWithWorktrees.map(story => {
-      const wt = worktreeMap.get(story.id)!;
-      return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index, specForBrowserMcp, pendingIntegratedPasses)
-          .then(result => ({ storyId: story.id, result }));
+    const tasks = dispatchStories.map(story => {
+      const wt = worktreeMap.get(story.id);
+      return async () => {
+        const manifest = config.executionManifests.get(story.id);
+        if (singletonCompiledWave && manifest) {
+          assertSingletonRunWorktree(config.cwd, {
+            ...manifest.execution.worktree,
+            guardedWorkingDirectory: manifest.commandSafety.guardedWorkingDirectory,
+          });
+        }
+        return executeStory(
+        story,
+        config,
+        mode,
+        playbook,
+        logDir,
+        workspaceId,
+        retryCounts,
+        wt?.worktreePath ?? config.cwd,
+        wt,
+        undefined,
+        stories,
+        undefined,
+        undefined,
+        personaRegistry,
+        wave.index,
+        specForBrowserMcp,
+        pendingIntegratedPasses,
+        ).then(result => ({ storyId: story.id, result }));
+      };
     });
 
-    const results = await runWithBoundedConcurrency(tasks, config.parallelism);
+    const results = await runWithBoundedConcurrency(tasks, singletonCompiledWave ? 1 : config.parallelism);
 
     const passedInWave: StoryWorktree[] = [];
     const failedInWave: StoryWorktree[] = [];
 
-    for (const settled of results) {
+    for (const [resultIndex, settled] of results.entries()) {
+      const dispatchedStory = dispatchStories[resultIndex];
       if (settled.status === 'fulfilled') {
         const { storyId, result } = settled.value;
         processedIds.add(storyId);
@@ -7948,7 +8042,7 @@ async function runParallel(
         if (result !== 'passed') {
           failedIds.add(storyId);
           if (result === 'closeout_blocked' && wt) {
-            logger.info(`  [closeout] Preserving blocked worktree for inspection: ${wt.worktreePath}`);
+            logger.info(`  [closeout] Preserve decision overrides cleanup for blocked worktree: ${wt.worktreePath}`);
           } else if (wt) {
             failedInWave.push(wt);
           }
@@ -7956,7 +8050,23 @@ async function runParallel(
           passedInWave.push(wt);
         }
       } else {
-        logger.error(`[engine] Unexpected rejection in wave ${wave.index}:`, settled.reason);
+        const storyId = dispatchedStory?.id ?? 'unknown';
+        logger.error(`[engine] Story ${storyId} rejected in wave ${wave.index}:`, settled.reason);
+        if (dispatchedStory) {
+          processedIds.add(storyId);
+          failedIds.add(storyId);
+          const wt = worktreeMap.get(storyId);
+          if (wt) failedInWave.push(wt);
+          rsMarkStoryFailed(config.cwd, {
+            storyId,
+            title: dispatchedStory.title,
+            status: 'failed',
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            agentType: config.agentType,
+            failReason: `dispatch_rejected: ${settled.reason instanceof Error ? settled.reason.message.slice(0, 256) : 'unknown'}`,
+          });
+        }
       }
     }
 
@@ -7971,14 +8081,14 @@ async function runParallel(
           logger.error(`  [worktree] ${wt.storyId} passed implementation but merge failed — marking as merge_conflict`);
           failedIds.add(wt.storyId);
           await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
-          logger.info(`  [worktree] Preserving failed merge worktree for inspection: ${wt.worktreePath}`);
+          removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'rejected');
         } else {
           if (!pendingPass) {
             throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
           }
           await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
           pendingIntegratedPasses.delete(wt.storyId);
-          removeStoryWorktree(config.cwd, wt);
+          removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'integrated');
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
@@ -8001,7 +8111,7 @@ async function runParallel(
             await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
             pendingIntegratedPasses.delete(wt.storyId);
           }
-          for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
+          for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'integrated');
         } else {
           // Some merges failed — add only the specific failed stories to failedIds
           const failures = mergeResult.mergeFailures || (mergeResult.blocked ? [mergeResult.blocked] : []);
@@ -8034,17 +8144,20 @@ async function runParallel(
               }
               await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
               pendingIntegratedPasses.delete(wt.storyId);
-              removeStoryWorktree(config.cwd, wt);
+              removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'integrated');
             }
           }
 
-          logger.info(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}. Continuing run — remaining waves unaffected.`);
-          logger.info(`  [merge] Failed worktree branches preserved for inspection.`);
+          for (const failure of failures) {
+            const failedWorktree = worktreeMap.get(failure.storyId);
+            if (failedWorktree) removeStoryWorktree(config.cwd, failedWorktree, currentWaveAllowlist, 'rejected');
+          }
+          logger.info(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}; immutable recovery artifacts retained where needed.`);
         }
       }
     }
 
-    for (const wt of failedInWave) removeStoryWorktree(config.cwd, wt);
+    for (const wt of failedInWave) removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'rejected');
 
     const allStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
     const newlyBlocked = computeBlockedStories(allStories, failedIds, processedIds);
