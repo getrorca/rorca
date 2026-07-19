@@ -71,7 +71,7 @@ import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired, isSuperUser } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
-import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
+import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, resolveOperatorInputTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
@@ -1159,6 +1159,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists; does not reset passed story state." }
  *               rerunFromScratch: { type: boolean, description: "Reset passed story state and execute the spec from the first non-excluded story." }
  *               readinessOverride: { type: boolean, description: "Explicitly run despite readiness blockers; usage is logged to WAL for auditability." }
+ *               operator_keyboard_input: { type: boolean, default: false, description: "Explicitly request the reviewed native PTY profile with keyboard input; Pi otherwise uses its structured autonomous profile in ansi-html mode." }
  *               terminal_mode:
  *                 type: string
  *                 enum: [ansi-html, pty, native-pty]
@@ -1218,6 +1219,8 @@ const PipelineTriggerSchema = z.object({
   overrideReadinessGate: z.boolean().optional(),
   terminal_mode: z.string().nullable().optional(),
   terminalMode: z.string().nullable().optional(),
+  operator_keyboard_input: z.boolean().optional(),
+  operatorKeyboardInput: z.boolean().optional(),
   idempotencyKey: z.string().optional(),
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
@@ -1268,7 +1271,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1279,7 +1282,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
-    const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    const requestedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    const resolvedTerminalMode = resolveOperatorInputTerminalMode(
+      requestedTerminalMode,
+      operator_keyboard_input === true || operatorKeyboardInput === true,
+    );
     assertTerminalModeAvailable(resolvedTerminalMode);
     const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
     await assertExecutionEnvironmentReady(resolvedExecutionEnvironment);

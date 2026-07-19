@@ -49,6 +49,7 @@ import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { isPtyTerminalMode, normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import {
+  appendPtyCompletionInstructions,
   buildPtyCompletionMarker,
   buildPtyMarkerFilePath,
   getPtyReadinessTimeoutMs,
@@ -90,6 +91,15 @@ import { PtyTranscriptRecorder } from './pty-transcript-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
+import {
+  createPiPromptFile,
+  createPiSessionDirectory,
+  detectPiStructuredCapability,
+  mapPiStructuredEvent,
+  PI_STRUCTURED_MIN_VERSION,
+  resolvePiExecutionProfile,
+} from './pi-structured-profile';
+import { UnprocessableError } from './errors';
 import {
   assertPtyCliCompatible,
   type PtyCliCapability,
@@ -1253,7 +1263,7 @@ function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
 }
 
-function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
+export function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
   const decoder = new StringDecoder('utf8');
   let buffer = '';
 
@@ -1297,7 +1307,20 @@ async function startPiRpcServer(
   skillFiles: string[] = [],
   mcpServers?: Record<string, string>,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+  onStructuredRecord?: (event: unknown, stream: 'stdout' | 'stderr') => void,
+  onHumanLine?: (line: string, stream: 'stdout' | 'stderr') => void,
+  onSpawn?: (pid: number | undefined) => void,
+  sessionDir?: string,
 ): Promise<PiRpcServer> {
+  const status = detectPi();
+  const capability = detectPiStructuredCapability(status.piVersion);
+  if (!status.piInstalled || !status.piBinPath || !capability.supported) {
+    throw new UnprocessableError(
+      `Pi structured autonomous profile unavailable: ${capability.reason}`,
+      'PI_STRUCTURED_PROFILE_UNSUPPORTED',
+      { installedVersion: status.piVersion, requiredVersion: PI_STRUCTURED_MIN_VERSION, profile: 'rpc-jsonl-v1' },
+    );
+  }
   const thinkingLevel = resolvePiThinkingLevel(model, effortLevel);
   const mcpServersSignature = normalizePiMcpServers(mcpServers);
   const piSelection = resolvePiCliSelection(model);
@@ -1307,6 +1330,7 @@ async function startPiRpcServer(
     '--no-extensions',
     '--tools', 'read,bash,edit,write,grep,find,ls',
     '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
+    ...(sessionDir ? ['--session-dir', sessionDir] : []),
     ...explicitExtensions.flatMap(extensionPath => ['--extension', extensionPath]),
     ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
     ...(piSelection.model ? ['--model', piSelection.model] : []),
@@ -1344,25 +1368,48 @@ async function startPiRpcServer(
     detachedProcessGroup,
   };
 
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    server.stderr += chunk.toString();
-    if (server.stderr.length > 64 * 1024) {
-      server.stderr = server.stderr.slice(-64 * 1024);
+  // Cancellation authority must see the detached process group immediately.
+  // Register synchronously after spawn, before startup waits or any other await.
+  _piRpcServers.add(server);
+  onSpawn?.(child.pid);
+
+  const dispatchEvent = (data: unknown, stream: 'stdout' | 'stderr'): void => {
+    onStructuredRecord?.(data, stream);
+    for (const listener of [...server.eventListeners]) {
+      try {
+        listener(data);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
+      }
     }
-  });
+  };
+
+  const handleJsonlLine = (line: string, stream: 'stdout' | 'stderr'): unknown | undefined => {
+    const trimmed = line.endsWith('\r') ? line.slice(0, -1).trim() : line.trim();
+    if (!trimmed) return undefined;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      const malformed = { type: 'malformed_json', stream, line };
+      onStructuredRecord?.(malformed, stream);
+      onHumanLine?.(line.endsWith('\n') ? line : `${line}\n`, stream);
+      server.stderr += `\n[pi-rpc] Invalid JSONL from ${stream}: ${trimmed.slice(0, 500)}`;
+      return undefined;
+    }
+  };
+
+  const detachStderrReader = child.stderr
+    ? attachJsonlLineReader(child.stderr, (line) => {
+      const data = handleJsonlLine(line, 'stderr');
+      if (data !== undefined) dispatchEvent(data, 'stderr');
+    })
+    : () => {};
 
   const detachStdoutReader = child.stdout
     ? attachJsonlLineReader(child.stdout, (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-
-      let data: unknown;
-      try {
-        data = JSON.parse(trimmed);
-      } catch {
-        server.stderr += `\n[pi-rpc] Invalid JSONL from stdout: ${trimmed.slice(0, 500)}`;
-        return;
-      }
+      const data = handleJsonlLine(line, 'stdout');
+      if (data === undefined) return;
 
       if (
         typeof data === 'object'
@@ -1393,17 +1440,11 @@ async function startPiRpcServer(
             }
           }
         }
+        onStructuredRecord?.(data, 'stdout');
         return;
       }
 
-      for (const listener of [...server.eventListeners]) {
-        try {
-          listener(data);
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
-        }
-      }
+      dispatchEvent(data, 'stdout');
     })
     : () => {};
 
@@ -1420,6 +1461,7 @@ async function startPiRpcServer(
 
   child.on('exit', (code, signal) => {
     detachStdoutReader();
+    detachStderrReader();
     server.ready = false;
     _piRpcServers.delete(server);
     const exitMessage = `pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
@@ -1441,7 +1483,6 @@ async function startPiRpcServer(
   }
 
   server.ready = true;
-  _piRpcServers.add(server);
 
   if (!_piRpcExitCleanupRegistered) {
     _piRpcExitCleanupRegistered = true;
@@ -1597,6 +1638,9 @@ async function buildPiSessionOptions(
   });
 
   return {
+    runId,
+    workspaceId,
+    storyId: story.id,
     progressLogPath,
     directionText: directionText.trim() || undefined,
     doneChecklist: packet.doneChecklist,
@@ -1946,6 +1990,9 @@ interface PiRetryContext {
 }
 
 interface PiSessionOptions {
+  runId: number;
+  workspaceId: string | null;
+  storyId: string;
   progressLogPath: string;
   directionText?: string;
   doneChecklist?: string[];
@@ -2879,7 +2926,7 @@ function runAgent(
     return Promise.resolve(buildPromptDeliveryFailureResult(startTime));
   }
 
-  if (ptyOptions?.enabled) {
+  if (ptyOptions?.enabled && (agentType !== 'pi' || resolvePiExecutionProfile(ptyOptions.terminalMode) === 'interactive')) {
     return spawnAgentViaPty(
       ptyOptions,
       prompt,
@@ -3513,15 +3560,95 @@ async function spawnPiRpc(
   retryContext?: PiRetryContext,
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
   piServerSkillFiles: string[] = [],
-  _piSessionOptions?: PiSessionOptions,
+  piSessionOptions?: PiSessionOptions,
   mcpServers?: Record<string, string>,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Promise<AgentResult> {
   const startTime = Date.now();
   let serverForCleanup: PiRpcServer | null = null;
+  let promptFile: ReturnType<typeof createPiPromptFile> | null = null;
+  let transcriptRecorder: PtyTranscriptRecorder | null = null;
+  let generationRef: PtyGenerationRef | null = null;
+  let markerFile: string | null = null;
+  let completionMarker: string | null = null;
+  let finalExitCode = 1;
+
+  const capability = detectPiStructuredCapability(detectPi().piVersion);
+  if (!capability.supported) {
+    throw new UnprocessableError(
+      `Pi structured autonomous profile unavailable: ${capability.reason}`,
+      'PI_STRUCTURED_PROFILE_UNSUPPORTED',
+    );
+  }
+
+  if (piSessionOptions?.workspaceId) {
+    completionMarker = buildPtyCompletionMarker(piSessionOptions.runId, piSessionOptions.storyId);
+    const markerFilePath = buildPtyMarkerFilePath(piSessionOptions.runId, piSessionOptions.storyId);
+    markerFile = path.resolve(cwd, markerFilePath);
+    try { fs.unlinkSync(markerFile); } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const generation = await startRunPtySession({
+      runId: piSessionOptions.runId,
+      workspaceId: piSessionOptions.workspaceId,
+      storyId: piSessionOptions.storyId,
+      attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+      cwd,
+      agentType: 'pi',
+      cols: DEFAULT_PTY_COLS,
+      rows: DEFAULT_PTY_ROWS,
+      childPid: null,
+      completionMarker,
+    });
+    generationRef = {
+      runId: generation.runId,
+      generationId: generation.generationId,
+      generationToken: generation.generationToken,
+    };
+    transcriptRecorder = new PtyTranscriptRecorder(generationRef);
+    transcriptRecorder.recordHostNotice('generation_started', 'Pi structured RPC generation started.', {
+      profile: capability.profile,
+      attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+    });
+  }
+
+  const sessionDirectory = createPiSessionDirectory(
+    piSessionOptions?.runId ?? process.pid,
+    piSessionOptions?.storyId ?? 'story',
+  );
+  const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+  const mappedEvent = (event: unknown, stream: 'stdout' | 'stderr'): void => {
+    const mapped = mapPiStructuredEvent(event);
+    for (const transcript of mapped.transcripts) {
+      transcriptRecorder?.recordStructured(transcript);
+    }
+    logStream.write(`[PiEvent:${stream}] ${JSON.stringify(event)}\n`);
+  };
+  const humanLine = (line: string): void => {
+    process.stdout.write(line);
+    logStream.write(line);
+  };
   const launchPiRpcServer = async (): Promise<PiRpcServer> => {
-    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
-    const launchedServer = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers, effortLevel);
+    logger.info(`[pi-rpc] Starting pi RPC server (profile=${capability.profile}, model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
+    const launchedServer = await startPiRpcServer(
+      cwd,
+      model,
+      piServerSkillFiles,
+      mcpServers,
+      effortLevel,
+      mappedEvent,
+      humanLine,
+      (pid) => {
+        if (generationRef && pid) {
+          void updateRunPtyChildPid(generationRef, pid).catch((error: unknown) => {
+            transcriptRecorder?.recordError('structured_pid_persistence_failed', 'Pi process PID could not be persisted.', {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      },
+      sessionDirectory.path,
+    );
     serverForCleanup = launchedServer;
     logger.info('[pi-rpc] pi RPC server started');
     return launchedServer;
@@ -3558,7 +3685,6 @@ async function spawnPiRpc(
       });
     }
 
-    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     let storyTimedOut = false;
     let settled = false;
 
@@ -3720,22 +3846,60 @@ async function spawnPiRpc(
     }, timeoutMs);
 
     try {
-      logger.info('[pi-rpc] Dispatching prompt');
-      await sendPiRpcCommand(server, { type: 'prompt', message: prompt });
-      logger.info('[pi-rpc] Prompt accepted by RPC server; waiting for turn completion');
+      let deliveredPrompt = prompt;
+      if (generationRef && completionMarker && markerFile && piSessionOptions) {
+        deliveredPrompt = appendPtyCompletionInstructions({
+          basePrompt: prompt,
+          runId: piSessionOptions.runId,
+          storyId: piSessionOptions.storyId,
+          agentType: 'pi',
+          completionMarker,
+          markerFilePath: path.relative(cwd, markerFile),
+          generationId: generationRef.generationId,
+          generationToken: generationRef.generationToken,
+          attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+          executionProfile: 'structured-rpc',
+        });
+      }
+      promptFile = createPiPromptFile(
+        piSessionOptions?.runId ?? process.pid,
+        piSessionOptions?.storyId ?? 'story',
+        deliveredPrompt,
+      );
+      logger.info(`[pi-rpc] Dispatching ${promptFile.bytes} prompt bytes from private file over RPC stdin`);
+      const promptFromFile = fs.readFileSync(promptFile.path, 'utf8');
+      await sendPiRpcCommand(server, { type: 'prompt', message: promptFromFile });
+      logger.info('[pi-rpc] Prompt accepted by RPC server; waiting for settled completion');
       await storyDone;
-      logger.info('[pi-rpc] Story turn completed');
+      logger.info('[pi-rpc] Story RPC session settled');
+
+      if (generationRef && completionMarker && markerFile && piSessionOptions) {
+        if (!fs.existsSync(markerFile)) {
+          throw new Error('PI_COMPLETION_STATUS_MISSING: settled RPC output is not completion authority');
+        }
+        const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
+        const attempt = retryContext?.attempt ? retryContext.attempt + 1 : 1;
+        const valid = parsed.storyId === piSessionOptions.storyId
+          && Number(parsed.runId) === piSessionOptions.runId
+          && parsed.marker === completionMarker
+          && parsed.generationId === generationRef.generationId
+          && parsed.generationToken === generationRef.generationToken
+          && Number(parsed.attempt) === attempt;
+        if (!valid) throw new Error('PI_COMPLETION_STATUS_INVALID: status payload does not match this generation');
+        await markRunPtyCompletionFileSeen(generationRef, completionMarker);
+      }
+
       clearTimeout(timeout);
       cleanupListener();
-      logStream.end();
-      return finish(storyTimedOut ? 124 : 0);
+      finalExitCode = storyTimedOut ? 124 : 0;
+      return finish(finalExitCode);
     } catch (error: unknown) {
       clearTimeout(timeout);
       cleanupListener();
-      logStream.end();
       const message = error instanceof Error ? error.message : String(error);
+      finalExitCode = storyTimedOut ? 124 : 1;
       return {
-        exitCode: storyTimedOut ? 124 : 1,
+        exitCode: finalExitCode,
         stderrTail: `${server.stderr.slice(-4096)}${message ? `\n${message}` : ''}`.trim(),
         elapsedMs: Date.now() - startTime,
         piSessionId,
@@ -3745,6 +3909,30 @@ async function spawnPiRpc(
     if (serverForCleanup) {
       await stopPiRpcServer(serverForCleanup);
     }
+    promptFile?.cleanup();
+    sessionDirectory.cleanup();
+    transcriptRecorder?.recordHostNotice('generation_closed', 'Pi structured RPC generation closed.', {
+      exitCode: finalExitCode,
+      completionStatusObserved: finalExitCode === 0,
+    });
+    try {
+      await transcriptRecorder?.drain();
+    } catch (error: unknown) {
+      logRunPtyStoreError('Failed to finalize Pi structured transcript', piSessionOptions?.runId ?? 0, error);
+    }
+    if (generationRef) {
+      try {
+        await completeRunPtySession(
+          generationRef,
+          finalExitCode === 0 ? 'exited' : finalExitCode === 124 ? 'timed_out' : 'failed',
+          finalExitCode,
+          null,
+        );
+      } catch (error: unknown) {
+        logRunPtyStoreError('Failed to close Pi structured generation', piSessionOptions?.runId ?? 0, error);
+      }
+    }
+    logStream.end();
   }
 }
 

@@ -37,6 +37,7 @@ export interface PtyPromptInput {
   generationId?: string;
   generationToken?: string;
   attempt?: number;
+  executionProfile?: 'interactive-pty' | 'structured-rpc';
 }
 
 /** Terminal marker state is deliberately separate from marker-file completion. */
@@ -124,9 +125,12 @@ function describeMarkerWithoutEcho(marker: string): string {
 export function appendPtyCompletionInstructions(input: PtyPromptInput): string {
   const markerPartsJson = describeMarkerWithoutEcho(input.completionMarker);
   const markerFileJson = JSON.stringify(input.markerFilePath);
+  const structured = input.executionProfile === 'structured-rpc';
   const instructions = [
-    '## Rorca PTY Completion Contract',
-    'You are running inside a real interactive PTY. When your implementation turn is complete, write the completion status file, then print the completion marker as your final visible action.',
+    structured ? '## Rorca Structured Completion Contract' : '## Rorca PTY Completion Contract',
+    structured
+      ? 'You are running through Pi RPC in a non-interactive autonomous pipeline. When your implementation turn is complete, write the completion status file; a final printed marker is corroborating presentation only.'
+      : 'You are running inside a real interactive PTY. When your implementation turn is complete, write the completion status file, then print the completion marker as your final visible action.',
     `1. Build it by concatenating these JSON string parts in order, with no quotes, spaces, or separators: ${markerPartsJson}`,
     `2. Create the parent directory and write a small JSON status file at ${input.markerFilePath} with storyId ${JSON.stringify(input.storyId)}, runId ${input.runId}, marker equal to that constructed value${input.generationId ? `, generationId ${JSON.stringify(input.generationId)}` : ''}${input.generationToken ? `, generationToken ${JSON.stringify(input.generationToken)}` : ''}${input.attempt !== undefined ? `, and attempt ${input.attempt}` : ''}.`,
     'The status file is Rorca\'s primary turn-completion signal. The printed marker only corroborates it.',
