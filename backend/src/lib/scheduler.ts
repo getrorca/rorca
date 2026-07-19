@@ -48,6 +48,8 @@ export async function triggerScheduledRun(schedule: {
       workspaceId: schedule.workspace_id,
       autoWorktree: false,
       triggerType: 'scheduled',
+      orchestrationMode: 'sequential',
+      parallelism: 1,
     };
     if (schedule.agent) body.agent = schedule.agent;
     if (schedule.model) body.model = schedule.model;

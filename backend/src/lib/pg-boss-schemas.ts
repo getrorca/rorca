@@ -46,6 +46,42 @@ const ExecutionSecretReferencesSchema = z.object({
 export const MergeStrategyEnum = z.enum(['direct', 'pr', 'draft-pr', 'branch-only']);
 export type MergeStrategy = z.infer<typeof MergeStrategyEnum>;
 
+export const WavePolicyEnvelopeSchema = z.object({
+  schemaVersion: z.literal('rorca.wave-production-policy/v1'),
+  policyRevision: z.literal('wave-production-rollout-v1'),
+  requested: z.object({
+    orchestrationMode: z.enum(['sequential', 'wave-parallel']),
+    parallelism: z.number().int().min(1).max(4),
+    qualificationReceiptId: z.string().nullable(),
+    rolloutCohort: z.string().nullable(),
+  }).strict(),
+  effective: z.object({
+    orchestrationMode: z.enum(['sequential', 'wave-parallel']),
+    parallelism: z.number().int().min(1).max(4),
+  }).strict(),
+  status: z.enum([
+    'sequential-default', 'experimental-nonproduction', 'production-disabled',
+    'receipt-missing', 'receipt-stale', 'canary-enabled', 'halted', 'draining', 'enabled',
+  ]),
+  allowed: z.boolean(),
+  reason: z.string().min(1),
+  workspaceId: z.string().min(1),
+  runId: z.number().int().positive().nullable(),
+  receipt: z.object({
+    id: z.string().min(1),
+    reportHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    sourceRevision: z.string().regex(/^[0-9a-f]{40,64}$/),
+  }).strict().nullable(),
+  rollout: z.object({
+    cohort: z.string().min(1),
+    maxParallelism: z.number().int().min(1).max(4),
+    maxActiveWaveRuns: z.number().int().min(1).max(16),
+    maxActiveWaveRunsPerWorkspace: z.number().int().min(1).max(4),
+  }).strict(),
+  fencingPolicy: z.literal('dispatch-boundary-v1'),
+  fence: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+}).strict();
+
 export const PipelineRunJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   specPath: z.string().min(1),
@@ -56,9 +92,11 @@ export const PipelineRunJobPayload = z.object({
   branchName: z.string().nullable(),
   terminalMode: TerminalModeSchema.optional().default('ansi-html'),
   executionEnvironment: ExecutionEnvironmentSchema.optional().default('remote-rorca'),
+  parallelism: z.number().int().min(1).max(4).optional().default(1),
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
+  wavePolicy: WavePolicyEnvelopeSchema.optional(),
   safetyOptions: z.object({
     deploy: z.boolean(),
     externalSend: z.boolean(),

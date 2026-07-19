@@ -69,6 +69,15 @@ interface ExecutionEnvironmentReadiness {
   secretProfileId: string | null;
 }
 
+interface WaveProductionStatus {
+  status: 'sequential-default' | 'experimental-nonproduction' | 'production-disabled' | 'receipt-missing' | 'receipt-stale' | 'canary-enabled' | 'halted' | 'draining' | 'enabled';
+  effective: { orchestrationMode: 'sequential' | 'wave-parallel'; parallelism: number };
+  reason: string;
+  receipt: { id: string; reportHash: string; sourceRevision: string } | null;
+  rollout: { cohort: string; maxParallelism: number };
+  productionEnableAvailable: boolean;
+}
+
 interface OrchestrationPreview {
   mode: 'sequential' | 'wave-parallel';
   parallelism: number;
@@ -192,6 +201,10 @@ function TokenBar({ global, scoped, tagged, budget }: { global: number; scoped: 
 
 export interface TriggerOptions {
   forceSequential?: boolean;
+  orchestrationMode?: 'sequential' | 'wave-parallel';
+  parallelism?: number;
+  qualificationReceiptId?: string;
+  rolloutCohort?: string;
   autoMerge?: boolean;
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   includeGraph?: boolean;
@@ -254,13 +267,14 @@ export default function TriggerPopover({
   const [agentConfig, setAgentConfig] = useState<AgentConfigSummary | null>(null);
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
   const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
+  const [waveStatus, setWaveStatus] = useState<WaveProductionStatus | null>(null);
   const [healthBadge, setHealthBadge] = useState<HealthBadge | null>(null);
   const [contextPreview, setContextPreview] = useState<ContextPreviewData | null>(null);
   const [contextExpanded, setContextExpanded] = useState(false);
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const [driftData, setDriftData] = useState<DriftReportData | null>(null);
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
-  const [forceSequential, setForceSequential] = useState(false);
+  const [forceSequential, setForceSequential] = useState(true);
   const [includeGraph, setIncludeGraph] = useState(false);
   const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty' | 'native-pty'>('pty');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
@@ -354,13 +368,18 @@ export default function TriggerPopover({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ specPath, workspaceId }),
     })
-      .then((result) => {
-        setOrchestration(result);
-        // Auto-enable worktrees for wave-parallel
-        if (result.mode === 'wave-parallel') setAutoWorktree(true);
-      })
+      .then(setOrchestration)
       .catch(() => {});
   }, [specPath, workspaceId]);
+
+  // Fetch governed wave status. The status/receipt/cohort are evidence; the
+  // environment variable is intentionally never returned or displayed.
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<WaveProductionStatus>(`/api/admin/wave-qualification/status?workspaceId=${encodeURIComponent(workspaceId)}`)
+      .then(setWaveStatus)
+      .catch(() => setWaveStatus(null));
+  }, [workspaceId]);
 
   // Fetch drift report + config on mount
   useEffect(() => {
@@ -451,6 +470,8 @@ export default function TriggerPopover({
   const showDriftWarning = driftCheckEnabled && driftErrors.length > 0;
 
   const isWaveParallel = orchestration?.mode === 'wave-parallel';
+  const waveOptInAvailable = waveStatus != null && ['experimental-nonproduction', 'canary-enabled', 'enabled'].includes(waveStatus.status);
+  const waveRequested = isWaveParallel && waveOptInAvailable && !forceSequential;
 
   // Reasoning cost multipliers for the current model (used in ThinkingControls and dry-run preview)
   const reasoningCostMultipliers = getReasoningCostMultipliers(agentConfig?.agentModel ?? null);
@@ -845,12 +866,19 @@ export default function TriggerPopover({
             {/* Wave Parallel pill */}
             <button
               type="button"
-              onClick={() => { if (isWaveParallel) setForceSequential(false); }}
-              disabled={!isWaveParallel}
+              onClick={() => {
+                if (isWaveParallel && waveOptInAvailable) {
+                  setForceSequential(false);
+                  setTerminalMode('ansi-html');
+                  setAutoMerge(false);
+                  setMergeStrategy('branch-only');
+                }
+              }}
+              disabled={!isWaveParallel || !waveOptInAvailable}
               className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-[11px] font-medium transition-colors border ${
-                isWaveParallel && !forceSequential
+                waveRequested
                   ? 'bg-accent text-white border-accent'
-                  : isWaveParallel
+                  : isWaveParallel && waveOptInAvailable
                     ? 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'
                     : 'bg-[var(--bg)] text-muted/40 border-border/40 cursor-not-allowed'
               }`}
@@ -866,8 +894,12 @@ export default function TriggerPopover({
             </button>
           </div>
 
+          <p className="text-[10px] text-muted leading-tight">
+            Governed status: <span className="font-medium text-[var(--text)]">{waveStatus?.status ?? 'sequential-default'}</span>
+          </p>
+
           {/* Context below the segmented control */}
-          {isWaveParallel && !forceSequential && orchestration && (
+          {waveRequested && orchestration && (
             <div className="space-y-1.5 pt-0.5">
               {orchestration.waves.map((w) => (
                 <div key={w.index}>
@@ -881,7 +913,7 @@ export default function TriggerPopover({
               ))}
             </div>
           )}
-          {(!isWaveParallel || forceSequential) && orchestration && (
+          {!waveRequested && orchestration && (
             <p className="text-[10px] text-muted leading-tight">
               {orchestration.totalStories} {orchestration.totalStories === 1 ? 'story' : 'stories'} · one at a time
             </p>
@@ -896,14 +928,14 @@ export default function TriggerPopover({
           <div className="relative flex items-center justify-center">
             <input
               type="checkbox"
-              checked={autoWorktree || (isWaveParallel && !forceSequential)}
+              checked={autoWorktree || waveRequested}
               onChange={(e) => {
-                if (isWaveParallel && !forceSequential) return;
+                if (waveRequested) return;
                 setAutoWorktree(e.target.checked);
                 if (e.target.checked) setAutoMerge(true);
                 else setAutoMerge(false);
               }}
-              disabled={isWaveParallel && !forceSequential}
+              disabled={waveRequested}
               className="peer sr-only"
             />
             <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-accent transition-colors" />
@@ -913,7 +945,7 @@ export default function TriggerPopover({
             <div className="flex items-center gap-1.5">
               <GitBranch size={12} className="text-muted shrink-0" />
               <span className="text-xs font-medium text-[var(--text)]">Isolate in worktree</span>
-              {isWaveParallel && !forceSequential && (
+              {waveRequested && (
                 <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent font-medium">required</span>
               )}
             </div>
@@ -921,7 +953,7 @@ export default function TriggerPopover({
         </label>
 
         {/* Merge Strategy — nested under worktrees */}
-        {(autoWorktree || (isWaveParallel && !forceSequential)) && (
+        {(autoWorktree || waveRequested) && (
           <div className="ml-11 py-1.5">
             <label htmlFor="trigger-merge-strategy" className="text-[11px] text-muted mb-1.5 block font-medium">Completion action</label>
             <select
@@ -1054,12 +1086,16 @@ export default function TriggerPopover({
         {/* Run Now — primary */}
         <button
           onClick={() => {
-            const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
+            const effectiveWorktree = autoWorktree || waveRequested;
             const isClaude = agentConfig?.agentType === 'claude';
             const m = agentConfig?.agentModel?.toLowerCase() ?? '';
             const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
             onTrigger(effectiveWorktree, {
-              forceSequential: forceSequential || terminalMode === 'native-pty' || undefined,
+              forceSequential: !waveRequested || terminalMode === 'native-pty' || undefined,
+              orchestrationMode: waveRequested ? 'wave-parallel' : 'sequential',
+              parallelism: waveRequested ? Math.min(orchestration?.parallelism ?? 1, waveStatus?.rollout.maxParallelism ?? 1) : 1,
+              qualificationReceiptId: waveRequested ? waveStatus?.receipt?.id : undefined,
+              rolloutCohort: waveRequested ? waveStatus?.rollout.cohort : undefined,
               autoMerge: effectiveWorktree ? autoMerge : undefined,
               mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
@@ -1085,12 +1121,14 @@ export default function TriggerPopover({
         {onAddToQueue && (
           <button
             onClick={() => {
-              const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
+              const effectiveWorktree = autoWorktree;
               const isClaude = agentConfig?.agentType === 'claude';
               const m = agentConfig?.agentModel?.toLowerCase() ?? '';
               const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
               onAddToQueue(effectiveWorktree, {
-                forceSequential: forceSequential || terminalMode === 'native-pty' || undefined,
+                forceSequential: true,
+                orchestrationMode: 'sequential',
+                parallelism: 1,
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
                 mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,

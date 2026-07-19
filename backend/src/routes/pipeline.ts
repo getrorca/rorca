@@ -143,6 +143,7 @@ import {
 } from '../lib/execution-secret-references';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
+import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -1130,6 +1131,10 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
+ *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Explicit run mode; graph preview never opts a run into parallel execution" }
+ *               parallelism: { type: integer, minimum: 1, maximum: 4, default: 1 }
+ *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity required for production wave execution" }
+ *               rolloutCohort: { type: string, description: "Explicit governed rollout cohort required for production wave execution" }
  *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi], description: "Override the execution agent for this run" }
  *               modelOverride: { type: string, description: "Override the execution model for this run" }
@@ -1180,6 +1185,10 @@ const PipelineTriggerSchema = z.object({
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   forceSequential: z.boolean().optional(),
+  orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional(),
+  parallelism: z.number().int().min(1).max(4).optional(),
+  qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]).optional(),
+  rolloutCohort: z.string().min(1).max(128).optional(),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
@@ -1249,7 +1258,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, orchestrationMode, parallelism: requestedParallelism, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1661,11 +1670,32 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // optional external orchestration mode would bypass its cleanup/closeout seam.
     const useExternalPiOrchestration = resolvedAgentType === 'pi'
       && isPiExternalOrchestrationEnabled()
-      && !autonomousSafety.policyLocked;
+      && !autonomousSafety.policyLocked
+      && !(orchestrationMode === 'wave-parallel' && Number(requestedParallelism) > 1);
 
     if (!queuedRunId && !reservedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
       if (queue && !useExternalPiOrchestration) {
+        if (orchestrationMode === 'wave-parallel' && Number(requestedParallelism) > 1) {
+          const queuePolicy = await resolveWaveProductionPolicy({
+            workspaceId: workspace.id,
+            workspacePath: workspace.path,
+            request: {
+              orchestrationMode,
+              parallelism: requestedParallelism,
+              qualificationReceiptId: qualificationReceiptId === undefined ? undefined : String(qualificationReceiptId),
+              rolloutCohort,
+            },
+          });
+          await auditWaveProductionDecision({
+            envelope: queuePolicy,
+            actor: String(pipelineUser?.id ?? 'local-operator'),
+            rationale: 'Queue reservation denied: wave authority must be evaluated at promotion dispatch',
+            eventType: 'deny',
+            outcome: 'denied',
+          });
+          throw new ValidationError('wave_parallel_denied:queue_reservations_are_sequential; dispatch explicitly when promoted');
+        }
         const MAX_QUEUE_DEPTH = 10;
         const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
@@ -1710,7 +1740,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
             autoMerge: queuedAutoMerge,
             mergeStrategy: queuedMergeStrategy,
             triggerType: triggerType === 'scheduled' ? 'scheduled' : 'manual',
-            forceSequential,
+            forceSequential: true,
+            orchestrationMode: 'sequential',
+            parallelism: 1,
             agentOverride,
             modelOverride,
             storyId,
@@ -1728,15 +1760,16 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
             executionEnvironment: resolvedExecutionEnvironment.effective,
           }).filter(([, value]) => value !== undefined)
         );
-        const queuedTriggerOptions = JSON.stringify({ ...queuedBaseTriggerOptions, ...(triggerOptions ?? {}) });
+        const queuedTriggerOptions = JSON.stringify({ ...(triggerOptions ?? {}), ...queuedBaseTriggerOptions });
         const queuedTaskManifestArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
         const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
           (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via,
            auto_worktree, auto_merge, merge_strategy, include_graph, agent, agent_type, agent_model,
            terminal_mode, execution_environment, branch_name, worktree_path, effective_options,
-           idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+           idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+           parallelism, orchestration_mode)
           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11,
-                  $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20::jsonb)
+                  $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20::jsonb, 1, 'sequential')
           RETURNING id`, [
           specPath,
           workspaceId,
@@ -1928,9 +1961,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
-    // 4b. Auto-select orchestration mode (sequential vs wave-parallel)
-    // IMPORTANT: Respect waveParallelism from .rorca/config.json — if false, force sequential
-    let parallelism = 1;
+    // 4b. Dependency analysis is advisory only. A run remains sequential unless
+    // the request explicitly supplies both wave-parallel mode and parallelism > 1.
     let orchestration: ReturnType<typeof autoSelectOrchestration> | null = null;
     try {
       const specJsonForOrch = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
@@ -1944,43 +1976,47 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         excluded: s.excluded,
       }));
       orchestration = autoSelectOrchestration(orchStories);
-
-      // Check forceSequential from trigger request (UI toggle) or .rorca/config.json
-      if (forceSequential) {
-        parallelism = 1;
-        logger.info(`[orchestration] Forced sequential (user selected sequential in UI)`);
-      } else {
-        let waveParallelismEnabled = true;
-        try {
-          const rorcaConfigPath = path.join(workspace.path, '.rorca', 'config.json');
-          if (fs.existsSync(rorcaConfigPath)) {
-            const rorcaConfig = JSON.parse(fs.readFileSync(rorcaConfigPath, 'utf8'));
-            if (rorcaConfig?.execution?.waveParallelism === false) {
-              waveParallelismEnabled = false;
-            }
-          }
-        } catch { /* config parse error — use default */ }
-
-        if (!waveParallelismEnabled) {
-          parallelism = 1;
-          logger.info(`[orchestration] Forced sequential (waveParallelism: false in .rorca/config.json)`);
-        } else {
-          parallelism = orchestration.parallelism;
-          logger.info(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
-        }
-      }
     } catch {
-      // Spec parse error — fall back to sequential
-      logger.info('[orchestration] Using sequential (spec parse error, fallback)');
+      logger.info('[orchestration] Graph preview unavailable; sequential remains the default');
     }
 
-    if (isPtyTerminalMode(resolvedTerminalMode) && parallelism > 1) {
-      parallelism = 1;
-      logger.info('[orchestration] Forced sequential because PTY sessions are run-scoped interactive terminals');
+    const wavePolicyRequest = forceSequential === true
+      ? { orchestrationMode: 'sequential', parallelism: 1 }
+      : {
+          orchestrationMode,
+          parallelism: requestedParallelism,
+          qualificationReceiptId: qualificationReceiptId === undefined ? undefined : String(qualificationReceiptId),
+          rolloutCohort,
+        };
+    let wavePolicy = await resolveWaveProductionPolicy({
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      request: wavePolicyRequest,
+    });
+    const explicitWaveRequested = orchestrationMode === 'wave-parallel' && Number(requestedParallelism) > 1 && forceSequential !== true;
+    if (explicitWaveRequested && !wavePolicy.allowed) {
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: `API dispatch denied: ${wavePolicy.reason}`,
+      });
+      throw new ForbiddenError(`wave_parallel_denied:${wavePolicy.status}:${wavePolicy.reason}`);
     }
+    if (explicitWaveRequested && isPtyTerminalMode(resolvedTerminalMode)) {
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: 'API dispatch denied: run-scoped PTY terminal is incompatible with wave-parallel execution',
+        eventType: 'deny',
+        outcome: 'denied',
+      });
+      throw new ValidationError('wave_parallel_denied:pty_terminal_requires_sequential');
+    }
+    let parallelism = wavePolicy.effective.parallelism;
 
-    // 5. Determine CWD — main workspace or new worktree
-    const needsWorktree = effectiveAutoWorktreeRequest || orchestration?.mode === 'wave-parallel';
+    // 5. Determine CWD — main workspace or new worktree. Graph advice alone
+    // never creates a worktree or changes execution mode.
+    const needsWorktree = effectiveAutoWorktreeRequest || parallelism > 1;
     let cwd = workspace.path;
     let branchName: string | null = null;
     let worktreePath: string | null = null;
@@ -2027,7 +2063,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // A base-branch merge is opt-in. Worktree isolation alone must never imply
     // permission to merge its branch back into the workspace, and policy-locked
     // autonomous runs cannot acquire merge authority from request defaults.
-    const computedAutoMerge = autonomousSafety.policyLocked
+    const computedAutoMerge = autonomousSafety.policyLocked || parallelism > 1
       ? false
       : needsWorktree && autonomousSafety.autoMerge === true;
 
@@ -2058,7 +2094,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       }
     }
 
-    if (autonomousSafety.policyLocked) {
+    if (autonomousSafety.policyLocked || parallelism > 1) {
+      // Wave authority is execution authority only; it never implies merge,
+      // deployment, retry, or lifecycle approval.
       resolvedMergeStrategy = 'branch-only';
     }
 
@@ -2088,6 +2126,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         mergeStrategy: resolvedMergeStrategy,
         triggerType: validTriggerType,
         forceSequential,
+        orchestrationMode: wavePolicy.requested.orchestrationMode,
+        parallelism: wavePolicy.requested.parallelism,
+        qualificationReceiptId: wavePolicy.requested.qualificationReceiptId,
+        rolloutCohort: wavePolicy.requested.rolloutCohort,
+        wavePolicyFence: wavePolicy.fence,
         agentOverride,
         modelOverride,
         storyId,
@@ -2142,11 +2185,56 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       runId = normalizeWorkerRunId(runResult?.id);
     }
 
-    const effectiveRunOptions = persistedDispatchOptions;
-    await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
-      JSON.stringify(effectiveRunOptions),
+    // Re-evaluate after the durable run identity exists. This is the API/run-row
+    // fence and closes cap/cohort races before manifests or queue payloads exist.
+    wavePolicy = await resolveWaveProductionPolicy({
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      request: wavePolicyRequest,
       runId,
-    ]);
+    });
+    if (explicitWaveRequested && !wavePolicy.allowed) {
+      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = $2 WHERE id = $1`, [runId, `wave_parallel_denied:${wavePolicy.reason}`]);
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: `Run-row dispatch fence denied: ${wavePolicy.reason}`,
+      });
+      throw new ForbiddenError(`wave_parallel_denied:${wavePolicy.status}:${wavePolicy.reason}`);
+    }
+    parallelism = wavePolicy.effective.parallelism;
+    effectiveTriggerOptions.orchestrationMode = wavePolicy.requested.orchestrationMode;
+    effectiveTriggerOptions.parallelism = wavePolicy.requested.parallelism;
+    effectiveTriggerOptions.qualificationReceiptId = wavePolicy.requested.qualificationReceiptId;
+    effectiveTriggerOptions.rolloutCohort = wavePolicy.requested.rolloutCohort;
+    effectiveTriggerOptions.wavePolicyFence = wavePolicy.fence;
+    await execute(
+      `UPDATE pipeline_runs
+          SET effective_options = $1::jsonb,
+              parallelism = $3,
+              orchestration_mode = $4,
+              wave_policy = $5::jsonb,
+              wave_policy_fence = $6,
+              wave_qualification_receipt_id = $7,
+              wave_source_revision = $8,
+              wave_rollout_cohort = $9,
+              trigger_options = $10::jsonb
+        WHERE id = $2`,
+      [
+        JSON.stringify(persistedDispatchOptions), runId, parallelism,
+        wavePolicy.effective.orchestrationMode, JSON.stringify(wavePolicy), wavePolicy.fence,
+        wavePolicy.receipt?.id ?? null, wavePolicy.receipt?.sourceRevision ?? null,
+        wavePolicy.requested.rolloutCohort, JSON.stringify(effectiveTriggerOptions),
+      ],
+    );
+    if (explicitWaveRequested) {
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: 'Explicit wave-parallel API/run-row dispatch fence enabled',
+      });
+    }
+    const effectiveRunOptions = persistedDispatchOptions;
 
     // 7. Queue only non-secret options. pg-boss persists its payload, so all
     // workspace values and provider credentials travel as opaque references and
@@ -2299,9 +2387,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       branchName: branchName ?? null,
       terminalMode: effectiveTerminalMode,
       executionEnvironment: resolvedExecutionEnvironment.effective,
+      parallelism,
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
+      wavePolicy,
       safetyOptions: {
         deploy: autonomousSafety.deploy,
         externalSend: autonomousSafety.externalSend,
@@ -2379,6 +2469,16 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       terminalMode: effectiveTerminalMode,
       terminal_mode: effectiveTerminalMode,
       effectiveOptions: effectiveRunOptions,
+      wavePolicy: {
+        status: wavePolicy.status,
+        requested: wavePolicy.requested,
+        effective: wavePolicy.effective,
+        receiptHash: wavePolicy.receipt?.reportHash ?? null,
+        sourceRevision: wavePolicy.receipt?.sourceRevision ?? null,
+        rolloutCohort: wavePolicy.rollout.cohort,
+        fencingPolicy: wavePolicy.fencingPolicy,
+        fence: wavePolicy.fence,
+      },
       lifecycleStatus: 'queued',
       lifecycle_status: 'queued',
       lifecyclePhase: 'queued',
@@ -3386,7 +3486,9 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       triggerType: 'manual',
       queue: false,
       reservedRunId: reservation.runId,
-      forceSequential: requestBody.forceSequential === true,
+      forceSequential: true,
+      orchestrationMode: 'sequential',
+      parallelism: 1,
       includeGraph: requestBody.includeGraph === true,
       readinessOverride: true,
       idempotencyKey: requestIdempotencyKey,
@@ -6054,9 +6156,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     // 7. Create a NEW pipeline_run linked to the original while preserving the
     // host-enforced model, effort, worktree, merge, graph, terminal, and safety options.
     const retryTerminalMode = normalizeTerminalMode(approvedPreview.options.terminalMode);
-    const retryParallelism = isPtyTerminalMode(retryTerminalMode)
-      ? 1
-      : approvedPreview.forceSequential ? 1 : (originalRun.parallelism ?? 1);
+    // Retry approval does not carry production wave authority. A future
+    // parallel retry needs its own explicit governed request and receipt fence.
+    const retryParallelism = 1;
     const retryEffectiveOptions: EffectiveRunOptions = {
       ...originalEffectiveOptions,
       model: approvedPreview.options.model,
@@ -6070,9 +6172,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
        retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
-       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options)
+       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options, orchestration_mode)
       VALUES ($1, $2, 'queued', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15::jsonb)
+              $11, $12, $13, $14, $15::jsonb, 'sequential')
       RETURNING id`, [
       originalRun.spec_path,
       originalRun.workspace_id,

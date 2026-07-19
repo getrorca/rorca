@@ -162,7 +162,7 @@ router.get('/status', async (req: Request, res: Response) => {
  *               workspaceId: { type: string, description: "Workspace ID" }
  *               specId: { type: string, description: "Spec slug identifier" }
  *               specPath: { type: string, description: "Relative spec path within the workspace" }
- *               parallelism: { type: integer, default: 1, description: "Number of parallel story executions" }
+ *               parallelism: { type: integer, default: 1, description: "Reserved for compatibility; ordinary queue entries are always sequential and production wave opt-in occurs only at governed trigger dispatch" }
  *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
  *     responses:
  *       201:
@@ -190,6 +190,9 @@ router.post('/', async (req: Request, res: Response) => {
       throw new ValidationError('workspaceId, specId, and specPath are required');
       return;
     }
+    if (parallelism !== undefined && Number(parallelism) > 1) {
+      throw new ValidationError('wave_parallel_denied:run_queue_is_sequential; use an explicit governed pipeline trigger at dispatch');
+    }
 
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
@@ -207,7 +210,7 @@ router.post('/', async (req: Request, res: Response) => {
     const inserted = await queryOne<{ id: number }>(
       `INSERT INTO run_queue (workspace_id, spec_id, spec_path, parallelism, auto_worktree, position)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [workspaceId, specId, specPath, parallelism ?? 1, autoWorktree ? 1 : 0, nextPosition]
+      [workspaceId, specId, specPath, 1, autoWorktree ? 1 : 0, nextPosition]
     );
 
     const entry = await queryOne('SELECT * FROM run_queue WHERE id = $1', [inserted?.id]);

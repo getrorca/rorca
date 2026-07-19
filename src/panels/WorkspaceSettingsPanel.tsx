@@ -1191,7 +1191,7 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
           <div className="border-t border-border pt-5">
             <label className="block text-xs text-muted mb-1">Execution Mode</label>
             <p className="text-sm text-[var(--text)]">Auto-orchestrated</p>
-            <p className="text-xs text-muted mt-1">Sequential or wave-parallel is auto-selected based on the spec's dependency graph</p>
+            <p className="text-xs text-muted mt-1">Dependency analysis is advisory; every parallel run requires an explicit governed opt-in</p>
           </div>
         </div>
       </div>

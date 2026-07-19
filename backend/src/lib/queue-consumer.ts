@@ -59,7 +59,9 @@ async function triggerQueueEntry(entry: RunQueueEntry): Promise<void> {
   const payload = JSON.stringify({
     specPath: entry.spec_path,
     workspaceId: String(entry.workspace_id),
-    parallelism: entry.parallelism,
+    orchestrationMode: 'sequential',
+    parallelism: 1,
+    forceSequential: true,
     autoWorktree: entry.auto_worktree === 1,
     triggerType: 'queued',
   });

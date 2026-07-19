@@ -26,6 +26,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { hasAgentCredentials } from '../lib/secret-resolver';
+import { assertWavePolicyEnvelopeIntegrity, type WavePolicyEnvelope } from '../lib/wave-production-policy';
 
 const apiUrl = (process.env.RORCA_API_URL ?? 'http://localhost:3030/api').replace(/\/$/, '');
 const environmentId = process.env.RORCA_RUNNER_ENVIRONMENT_ID ?? 'local-user';
@@ -127,7 +128,6 @@ function resolveEnginePath(): string {
 
 async function runJob(job: any): Promise<void> {
   const payload = job.payload ?? {};
-  await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/running`, { runnerId });
 
   const workspacePath = workspacePathOverride || payload.worktreePath || payload.workspacePath;
   if (!workspacePath || typeof workspacePath !== 'string') {
@@ -142,6 +142,7 @@ async function runJob(job: any): Promise<void> {
   args.push('--json', jsonPath);
   args.push('--cwd', workspacePath);
   args.push('--run-id', String(payload.runId));
+  if (payload.wavePolicy?.workspaceId) args.push('--workspace-id', String(payload.wavePolicy.workspaceId));
   args.push('--port', String(engineApiPort));
   args.push('--parallelism', String(payload.parallelism ?? 1));
   args.push('--agent', String(payload.agent ?? 'claude'));
@@ -156,6 +157,23 @@ async function runJob(job: any): Promise<void> {
   if (payload.effortLevel) args.push('--effort-level', String(payload.effortLevel));
   if (payload.reasoningEffort) args.push('--reasoning-effort', String(payload.reasoningEffort));
 
+  const embeddedPolicy = payload.wavePolicy as WavePolicyEnvelope | undefined;
+  if (Number(payload.parallelism ?? 1) > 1 && !embeddedPolicy) {
+    throw new Error('wave_parallel_denied:local_runner_missing_policy');
+  }
+  if (embeddedPolicy) assertWavePolicyEnvelopeIntegrity(embeddedPolicy);
+  const currentPolicy = await api<{
+    allowed: boolean;
+    effective: { orchestrationMode: 'sequential' | 'wave-parallel'; parallelism: number };
+    fence: string;
+  }>(`/execution-environments/${environmentId}/runner/jobs/${job.id}/revalidate`, { runnerId });
+  if ((embeddedPolicy && currentPolicy.fence !== embeddedPolicy.fence)
+    || currentPolicy.effective.parallelism !== Number(payload.parallelism ?? 1)
+    || currentPolicy.effective.orchestrationMode !== (Number(payload.parallelism ?? 1) > 1 ? 'wave-parallel' : 'sequential')) {
+    throw new Error('wave_parallel_denied:local_runner_policy_drift');
+  }
+  await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/running`, { runnerId });
+
   const child = spawn(command, args, {
     cwd: workspacePath,
     stdio: 'inherit',
@@ -163,6 +181,7 @@ async function runJob(job: any): Promise<void> {
       ...process.env,
       RORCA_ENGINE_API_BASE_URL: engineApiBaseUrl,
       ...(payload.envOverrides ?? {}),
+      ...(embeddedPolicy ? { RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(embeddedPolicy) } : {}),
     },
   });
 

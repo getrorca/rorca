@@ -36,6 +36,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { spawn, execFileSync, execSync, type ChildProcess } from 'child_process';
 import { z } from 'zod';
+import { auditWaveProductionDecision, revalidatePersistedWavePolicy } from './lib/wave-production-governance';
 import PgBoss from 'pg-boss';
 import {
   PipelineRunJobPayload,
@@ -511,6 +512,22 @@ async function persistGhCliPrMetadata(
 
 // ── Job handler: pipeline:run ─────────────────────────────────────────────
 
+async function assertCurrentWaveRunDispatch(input: {
+  runId: number;
+  parallelism: number;
+  payload: PipelineRunJobPayloadType;
+}): Promise<void> {
+  const currentWavePolicy = await revalidatePersistedWavePolicy({
+    runId: input.runId,
+    queueEnvelope: input.payload.wavePolicy,
+  });
+  if (currentWavePolicy.effective.parallelism !== Number(input.parallelism ?? 1)
+    || input.payload.parallelism !== Number(input.parallelism ?? 1)
+    || currentWavePolicy.effective.orchestrationMode !== (Number(input.parallelism ?? 1) > 1 ? 'wave-parallel' : 'sequential')) {
+    throw new Error('[wave-production-policy] worker mode/parallelism differs from governed run evidence');
+  }
+}
+
 async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   // Process all jobs concurrently — batchSize controls how many are fetched per poll,
   // but each spawns an independent child process that should run in parallel.
@@ -611,6 +628,28 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         expireInSeconds: 300,
         startAfter: 10,
       });
+      return;
+    }
+
+    // Fence before lifecycle, PR, hooks, or process side effects. A replayed
+    // queue payload cannot become a started run under stale production authority.
+    try {
+      await assertCurrentWaveRunDispatch({ runId, parallelism: Number(parallelism ?? 1), payload });
+    } catch (error) {
+      if (payload.wavePolicy) {
+        await auditWaveProductionDecision({
+          envelope: payload.wavePolicy,
+          actor: WORKER_ID,
+          rationale: `Worker dispatch denial: ${error instanceof Error ? error.message : 'policy_revalidation_failed'}`,
+          eventType: 'deny',
+          outcome: 'denied',
+        }).catch(() => undefined);
+      }
+      await execute(
+        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'wave_policy_revalidation_denied' WHERE id = $1`,
+        [runId],
+      );
+      logger.error({ runId, error }, '[worker] governed dispatch policy denied before lifecycle start');
       return;
     }
 
@@ -730,13 +769,33 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       RORCA_PROCESS_ROLE: 'engine',
       RORCA_WORKSPACE_ID: workspaceId,
       RORCA_TERMINAL_MODE: terminalMode,
+      ...(payload.wavePolicy ? { RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(payload.wavePolicy) } : {}),
     };
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_ENTRYPOINT;
     delete env.CLAUDE_AGENT_SDK_VERSION;
     delete env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
 
-    logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Spawning execution-engine');
+    logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Revalidating governed mode immediately before spawn');
+    try {
+      await assertCurrentWaveRunDispatch({ runId, parallelism: Number(parallelism ?? 1), payload });
+    } catch (error) {
+      if (payload.wavePolicy) {
+        await auditWaveProductionDecision({
+          envelope: payload.wavePolicy,
+          actor: WORKER_ID,
+          rationale: `Worker pre-spawn denial: ${error instanceof Error ? error.message : 'policy_revalidation_failed'}`,
+          eventType: 'deny',
+          outcome: 'denied',
+        }).catch(() => undefined);
+      }
+      await execute(
+        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'wave_policy_revalidation_denied' WHERE id = $1`,
+        [runId],
+      );
+      logger.error({ runId, error }, '[worker] governed pre-spawn policy denied execution');
+      return;
+    }
 
     const child = spawn(engineLauncher.bin, engineArgs, {
       cwd,
@@ -1296,6 +1355,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
+    if (Number(parallelism ?? 1) !== 1) {
+      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'retry_wave_policy_not_explicitly_authorized' WHERE id = $1`, [runId]);
+      throw new Error('[wave-production-policy] retries are sequential unless a fresh explicit governed wave request is approved');
+    }
     if (
       workspaceId !== dispatchIdentity.workspaceId
       || path.basename(runRow.spec_path, '.json') !== dispatchIdentity.specId
