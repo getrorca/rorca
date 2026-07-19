@@ -348,11 +348,19 @@ Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>proc
       cwd: probeRoot,
       env: { PATH: '/usr/local/bin:/usr/bin:/bin' },
     });
-    const result = spawnSync(launch.command, launch.args, {
-      cwd: launch.cwd,
-      env: { ...launch.env, RORCA_ANCESTOR_SECRET_PROBE: marker },
-      encoding: 'utf8', timeout: 15_000,
-    });
+    const previousMarker = process.env.RORCA_ANCESTOR_SECRET_PROBE;
+    process.env.RORCA_ANCESTOR_SECRET_PROBE = marker;
+    let result: ReturnType<typeof spawnSync>;
+    try {
+      result = spawnSync(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        encoding: 'utf8', timeout: 15_000,
+      });
+    } finally {
+      if (previousMarker === undefined) delete process.env.RORCA_ANCESTOR_SECRET_PROBE;
+      else process.env.RORCA_ANCESTOR_SECRET_PROBE = previousMarker;
+    }
     if (result.status !== 0) {
       throw new Error(`autonomous sandbox capability probe failed (${result.status ?? result.signal ?? 'unknown'}): ${String(result.stderr ?? '').trim()}`);
     }
