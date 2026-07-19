@@ -39,7 +39,7 @@ import { GraphTabWithSubTabs } from './GraphTabWithSubTabs';
 import MermaidDiagram from './MermaidDiagram';
 import { SpecVersionHistory } from './SpecVersionHistory';
 import { TagChips } from './TagChips';
-import TriggerPopover from './TriggerPopover';
+import TriggerPopover, { type TriggerOptions } from './TriggerPopover';
 import PreFlightGraph from './PreFlightGraph';
 import { ImagePreviewModal } from './ImagePreviewModal';
 import type { PanelId } from './Sidebar';
@@ -609,7 +609,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; terminal_mode?: 'ansi-html' | 'pty' | 'native-pty'; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; executionEnvironment?: string; forceRerun?: boolean; rerunFromScratch?: boolean; readinessOverride?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: TriggerOptions & { queue?: boolean; forceRerun?: boolean; rerunFromScratch?: boolean; readinessOverride?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -620,6 +620,8 @@ function SpecDetailContent({
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
           specPath: `forge/specs/approved/${summary.id}.json`, workspaceId, autoWorktree,
           ...(options?.forceSequential ? { forceSequential: true } : {}),
+          ...(options?.orchestrationMode ? { orchestrationMode: options.orchestrationMode } : {}),
+          ...(options?.parallelism !== undefined ? { parallelism: options.parallelism } : {}),
           ...(options?.queue ? { queue: true } : {}),
           ...(autoWorktree && options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
           ...(autoWorktree && options?.mergeStrategy ? { mergeStrategy: options.mergeStrategy } : {}),

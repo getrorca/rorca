@@ -15,6 +15,7 @@ interface QueuedRunRow {
   workspace_id: string;
   queued_at: string;
   queue_position: number;
+  parallelism: number;
   auto_worktree: boolean;
   auto_merge: boolean;
   merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
@@ -23,6 +24,7 @@ interface QueuedRunRow {
   agent_type: 'claude' | 'opencode' | 'codex' | 'pi';
   agent_model: string | null;
   effective_options: { effort?: string | null } | null;
+  trigger_options: Record<string, unknown> | null;
 }
 
 const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
@@ -115,9 +117,9 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
 
     // Find the next queued run (oldest first), including auto_worktree
     const nextQueued = await queryOne<QueuedRunRow>(
-      `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree,
+      `SELECT id, spec_path, workspace_id, queued_at, queue_position, parallelism, auto_worktree,
               auto_merge, merge_strategy, include_graph, terminal_mode, agent_type,
-              agent_model, effective_options
+              agent_model, effective_options, trigger_options
          FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
        ORDER BY queued_at ASC NULLS LAST, id ASC LIMIT 1`,
@@ -158,6 +160,10 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
         specPath: nextQueued.spec_path,
         workspaceId: nextQueued.workspace_id,
         queuedRunId: nextQueued.id,
+        orchestrationMode: nextQueued.parallelism > 1 ? 'wave-parallel' : 'sequential',
+        parallelism: nextQueued.parallelism,
+        forceSequential: nextQueued.parallelism <= 1,
+        triggerOptions: nextQueued.trigger_options ?? undefined,
         autoWorktree: nextQueued.auto_worktree,
         autoMerge: nextQueued.auto_merge,
         mergeStrategy: nextQueued.merge_strategy ?? 'branch-only',

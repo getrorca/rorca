@@ -763,6 +763,8 @@ function SpecPreviewDrawer({
             workspaceId,
             autoWorktree,
             ...(options?.forceSequential ? { forceSequential: true } : {}),
+            ...(options?.orchestrationMode ? { orchestrationMode: options.orchestrationMode } : {}),
+            ...(options?.parallelism !== undefined ? { parallelism: options.parallelism } : {}),
             ...(options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
             ...(options?.includeGraph ? { includeGraph: true } : {}),
             ...(options?.terminal_mode ? { terminal_mode: options.terminal_mode } : {}),

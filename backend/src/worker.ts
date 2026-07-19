@@ -78,6 +78,12 @@ import {
   registerAutonomousPrDeliveryWorker,
   resumeAutonomousDeliveryAfterRecoveryRun,
 } from './lib/autonomous-pr-delivery';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveDispatchConsistency,
+  WaveParallelPolicyError,
+  type WaveExecutionMode,
+} from './lib/wave-parallel-policy';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -400,6 +406,47 @@ async function emitWalEvent(
   }
 }
 
+async function enforceWorkerWavePolicy(input: {
+  runId: number;
+  workspaceId: string;
+  rowParallelism: number | null;
+  payloadMode: WaveExecutionMode;
+  payloadParallelism: number;
+  triggerOptions?: Record<string, unknown>;
+  source: 'worker-run' | 'worker-retry';
+}): Promise<boolean> {
+  try {
+    enforceWaveDispatchConsistency({
+      source: input.source,
+      payloadMode: input.payloadMode,
+      payloadParallelism: input.payloadParallelism,
+      rowParallelism: input.rowParallelism,
+      triggerOptions: input.triggerOptions,
+      environment: currentWaveParallelPolicyEnvironment(),
+    });
+    return true;
+  } catch (error) {
+    if (!(error instanceof WaveParallelPolicyError)) throw error;
+    logger.error({ runId: input.runId, policy: error.toJSON() }, '[worker] wave-parallel dispatch refused');
+    await execute(
+      `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'wave_parallel_policy_denied' WHERE id = $1`,
+      [input.runId],
+    );
+    await transitionRunLifecycle(input.runId, 'failed', {
+      owner: input.source,
+      process: 'wave_parallel_policy',
+      reason: error.code,
+    });
+    await emitWalEvent('run_finished', input.workspaceId, {
+      run_id: input.runId,
+      status: 'failed',
+      reason: 'wave_parallel_policy_denied',
+      policy: error.toJSON(),
+    });
+    return false;
+  }
+}
+
 async function synthesizeInterruptedStoryFailure(params: {
   runId: number;
   workspaceId: string | number;
@@ -521,7 +568,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, orchestrationMode, parallelism: payloadParallelism, triggerOptions, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -546,6 +593,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
+    if (!await enforceWorkerWavePolicy({
+      runId,
+      workspaceId,
+      rowParallelism: parallelism,
+      payloadMode: orchestrationMode,
+      payloadParallelism,
+      triggerOptions,
+      source: 'worker-run',
+    })) return;
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
@@ -670,7 +726,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       '--run-id', String(runId),
       '--workspace-id', workspaceId,
       '--port', backendPort,
-      '--parallelism', String(parallelism ?? 1),
+      '--parallelism', String(payloadParallelism),
       '--agent', agent,
       '--terminal-mode', terminalMode,
     ];
@@ -1305,6 +1361,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       secretReferences,
       includeGraph,
       terminalMode: payloadTerminalMode,
+      orchestrationMode,
+      parallelism: payloadParallelism,
+      triggerOptions,
       thinkingEnabled,
       thinkingBudget,
       effortLevel,
@@ -1333,6 +1392,15 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
       return;
     }
+    if (!await enforceWorkerWavePolicy({
+      runId,
+      workspaceId,
+      rowParallelism: parallelism,
+      payloadMode: orchestrationMode,
+      payloadParallelism,
+      triggerOptions,
+      source: 'worker-retry',
+    })) return;
     const previewRow = await queryOne<{ status: string }>(
       `SELECT status FROM pipeline_retry_previews WHERE preview_hash = $1 AND retry_run_id = $2`,
       [previewHash, runId],
@@ -1446,7 +1514,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       '--run-id', String(runId),
       '--workspace-id', workspaceId,
       '--port', backendPort,
-      '--parallelism', String(parallelism ?? 1),
+      '--parallelism', String(payloadParallelism),
       '--agent', agent,
       '--terminal-mode', effectiveTerminalMode,
     ];

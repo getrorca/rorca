@@ -8,6 +8,11 @@
 import { queryOne, execute } from '../db/index';
 import { subscribe, broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveParallelPolicy,
+  WaveParallelPolicyError,
+} from './wave-parallel-policy';
 
 interface RunQueueEntry {
   id: number;
@@ -48,6 +53,19 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
 }
 
 async function triggerQueueEntry(entry: RunQueueEntry): Promise<void> {
+  let wavePolicy;
+  try {
+    wavePolicy = enforceWaveParallelPolicy({
+      source: 'run-queue-consumer',
+      requestedMode: entry.parallelism > 1 ? 'wave-parallel' : 'sequential',
+      requestedParallelism: entry.parallelism,
+    }, currentWaveParallelPolicyEnvironment());
+  } catch (error) {
+    if (!(error instanceof WaveParallelPolicyError)) throw error;
+    await markEntryFailed(entry, `${error.code}: ${error.message}`);
+    return;
+  }
+
   // Mark as triggering
   await execute(
     `UPDATE run_queue SET status = 'triggering' WHERE id = $1`,
@@ -59,9 +77,10 @@ async function triggerQueueEntry(entry: RunQueueEntry): Promise<void> {
   const payload = JSON.stringify({
     specPath: entry.spec_path,
     workspaceId: String(entry.workspace_id),
-    parallelism: entry.parallelism,
+    orchestrationMode: wavePolicy.mode,
+    parallelism: wavePolicy.parallelism,
     autoWorktree: entry.auto_worktree === 1,
-    triggerType: 'queued',
+    triggerType: 'manual',
   });
 
   // Use dynamic import to avoid pulling in http at module level during tests
