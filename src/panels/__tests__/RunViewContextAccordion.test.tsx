@@ -211,7 +211,7 @@ describe('RunViewPanel — Stories tab with context data', () => {
 
     // Navigate to Stories tab
     const storiesTab =
-      screen.queryByRole('button', { name: /stories/i }) ??
+      screen.queryByRole('button', { name: /^stories$/i }) ??
       screen.queryByText(/^stories$/i);
     if (storiesTab) fireEvent.click(storiesTab);
   }
@@ -282,16 +282,12 @@ describe('RunViewPanel — run header renders with context-bearing response', ()
     }, { timeout: 3000 });
   });
 
-  it('displays run status badge', async () => {
+  it('reconciles the contradictory done run with one failed story as Partial', async () => {
     renderWithProviders(
       <RunViewPanel runId={BASE_RUN.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
     );
     await waitFor(() => {
-      const badge =
-        screen.queryByText(/passed/i) ??
-        screen.queryByText(/done/i) ??
-        screen.queryByText(/running/i);
-      expect(badge).toBeInTheDocument();
+      expect(screen.getByTestId('run-semantic-status')).toHaveTextContent('Partial');
     }, { timeout: 3000 });
   });
 
@@ -300,8 +296,8 @@ describe('RunViewPanel — run header renders with context-bearing response', ()
       <RunViewPanel runId={BASE_RUN.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
     );
     await waitFor(() => {
-      const terminal = screen.queryByRole('button', { name: /terminal/i });
-      const stories = screen.queryByRole('button', { name: /stories/i });
+      const terminal = screen.queryByRole('button', { name: /^terminal$/i });
+      const stories = screen.queryByRole('button', { name: /^stories$/i });
       expect(terminal !== null || stories !== null).toBe(true);
     }, { timeout: 3000 });
   });

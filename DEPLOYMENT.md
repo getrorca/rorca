@@ -31,6 +31,8 @@ cp deploy/env.production.example .env
 | `CORS_ORIGIN` | `https://app.rorca.dev` | Exact frontend URL |
 | `RORCA_BASE_URL` | `https://app.rorca.dev` | Absolute frontend URL used for generated links and browser-facing callbacks |
 
+Wave-parallel execution is not production-ready. Production deployments must keep sequential execution; `RORCA_EXPERIMENTAL_WAVE_PARALLEL` is ignored/refused under `NODE_ENV=production`. See [Wave-parallel experimental safety gate](docs/wave-parallel-experimental-gate.md) for the temporary non-production test procedure.
+
 Generate a secure JWT secret:
 
 ```bash

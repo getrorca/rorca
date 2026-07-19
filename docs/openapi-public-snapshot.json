@@ -1,6 +1,6 @@
 {
-  "contractVersion": "10.0.0",
-  "generatedAt": "2026-07-19T18:28:47.415Z",
+  "contractVersion": "11.0.0",
+  "generatedAt": "2026-07-19T20:41:16.959Z",
   "routes": [
     {
       "method": "GET",
@@ -4678,6 +4678,11 @@
                     "description": "Force rerun even if an identical idempotent request already exists; does not reset passed story state.",
                     "type": "boolean"
                   },
+                  "forceSequential": {
+                    "default": false,
+                    "description": "Force effective sequential execution.",
+                    "type": "boolean"
+                  },
                   "includeGraph": {
                     "default": false,
                     "description": "Include knowledge graph context in the pipeline run",
@@ -4702,6 +4707,22 @@
                     "default": false,
                     "description": "Explicitly request the reviewed native PTY profile with keyboard input; Pi otherwise uses its structured autonomous profile in ansi-html mode.",
                     "type": "boolean"
+                  },
+                  "orchestrationMode": {
+                    "default": "sequential",
+                    "description": "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated.",
+                    "enum": [
+                      "sequential",
+                      "wave-parallel"
+                    ],
+                    "type": "string"
+                  },
+                  "parallelism": {
+                    "default": 1,
+                    "description": "Requested effective story parallelism. Values above 1 require the non-production experimental gate.",
+                    "maximum": 10,
+                    "minimum": 1,
+                    "type": "integer"
                   },
                   "readinessOverride": {
                     "description": "Explicitly run despite readiness blockers; usage is logged to WAL for auditability.",
@@ -4800,9 +4821,10 @@
           }
         },
         "400": {},
-        "404": {}
+        "404": {},
+        "422": {}
       },
-      "hash": "sha256:d519ab2c3387a0184cf68c89aaa87d4654b60060320df262995a21a05b843c23"
+      "hash": "sha256:08173cdf717250a248c5d3c595351e631d30e5181803ec2ef169f0faf263de1d"
     },
     {
       "method": "GET",
