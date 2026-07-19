@@ -14,7 +14,7 @@ const mockBindingRow = {
   installation_record_id: '10000000-0000-4000-8000-000000000004', installation_id: 77, installation_status: 'active',
   account_id: 88, account_login: 'acme', account_type: 'Organization', repository_selection: 'selected',
   repository_id: 99, repo_owner: 'acme', repo_name: 'widgets',
-  permissions: { metadata: 'read', actions: 'write', checks: 'write', statuses: 'write', contents: 'write', issues: 'read', pull_requests: 'write' },
+  permissions: { metadata: 'read', actions: 'read', checks: 'write', statuses: 'write', contents: 'write', issues: 'read', pull_requests: 'write' },
   events: ['check_run', 'issues', 'pull_request', 'push'], last_validated_at: null, last_webhook_at: null, validation_error_code: null,
   provider_profile_verified_at: '2026-07-17T11:00:00.000Z', provider_hook_configured: true, signed_delivery_observed: false,
 };

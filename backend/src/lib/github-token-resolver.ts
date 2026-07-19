@@ -26,7 +26,6 @@ export type GithubCredentialPurpose =
   | 'reviewed-delivery'
   | 'merge'
   | 'workflow-read'
-  | 'workflow-dispatch'
   | 'issues-read'
   | 'routine' // compatibility alias for repository-read
   | 'checks'; // compatibility alias for statuses-write + checks-write
@@ -50,7 +49,6 @@ export function githubPermissionsForPurpose(purpose: GithubCredentialPurpose): G
     case 'reviewed-delivery': return { checks: 'read', contents: 'read', pull_requests: 'read', statuses: 'read' };
     case 'merge': return { contents: 'write', pull_requests: 'write' };
     case 'workflow-read': return { actions: 'read' };
-    case 'workflow-dispatch': return { actions: 'write' };
     case 'issues-read': return { issues: 'read' };
     case 'routine':
     case 'repository-read':

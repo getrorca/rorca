@@ -11,7 +11,7 @@ import { readFile } from 'fs/promises';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { query, queryOne, execute } from '../db/index';
 import { encryptToken, requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
-import { NotFoundError, ValidationError } from '../lib/errors';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { storeOAuthToken, revokeToken, markTokenValidated } from '../lib/integration-vault';
 import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
 import { fetchGithubWithTimeout, getWorkspaceGithubAppBinding, githubAppBindingHasVerifiedProfile } from '../lib/github-app-credential-provider';
@@ -998,10 +998,10 @@ jobs:
  * /api/workspaces/{id}/github/dispatch:
  *   post:
  *     tags: [GitHub]
- *     summary: Dispatch one configured GitHub Actions workflow
+ *     summary: Workflow dispatch is hard disabled
  *     operationId: dispatchWorkspaceGithubWorkflow
  *     x-rorca-tier: admin
- *     x-rorca-rationale: "Provider workflow execution is an explicit administrator operation."
+ *     x-rorca-rationale: "Compatibility endpoint returns conflict without resolving credentials or invoking GitHub."
  *     parameters:
  *       - in: path
  *         name: id
@@ -1019,47 +1019,12 @@ jobs:
  *               ref: { type: string, minLength: 1, maxLength: 255 }
  *               inputs: { type: object, additionalProperties: true }
  *     responses:
- *       200: { description: Workflow dispatch accepted by GitHub }
- *       400: { description: Invalid workflow or ref }
+ *       409: { description: Workflow dispatch is hard disabled; deployment/workflow authority is not exposed by operator HTTP routes }
  */
-router.post('/:id/github/dispatch', requireWorkspaceAdmin(), async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    await requireWorkspace(String(req.params.id));
-    const authority = await getGithubRepositoryAuthority(String(req.params.id), { requireActive: true });
-    if (!authority) throw new ValidationError('No GitHub repository connected for this workspace');
-
-    const resolved = await resolveWorkspaceGitHubToken(String(req.params.id), {
-      repository: { owner: authority.owner, name: authority.name }, purpose: 'workflow-dispatch',
-    });
-    if (!resolved) throw new ValidationError('No GitHub token configured for this workspace');
-
-    const workflowId = String(req.body.workflow_id || '').trim();
-    const ref = String(req.body.ref || 'main').trim() || 'main';
-    const inputs = req.body.inputs && typeof req.body.inputs === 'object' && !Array.isArray(req.body.inputs)
-      ? req.body.inputs
-      : {};
-
-    if (!workflowId || workflowId.length > 255) throw new ValidationError('workflow_id is required and must be at most 255 characters');
-    assertGithubRef(ref);
-
-    const response = await fetchGithubWithTimeout(fetch,
-      githubRepoApiUrl(authority.owner, authority.name, `/actions/workflows/${encodeURIComponent(workflowId)}/dispatches`),
-      {
-        method: 'POST',
-        headers: buildGitHubHeaders(resolved.token),
-        body: JSON.stringify({ ref, inputs }),
-      },
-    );
-
-    if (!response.ok) {
-      const safe = extractGithubProviderError(response, 'GITHUB_WORKFLOW_DISPATCH_FAILED');
-      throw new ValidationError(safe.message, { providerStatus: safe.providerStatus, providerRequestId: safe.requestId });
-    }
-
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
+router.post('/:id/github/dispatch', requireWorkspaceAdmin(), async (_req: Request, _res: Response, next: NextFunction) => {
+  // Intentionally no credential resolution and no provider call. Workflow and
+  // deployment actuation are outside the release contract and remain disabled.
+  next(new ConflictError('GitHub workflow dispatch is hard disabled'));
 });
 
 export function verifyWebhookSignature(rawBody: Buffer | string, signatureHeader: string | undefined, secret: string): boolean {

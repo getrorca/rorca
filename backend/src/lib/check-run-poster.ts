@@ -466,6 +466,8 @@ async function discoverCheckRun(
 ): Promise<number | null> {
   const matches: Array<{ id?: number; external_id?: string; head_sha?: string }> = [];
   const maxPages = 10;
+  let observedRows = 0;
+  let expectedTotal: number | null = null;
   for (let page = 1; page <= maxPages; page++) {
     const suffix = `/commits/${claim.head_sha}/check-runs?check_name=${encodeURIComponent(CHECK_RUN_NAME)}&filter=all&per_page=100&page=${page}`;
     const response = await providerFetch(
@@ -473,23 +475,40 @@ async function discoverCheckRun(
       { method: 'GET', headers: headers(token) },
       'GITHUB_CHECK_RUN_RECONCILE_FAILED',
     );
-    let body: { total_count?: number; check_runs?: Array<{ id?: number; external_id?: string; head_sha?: string }> };
-    try { body = await response.json() as typeof body; }
+    let body: unknown;
+    try { body = await response.json(); }
     catch {
       throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup response was unreadable');
     }
-    const pageRows = body.check_runs ?? [];
+    const candidate = body as { total_count?: unknown; check_runs?: unknown };
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+      || !Array.isArray(candidate.check_runs)
+      || !Number.isSafeInteger(candidate.total_count)
+      || Number(candidate.total_count) < 0
+      || candidate.check_runs.length > 100) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup response shape was indeterminate');
+    }
+    const total = Number(candidate.total_count);
+    if (expectedTotal === null) expectedTotal = total;
+    if (total !== expectedTotal) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup total changed during pagination');
+    }
+    const pageRows = candidate.check_runs as Array<{ id?: number; external_id?: string; head_sha?: string }>;
+    observedRows += pageRows.length;
+    if (observedRows > total || (pageRows.length < 100 && observedRows !== total)) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup under-reported or omitted rows');
+    }
     matches.push(...pageRows.filter(check =>
-      check.external_id === claim.external_id
+      check && typeof check === 'object'
+        && check.external_id === claim.external_id
         && check.head_sha?.toLowerCase() === claim.head_sha
         && Number.isSafeInteger(check.id)));
     if (matches.length > 1) {
       throw new ProjectionProviderError('GITHUB_CHECK_RUN_IDENTITY_AMBIGUOUS', false, false, response.status, safeRequestId(response), 'Multiple provider Check Runs share one Rorca external identity');
     }
-    const total = Number(body.total_count ?? pageRows.length);
-    if (pageRows.length < 100 || page * 100 >= total) return matches[0]?.id ?? null;
-    if (page === maxPages) {
-      throw new ProjectionProviderError('GITHUB_CHECK_RUN_DISCOVERY_TRUNCATED', true, true, response.status, safeRequestId(response), 'GitHub Check Run discovery exceeded its deterministic page bound');
+    if (observedRows === total) return matches[0]?.id ?? null;
+    if (pageRows.length !== 100 || page === maxPages) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_DISCOVERY_TRUNCATED', true, true, response.status, safeRequestId(response), 'GitHub Check Run discovery exceeded or contradicted its deterministic page bound');
     }
   }
   return matches[0]?.id ?? null;

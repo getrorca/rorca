@@ -152,6 +152,10 @@ function input() {
         story_title: 'Recover relay after local pass',
         integrated: true,
         commit_sha: SHA,
+        checkpoint_attestation_id: 7001,
+        checkpoint_attestation_digest: `sha256:${'7'.repeat(64)}`,
+        checkpoint_attestation_passed_at: '2026-07-18T09:59:00.000Z',
+        checkpoint_attestation_expires_at: '2026-07-18T11:59:00.000Z',
       },
     },
   };
@@ -195,6 +199,24 @@ test('production worker can verify only an exact existing immutable host result'
     const near = input();
     near.commitMessage = 'near match must not verify';
     await expect(verifyReleasedHostResultProposal(near)).rejects.toThrow(/different immutable payload/);
+
+    for (const [field, value] of [
+      ['checkpoint_attestation_id', 7002],
+      ['checkpoint_attestation_digest', `sha256:${'8'.repeat(64)}`],
+      ['checkpoint_attestation_passed_at', '2026-07-18T09:58:00.000Z'],
+      ['checkpoint_attestation_expires_at', '2026-07-18T12:00:00.000Z'],
+    ] as const) {
+      const mismatch = input();
+      (mismatch.trustedPassOutbox.payload as Record<string, unknown>)[field] = value;
+      await expect(verifyReleasedHostResultProposal(mismatch)).rejects.toThrow(
+        /Trusted WAL relay reference does not exactly match/,
+      );
+    }
+    const missing = input();
+    delete (missing.trustedPassOutbox.payload as Record<string, unknown>).checkpoint_attestation_id;
+    await expect(verifyReleasedHostResultProposal(missing)).rejects.toThrow(
+      /Trusted WAL relay reference does not exactly match/,
+    );
 
     const existing = state.result;
     delete state.result;

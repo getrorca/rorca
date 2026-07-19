@@ -25,7 +25,7 @@ export type GithubPermissionRequest = Record<string, 'read' | 'write'>;
 /** The only supported App grant. Unknown permissions/events and broader levels fail closed. */
 export const GITHUB_APP_REQUIRED_PERMISSIONS: Readonly<GithubPermissionRequest> = Object.freeze({
   metadata: 'read',
-  actions: 'write',
+  actions: 'read',
   checks: 'write',
   contents: 'write',
   issues: 'read',

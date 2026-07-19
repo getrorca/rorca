@@ -91,6 +91,25 @@ describe('governed retry dispatch contract', () => {
     expect(handler).toContain("emitWalEvent('retry_scope_mismatch'");
   });
 
+  test.each(['direct', 'pr', 'draft-pr', 'branch-only'])('successful %s retry closes through the identical durable release seam', (strategy) => {
+    const handler = workerSource.slice(workerSource.indexOf('async function handlePipelineRetry'), workerSource.indexOf('// ── Job handler: pipeline:cancel'));
+    expect(handler).toContain('prepareRunReleaseIntent({');
+    expect(handler).toContain('reconcileRunReleaseIntent(runId');
+    expect(handler).toContain('mergeStrategy: approvedPreview.options.merge.strategy');
+    expect(handler).toContain('autoMerge: approvedPreview.options.merge.autoMerge');
+    expect(handler).toContain('externalSend: approvedPreview.options.safety.externalSend');
+    expect(['direct', 'pr', 'draft-pr', 'branch-only']).toContain(strategy);
+  });
+
+  test('legacy retry-merge conflicts before DB state mutation or queue dispatch', () => {
+    const start = pipelineSource.indexOf("router.post('/runs/:runId/retry-merge'");
+    const end = pipelineSource.indexOf("router.post('/runs/:runId/pause'", start);
+    const retired = pipelineSource.slice(start, end);
+    expect(retired).toContain('Manual retry-merge is retired');
+    expect(retired).not.toContain('UPDATE pipeline_runs');
+    expect(retired).not.toContain("boss.send('pipeline:merge'");
+  });
+
   test('destructive capabilities require explicit approval and policy defaults are host enforced', () => {
     expect(route).toContain('approvedPreview.requiresApproval && !approvalToken');
     expect(route).toContain('resolvePiRunSafetyOptions(originalRun.spec_path, sourceSpecJson');

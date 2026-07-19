@@ -884,18 +884,32 @@ export async function verifyReleasedHostResultProposal(
        FOR SHARE
     `, [existing.id]));
     if (outboxes.length !== 1 || !outboxes[0].outbox_ready_at) return false;
-    assertExactTrustedWalRow(outboxes[0]);
-    const payload = typeof outboxes[0].payload === 'string'
-      ? JSON.parse(outboxes[0].payload) as Record<string, unknown>
-      : outboxes[0].payload as unknown as Record<string, unknown>;
-    return outboxes[0].event_type === 'story_passed'
-      && outboxes[0].workspace_id === projection.workspace_id
-      && outboxes[0].spec_id === specId
-      && outboxes[0].story_id === input.storyId
-      && Number(outboxes[0].canonical_run_id) === input.runId
-      && Number(payload.story_result_id) === existing.id
-      && String(payload.commit_sha).toLowerCase() === commit.commitSha
-      && payload.closeout_decision_id === projection.closeout_decision_id;
+    const outbox = outboxes[0];
+    const expectedPayload = {
+      ...input.trustedPassOutbox?.payload,
+      run_id: input.runId,
+      story_id: input.storyId,
+      story_result_id: existing.id,
+      commit_sha: commit.commitSha,
+      closeout_decision_id: projection.closeout_decision_id,
+    };
+    // Compare the complete canonical WAL identity, not a selected subset. This
+    // includes checkpoint attestation id/digest/passed-at/expiry and every
+    // future stable payload field supplied by the host result finalizer.
+    assertExactTrustedWalRow(outbox, {
+      id: outbox.id,
+      ingestKey: outbox.ingest_key,
+      identityHash: outbox.event_identity_hash,
+      eventType: 'story_passed',
+      workspaceId: projection.workspace_id,
+      runId: input.runId,
+      specId,
+      storyId: input.storyId,
+      source: 'story-result',
+      storyResultId: existing.id,
+      payload: expectedPayload,
+    });
+    return true;
   });
 }
 

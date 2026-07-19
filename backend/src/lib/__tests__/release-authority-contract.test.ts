@@ -36,16 +36,27 @@ test('terminal intent is durable before public done and relay follows done', () 
   );
   expect(atomic).toContain("SET status = 'done'");
   expect(atomic).toContain('SET outbox_ready_at = COALESCE(outbox_ready_at, NOW())');
-  expect(workerSource).toContain('reconcilePendingRunReleases()');
+  expect(workerSource).toContain('drainPendingRunReleases(100, 1000)');
   expect(workerSource).not.toContain('gh pr');
 });
 
 test('direct merge preserves immutable execution identity until durable cleanup', () => {
   expect(mergeSource).not.toContain('SET worktree_path = NULL');
-  expect(mergeSource).toContain("worktree_cleanup_status = 'pending'");
-  expect(releaseSource.indexOf('persistTerminalIntent(row)')).toBeLessThan(releaseSource.indexOf('cleanupExecutionWorktree(row)'));
+  expect(releaseSource).toContain("worktree_cleanup_status = 'pending'");
+  const reconcile = releaseSource.slice(releaseSource.indexOf('export async function reconcileRunReleaseIntent'));
+  expect(reconcile.indexOf('persistTerminalIntent(row)')).toBeLessThan(reconcile.indexOf('cleanupExecutionWorktree(row)'));
+  expect(mergeSource).toContain('integrationCheckoutPath');
+  expect(mergeSource).toContain("['merge', '--abort']");
   expect(checkSource).toContain('terminal_checkout_sha');
   expect(checkSource).toContain('release_authorized_sha');
+});
+
+test('startup drains releases before stale classification and periodically retries a bounded batch', () => {
+  const startup = workerSource.slice(workerSource.indexOf('async function start()'));
+  expect(startup.indexOf('drainPendingRunReleases(100, 1000)')).toBeLessThan(startup.indexOf('recoverStaleJobs()'));
+  expect(startup).toContain('reconcilePendingRunReleases(100)');
+  expect(workerSource).toContain('NOT EXISTS (SELECT 1 FROM pipeline_run_release_intents ri WHERE ri.run_id = pr.id)');
+  expect(workerSource).toContain("SELECT 1 FROM pipeline_run_release_intents ri\n           WHERE ri.run_id = (j.data->>'runId')::bigint");
 });
 
 test('story commits stay local and deployment/workflow authority is absent', () => {

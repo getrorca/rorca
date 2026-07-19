@@ -24,6 +24,7 @@ jest.mock('../github-token-resolver', () => ({
 
 import {
   withGithubReleaseActuation,
+  withRunReleaseLock,
   type RunReleaseIdentity,
 } from '../release-identity';
 
@@ -62,6 +63,10 @@ beforeEach(() => {
     branchName: 'run/release',
     workspaceRealpath: fs.realpathSync(workspace),
     worktreeRealpath: fs.realpathSync(worktree),
+    baseBranch: 'main',
+    baseSha: git(workspace, 'rev-parse', 'main'),
+    providerReleaseRef: `rorca/release/run-71-${sha.slice(0, 12)}`,
+    integrationCheckoutPath: path.join(root, 'integration'),
     repository: {
       owner: 'getrorca', name: 'rorca', source: 'github-app-installation',
       bindingId: '00000000-0000-4000-8000-000000000071',
@@ -94,7 +99,7 @@ test('reacquires App authority, resolves the purpose credential last, and actuat
   expect(actuator).toHaveBeenCalledTimes(1);
 });
 
-test.each(['merge', 'pulls-write', 'workflow-dispatch', 'checks-write'] as const)(
+test.each(['merge', 'pulls-write', 'repository-read', 'checks-write'] as const)(
   'HEAD advance during %s credential resolution blocks the actuator',
   async (purpose) => {
     resolveToken.mockImplementationOnce(async () => {
@@ -121,4 +126,21 @@ test('App authority cannot downgrade to a workspace PAT', async () => {
   const actuator = jest.fn();
   await expect(withGithubReleaseActuation(release, 'merge', actuator)).rejects.toThrow(/cannot downgrade/);
   expect(actuator).not.toHaveBeenCalled();
+});
+
+test('different runs for one repository serialize under one repository-wide lock', async () => {
+  const events: string[] = [];
+  const second = { ...release, runId: 72 };
+  await Promise.all([
+    withRunReleaseLock(release, async () => {
+      events.push('first:start');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      events.push('first:end');
+    }),
+    withRunReleaseLock(second, async () => {
+      events.push('second:start');
+      events.push('second:end');
+    }),
+  ]);
+  expect(events).toEqual(['first:start', 'first:end', 'second:start', 'second:end']);
 });

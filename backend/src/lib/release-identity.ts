@@ -17,13 +17,13 @@ import {
   getGithubRepositoryAuthority,
   type GithubRepositoryAuthority,
 } from './github-repository-authority';
+import { isGitSha } from './git-sha';
 import {
   resolveWorkspaceGitHubToken,
   type GithubCredentialPurpose,
   type ResolvedGitHubToken,
 } from './github-token-resolver';
 
-const FULL_SHA = /^[0-9a-f]{40}$/;
 const LOCK_WAIT_MS = 10_000;
 
 export interface RunReleaseIdentity {
@@ -34,6 +34,10 @@ export interface RunReleaseIdentity {
   branchName: string;
   workspaceRealpath: string;
   worktreeRealpath: string;
+  baseBranch: string;
+  baseSha: string;
+  providerReleaseRef: string | null;
+  integrationCheckoutPath: string;
   repository: {
     owner: string;
     name: string;
@@ -52,6 +56,10 @@ interface FrozenRunRow {
   execution_workspace_path: string | null;
   execution_worktree_path: string | null;
   terminal_checkout_sha: string | null;
+  base_branch: string | null;
+  base_sha: string | null;
+  provider_release_ref: string | null;
+  integration_checkout_path: string | null;
 }
 
 function sameRepository(
@@ -70,16 +78,21 @@ function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-function lockPath(identity: RunReleaseIdentity): string {
-  const digest = crypto.createHash('sha256').update(JSON.stringify({
-    repository: identity.workspaceRealpath,
-    runId: identity.runId,
-  })).digest('hex');
-  return path.join(os.tmpdir(), `rorca-release-${digest}.lock`);
+function lockPaths(identity: RunReleaseIdentity): string[] {
+  // Every release takes the local repository lock. Provider-backed releases
+  // additionally take an owner/name lock, so aliases/clones serialize too.
+  // Sorted acquisition avoids deadlock. runId is deliberately excluded.
+  const keys = [`local:${identity.workspaceRealpath}`];
+  if (identity.repository) {
+    keys.push(`provider:${identity.repository.owner.toLowerCase()}/${identity.repository.name.toLowerCase()}`);
+  }
+  return keys.map((key) => {
+    const digest = crypto.createHash('sha256').update(key).digest('hex');
+    return path.join(os.tmpdir(), `rorca-release-${digest}.lock`);
+  }).sort();
 }
 
-async function acquire(identity: RunReleaseIdentity): Promise<() => void> {
-  const target = lockPath(identity);
+async function acquireTarget(target: string, identity: RunReleaseIdentity): Promise<() => void> {
   const deadline = Date.now() + LOCK_WAIT_MS;
   while (true) {
     try {
@@ -114,9 +127,13 @@ export async function withRunReleaseLock<T>(
   identity: RunReleaseIdentity,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const release = await acquire(identity);
-  try { return await operation(); }
-  finally { release(); }
+  const releases: Array<() => void> = [];
+  try {
+    for (const target of lockPaths(identity)) releases.push(await acquireTarget(target, identity));
+    return await operation();
+  } finally {
+    for (const release of releases.reverse()) release();
+  }
 }
 
 /** Re-read DB paths and prove the exact canonical branch/HEAD while locked. */
@@ -125,18 +142,28 @@ export async function revalidateRunReleaseIdentity(
   options: { requireLiveCheckout?: boolean } = { requireLiveCheckout: true },
 ): Promise<void> {
   if (!Number.isSafeInteger(identity.runId) || identity.runId <= 0
-    || !FULL_SHA.test(identity.authorizedSha)) throw new Error('release identity is invalid');
+    || !isGitSha(identity.authorizedSha)
+    || !isGitSha(identity.baseSha)
+    || !identity.baseBranch
+    || !path.isAbsolute(identity.integrationCheckoutPath)) throw new Error('release identity is invalid');
   const run = await queryOne<FrozenRunRow>(`
-    SELECT workspace_id, spec_path, branch_name, worktree_path,
-           execution_workspace_path, execution_worktree_path, terminal_checkout_sha
-      FROM pipeline_runs WHERE id = $1
+    SELECT pr.workspace_id, pr.spec_path, pr.branch_name, pr.worktree_path,
+           pr.execution_workspace_path, pr.execution_worktree_path, pr.terminal_checkout_sha,
+           ri.base_branch, ri.base_sha, ri.provider_release_ref, ri.integration_checkout_path
+      FROM pipeline_runs pr
+      LEFT JOIN pipeline_run_release_intents ri ON ri.run_id = pr.id
+     WHERE pr.id = $1
   `, [identity.runId]);
   if (!run
     || run.workspace_id !== identity.workspaceId
     || path.basename(run.spec_path, '.json') !== identity.specId
     || run.branch_name !== identity.branchName
     || run.execution_workspace_path !== identity.workspaceRealpath
-    || run.execution_worktree_path !== identity.worktreeRealpath) {
+    || run.execution_worktree_path !== identity.worktreeRealpath
+    || (run.base_branch != null && run.base_branch !== identity.baseBranch)
+    || (run.base_sha != null && run.base_sha.toLowerCase() !== identity.baseSha)
+    || (run.provider_release_ref != null && run.provider_release_ref !== identity.providerReleaseRef)
+    || (run.integration_checkout_path != null && run.integration_checkout_path !== identity.integrationCheckoutPath)) {
     throw new Error('release identity differs from DB-frozen run authority');
   }
   if (options.requireLiveCheckout !== false) {
@@ -159,7 +186,7 @@ export interface GithubReleaseActuationContext {
 }
 
 /**
- * Canonical external-effect boundary. It holds the per-run/repository lock,
+ * Canonical external-effect boundary. It holds repository-wide local/provider locks,
  * reacquires exact repository authority, resolves a purpose token last, then
  * repeats HEAD validation immediately before handing control to the actuator.
  */

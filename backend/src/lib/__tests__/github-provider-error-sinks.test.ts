@@ -14,7 +14,6 @@ const providerCallers = [
   path.join(LIB, 'release-authority.ts'),
   path.join(LIB, 'check-run-poster.ts'),
   path.join(LIB, 'github-checks.ts'),
-  path.join(LIB, 'ci-autofix', 'fix-orchestrator.ts'),
   path.join(LIB, 'autonomous-pr-delivery.ts'),
   path.join(BACKEND_SRC, 'routes', 'workspace-github.ts'),
 ];

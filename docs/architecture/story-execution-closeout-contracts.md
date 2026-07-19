@@ -12,7 +12,7 @@ The closeout gate does **not** evaluate or write lifecycle phase state, approve 
 
 ## Host authority
 
-Required commands run through the existing autonomous command guard in the manifest-bound story worktree. A host observation records:
+Required commands run through the existing autonomous command guard in the manifest-bound story worktree. The guard is command-policy/defense-in-depth, not a security boundary; stripped child authority and host-only release/provider capabilities provide that boundary. A host observation records:
 
 - canonical executable/argument hash;
 - guarded working directory;

@@ -113,7 +113,7 @@ The broader app settings also support other provider/model sources for non-execu
 - **Skills-first public surface:** the launch UI now uses Skills terminology end-to-end instead of Marketplace labels.
 - **Spec-Centric Memory Relevance Graph:** run-time and pre-flight context graph views make retrieval explainability visible in the product.
 - **Memory provenance cleanup:** imported / provenance-poor memories now have a separate review lane instead of being hidden inside stale review.
-- **GitHub integration polish:** the dashboard and docs now focus on repo wiring, webhooks, workflow dispatch, and PR automation.
+- **GitHub integration polish:** the dashboard and docs focus on repository wiring, signed webhooks, exact-SHA PR/release automation, and hard-disabled workflow/deployment dispatch.
 
 ## The mental model
 

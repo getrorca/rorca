@@ -26,11 +26,6 @@ import { subscribe, broadcastAll, type WalEvent } from '../sse-hub';
 import { queryOne, query, execute } from '../../db/index';
 import { getBoss } from '../pg-boss';
 import { logger } from '../logger';
-import { githubRateLimiter } from '../github-rate-limiter';
-import { getGithubRepositoryAuthority, githubRepoApiUrl, isFullGitObjectId } from '../github-repository-authority';
-import { resolveWorkspaceGitHubToken } from '../github-token-resolver';
-import { fetchGithubWithTimeout } from '../github-app-credential-provider';
-import { extractGithubProviderError, sanitizeGithubProviderException } from '../github-provider-error';
 import type { CiCheckFailure, CiAnnotation } from './webhook-handler';
 import type { AgentType } from '../config';
 
@@ -331,7 +326,7 @@ async function handleCiCheckFailed(event: WalEvent): Promise<void> {
  * When a pipeline run triggered by CI autofix completes, close the feedback loop:
  * 1. Look up ci_autofix_runs row by run_id
  * 2. Determine outcome from pipeline_runs.status and story_results
- * 3. Post GitHub commit status on the original SHA
+ * 3. Record local/WAL completion only (automatic provider status is disabled)
  * 4. Update ci_autofix_runs row with final status
  * 5. Emit ci_autofix_completed WAL event
  */
@@ -382,65 +377,9 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
 
   const finalStatus = success ? 'completed' : 'failed';
 
-  // 3. Post GitHub commit status
-  const repoInfo = await getGithubRepositoryAuthority(autofixRow.workspace_id, { requireActive: true }).catch(() => null);
-
-  if (repoInfo) {
-    const resolved = await resolveWorkspaceGitHubToken(autofixRow.workspace_id, {
-      repository: { owner: repoInfo.owner, name: repoInfo.name }, purpose: 'statuses-write',
-    }).catch(() => null);
-    const token = resolved?.token ?? null;
-    if (!isFullGitObjectId(autofixRow.head_sha)) {
-      logger.warn('[CI Autofix] Full immutable commit SHA is unavailable — skipping commit status post');
-    } else if (token) {
-      const state = success ? 'success' : 'failure';
-      const description = success
-        ? `Rorca autofix: all errors in ${autofixRow.check_run_name} resolved`
-        : `Rorca autofix: could not resolve all errors in ${autofixRow.check_run_name} — manual fix required`;
-
-      const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:5210';
-      const targetUrl = `${baseUrl}/runs/${runId}`;
-
-      const url = githubRepoApiUrl(repoInfo.owner, repoInfo.name, `/statuses/${autofixRow.head_sha}`);
-      try {
-        const res = await githubRateLimiter.execute(() =>
-          fetchGithubWithTimeout(fetch, url, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: 'application/vnd.github+json',
-              'Content-Type': 'application/json',
-              'X-GitHub-Api-Version': '2022-11-28',
-            },
-            body: JSON.stringify({
-              state,
-              context: 'Rorca CI Autofix',
-              description: description.slice(0, 140),
-              target_url: targetUrl,
-            }),
-          }),
-        );
-
-        if (!res.ok) {
-          const providerError = extractGithubProviderError(res, 'GITHUB_CI_AUTOFIX_STATUS_FAILED');
-          logger.warn({ providerError }, '[CI Autofix] GitHub commit status API error');
-        } else {
-          logger.info(
-            `[CI Autofix] Posted ${state} commit status for ${autofixRow.head_sha.slice(0, 7)} (${autofixRow.check_run_name})`,
-          );
-        }
-      } catch (err) {
-        const providerError = sanitizeGithubProviderException(err, 'GITHUB_CI_AUTOFIX_STATUS_FAILED');
-        logger.warn({ providerError }, '[CI Autofix] Failed to post GitHub commit status');
-      }
-    } else {
-      logger.warn('[CI Autofix] No GitHub token available — skipping commit status post');
-    }
-  } else {
-    logger.warn(
-      `[CI Autofix] No GitHub connection for workspace ${autofixRow.workspace_id} — skipping commit status post`,
-    );
-  }
+  // Automatic provider status mutation is deliberately disabled. CI autofix
+  // records durable local/WAL outcome only; terminal GitHub projection remains
+  // owned by the exact run release/Check Run reconciler.
 
   // 4. Update ci_autofix_runs row
   await execute(

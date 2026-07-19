@@ -19,7 +19,7 @@ Repository permissions:
 | Permission | Access | Reason |
 |---|---:|---|
 | Metadata | Read | Required repository identity metadata. |
-| Actions | **Read and write** | Reserved for separately authorized host operations. Autonomous run deployment/workflow dispatch is disabled by the release seam. |
+| Actions | **Read** | Workflow/deployment dispatch is hard disabled; read supports workflow diagnostics only. Historical Actions-write bindings fail closed until the provider profile is explicitly downgraded and revalidated. |
 | Checks | **Read and write** | Exact-SHA evidence reads Check Runs; Rorca publishes exact-final-SHA Check Runs. |
 | Commit statuses | **Read and write** | Exact-SHA evidence reads statuses; only explicit admin manual/non-governing statuses are published. Per-story trusted-WAL status projection is disabled. |
 | Contents | **Read and write** | Compare/spec discovery reads contents; governed merge paths require write. |
@@ -42,12 +42,13 @@ GitHub **Team plan remains separately required** for private-repository protecte
 
 ## Host-owned release authority
 
-- Execution-engine story commits remain local. Agent/model shells cannot use `git push`, `gh`, network Git/SSH, `curl`, `wget`, or ambient credential helpers.
-- The worker persists one immutable release intent containing the exact authorized 40-hex SHA, branch, DB-frozen workspace/worktree realpaths, and exact repository/App installation identity before any external effect or public `done` state.
-- Every merge, push, PR create/finalize, and reviewed exact-SHA merge reacquires canonical repository authority under a local run/repository lock, resolves a purpose-scoped credential last, and repeats HEAD validation immediately before actuation.
+- Execution-engine story commits remain local. PATH wrappers deny common remote commands only as defense in depth; they are not the capability boundary. Child environments omit DB/vault/App/PAT/operator secrets, and provider-mutating HTTP routes require a real authenticated principal or an explicit local operator capability even when `AUTH_REQUIRED=false`.
+- In local mode set only `RORCA_OPERATOR_CAPABILITY_SHA256=<sha256-of-operator-secret>` on the server and supply the preimage in `X-Rorca-Operator-Capability` for provider-facing mutations. The server never stores or returns the preimage, and execution children receive neither digest nor preimage. Without this configuration, provider mutation controls are safely read-only/disabled.
+- The worker persists one immutable release intent containing the exact authorized 40-hex SHA, branch, DB-frozen workspace/worktree realpaths, exact base branch/SHA, deterministic isolated integration path, unique provider release ref, and exact repository/App installation identity. Intent, terminal checkout attestation, and `release_pending` transition commit in one transaction before any effect.
+- Every merge, push, PR create/finalize, and reviewed exact-SHA merge reacquires canonical repository authority under repository-wide local/provider locks, resolves a purpose-scoped credential last, and repeats exact identity validation immediately before actuation.
 - App authority never downgrades. Workspace PAT/OAuth is usable only when the canonical authority view explicitly selects `pat-oauth-fallback` because no App binding exists. There is no `gh` or SSH fallback.
-- `direct`, `pr`, `draft-pr`, and authorized `branch-only` retain their distinct behavior. Deployment/workflow dispatch remains disabled. ANSI, PTY, and native-PTY execution transport is unchanged.
-- Terminal intent and exact SHA are durable before `done`; startup reconciles pending release intents through the existing worker boundary. Worktree cleanup is separate mutable state and never erases immutable execution identity.
+- `direct` builds the merge in the persisted isolated integration checkout, verifies the frozen canonical base, pushes with provider force-with-lease CAS, and advances the local base by exact `update-ref` CAS. `pr`/`draft-pr`/`branch-only` push a unique run-owned ref; PR create/finalize rereads that ref immediately before mutation, verifies exact head afterward, and closes/quarantines any raced PR. Deployment/workflow dispatch and automatic legacy PR/CI-autofix statuses are hard disabled. ANSI, PTY, and native-PTY execution transport is unchanged.
+- Successful fresh and retry runs use the identical release seam and preserve predecessor authority/strategy. Terminal intent and exact SHA are durable before `done`; startup drains a globally bounded set before stale classification and periodic worker reconciliation retries bounded batches. Exact cleanup treats an already absent/unregistered authorized worktree as complete and never replays a completed cleanup after relay failure.
 8. To replace a disabled/invalid binding, enter the new exact installation/repository identity and an audited replacement reason. Rorca preserves and permanently supersedes the old row; it never deletes or rewrites binding identity.
 
 No model may choose repository authority, grant permissions, install the App, activate policy, merge, or deploy.

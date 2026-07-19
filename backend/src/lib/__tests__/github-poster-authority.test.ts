@@ -46,8 +46,9 @@ test('story commit statuses are explicitly removed from trusted/governing delive
   expect(trustedWal).toContain("trust_provenance !== 'host'");
 });
 
-test('spec-compliance status uses purpose-narrow read/write credentials', () => {
-  expect(checks).toContain("getGithubToken(workspaceId, owner, repo, 'pulls-read')");
+test('only explicit manual status uses a purpose-narrow write credential', () => {
+  expect(checks).not.toContain("getGithubToken(workspaceId, owner, repo, 'pulls-read')");
   expect(checks).toContain("getGithubToken(workspaceId, owner, repo, 'statuses-write')");
+  expect(checks).toContain('Automatic PR #${prNumber} status evaluation is disabled');
   expect(checks).not.toContain("purpose: 'checks'");
 });

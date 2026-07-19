@@ -20,6 +20,11 @@ jest.mock('../../db/index', () => ({
   }),
 }));
 jest.mock('../merge-handler', () => ({ performMerge: jest.fn() }));
+jest.mock('../release-identity', () => ({
+  revalidateRunReleaseIdentity: jest.fn().mockResolvedValue(undefined),
+  withRunReleaseLock: async (_identity: unknown, fn: () => Promise<unknown>) => fn(),
+  withGithubReleaseActuation: jest.fn(),
+}));
 jest.mock('../github-repository-authority', () => ({
   getGithubRepositoryAuthority: jest.fn(),
   githubRepoApiUrl: jest.fn(),
@@ -55,6 +60,10 @@ const intent = {
   identity_hash: 'b'.repeat(64),
   status: 'processing',
   step_state: {},
+  base_branch: 'main',
+  base_sha: 'd'.repeat(40),
+  provider_release_ref: null,
+  integration_checkout_path: '/integration',
   merge_commit_sha: null,
   terminal_event_id: null,
 };

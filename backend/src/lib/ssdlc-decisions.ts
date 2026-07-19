@@ -16,6 +16,7 @@ import { simpleGit } from 'simple-git';
 import type { PoolClient } from 'pg';
 import { query, queryOne, transaction } from '../db/index';
 import { LOCAL_ADMIN } from './auth-utils';
+import { GIT_SHA_PATTERN } from './git-sha';
 import { LifecyclePlanSchema, type LifecyclePlan, type PhaseId } from './ssdlc-contracts';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import {
@@ -276,7 +277,7 @@ function normalizeSubject(subject: DecisionSubject | null | undefined): Decision
     throw new ValidationError('subject.type must be commit_sha or artifact_digest', { field: 'subject.type' });
   }
   const value = text(subject.value, 'subject.value').toLowerCase();
-  if (subject.type === 'commit_sha' && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) {
+  if (subject.type === 'commit_sha' && !GIT_SHA_PATTERN.test(value)) {
     throw new ValidationError('commit_sha must be a full 40 character hexadecimal revision', { field: 'subject.value' });
   }
   if (subject.type === 'artifact_digest' && !/^sha256:[a-f0-9]{64}$/.test(value)) {

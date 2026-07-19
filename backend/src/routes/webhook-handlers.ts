@@ -28,7 +28,6 @@ import * as path from 'path';
 import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
-import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
 import { logger } from '../lib/logger';
 import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
@@ -383,11 +382,11 @@ export function handlePullRequestCheck(
   const [owner, repo] = repoFullName.split('/');
   if (!owner || !repo) return;
 
-  // Fire and forget — the check is posted asynchronously
-  evaluatePrAndPostCheck(owner, repo, prNumber, headSha, prTitle, branchName, workspaceId)
-    .catch(err => {
-      logger.error(`[Webhook] Check evaluation failed for PR #${prNumber}:`, err);
-    });
+  // Provider status mutation from PR webhooks is intentionally disabled. The
+  // signed event remains local evidence; only the durable exact run Check Run
+  // reconciler may project an automatic provider outcome.
+  logger.info({ owner, repo, prNumber, headSha, prTitle, branchName, workspaceId },
+    '[Webhook] PR update recorded without automatic provider status mutation');
 }
 
 // ─── Push spec discovery handler ────────────────────────────────────────────

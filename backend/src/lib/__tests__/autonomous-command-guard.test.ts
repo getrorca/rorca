@@ -54,7 +54,10 @@ describe('autonomous-command-guard', () => {
       DATABASE_URL: 'postgres://prod-secret',
       PGPASSWORD: 'db-secret',
       JWT_SECRET: 'jwt-secret',
+      VAULT_KEY: 'vault-secret',
       GITHUB_TOKEN: 'github-secret',
+      RORCA_OPERATOR_CAPABILITY: 'operator-secret',
+      RORCA_OPERATOR_CAPABILITY_SHA256: 'digest-not-for-children',
       ANTHROPIC_API_KEY: 'provider-key-required-by-selected-cli',
     })).toEqual({
       PATH: '/usr/bin',
@@ -86,6 +89,7 @@ describe('autonomous-command-guard', () => {
           ...process.env,
           DATABASE_URL: 'postgres://rorca:rorca@127.0.0.1:5433/rorca',
           DATABASE_URL_TEST: 'postgres://guard:guard@127.0.0.1:1/guard_test',
+          RORCA_TEST_DATABASE_URL: 'postgres://guard:guard@127.0.0.1:1/guard_test',
         } as Record<string, string>,
       });
 
@@ -110,7 +114,34 @@ describe('autonomous-command-guard', () => {
     }
   });
 
-  test.each(['general', 'conflict-resolution'] as const)('%s profile blocks network, gh, and remote git operations', (profile) => {
+  test('absolute interpreters bypass PATH wrappers but receive no host/provider capability', () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-absolute-guard-ws-'));
+    const guarded = createAutonomousCommandGuard({
+      cwd: workspace,
+      env: {
+        ...process.env,
+        VAULT_KEY: 'vault-secret',
+        GITHUB_TOKEN: 'github-secret',
+        RORCA_OPERATOR_CAPABILITY: 'operator-secret',
+        RORCA_OPERATOR_CAPABILITY_SHA256: 'operator-digest',
+      } as Record<string, string>,
+    });
+    try {
+      const absoluteNode = process.execPath;
+      const result = spawnSync(absoluteNode, ['-e', 'process.stdout.write(JSON.stringify({vault:process.env.VAULT_KEY,github:process.env.GITHUB_TOKEN,operator:process.env.RORCA_OPERATOR_CAPABILITY,digest:process.env.RORCA_OPERATOR_CAPABILITY_SHA256}))'], {
+        cwd: workspace, env: guarded.env, encoding: 'utf8',
+      });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({});
+      // This explicitly proves wrappers are not treated as the capability
+      // boundary: the absolute interpreter executed successfully.
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      fs.rmSync(guarded.guardBinDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['general', 'conflict-resolution'] as const)('%s profile blocks network, gh, and remote git operations as defense in depth', (profile) => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-conflict-guard-ws-'));
     const guarded = createAutonomousCommandGuard({
       cwd: workspace,

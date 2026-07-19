@@ -7,11 +7,11 @@
 
 import { queryOne } from '../db/index';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from './errors';
+import { isGitSha } from './git-sha';
 
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 const BRANCH = /^(?!\/)(?!.*(?:\.\.|\/\/|@\{|\\|[~^:?*\[]))(?!.*\.$)[A-Za-z0-9._\/-]{1,255}$/;
-const FULL_GIT_OBJECT_ID = /^[0-9a-f]{40}$/i;
 const GITHUB_API_ORIGIN = 'https://api.github.com';
 
 export type GithubRepositoryAuthoritySource = 'github-app-installation' | 'pat-oauth-fallback';
@@ -85,9 +85,7 @@ export function assertGithubRef(ref: string): void {
   if (!BRANCH.test(ref)) throw new ValidationError('Invalid GitHub branch or ref');
 }
 
-export function isFullGitObjectId(value: unknown): value is string {
-  return typeof value === 'string' && FULL_GIT_OBJECT_ID.test(value);
-}
+export const isFullGitObjectId = isGitSha;
 
 export function githubRepoApiUrl(owner: string, name: string, suffix = ''): string {
   assertGithubRepositoryIdentity(owner, name);

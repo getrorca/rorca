@@ -193,7 +193,7 @@ describe('GitHubSettingsPanel', () => {
       manifest: {
         name: 'Rorca',
         redirect_url: 'https://rorca.example/settings/github?github_app_setup=callback',
-        default_permissions: { actions: 'write', contents: 'write' },
+        default_permissions: { actions: 'read', contents: 'write' },
       },
       nextAction: 'Create the private App in acme.',
     };

@@ -254,7 +254,7 @@ beforeEach(() => {
     };
   });
   providerFetch.mockImplementation(async (url: string, init: RequestInit) => {
-    if (url.includes('/commits/') && init.method === 'GET') return response({ check_runs: [] });
+    if (url.includes('/commits/') && init.method === 'GET') return response({ total_count: 0, check_runs: [] });
     if (url.endsWith('/check-runs') && init.method === 'POST') return response({ id: 101 }, 201);
     return response({}, 200);
   });
@@ -495,7 +495,8 @@ describe('check run terminal completeness authority', () => {
     let createAttempts = 0;
     providerFetch.mockImplementation(async (url: string, init: RequestInit) => {
       if (url.includes('/commits/') && init.method === 'GET') {
-        return response(createAttempts === 0 ? { check_runs: [] } : {
+        return response(createAttempts === 0 ? { total_count: 0, check_runs: [] } : {
+          total_count: 1,
           check_runs: [{ id: 909, external_id: 'rorca:pipeline-run:41:v1', head_sha: FINAL_SHA }],
         });
       }
@@ -544,6 +545,32 @@ describe('check run terminal completeness authority', () => {
     expect(providerFetch.mock.calls.filter(([url, init]: [string, RequestInit]) =>
       url.endsWith('/check-runs') && init.method === 'POST')).toHaveLength(0);
     expect(projection?.check_run_id).toBe(910);
+  });
+
+  test.each([
+    ['missing check_runs', { total_count: 0 }],
+    ['missing total_count', { check_runs: [] }],
+    ['negative total_count', { total_count: -1, check_runs: [] }],
+    ['unsafe total_count', { total_count: Number.MAX_SAFE_INTEGER + 1, check_runs: [] }],
+    ['under-reported total_count', { total_count: 1, check_runs: [] }],
+  ])('malformed discovery shape (%s) remains uncertain and never creates', async (_label, malformed) => {
+    currentRun = {
+      ...currentRun,
+      status: 'done', lifecycle_status: 'finished', expected_story_ids: ['US-001'],
+      finished_at: '2026-07-18T10:02:00.000Z',
+    };
+    terminalRows = [acceptedRow('US-001', 1, FINAL_SHA, '2026-07-18T10:02:00.000Z')];
+    providerFetch.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.includes('/commits/') && init.method === 'GET') return response(malformed);
+      if (url.endsWith('/check-runs') && init.method === 'POST') return response({ id: 999 }, 201);
+      return response({}, 200);
+    });
+    await handleCheckRunWalEvent(trustedEvent({
+      eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
+    }));
+    expect(projection?.projection_status).toBe('uncertain');
+    expect(providerFetch.mock.calls.filter(([url, init]: [string, RequestInit]) =>
+      url.endsWith('/check-runs') && init.method === 'POST')).toHaveLength(0);
   });
 
   test('a failed terminal run cannot publish neutral or success merely because its last story passed', async () => {

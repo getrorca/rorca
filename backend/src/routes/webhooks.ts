@@ -20,6 +20,7 @@ import {
 } from '../lib/webhook-router';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { insertAuditEntry } from './integration-audit-log';
+import { requireProviderMutationAuthority } from '../lib/provider-mutation-authority';
 
 export const webhookCallbackRouter = Router({ strict: true, caseSensitive: true });
 export const webhookAdminRouter = Router({ strict: true, caseSensitive: true });
@@ -562,7 +563,7 @@ webhookAdminRouter.get('/dlq', requirePlatformAdmin, requireDlqWorkspaceRole('me
  *       404:
  *         description: DLQ entry not found
  */
-webhookAdminRouter.post('/dlq/:id/retry', requirePlatformAdmin, requireDlqWorkspaceRole('admin'), async (req: Request, res: Response) => {
+webhookAdminRouter.post('/dlq/:id/retry', requireProviderMutationAuthority, requirePlatformAdmin, requireDlqWorkspaceRole('admin'), async (req: Request, res: Response) => {
   const rawDlqId = String(req.params.id);
   if (!/^[1-9][0-9]*$/.test(rawDlqId)) throw new ValidationError('Invalid DLQ entry ID');
   const dlqId = Number(rawDlqId);

@@ -6211,99 +6211,31 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
   }
 }
 
-// ─── POST /api/pipeline/runs/:runId/retry-merge — Retry a failed worktree merge ─
-// Re-enqueues the merge job for a run whose merge_status is 'failed'.
+// ─── POST /api/pipeline/runs/:runId/retry-merge — Retired legacy actuator ───
 
 /**
  * @swagger
  * /api/pipeline/runs/{runId}/retry-merge:
  *   post:
  *     tags: [Pipeline]
- *     summary: Retry a failed worktree auto-merge
+ *     summary: Retired manual merge retry actuator
  *     operationId: retryMerge
- *     description: Re-enqueues a pipeline:merge pg-boss job for a run whose merge_status is 'failed'. Resets merge_status to 'merging'.
+ *     description: Returns a truthful conflict. Exact release intents retry through the canonical periodic reconciler; historical runs cannot be upgraded safely from branch-name-only state.
  *     parameters:
  *       - in: path
  *         name: runId
  *         required: true
  *         schema: { type: string, pattern: '^[0-9]+$' }
  *     responses:
- *       200: { description: "Merge job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: string }, queued: { type: boolean } } } } } }
- *       404: { description: "Run not found" }
- *       409: { description: "merge_status is not failed" }
+ *       400: { description: "Invalid run id" }
+ *       409: { description: "Manual actuator retired; canonical reconciliation is automatic" }
  */
-router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
-  try {
-    const runIdText = String(req.params.runId);
-    if (!/^[1-9][0-9]*$/.test(runIdText)) {
-      throw new ValidationError('Invalid runId');
-    }
-    const runId = normalizeWorkerRunId(runIdText);
-
-    const run = await queryOne<{
-      id: string;
-      merge_status: string | null;
-      branch_name: string | null;
-      worktree_path: string | null;
-      workspace_id: string;
-      auto_merge: boolean | null;
-      merge_strategy: string | null;
-      agent_type: string | null;
-      agent_model: string | null;
-    }>(
-      'SELECT id, merge_status, branch_name, worktree_path, workspace_id, auto_merge, merge_strategy, agent_type, agent_model FROM pipeline_runs WHERE id = $1',
-      [runId],
-    );
-
-    if (!run) {
-      throw new NotFoundError('Run', String(runId));
-    }
-
-    if (run.merge_status !== 'failed') {
-      throw new ConflictError(
-        `Cannot retry merge: merge_status is '${run.merge_status ?? 'null'}', expected 'failed'`,
-      );
-    }
-
-    if (!run.branch_name) {
-      throw new ConflictError('Cannot retry merge: run has no branch_name (not a worktree run)');
-    }
-    if (run.auto_merge !== true || run.merge_strategy !== 'direct') {
-      throw new ConflictError('Cannot retry merge: only autoMerge=true direct runs may merge into the base branch');
-    }
-    if (!['claude', 'opencode', 'codex', 'pi'].includes(run.agent_type ?? '')) {
-      throw new ConflictError('Cannot retry merge: persisted configured agent is missing or invalid');
-    }
-
-    // Reset merge_status to 'merging' — use rowCount to detect race condition
-    const { rowCount } = await execute(
-      `UPDATE pipeline_runs SET merge_status = 'merging' WHERE id = $1 AND merge_status = 'failed'`,
-      [runId],
-    );
-
-    if (rowCount === 0) {
-      throw new ConflictError('Merge status was already changed by another request');
-    }
-
-    // Enqueue pipeline:merge job
-    await getBoss().send('pipeline:merge', {
-      runId,
-      branch: run.branch_name,
-      workspaceId: run.workspace_id,
-      posture: { agent: run.agent_type as 'claude' | 'opencode' | 'codex' | 'pi', model: run.agent_model, source: 'manual-retry' },
-    }, {
-      retryLimit: 0,
-      expireInSeconds: 3600, // 1 hour
-    });
-
-    logger.info({ runId, branch: run.branch_name }, '[Pipeline] Enqueued pipeline:merge retry job');
-
-    res.status(200).json({ ok: true, runId, queued: true });
-  } catch (error: any) {
-    // AppError subclasses are caught and serialized by the centralized error handler
-    logger.error({ error }, '[Pipeline] retry-merge error');
-    throw error;
-  }
+router.post('/runs/:runId/retry-merge', (req: Request, _res: Response) => {
+  const runIdText = String(req.params.runId);
+  if (!/^[1-9][0-9]*$/.test(runIdText)) throw new ValidationError('Invalid runId');
+  throw new ConflictError(
+    'Manual retry-merge is retired: exact release intents retry automatically; historical branch-only merge state cannot be authorized safely.',
+  );
 });
 
 // ─── POST /api/pipeline/runs/:runId/pause — Pause a running pipeline ─────────
