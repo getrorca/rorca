@@ -870,6 +870,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     });
 
     child.on('close', async () => {
+      let semanticCloseoutCompleted = false;
       try {
         await flushPending();
         // The engine flushes its bounded telemetry queue before process close.
@@ -911,9 +912,16 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           source: 'worker',
         });
 
+        // A clean process exit is not yet semantic success. Keep the public run
+        // non-terminal until merge/integration routing reaches closeout; adverse
+        // process outcomes may become terminal immediately.
+        const provisionalStatus = status === 'done' ? 'running' : status;
         await execute(
-          `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
-          [status, runId],
+          `UPDATE pipeline_runs
+              SET status = $1,
+                  finished_at = CASE WHEN $1 = 'running' THEN NULL ELSE NOW() END
+            WHERE id = $2`,
+          [provisionalStatus, runId],
         );
 
         if (wasCancelled) {
@@ -922,8 +930,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             cancelledAt: new Date().toISOString(),
             source: 'worker',
           });
+          semanticCloseoutCompleted = true;
         } else {
-          await emitWalEvent('run_finished', workspaceId, {
+          // Process exit is transport evidence only. Keep it on a distinct event
+          // so completion subscribers cannot act on a provisional success before
+          // merge/integration gates establish the semantic closeout.
+          await emitWalEvent('run_process_finished', workspaceId, {
             run_id: runId,
             status,
             exit_code: code,
@@ -1201,7 +1213,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]);
             logger.error({ runId }, '[worker] required direct merge failed; run outcome changed to failed');
           }
-          await emitWalEvent('run_closeout', workspaceId, {
+          await execute(
+            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
+            [status, runId],
+          );
+          const semanticCloseoutPayload = {
             run_id: runId,
             status,
             completion_scope: worktreePath ? (mergeStatusAtCloseout === 'merged' ? 'base_integrated' : 'run_branch') : 'base_integrated',
@@ -1209,7 +1225,18 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             branch_name: payload.branchName ?? null,
             merge_strategy: effectiveMergeStrategy,
             merge_status: mergeStatusAtCloseout,
+          };
+          await emitWalEvent('run_closeout', workspaceId, semanticCloseoutPayload);
+          // `run_finished` is the broad subscriber contract. Emit it only after
+          // authoritative closeout and with that final semantic status.
+          await emitWalEvent('run_finished', workspaceId, {
+            ...semanticCloseoutPayload,
+            exit_code: code,
+            exit_signal: signal,
+            source: 'worker',
+            semantic_closeout: true,
           });
+          semanticCloseoutCompleted = true;
 
           // A bounded CI-recovery child resumes the original reviewed-delivery
           // state machine only after its branch push/closeout is durable.
@@ -1249,6 +1276,34 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         );
       } catch (err) {
         logger.error({ err, runId }, '[worker] close handler failed');
+        if (!semanticCloseoutCompleted) {
+          try {
+            await execute(
+              `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'worker_closeout_failed' WHERE id = $1`,
+              [runId],
+            );
+            await transitionRunLifecycle(runId, 'failed', {
+              owner: 'worker',
+              outcome: 'failed',
+              reason: 'worker_closeout_failed',
+            });
+            const failedCloseout = {
+              run_id: runId,
+              status: 'failed',
+              reason: 'worker_closeout_failed',
+              source: 'worker',
+              semantic_closeout: true,
+            };
+            await emitWalEvent('run_closeout', workspaceId, failedCloseout);
+            await emitWalEvent('run_finished', workspaceId, failedCloseout);
+            semanticCloseoutCompleted = true;
+          } catch (closeoutErr) {
+            logger.error({ err: closeoutErr, runId }, '[worker] failed to persist fail-closed semantic closeout');
+          }
+          advanceQueue(String(workspaceId)).catch(queueErr =>
+            logger.error({ err: queueErr, runId, workspaceId }, '[worker] advanceQueue failed after closeout failure'),
+          );
+        }
       }
     });
 

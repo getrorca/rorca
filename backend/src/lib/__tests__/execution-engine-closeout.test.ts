@@ -203,6 +203,33 @@ describe('execution-engine closeout architecture', () => {
     expect(ENGINE_SOURCE).toContain("fs.chmodSync(diagnosticPath, 0o600)");
     expect(persistence.match(/diagnostic\.rawDiagnostic/g)).toHaveLength(1);
     expect(persistence).not.toContain('error_raw');
+    expect(persistence).not.toContain('diagnostic_log:');
+    expect(persistence).not.toContain('logPath: diagnosticPath');
+
+    const rejectedMutationStart = ENGINE_SOURCE.indexOf('async function markStoryPromiseRejected(');
+    const rejectedMutationEnd = ENGINE_SOURCE.indexOf('/** Revert a story', rejectedMutationStart);
+    const rejectedMutation = ENGINE_SOURCE.slice(rejectedMutationStart, rejectedMutationEnd);
+    expect(rejectedMutation).toContain("story.status = 'failed'");
+    expect(rejectedMutation).toContain('delete story.skipped');
+    expect(rejectedMutation).not.toContain('story.skipped = true');
+  });
+
+  test('publishes broad run completion only after authoritative semantic closeout', () => {
+    const handlerStart = WORKER_SOURCE.indexOf('async function handlePipelineRun(');
+    const handlerEnd = WORKER_SOURCE.indexOf('// ── Job handler: pipeline:retry', handlerStart);
+    const handler = WORKER_SOURCE.slice(handlerStart, handlerEnd);
+    const processFinished = handler.indexOf("emitWalEvent('run_process_finished'");
+    const semanticCloseout = handler.indexOf("emitWalEvent('run_closeout'", processFinished);
+    const subscriberFinished = handler.indexOf("emitWalEvent('run_finished'", semanticCloseout);
+
+    expect(processFinished).toBeGreaterThan(0);
+    expect(handler).toContain("const provisionalStatus = status === 'done' ? 'running' : status");
+    expect(semanticCloseout).toBeGreaterThan(processFinished);
+    expect(subscriberFinished).toBeGreaterThan(semanticCloseout);
+    expect(handler.slice(processFinished, semanticCloseout)).not.toContain("emitWalEvent('run_finished'");
+    expect(handler.slice(subscriberFinished, handlerEnd)).toContain('semantic_closeout: true');
+    expect(handler).toContain("summary = 'worker_closeout_failed'");
+    expect(handler).toContain("reason: 'worker_closeout_failed'");
   });
 
   test('keeps retry/restart identity and timeout/cancellation paths fail closed', () => {

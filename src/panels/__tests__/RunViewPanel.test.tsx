@@ -565,6 +565,8 @@ describe('RunViewPanel', () => {
     renderWithProviders(<RunViewPanel runId={88} onBack={vi.fn()} onNavigate={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByTestId('run-semantic-status')).toHaveTextContent('Failed'));
+    expect(screen.getByText(/Run failed — 1 story did not complete.*1 no result/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Retry failed stories/i })).not.toBeInTheDocument();
     expect(screen.queryByText('Passed')).not.toBeInTheDocument();
   });
 

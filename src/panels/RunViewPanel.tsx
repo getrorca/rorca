@@ -1476,6 +1476,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   ), [runReconciliation.storyStatuses]);
 
   const failedStoryCount = failedStoryIds.size;
+  const incompleteStoryCount = runReconciliation.counts.failed
+    + runReconciliation.counts.blocked
+    + runReconciliation.counts.unresolved;
   const passedStoryCount = runReconciliation.counts.passed;
 
   // Derive root cause analysis for wave failure banner:
@@ -1960,7 +1963,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       )}
 
       {/* Run failed banner — root cause analysis for wave failures */}
-      {(effectiveStatus === 'failed' || effectiveStatus === 'partial_failure') && failedStoryCount > 0 && (
+      {(effectiveStatus === 'failed' || effectiveStatus === 'partial_failure') && incompleteStoryCount > 0 && (
         <div className="shrink-0 border-b border-red-500/30 bg-red-500/10" role="alert" aria-live="assertive">
           <div className="px-3 md:px-4 py-2.5 md:py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-3">
             <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -1981,12 +1984,16 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                     </button>
                   </>
                 ) : (
-                  <>Run failed — {failedStoryCount} {failedStoryCount === 1 ? 'story' : 'stories'} did not complete</>
+                  <>
+                    Run failed — {incompleteStoryCount} {incompleteStoryCount === 1 ? 'story' : 'stories'} did not complete
+                    {runReconciliation.counts.blocked > 0 ? ` (${runReconciliation.counts.blocked} blocked)` : ''}
+                    {runReconciliation.counts.unresolved > 0 ? ` (${runReconciliation.counts.unresolved} no result)` : ''}
+                  </>
                 )}
               </span>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {!waveFailureInfo && (
+              {!waveFailureInfo && failedStoryCount > 0 && (
                 <button
                   onClick={handleViewErrorDetail}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
@@ -1995,21 +2002,23 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                   View error detail
                 </button>
               )}
-              <button
-                onClick={handleRetryFailed}
-                disabled={retryLoading}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${retryLoading
-                  ? 'bg-red-500/20 text-red-500/40 cursor-not-allowed'
-                  : 'bg-red-500 text-white hover:bg-red-600'
-                  }`}
-              >
-                {retryLoading ? (
-                  <Loader2 size={12} className="animate-spin" />
-                ) : (
-                  <RotateCcw size={12} />
-                )}
-                Retry failed stories
-              </button>
+              {failedStoryCount > 0 && (
+                <button
+                  onClick={handleRetryFailed}
+                  disabled={retryLoading}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${retryLoading
+                    ? 'bg-red-500/20 text-red-500/40 cursor-not-allowed'
+                    : 'bg-red-500 text-white hover:bg-red-600'
+                    }`}
+                >
+                  {retryLoading ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <RotateCcw size={12} />
+                  )}
+                  Retry failed stories
+                </button>
+              )}
             </div>
           </div>
         </div>

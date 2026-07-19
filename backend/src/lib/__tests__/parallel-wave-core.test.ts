@@ -34,8 +34,10 @@ function accountingState(): WaveAccountingState {
 describe('parallel-wave rejection evidence', () => {
   test('normalizes, bounds, and redacts durable rejection fields while retaining a local-only raw diagnostic', () => {
     const secret = 'sk-test_REALLY_SECRET_TOKEN_1234567890';
-    const error = new Error(`dispatch exploded with token ${secret} ${'x'.repeat(3_000)}`);
-    error.stack = `${error.name}: ${error.message}\n${`at worker (${secret})\n`.repeat(1_000)}`;
+    const hostPath = '/Users/operator/private/rorca/backend/src/worker.ts';
+    const windowsPath = 'C:\\Users\\operator\\private\\worker.ts';
+    const error = new Error(`dispatch exploded at ${hostPath} and ${windowsPath} with token ${secret} ${'x'.repeat(3_000)}`);
+    error.stack = `${error.name}: ${error.message}\n${`at worker (${hostPath}:42:7 ${secret})\n`.repeat(1_000)}`;
 
     const normalized = normalizeWaveRejection(error);
 
@@ -43,7 +45,12 @@ describe('parallel-wave rejection evidence', () => {
     expect(normalized.stack.length).toBeLessThanOrEqual(WAVE_REJECTION_STACK_MAX_CHARS);
     expect(normalized.message).not.toContain(secret);
     expect(normalized.stack).not.toContain(secret);
+    expect(normalized.message).not.toContain(hostPath);
+    expect(normalized.message).not.toContain(windowsPath);
+    expect(normalized.stack).not.toContain(hostPath);
+    expect(normalized.message).toContain('[redacted-path]');
     expect(normalized.rawDiagnostic).toContain(secret);
+    expect(normalized.rawDiagnostic).toContain(hostPath);
   });
 
   test('attempts spec, run-state, WAL, and story-result failure evidence even after an earlier rejection', async () => {

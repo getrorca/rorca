@@ -4013,7 +4013,7 @@ async function markStoryPromiseRejected(jsonPath: string, storyId: string, reaso
     if (!story) throw new Error(`Cannot persist rejected wave story ${storyId}: story not found`);
     story.passes = false;
     story.status = 'failed';
-    story.skipped = true;
+    delete story.skipped;
     story.notes = `${reason} — preserved for inspection and safe retry`;
     fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
     logger.info(`Marked ${storyId} as failed after ${reason}`);
@@ -5265,7 +5265,7 @@ async function recordParallelStoryInfrastructureFailure(input: {
     reason: input.reasonCode,
     message: diagnostic.message,
     stack: diagnostic.stack,
-    diagnosticPath: diagnosticPath ?? null,
+    diagnosticRef: diagnosticPath ? path.basename(diagnosticPath) : null,
   }, '[engine] wave story failed outside the normal executor outcome contract');
 
   const finishedAt = new Date().toISOString();
@@ -5298,7 +5298,9 @@ async function recordParallelStoryInfrastructureFailure(input: {
         wave: input.waveIndex,
         error_message: diagnostic.message,
         error_stack: diagnostic.stack,
-        diagnostic_log: diagnosticPath ?? null,
+        // The raw diagnostic may contain secrets. Its mode-0600 local path is
+        // deliberately not persisted because story output APIs dereference
+        // story-result log paths and would otherwise expose the raw material.
         diagnostic_raw_local_only: true,
         diagnostic_raw_truncated: diagnostic.rawTruncated,
         ...(input.worktree ? {
@@ -5315,7 +5317,6 @@ async function recordParallelStoryInfrastructureFailure(input: {
         storyId: input.story.id,
         status: 'fail',
         reason: input.reasonCode,
-        logPath: diagnosticPath,
         ...(input.worktree ? {
           worktreePath: input.worktree.worktreePath,
           worktreeBranch: input.worktree.branchName,

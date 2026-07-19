@@ -120,7 +120,7 @@ describe('reconcileRunCloseout story truth', () => {
     expect(result.terminal).toBe(true);
     expect(result.storyStatuses.get('US-001')).toBe('no_result');
     expect(result.storyStatuses.get('US-002')).toBe('no_result');
-    expect(result.storyStatuses.get('US-003')).toBe('pending');
+    expect(result.storyStatuses.get('US-003')).toBe('no_result');
     expect([...result.storyStatuses.values()]).not.toContain('running');
     expect(result.counts.passed).toBe(0);
   });

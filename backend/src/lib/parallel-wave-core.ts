@@ -31,11 +31,20 @@ function rawRejectionDiagnostic(reason: unknown): string {
  * Produce bounded, secret-redacted fields for durable evidence while retaining a
  * bounded raw value solely for a mode-0600 local diagnostic file.
  */
+function redactAbsoluteHostPaths(value: string): string {
+  return value
+    // Stack/message evidence may be API-visible. Preserve frames while removing
+    // checkout, home, and temporary-directory identities on POSIX and Windows.
+    .replace(/(^|[\s(])\/(?!\/)[^\s),;\]]+/gm, '$1[redacted-path]')
+    .replace(/(^|[\s(])[A-Za-z]:\\[^\s),;\]]+/gm, '$1[redacted-path]');
+}
+
 function boundedSafeDiagnostic(value: string, maxChars: number): string {
   // Bound the redaction workload as well as its final output. Two output windows
   // retain enough source for redaction patterns which straddle the first window.
   const source = value.slice(0, maxChars * 2);
-  const safe = contextSafeString(source, { maxStringChars: source.length + 1 }).value;
+  const contextSafe = contextSafeString(source, { maxStringChars: source.length + 1 }).value;
+  const safe = redactAbsoluteHostPaths(contextSafe);
   if (safe.length <= maxChars && value.length <= source.length) return safe;
   const suffix = '… [truncated]';
   return `${safe.slice(0, Math.max(0, maxChars - suffix.length))}${suffix}`;

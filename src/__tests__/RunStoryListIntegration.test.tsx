@@ -504,8 +504,8 @@ describe('RunStoryList Integration', () => {
 
     await waitFor(() => expect(screen.getByTestId('story-row-US-001')).toBeInTheDocument());
     expect(screen.getByTestId('story-row-US-001')).toHaveAttribute('data-story-status', 'no_result');
-    expect(screen.getByTestId('story-row-US-002')).toHaveAttribute('data-story-status', 'pending');
-    expect(screen.getByText('1 no result')).toBeInTheDocument();
+    expect(screen.getByTestId('story-row-US-002')).toHaveAttribute('data-story-status', 'no_result');
+    expect(screen.getByText('2 no result')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
   });
 

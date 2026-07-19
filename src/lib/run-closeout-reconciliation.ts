@@ -322,7 +322,11 @@ export function reconcileRunCloseout(input: ReconcileRunCloseoutInput): RunClose
   const storyStatuses = new Map(initialStoryStatuses);
   if (terminal) {
     for (const [storyId, storyStatus] of storyStatuses) {
-      if (storyStatus === 'running' || storyStatus === 'retry') storyStatuses.set(storyId, 'no_result');
+      // Terminal runs cannot truthfully retain live/pending labels. Absence of
+      // explicit pass/fail/blocked/skip evidence is a settled no-result state.
+      if (storyStatus === 'pending' || storyStatus === 'running' || storyStatus === 'retry') {
+        storyStatuses.set(storyId, 'no_result');
+      }
     }
   }
 
