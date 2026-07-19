@@ -152,6 +152,27 @@ export class RetentionBudgetExhaustedError extends AppError {
         super(message, 'RETENTION_BUDGET_EXHAUSTED', details);
     }
 }
+/** 503 — a normalized transcript event could not be durably appended */
+export class TranscriptPersistenceError extends AppError {
+    statusCode = 503;
+    constructor(message = 'PTY transcript persistence failed', details) {
+        super(message, 'TRANSCRIPT_PERSISTENCE_FAILED', details);
+    }
+}
+/** 507 — exact raw terminal evidence could not be written completely */
+export class RawArchiveWriteError extends AppError {
+    statusCode = 507;
+    constructor(message = 'Raw PTY archive write failed', details) {
+        super(message, 'RAW_ARCHIVE_WRITE_FAILED', details);
+    }
+}
+/** 422 — a raw archive segment is missing or failed integrity validation */
+export class RawArchiveIntegrityError extends AppError {
+    statusCode = 422;
+    constructor(message = 'Raw PTY archive integrity verification failed', details) {
+        super(message, 'RAW_ARCHIVE_INTEGRITY_FAILED', details);
+    }
+}
 /** 503 — service unavailable (upstream down, circuit breaker open) */
 export class ServiceUnavailableError extends AppError {
     statusCode = 503;

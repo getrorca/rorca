@@ -384,6 +384,19 @@ export function contentDigest(content, algorithm = 'sha256') {
 export function shortHash(content, length = 12) {
     return hashContent(content, 'sha256').slice(0, Math.max(1, length));
 }
+/**
+ * Stream a file through the shared hashing primitive without loading it into
+ * memory. Security-sensitive archive verifiers use this instead of creating
+ * ad-hoc hash implementations outside context-safety.
+ */
+export async function hashFileContent(filePath, algorithm = 'sha256') {
+    const hash = createHash(algorithm);
+    const stream = fs.createReadStream(filePath);
+    for await (const chunk of stream) {
+        hash.update(chunk);
+    }
+    return hash.digest('hex');
+}
 /** Build a non-reversible preview of a matched secret (head/tail only). */
 function buildPreview(value) {
     if (value.length <= 8)
@@ -855,6 +868,64 @@ export function sanitizeContextResponseValue(value, options = {}, depth = 0) {
         output._truncatedKeys = entries.length - opts.maxObjectKeys;
     }
     return output;
+}
+/** Maximum persisted bytes for one normalized transcript payload. */
+export const MAX_TRANSCRIPT_PAYLOAD_BYTES = 16 * 1024;
+/**
+ * Redact and structurally bound one transcript payload. This is the only
+ * transcript sanitization boundary: callers must persist `value`/`serialized`
+ * exactly as returned rather than adding writer-local secret rules.
+ */
+export function sanitizeTranscriptPayload(value, maxBytes = MAX_TRANSCRIPT_PAYLOAD_BYTES) {
+    const boundedMax = Math.min(MAX_TRANSCRIPT_PAYLOAD_BYTES, Math.max(512, Math.floor(maxBytes)));
+    let originalSerialized;
+    try {
+        originalSerialized = JSON.stringify(value ?? null);
+    }
+    catch {
+        originalSerialized = JSON.stringify('[UNSERIALIZABLE_TRANSCRIPT_PAYLOAD]');
+    }
+    let safeValue;
+    try {
+        // Key-aware redaction must happen before structural truncation. Otherwise a
+        // separate `{ password: "..." }` key/value would not look like an inline
+        // assignment when the string value is sanitized on its own.
+        safeValue = sanitizeContextResponseValue(redactObject(value).value, {
+            maxStringChars: 2_000,
+            maxArrayItems: 25,
+            maxObjectKeys: 40,
+            maxDepth: 6,
+        });
+    }
+    catch {
+        safeValue = '[UNSERIALIZABLE_TRANSCRIPT_PAYLOAD]';
+    }
+    let serialized = JSON.stringify(safeValue ?? null);
+    let truncated = serialized !== originalSerialized && (serialized.includes('[TRUNCATED:') || serialized.includes('… [truncated '));
+    if (Buffer.byteLength(serialized, 'utf8') > boundedMax) {
+        const summaryLimit = Math.max(128, Math.min(8_000, boundedMax - 256));
+        safeValue = {
+            // Summarize the already-redacted structured form, never the raw input.
+            summary: contextSafeString(serialized, { maxStringChars: summaryLimit }).value,
+            truncated: true,
+        };
+        serialized = JSON.stringify(safeValue);
+        truncated = true;
+    }
+    // JSON escaping can make the fallback larger than its character cap. Shrink
+    // deterministically until the hard byte contract is met.
+    if (Buffer.byteLength(serialized, 'utf8') > boundedMax) {
+        safeValue = { summary: '[TRUNCATED:payload exceeds byte contract]', truncated: true };
+        serialized = JSON.stringify(safeValue);
+        truncated = true;
+    }
+    return {
+        value: safeValue,
+        serialized,
+        bytes: Buffer.byteLength(serialized, 'utf8'),
+        redacted: serialized !== originalSerialized && serialized.includes('[REDACTED'),
+        truncated,
+    };
 }
 // ─── Compatibility exports for context-capture sidecar APIs ─────────────────
 export const CONTEXT_SAFETY_CONTRACT_VERSION = 'rorca-context-safety/v1';

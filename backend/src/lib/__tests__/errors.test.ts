@@ -15,6 +15,9 @@ import {
   UnprocessableError,
   CheckpointCorruptionError,
   RetentionBudgetExhaustedError,
+  TranscriptPersistenceError,
+  RawArchiveWriteError,
+  RawArchiveIntegrityError,
 } from '../errors';
 import { errorHandler } from '../error-handler';
 import type { Request, Response, NextFunction } from 'express';
@@ -93,6 +96,21 @@ describe('Error classes', () => {
     expect(exhausted.statusCode).toBe(507);
     expect(exhausted.code).toBe('RETENTION_BUDGET_EXHAUSTED');
     expect(exhausted.details).toEqual({ maxBytes: 1024 });
+  });
+
+  test('PTY evidence errors distinguish transcript availability, raw writes, and integrity', () => {
+    const transcript = new TranscriptPersistenceError(undefined, { generationId: 'gen-1' });
+    expect(transcript.statusCode).toBe(503);
+    expect(transcript.code).toBe('TRANSCRIPT_PERSISTENCE_FAILED');
+
+    const write = new RawArchiveWriteError(undefined, { segmentIndex: 2 });
+    expect(write.statusCode).toBe(507);
+    expect(write.code).toBe('RAW_ARCHIVE_WRITE_FAILED');
+
+    const integrity = new RawArchiveIntegrityError(undefined, { segmentIndex: 2 });
+    expect(integrity.statusCode).toBe(422);
+    expect(integrity.code).toBe('RAW_ARCHIVE_INTEGRITY_FAILED');
+    expect(integrity).toBeInstanceOf(AppError);
   });
 
   test('toJSON produces standard { error, code?, details? } shape', () => {

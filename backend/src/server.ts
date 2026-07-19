@@ -35,6 +35,7 @@ import contextCandidatesRouter from './routes/context-candidates';
 import contextCaptureRouter from './routes/context-capture';
 import captureIngestRouter from './routes/capture-ingest';
 import pipelineRouter, { cleanupOldLogs, cleanupOrphanRuns } from './routes/pipeline';
+import ptyEvidenceRouter from './routes/pty-evidence';
 import recoveryRouter from './routes/recovery';
 import hooksRouter from './routes/hooks';
 import worktreesRouter from './routes/worktrees';
@@ -144,6 +145,7 @@ import lifecycleMutationsRouter from './routes/lifecycle-mutations';
 import deliveryGovernanceRouter from './routes/delivery-governance';
 import { startSsdlcEvidenceNormalizer } from './lib/ssdlc-evidence-subscriber';
 import { randomUUID } from 'crypto';
+import { pruneExpiredRawPtyArchives, reconcileInterruptedRawPtyArchives } from './lib/pty-raw-archive';
 
 
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
@@ -423,6 +425,7 @@ app.use('/api/context-candidates', contextCandidatesRouter);
 app.use('/api/context-capture', contextCaptureRouter);
 app.use('/api/workspaces', captureIngestRouter);
 app.use('/api/pipeline', pipelineRouter);
+app.use('/api/pty-evidence', ptyEvidenceRouter);
 // Admin-only and deliberately absent from MCP/OpenAPI tool generation.
 app.use('/api/admin/recovery', recoveryRouter);
 app.use('/api/execution-environments', executionEnvironmentsRouter);
@@ -614,6 +617,14 @@ if (process.env.NODE_ENV !== 'test') {
     // Scheduler runs in-process with API — see CLI-035 Supervisor decision.
     startScheduler();
     cleanupOldLogs();
+    // Reconcile closed generations left in a writing archive state before
+    // pruning expired restricted evidence. Both operations are bounded.
+    reconcileInterruptedRawPtyArchives()
+      .then((count) => { if (count > 0) logger.info({ count }, '[pty-archive] Reconciled interrupted archives'); })
+      .catch((err) => logger.error({ err }, '[pty-archive] Startup reconciliation failed'));
+    pruneExpiredRawPtyArchives()
+      .then((result) => { if (result.pruned > 0 || result.failed > 0) logger.info(result, '[pty-archive] Retention prune complete'); })
+      .catch((err) => logger.error({ err }, '[pty-archive] Retention prune failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
     // PG-004: Initialise pg-boss so the Express process can send jobs

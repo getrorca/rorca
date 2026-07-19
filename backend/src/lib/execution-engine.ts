@@ -85,6 +85,8 @@ import {
   type PtyGenerationRef,
 } from './run-pty-store';
 import { attachRunPtyLifecycle, transitionRunLifecycle } from './run-lifecycle';
+import { openRawPtyArchive, type RawPtyArchiveWriter } from './pty-raw-archive';
+import { PtyTranscriptRecorder } from './pty-transcript-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
@@ -2252,6 +2254,9 @@ async function spawnAgentViaPty(
     let readinessState: PtyReadinessState | null = null;
     let adapter: InteractivePtyAgentAdapter | null = null;
     let outputBatcher: ReturnType<typeof createRunPtyOutputBatcher> | null = null;
+    let transcriptRecorder: PtyTranscriptRecorder | null = null;
+    let rawArchiveWriter: RawPtyArchiveWriter | null = null;
+    let rawArchiveWriteFailed = false;
     let generationRef: PtyGenerationRef | null = null;
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
@@ -2291,8 +2296,6 @@ async function spawnAgentViaPty(
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to drain bounded PTY output writer', ptyOptions.runId, err);
       }
-      logStream.end();
-      ptyCommand?.cleanup?.();
       // A file alone never erases an unexpected process failure. The only
       // normalized non-zero exit is the SIGTERM we intentionally send after a
       // valid file has ended the interactive turn.
@@ -2306,6 +2309,29 @@ async function spawnAgentViaPty(
             : exitSignal
               ? 'killed'
               : 'failed';
+      try {
+        await rawArchiveWriter?.drain();
+      } catch (err: unknown) {
+        rawArchiveWriteFailed = true;
+        transcriptRecorder?.recordError(
+          'raw_archive_finalize_failed',
+          'Exact raw PTY archive could not be finalized; earlier verified segments remain available.',
+        );
+        logRunPtyStoreError('Failed to finalize exact raw PTY archive', ptyOptions.runId, err);
+      }
+      transcriptRecorder?.recordHostNotice('generation_closed', 'PTY generation process exited.', {
+        processStatus: status,
+        rawArchiveComplete: !rawArchiveWriteFailed,
+      });
+      try {
+        await transcriptRecorder?.drain();
+      } catch (err: unknown) {
+        // Transcript evidence failure is explicit operational telemetry, but it
+        // never changes the agent process/story result.
+        logRunPtyStoreError('Failed to finalize structured PTY transcript', ptyOptions.runId, err);
+      }
+      logStream.end();
+      ptyCommand?.cleanup?.();
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
       if (!completionFileSeen && generationRef) {
@@ -2411,6 +2437,21 @@ async function spawnAgentViaPty(
         cols: ptyOptions.cols,
         rows: ptyOptions.rows,
       });
+      transcriptRecorder = new PtyTranscriptRecorder(generationRef);
+      transcriptRecorder.recordHostNotice('generation_started', 'PTY generation started.', {
+        agentType: ptyOptions.agentType,
+        attempt: ptyOptions.attempt,
+      });
+      try {
+        rawArchiveWriter = await openRawPtyArchive(generationRef);
+      } catch (err: unknown) {
+        rawArchiveWriteFailed = true;
+        transcriptRecorder.recordError(
+          'raw_archive_initialization_failed',
+          'Exact raw PTY archive could not be initialized; the agent process will continue independently.',
+        );
+        logRunPtyStoreError('Failed to initialize exact raw PTY archive', ptyOptions.runId, err);
+      }
       completionState = createPtyCompletionState(completionMarker);
       readinessState = createPtyReadinessState(ptyOptions.agentType);
       adapter = buildInteractivePtyAgentAdapter(
@@ -2589,9 +2630,23 @@ async function spawnAgentViaPty(
               .catch((err: unknown) => logRunPtyStoreError('Failed to record corroborating PTY terminal marker', ptyOptions.runId, err));
           }
         }
-        // node-pty is push-only. The bounded single writer batches durable
-        // inserts and accounts for overflow instead of retaining an unbounded
-        // promise chain when terminal output outpaces PostgreSQL.
+        // Archive bytes before normalization: only this path receives the exact
+        // node-pty Buffer, preserving order and every repaint/control byte.
+        if (rawArchiveWriter && !rawArchiveWriteFailed) {
+          try {
+            rawArchiveWriter.append(buf);
+          } catch (err: unknown) {
+            rawArchiveWriteFailed = true;
+            transcriptRecorder?.recordError(
+              'raw_archive_write_failed',
+              'Exact raw PTY archive write failed; earlier verified segments remain available.',
+            );
+            logRunPtyStoreError('Failed to append exact raw PTY archive bytes', ptyOptions.runId, err);
+          }
+        }
+        transcriptRecorder?.recordModelBytes(buf);
+        // node-pty is push-only. The bounded replay-ring writer batches durable
+        // inserts and accounts for overflow. It is not full-history authority.
         outputBatcher?.enqueue(buf);
       });
 
@@ -2702,6 +2757,26 @@ async function spawnAgentViaPty(
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
+      try {
+        await outputBatcher?.drain();
+      } catch (drainError) {
+        logRunPtyStoreError('Failed to drain PTY replay ring after spawn failure', ptyOptions.runId, drainError);
+      }
+      try {
+        await rawArchiveWriter?.drain();
+      } catch (archiveError) {
+        transcriptRecorder?.recordError(
+          'raw_archive_finalize_failed',
+          'Exact raw PTY archive could not be finalized after process startup failure.',
+        );
+        logRunPtyStoreError('Failed to finalize raw archive after spawn failure', ptyOptions.runId, archiveError);
+      }
+      transcriptRecorder?.recordError('pty_spawn_failed', 'PTY process startup failed before a normal generation exit.');
+      try {
+        await transcriptRecorder?.drain();
+      } catch (transcriptError) {
+        logRunPtyStoreError('Failed to finalize transcript after spawn failure', ptyOptions.runId, transcriptError);
+      }
       try {
         if (generationRef) await completeRunPtySession(generationRef, 'failed', 1, null);
       } catch { /* session may not have been persisted yet */ }
