@@ -66,6 +66,7 @@ const validRetryPayload = {
   previewHash: `sha256:${'b'.repeat(64)}`,
   approvedPreview: { schemaVersion: 'retry-preview.v1' },
   generatedPlanHash: `sha256:${'c'.repeat(64)}`,
+  dispatchIdentity: { schemaVersion: 'rorca.governed-retry-dispatch.v1', identityHash: `sha256:${'d'.repeat(64)}` },
   workspacePath: '/home/user/project',
   specPath: 'forge/specs/approved/my-spec.json',
   retrySpecPath: '/tmp/retry-my-spec.json',

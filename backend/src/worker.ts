@@ -34,7 +34,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import { spawn, execSync, type ChildProcess } from 'child_process';
+import { spawn, execFileSync, execSync, type ChildProcess } from 'child_process';
 import { z } from 'zod';
 import PgBoss from 'pg-boss';
 import {
@@ -52,7 +52,7 @@ import { performMerge } from './lib/merge-handler';
 // withUserClient(). This process runs with RORCA_PROCESS_ROLE=worker and spawns
 // RORCA_PROCESS_ROLE=engine children to perform system-owned orchestration jobs,
 // so it must bypass per-request JWT RLS scoping.
-import { initDb, query, queryOne, execute, closePool } from './db/index';
+import { initDb, query, queryOne, execute, transaction, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
@@ -67,6 +67,12 @@ import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import { replayFallbackResults } from './lib/fallback-replay';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
+import { deriveStoryContractRevision } from './lib/story-execution-packet';
+import {
+  governedRetryQueuePayloadHash,
+  verifyGovernedRetryDispatchIdentity,
+  type GovernedRetryDispatchIdentity,
+} from './lib/governed-story-retry';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { isPtyTerminalMode } from './lib/terminal-mode';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
@@ -1225,52 +1231,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
 // ── Job handler: pipeline:retry ───────────────────────────────────────────
 
-function collectStoriesFromSpec(specJson: any): any[] {
-  if (Array.isArray(specJson?.userStories)) return specJson.userStories;
-  if (Array.isArray(specJson?.phases)) {
-    return specJson.phases.flatMap((phase: { stories?: unknown[] }) => Array.isArray(phase.stories) ? phase.stories : []);
-  }
-  return [];
-}
-
-function syncRetrySpecPassesToOriginalSpec(params: {
-  retrySpecPath: string;
-  originalSpecPath: string;
-  storyIds: string[];
-}): { syncedStoryIds: string[]; remainingStoryIds: string[] } {
-  const retrySpecJson = JSON.parse(fs.readFileSync(params.retrySpecPath, 'utf8'));
-  const originalSpecJson = JSON.parse(fs.readFileSync(params.originalSpecPath, 'utf8'));
-  const retriedIds = new Set(params.storyIds);
-  const passedInRetry = new Set(
-    collectStoriesFromSpec(retrySpecJson)
-      .filter((story: any) => retriedIds.has(String(story.id)) && story.passes === true)
-      .map((story: any) => String(story.id)),
-  );
-
-  const syncedStoryIds: string[] = [];
-  let changed = false;
-  for (const story of collectStoriesFromSpec(originalSpecJson)) {
-    const storyId = String(story.id);
-    if (passedInRetry.has(storyId) && story.passes !== true) {
-      story.passes = true;
-      syncedStoryIds.push(storyId);
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    fs.writeFileSync(params.originalSpecPath, JSON.stringify(originalSpecJson, null, 2), 'utf8');
-  }
-
-  const remainingStoryIds = collectStoriesFromSpec(originalSpecJson)
-    .filter((story: any) => story.excluded !== true && story.passes !== true)
-    .map((story: any) => String(story.id));
-
-  return { syncedStoryIds, remainingStoryIds };
-}
-
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
-  await Promise.allSettled(jobs.map(async (job) => {
+  const outcomes = await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
     logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:retry received');
 
@@ -1285,7 +1247,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     const {
       runId,
       originalRunId,
-      storyIds,
+      storyIds: _storyIds,
       workspacePath,
       specPath,
       retrySpecPath,
@@ -1305,15 +1267,28 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       previewHash,
       approvedPreview: approvedPreviewRaw,
       generatedPlanHash,
+      dispatchIdentity: dispatchIdentityRaw,
     } = payload;
     const approvedPreview = approvedPreviewRaw as unknown as RetryPreviewPacket;
+    const dispatchIdentity = dispatchIdentityRaw as unknown as GovernedRetryDispatchIdentity;
+    if (
+      !verifyGovernedRetryDispatchIdentity(dispatchIdentity)
+      || governedRetryQueuePayloadHash(payload as unknown as Record<string, unknown>) !== dispatchIdentity.queuePayloadHash
+      || dispatchIdentity.queueName !== 'pipeline:retry'
+      || dispatchIdentity.retryRunId !== runId
+      || dispatchIdentity.originalRunId !== originalRunId
+      || dispatchIdentity.approvedPreviewHash !== previewHash
+      || dispatchIdentity.scopeHash !== payload.scopeHash
+    ) {
+      throw new Error('[governed-retry] queue payload identity is invalid or stale');
+    }
 
     // Effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
 
     // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string; spec_path: string }>(
-      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path FROM pipeline_runs WHERE id = $1',
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null; branch_name: string | null; status: string; spec_path: string; retried_from_run_id: number | null; pid: number | null }>(
+      'SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path, retried_from_run_id, pid FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
@@ -1321,6 +1296,20 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
     const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode, branch_name: branchName } = runRow;
+    if (
+      workspaceId !== dispatchIdentity.workspaceId
+      || path.basename(runRow.spec_path, '.json') !== dispatchIdentity.specId
+      || Number(runRow.retried_from_run_id) !== originalRunId
+      || workspacePath !== path.resolve(workspacePath)
+      || specPath !== runRow.spec_path
+    ) throw new Error('[governed-retry] workspace/spec/run lineage changed after dispatch');
+    const recoveryRevision = execFileSync('git', ['rev-parse', dispatchIdentity.recoveryRef], { cwd, encoding: 'utf8' }).trim();
+    const currentRevision = execSync('git rev-parse HEAD', { cwd, encoding: 'utf8' }).trim();
+    if (
+      recoveryRevision !== dispatchIdentity.recoveryRefRevision
+      || currentRevision !== dispatchIdentity.integratedRevision
+      || currentRevision !== dispatchIdentity.baseRevision
+    ) throw new Error('[governed-retry] base/integrated/recovery revision changed after dispatch');
     const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
     if (runRow.status === 'cancelled') {
       logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
@@ -1333,6 +1322,14 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     if (previewRow?.status !== 'dispatched' || !verifyRetryPreview(approvedPreview)) {
       await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'retry_preview_not_authorized' WHERE id = $1`, [runId]);
       await emitWalEvent('retry_scope_mismatch', workspaceId, { run_id: runId, original_run_id: originalRunId, preview_hash: previewHash, reason: 'preview_not_authorized' });
+      return;
+    }
+    const durableReplayState = await queryOne<{ state: string }>(
+      `SELECT state FROM governed_retry_dispatches WHERE identity_hash = $1`,
+      [dispatchIdentity.identityHash],
+    );
+    if (durableReplayState && ['committed', 'integrating', 'integrated_validated', 'finalized', 'failed', 'manual_review_required'].includes(durableReplayState.state)) {
+      logger.info({ jobId, runId, state: durableReplayState.state }, '[worker] retry delivery already crossed the agent boundary; replay is a no-op');
       return;
     }
 
@@ -1376,6 +1373,12 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       return;
     }
     const actualRetrySpec = JSON.parse(fs.readFileSync(retrySpecPath, 'utf8')) as Record<string, unknown>;
+    const sourceSpecAbsolutePath = path.join(workspacePath, specPath);
+    if (!fs.existsSync(sourceSpecAbsolutePath)) throw new Error('[governed-retry] approved source spec is missing');
+    const currentSourceSpec = JSON.parse(fs.readFileSync(sourceSpecAbsolutePath, 'utf8')) as Record<string, unknown>;
+    if (deriveStoryContractRevision(currentSourceSpec) !== dispatchIdentity.specRevision) {
+      throw new Error('[governed-retry] approved source spec revision changed after dispatch');
+    }
     const planComparison = compareRetryPlanToPreview(actualRetrySpec, approvedPreview);
     if (!planComparison.matches || planComparison.scopeHash !== generatedPlanHash || retryHash(approvedPreview.scope.executable.map((entry) => entry.storyId)) !== payload.scopeHash) {
       await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'worker_scope_mismatch' WHERE preview_hash = $1`, [previewHash]);
@@ -1387,6 +1390,208 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         approved_scope: planComparison.approved,
         actual_scope: planComparison.actual,
         reason: 'worker_scope_mismatch',
+      });
+      return;
+    }
+    if (!executionManifestPath || !fs.existsSync(executionManifestPath)) {
+      throw new Error('[governed-retry] immutable execution manifest bundle is missing');
+    }
+    const manifestBundle = JSON.parse(fs.readFileSync(executionManifestPath, 'utf8')) as Array<{ manifestHash?: string }>;
+    const manifestHash = retryHash(manifestBundle.map((manifest) => manifest.manifestHash).sort());
+    if (manifestHash !== dispatchIdentity.executionManifestHash) {
+      throw new Error('[governed-retry] immutable execution manifest bundle changed after dispatch');
+    }
+    const persistedDispatch = await queryOne<{
+      identity_hash: string; workspace_id: string; spec_id: string; spec_revision: string;
+      retry_run_id: number; original_run_id: number; state: string; queue_payload_hash: string;
+    }>(
+      `SELECT identity_hash, workspace_id, spec_id, spec_revision, retry_run_id,
+              original_run_id, state, queue_payload_hash
+       FROM governed_retry_dispatches WHERE identity_hash = $1`,
+      [dispatchIdentity.identityHash],
+    );
+    if (
+      !persistedDispatch
+      || persistedDispatch.workspace_id !== workspaceId
+      || Number(persistedDispatch.retry_run_id) !== runId
+      || Number(persistedDispatch.original_run_id) !== originalRunId
+      || persistedDispatch.spec_id !== dispatchIdentity.specId
+      || persistedDispatch.spec_revision !== dispatchIdentity.specRevision
+      || persistedDispatch.queue_payload_hash !== dispatchIdentity.queuePayloadHash
+    ) throw new Error('[governed-retry] durable dispatch identity is missing or inconsistent');
+
+    // One Rorca-owned lease linearizes duplicate pg-boss deliveries. A crashed
+    // worker may be fenced only after expiry; a concurrent duplicate receives no
+    // row and must not start an agent or clean resources.
+    const leaseOwner = `${WORKER_ID}:${jobId}`;
+    const claimed = await queryOne<{ fencing_token: string; state: string }>(
+      `UPDATE governed_retry_dispatches
+       SET state = CASE WHEN state = 'dispatched' THEN 'claimed' ELSE state END,
+           fencing_token = CASE WHEN state = 'dispatched' THEN fencing_token ELSE fencing_token + 1 END,
+           lease_owner = $2,
+           lease_expires_at = NOW() + INTERVAL '5 minutes'
+       WHERE identity_hash = $1
+         AND (
+           state = 'dispatched'
+           OR (state IN ('claimed', 'executing') AND lease_expires_at <= NOW())
+         )
+       RETURNING fencing_token::text, state`,
+      [dispatchIdentity.identityHash, leaseOwner],
+    );
+    if (!claimed) {
+      logger.info({ jobId, runId, identityHash: dispatchIdentity.identityHash }, '[worker] duplicate retry delivery fenced before agent start');
+      return;
+    }
+    const fencingToken = Number(claimed.fencing_token);
+    const executing = await execute(
+      `UPDATE governed_retry_dispatches
+       SET state = 'executing'
+       WHERE identity_hash = $1 AND fencing_token = $2 AND lease_owner = $3
+         AND state IN ('claimed', 'executing')`,
+      [dispatchIdentity.identityHash, fencingToken, leaseOwner],
+    );
+    if (executing.rowCount !== 1) throw new Error('[governed-retry] lease fence was lost before execution');
+    await execute(
+      `UPDATE governed_retry_story_attempts SET state = 'executing'
+       WHERE dispatch_identity_hash = $1 AND state = 'pending'`,
+      [dispatchIdentity.identityHash],
+    );
+
+    if (runRow.status === 'running' && isProcessAlive(runRow.pid)) {
+      // A worker restart loses its ChildProcess map, not ownership evidence. The
+      // durable PID wins; hold the new fence and let the surviving engine finish.
+      throw new Error('[governed-retry] prior fenced engine process is still alive; duplicate start refused');
+    }
+    const recoveredAttempts = await query<{
+      story_id: string; attempt: number; result_status: string | null;
+      integration_state: string | null; source_commit: string | null; resulting_head: string | null;
+    }>(
+      `SELECT attempt.story_id, attempt.attempt,
+              (SELECT result.status FROM story_results result
+               WHERE result.run_id = attempt.retry_run_id AND result.story_id = attempt.story_id
+               ORDER BY result.id DESC LIMIT 1) AS result_status,
+              ledger.state AS integration_state, ledger.source_commit, ledger.resulting_head
+       FROM governed_retry_story_attempts attempt
+       LEFT JOIN story_integration_ledger ledger
+         ON ledger.run_id = attempt.retry_run_id
+        AND ledger.story_id = attempt.story_id
+        AND ledger.attempt = attempt.attempt
+       WHERE attempt.dispatch_identity_hash = $1
+       ORDER BY attempt.story_id`,
+      [dispatchIdentity.identityHash],
+    );
+    const hasDurablePostAgentEvidence = recoveredAttempts.some((attempt) =>
+      ['pass', 'fail', 'timeout'].includes(attempt.result_status ?? '') || attempt.integration_state !== null,
+    );
+    if (hasDurablePostAgentEvidence) {
+      const allPastAgent = recoveredAttempts.length > 0 && recoveredAttempts.every((attempt) =>
+        ['pass', 'fail', 'timeout'].includes(attempt.result_status ?? '') || attempt.integration_state !== null,
+      );
+      if (!allPastAgent) {
+        throw new Error('[governed-retry] partial post-agent evidence requires manual review; duplicate agent start refused');
+      }
+      const allFinalized = recoveredAttempts.every((attempt) => attempt.integration_state === 'finalized');
+      const anyFailed = recoveredAttempts.some((attempt) => ['fail', 'timeout'].includes(attempt.result_status ?? ''));
+      await transaction(async (client) => {
+        if (anyFailed) {
+          const evidence = JSON.stringify({ reason: 'reconciled_terminal_failure', recoveredAttempts, fencingToken });
+          await client.query(
+            `UPDATE governed_retry_story_attempts SET state = 'failed', failure_evidence = $2::jsonb
+             WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
+            [dispatchIdentity.identityHash, evidence],
+          );
+          await client.query(
+            `UPDATE governed_retry_dispatches
+             SET state = 'failed', failure_evidence = $4::jsonb, lease_owner = NULL, lease_expires_at = NULL
+             WHERE identity_hash = $1 AND state = 'executing' AND fencing_token = $2 AND lease_owner = $3`,
+            [dispatchIdentity.identityHash, fencingToken, leaseOwner, evidence],
+          );
+          return;
+        }
+        await client.query(
+          `UPDATE governed_retry_story_attempts SET state = 'committed'
+           WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
+          [dispatchIdentity.identityHash],
+        );
+        await client.query(
+          `UPDATE governed_retry_dispatches
+           SET state = 'committed', lease_owner = NULL, lease_expires_at = NULL
+           WHERE identity_hash = $1 AND state = 'executing' AND fencing_token = $2 AND lease_owner = $3`,
+          [dispatchIdentity.identityHash, fencingToken, leaseOwner],
+        );
+        if (!allFinalized) {
+          const interruptedIntegration = recoveredAttempts.some((attempt) => attempt.integration_state !== null);
+          if (interruptedIntegration) {
+            const evidence = JSON.stringify({
+              reason: 'post_git_evidence_not_finalized', recoveredAttempts, fencingToken,
+              action: 'manual_review_required', patch_reapplied: false,
+            });
+            await client.query(
+              `UPDATE governed_retry_story_attempts SET state = 'integrating'
+               WHERE dispatch_identity_hash = $1 AND state = 'committed'`,
+              [dispatchIdentity.identityHash],
+            );
+            await client.query(
+              `UPDATE governed_retry_story_attempts SET state = 'manual_review_required', failure_evidence = $2::jsonb
+               WHERE dispatch_identity_hash = $1 AND state = 'integrating'`,
+              [dispatchIdentity.identityHash, evidence],
+            );
+            await client.query(
+              `UPDATE governed_retry_dispatches SET state = 'integrating'
+               WHERE identity_hash = $1 AND state = 'committed'`,
+              [dispatchIdentity.identityHash],
+            );
+            await client.query(
+              `UPDATE governed_retry_dispatches
+               SET state = 'manual_review_required', failure_evidence = $2::jsonb
+               WHERE identity_hash = $1 AND state = 'integrating'`,
+              [dispatchIdentity.identityHash, evidence],
+            );
+          }
+          return;
+        }
+        for (const attempt of recoveredAttempts) {
+          const finalizationIdentity = retryHash({
+            dispatchIdentity: dispatchIdentity.identityHash, storyId: attempt.story_id,
+            attempt: attempt.attempt, resultingHead: attempt.resulting_head,
+          });
+          await client.query(
+            `UPDATE governed_retry_story_attempts SET state = 'integrating'
+             WHERE dispatch_identity_hash = $1 AND story_id = $2 AND state = 'committed'`,
+            [dispatchIdentity.identityHash, attempt.story_id],
+          );
+          await client.query(
+            `UPDATE governed_retry_story_attempts
+             SET state = 'finalized', source_commit = $3, finalization_identity = $4
+             WHERE dispatch_identity_hash = $1 AND story_id = $2 AND state = 'integrating'`,
+            [dispatchIdentity.identityHash, attempt.story_id, attempt.source_commit, finalizationIdentity],
+          );
+        }
+        await client.query(`UPDATE governed_retry_dispatches SET state = 'integrating' WHERE identity_hash = $1 AND state = 'committed'`, [dispatchIdentity.identityHash]);
+        await client.query(`UPDATE governed_retry_dispatches SET state = 'integrated_validated' WHERE identity_hash = $1 AND state = 'integrating'`, [dispatchIdentity.identityHash]);
+        await client.query(
+          `UPDATE governed_retry_dispatches SET state = 'finalized', finalization_identity = $2
+           WHERE identity_hash = $1 AND state = 'integrated_validated'`,
+          [dispatchIdentity.identityHash, retryHash({ dispatchIdentity: dispatchIdentity.identityHash, recovered: true })],
+        );
+      });
+      const recoveredStatus = anyFailed ? 'partial_failure' : allFinalized ? 'done' : 'partial_failure';
+      await execute(
+        `UPDATE pipeline_runs SET status = $2, finished_at = COALESCE(finished_at, NOW()),
+                summary = COALESCE(summary, 'retry_reconciled_without_duplicate_agent')
+         WHERE id = $1`,
+        [runId, recoveredStatus],
+      );
+      await emitWalEvent('run_closeout', workspaceId, {
+        run_id: runId, original_run_id: originalRunId, status: recoveredStatus,
+        dispatch_identity: dispatchIdentity.identityHash, fencing_token: fencingToken,
+        restart_reconciled: true, duplicate_agent_started: false,
+        integrated_revision: execSync('git rev-parse HEAD', { cwd, encoding: 'utf8' }).trim(),
+        integration_ancestry: dispatchIdentity.priorIntegrationAncestry,
+        accepted_story_ids: [
+          ...dispatchIdentity.carriedForward.map((story) => story.storyId),
+          ...recoveredAttempts.filter((attempt) => attempt.integration_state === 'finalized').map((attempt) => attempt.story_id),
+        ].sort(),
       });
       return;
     }
@@ -1497,6 +1702,20 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
 
     activeProcesses.set(runId, child);
+    const leaseRenewal = setInterval(() => {
+      void execute(
+        `UPDATE governed_retry_dispatches
+         SET lease_expires_at = NOW() + INTERVAL '5 minutes'
+         WHERE identity_hash = $1 AND fencing_token = $2 AND lease_owner = $3 AND state = 'executing'`,
+        [dispatchIdentity.identityHash, fencingToken, leaseOwner],
+      ).then((result) => {
+        if (result.rowCount !== 1) {
+          logger.error({ runId, fencingToken }, '[worker] governed retry lease renewal lost its fence; terminating agent');
+          try { child.kill('SIGTERM'); } catch { /* process already exited */ }
+        }
+      }).catch((error) => logger.error({ error, runId }, '[worker] governed retry lease renewal failed'));
+    }, 60_000);
+    leaseRenewal.unref?.();
 
     // Listen for IPC message from execution-engine reporting its own PID (same as pipeline:run handler)
     child.on('message', async (msg: unknown) => {
@@ -1547,7 +1766,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         const code = capturedCode;
         activeProcesses.delete(runId);
-
+        clearInterval(leaseRenewal);
 
         const wasCancelled = cancellingRuns.delete(runId);
 
@@ -1574,24 +1793,17 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           }
 
           if (finalStatus === 'done') {
-            try {
-              const syncResult = syncRetrySpecPassesToOriginalSpec({
-                retrySpecPath,
-                originalSpecPath: path.join(workspacePath, specPath),
-                storyIds,
-              });
-              syncedStoryIds = syncResult.syncedStoryIds;
-              remainingStoryIds = syncResult.remainingStoryIds;
-              retrySpecSyncSucceeded = true;
-            } catch (syncErr: any) {
-              logger.warn({ err: syncErr, runId, retrySpecPath, specPath }, '[worker] Failed to sync retry spec pass flags back to original spec');
-            }
+            // The approved spec and prior pass evidence are immutable. A retry
+            // never projects temp-spec pass flags back into the source spec;
+            // integration-ledger finalization below is the only acceptance path.
+            remainingStoryIds = approvedPreview.scope.remaining.map((story) => story.storyId);
+            retrySpecSyncSucceeded = true;
           }
         }
 
-        const retryScopeComplete = !wasCancelled && finalStatus === 'done';
-        const fullSpecComplete = retryScopeComplete && retrySpecSyncSucceeded && remainingStoryIds.length === 0;
-        const retrySummary = retryScopeComplete && !fullSpecComplete
+        let retryScopeComplete = !wasCancelled && finalStatus === 'done';
+        let fullSpecComplete = retryScopeComplete && retrySpecSyncSucceeded && remainingStoryIds.length === 0;
+        let retrySummary = retryScopeComplete && !fullSpecComplete
           ? `retry_scope_passed_remaining_stories:${remainingStoryIds.join(',')}`
           : null;
 
@@ -1608,6 +1820,110 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           exitSignal: null,
           source: 'worker_retry',
         });
+
+        const governedFinalizedStoryIds: string[] = [];
+        try {
+          await transaction(async (client) => {
+            const terminalFailure = wasCancelled || finalStatus !== 'done';
+            if (terminalFailure) {
+              const failureEvidence = JSON.stringify({ finalStatus, exitCode: code, wasCancelled, fencingToken });
+              await client.query(
+                `UPDATE governed_retry_story_attempts
+                 SET state = 'failed', failure_evidence = $2::jsonb
+                 WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
+                [dispatchIdentity.identityHash, failureEvidence],
+              );
+              const failed = await client.query(
+                `UPDATE governed_retry_dispatches
+                 SET state = 'failed', failure_evidence = $4::jsonb,
+                     lease_owner = NULL, lease_expires_at = NULL
+                 WHERE identity_hash = $1 AND state = 'executing'
+                   AND fencing_token = $2 AND lease_owner = $3
+                 RETURNING identity_hash`,
+                [dispatchIdentity.identityHash, fencingToken, leaseOwner, failureEvidence],
+              );
+              if (failed.rowCount !== 1) throw new Error('[governed-retry] failure finalization lost its fence');
+              return;
+            }
+
+            const committedAttempts = await client.query<{ story_id: string; attempt: number }>(
+              `UPDATE governed_retry_story_attempts SET state = 'committed'
+               WHERE dispatch_identity_hash = $1 AND state = 'executing'
+               RETURNING story_id, attempt`,
+              [dispatchIdentity.identityHash],
+            );
+            const committedDispatch = await client.query(
+              `UPDATE governed_retry_dispatches
+               SET state = 'committed', lease_owner = NULL, lease_expires_at = NULL
+               WHERE identity_hash = $1 AND state = 'executing'
+                 AND fencing_token = $2 AND lease_owner = $3
+               RETURNING identity_hash`,
+              [dispatchIdentity.identityHash, fencingToken, leaseOwner],
+            );
+            if (committedDispatch.rowCount !== 1) throw new Error('[governed-retry] commit finalization lost its fence');
+
+            for (const attempt of committedAttempts.rows) {
+              const ledger = await client.query<{ source_commit: string; resulting_head: string; finalization_identity: Record<string, unknown> }>(
+                `SELECT source_commit, resulting_head, finalization_identity
+                 FROM story_integration_ledger
+                 WHERE run_id = $1 AND story_id = $2 AND attempt = $3 AND state = 'finalized'`,
+                [runId, attempt.story_id, attempt.attempt],
+              );
+              if (ledger.rowCount !== 1 || !ledger.rows[0].resulting_head) continue;
+              const finalizationIdentity = retryHash({
+                dispatchIdentity: dispatchIdentity.identityHash,
+                storyId: attempt.story_id,
+                attempt: attempt.attempt,
+                resultingHead: ledger.rows[0].resulting_head,
+                ledgerFinalization: ledger.rows[0].finalization_identity,
+              });
+              await client.query(
+                `UPDATE governed_retry_story_attempts SET state = 'integrating'
+                 WHERE dispatch_identity_hash = $1 AND story_id = $2 AND state = 'committed'`,
+                [dispatchIdentity.identityHash, attempt.story_id],
+              );
+              const finalized = await client.query(
+                `UPDATE governed_retry_story_attempts
+                 SET state = 'finalized', source_commit = $3, finalization_identity = $4
+                 WHERE dispatch_identity_hash = $1 AND story_id = $2 AND state = 'integrating'
+                 RETURNING story_id`,
+                [dispatchIdentity.identityHash, attempt.story_id, ledger.rows[0].source_commit, finalizationIdentity],
+              );
+              if (finalized.rowCount === 1) governedFinalizedStoryIds.push(attempt.story_id);
+            }
+            if (governedFinalizedStoryIds.length === committedAttempts.rows.length && committedAttempts.rows.length > 0) {
+              const finalizationIdentity = retryHash({
+                dispatchIdentity: dispatchIdentity.identityHash,
+                stories: governedFinalizedStoryIds.sort(),
+                revision: execSync('git rev-parse HEAD', { cwd, encoding: 'utf8' }).trim(),
+              });
+              await client.query(`UPDATE governed_retry_dispatches SET state = 'integrating' WHERE identity_hash = $1 AND state = 'committed'`, [dispatchIdentity.identityHash]);
+              await client.query(`UPDATE governed_retry_dispatches SET state = 'integrated_validated' WHERE identity_hash = $1 AND state = 'integrating'`, [dispatchIdentity.identityHash]);
+              const finalized = await client.query(
+                `UPDATE governed_retry_dispatches
+                 SET state = 'finalized', finalization_identity = $2
+                 WHERE identity_hash = $1 AND state = 'integrated_validated'
+                 RETURNING identity_hash`,
+                [dispatchIdentity.identityHash, finalizationIdentity],
+              );
+              if (finalized.rowCount !== 1) throw new Error('[governed-retry] dispatch finalization lost optimistic concurrency');
+            }
+          });
+        } catch (governanceError) {
+          logger.error({ governanceError, runId }, '[worker] governed retry closeout failed closed');
+          finalStatus = 'failed';
+        }
+        if (finalStatus === 'done' && governedFinalizedStoryIds.length !== dispatchIdentity.storyAttempts.length) {
+          const finalized = new Set(governedFinalizedStoryIds);
+          remainingStoryIds = [...new Set([
+            ...remainingStoryIds,
+            ...dispatchIdentity.storyAttempts.filter((attempt) => !finalized.has(attempt.storyId)).map((attempt) => attempt.storyId),
+          ])].sort();
+          finalStatus = 'partial_failure';
+          retrySummary = `retry_integration_pending:${remainingStoryIds.join(',')}`;
+        }
+        retryScopeComplete = !wasCancelled && finalStatus === 'done';
+        fullSpecComplete = retryScopeComplete && retrySpecSyncSucceeded && remainingStoryIds.length === 0;
 
         try {
           await execute(
@@ -1636,6 +1952,20 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
               synced_story_ids: syncedStoryIds,
               remaining_story_ids: remainingStoryIds,
               ...(retrySummary ? { summary: retrySummary } : {}),
+            });
+            await emitWalEvent('run_closeout', workspaceId, {
+              run_id: runId,
+              original_run_id: originalRunId,
+              original_run_lineage: dispatchIdentity.originalRunLineage,
+              status: finalStatus,
+              integrated_revision: execSync('git rev-parse HEAD', { cwd, encoding: 'utf8' }).trim(),
+              integration_ancestry: dispatchIdentity.priorIntegrationAncestry,
+              accepted_story_ids: [
+                ...dispatchIdentity.carriedForward.map((story) => story.storyId),
+                ...governedFinalizedStoryIds,
+              ].sort(),
+              dispatch_identity: dispatchIdentity.identityHash,
+              fencing_token: fencingToken,
             });
           }
           const learnCloseout = await tryGenerateLearnCloseoutCandidates({
@@ -1669,10 +1999,25 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
+        clearInterval(leaseRenewal);
 
         cancellingRuns.delete(runId);
 
         try {
+          const failureEvidence = JSON.stringify({ reason: 'spawn_failed', error: (err as Error).message, fencingToken });
+          await execute(
+            `UPDATE governed_retry_story_attempts SET state = 'failed', failure_evidence = $2::jsonb
+             WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
+            [dispatchIdentity.identityHash, failureEvidence],
+          );
+          await execute(
+            `UPDATE governed_retry_dispatches
+             SET state = 'failed', failure_evidence = $4::jsonb,
+                 lease_owner = NULL, lease_expires_at = NULL
+             WHERE identity_hash = $1 AND state = 'executing'
+               AND fencing_token = $2 AND lease_owner = $3`,
+            [dispatchIdentity.identityHash, fencingToken, leaseOwner, failureEvidence],
+          );
           await execute(
             `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
             [runId],
@@ -1701,6 +2046,8 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       });
     });
   }));
+  const rejected = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+  if (rejected) throw rejected.reason;
 }
 
 // ── Job handler: pipeline:cron ────────────────────────────────────────────

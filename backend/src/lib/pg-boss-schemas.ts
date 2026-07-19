@@ -106,6 +106,8 @@ export const PipelineRetryJobPayload = z.object({
   previewHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   approvedPreview: z.record(z.string(), z.unknown()),
   generatedPlanHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  /** Exact Rorca-owned idempotency, lineage, revision, manifest, and lease authority. */
+  dispatchIdentity: z.record(z.string(), z.unknown()),
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
   retrySpecPath: z.string().min(1),
