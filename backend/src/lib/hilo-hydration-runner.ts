@@ -40,6 +40,7 @@ import {
 } from '../db/workspace-hydration';
 import { type HiloConfig } from './hilo-config';
 import { logger } from './logger';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
 
 /**
  * Promise-based wrapper around `execFile` that matches the Node.js
@@ -447,8 +448,15 @@ export async function runHiloHydration(
   const stderrChunks: string[] = [];
 
   try {
-    const { stdout, stderr } = await execFileAsync(binaryPath, args, {
+    const launch = prepareAutonomousSandboxLaunch({
+      command: binaryPath,
+      args,
       cwd,
+      env: { PATH: process.env.PATH ?? '' },
+    });
+    const { stdout, stderr } = await execFileAsync(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       timeout: config.timeoutMs,
       maxBuffer: HILO_MAX_OUTPUT_BYTES,
       windowsHide: true,

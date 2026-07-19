@@ -5,8 +5,9 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { execSync } from 'child_process';
 import crypto from 'crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { query, queryOne, execute } from '../db/index';
 import { ConflictError, NotFoundError, ServiceUnavailableError, ValidationError } from './errors';
 import { evaluateSecretProfileReadiness, getAgentCredentialChecks, hasAgentCredentials, type SecretProfileReadiness, type SecretProvider } from './secret-resolver';
@@ -76,18 +77,15 @@ export function hashRunnerToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function commandVersion(command: string): { installed: boolean; version?: string } {
-  try {
-    const version = execSync(`${command} --version`, { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\n')[0];
-    return { installed: true, ...(version ? { version } : {}) };
-  } catch {
+function commandVersion(command: string): { installed: boolean } {
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(dir, process.platform === 'win32' ? `${command}.cmd` : command);
     try {
-      execSync(`command -v ${command}`, { encoding: 'utf8', timeout: 5000, shell: '/bin/sh' });
+      fs.accessSync(candidate, fs.constants.X_OK);
       return { installed: true };
-    } catch {
-      return { installed: false };
-    }
+    } catch { /* continue */ }
   }
+  return { installed: false };
 }
 
 export async function listExecutionEnvironments(): Promise<ExecutionEnvironmentRow[]> {
@@ -203,7 +201,6 @@ function remoteAgentReadiness(agent: string): AgentReadiness {
       { name: `${agent}.binary`, ok: binary.installed, detail: `${agent} on PATH` },
       ...credentialChecks,
     ],
-    ...(binary.version ? { version: binary.version } : {}),
   };
 }
 

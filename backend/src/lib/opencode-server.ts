@@ -20,7 +20,7 @@
 //   // ... spawn N story subprocesses with attachFlag ...
 //   server.stop();
 
-import { spawn, type ChildProcess } from 'child_process';
+import type { ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -28,7 +28,6 @@ import { detectOpenCode } from './opencode-detector';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const SERVER_STARTUP_TIMEOUT_MS = 10_000;
 const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -100,97 +99,10 @@ export class OpenCodeServer {
    * Rejects if the server fails to start within the timeout or exits immediately.
    */
   async start(): Promise<void> {
-    if (this.state === 'running') return;
-
-    this.state = 'starting';
-
-    // Generate a unique socket path in tmpdir
-    const socketName = `rorca-oc-${process.pid}-${Date.now()}.sock`;
-    this.socketPath = path.join(os.tmpdir(), socketName);
-
-    // Open log file
-    const logFd = fs.openSync(this.logPath, 'a');
-
-    const child = spawn(this.binPath, ['server', '--socket', this.socketPath], {
-      stdio: ['ignore', logFd, logFd],
-      detached: true,
-      env: { ...process.env },
-    });
-
-    fs.closeSync(logFd);
-    child.unref();
-
-    this.process = child;
-
-    // Notify PID consumer (for DB persistence)
-    if (child.pid && this.options.onPidReady) {
-      this.options.onPidReady(child.pid);
-    }
-
-    // Wait for server readiness: poll for socket file or early exit
-    return new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const startTime = Date.now();
-
-      // Listen for premature exit
-      const onExit = (code: number | null) => {
-        if (settled) return;
-        settled = true;
-        clearInterval(pollTimer);
-        this.state = 'error';
-        this.process = null;
-        reject(new Error(`OpenCode server exited prematurely with code ${code}. Log: ${this.logPath}`));
-      };
-
-      child.on('exit', onExit);
-      child.on('error', (err) => {
-        if (settled) return;
-        settled = true;
-        clearInterval(pollTimer);
-        this.state = 'error';
-        this.process = null;
-        reject(new Error(`OpenCode server failed to spawn: ${err.message}`));
-      });
-
-      // Poll for socket file existence
-      const pollTimer = setInterval(() => {
-        if (settled) return;
-
-        // Check socket file exists
-        if (this.socketPath && fs.existsSync(this.socketPath)) {
-          settled = true;
-          clearInterval(pollTimer);
-          child.removeListener('exit', onExit);
-
-          // Re-attach exit listener for crash detection (post-startup)
-          child.on('exit', () => {
-            this.state = 'stopped';
-            this.process = null;
-          });
-
-          this.state = 'running';
-          resolve();
-          return;
-        }
-
-        // Timeout check
-        if (Date.now() - startTime > SERVER_STARTUP_TIMEOUT_MS) {
-          settled = true;
-          clearInterval(pollTimer);
-          child.removeListener('exit', onExit);
-          this.state = 'error';
-
-          // Kill the hung process
-          try { child.kill('SIGTERM'); } catch { /* already dead */ }
-          setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch { /* already dead */ }
-          }, 3_000);
-          this.process = null;
-
-          reject(new Error(`OpenCode server failed to start within ${SERVER_STARTUP_TIMEOUT_MS}ms. Log: ${this.logPath}`));
-        }
-      }, 100);
-    });
+    this.state = 'error';
+    throw new Error(
+      'Warm OpenCode server mode is retired because it cannot share a control socket across isolated namespaces. Use sandboxed per-request OpenCode execution.',
+    );
   }
 
   /**

@@ -9,12 +9,12 @@
 // OC-002: Detect whether the opencode binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
-import { execFile, execSync } from 'child_process';
-import { promisify } from 'util';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { logger } from './logger';
+import { probeAutonomousCli, probeAutonomousCliSync } from './autonomous-cli-probe';
 
 export const MIN_OPENCODE_VERSION = '0.1.0';
-const execFileAsync = promisify(execFile);
 
 export interface OpenCodeStatus {
   opencodeInstalled: boolean;
@@ -28,13 +28,21 @@ export interface OpenCodeStatus {
  */
 function resolveBinPath(): string | null {
   const envBin = process.env.OPENCODE_BIN?.trim();
-  if (envBin) return envBin;
-
-  try {
-    return execSync('which opencode', { encoding: 'utf-8', timeout: 5000 }).trim();
-  } catch {
-    return null;
+  if (envBin) {
+    try {
+      fs.accessSync(envBin, fs.constants.X_OK);
+      return fs.realpathSync(envBin);
+    } catch { return null; }
   }
+
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(dir, 'opencode');
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return fs.realpathSync(candidate);
+    } catch { /* continue */ }
+  }
+  return null;
 }
 
 /**
@@ -70,8 +78,9 @@ export function detectOpenCode(): OpenCodeStatus {
   }
 
   try {
-    const raw = execSync(`"${binPath}" --version`, { encoding: 'utf-8', timeout: 5000 });
-    const version = parseVersion(raw);
+    const result = probeAutonomousCliSync(binPath, ['--version'], { timeoutMs: 5_000 });
+    if (result.status !== 0) throw result.error ?? new Error('OpenCode version probe failed');
+    const version = parseVersion(`${result.stdout}\n${result.stderr}`);
     return {
       opencodeInstalled: true,
       opencodeVersion: version,
@@ -85,19 +94,12 @@ export function detectOpenCode(): OpenCodeStatus {
 
 /** Non-blocking detector for request/diagnostic paths. */
 export async function detectOpenCodeAsync(timeoutMs = 1_000): Promise<OpenCodeStatus> {
-  let binPath = process.env.OPENCODE_BIN?.trim() || null;
-  if (!binPath) {
-    try {
-      const result = await execFileAsync('which', ['opencode'], { encoding: 'utf8', timeout: timeoutMs });
-      binPath = result.stdout.trim() || null;
-    } catch {
-      return { opencodeInstalled: false, opencodeVersion: null, opencodeBinPath: null };
-    }
-  }
+  const binPath = resolveBinPath();
   if (!binPath) return { opencodeInstalled: false, opencodeVersion: null, opencodeBinPath: null };
   try {
-    const result = await execFileAsync(binPath, ['--version'], { encoding: 'utf8', timeout: timeoutMs });
-    return { opencodeInstalled: true, opencodeVersion: parseVersion(result.stdout), opencodeBinPath: binPath };
+    const result = await probeAutonomousCli(binPath, ['--version'], { timeoutMs });
+    if (result.status !== 0) throw result.error ?? new Error('OpenCode version probe failed');
+    return { opencodeInstalled: true, opencodeVersion: parseVersion(`${result.stdout}\n${result.stderr}`), opencodeBinPath: binPath };
   } catch {
     return { opencodeInstalled: true, opencodeVersion: null, opencodeBinPath: binPath };
   }

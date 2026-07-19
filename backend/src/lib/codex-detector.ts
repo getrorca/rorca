@@ -9,11 +9,10 @@
 // OC-024: Detect whether the Codex CLI binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
-import { execFile, execSync } from 'child_process';
-import { promisify } from 'util';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { logger } from './logger';
-
-const execFileAsync = promisify(execFile);
+import { probeAutonomousCli, probeAutonomousCliSync } from './autonomous-cli-probe';
 
 export interface CodexStatus {
   codexInstalled: boolean;
@@ -27,13 +26,21 @@ export interface CodexStatus {
  */
 function resolveBinPath(): string | null {
   const envBin = process.env.CODEX_BIN?.trim();
-  if (envBin) return envBin;
-
-  try {
-    return execSync('which codex', { encoding: 'utf-8', timeout: 5000 }).trim();
-  } catch {
-    return null;
+  if (envBin) {
+    try {
+      fs.accessSync(envBin, fs.constants.X_OK);
+      return fs.realpathSync(envBin);
+    } catch { return null; }
   }
+
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(dir, 'codex');
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return fs.realpathSync(candidate);
+    } catch { /* continue */ }
+  }
+  return null;
 }
 
 /**
@@ -56,8 +63,9 @@ export function detectCodex(): CodexStatus {
   }
 
   try {
-    const raw = execSync(`"${binPath}" --version`, { encoding: 'utf-8', timeout: 5000 });
-    const version = parseVersion(raw);
+    const result = probeAutonomousCliSync(binPath, ['--version'], { timeoutMs: 5_000 });
+    if (result.status !== 0) throw result.error ?? new Error('Codex version probe failed');
+    const version = parseVersion(`${result.stdout}\n${result.stderr}`);
     return {
       codexInstalled: true,
       codexVersion: version,
@@ -71,19 +79,12 @@ export function detectCodex(): CodexStatus {
 
 /** Non-blocking detector for request/diagnostic paths. */
 export async function detectCodexAsync(timeoutMs = 1_000): Promise<CodexStatus> {
-  let binPath = process.env.CODEX_BIN?.trim() || null;
-  if (!binPath) {
-    try {
-      const result = await execFileAsync('which', ['codex'], { encoding: 'utf8', timeout: timeoutMs });
-      binPath = result.stdout.trim() || null;
-    } catch {
-      return { codexInstalled: false, codexVersion: null, codexBinPath: null };
-    }
-  }
+  const binPath = resolveBinPath();
   if (!binPath) return { codexInstalled: false, codexVersion: null, codexBinPath: null };
   try {
-    const result = await execFileAsync(binPath, ['--version'], { encoding: 'utf8', timeout: timeoutMs });
-    return { codexInstalled: true, codexVersion: parseVersion(result.stdout), codexBinPath: binPath };
+    const result = await probeAutonomousCli(binPath, ['--version'], { timeoutMs });
+    if (result.status !== 0) throw result.error ?? new Error('Codex version probe failed');
+    return { codexInstalled: true, codexVersion: parseVersion(`${result.stdout}\n${result.stderr}`), codexBinPath: binPath };
   } catch {
     return { codexInstalled: true, codexVersion: null, codexBinPath: binPath };
   }

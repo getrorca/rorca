@@ -7,9 +7,9 @@
 
 import { spawn } from 'child_process';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { detectCodex } from './codex-detector';
+import { prepareAutonomousModelSandboxLaunch } from './autonomous-sandbox';
 
 export interface CodexDraftUsage {
   inputTokens: number;
@@ -22,8 +22,8 @@ export interface CodexDraftSpecResult {
   usage: CodexDraftUsage;
 }
 
-function writeOutputSchemaFile(): string {
-  const filePath = path.join(os.tmpdir(), `rorca-codex-spec-schema-${Date.now()}-${process.pid}.json`);
+function writeOutputSchemaFile(scratchDir: string): string {
+  const filePath = path.join(scratchDir, 'output-schema.json');
   const schema = {
     type: 'object',
     additionalProperties: true,
@@ -117,14 +117,14 @@ export async function draftSpecWithCodex(opts: {
     throw new Error('Codex CLI not installed or not discoverable');
   }
 
-  const outputSchemaFile = writeOutputSchemaFile();
-  const lastMessageFile = path.join(os.tmpdir(), `rorca-codex-last-message-${Date.now()}-${process.pid}.txt`);
+  const scratchDir = fs.mkdtempSync(path.join(opts.cwd, '.rorca-codex-draft-'));
+  const outputSchemaFile = writeOutputSchemaFile(scratchDir);
+  const lastMessageFile = path.join(scratchDir, 'last-message.txt');
   const args = [
     'exec',
     '--json',
     '--ephemeral',
     '--skip-git-repo-check',
-    '--dangerously-bypass-approvals-and-sandbox',
     '--output-last-message', lastMessageFile,
     '--output-schema', outputSchemaFile,
     '--cd', opts.cwd,
@@ -134,10 +134,16 @@ export async function draftSpecWithCodex(opts: {
   const timeoutMs = opts.timeoutMs ?? 300_000;
 
   try {
+    const launch = await prepareAutonomousModelSandboxLaunch({
+      command: status.codexBinPath,
+      args,
+      cwd: opts.cwd,
+      env: Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    });
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn(status.codexBinPath!, args, {
-        cwd: opts.cwd,
-        env: { ...process.env },
+      const child = spawn(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
@@ -190,7 +196,6 @@ export async function draftSpecWithCodex(opts: {
       usage: extractUsage(result.stdout),
     };
   } finally {
-    try { fs.unlinkSync(outputSchemaFile); } catch { /* best effort */ }
-    try { fs.unlinkSync(lastMessageFile); } catch { /* best effort */ }
+    fs.rmSync(scratchDir, { recursive: true, force: true });
   }
 }

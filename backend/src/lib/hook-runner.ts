@@ -5,11 +5,12 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { createHmac } from 'crypto';
 import { query } from '../db/index';
 import { decryptToken } from '../lib/auth-utils';
 import { logger } from './logger';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
 
 export interface PipelineHookRow {
   id: number;
@@ -132,21 +133,30 @@ export async function runHooks(
       continue;
     }
 
-    // Shell command hook
+    // Workspace-controlled shell commands always run inside the mandatory
+    // autonomous namespace. Arbitrary inherited hook secrets and host authority
+    // are discarded; only bounded lifecycle identifiers survive the allowlist.
     let output = '';
-    let exitCode = 0;
+    let exitCode = 1;
     try {
-      output = execSync(hook.command, {
+      const launch = prepareAutonomousSandboxLaunch({
+        command: '/bin/sh',
+        args: ['-lc', hook.command],
         cwd,
         env,
+      });
+      const result = spawnSync(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
         timeout: 60_000,
         maxBuffer: 1024 * 1024,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-    } catch (err: any) {
-      exitCode = err.status ?? 1;
-      output = (err.stdout || '') + (err.stderr || '');
+      exitCode = result.status ?? 1;
+      output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    } catch (err) {
+      output = err instanceof Error ? err.message : String(err);
     }
 
     results.push({ hookId: hook.id, command: hook.command, exitCode, output });

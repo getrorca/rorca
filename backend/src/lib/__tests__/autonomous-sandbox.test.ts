@@ -58,10 +58,17 @@ test('production environment is reconstructed from an allowlist with no inherite
     GIT_CONFIG_GLOBAL: '/dev/null',
     GH_CONFIG_DIR: '/home/rorca-agent/.config/gh',
   });
+  const generic = sanitizeAutonomousSandboxEnvForTests({
+    ANTHROPIC_API_KEY: 'must-not-reach-hooks',
+    RORCA_AUTONOMOUS_EGRESS_SOCKET: '/must/not/mount.sock',
+  });
+  expect(generic.ANTHROPIC_API_KEY).toBeUndefined();
+  expect(generic.RORCA_AUTONOMOUS_EGRESS_SOCKET).toBeUndefined();
+  expect(generic.HTTPS_PROXY).toBeUndefined();
   const sanitized = sanitizeAutonomousSandboxEnvForTests({
     DATABASE_URL: 'secret', VAULT_KEY: 'secret', JWT_SECRET: 'secret',
     GITHUB_TOKEN: 'secret', ANTHROPIC_API_KEY: 'secret', RORCA_INTERNAL_SERVICE_TOKEN: 'secret',
-  });
+  }, true);
   expect(Object.keys(sanitized)).not.toEqual(expect.arrayContaining([
     'DATABASE_URL', 'VAULT_KEY', 'JWT_SECRET', 'GITHUB_TOKEN',
     'RORCA_INTERNAL_SERVICE_TOKEN',
@@ -93,27 +100,27 @@ test('Linux launch topology has fresh namespaces, private proc/home/tmp, exact w
   }
 });
 
-test('explicit local-dev posture is non-production and cannot coexist with provider capability', () => {
+test('raw local-dev posture always fails closed, including file-backed and unenumerated credential probes', () => {
   const cwd = fixture();
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-fake-home-'));
   try {
-    expect(() => assertAutonomousExecutionBoundary({
-      cwd, providerCapable: false, platform: 'darwin', runProbe: false,
-      env: { NODE_ENV: 'development', RORCA_AUTONOMOUS_ISOLATION: 'local-dev' },
-    })).not.toThrow();
-    expect(() => assertAutonomousExecutionBoundary({
-      cwd, providerCapable: true, platform: 'darwin', runProbe: false,
-      env: { NODE_ENV: 'development', RORCA_AUTONOMOUS_ISOLATION: 'local-dev' },
-    })).toThrow(/cannot coexist with provider authority/);
-    expect(() => assertAutonomousExecutionBoundary({
-      cwd, providerCapable: false, platform: 'darwin', runProbe: false,
-      env: { NODE_ENV: 'development', RORCA_AUTONOMOUS_ISOLATION: 'local-dev', GITHUB_TOKEN: 'present' },
-    })).toThrow(/cannot coexist with provider authority/);
-    expect(() => assertAutonomousExecutionBoundary({
-      cwd, providerCapable: false, platform: 'linux', runProbe: false,
-      env: { NODE_ENV: 'production', RORCA_AUTONOMOUS_ISOLATION: 'local-dev' },
-    })).toThrow(/forbidden in production/);
+    fs.mkdirSync(path.join(fakeHome, '.config', 'gh'), { recursive: true });
+    fs.writeFileSync(path.join(fakeHome, '.config', 'gh', 'hosts.yml'), 'github.com:\n  oauth_token: fake-only\n');
+    for (const env of [
+      { NODE_ENV: 'development', RORCA_AUTONOMOUS_ISOLATION: 'local-dev' },
+      { NODE_ENV: 'test' },
+      {
+        NODE_ENV: 'development', RORCA_AUTONOMOUS_ISOLATION: 'local-dev',
+        HOME: fakeHome, GITHUB_APP_PRIVATE_KEY: 'fake-private-key',
+      },
+    ]) {
+      expect(() => assertAutonomousExecutionBoundary({
+        cwd, providerCapable: false, platform: 'darwin', runProbe: false, env,
+      })).toThrow(/must explicitly be linux-bwrap/);
+    }
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(fakeHome, { recursive: true, force: true });
   }
 });
 

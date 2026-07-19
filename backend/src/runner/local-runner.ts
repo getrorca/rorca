@@ -21,7 +21,7 @@
  * or equivalent, then set RORCA_ENGINE_API_PORT to that local port.
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -68,18 +68,15 @@ async function api<T>(pathSuffix: string, body: Record<string, unknown>): Promis
   return parsed as T;
 }
 
-function commandStatus(command: string): { installed: boolean; version?: string } {
-  try {
-    const version = execSync(`${command} --version`, { encoding: 'utf8', timeout: 5000 }).trim().split('\n')[0];
-    return { installed: true, ...(version ? { version } : {}) };
-  } catch {
+function commandStatus(command: string): { installed: boolean } {
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(dir, process.platform === 'win32' ? `${command}.cmd` : command);
     try {
-      execSync(`command -v ${command}`, { encoding: 'utf8', timeout: 5000, shell: '/bin/sh' });
+      fs.accessSync(candidate, fs.constants.X_OK);
       return { installed: true };
-    } catch {
-      return { installed: false };
-    }
+    } catch { /* continue */ }
   }
+  return { installed: false };
 }
 
 function localAgentReport() {
@@ -89,7 +86,6 @@ function localAgentReport() {
     agents[agent] = {
       installed: status.installed,
       credentialsReady: hasAgentCredentials(agent),
-      ...(status.version ? { version: status.version } : {}),
     };
   }
   return agents;

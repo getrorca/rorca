@@ -129,12 +129,12 @@ export function buildMergeResolverCommand(posture: MergeResolutionPosture): { co
     case 'claude': {
       const model = posture.model && /^claude-/.test(posture.model) && !posture.model.includes('/')
         ? posture.model.replace(/-(\d+)\.(\d+)(-\d{8})?$/, '-$1-$2$3') : null;
-      return { command: binary('CLAUDE_BIN', 'claude'), args: ['--dangerously-skip-permissions', '--print', '--verbose', '--output-format', 'stream-json', ...(model ? ['--model', model] : []), ...(posture.thinkingEnabled ? ['--thinking'] : []), ...(posture.thinkingBudget ? ['--thinking-budget', String(posture.thinkingBudget)] : []), ...(posture.effortLevel ? ['--effort', posture.effortLevel] : [])] };
+      return { command: binary('CLAUDE_BIN', 'claude'), args: ['--print', '--verbose', '--output-format', 'stream-json', ...(model ? ['--model', model] : []), ...(posture.thinkingEnabled ? ['--thinking'] : []), ...(posture.thinkingBudget ? ['--thinking-budget', String(posture.thinkingBudget)] : []), ...(posture.effortLevel ? ['--effort', posture.effortLevel] : [])] };
     }
     case 'opencode':
       return { command: detectOpenCode().opencodeBinPath ?? binary('OPENCODE_BIN', 'opencode'), args: ['run', '--format', 'json', ...(posture.model ? ['--model', normalizeOpenCodeModel(posture.model)] : [])] };
     case 'codex':
-      return { command: binary('CODEX_BIN', 'codex'), args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(posture.model ? ['--model', posture.model] : [])] };
+      return { command: binary('CODEX_BIN', 'codex'), args: ['exec', ...(posture.model ? ['--model', posture.model] : [])] };
     case 'pi': {
       const selection = piSelection(posture.model);
       return { command: binary('PI_BIN', 'pi'), args: ['--mode', 'rpc', '--no-extensions', '--tools', 'read,bash,edit,write,grep,find,ls', ...(selection.provider ? ['--provider', selection.provider] : []), ...(selection.model ? ['--model', selection.model] : [])] };
@@ -213,10 +213,11 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
   }
 
   fs.mkdirSync(path.dirname(request.logPath), { recursive: true });
-  await ensureAutonomousModelEgress();
+  const egressSocket = await ensureAutonomousModelEgress();
+  if (!egressSocket) return result('not_ready');
   const env = createAutonomousCommandGuard({
     cwd: request.cwd,
-    env: buildCleanResolverEnv(request.env),
+    env: buildCleanResolverEnv({ ...request.env, RORCA_AUTONOMOUS_EGRESS_SOCKET: egressSocket }),
     profile: 'conflict-resolution',
   }).env;
   const command = buildMergeResolverCommand(posture);
@@ -228,6 +229,7 @@ export async function resolveMergeConflict(request: MergeResolutionRequest): Pro
     args: command.args,
     cwd: request.cwd,
     env,
+    modelCredentials: true,
   });
   const log = fs.createWriteStream(request.logPath, { flags: 'a' });
   log.write(`[merge-resolver] agent=${posture.agent} model=${posture.model ?? 'default'} source=${posture.source} files=${request.conflictFiles.join(',')}\n`);

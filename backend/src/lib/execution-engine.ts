@@ -511,17 +511,11 @@ function resolveNoopRecoveryEngine(
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PLAYWRIGHT_MCP_PORT = 4040;
-const PLAYWRIGHT_MCP_URL = `http://localhost:${PLAYWRIGHT_MCP_PORT}/mcp`;
 let _playwrightMcpServerPid: number | null = null;
-let _playwrightMcpReady = false;
 
 // Chrome DevTools MCP — stdio→HTTP bridge running on port 4041.
 // Attaches to the user's existing Chrome via CDP (--remote-debugging-port=9222).
-const CHROME_MCP_PORT = 4041;
-const CHROME_MCP_URL = `http://localhost:${CHROME_MCP_PORT}/mcp`;
 let _chromeMcpProxyPid: number | null = null;
-let _chromeMcpReady = false;
 // Resolved chrome-devtools-mcp binary info for writing stdio MCP configs.
 let _chromeMcpCmd: string | null = null;
 let _chromeMcpArgs: string[] = [];
@@ -675,284 +669,15 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
  * Idempotent — starts at most once per engine process.
  * Returns the server URL on success, null on failure (caller handles gracefully — never throws).
  */
-async function ensurePlaywrightMcpServer(headless = true): Promise<string | null> {
-  if (process.env.RORCA_AUTONOMOUS_ISOLATION === 'linux-bwrap') {
-    process.stdout.write('[BrowserMCP] Disabled: isolated agents cannot access the local control plane.\n');
-    return null;
-  }
-  // Health-check: if we think the server is ready, verify it's still alive.
-  if (_playwrightMcpReady) {
-    try {
-      const probe = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(2000) });
-      if (probe.status < 500) return PLAYWRIGHT_MCP_URL;
-    } catch { /* server died — fall through to restart */ }
-    process.stdout.write(`[BrowserMCP] Playwright MCP server died — restarting...\n`);
-    _playwrightMcpReady = false;
-    _playwrightMcpServerPid = null;
-  }
-
-  // Check if port is already occupied (e.g. another story in a parallel run already started it)
-  try {
-    const probe = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(1000) });
-    if (probe.status < 500) {
-      _playwrightMcpReady = true;
-      return PLAYWRIGHT_MCP_URL;
-    }
-  } catch {
-    // Port not occupied — fall through to spawn
-  }
-
-  try {
-    const mcpProc = spawn(
-      'npx',
-      ['@playwright/mcp', '--port', String(PLAYWRIGHT_MCP_PORT), ...(headless ? ['--headless'] : [])],
-      { detached: true, stdio: 'ignore', env: { ...process.env } },
-    );
-    mcpProc.unref();
-    _playwrightMcpServerPid = mcpProc.pid ?? null;
-
-    // Poll for readiness up to 10s
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 300));
-      try {
-        const check = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(500) });
-        if (check.status < 500) {
-          _playwrightMcpReady = true;
-          process.stdout.write(`[BrowserMCP] @playwright/mcp ready at ${PLAYWRIGHT_MCP_URL}\n`);
-          return PLAYWRIGHT_MCP_URL;
-        }
-      } catch { /* not ready yet */ }
-    }
-
-    process.stdout.write(`[BrowserMCP] WARNING: @playwright/mcp did not become ready within 10s — browser tools unavailable for this story\n`);
-    return null;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stdout.write(`[BrowserMCP] WARNING: Failed to start @playwright/mcp: ${msg} — browser tools unavailable\n`);
-    return null;
-  }
+async function ensurePlaywrightMcpServer(_headless = true): Promise<string | null> {
+  process.stdout.write('[BrowserMCP] Disabled: autonomous namespaces cannot access a local browser control plane.\n');
+  return null;
 }
 
-/**
- * Ensure chrome-devtools-mcp is running as an HTTP MCP server on port 4041.
- *
- * chrome-devtools-mcp is a stdio-only process. We bridge it to HTTP using a
- * lightweight in-process proxy built on the @modelcontextprotocol/sdk:
- *   - Spawn `chrome-devtools-mcp --browser-url http://127.0.0.1:9222
- *            --no-usage-statistics --no-performance-crux` as a child process
- *   - The SDK StdioClientTransport connects to it over stdin/stdout
- *   - An Express server + StreamableHTTPServerTransport exposes it on port 4041
- *
- * CDP port: reads RORCA_CDP_PORT env var (default 9222). Chrome must be running
- * with --remote-debugging-port=<CDP_PORT> for this to work.
- *
- * Idempotent — starts at most once per engine process.
- * Returns the server URL on success, null on failure (never throws).
- */
 async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
-  if (process.env.RORCA_AUTONOMOUS_ISOLATION === 'linux-bwrap') {
-    process.stdout.write('[ChromeMCP] Disabled: isolated agents cannot access the local control plane.\n');
-    return null;
-  }
-  // Health-check: if we think the server is ready, verify it's still alive.
-  // Processes can die between stories — reset state and restart if needed.
-  if (_chromeMcpReady) {
-    try {
-      const probe = await fetch(CHROME_MCP_URL, { signal: AbortSignal.timeout(2000) });
-      if (probe.status < 500) return CHROME_MCP_URL;
-    } catch { /* server died — fall through to restart */ }
-    process.stdout.write(`[ChromeMCP] Proxy server died — restarting...\n`);
-    _chromeMcpReady = false;
-    _chromeMcpProxyPid = null;
-    // Close stale HTTP server reference if it exists.
-    const staleServer = (global as Record<string, unknown>).__rorcaChromeMcpHttpServer as
-      { close: (cb?: () => void) => void } | undefined;
-    if (staleServer) { try { staleServer.close(); } catch { /* already dead */ } }
-  }
-
-  // Check if port is already occupied (another process started it)
-  try {
-    const probe = await fetch(CHROME_MCP_URL, { signal: AbortSignal.timeout(1000) });
-    if (probe.status < 500) {
-      _chromeMcpReady = true;
-      return CHROME_MCP_URL;
-    }
-  } catch {
-    // Port not occupied — fall through to spawn
-  }
-
-  const cdpPort = process.env.RORCA_CDP_PORT ?? '9222';
-  const browserUrl = `http://127.0.0.1:${cdpPort}`;
-
-  // Helper: probe CDP endpoint, return version string or null.
-  async function probeCdp(): Promise<string | null> {
-    try {
-      const r = await fetch(`${browserUrl}/json/version`, { signal: AbortSignal.timeout(2000) });
-      if (!r.ok) return null;
-      const v = await r.json() as Record<string, string>;
-      return v['Browser'] ?? 'unknown version';
-    } catch {
-      return null;
-    }
-  }
-
-  // First: check if Chrome is already running with CDP enabled.
-  let chromeVersion = await probeCdp();
-
-  if (!chromeVersion) {
-    // Chrome not reachable — try to launch it automatically.
-    process.stdout.write(`[ChromeMCP] Chrome not found at ${browserUrl} — attempting to launch Chrome with --remote-debugging-port=${cdpPort}...\n`);
-
-    // Resolve Chrome binary path (macOS, Linux, Windows).
-    const chromeCandidates = [
-      process.env.RORCA_CHROME_BIN,
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/chromium',
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    ].filter(Boolean) as string[];
-
-    const chromeBin = chromeCandidates.find(p => {
-      try { return fs.existsSync(p); } catch { return false; }
-    });
-
-    if (!chromeBin) {
-      process.stdout.write(
-        `[ChromeMCP] WARNING: Chrome binary not found. Set RORCA_CHROME_BIN env var or install Chrome.\n`,
-      );
-      return null;
-    }
-
-    // Use a dedicated user-data-dir so we don't stomp on the user's real profile.
-    const userDataDir = path.join(os.tmpdir(), `rorca-chrome-${cdpPort}`);
-    fs.mkdirSync(userDataDir, { recursive: true });
-
-    const chromeProc = spawn(
-      chromeBin,
-      [
-        `--remote-debugging-port=${cdpPort}`,
-        `--user-data-dir=${userDataDir}`,
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-extensions',
-        '--disable-translate',
-        '--disable-features=TranslateUI',
-      ],
-      { detached: true, stdio: 'ignore' },
-    );
-    chromeProc.unref();
-    process.stdout.write(`[ChromeMCP] Chrome launched (PID ${chromeProc.pid ?? 'unknown'}) — waiting for CDP...\n`);
-
-    // Poll for CDP readiness up to 15s.
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 500));
-      chromeVersion = await probeCdp();
-      if (chromeVersion) break;
-    }
-
-    if (!chromeVersion) {
-      process.stdout.write(`[ChromeMCP] WARNING: Chrome did not become ready within 15s — chrome-devtools-mcp unavailable.\n`);
-      return null;
-    }
-  }
-
-  process.stdout.write(`[ChromeMCP] Chrome ready at ${browserUrl} — ${chromeVersion}\n`);
-
-  // Resolve chrome-devtools-mcp binary — prefer local node_modules over global npx.
-  // Store in module-level vars so spawnClaude can write stdio MCP configs.
-  const localBin = path.join(path.dirname(require.resolve('chrome-devtools-mcp/package.json')), 'build/src/bin/chrome-devtools-mcp.js');
-  const chromeMcpCmd = fs.existsSync(localBin) ? process.execPath : 'node';
-  const chromeMcpArgs = fs.existsSync(localBin)
-    ? [localBin, `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux']
-    : [require.resolve('chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js'), `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux'];
-  _chromeMcpCmd = chromeMcpCmd;
-  _chromeMcpArgs = chromeMcpArgs;
-
-  try {
-    // Lazy-load MCP SDK to avoid importing at module level (keeps startup fast when not needed).
-    const { Client } = runtimeRequire('@modelcontextprotocol/sdk/client/index.js') as typeof import('@modelcontextprotocol/sdk/client/index.js');
-    const { StdioClientTransport } = runtimeRequire('@modelcontextprotocol/sdk/client/stdio.js') as typeof import('@modelcontextprotocol/sdk/client/stdio.js');
-    const { Server } = runtimeRequire('@modelcontextprotocol/sdk/server/index.js') as typeof import('@modelcontextprotocol/sdk/server/index.js');
-    const { StreamableHTTPServerTransport } = runtimeRequire('@modelcontextprotocol/sdk/server/streamableHttp.js') as typeof import('@modelcontextprotocol/sdk/server/streamableHttp.js');
-    const { CallToolRequestSchema, ListToolsRequestSchema } = runtimeRequire('@modelcontextprotocol/sdk/types.js') as typeof import('@modelcontextprotocol/sdk/types.js');
-    const expressLib = runtimeRequire('express') as typeof import('express');
-
-    // 1. Connect to chrome-devtools-mcp via stdio
-    const stdioTransport = new StdioClientTransport({
-      command: chromeMcpCmd,
-      args: chromeMcpArgs,
-      env: { ...process.env } as Record<string, string>,
-    });
-    const client = new Client({ name: 'rorca-chrome-bridge', version: '1.0.0' });
-    await client.connect(stdioTransport);
-    _chromeMcpProxyPid = (stdioTransport as unknown as { _process?: { pid?: number } })._process?.pid ?? null;
-    process.stdout.write(`[ChromeMCP] chrome-devtools-mcp connected (PID ${_chromeMcpProxyPid ?? 'unknown'})\n`);
-
-    // 2. List tools from the upstream server so we can re-expose them.
-    const { tools: upstreamTools } = await client.listTools();
-
-    // 3. Create a transparent proxy MCP server using the low-level Server class.
-    //    This avoids McpServer's Zod schema requirement — we forward tool calls as-is.
-    const proxyServer = new Server(
-      { name: 'rorca-chrome-devtools-proxy', version: '1.0.0' },
-      { capabilities: { tools: {} } },
-    );
-
-    proxyServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: upstreamTools,
-    }));
-
-    proxyServer.setRequestHandler(CallToolRequestSchema, async (req) => {
-      const result = await client.callTool({
-        name: req.params.name,
-        arguments: (req.params.arguments ?? {}) as Record<string, unknown>,
-      });
-      return result;
-    });
-
-    // 4. Expose the proxy server over HTTP on CHROME_MCP_PORT via Express.
-    const app = expressLib();
-    app.use(expressLib.json());
-
-    // Each request gets its own StreamableHTTPServerTransport (stateless — suitable for MCP).
-    app.all('/mcp', async (req, res) => {
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      res.on('close', () => { transport.close().catch(() => {}); });
-      await proxyServer.connect(transport);
-      await transport.handleRequest(req, res, req.body as Record<string, unknown>);
-    });
-
-    const httpServer = app.listen(CHROME_MCP_PORT, '127.0.0.1', () => {
-      _chromeMcpReady = true;
-      process.stdout.write(`[ChromeMCP] Proxy ready at ${CHROME_MCP_URL} (${upstreamTools.length} tools forwarded)\n`);
-    });
-
-    // Store reference so we can close on SIGINT/SIGTERM.
-    (global as Record<string, unknown>).__rorcaChromeMcpHttpServer = httpServer;
-
-    // Wait for the server to become ready (listen callback fires async).
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline) {
-      if (_chromeMcpReady) return CHROME_MCP_URL;
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    process.stdout.write(`[ChromeMCP] WARNING: Proxy HTTP server did not become ready within 5s\n`);
-    return null;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stdout.write(`[ChromeMCP] WARNING: Failed to start chrome-devtools-mcp bridge: ${msg}\n`);
-    return null;
-  }
+  process.stdout.write('[ChromeMCP] Disabled: autonomous namespaces cannot access a local browser control plane.\n');
+  return null;
 }
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getStories(spec: SpecJson): UserStory[] {
   if (spec.userStories) return spec.userStories;
@@ -1344,8 +1069,9 @@ function isolatedAgentLaunch(
   args: readonly string[],
   cwd: string,
   env: Record<string, string>,
+  modelCredentials = true,
 ) {
-  return prepareAutonomousSandboxLaunch({ command, args, cwd, env });
+  return prepareAutonomousSandboxLaunch({ command, args, cwd, env, modelCredentials });
 }
 
 function serializeJsonLine(value: unknown): string {
@@ -2249,9 +1975,9 @@ export function buildPtyCommand(
       const compatibility = requireCapabilities(agentModel ? ['model'] : []);
       const env = buildGuardedAgentEnv(cwd);
       // Do not mutate the user's global Codex MCP registry for a run-scoped
-      // PTY. The generated Rorca HTTP endpoint requires bearer auth, while
-      // `codex mcp add --url` without token metadata stalls startup and can
-      // discard the injected prompt. Story context is already in the prompt.
+      // PTY. The generated Rorca HTTP endpoint requires bearer auth, and
+      // global registry mutation can stall startup or discard the injected
+      // prompt. Story context is already in the prompt.
       void mcpServers;
       return {
         command: compatibility.binaryPath!,
@@ -2965,7 +2691,6 @@ function spawnClaude(
     // Pipe prompt via stdin — positional args silently fail for large prompts (>~32KB).
     const claudeCliModel = resolveClaudeCliModelId(agentModel);
     const args = [
-      '--dangerously-skip-permissions',
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
@@ -3385,7 +3110,7 @@ function spawnOpenCode(
 }
 
 /**
- * Spawn `codex exec --dangerously-bypass-approvals-and-sandbox`.
+ * Spawn `codex exec` inside the mandatory outer autonomous sandbox.
  * Prompt is passed via stdin (codex exec reads stdin when no prompt arg given).
  */
 function spawnCodex(
@@ -3395,28 +3120,13 @@ function spawnCodex(
   logFile: string,
   model?: string | null,
   _onTokenUpdate?: TokenUpdateCallback,
-  mcpServers?: Record<string, string>,
+  _mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildGuardedAgentEnv(cwd);
     const startTime = Date.now();
 
-    const codexMcpRegisteredNames: string[] = [];
-    if (process.env.RORCA_AUTONOMOUS_ISOLATION !== 'linux-bwrap'
-      && mcpServers && Object.keys(mcpServers).length > 0) {
-      for (const [name, url] of Object.entries(mcpServers)) {
-        try {
-          execSync(`${CODEX_BIN} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
-          codexMcpRegisteredNames.push(name);
-          process.stdout.write(`[BrowserMCP] Registered ${name} MCP in codex config\n`);
-        } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e);
-          process.stdout.write(`[BrowserMCP] WARNING: Failed to register ${name} MCP in codex: ${msg}\n`);
-        }
-      }
-    }
-
-    const args: string[] = ['exec', '--dangerously-bypass-approvals-and-sandbox'];
+    const args: string[] = ['exec'];
     if (model) args.push('--model', model);
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
@@ -3489,11 +3199,6 @@ function spawnCodex(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
-      for (const name of codexMcpRegisteredNames) {
-        try {
-          execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' });
-        } catch { /* ignore if already gone */ }
-      }
       if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
@@ -4426,7 +4131,7 @@ function runGate(
     } else {
       logger.info('  [gate] Running tsc --noEmit...');
       try {
-        const launch = isolatedAgentLaunch('npx', ['tsc', '--noEmit'], cwd, buildGuardedAgentEnv(cwd, env));
+        const launch = isolatedAgentLaunch('npx', ['tsc', '--noEmit'], cwd, buildGuardedAgentEnv(cwd, env), false);
         execFileSync(launch.command, launch.args, {
           cwd: launch.cwd, env: launch.env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS,
         });

@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
 import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
+import { ensureAutonomousModelEgress } from './autonomous-model-egress';
 
 export const GITREINS_EVIDENCE_SCHEMA = 'https://gitreins.dev/schemas/evidence/v1.json';
 export const GITREINS_EVIDENCE_VERSION = '1.0';
@@ -211,14 +212,22 @@ export async function runGitReinsJudge(input: GitReinsJudgeInput): Promise<GitRe
     '--json',
   ];
 
+  const egressSocket = await ensureAutonomousModelEgress();
+  if (!egressSocket) return resultFor(input, startedAt, 'error', 'missing_config');
   const guard = createAutonomousCommandGuard({
     cwd: input.cwd,
-    env: process.env as Record<string, string>,
+    env: { ...process.env, RORCA_AUTONOMOUS_EGRESS_SOCKET: egressSocket } as Record<string, string>,
   });
   const cleanupGuard = () => fs.rmSync(guard.guardBinDir, { recursive: true, force: true });
   let launch: ReturnType<typeof prepareAutonomousSandboxLaunch>;
   try {
-    launch = prepareAutonomousSandboxLaunch({ command: binary, args, cwd: input.cwd, env: guard.env });
+    launch = prepareAutonomousSandboxLaunch({
+      command: binary,
+      args,
+      cwd: input.cwd,
+      env: guard.env,
+      modelCredentials: true,
+    });
   } catch {
     cleanupGuard();
     return resultFor(input, startedAt, 'error', 'missing_binary');

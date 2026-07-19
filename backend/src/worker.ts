@@ -172,24 +172,6 @@ let _lastReconciliationErrors = 0;
 let pgBossHealthFailures = 0;
 const PG_BOSS_HEALTH_MAX_FAILURES = 3;
 
-async function assertLocalDevHasNoDurableProviderAuthority(): Promise<void> {
-  if (process.env.RORCA_AUTONOMOUS_ISOLATION !== 'local-dev') return;
-  const authority = await queryOne<{ present: boolean }>(`
-    SELECT (
-      EXISTS (
-        SELECT 1 FROM integration_vault_secrets
-         WHERE provider = 'github_app' AND revoked_at IS NULL
-      ) OR EXISTS (
-        SELECT 1 FROM integration_tokens
-         WHERE provider = 'github' AND revoked_at IS NULL
-      )
-    ) AS present
-  `);
-  if (!authority || authority.present) {
-    throw new Error('local-dev autonomous isolation cannot coexist with durable provider authority');
-  }
-}
-
 async function pgBossHealthCheck(): Promise<void> {
   try {
     const boss = getBoss();
@@ -522,13 +504,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
 
-    // Prove the process/filesystem/network boundary before the run can become
-    // running. In explicit local-dev posture provider-capable jobs are refused.
+    // Prove the mandatory process/filesystem/network boundary before the run
+    // can become running. There is no raw local-development bypass.
     assertAutonomousExecutionBoundary({
       cwd,
       providerCapable: payload.safetyOptions.externalSend,
     });
-    await assertLocalDevHasNoDurableProviderAuthority();
     await ensureAutonomousModelEgress();
 
     // Backend/engine own lifecycle phase; legacy status remains for existing
@@ -1167,7 +1148,6 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       cwd,
       providerCapable: approvedPreview.options.safety.externalSend,
     });
-    await assertLocalDevHasNoDurableProviderAuthority();
     await ensureAutonomousModelEgress();
 
     await transitionRunLifecycle(runId, 'starting', {

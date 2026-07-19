@@ -41,21 +41,16 @@ test('production worker image and Compose select the concrete fail-closed sandbo
 
 test('worker proves isolation before either fresh or retry lifecycle can become running', () => {
   const calls = [...worker.matchAll(/assertAutonomousExecutionBoundary\(\{/g)].map(match => match.index!);
-  const durableAuthority = [...worker.matchAll(/await assertLocalDevHasNoDurableProviderAuthority\(\)/g)].map(match => match.index!);
   const egress = [...worker.matchAll(/await ensureAutonomousModelEgress\(\)/g)].map(match => match.index!);
   const running = [...worker.matchAll(/transitionRunLifecycle\(runId, 'starting'/g)].map(match => match.index!);
   expect(calls).toHaveLength(2);
-  expect(durableAuthority).toHaveLength(2);
   expect(egress).toHaveLength(2);
   expect(running).toHaveLength(2);
-  expect(calls[0]).toBeLessThan(durableAuthority[0]);
-  expect(durableAuthority[0]).toBeLessThan(egress[0]);
+  expect(calls[0]).toBeLessThan(egress[0]);
   expect(egress[0]).toBeLessThan(running[0]);
-  expect(calls[1]).toBeLessThan(durableAuthority[1]);
-  expect(durableAuthority[1]).toBeLessThan(egress[1]);
+  expect(calls[1]).toBeLessThan(egress[1]);
   expect(egress[1]).toBeLessThan(running[1]);
-  expect(worker).toContain("FROM integration_vault_secrets");
-  expect(worker).toContain("FROM integration_tokens");
+  expect(worker).not.toContain('assertLocalDevHasNoDurableProviderAuthority');
   expect(worker).toContain('providerCapable: payload.safetyOptions.externalSend');
   expect(worker).toContain('providerCapable: approvedPreview.options.safety.externalSend');
 });
@@ -81,7 +76,7 @@ test('boundary is topology, not PATH or environment theater', () => {
   ]) expect(sandbox).toContain(required);
   expect(sandbox).toContain('Repository Git config contains an embedded credential');
   expect(sandbox).toContain('Autonomous worktree overlaps the trusted engine installation');
-  expect(sandbox).toContain('local-dev autonomous isolation cannot coexist with provider authority');
+  expect(sandbox).toContain('raw local-dev autonomous execution is forbidden');
   expect(sandbox).toContain("selected.HTTPS_PROXY = SANDBOX_PROXY_URL");
   expect(sandbox).toContain('Autonomous model egress endpoint is not a Unix socket');
   expect(egress).toContain("host.endsWith('.github.com')");

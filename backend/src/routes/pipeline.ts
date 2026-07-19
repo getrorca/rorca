@@ -7,7 +7,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { isUtf8 } from 'buffer';
-import { execSync, spawn } from 'child_process';
+import { execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -18,10 +18,8 @@ import { validateBody } from '../lib/validate';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
-import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
-import { getWorkspaceEnvVars } from './env-vars';
+import { DEFAULT_MODEL } from '../lib/llm-client';
 import { checkBudgetThresholds } from './budget';
-import { getVaultKey } from './vault';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
 import { requireWorkspaceAdmin } from '../lib/auth-utils';
@@ -31,7 +29,6 @@ import { parseLine } from '../lib/semantic-log-parser';
 import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
-import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, storyAllowsNoCodeChanges, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
 import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
@@ -54,11 +51,10 @@ import {
 import { persistStoryExecutionManifest } from '../lib/story-closeout';
 import { inspectApprovedSpecPasses, reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
 import { classifyRunLiveness } from '../lib/ssdlc-liveness';
-import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
+import { routeWorkspaceContext } from '../lib/workspace-context-routing';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
-import { synthesizeRunMemory } from '../lib/auto-memory';
 import * as piDetector from '../lib/pi-detector';
 import {
   PiExecutionPreflightError,
@@ -657,14 +653,6 @@ export async function syncFallbackResults(cwd: string, workspaceId: string): Pro
   return replay.inserted + replay.duplicates;
 }
 
-// All Claude Code env vars that block nested invocation (same as llm-client.ts)
-const CLAUDE_ENV_VARS_TO_REMOVE = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_AGENT_SDK_VERSION',
-  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
-];
-
 function assertReusableWorktreeFresh(
   workspacePath: string,
   worktreePath: string,
@@ -698,34 +686,6 @@ function assertReusableBranchFresh(workspacePath: string, branchName: string): v
     `Reusable branch is stale or invalid (${result.reason}). ` +
     `Refresh or recreate ${branchName} before retrying.${detail}`,
   );
-}
-
-/** FR-005: When a pipeline run finishes with status='done', snapshot spec version as 'completed'. */
-async function markSpecCompleted(specPath: string): Promise<void> {
-  try {
-    const slug = path.basename(specPath, '.json');
-    // Check if latest spec_versions entry is already 'completed'
-    const latestVersion = await queryOne(`SELECT status FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [slug]) as { status: string } | undefined;
-    if (latestVersion?.status === 'completed') return; // already marked
-
-    // Read spec content from filesystem (approved dir is the canonical location)
-    // spec_path stored in pipeline_runs is relative like 'forge/specs/approved/slug.json'
-    // We just need the slug for the version snapshot
-    const run = await queryOne(`SELECT pr.workspace_id, w.path as workspace_path FROM pipeline_runs pr
-       JOIN workspaces w ON w.id = pr.workspace_id
-       WHERE pr.spec_path = $1 ORDER BY pr.id DESC LIMIT 1`, [specPath]) as { workspace_id: string; workspace_path: string } | undefined;
-    if (!run) return;
-
-    const absSpecPath = path.join(run.workspace_path, specPath);
-    if (!fs.existsSync(absSpecPath)) return;
-
-    const content = fs.readFileSync(absSpecPath, 'utf8');
-    const nextVer = ((await queryOne('SELECT MAX(version) as max_ver FROM spec_versions WHERE spec_slug = $1', [slug]) as { max_ver: number | null } | undefined)?.max_ver ?? 0) + 1;
-
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, 'completed')`, [slug, nextVer, content]);
-  } catch {
-    // Non-fatal — completed status is also derived from pipeline_runs at query time
-  }
 }
 
 const router = Router();
@@ -1035,14 +995,6 @@ router.post('/preflight', async (req: Request, res: Response) => {
     const orchConfig = loadOrchestrationConfig(workspace.path);
     const executionReadiness = buildExecutionReadinessSummary(workspace.path, specJson);
 
-    let browserMcpAvailable = false;
-    try {
-      require.resolve('@playwright/mcp');
-      browserMcpAvailable = true;
-    } catch {
-      browserMcpAvailable = false;
-    }
-
     res.json({
       compatible: report.compatible,
       mismatchMode: orchConfig.capabilityMismatch,
@@ -1055,8 +1007,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
         warnings: s.result.warnings,
       })),
       executionReadiness,
-      browserMcpAvailable,
-      browserMcpPort: 4040,
+      browserMcpAvailable: false,
+      browserMcpPort: null,
+      browserMcpReason: 'disabled_by_autonomous_isolation',
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Preflight');
@@ -1068,12 +1021,12 @@ router.post('/preflight', async (req: Request, res: Response) => {
  * /api/pipeline/trigger:
  *   post:
  *     tags: [Pipeline]
- *     summary: Trigger a pipeline run (spawn run-loop.sh)
+ *     summary: Trigger a canonical worker-backed pipeline run
  *     operationId: triggerPipelineRun
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Starting a local spec run is a core open-source CLI action and must remain callable via MCP and REST."
  *     x-rorca-public-api: true
- *     description: Spawns the execution engine as a subprocess to run all stories in the specified spec, optionally in a git worktree.
+ *     description: Validates and enqueues an approved spec for the canonical worker, which launches the execution engine under mandatory autonomous isolation.
  *     requestBody:
  *       required: true
  *       content:
@@ -1588,12 +1541,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     }
 
     const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(path.join(__dirname, '..'));
-    const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const hasExecutionEngine = executionEngineEntrypoint.exists;
-    const hasBashRunLoop = fs.existsSync(runLoopSh);
-
-    if (!hasExecutionEngine && !hasBashRunLoop) {
-      throw new UnprocessableError('No execution engine found — expected execution-engine.js or execution-engine.ts');
+    if (!executionEngineEntrypoint.exists) {
+      throw new UnprocessableError('No canonical execution engine found — expected execution-engine.js or execution-engine.ts');
       return;
     }
 
@@ -3682,420 +3631,25 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/pipeline/quick-run — Brief → single-story spec → immediate run ─
-// Accepts a plain-English brief, generates a 1-story spec, writes it directly
-// to approved/ (no review queue), emits spec_approved WAL, triggers execution.
+// ─── POST /api/pipeline/quick-run — retired unsafe API-side orchestrator ──────
 
 /**
  * @swagger
  * /api/pipeline/quick-run:
  *   post:
  *     tags: [Pipeline]
- *     summary: Quick-run — generate a 1-story spec from a brief and execute immediately
+ *     summary: Retired quick-run endpoint
  *     operationId: quickRunPipeline
- *     description: |
- *       Generates a single-story spec from a plain-English brief, writes it directly to
- *       approved (no review queue), and immediately triggers pipeline execution.
- *
- *       The spec generation prompt incorporates a layered context cascade in this order:
- *       1. **Direction Stack (L1-L3)** — synthesized from direction_layers table:
- *          L1 (global engineering principles), L2 (domain conventions matched by workspace.domain),
- *          L3 (project-specific context scoped to this workspace). Merged via synthesize().
- *       2. **MEMORY.md** — episodic ledger from workspace root (first 2000 chars).
- *          Contains timestamped Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha entries.
- *       3. **Installed Skills** — list of skills from installed_skills table (name + description).
- *          Informs the LLM which reusable skill files are available for the generated story.
- *       All three context sources are best-effort: silently omitted if missing or on error.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId, brief]
- *             properties:
- *               workspaceId: { type: string }
- *               brief: { type: string, description: "Plain-English description of what to build" }
- *               model: { type: string, description: "LLM model to use for spec generation" }
+ *     description: This legacy API-side execution path is retired. Persist and approve a spec, then use the canonical worker-backed pipeline trigger API.
  *     responses:
- *       202:
- *         description: Quick-run started
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 runId: { type: integer }
- *                 specId: { type: string }
- *       400: { description: "Missing required fields" }
- *       404: { description: "Workspace not found" }
- *       409: { description: "Active run conflict or budget cap exceeded" }
+ *       409:
+ *         description: Quick-run is retired; no spec, run, WAL, environment load, or subprocess mutation occurs.
  */
-router.post('/quick-run', async (req: Request, res: Response) => {
-  try {
-    const { workspaceId, brief, model: requestedModel } = req.body;
-
-    if (!workspaceId || !brief) {
-      throw new ValidationError('Missing required fields: workspaceId, brief');
-      return;
-    }
-
-    // 1. Look up workspace
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
-      { id: string; label: string; path: string; domain?: string } | undefined;
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
-    // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
-
-    // 3. Budget cap guard
-    const budgetStatus = await checkBudgetThresholds(workspaceId);
-    if (budgetStatus.capExceeded) {
-      throw new ConflictError('Budget cap exceeded for this period');
-      return;
-    }
-
-    // 4. Conflict detection
-    const activeRun = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
-    if (activeRun) {
-      res.json({ conflict: true, activeRunId: activeRun.id });
-      return;
-    }
-
-    // 5. Resolve model — from request only, no hidden DB fallbacks
-    const resolvedModel: string = requestedModel ?? DEFAULT_MODEL;
-
-    // 6. Resolve vault creds for LLM call
-    const user = await getEffectiveUser(req);
-    let vaultCreds: { apiKey?: string; baseUrl?: string } = {};
-    if (user?.id) {
-      const vaultProvider = resolveVaultProvider(resolvedModel);
-      if (vaultProvider) {
-        const result = await getVaultKey(user.id, vaultProvider);
-        if (result) vaultCreds = { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
-      }
-      if (!vaultCreds.apiKey) {
-        const compat = await getVaultKey(user.id, 'openai-compat');
-        if (compat) vaultCreds = { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
-      }
-      if (!vaultCreds.apiKey) {
-        const anthropic = await getVaultKey(user.id, 'anthropic');
-        if (anthropic) vaultCreds = { apiKey: anthropic.key };
-      }
-    }
-
-    // Context cascade: direction stack → MEMORY.md → installed skills → instructions
-    // Each layer is best-effort (silently omitted on error or absence):
-    //   1. Direction Stack (L1–L3): global engineering principles → domain conventions → project context
-    //   2. MEMORY.md: episodic ledger at workspace root, capped at 2000 chars
-    //   3. Installed Skills: names + descriptions from installed_skills table
-    // Layers are assembled in this order and prepended to the LLM instructions block.
-    // An empty layer is filtered out — the prompt degrades gracefully to bare instructions.
-
-    // 7. Synthesize direction stack (L1–L3) for this workspace
-    let directionContext = '';
-    try {
-      const domain = workspace.domain ?? '';
-      const [l1Row, l2Row, l3Row] = await Promise.all([
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = '' AND COALESCE(team_id, '') = '' LIMIT 1`, []),
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id, '') = '' AND (domain = $1 OR COALESCE(domain, '') = '') AND COALESCE(team_id, '') = '' ORDER BY (domain = $1) DESC LIMIT 1`, [domain]),
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = '' LIMIT 1`, [workspaceId]),
-      ]);
-      directionContext = synthesize({ l1: l1Row?.content_yaml, l2: l2Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: brief });
-    } catch (err: unknown) {
-      // Silently skip — direction context is best-effort
-      if (err instanceof Error) void err.message;
-    }
-
-    // 8. Generate 1-story spec via LLM
-    // CTM-006: Route quick-run context injection through the canonical workspace-context path.
-    // Validate the .rorca / AGENTS.md / MEMORY.md contract once, then resolve MEMORY.md and
-    // installed skills against it so quick-run specs are never context blind by accident.
-    const routingContract = validateRoutingContract(workspace.path);
-
-    // Read MEMORY.md from workspace root (best-effort, silent on error).
-    // Keep the root-relative read so the contract's resolved path can never break a
-    // workspace whose ledger lives at the conventional root MEMORY.md.
-    let memoryContent = '';
-    try {
-      memoryContent = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
-    } catch (err: unknown) {
-      // ENOENT or any read error — fall back to the contract-resolved ledger (also nonfatal)
-      if (err instanceof Error) void err.message;
-      memoryContent = readContractMemory(workspace.path, routingContract);
-    }
-
-    // Fetch installed skills for this workspace (best-effort, silent on error)
-    let installedSkills: Array<{ name: string; description: string | null }> = [];
-    try {
-      installedSkills = await query<{ name: string; description: string | null }>(
-        `SELECT name, description FROM installed_skills ORDER BY name`,
-        [],
-      );
-    } catch (err: unknown) {
-      // DB error — silently skip
-      if (err instanceof Error) void err.message;
-    }
-
-    // Build ordered, non-empty context blocks via the single deterministic assembler.
-    const { blocks: contextBlocks } = buildQuickRunContextBlocks({
-      directionContext,
-      memoryContent,
-      installedSkills,
-    });
-
-    const instructions = [
-      '=== INSTRUCTIONS: READ THIS FIRST ===',
-      'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
-      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
-      'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
-      'If you output anything other than raw JSON, the system will fail.',
-      '=== END INSTRUCTIONS ===',
-      '',
-      `TASK: Generate a software specification JSON with exactly 1 user story.`,
-      `Brief: ${brief}`,
-      '',
-      'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
-      '',
-      'JSON schema:',
-      '{"stories":[{"id":"QR-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":[]}]}',
-      '',
-      'Rules:',
-      '- Generate exactly 1 story with id "QR-001"',
-      '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
-      '- acceptanceCriteria must be specific and testable',
-      '- dependsOn must be an empty array (single story has no deps)',
-      '- The description should be detailed enough for an engineer to implement',
-      '- Your entire response must be valid JSON parseable by JSON.parse()',
-    ].join('\n');
-
-    const quickRunPrompt = contextBlocks.length > 0
-      ? `${contextBlocks.join('\n\n')}\n\n${instructions}`
-      : instructions;
-
-    const llmResult = await chatComplete(
-      [{ role: 'user', content: quickRunPrompt }],
-      { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
-    );
-    const rawResponse = llmResult.text;
-
-    // 8. Parse JSON
-    let parsed: { stories: Array<{ id: string; title: string; description: string; acceptanceCriteria: string[]; dependsOn: string[] }> };
-    try {
-      const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-      const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-      const jsonStart = jsonStr.indexOf('{');
-      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
-    } catch {
-      res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
-      return;
-    }
-
-    if (!Array.isArray(parsed.stories) || parsed.stories.length === 0) {
-      res.status(500).json({ error: 'Invalid spec structure from LLM' });
-      return;
-    }
-
-    // Enforce single story only; keep all acceptance criteria returned by the model.
-    const story = parsed.stories[0];
-
-    // 9. Build slug and write spec directly to approved/
-    const slug = `qr-${brief.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50)}-${Date.now()}`;
-    const approvedDir = path.join(workspace.path, 'forge', 'specs', 'approved');
-    fs.mkdirSync(approvedDir, { recursive: true });
-
-    const specJson = {
-      title: brief.slice(0, 120),
-      generatedAt: new Date().toISOString(),
-      model: resolvedModel,
-      source: 'quick-run',
-      userStories: [{
-        id: story.id || 'QR-001',
-        title: story.title,
-        description: story.description,
-        acceptanceCriteria: story.acceptanceCriteria || [],
-        dependsOn: [],
-        passes: false,
-      }],
-    };
-
-    const specPath = path.join(approvedDir, `${slug}.json`);
-    fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');
-    const relativeSpecPath = `forge/specs/approved/${slug}.json`;
-
-    // 10. Emit spec_approved WAL event with actor: 'quick-run'
-    const walApproveEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_approved', $1, $2, $3)` + ' RETURNING *', [slug, workspaceId, JSON.stringify({ actor: 'quick-run', brief: brief.slice(0, 200), model: resolvedModel })]);
-    broadcastAll(walApproveEvent!);
-
-    // 11. Trigger pipeline execution (same logic as /trigger)
-    const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
-    const hasBashRunLoop = fs.existsSync(runLoopSh);
-    const hasTsRunLoop = fs.existsSync(runLoopTs);
-    if (!hasBashRunLoop && !hasTsRunLoop) {
-      throw new UnprocessableError(`No run-loop engine found for workspace`);
-      return;
-    }
-    const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
-
-    const runResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES ($1, $2, 'running', 'quick-run') RETURNING id`, [relativeSpecPath, workspaceId]);
-    const runId = normalizeWorkerRunId(runResult!.id);
-
-    // Build clean env
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-        env[k] = v;
-      }
-    }
-    env['RORCA_PROCESS_ROLE'] = 'engine';
-    const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
-    for (const [k, v] of Object.entries(workspaceEnvVars)) {
-      env[k] = v;
-    }
-
-    // Inject vault API keys
-    if (user?.id) {
-      const anthropicVaultKey = await getVaultKey(user.id, 'anthropic');
-      if (anthropicVaultKey) env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
-      const openaiVaultKey = await getVaultKey(user.id, 'openai-compat');
-      if (openaiVaultKey) {
-        env['OPENAI_API_KEY'] = openaiVaultKey.key;
-        if (openaiVaultKey.baseUrl) env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
-      }
-      const openrouterVaultKey = await getVaultKey(user.id, 'openrouter');
-      if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
-
-    }
-
-    // Inject agent profile
-    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
-    if (activeProfile) {
-      if (activeProfile.system_prompt_override) env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
-      const tools = (Array.isArray(activeProfile.allowed_tools) ? activeProfile.allowed_tools : JSON.parse(activeProfile.allowed_tools)) as string[];
-      if (tools.length > 0) env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
-      if (activeProfile.model_override) env['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
-    }
-
-    // Spawn run-loop
-    const logPath = workspaceLogPath(workspace.path, runId);
-    await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [logPath, runId]);
-    const logFd = fs.openSync(logPath, 'a');
-    let child: ReturnType<typeof spawn>;
-
-    if (useTypescriptRunLoop) {
-      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
-      const backendPort = process.env.PORT || '3030';
-      child = spawn(tsxBin, [
-        runLoopTs,
-        '--json', specPath,
-        '--cwd', workspace.path,
-        '--run-id', String(runId),
-        '--port', backendPort,
-        '--parallelism', '1',
-      ], {
-        cwd: workspace.path,
-        stdio: ['ignore', logFd, logFd],
-        detached: true,
-        env,
-      });
-    } else {
-      const scriptInCwd = path.join(workspace.path, 'forge', 'run-loop.sh');
-      child = spawn('bash', [scriptInCwd, '--json', specPath], {
-        cwd: workspace.path,
-        stdio: ['ignore', logFd, logFd],
-        detached: true,
-        env,
-      });
-    }
-    fs.closeSync(logFd);
-    child.unref();
-
-    if (child.pid) {
-      await execute(`UPDATE pipeline_runs SET pid = $1 WHERE id = $2`, [child.pid, runId]);
-    }
-
-    // Set up output buffer
-    const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
-    outputBuffers.set(runId, buf);
-
-    let tailPos = 0;
-    const tailInterval = setInterval(() => {
-      try {
-        const stat = fs.statSync(logPath);
-        if (stat.size > tailPos) {
-          const fd = fs.openSync(logPath, 'r');
-          const newBytes = Buffer.alloc(stat.size - tailPos);
-          fs.readSync(fd, newBytes, 0, newBytes.length, tailPos);
-          fs.closeSync(fd);
-          tailPos = stat.size;
-          const text = newBytes.toString('utf8');
-          buf.chunks.push(text);
-          buf.subscribers.forEach(cb => cb(text));
-        }
-      } catch { /* transient read error */ }
-    }, 200);
-
-    // Handle process exit
-    child.on('exit', async (code) => {
-      clearInterval(tailInterval);
-      try {
-        const stat = fs.statSync(logPath);
-        if (stat.size > tailPos) {
-          const fd = fs.openSync(logPath, 'r');
-          const remaining = Buffer.alloc(stat.size - tailPos);
-          fs.readSync(fd, remaining, 0, remaining.length, tailPos);
-          fs.closeSync(fd);
-          buf.chunks.push(remaining.toString('utf8'));
-          buf.subscribers.forEach(cb => cb(remaining.toString('utf8')));
-        }
-      } catch { /* ignore */ }
-
-      if (false /* pg pool always available */) {
-        buf.done = true;
-        buf.subscribers.clear();
-        return;
-      }
-
-      const status = code === 0 ? 'done' : 'failed';
-      await execute(`UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`, [status, runId]);
-
-      // FR-005: Mark spec as completed when run succeeds
-      if (status === 'done') markSpecCompleted(relativeSpecPath);
-
-      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
-      synthesizeRunMemory(runId, workspaceId).catch(() => {});
-
-      const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
-      const postRunResults = await runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
-      if (postRunResults.length > 0) {
-        const hookOutput = postRunResults.map(r =>
-          `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
-          (r.exitCode !== 0 ? `\r\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\r\n` : '\r\n')
-        ).join('');
-        buf.chunks.push(hookOutput);
-        buf.subscribers.forEach(cb => cb(hookOutput));
-        fs.appendFileSync(logPath, hookOutput);
-      }
-
-      const walFinishEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code, source: 'quick-run' })]);
-      broadcastAll(walFinishEvent!);
-
-      // PR-RQ-1: Advance run queue — promote next queued run if any
-      advanceQueue(workspaceId);
-
-      buf.done = true;
-      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
-      buf.subscribers.clear();
-      setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
-    });
-
-    res.status(202).json({ runId, specId: slug });
-  } catch (error: any) {
-    handleRouteError(res, error, '[Pipeline] Quick-run');
-  }
+router.post('/quick-run', (_req: Request, res: Response) => {
+  res.status(409).json({
+    error: 'quick_run_retired',
+    message: 'Quick-run is retired. Persist and approve a spec, then use the canonical pipeline trigger API.',
+  });
 });
 
 // ─── POST /api/pipeline/runs — Create a pipeline run ────────────────────────

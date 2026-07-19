@@ -12,6 +12,32 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+// Unit fixture only: execute fake local scripts in place of the production
+// helper. Separate boundary tests prove the real helper always builds bwrap.
+jest.mock('../autonomous-cli-probe', () => {
+  const childProcess = jest.requireActual('node:child_process') as typeof import('node:child_process');
+  const run = (command: string, args: string[], options: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => {
+    const result = childProcess.spawnSync(command, args, {
+      env: options.env,
+      encoding: 'utf8',
+      timeout: options.timeoutMs,
+      killSignal: 'SIGKILL',
+    });
+    return {
+      status: result.status,
+      signal: result.signal,
+      stdout: String(result.stdout ?? ''),
+      stderr: String(result.stderr ?? ''),
+      ...(result.error ? { error: result.error } : {}),
+    };
+  };
+  return {
+    probeAutonomousCliSync: run,
+    probeAutonomousCli: async (...args: Parameters<typeof run>) => run(...args),
+  };
+});
+
 import {
   assertPtyCliCompatible,
   probePtyCliCompatibility,

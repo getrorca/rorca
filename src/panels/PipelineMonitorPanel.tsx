@@ -197,7 +197,6 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   const navigate = useNavigate();
   const { runs, refetch: refetchRuns } = usePipelineRuns(workspaceId, 10_000);
   const [_showStartHelp, _setShowStartHelp] = useState(false);
-  const [_copied, setCopied] = useState(false);
   const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
   const [specPickerOpen, setSpecPickerOpen] = useState(false);
   const [cancellingRunId, setCancellingRunId] = useState<number | null>(null);
@@ -319,13 +318,6 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
       console.error('[RunQueue] Add failed:', err);
     }
   }, [workspaceId, fetchQueue]);
-
-  const _handleCopyCommand = () => {
-    const cmd = `./forge/run-loop.sh --json forge/specs/approved/<spec>.json`;
-    navigator.clipboard.writeText(cmd);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   const handleRunClick = (runId: number) => {
     if (onNavigateToRun) {

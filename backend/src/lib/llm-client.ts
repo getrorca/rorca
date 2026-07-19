@@ -6,9 +6,13 @@
  */
 
 import { spawn } from 'child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { logger } from './logger';
+import { prepareAutonomousModelSandboxLaunch } from './autonomous-sandbox';
 
 // ─── Provider Types ──────────────────────────────────────────────────────────
 
@@ -122,6 +126,8 @@ export interface ChatOptions {
   maxTokens?: number;
   /** OpenRouter provider routing preferences (order, ignore, allow_fallbacks). */
   openRouterProvider?: OpenRouterProviderPrefs;
+  /** Optional workspace visible to a sandboxed CLI provider. SDK providers ignore it. */
+  cwd?: string;
   /**
    * Unified reasoning options. Supersedes the legacy `thinking` field for new callers.
    * When both are present, `reasoning` takes precedence.
@@ -578,35 +584,39 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
   'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
 ];
 
-function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatResult> {
+async function chatCompleteCLI(messages: ChatMessage[], opts: ChatOptions): Promise<ChatResult> {
   const prompt = messages.length === 1
     ? messages[0].content
     : messages.map(m =>
         m.role === 'user' ? m.content : `[Previous response: ${m.content}]`
       ).join('\n\n---\n\n');
 
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-      env[k] = v;
-    }
-  }
+  const env = Object.fromEntries(
+    Object.entries(process.env)
+      .filter((entry): entry is [string, string] => entry[1] !== undefined)
+      .filter(([key]) => !CLAUDE_ENV_VARS_TO_REMOVE.includes(key)),
+  );
+  const ownedScratch = opts.cwd ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-claude-cli-'));
+  const cwd = opts.cwd ?? ownedScratch!;
 
-  return new Promise((resolve, reject) => {
+  try {
     const args = [
-      '--dangerously-skip-permissions',
       '--print',
+      '--tools', '',
       '--output-format', 'json',
     ];
-    if (model) {
-      args.push('--model', model);
+    if (opts.model) {
+      args.push('--model', opts.model);
     }
     args.push(prompt);
 
-    const child = spawn(CLAUDE_BIN, args, {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const launch = await prepareAutonomousModelSandboxLaunch({ command: CLAUDE_BIN, args, cwd, env });
+    return await new Promise((resolve, reject) => {
+      const child = spawn(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
 
     let stdout = '';
     let stderr = '';
@@ -618,7 +628,7 @@ function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatR
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
 
-    child.on('close', (code) => {
+      child.on('close', (code) => {
       if (stderr) logger.warn({ stderr: stderr.slice(0, 500) }, '[LLM] claude stderr');
       if (code !== 0) {
         const detail = stderr.slice(0, 300) || stdout.slice(0, 300);
@@ -648,8 +658,11 @@ function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatR
       } catch {
         resolve({ text: stdout.trim(), usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0 } });
       }
+      });
     });
-  });
+  } finally {
+    if (ownedScratch) fs.rmSync(ownedScratch, { recursive: true, force: true });
+  }
 }
 
 // ─── Anthropic SDK ───────────────────────────────────────────────────────────
@@ -933,7 +946,7 @@ export async function chatComplete(messages: ChatMessage[], modelOrOpts?: string
   const attemptCall = (callOpts: ChatOptions): Promise<ChatResult> => {
     switch (provider) {
       case 'claude-cli':
-        return chatCompleteCLI(messages, model);
+        return chatCompleteCLI(messages, { ...callOpts, model });
 
       case 'anthropic':
         if (!callOpts.apiKey) {

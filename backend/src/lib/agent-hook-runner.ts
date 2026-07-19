@@ -5,10 +5,11 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { exec } from 'child_process';
+import { spawn } from 'child_process';
 import { query, queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
 
 export interface AgentHookRow {
   id: number;
@@ -50,6 +51,12 @@ export async function fireAgentHooks(walEvent: WalEvent): Promise<void> {
 
   if (hooks.length === 0) return;
 
+  const workspace = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace?.path) {
+    logger.error({ workspaceId }, '[AgentHooks] Workspace path unavailable; refusing hook launch');
+    return;
+  }
+
   const eventPayload = JSON.stringify({
     event_type: walEvent.event_type,
     workspace_id: walEvent.workspace_id,
@@ -62,43 +69,49 @@ export async function fireAgentHooks(walEvent: WalEvent): Promise<void> {
   for (const hook of hooks) {
     const timeoutMs = (hook.timeout_seconds || 30) * 1000;
 
-    exec(hook.command, {
-      timeout: timeoutMs,
-      maxBuffer: 1024 * 1024,
-      env: { ...process.env, RORCA_EVENT: eventPayload },
-    }, (error, stdout, stderr) => {
-      const exitCode = error ? (error as any).code ?? 1 : 0;
-      const resultPayload = JSON.stringify({
-        hook_id: hook.id,
-        hook_event_type: hook.event_type,
-        command: hook.command,
-        exit_code: exitCode,
-        stdout: stdout.slice(0, 4096),
-        stderr: stderr.slice(0, 4096),
-        trigger_event_id: walEvent.id,
+    try {
+      const launch = prepareAutonomousSandboxLaunch({
+        command: '/bin/sh',
+        args: ['-lc', hook.command],
+        cwd: workspace.path,
+        env: { PATH: process.env.PATH ?? '', RORCA_EVENT: eventPayload },
       });
-
-      (async () => {
-        try {
-          const hookWalEvent = await queryOne<WalEvent>(
-            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
-             VALUES ('hook_executed', $1, $2, $3, 'system', $4)
-             RETURNING *`,
-            [
-              workspaceId,
-              walEvent.spec_id ?? null,
-              walEvent.story_id ?? null,
-              resultPayload,
-            ]
-          );
-
-          if (hookWalEvent) {
-            broadcastAll(hookWalEvent);
-          }
-        } catch (err) {
-          logger.error({ err }, `[AgentHooks] Failed to log hook result for hook ${hook.id}`);
-        }
-      })();
-    });
+      const child = spawn(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', chunk => { if (stdout.length < 4096) stdout += String(chunk); });
+      child.stderr?.on('data', chunk => { if (stderr.length < 4096) stderr += String(chunk); });
+      const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        const resultPayload = JSON.stringify({
+          hook_id: hook.id,
+          hook_event_type: hook.event_type,
+          command: hook.command,
+          exit_code: code ?? 1,
+          stdout: stdout.slice(0, 4096),
+          stderr: stderr.slice(0, 4096),
+          trigger_event_id: walEvent.id,
+        });
+        void queryOne<WalEvent>(
+          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
+           VALUES ('hook_executed', $1, $2, $3, 'system', $4)
+           RETURNING *`,
+          [workspaceId, walEvent.spec_id ?? null, walEvent.story_id ?? null, resultPayload],
+        ).then(hookWalEvent => {
+          if (hookWalEvent) broadcastAll(hookWalEvent);
+        }).catch(err => logger.error({ err }, `[AgentHooks] Failed to log hook result for hook ${hook.id}`));
+      });
+      child.once('error', err => {
+        clearTimeout(timer);
+        logger.error({ err }, `[AgentHooks] Sandboxed hook ${hook.id} failed to spawn`);
+      });
+    } catch (err) {
+      logger.error({ err }, `[AgentHooks] Refused unsafe hook ${hook.id}`);
+    }
   }
 }

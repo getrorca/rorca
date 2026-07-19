@@ -10,6 +10,13 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousSandboxLaunch: jest.fn((options: any) => ({
+    command: options.command, args: [...options.args], cwd: options.cwd, env: options.env, isolated: true,
+  })),
+}));
+
 import { createStoryExecutionManifest } from '../story-execution-packet';
 import { runHostValidationRequirement } from '../story-host-validation';
 

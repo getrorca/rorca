@@ -12,8 +12,9 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ensureAutonomousModelEgress } from './autonomous-model-egress';
 
-export type AutonomousIsolationPosture = 'linux-bwrap' | 'local-dev';
+export type AutonomousIsolationPosture = 'linux-bwrap';
 
 export interface AutonomousSandboxLaunch {
   command: string;
@@ -28,6 +29,8 @@ export interface AutonomousSandboxOptions {
   args: readonly string[];
   cwd: string;
   env: Record<string, string>;
+  /** Explicit model process: permits model keys only with the confined broker. */
+  modelCredentials?: boolean;
 }
 
 export interface AutonomousBoundaryPreflightOptions {
@@ -41,27 +44,21 @@ export interface AutonomousBoundaryPreflightOptions {
 const SAFE_PRODUCTION_ENV_KEYS = new Set([
   'PATH', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM',
   'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ',
-  // Model credentials are the only production child credentials. The child has
-  // no network interface; they are usable only through the exact-host CONNECT
-  // broker mounted below, never for GitHub/DB/control-plane egress.
-  'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GOOGLE_API_KEY',
   'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
   'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_COUNT',
   'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1',
   'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GIT_SSH_COMMAND', 'GCM_INTERACTIVE', 'GH_CONFIG_DIR',
   'RORCA_AUTONOMOUS_COMMAND_GUARD', 'RORCA_AUTONOMOUS_WORKSPACE_ROOT',
-  'RORCA_AUTONOMOUS_EGRESS_SOCKET',
+  'RORCA_EVENT', 'RORCA_HOOK_TYPE', 'RORCA_RUN_ID', 'RORCA_STORY_ID',
   'RORCA_ALLOW_BACKEND_JEST', 'RORCA_AUTONOMOUS_BACKEND_JEST_DATABASE_URL',
   'RORCA_AUTONOMOUS_BACKEND_JEST_PGHOST', 'RORCA_AUTONOMOUS_BACKEND_JEST_PGPORT',
   'RORCA_AUTONOMOUS_BACKEND_JEST_PGUSER', 'RORCA_AUTONOMOUS_BACKEND_JEST_PGPASSWORD',
   'RORCA_AUTONOMOUS_BACKEND_JEST_PGDATABASE',
 ]);
 
-const PROVIDER_AUTHORITY_KEYS = [
-  'GITHUB_TOKEN', 'GH_TOKEN', 'VAULT_KEY', 'RORCA_OPERATOR_CAPABILITY',
-  'RORCA_OPERATOR_CAPABILITY_SHA256', 'GIT_ASKPASS', 'SSH_AUTH_SOCK',
-] as const;
-
+const MODEL_ENV_KEYS = new Set([
+  'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GOOGLE_API_KEY',
+]);
 const DEFAULT_TOOL_ROOTS = ['/usr', '/bin', '/lib', '/lib64'];
 const SANDBOX_EGRESS_SOCKET = '/run/rorca-egress/proxy.sock';
 const SANDBOX_PROXY_URL = 'http://127.0.0.1:3128';
@@ -75,9 +72,8 @@ let successfulProbeKey: string | null = null;
 
 function configuredPosture(env: NodeJS.ProcessEnv = process.env): AutonomousIsolationPosture {
   const value = String(env.RORCA_AUTONOMOUS_ISOLATION ?? '').trim();
-  if (value === 'linux-bwrap' || value === 'local-dev') return value;
-  if (env.NODE_ENV === 'test') return 'local-dev';
-  throw new Error('RORCA_AUTONOMOUS_ISOLATION must explicitly be linux-bwrap or local-dev');
+  if (value === 'linux-bwrap') return value;
+  throw new Error('RORCA_AUTONOMOUS_ISOLATION must explicitly be linux-bwrap; raw local-dev autonomous execution is forbidden');
 }
 
 function bwrapBinary(env: NodeJS.ProcessEnv = process.env): string {
@@ -126,10 +122,12 @@ function resolveExecutable(command: string, env: Record<string, string>, roots: 
   throw new Error(`Autonomous executable is unavailable outside approved tool roots: ${command}`);
 }
 
-function safeProductionEnv(input: Record<string, string>): Record<string, string> {
+function safeProductionEnv(input: Record<string, string>, modelCredentials = false): Record<string, string> {
   const selected: Record<string, string> = {};
   for (const [key, value] of Object.entries(input)) {
-    if (SAFE_PRODUCTION_ENV_KEYS.has(key) && value !== undefined) selected[key] = value;
+    if ((SAFE_PRODUCTION_ENV_KEYS.has(key) || (modelCredentials && MODEL_ENV_KEYS.has(key))) && value !== undefined) {
+      selected[key] = value;
+    }
   }
   selected.PATH = '/usr/local/bin:/usr/bin:/bin';
   selected.HOME = '/home/rorca-agent';
@@ -143,7 +141,7 @@ function safeProductionEnv(input: Record<string, string>): Record<string, string
   selected.GIT_SSH_COMMAND = '/bin/false';
   selected.GCM_INTERACTIVE = 'Never';
   selected.GH_CONFIG_DIR = '/home/rorca-agent/.config/gh';
-  if (input.RORCA_AUTONOMOUS_EGRESS_SOCKET) {
+  if (modelCredentials && input.RORCA_AUTONOMOUS_EGRESS_SOCKET) {
     selected.HTTP_PROXY = SANDBOX_PROXY_URL;
     selected.HTTPS_PROXY = SANDBOX_PROXY_URL;
     selected.ALL_PROXY = SANDBOX_PROXY_URL;
@@ -249,8 +247,11 @@ function buildBwrapArgs(options: AutonomousSandboxOptions, executable: string, r
     if (fs.existsSync(config)) args.push('--ro-bind', config, config);
   }
   maskWorkspaceCredentialFiles(args, cwd);
-  const innerEnv = safeProductionEnv(options.env);
-  const egressSocket = options.env.RORCA_AUTONOMOUS_EGRESS_SOCKET;
+  const innerEnv = safeProductionEnv(options.env, options.modelCredentials === true);
+  const egressSocket = options.modelCredentials ? options.env.RORCA_AUTONOMOUS_EGRESS_SOCKET : undefined;
+  if (options.modelCredentials && !egressSocket) {
+    throw new Error('Autonomous model credentials require the confined egress broker');
+  }
   if (egressSocket) {
     const realSocket = fs.realpathSync(egressSocket);
     if (!fs.statSync(realSocket).isSocket()) throw new Error('Autonomous model egress endpoint is not a Unix socket');
@@ -279,22 +280,21 @@ export function buildLinuxSandboxArgumentsForTests(
   return buildBwrapArgs(options, executable, roots);
 }
 
-export function sanitizeAutonomousSandboxEnvForTests(input: Record<string, string>): Record<string, string> {
-  return safeProductionEnv(input);
+export function sanitizeAutonomousSandboxEnvForTests(
+  input: Record<string, string>,
+  modelCredentials = false,
+): Record<string, string> {
+  return safeProductionEnv(input, modelCredentials);
 }
 
 /** Build one launch that cannot see the trusted ancestor namespace/filesystem/network. */
 export function prepareAutonomousSandboxLaunch(options: AutonomousSandboxOptions): AutonomousSandboxLaunch {
-  const posture = configuredPosture();
+  configuredPosture();
   const cwd = fs.realpathSync(options.cwd);
-  if (posture === 'local-dev') {
-    if (process.env.NODE_ENV === 'production') throw new Error('local-dev autonomous isolation is forbidden in production');
-    return { command: options.command, args: [...options.args], cwd, env: options.env, isolated: false };
-  }
   if (process.platform !== 'linux') throw new Error('linux-bwrap autonomous isolation requires Linux');
   const roots = toolRoots();
   const executable = resolveExecutable(options.command, options.env, roots);
-  const env = safeProductionEnv(options.env);
+  const env = safeProductionEnv(options.env, options.modelCredentials === true);
   return {
     command: bwrapBinary(),
     args: buildBwrapArgs(options, executable, roots),
@@ -304,15 +304,6 @@ export function prepareAutonomousSandboxLaunch(options: AutonomousSandboxOptions
     env,
     isolated: true,
   };
-}
-
-function assertLocalDevPosture(options: AutonomousBoundaryPreflightOptions, env: NodeJS.ProcessEnv): void {
-  if (env.NODE_ENV === 'production') {
-    throw new Error('local-dev autonomous isolation is forbidden in production');
-  }
-  if (options.providerCapable || PROVIDER_AUTHORITY_KEYS.some(key => Boolean(env[key]))) {
-    throw new Error('local-dev autonomous isolation cannot coexist with provider authority');
-  }
 }
 
 function runBoundaryProbe(cwd: string, env: NodeJS.ProcessEnv): void {
@@ -372,11 +363,7 @@ Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>proc
 /** Fail before a run becomes running or gains any release-eligible result. */
 export function assertAutonomousExecutionBoundary(options: AutonomousBoundaryPreflightOptions): void {
   const env = options.env ?? process.env;
-  const posture = configuredPosture(env);
-  if (posture === 'local-dev') {
-    assertLocalDevPosture(options, env);
-    return;
-  }
+  configuredPosture(env);
   if ((options.platform ?? process.platform) !== 'linux') throw new Error('linux-bwrap autonomous isolation requires Linux');
   const binary = bwrapBinary(env);
   fs.accessSync(binary, fs.constants.X_OK);
@@ -386,6 +373,24 @@ export function assertAutonomousExecutionBoundary(options: AutonomousBoundaryPre
     runBoundaryProbe(options.cwd, env);
     successfulProbeKey = key;
   }
+}
+
+/**
+ * Prepare a model/tool launcher only after the same namespace probe and exact-host
+ * CONNECT broker used by the canonical worker. The broker is trusted transport,
+ * not an orchestrator, and exposes no DB/vault/provider/control-plane operation.
+ */
+export async function prepareAutonomousModelSandboxLaunch(
+  options: AutonomousSandboxOptions,
+): Promise<AutonomousSandboxLaunch> {
+  assertAutonomousExecutionBoundary({ cwd: options.cwd, providerCapable: true });
+  const egressSocket = await ensureAutonomousModelEgress();
+  if (!egressSocket) throw new Error('Autonomous model egress broker is unavailable');
+  return prepareAutonomousSandboxLaunch({
+    ...options,
+    modelCredentials: true,
+    env: { ...options.env, RORCA_AUTONOMOUS_EGRESS_SOCKET: egressSocket },
+  });
 }
 
 export function resetAutonomousSandboxProbeForTests(): void {

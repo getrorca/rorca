@@ -297,7 +297,7 @@ The daemon uses durable workspace-local files under `.rorca/capture/`: `state.js
 
 `rorca-capture setup --always-on` now renders thin, reversible adapter artifacts for Pi, Claude Code, Codex, and OpenCode. The files live under `.rorca/capture/adapters/` plus a project-local `.pi/extensions/rorca/capture-command.json` alias. They call `rorca-capture remember` or `POST /api/context-capture/events`; none of them write to PostgreSQL, embed bearer/API token values, or modify provider model/configuration.
 
-Claude Code receives documented slash-command/MCP config that points at `~/.rorca/mcp-token` (path only) and follows the local MCP bearer/OAuth flow. Pi receives a first-class `/rorca-remember`/skill alias that routes through the capture CLI/public API. Codex and OpenCode receive pass-through wrapper scripts; if the native binary is missing the wrappers exit `127` and the setup report marks fallback mode, while normal runs invoke the native binary with unchanged arguments and exit with its exact status. Codex examples use `codex exec --dangerously-bypass-approvals-and-sandbox -m <model>` with prompt content on stdin.
+Claude Code receives documented slash-command/MCP config that points at `~/.rorca/mcp-token` (path only) and follows the local MCP bearer/OAuth flow. Pi receives a first-class `/rorca-remember`/skill alias that routes through the capture CLI/public API. Codex and OpenCode receive pass-through wrapper scripts; if the native binary is missing the wrappers exit `127` and the setup report marks fallback mode, while normal runs invoke the native binary with unchanged arguments and exit with its exact status. Codex examples use `codex exec -m <model>` with prompt content on stdin; outer autonomous execution requires the central Linux sandbox and no example enables a CLI permission bypass.
 
 Every adapter command/event includes `source_system`, `tool_name`, and `session_id` metadata so downstream consumers can distinguish Pi, Claude Code, Codex, OpenCode, shell, IDE, and daemon events without inspecting free-form body text.
 
@@ -406,7 +406,7 @@ Run the applicable commands from a disposable workspace and confirm `rorca-captu
 | --- | --- | --- |
 | Pi | E2E verifies `.pi/extensions/rorca/capture-command.json` and agent event distillation. | `pi` then invoke `/rorca-remember` or the generated Pi alias if available. |
 | Claude Code | Setup renders Claude Code slash/MCP adapter metadata. | `claude` then invoke the generated `/rorca-remember` command; token path is `~/.rorca/mcp-token`, never an embedded bearer value. |
-| Codex | Setup renders pass-through wrapper. | `codex exec --dangerously-bypass-approvals-and-sandbox -m <model>` with a short prompt on stdin; wrapper must preserve exit status. |
+| Codex | Setup renders pass-through wrapper. | `codex exec -m <model>` with a short prompt on stdin; wrapper must preserve exit status and run only under the central autonomous sandbox. |
 | OpenCode | Setup renders pass-through wrapper. | `opencode run` through the generated wrapper; native binary absence should return `127` and report fallback mode. |
 | zsh | E2E installs/removes managed startup block. | `SHELL=/bin/zsh rorca-capture setup --always-on --policy metadata-only`, open a new zsh, run `echo rorca-smoke`. |
 | bash | Teardown compatibility test covers removal path. | `SHELL=/bin/bash rorca-capture setup --always-on --policy metadata-only`, open bash, run `git status`. |

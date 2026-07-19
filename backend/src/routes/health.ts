@@ -8,8 +8,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import type { QueryConfig } from 'pg';
 import { CronExpressionParser } from 'cron-parser';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { combinedPoolStats, operationalQueryOne, query, queryOne, dbHealthCheck } from '../db/index';
 import { getBackupDir } from '../lib/backup';
 import { activeAgent, activeModel, agentType } from '../lib/config';
@@ -50,7 +48,6 @@ interface EngineDetectionSnapshot {
   pi: PiStatus;
 }
 
-const execFileAsync = promisify(execFile);
 let engineSnapshotCache: EngineDetectionSnapshot | null = null;
 let engineSnapshotCacheAt = 0;
 let engineSnapshotInFlight: Promise<EngineDetectionSnapshot> | null = null;
@@ -61,12 +58,13 @@ async function detectClaudeBinaryAsync(): Promise<boolean> {
   if (claudeBin) {
     return fs.promises.access(claudeBin, fs.constants.X_OK).then(() => true).catch(() => false);
   }
-  try {
-    await execFileAsync('which', ['claude'], { encoding: 'utf8', timeout: 1_000 });
-    return true;
-  } catch {
-    return false;
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    try {
+      await fs.promises.access(path.join(dir, process.platform === 'win32' ? 'claude.cmd' : 'claude'), fs.constants.X_OK);
+      return true;
+    } catch { /* continue */ }
   }
+  return false;
 }
 
 async function detectEngineSnapshot(): Promise<EngineDetectionSnapshot> {

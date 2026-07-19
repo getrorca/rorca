@@ -168,7 +168,6 @@ describe('QRW-012 AC2: spawnClaude reasoning flag construction', () => {
     effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   ): string[] {
     return [
-      '--dangerously-skip-permissions',
       '--print',
       '--verbose',
       '--output-format', 'stream-json',

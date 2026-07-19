@@ -179,7 +179,7 @@ describe('execution-engine closeout architecture', () => {
     expect(WAL_LISTENER_SOURCE).toContain('await persistLegacyStoryResultAccounting({');
     const fallbackSync = PIPELINE_SOURCE.slice(
       PIPELINE_SOURCE.indexOf('export async function syncFallbackResults('),
-      PIPELINE_SOURCE.indexOf('// All Claude Code env vars', PIPELINE_SOURCE.indexOf('export async function syncFallbackResults(')),
+      PIPELINE_SOURCE.indexOf('function assertReusableWorktreeFresh(', PIPELINE_SOURCE.indexOf('export async function syncFallbackResults(')),
     );
     expect(fallbackSync).toContain('await replayFallbackResults(cwd, workspaceId)');
     expect(fallbackSync).not.toContain('INSERT INTO story_results');

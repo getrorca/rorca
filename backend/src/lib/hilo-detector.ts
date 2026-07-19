@@ -28,15 +28,12 @@
  * and `path` are used.
  */
 
-import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { promisify } from 'util';
 
 import { UnprocessableError } from './errors';
+import { probeAutonomousCli } from './autonomous-cli-probe';
 import { HILO_ENV, type HiloConfig } from './hilo-config';
-
-const execFileAsync = promisify(execFile);
 
 /** How long to wait for a `--version` probe before giving up (independent of the hydration timeout). */
 export const HILO_VERSION_PROBE_TIMEOUT_MS = 5_000;
@@ -128,18 +125,11 @@ async function resolveFromPath(
   name: string,
   env: NodeJS.ProcessEnv,
 ): Promise<string | null> {
-  const finder = process.platform === 'win32' ? 'where' : 'which';
-  try {
-    const { stdout } = await execFileAsync(finder, [name], {
-      timeout: HILO_VERSION_PROBE_TIMEOUT_MS,
-      env,
-      windowsHide: true,
-    });
-    const first = stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
-    return first ?? null;
-  } catch {
-    return null;
+  for (const dir of (env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(dir, process.platform === 'win32' ? `${name}.exe` : name);
+    if (isExecutableFile(candidate)) return fs.realpathSync(candidate);
   }
+  return null;
 }
 
 /**
@@ -216,13 +206,9 @@ export async function detectHilo(
   );
 
   try {
-    const { stdout, stderr } = await execFileAsync(binaryPath, ['--version'], {
-      timeout: probeTimeout,
-      env,
-      windowsHide: true,
-      maxBuffer: 64 * 1024,
-    });
-    const raw = (stdout || stderr || '').trim();
+    const result = await probeAutonomousCli(binaryPath, ['--version'], { timeoutMs: probeTimeout, env });
+    if (result.status !== 0) throw result.error ?? new Error('Hilo version probe failed');
+    const raw = (result.stdout || result.stderr || '').trim();
     const version = parseHiloVersion(raw);
     return {
       status: 'available',

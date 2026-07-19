@@ -9,13 +9,10 @@
 // Detect whether the Pi CLI binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
-import { execFile, execSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { promisify } from 'util';
 import { logger } from './logger';
-
-const execFileAsync = promisify(execFile);
+import { probeAutonomousCli, probeAutonomousCliSync } from './autonomous-cli-probe';
 
 export interface PiStatus {
   piInstalled: boolean;
@@ -53,13 +50,14 @@ const PI_PROBE_TIMEOUT_MS = 2_000;
  */
 function resolveBinPath(): string | null {
   const envBin = process.env.PI_BIN?.trim();
-  if (envBin) return envBin;
-
-  try {
-    return execSync('which pi', { encoding: 'utf8', timeout: 5000 }).trim();
-  } catch {
-    return null;
+  if (envBin) {
+    try {
+      fs.accessSync(envBin, fs.constants.X_OK);
+      return fs.realpathSync(envBin);
+    } catch { return null; }
   }
+
+  return detectPiAvailability().piBinPath;
 }
 
 /**
@@ -128,12 +126,7 @@ export function detectPi(): PiStatus {
   }
 
   try {
-    const result = spawnSync(binPath, PI_VERSION_ARGS, {
-      encoding: 'utf8',
-      timeout: PI_PROBE_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const result = probeAutonomousCliSync(binPath, PI_VERSION_ARGS, { timeoutMs: PI_PROBE_TIMEOUT_MS });
     if (result.status !== 0) {
       return { piInstalled: false, piVersion: null, piBinPath: null };
     }
@@ -151,21 +144,13 @@ export function detectPi(): PiStatus {
 
 /** Non-blocking detector for request/diagnostic paths. */
 export async function detectPiAsync(timeoutMs = 1_000): Promise<PiStatus> {
-  let binPath = process.env.PI_BIN?.trim() || null;
-  if (!binPath) {
-    try {
-      const result = await execFileAsync('which', ['pi'], { encoding: 'utf8', timeout: timeoutMs });
-      binPath = result.stdout.trim() || null;
-    } catch {
-      return { piInstalled: false, piVersion: null, piBinPath: null };
-    }
-  }
+  const binPath = resolveBinPath();
   if (!binPath) return { piInstalled: false, piVersion: null, piBinPath: null };
   try {
-    const result = await execFileAsync(binPath, PI_VERSION_ARGS, {
-      encoding: 'utf8',
-      timeout: Math.min(timeoutMs, PI_PROBE_TIMEOUT_MS),
+    const result = await probeAutonomousCli(binPath, PI_VERSION_ARGS, {
+      timeoutMs: Math.min(timeoutMs, PI_PROBE_TIMEOUT_MS),
     });
+    if (result.status !== 0) throw result.error ?? new Error('Pi version probe failed');
     const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
     return { piInstalled: true, piVersion: parseVersion(raw), piBinPath: binPath };
   } catch {
@@ -227,11 +212,7 @@ export function parsePiModelTable(stdout: string): PiModel[] {
 
 export function listPiModels(binPath: string): PiModel[] {
   try {
-    const result = spawnSync(binPath, ['--list-models'], {
-      encoding: 'utf8',
-      timeout: 10000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const result = probeAutonomousCliSync(binPath, ['--list-models'], { timeoutMs: 10_000 });
 
     if (result.error) {
       return [];
