@@ -1,6 +1,10 @@
 # PTY transcript and restricted raw archive
 
-For capacity, alerts, independent retention, mixed-version rollout, repair, and non-destructive rollback, see [`pty-recovery-operations.md`](pty-recovery-operations.md).
+For capacity, alerts, independent retention, mixed-version rollout, repair, and non-destructive rollback, see [`pty-recovery-operations.md`](pty-recovery-operations.md). Deterministic multi-story release evidence is recorded in [`pty-noisy-recovery-release-evidence.md`](pty-noisy-recovery-release-evidence.md).
+
+## Guarantee
+
+The current terminal is always recoverable from a validated bounded checkpoint plus bounded generation deltas; complete structured history is browsable through bounded cursor pages; exact raw bytes are available during their configured retention window; and no UI attempts to load an unbounded raw TUI recording at once. If newest evidence is corrupt or incomplete, Rorca reports the gap and preserves earlier valid evidence instead of manufacturing state or completion. This guarantee does not extend raw retention indefinitely or make terminal presentation lifecycle authority.
 
 Rorca stores two independent generation-scoped terminal records:
 
