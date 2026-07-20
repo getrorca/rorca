@@ -91,7 +91,7 @@ jobs:
           set -euo pipefail
           cd backend
           DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" node_modules/.bin/tsx -e \
-            "import('./src/db/pg-index.ts').then(async m => m.runPgMigrations()).catch(error => { console.error(error); process.exit(1); })"
+            "import('./src/db/pg-index.ts').then(async m => (m.runPgMigrations ?? m.default?.runPgMigrations)()).catch(error => { console.error(error); process.exit(1); })"
       - name: Run full frontend and backend suites only against the isolated test database
         shell: bash
         run: |
@@ -217,7 +217,7 @@ jobs:
           set -euo pipefail
           cd backend
           DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" node_modules/.bin/tsx -e \
-            "import('./src/db/pg-index.ts').then(async m => m.runPgMigrations()).catch(error => { console.error(error); process.exit(1); })"
+            "import('./src/db/pg-index.ts').then(async m => (m.runPgMigrations ?? m.default?.runPgMigrations)()).catch(error => { console.error(error); process.exit(1); })"
       - name: Run full frontend and backend suites only against the isolated test database
         shell: bash
         run: |
