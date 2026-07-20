@@ -61,7 +61,7 @@ jobs:
           TOKEN="$(openssl rand -hex 12)"
           RUN_ID="qrun_${TOKEN}"
           ROLE="rorca_qrole_${TOKEN}"
-          DATABASE="rorca_qtest_${TOKEN}"
+          DATABASE="rorca_qtest_${TOKEN}_test"
           PASSWORD="$(openssl rand -hex 24)"
           MARKER="rorca-qualification-owned:${RUN_ID}"
           APPLICATION_NAME="rorca-qualification:${RUN_ID}"
@@ -127,7 +127,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RORCA_QUALIFICATION_DATABASE_NAME" =~ ^rorca_qtest_[a-f0-9]{24}$ ]]
+          [[ "$RORCA_QUALIFICATION_DATABASE_NAME" =~ ^rorca_qtest_[a-f0-9]{24}_test$ ]]
           [[ "$RORCA_QUALIFICATION_ROLE_NAME" =~ ^rorca_qrole_[a-f0-9]{24}$ ]]
           PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres \
             -v database="$RORCA_QUALIFICATION_DATABASE_NAME" -v role="$RORCA_QUALIFICATION_ROLE_NAME" <<'SQL'
@@ -187,7 +187,7 @@ jobs:
           TOKEN="$(openssl rand -hex 12)"
           RUN_ID="qrun_${TOKEN}"
           ROLE="rorca_qrole_${TOKEN}"
-          DATABASE="rorca_qtest_${TOKEN}"
+          DATABASE="rorca_qtest_${TOKEN}_test"
           PASSWORD="$(openssl rand -hex 24)"
           MARKER="rorca-qualification-owned:${RUN_ID}"
           echo "::add-mask::${PASSWORD}"
@@ -253,7 +253,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RORCA_QUALIFICATION_DATABASE_NAME" =~ ^rorca_qtest_[a-f0-9]{24}$ ]]
+          [[ "$RORCA_QUALIFICATION_DATABASE_NAME" =~ ^rorca_qtest_[a-f0-9]{24}_test$ ]]
           [[ "$RORCA_QUALIFICATION_ROLE_NAME" =~ ^rorca_qrole_[a-f0-9]{24}$ ]]
           PGBIN="$(brew --prefix postgresql@16)/bin"
           "$PGBIN/psql" -d postgres -v database="$RORCA_QUALIFICATION_DATABASE_NAME" -v role="$RORCA_QUALIFICATION_ROLE_NAME" <<'SQL'
