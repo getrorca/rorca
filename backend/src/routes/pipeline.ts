@@ -1740,13 +1740,24 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // Reconcile before queue-row creation, worktree creation, manifest creation,
     // or pg-boss dispatch. An ambiguous story must never be converted into an
     // automatic scope by the scheduler.
-    const passReconciliation = await reconcileApprovedSpecPasses({
-      workspaceId,
-      workspacePath: workspace.path,
-      specPath,
-    });
-    assertReconciliationAllowsAutomaticScope(passReconciliation);
-    (req as any)._passReconciliation = passReconciliation;
+    const taskManifestExecution = (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true
+      && typeof manifestId === 'string' && manifestId.length > 0
+      && triggerOptions !== null && typeof triggerOptions === 'object' && !Array.isArray(triggerOptions)
+      && (triggerOptions as Record<string, unknown>).source === 'task-manifest';
+    if (!taskManifestExecution) {
+      const passReconciliation = await reconcileApprovedSpecPasses({
+        workspaceId,
+        workspacePath: workspace.path,
+        specPath,
+      });
+      assertReconciliationAllowsAutomaticScope(passReconciliation);
+      (req as any)._passReconciliation = passReconciliation;
+    } else {
+      // Synthetic TaskManifest specs are immutable manifest projections, not
+      // human-approved canonical specs. They must never enter approved-spec
+      // pass reconciliation or inherit copied pass authority.
+      (req as any)._passReconciliation = undefined;
+    }
 
     // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
     //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
@@ -3528,6 +3539,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       ...(executionEnvironmentResolution.supported && resolvedExecutionEnvironmentId ? { executionEnvironmentId: resolvedExecutionEnvironmentId } : {}),
     };
 
+    (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution = true;
     await handlePipelineTrigger(req, res);
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Task manifest trigger');
@@ -5298,12 +5310,21 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new NotFoundError('Workspace not found');
       return;
     }
-    const passReconciliation = await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)({
+    const taskManifestSynthetic = typeof originalRun.task_manifest_id === 'string' && originalRun.task_manifest_id.length > 0;
+    const passReconciliation: PassReconciliationReport = taskManifestSynthetic ? {
+      workspaceId: originalRun.workspace_id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      specPath: originalRun.spec_path,
+      specRevision: `task-manifest:${originalRun.task_manifest_id}`,
+      blocking: false,
+      repairedStoryIds: [],
+      stories: [],
+    } : await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)({
       workspaceId: originalRun.workspace_id,
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
     });
-    assertReconciliationAllowsAutomaticScope(passReconciliation);
+    if (!taskManifestSynthetic) assertReconciliationAllowsAutomaticScope(passReconciliation);
     const reconciliationByStory = new Map(passReconciliation.stories.map((story) => [story.storyId, story]));
 
     // 2. Find all stories and their latest status from the original run
@@ -5347,8 +5368,8 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const failedStories = Array.from(latestByStory.values()).filter((s) => {
       const reconciliation = reconciliationByStory.get(s.story_id);
       return (s.status === 'fail' || s.status === 'skip')
-        && reconciliation?.status === 'consistent-not-passed'
-        && !reconciliation.reasonCodes.includes('EXCLUDED_STORY');
+        && (taskManifestSynthetic || reconciliation?.status === 'consistent-not-passed')
+        && (taskManifestSynthetic || !reconciliation!.reasonCodes.includes('EXCLUDED_STORY'));
     });
     const predecessorAuthority = await inspectRunHostAuthority(originalRunId);
     const exactPredecessorPasses = new Map((predecessorAuthority?.stories ?? [])

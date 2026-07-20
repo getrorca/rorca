@@ -542,6 +542,34 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
     expect(mockBoss.send).not.toHaveBeenCalled();
   });
 
+  test('dispatches a non-dry-run synthetic manifest without applying approved-spec pass authority', async () => {
+    const app = makeApp();
+    const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;
+    (manifest.policy as JsonRecord).dryRun = false;
+
+    const response = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .send({
+        workspaceId: 'ws-hermes',
+        idempotencyKey: manifest.idempotencyKey,
+        manifest,
+        queue: false,
+        autoWorktree: true,
+        mergeStrategy: 'draft-pr',
+        agentOverride: 'claude',
+      });
+
+    expect({ status: response.status, body: response.body }).toEqual({ status: 201, body: expect.objectContaining({
+      ok: true,
+      queued: true,
+      manifestId: manifest.manifestId,
+      idempotencyKey: manifest.idempotencyKey,
+      runId: expect.any(Number),
+    }) });
+    expect(taskManifestReservations).toHaveLength(1);
+    expect(mockBoss.send).toHaveBeenCalledTimes(1);
+  });
+
   test('rejects explicit local-user before workspace, reservation, artifact, or queue mutation', async () => {
     const app = makeApp();
     const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;

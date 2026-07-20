@@ -138,6 +138,45 @@ test('POST /api/pipeline/runs/:runId/retry creates new run and retries all faile
   expect(originalRun.status).toBe('failed');
 });
 
+test('TaskManifest retry preview uses failed application truth without importing approved-spec pass authority', async () => {
+  await createWorkspace();
+  const manifestId = randomUUID();
+  const syntheticPath = `forge/task-manifests/${manifestId}/hermes-task-manifest-${manifestId}.json`;
+  const absolute = path.join(tmpDir, syntheticPath);
+  fs.mkdirSync(path.dirname(absolute), { recursive: true });
+  fs.writeFileSync(absolute, JSON.stringify({
+    title: 'Synthetic task manifest',
+    userStories: [{ id: 'TM-001', title: 'Manifest task', description: 'Execute bounded work', acceptanceCriteria: [], dependsOn: [], passes: false }],
+  }));
+  const run = await queryOne<{ id: number }>(`
+    INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at, task_manifest_id)
+    VALUES ($1, $2, 'failed', NOW(), $3) RETURNING id
+  `, [syntheticPath, fixtureWorkspaceId, manifestId]);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at)
+    VALUES ($1, 'TM-001', 'fail', 0, NOW())`, [run!.id]);
+
+  const preview = await request(app)
+    .post(`/api/pipeline/runs/${run!.id}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({ storyIds: ['TM-001'], safeMode: true, forceSequential: true });
+
+  expect(preview.status).toBe(200);
+  expect(preview.body.preview).toEqual(expect.objectContaining({
+    originalRunId: Number(run!.id),
+    requiresApproval: false,
+    scope: expect.objectContaining({
+      executable: [{ storyId: 'TM-001', reasonCode: 'EXECUTABLE_RETRY_WORK' }],
+      copiedPassed: [],
+    }),
+  }));
+  expect(preview.body.passReconciliation).toEqual(expect.objectContaining({
+    specRevision: `task-manifest:${manifestId}`,
+    stories: [],
+    blocking: false,
+  }));
+  expect(mockBossSend).not.toHaveBeenCalled();
+});
+
 // ─── Test 2: Retry specific stories via storyIds ─────────────────────────────
 
 test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', async () => {
