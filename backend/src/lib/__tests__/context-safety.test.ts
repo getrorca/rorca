@@ -23,6 +23,7 @@ import {
   exceedsSizeCap,
   getMaxFileBytes,
   hashContent,
+  hashFileContent,
   isWithinWorkspace,
   loadCaptureIgnore,
   normalizeWorkspaceRelativePath,
@@ -30,6 +31,7 @@ import {
   redactObject,
   redactSecrets,
   safeWorkspaceRelativePath,
+  sanitizeTranscriptPayload,
   shortHash,
   toPosixPath,
 } from '../context-safety';
@@ -283,6 +285,17 @@ describe('context-safety', () => {
       expect(shortHash('hello')).toBe(hashContent('hello').slice(0, 12));
       expect(shortHash('hello', 8)).toHaveLength(8);
     });
+
+    it('hashFileContent streams the same shared digest without loading caller state', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'context-hash-'));
+      const file = path.join(dir, 'segment.gz');
+      try {
+        fs.writeFileSync(file, Buffer.from([0, 1, 2, 3, 255]));
+        expect(await hashFileContent(file)).toBe(hashContent(Buffer.from([0, 1, 2, 3, 255])));
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────────
@@ -370,6 +383,20 @@ describe('context-safety', () => {
       const { redacted } = redactSecrets('password = "topsecret9"', { placeholder: '***' });
       expect(redacted).toContain('***');
       expect(redacted).not.toContain('topsecret9');
+    });
+
+    describe('bounded transcript payloads', () => {
+      it('redacts nested credentials and enforces the persisted byte contract', () => {
+        const safe = sanitizeTranscriptPayload({
+          tool: 'deploy',
+          password: 'super-secret-password',
+          output: 'x'.repeat(50_000),
+        });
+        expect(safe.serialized).not.toContain('super-secret-password');
+        expect(safe.redacted).toBe(true);
+        expect(safe.truncated).toBe(true);
+        expect(safe.bytes).toBeLessThanOrEqual(16 * 1024);
+      });
     });
 
     describe('redactObject (structured payloads)', () => {

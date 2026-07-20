@@ -604,14 +604,20 @@ export async function deletePiGeneratedSkillFile(filePath?: string): Promise<voi
 
 export async function cleanupPiRunTempArtifacts(runId: number): Promise<void> {
   const prefix = `rorca-pi-autonomous-runner-${runId}`;
+  const promptPrefix = `rorca-pi-${runId}-`;
+  const sessionPrefix = `rorca-pi-session-${runId}-`;
   let entries: string[] = [];
   try { entries = await fs.promises.readdir(os.tmpdir()); } catch { return; }
   await Promise.all(entries
     .filter(entry => entry === `${prefix}.md`
       || (entry.startsWith(`${prefix}-`) && entry.endsWith('.md'))
       || (entry.startsWith(`${prefix}.md.`) && entry.endsWith('.tmp'))
-      || (entry.startsWith(`${prefix}-`) && entry.endsWith('.tmp')))
-    .map(entry => deletePiGeneratedSkillFile(path.join(os.tmpdir(), entry))));
+      || (entry.startsWith(`${prefix}-`) && entry.endsWith('.tmp'))
+      || (entry.startsWith(promptPrefix) && entry.endsWith('.txt'))
+      || entry.startsWith(sessionPrefix))
+    .map(entry => entry.startsWith(sessionPrefix)
+      ? fs.promises.rm(path.join(os.tmpdir(), entry), { recursive: true, force: true })
+      : deletePiGeneratedSkillFile(path.join(os.tmpdir(), entry))));
 }
 
 export async function terminatePiOwnedProcessTree(

@@ -6,12 +6,18 @@
   "license": "Apache-2.0",
   "keywords": ["pi-package", "rorca", "pi-extension"],
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.80.7"
+    "@earendil-works/pi-coding-agent": ">=0.80.7",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "^0.80.7",
+    "typebox": "^1.1.38"
   },
   "pi": {
     "extensions": ["./extensions"],

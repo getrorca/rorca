@@ -15,7 +15,14 @@ import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { validateBody } from '../lib/validate';
-import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
+import {
+  broadcastAll,
+  attachSSE,
+  createBoundedTopicSseSink,
+  subscribeTopic,
+  type BoundedTopicSseSink,
+  type WalEvent,
+} from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
 import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
@@ -72,21 +79,38 @@ import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired, isSuperUser } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
-import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
+import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, resolveOperatorInputTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
+import { isPtyGenerationReaderEnabled } from '../lib/pty-feature-flags';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
+  RUN_OUTPUT_ANSI_SOURCE,
+  RUN_OUTPUT_CONTRACT_VERSION,
+  RUN_OUTPUT_PTY_SOURCE,
+  decodeRunOutputCursor,
+  encodeRunOutputCursor,
+  isRunOutputSource,
+  outputCursorMatches,
+  type RunOutputCursor,
+  type RunOutputSource,
+} from '../lib/run-output-contract';
+import {
+  getRunPtyGeneration,
   getRunPtySessionHealth,
-  getRunPtySessionStatus,
   getRunPtyOutputLimits,
   listRecentRunPtyChunks,
   listRunPtyChunks,
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
+import {
+  getLatestValidRunPtyCheckpoint,
+  getValidRunPtyCheckpointById,
+  runPtyCheckpointTopic,
+} from '../lib/pty-checkpoint-store';
 import { sweepOrphanProcesses } from '../worker';
 import { safelyRefreshReusableWorktree, validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 import { PipelineRetryJobPayload } from '../lib/pg-boss-schemas';
@@ -293,51 +317,46 @@ function unwrapSemanticLogLine(line: string): string {
 }
 
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
+function getSemanticSteps(text: string, agent: string): ReturnType<typeof parseLine> {
+  const allSteps: ReturnType<typeof parseLine> = [];
+  for (const line of text.split('\n')) {
+    allSteps.push(...parseLine(unwrapSemanticLogLine(line), agent));
+  }
+  return allSteps;
+}
+
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
-  const lines = text.split('\n');
-  for (const line of lines) {
-    const semanticLine = unwrapSemanticLogLine(line);
-    const steps = parseLine(semanticLine, agent);
-    for (const step of steps) {
-      res.write(`event: semantic_step\ndata: ${JSON.stringify(step)}\n\n`);
-    }
+  for (const step of getSemanticSteps(text, agent)) {
+    if (res.destroyed || res.writableEnded || (res.socket !== null && !res.socket.writable)) return;
+    res.write(`event: semantic_step\ndata: ${JSON.stringify(step)}\n\n`);
   }
 }
 
-const RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS = 10_000;
+function emitBoundedSemanticSteps(
+  text: string,
+  agent: string,
+  sink: BoundedTopicSseSink,
+  lastConfirmedCursor: string | null,
+): boolean {
+  for (const step of getSemanticSteps(text, agent)) {
+    if (!sink.send({ event: 'semantic_step', data: JSON.stringify(step) }, lastConfirmedCursor)) return false;
+  }
+  return true;
+}
 
-/**
- * Respect Node's writable high-water mark. Durable cursors make it safe to end
- * a stalled attachment and let EventSource replay, rather than buffering an
- * unbounded transcript in the server process for a slow consumer.
- */
-async function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): Promise<boolean> {
-  if (res.destroyed || res.writableEnded) return false;
-  const accepted = res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
-  if (accepted) return true;
-
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const finish = (result: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      res.off('drain', onDrain);
-      res.off('close', onClose);
-      res.off('error', onClose);
-      resolve(result);
-    };
-    const onDrain = () => finish(true);
-    const onClose = () => finish(false);
-    const timer = setTimeout(() => {
-      finish(false);
-      if (!res.destroyed) res.destroy();
-    }, RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS);
-    timer.unref?.();
-    res.once('drain', onDrain);
-    res.once('close', onClose);
-    res.once('error', onClose);
-  });
+/** A committed delta is acknowledged only when the bounded hub sink admits it. */
+async function writeOutputChunkEvent(
+  sink: BoundedTopicSseSink,
+  source: RunOutputSource,
+  generationId: string | null,
+  sequence: number,
+  chunk: Buffer,
+  lastConfirmedCursor: string | null,
+): Promise<string | null> {
+  const cursor = encodeRunOutputCursor(source, generationId, sequence);
+  return sink.send({ id: cursor, event: 'chunk', data: chunk.toString('base64') }, lastConfirmedCursor)
+    ? cursor
+    : null;
 }
 
 function readBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
@@ -351,9 +370,9 @@ function readBoundedIntegerEnv(name: string, fallback: number, min: number, max:
 // immediately, and Express reads those committed rows by sequence. Bounded
 // polling remains a recovery path for listener reconnects/notification loss.
 const RUN_OUTPUT_PTY_LIVE_TRANSPORT = 'postgres-notify+db-replay' as const;
-const RUN_OUTPUT_PTY_REPLAY_SOURCE = 'run_pty_output_chunks' as const;
-const RUN_OUTPUT_ANSI_REPLAY_SOURCE = 'run_output_chunks' as const;
-type RunOutputReplaySource = typeof RUN_OUTPUT_PTY_REPLAY_SOURCE | typeof RUN_OUTPUT_ANSI_REPLAY_SOURCE;
+const RUN_OUTPUT_PTY_REPLAY_SOURCE = RUN_OUTPUT_PTY_SOURCE;
+const RUN_OUTPUT_ANSI_REPLAY_SOURCE = RUN_OUTPUT_ANSI_SOURCE;
+type RunOutputReplaySource = RunOutputSource;
 const RUN_OUTPUT_PTY_POLL_INTERVAL_MS = readBoundedIntegerEnv('RORCA_PTY_OUTPUT_POLL_INTERVAL_MS', 2_000, 250, 10_000);
 const RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS = RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 2;
 const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
@@ -388,9 +407,7 @@ function parseOutputResumeCursor(value: string, source: 'afterSequence' | 'Last-
 
 /** A durable cursor is valid only within one output store's sequence space. */
 function parseOutputReplaySource(value: string): RunOutputReplaySource {
-  if (value === RUN_OUTPUT_PTY_REPLAY_SOURCE || value === RUN_OUTPUT_ANSI_REPLAY_SOURCE) {
-    return value;
-  }
+  if (isRunOutputSource(value)) return value;
   throw new ValidationError('outputSource must be run_pty_output_chunks or run_output_chunks');
 }
 
@@ -411,6 +428,20 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     : Number.parseInt(String(health.total_output_bytes ?? 0), 10) || 0;
   const processAlive = health.status === 'active' && isPtyPidAlive(health.child_pid);
   return {
+    ptyGenerationId: health.generationId,
+    pty_generation_id: health.generationId,
+    ptyStoryId: health.storyId,
+    pty_story_id: health.storyId,
+    ptyAttempt: health.attempt,
+    pty_attempt: health.attempt,
+    ptyGenerationStatus: health.status,
+    pty_generation_status: health.status,
+    ptyGenerationActive: health.isActive,
+    pty_generation_active: health.isActive,
+    ptyGenerationSource: health.source,
+    pty_generation_source: health.source,
+    ptyGenerationReplaySource: health.replaySource,
+    pty_generation_replay_source: health.replaySource,
     ptySessionStatus: health.status,
     pty_session_status: health.status,
     ptyChildPid: health.child_pid,
@@ -421,8 +452,6 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_last_output_at: health.last_output_at,
     ptyLastHeartbeatAt: health.last_heartbeat_at,
     pty_last_heartbeat_at: health.last_heartbeat_at,
-    ptyCompletionMarker: health.completion_marker,
-    pty_completion_marker: health.completion_marker,
     ptyCompletionMarkerSeen: Boolean(health.completion_marker_seen_at),
     pty_completion_marker_seen: Boolean(health.completion_marker_seen_at),
     ptyCompletionMarkerSeenAt: health.completion_marker_seen_at,
@@ -431,20 +460,32 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_completion_file_seen: Boolean(health.completion_file_seen_at),
     ptyCompletionFileSeenAt: health.completion_file_seen_at,
     pty_completion_file_seen_at: health.completion_file_seen_at,
-    ptyCompletionFileError: health.completion_file_error,
-    pty_completion_file_error: health.completion_file_error,
+    ptyCompletionFileError: health.completion_file_error ? 'completion_file_invalid' : null,
+    pty_completion_file_error: health.completion_file_error ? 'completion_file_invalid' : null,
     ptyTerminalMarkerSeen: Boolean(health.terminal_marker_seen_at),
     pty_terminal_marker_seen: Boolean(health.terminal_marker_seen_at),
     ptyPromptReadinessStatus: health.prompt_readiness_status,
     pty_prompt_readiness_status: health.prompt_readiness_status,
-    ptyPromptReadinessReason: health.prompt_readiness_reason,
-    pty_prompt_readiness_reason: health.prompt_readiness_reason,
+    ptyPromptReadinessReason: health.prompt_readiness_reason ? 'readiness_state_recorded' : null,
+    pty_prompt_readiness_reason: health.prompt_readiness_reason ? 'readiness_state_recorded' : null,
     ptyPromptReadyAt: health.prompt_ready_at,
     pty_prompt_ready_at: health.prompt_ready_at,
     ptyPromptInjectedAt: health.prompt_injected_at,
     pty_prompt_injected_at: health.prompt_injected_at,
     ptyTotalOutputBytes: totalOutputBytes,
     pty_total_output_bytes: totalOutputBytes,
+    ptyNextOutputSequence: Number(health.next_output_sequence ?? 1),
+    pty_next_output_sequence: Number(health.next_output_sequence ?? 1),
+    ptyCheckpointSequence: Number(health.checkpoint_sequence ?? 0),
+    pty_checkpoint_sequence: Number(health.checkpoint_sequence ?? 0),
+    ptyCheckpointAgeMs: health.checkpoint_at ? Math.max(0, Date.now() - Date.parse(health.checkpoint_at)) : null,
+    pty_checkpoint_age_ms: health.checkpoint_at ? Math.max(0, Date.now() - Date.parse(health.checkpoint_at)) : null,
+    ptyFirstRetainedSequence: Number(health.first_retained_sequence ?? 1),
+    pty_first_retained_sequence: Number(health.first_retained_sequence ?? 1),
+    ptyRetainedOutputBytes: Number(health.retained_output_bytes ?? 0),
+    pty_retained_output_bytes: Number(health.retained_output_bytes ?? 0),
+    ptyCompactedByteCount: Number(health.compacted_byte_count ?? 0),
+    pty_compacted_byte_count: Number(health.compacted_byte_count ?? 0),
     ptyDroppedOutputBytes: Number(health.dropped_output_bytes ?? 0),
     pty_dropped_output_bytes: Number(health.dropped_output_bytes ?? 0),
     ptyOutputTruncated: Boolean(health.output_truncated_at),
@@ -454,9 +495,37 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
   };
 }
 
-function writePtyHealthEvent(res: Response, healthPayload: Record<string, unknown> | null): void {
-  if (!healthPayload) return;
-  res.write(`event: pty_health\ndata: ${JSON.stringify(healthPayload)}\n\n`);
+function writePtyHealthEvent(
+  sink: BoundedTopicSseSink,
+  healthPayload: Record<string, unknown> | null,
+  lastConfirmedCursor: string | null,
+): boolean {
+  return !healthPayload || sink.send(
+    { event: 'pty_health', data: JSON.stringify(healthPayload) },
+    lastConfirmedCursor,
+  );
+}
+
+interface RunOutputEvidenceAvailability {
+  transcriptAvailable: boolean;
+  archiveAvailable: boolean;
+}
+
+async function getRunOutputEvidenceAvailability(generationId: string | null): Promise<RunOutputEvidenceAvailability> {
+  if (!generationId) return { transcriptAvailable: false, archiveAvailable: false };
+  const availability = await queryOne<{ transcript_available: boolean; archive_available: boolean }>(
+    `SELECT
+       EXISTS (SELECT 1 FROM pty_transcript_events WHERE generation_id = $1) AS transcript_available,
+       EXISTS (
+         SELECT 1 FROM pty_raw_archive_manifests
+         WHERE generation_id = $1 AND completion_state <> 'pruned'
+       ) AS archive_available`,
+    [generationId],
+  );
+  return {
+    transcriptAvailable: Boolean(availability?.transcript_available),
+    archiveAvailable: Boolean(availability?.archive_available),
+  };
 }
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
@@ -1221,6 +1290,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists; does not reset passed story state." }
  *               rerunFromScratch: { type: boolean, description: "Reset passed story state and execute the spec from the first non-excluded story." }
  *               readinessOverride: { type: boolean, description: "Explicitly run despite readiness blockers; usage is logged to WAL for auditability." }
+ *               operator_keyboard_input: { type: boolean, default: false, description: "Explicitly request the reviewed native PTY profile with keyboard input; Pi otherwise uses its structured autonomous profile in ansi-html mode." }
  *               terminal_mode:
  *                 type: string
  *                 enum: [ansi-html, pty, native-pty]
@@ -1283,6 +1353,8 @@ const PipelineTriggerSchema = z.object({
   overrideReadinessGate: z.boolean().optional(),
   terminal_mode: z.string().nullable().optional(),
   terminalMode: z.string().nullable().optional(),
+  operator_keyboard_input: z.boolean().optional(),
+  operatorKeyboardInput: z.boolean().optional(),
   idempotencyKey: z.string().optional(),
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
@@ -1333,7 +1405,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1344,7 +1416,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
-    const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    const requestedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    const resolvedTerminalMode = resolveOperatorInputTerminalMode(
+      requestedTerminalMode,
+      operator_keyboard_input === true || operatorKeyboardInput === true,
+    );
     assertTerminalModeAvailable(resolvedTerminalMode);
     const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
     await assertExecutionEnvironmentReady(resolvedExecutionEnvironment);
@@ -6835,8 +6911,9 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [cols, rows]
+ *             required: [generationToken, cols, rows]
  *             properties:
+ *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
  *               cols: { type: integer, minimum: 1, maximum: 500 }
  *               rows: { type: integer, minimum: 1, maximum: 200 }
  *     responses:
@@ -6847,8 +6924,12 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     const runId = parseInt(String(req.params.runId), 10);
     const cols = parseInt(String(req.body?.cols), 10);
     const rows = parseInt(String(req.body?.rows), 10);
+    const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
 
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
+      throw new ValidationError('generationToken must be a UUID');
+    }
     if (!Number.isInteger(cols) || cols <= 0 || cols > MAX_PTY_COLS
       || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
       throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
@@ -6870,13 +6951,8 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const ptyStatus = await getRunPtySessionStatus(runId);
-    if (ptyStatus !== 'active') {
-      throw new ConflictError('Run PTY session is not active');
-    }
-
-    await requestRunPtyResize(runId, cols, rows);
-    res.json({ ok: true, runId, cols, rows });
+    const generation = await requestRunPtyResize(runId, generationToken, cols, rows);
+    res.json({ ok: true, runId, cols, rows, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Resize PTY run');
   }
@@ -6906,10 +6982,11 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *           schema:
  *             type: object
  *             properties:
+ *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
  *               dataBase64:
  *                 type: string
  *                 description: "Base64-encoded UTF-8 terminal input bytes from xterm.onData."
- *             required: [dataBase64]
+ *             required: [generationToken, dataBase64]
  *     responses:
  *       200: { description: PTY input request recorded }
  */
@@ -6923,6 +7000,10 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
 
+    const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
+      throw new ValidationError('generationToken must be a UUID');
+    }
     const dataBase64 = typeof req.body?.dataBase64 === 'string' ? req.body.dataBase64 : '';
     if (!dataBase64) {
       throw new ValidationError('dataBase64 is required');
@@ -6963,19 +7044,96 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const ptyStatus = await getRunPtySessionStatus(runId);
-    if (ptyStatus !== 'active') {
-      throw new ConflictError('Run PTY session is not active');
-    }
-
-    const accepted = await requestRunPtyInput(runId, input);
-    if (!accepted) {
+    const generation = await requestRunPtyInput(runId, generationToken, input);
+    if (!generation) {
       throw new ConflictError('PTY input queue is full or the session is no longer active');
     }
-    res.json({ ok: true, runId, bytes: input.length });
+    res.json({ ok: true, runId, bytes: input.length, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] PTY input');
   }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/pty/control:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Resolve the active PTY generation control credential over authenticated HTTP
+ *     operationId: getPipelinePtyControl
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "The generation credential grants terminal input/resize authority and must remain operator-only and outside SSE telemetry."
+ *     responses:
+ *       200: { description: Active generation identity and control credential }
+ *       404: { description: Run or active PTY generation not found }
+ */
+router.get('/runs/:runId/pty/control', async (req: Request, res: Response) => {
+  const runId = Number(req.params.runId);
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!isSuperUser(req.user)) throw new ForbiddenError('PTY controls require local operator admin access');
+  const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]);
+  if (!run) throw new NotFoundError('Run not found');
+  await assertPipelineWorkspaceAccess(req, run.workspace_id);
+  const generation = await getRunPtyGeneration(runId);
+  if (!generation?.isActive) throw new NotFoundError('Active PTY generation not found');
+  res.json({ generationId: generation.generationId, generationToken: generation.generationToken });
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Fetch a validated PTY terminal-state checkpoint
+ *     operationId: getPipelinePtyCheckpoint
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only, checksummed terminal recovery state for local run reattachment."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: checkpointId
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Validated terminal checkpoint with base64 serialized xterm state }
+ *       404: { description: Run or checkpoint not found }
+ *       422: { description: Checkpoint failed checksum, version, or compression validation }
+ */
+router.get('/runs/:runId/pty/checkpoints/:checkpointId', async (req: Request, res: Response) => {
+  const runId = Number(req.params.runId);
+  const checkpointId = String(req.params.checkpointId);
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(checkpointId)) {
+    throw new ValidationError('checkpointId must be a UUID');
+  }
+  const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]);
+  if (!run) throw new NotFoundError('Run not found');
+  await assertPipelineWorkspaceAccess(req, run.workspace_id);
+  const generation = await getRunPtyGeneration(runId);
+  if (!generation) throw new NotFoundError('PTY generation not found');
+  const checkpoint = await getValidRunPtyCheckpointById({
+    runId,
+    generationId: generation.generationId,
+    generationToken: generation.generationToken,
+    storyId: generation.storyId,
+  }, checkpointId);
+  res.json({
+    checkpointId: checkpoint.id,
+    generationId: checkpoint.generationId,
+    checkpointSeq: checkpoint.checkpointSequence,
+    firstRetainedSeq: checkpoint.firstRetainedSequence,
+    compactedByteCount: checkpoint.compactedByteCount,
+    version: checkpoint.version,
+    checksum: checkpoint.checksum,
+    terminalCols: checkpoint.terminalCols,
+    terminalRows: checkpoint.terminalRows,
+    dataBase64: checkpoint.serializedState.toString('base64'),
+    createdAt: checkpoint.createdAt,
+  });
 });
 
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
@@ -6993,12 +7151,17 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
  *     x-rorca-public-api: true
- *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store. Committed PostgreSQL notifications wake streams immediately, durable sequence replay supports reconnects, and bounded polling recovers from notification loss.
+ *     description: Server-Sent Events stream of base64 terminal deltas. Authoritative run_meta always precedes terminal_reset/checkpoint_ready and ordered chunk replay. New event IDs scope cursors to the selected output store and PTY generation; numeric Last-Event-ID remains accepted for old clients. PostgreSQL notifications are wakeups for committed-row queries, bounded polling recovers lost notifications, and slow consumers receive a retryable cursor-preserving disconnect.
  *     parameters:
  *       - in: path
  *         name: runId
  *         required: true
  *         schema: { type: integer }
+ *       - in: header
+ *         name: Last-Event-ID
+ *         required: false
+ *         schema: { type: string }
+ *         description: Generation-scoped SSE cursor from a prior chunk/checkpoint event; legacy numeric IDs remain accepted.
  *       - in: query
  *         name: afterSequence
  *         required: false
@@ -7009,6 +7172,21 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *         required: false
  *         schema: { type: string, enum: [run_pty_output_chunks, run_output_chunks] }
  *         description: Optional durable store identity paired with afterSequence. A changed source resets the cursor so independent PTY and ANSI sequence spaces cannot suppress fallback output.
+ *       - in: query
+ *         name: outputGenerationId
+ *         required: false
+ *         schema: { type: string, format: uuid }
+ *         description: Generation identity paired with afterSequence; mismatch resets the cursor to the always-current generation.
+ *       - in: query
+ *         name: recoverTerminal
+ *         required: false
+ *         schema: { type: boolean }
+ *         description: Request checkpoint-plus-delta reconstruction for a newly created terminal, even when a persisted sequence cursor exists.
+ *       - in: query
+ *         name: generationToken
+ *         required: false
+ *         schema: { type: string, format: uuid }
+ *         description: Explicit generation to replay. Omit to follow the active/newest generation.
  *     responses:
  *       200:
  *         description: SSE stream with chunk events (base64 data) and done event
@@ -7049,15 +7227,46 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   if (Array.isArray(outputSourceQuery)) {
     throw new ValidationError('outputSource must be a single replay source');
   }
-  const requestedReplaySource = typeof outputSourceQuery === 'string'
+  const requestedReplaySourceFromQuery = typeof outputSourceQuery === 'string'
     ? parseOutputReplaySource(outputSourceQuery)
     : null;
+  const parseOptionalUuidQuery = (name: 'generationToken' | 'outputGenerationId'): string | null => {
+    const value = req.query[name];
+    if (Array.isArray(value)) throw new ValidationError(`${name} must be a single UUID`);
+    if (value === undefined) return null;
+    if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+      throw new ValidationError(`${name} must be a UUID`);
+    }
+    return value;
+  };
+  const requestedGenerationToken = parseOptionalUuidQuery('generationToken');
+  const cursorGenerationId = parseOptionalUuidQuery('outputGenerationId');
+  const recoverTerminalValue = req.query.recoverTerminal;
+  if (Array.isArray(recoverTerminalValue) || (recoverTerminalValue !== undefined && recoverTerminalValue !== 'true' && recoverTerminalValue !== 'false')) {
+    throw new ValidationError('recoverTerminal must be true or false');
+  }
+  const recoverTerminal = recoverTerminalValue === 'true';
   const lastEventId = req.get('Last-Event-ID');
-  const resumeSource = afterSequence !== null ? 'afterSequence' : lastEventId !== undefined ? 'Last-Event-ID' : null;
-  let hasResumeCursor = resumeSource !== null;
-  let lastSequence = hasResumeCursor
-    ? parseOutputResumeCursor(afterSequence ?? lastEventId!, resumeSource!)
-    : 0;
+  let resumeCursor: RunOutputCursor | null = null;
+  if (afterSequence !== null) {
+    resumeCursor = {
+      version: 0,
+      source: requestedReplaySourceFromQuery,
+      generationId: cursorGenerationId,
+      sequence: parseOutputResumeCursor(afterSequence, 'afterSequence'),
+    };
+  } else if (lastEventId !== undefined) {
+    resumeCursor = decodeRunOutputCursor(lastEventId);
+  }
+  let hasResumeCursor = resumeCursor !== null;
+  let lastSequence = resumeCursor?.sequence ?? 0;
+  const generationReaderEnabled = isPtyGenerationReaderEnabled();
+  const preselectedPtyGeneration = isPtyTerminalMode(normalizeTerminalMode(runRow.terminal_mode)) && generationReaderEnabled
+    ? await getRunPtyGeneration(runId, requestedGenerationToken)
+    : null;
+  if (requestedGenerationToken && !preselectedPtyGeneration) {
+    throw new NotFoundError('PTY generation not found');
+  }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -7065,15 +7274,20 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  res.write('retry: 1000\n\n');
-  res.write(': connected\n\n');
+  const outputSink = createBoundedTopicSseSink(res, 1_000);
+  outputSink.send({ retryMs: 1_000 });
+  outputSink.send({ comment: 'connected' });
 
+  let lastConfirmedCursor: string | null = null;
   const hb = setInterval(() => {
-    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write(': hb\n\n');
+    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) {
+      outputSink.send({ comment: 'hb' }, lastConfirmedCursor);
+    }
   }, 15_000);
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
   let unsubscribeOutputWakeup: (() => void) | null = null;
+  let unsubscribeCheckpointEvents: (() => void) | null = null;
   const cleanupOutputStream = () => {
     if (streamClosed) return;
     streamClosed = true;
@@ -7084,6 +7298,9 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     }
     unsubscribeOutputWakeup?.();
     unsubscribeOutputWakeup = null;
+    unsubscribeCheckpointEvents?.();
+    unsubscribeCheckpointEvents = null;
+    outputSink.close();
   };
   req.on('close', cleanupOutputStream);
 
@@ -7093,10 +7310,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const requestedTerminalMode = runMetadata.terminalMode;
   const terminalStatuses = ['done', 'failed', 'partial_failure', 'cancelled'];
   const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
-  const requestedPtyMode = isPtyTerminalMode(requestedTerminalMode);
-  const ptyStatusAtOpen = requestedPtyMode
-    ? await getRunPtySessionStatus(runId)
-    : null;
+  const configuredPtyMode = isPtyTerminalMode(requestedTerminalMode);
+  const requestedPtyMode = configuredPtyMode && generationReaderEnabled;
+  let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
+  const ptyStatusAtOpen = selectedPtyGeneration?.status ?? null;
   // An active PTY run is legitimately session-pending while context routing and
   // prompt assembly run. Never permanently demote it because the browser attached
   // before node-pty started. A terminal run with no session is a real fallback.
@@ -7104,39 +7321,72 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     && PTY_AVAILABLE
     && (ptyStatusAtOpen !== null || !runIsTerminalAtOpen);
   const ptyHealthPayloadAtOpen = usePtyCapture
-    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId))
+    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken))
     : null;
   const terminalMode = usePtyCapture ? requestedTerminalMode : 'ansi-html';
   const isPty = usePtyCapture;
   const replaySource: RunOutputReplaySource = isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : RUN_OUTPUT_ANSI_REPLAY_SOURCE;
-  // PTY and ANSI captures intentionally have independent sequence spaces. A
-  // resume cursor from the other source must never suppress freshly selected
-  // fallback output; force the same bounded first-attach semantics instead.
-  const cursorReset = hasResumeCursor && requestedReplaySource !== null && requestedReplaySource !== replaySource;
+  const outputGenerationId = selectedPtyGeneration?.generationId ?? null;
+  const requestedReplaySource = requestedReplaySourceFromQuery ?? resumeCursor?.source ?? null;
+  const requestedCursorGenerationId = cursorGenerationId ?? resumeCursor?.generationId ?? null;
+  // PTY generations and ANSI capture intentionally have independent sequence
+  // spaces. A cursor from either another store or another generation must be
+  // reset before any current byte can be filtered by its sequence.
+  const cursorReset = hasResumeCursor && (
+    (requestedReplaySource !== null && requestedReplaySource !== replaySource)
+    || (requestedCursorGenerationId !== null && requestedCursorGenerationId !== outputGenerationId)
+    || (resumeCursor !== null && !outputCursorMatches(resumeCursor, replaySource, outputGenerationId))
+  );
   if (cursorReset) {
     hasResumeCursor = false;
     lastSequence = 0;
+    resumeCursor = null;
+  } else if (hasResumeCursor) {
+    lastConfirmedCursor = encodeRunOutputCursor(replaySource, outputGenerationId, lastSequence);
   }
-  const ptyFallbackActive = requestedPtyMode && !isPty;
+  const ptyFallbackActive = configuredPtyMode && !isPty;
   const ptyFallbackReason = ptyFallbackActive
-    ? PTY_AVAILABLE
-      ? 'pty-session-unavailable'
-      : 'node-pty-unavailable'
+    ? !generationReaderEnabled
+      ? 'generation-reader-disabled'
+      : PTY_AVAILABLE
+        ? 'pty-session-unavailable'
+        : 'node-pty-unavailable'
     : null;
   const ptyUnavailableHint = ptyFallbackReason === 'node-pty-unavailable'
     ? PTY_UNAVAILABLE_HINT
     : ptyFallbackReason === 'pty-session-unavailable'
       ? 'Inspect engine startup logs; the requested PTY session was never created.'
-      : null;
+      : ptyFallbackReason === 'generation-reader-disabled'
+        ? 'Legacy terminal replay is active; generation checkpoints and transcripts are temporarily unavailable.'
+        : null;
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();
     return;
   }
 
-  // Emit run metadata so frontend knows which renderer to use. When a requested
-  // PTY stream has no PTY session, this is the canonical demotion signal for the
-  // TUI: keep the ANSI replay stream open and label it as degraded/replay-only.
-  res.write(`event: run_meta\ndata: ${JSON.stringify({
+  const evidenceAvailabilityAtOpen = await getRunOutputEvidenceAvailability(outputGenerationId);
+  const checkpointSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyCheckpointSequence ?? 0);
+  const firstRetainedSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyFirstRetainedSequence ?? 1);
+  // This authoritative identity frame must precede reset/checkpoint and deltas.
+  // Legacy aliases remain for old browser and CLI clients.
+  const metadataAccepted = outputSink.send({ event: 'run_meta', data: JSON.stringify({
+    contractVersion: RUN_OUTPUT_CONTRACT_VERSION,
+    outputSource: replaySource,
+    output_source: replaySource,
+    outputGenerationId,
+    output_generation_id: outputGenerationId,
+    storyId: selectedPtyGeneration?.storyId ?? null,
+    story_id: selectedPtyGeneration?.storyId ?? null,
+    attempt: selectedPtyGeneration?.attempt ?? null,
+    checkpointSequence: checkpointSequenceAtOpen,
+    checkpoint_sequence: checkpointSequenceAtOpen,
+    firstRetainedSequence: firstRetainedSequenceAtOpen,
+    first_retained_sequence: firstRetainedSequenceAtOpen,
+    active: selectedPtyGeneration?.isActive ?? !runIsTerminalAtOpen,
+    transcriptAvailable: evidenceAvailabilityAtOpen.transcriptAvailable,
+    transcript_available: evidenceAvailabilityAtOpen.transcriptAvailable,
+    archiveAvailable: evidenceAvailabilityAtOpen.archiveAvailable,
+    archive_available: evidenceAvailabilityAtOpen.archiveAvailable,
     agentType: runMetadata.agentType,
     agentModel: runMetadata.agentModel,
     terminalMode,
@@ -7153,8 +7403,6 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     ptyFallbackReason,
     ptyLiveTransport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
     pty_live_transport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
-    outputSource: replaySource,
-    output_source: replaySource,
     cursorReset,
     cursor_reset: cursorReset,
     ptyReplaySource: replaySource,
@@ -7166,8 +7414,80 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     ptyUnavailableHint,
     pty_unavailable_hint: ptyUnavailableHint,
     ...(ptyHealthPayloadAtOpen ?? {}),
-  })}\n\n`);
-  writePtyHealthEvent(res, ptyHealthPayloadAtOpen);
+  }) }, lastConfirmedCursor);
+  if (!metadataAccepted) {
+    cleanupOutputStream();
+    return;
+  }
+
+  // Shared checkpoint notifications are wakeups only. The route always queries
+  // the committed checkpoint row before emitting its identity through this
+  // response's exact filtered hub sink.
+  let latestCheckpointSequenceEmitted = 0;
+  let recoveryFrameEmitted = false;
+  if (usePtyCapture && selectedPtyGeneration) {
+    const checkpointGeneration = {
+      runId,
+      generationId: selectedPtyGeneration.generationId,
+      generationToken: selectedPtyGeneration.generationToken,
+      storyId: selectedPtyGeneration.storyId,
+    };
+    const checkpoint = await getLatestValidRunPtyCheckpoint(checkpointGeneration);
+    const needsCheckpoint = checkpoint && (recoverTerminal || !hasResumeCursor || lastSequence < checkpoint.firstRetainedSequence);
+    if (checkpoint) latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+    if (checkpoint && needsCheckpoint) {
+      const checkpointCursor = encodeRunOutputCursor(replaySource, checkpoint.generationId, checkpoint.checkpointSequence);
+      const accepted = outputSink.send({
+        id: checkpointCursor,
+        event: 'checkpoint_ready',
+        data: JSON.stringify({
+          run_id: runId,
+          story_id: checkpoint.storyId,
+          generation_id: checkpoint.generationId,
+          checkpoint_id: checkpoint.id,
+          checkpoint_seq: checkpoint.checkpointSequence,
+          first_retained_seq: checkpoint.firstRetainedSequence,
+        }),
+      }, lastConfirmedCursor);
+      if (!accepted) {
+        cleanupOutputStream();
+        return;
+      }
+      latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+      lastSequence = checkpoint.checkpointSequence;
+      lastConfirmedCursor = checkpointCursor;
+      hasResumeCursor = true;
+      recoveryFrameEmitted = true;
+    }
+  }
+  if (!recoveryFrameEmitted && (cursorReset || recoverTerminal || !hasResumeCursor)) {
+    // A refreshed browser owns an empty xterm. If no valid checkpoint exists,
+    // a persisted cursor cannot reconstruct that viewport; replay a bounded
+    // current-generation tail instead of resuming after invisible bytes.
+    if (recoverTerminal) {
+      hasResumeCursor = false;
+      lastSequence = 0;
+      lastConfirmedCursor = null;
+    }
+    const accepted = outputSink.send({
+      event: 'terminal_reset',
+      data: JSON.stringify({
+        reason: cursorReset ? 'cursor_scope_changed' : recoverTerminal ? 'terminal_recovery' : 'first_attach',
+        outputSource: replaySource,
+        generationId: outputGenerationId,
+        checkpointSequence: 0,
+        firstRetainedSequence: firstRetainedSequenceAtOpen,
+      }),
+    }, lastConfirmedCursor);
+    if (!accepted) {
+      cleanupOutputStream();
+      return;
+    }
+  }
+  if (!writePtyHealthEvent(outputSink, ptyHealthPayloadAtOpen, lastConfirmedCursor)) {
+    cleanupOutputStream();
+    return;
+  }
 
   // ── Replay existing chunks (late-join/reconnect support) ──────────────────
   // EventSource sends Last-Event-ID automatically after a disconnect. The
@@ -7181,19 +7501,29 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let initialReplayMayHaveMore = false;
   if (usePtyCapture) {
     const existingChunks = hasResumeCursor
-      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS)
-      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS);
+      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS, selectedPtyGeneration)
+      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS, selectedPtyGeneration);
     initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
     if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
-      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+      if (!outputSink.send({
+        event: 'replay_truncated',
+        data: JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS }),
+      }, lastConfirmedCursor)) {
+        cleanupOutputStream();
+        return;
+      }
     }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+      const confirmed = await writeOutputChunkEvent(
+        outputSink, replaySource, outputGenerationId, row.sequence, chunkBuf, lastConfirmedCursor,
+      );
+      if (!confirmed) {
         cleanupOutputStream();
         return;
       }
       lastSequence = row.sequence;
+      lastConfirmedCursor = confirmed;
     }
   } else {
     const existingChunks = hasResumeCursor
@@ -7212,16 +7542,29 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
     initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
     if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
-      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
-    }
-    for (const row of existingChunks) {
-      const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+      if (!outputSink.send({
+        event: 'replay_truncated',
+        data: JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS }),
+      }, lastConfirmedCursor)) {
         cleanupOutputStream();
         return;
       }
-      emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+    }
+    for (const row of existingChunks) {
+      const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+      const confirmed = await writeOutputChunkEvent(
+        outputSink, replaySource, null, row.sequence, chunkBuf, lastConfirmedCursor,
+      );
+      if (!confirmed) {
+        cleanupOutputStream();
+        return;
+      }
       lastSequence = row.sequence;
+      lastConfirmedCursor = confirmed;
+      if (!emitBoundedSemanticSteps(chunkBuf.toString('utf8'), agent, outputSink, lastConfirmedCursor)) {
+        cleanupOutputStream();
+        return;
+      }
     }
   }
 
@@ -7234,8 +7577,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // ── If the run is already terminal, close immediately ────────────────────
   if (terminalStatuses.includes(runRow.status) && !initialReplayMayHaveMore) {
     clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
+    outputSink.end({ event: 'done', data: '' });
+    cleanupOutputStream();
     return;
   }
 
@@ -7249,16 +7592,121 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     let drainImmediately = false;
     try {
       let fetchedBatchIsFull = false;
+      let generationRolledOver = false;
       if (usePtyCapture) {
-        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS);
+        if (!requestedGenerationToken) {
+          const currentGeneration = await getRunPtyGeneration(runId);
+          if (currentGeneration && currentGeneration.generationId !== selectedPtyGeneration?.generationId) {
+            selectedPtyGeneration = currentGeneration;
+            generationRolledOver = true;
+            latestCheckpointSequenceEmitted = 0;
+            lastSequence = 0;
+            lastConfirmedCursor = null;
+            const generationHealth = normalizePtyHealthPayload(
+              await getRunPtySessionHealth(runId, currentGeneration.generationToken),
+            );
+            const evidenceAvailability = await getRunOutputEvidenceAvailability(currentGeneration.generationId);
+            const accepted = outputSink.send({ event: 'run_meta', data: JSON.stringify({
+              contractVersion: RUN_OUTPUT_CONTRACT_VERSION,
+              agentType: runMetadata.agentType,
+              agentModel: runMetadata.agentModel,
+              terminalMode,
+              terminal_mode: terminalMode,
+              requestedTerminalMode,
+              requested_terminal_mode: requestedTerminalMode,
+              isPty: true,
+              outputSource: replaySource,
+              output_source: replaySource,
+              outputGenerationId: currentGeneration.generationId,
+              output_generation_id: currentGeneration.generationId,
+              storyId: currentGeneration.storyId,
+              story_id: currentGeneration.storyId,
+              attempt: currentGeneration.attempt,
+              checkpointSequence: Number(generationHealth?.ptyCheckpointSequence ?? 0),
+              checkpoint_sequence: Number(generationHealth?.ptyCheckpointSequence ?? 0),
+              firstRetainedSequence: Number(generationHealth?.ptyFirstRetainedSequence ?? 1),
+              first_retained_sequence: Number(generationHealth?.ptyFirstRetainedSequence ?? 1),
+              active: currentGeneration.isActive,
+              transcriptAvailable: evidenceAvailability.transcriptAvailable,
+              transcript_available: evidenceAvailability.transcriptAvailable,
+              archiveAvailable: evidenceAvailability.archiveAvailable,
+              archive_available: evidenceAvailability.archiveAvailable,
+              cursorReset: true,
+              cursor_reset: true,
+              ...(generationHealth ?? {}),
+            }) }, lastConfirmedCursor);
+            if (!accepted) {
+              cleanupOutputStream();
+              return;
+            }
+          }
+        }
+        let emittedRolloverCheckpoint = false;
+        if (selectedPtyGeneration) {
+          const checkpoint = await getLatestValidRunPtyCheckpoint({
+            runId,
+            generationId: selectedPtyGeneration.generationId,
+            generationToken: selectedPtyGeneration.generationToken,
+            storyId: selectedPtyGeneration.storyId,
+          });
+          if (checkpoint && checkpoint.checkpointSequence > latestCheckpointSequenceEmitted) {
+            const checkpointCursor = encodeRunOutputCursor(replaySource, checkpoint.generationId, checkpoint.checkpointSequence);
+            const accepted = outputSink.send({
+              id: checkpointCursor,
+              event: 'checkpoint_ready',
+              data: JSON.stringify({
+                run_id: runId,
+                story_id: checkpoint.storyId,
+                generation_id: checkpoint.generationId,
+                checkpoint_id: checkpoint.id,
+                checkpoint_seq: checkpoint.checkpointSequence,
+                first_retained_seq: checkpoint.firstRetainedSequence,
+              }),
+            }, lastConfirmedCursor);
+            if (!accepted) {
+              cleanupOutputStream();
+              return;
+            }
+            latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+            lastSequence = Math.max(lastSequence, checkpoint.checkpointSequence);
+            lastConfirmedCursor = checkpointCursor;
+            emittedRolloverCheckpoint = generationRolledOver;
+          }
+        }
+        if (generationRolledOver && !emittedRolloverCheckpoint) {
+          const accepted = outputSink.send({
+            event: 'terminal_reset',
+            data: JSON.stringify({
+              reason: 'generation_changed',
+              outputSource: replaySource,
+              generationId: selectedPtyGeneration?.generationId ?? null,
+              checkpointSequence: 0,
+              firstRetainedSequence: 1,
+            }),
+          }, lastConfirmedCursor);
+          if (!accepted) {
+            cleanupOutputStream();
+            return;
+          }
+        }
+        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS, selectedPtyGeneration);
         fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+          const confirmed = await writeOutputChunkEvent(
+            outputSink,
+            replaySource,
+            selectedPtyGeneration?.generationId ?? null,
+            row.sequence,
+            chunkBuf,
+            lastConfirmedCursor,
+          );
+          if (!confirmed) {
             cleanupOutputStream();
             return;
           }
           lastSequence = row.sequence;
+          lastConfirmedCursor = confirmed;
         }
       } else {
         const newChunks = await query<ChunkRow>(
@@ -7269,12 +7717,19 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+          const confirmed = await writeOutputChunkEvent(
+            outputSink, replaySource, null, row.sequence, chunkBuf, lastConfirmedCursor,
+          );
+          if (!confirmed) {
             cleanupOutputStream();
             return;
           }
-          emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
           lastSequence = row.sequence;
+          lastConfirmedCursor = confirmed;
+          if (!emitBoundedSemanticSteps(chunkBuf.toString('utf8'), agent, outputSink, lastConfirmedCursor)) {
+            cleanupOutputStream();
+            return;
+          }
         }
       }
 
@@ -7282,21 +7737,30 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         queryOne<{ status: string; lifecycle_status: string | null }>(
           'SELECT status, lifecycle_status FROM pipeline_runs WHERE id = $1', [runId],
         ),
-        usePtyCapture ? getRunPtySessionHealth(runId) : Promise.resolve(null),
+        usePtyCapture ? getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken) : Promise.resolve(null),
       ]);
       const ptyHealthPayload = normalizePtyHealthPayload(ptyHealth);
       if (ptyHealthPayload) {
         const now = Date.now();
         const signature = JSON.stringify(ptyHealthPayload);
         if (signature !== lastPtyHealthSignature || now - lastPtyHealthEmitAt > RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS) {
-          writePtyHealthEvent(res, ptyHealthPayload);
+          if (!writePtyHealthEvent(outputSink, ptyHealthPayload, lastConfirmedCursor)) {
+            cleanupOutputStream();
+            return;
+          }
           lastPtyHealthSignature = signature;
           lastPtyHealthEmitAt = now;
         }
       }
       const ptyStatus = ptyHealth?.status ?? null;
       const runBecameTerminal = Boolean(statusRow && terminalStatuses.includes(statusRow.status));
-      const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
+      // A followed generation ending is a story boundary, not a run boundary.
+      // Keep the stream attached so the next story/retry can switch generations.
+      // An explicit historical generation replay may close when that generation ends.
+      const explicitPtyGenerationEnded = usePtyCapture
+        && requestedGenerationToken !== null
+        && ptyStatus !== null
+        && ptyStatus !== 'active';
 
       // An attached browser may have observed the legitimate PTY startup-pending
       // state before the engine later failed to create any session. Demote that
@@ -7311,7 +7775,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
            ) recent ORDER BY sequence ASC`,
           [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
         );
-        res.write(`event: run_meta\ndata: ${JSON.stringify({
+        const fallbackMetadataAccepted = outputSink.send({ event: 'run_meta', data: JSON.stringify({
+          contractVersion: RUN_OUTPUT_CONTRACT_VERSION,
           agentType: runMetadata.agentType,
           agentModel: runMetadata.agentModel,
           terminalMode: 'ansi-html',
@@ -7330,36 +7795,74 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
           pty_unavailable_hint: 'The requested PTY session was never created; showing the durable engine transcript.',
           outputSource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
           output_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
-          // This stream previously emitted PTY IDs. Tell the browser to reset
-          // its persisted cursor before accepting ANSI IDs from a new source.
+          outputGenerationId: null,
+          output_generation_id: null,
+          storyId: null,
+          story_id: null,
+          attempt: null,
+          checkpointSequence: 0,
+          checkpoint_sequence: 0,
+          firstRetainedSequence: fallbackChunks[0]?.sequence ?? 1,
+          first_retained_sequence: fallbackChunks[0]?.sequence ?? 1,
+          active: false,
+          transcriptAvailable: false,
+          transcript_available: false,
+          archiveAvailable: false,
+          archive_available: false,
           cursorReset: true,
           cursor_reset: true,
           ptyReplaySource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
           pty_replay_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
-        })}\n\n`);
-        if (fallbackChunks[0]?.sequence > 1) {
-          res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: fallbackChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+        }) }, lastConfirmedCursor);
+        lastSequence = 0;
+        lastConfirmedCursor = null;
+        if (!fallbackMetadataAccepted || !outputSink.send({
+          event: 'terminal_reset',
+          data: JSON.stringify({
+            reason: 'output_source_changed',
+            outputSource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+            generationId: null,
+            checkpointSequence: 0,
+            firstRetainedSequence: fallbackChunks[0]?.sequence ?? 1,
+          }),
+        })) {
+          cleanupOutputStream();
+          return;
+        }
+        if (fallbackChunks[0]?.sequence > 1 && !outputSink.send({
+          event: 'replay_truncated',
+          data: JSON.stringify({ fromSequence: fallbackChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS }),
+        })) {
+          cleanupOutputStream();
+          return;
         }
         for (const row of fallbackChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+          const confirmed = await writeOutputChunkEvent(
+            outputSink, RUN_OUTPUT_ANSI_REPLAY_SOURCE, null, row.sequence, chunkBuf, lastConfirmedCursor,
+          );
+          if (!confirmed) {
             cleanupOutputStream();
             return;
           }
-          emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+          lastSequence = row.sequence;
+          lastConfirmedCursor = confirmed;
+          if (!emitBoundedSemanticSteps(chunkBuf.toString('utf8'), agent, outputSink, lastConfirmedCursor)) {
+            cleanupOutputStream();
+            return;
+          }
         }
       }
 
-      if (!statusRow || runBecameTerminal || ptyTerminal) {
+      if (!statusRow || runBecameTerminal || explicitPtyGenerationEnded) {
         // Never emit done before a bounded cursor batch has fully drained.
         // Queue another non-overlapping poll; an exact-multiple batch simply
         // performs one empty confirmation read before closing.
         if (fetchedBatchIsFull) {
           drainImmediately = true;
         } else {
+          outputSink.end({ event: 'done', data: '' });
           cleanupOutputStream();
-          res.write('event: done\ndata: \n\n');
-          res.end();
         }
       } else if (fetchedBatchIsFull) {
         // Active noisy streams drain in bounded slices without waiting for the
@@ -7372,12 +7875,19 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       }
     } catch (err: unknown) {
       logger.warn({ err, runId, terminalMode }, '[pipeline-output] transient output poll failure; allowing SSE reconnect');
-      cleanupOutputStream();
       // A transport failure is not run completion. Emit a retryable error and
-      // end the HTTP response without a `done` marker so EventSource reconnects
-      // with Last-Event-ID and resumes exactly where it stopped.
-      res.write(`event: stream_error\ndata: ${JSON.stringify({ retryable: true, code: 'OUTPUT_POLL_FAILED', afterSequence: lastSequence })}\n\n`);
-      res.end();
+      // end without `done`; EventSource resumes from the last admitted scoped ID.
+      outputSink.end({
+        retryMs: 1_000,
+        event: 'stream_error',
+        data: JSON.stringify({
+          retryable: true,
+          code: 'OUTPUT_POLL_FAILED',
+          afterSequence: lastSequence,
+          cursor: lastConfirmedCursor,
+        }),
+      });
+      cleanupOutputStream();
     } finally {
       pollInFlight = false;
       if (drainImmediately && !streamClosed && !req.destroyed && !res.destroyed) {
@@ -7389,6 +7899,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // PostgreSQL NOTIFY provides immediate cross-process wakeups after durable
   // chunk commits. The interval remains as loss/reconnect protection.
   unsubscribeOutputWakeup = subscribeRunOutput(runId, () => { void pollOutput(); });
+  unsubscribeCheckpointEvents = subscribeTopic(runPtyCheckpointTopic(runId), () => { void pollOutput(); });
   pollInterval = setInterval(() => { void pollOutput(); }, RUN_OUTPUT_PTY_POLL_INTERVAL_MS);
   if (initialReplayMayHaveMore) void pollOutput();
 

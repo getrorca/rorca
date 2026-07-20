@@ -1082,7 +1082,9 @@ export default function TriggerPopover({
               effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
-              reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+              reasoningOverride: (modelCapability?.supportsReasoning ?? initialReasoning?.enabled === true)
+                ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined }
+                : undefined,
               executionEnvironment,
             });
           }}
@@ -1116,7 +1118,9 @@ export default function TriggerPopover({
                 effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
-                reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+                reasoningOverride: (modelCapability?.supportsReasoning ?? initialReasoning?.enabled === true)
+                  ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined }
+                  : undefined,
                 executionEnvironment,
               });
             }}
