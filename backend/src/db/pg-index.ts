@@ -214,6 +214,14 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           await client.query('CREATE EXTENSION IF NOT EXISTS age');
         } catch (err) {
           console.warn(`[pg-migrate] AGE extension unavailable; continuing in graph-lite mode: ${(err as Error).message || err}`);
+
+          // Loading AGE can install backend hooks before CREATE EXTENSION later
+          // fails (for example when a non-superuser owns an otherwise capable
+          // macOS PostgreSQL installation). Those hooks then reference the
+          // absent ag_catalog schema and poison unrelated later DDL. Discard the
+          // backend session before continuing in graph-lite mode.
+          try { client.release(true); } catch { /* already released or dead */ }
+          client = await pool.connect();
         }
 
         const catalog = await client.query<{ graph_catalog: string | null }>(
