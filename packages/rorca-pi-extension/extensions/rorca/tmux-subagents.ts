@@ -6,8 +6,8 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@mariozechner/pi-tui";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execFile as execFileCb } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { chmod, mkdtemp } from "node:fs/promises";

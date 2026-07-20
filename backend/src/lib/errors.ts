@@ -168,6 +168,51 @@ export class UnprocessableError extends AppError {
   }
 }
 
+/** 422 — a durable PTY checkpoint failed integrity/version validation */
+export class CheckpointCorruptionError extends AppError {
+  readonly statusCode = 422 as const;
+
+  constructor(message = 'PTY checkpoint is corrupt', details?: Record<string, unknown>) {
+    super(message, 'CHECKPOINT_CORRUPTION', details);
+  }
+}
+
+/** 507 — a terminal state cannot be serialized inside its configured bound */
+export class RetentionBudgetExhaustedError extends AppError {
+  readonly statusCode = 507 as const;
+
+  constructor(message = 'PTY retention budget exhausted', details?: Record<string, unknown>) {
+    super(message, 'RETENTION_BUDGET_EXHAUSTED', details);
+  }
+}
+
+/** 503 — a normalized transcript event could not be durably appended */
+export class TranscriptPersistenceError extends AppError {
+  readonly statusCode = 503 as const;
+
+  constructor(message = 'PTY transcript persistence failed', details?: Record<string, unknown>) {
+    super(message, 'TRANSCRIPT_PERSISTENCE_FAILED', details);
+  }
+}
+
+/** 507 — exact raw terminal evidence could not be written completely */
+export class RawArchiveWriteError extends AppError {
+  readonly statusCode = 507 as const;
+
+  constructor(message = 'Raw PTY archive write failed', details?: Record<string, unknown>) {
+    super(message, 'RAW_ARCHIVE_WRITE_FAILED', details);
+  }
+}
+
+/** 422 — a raw archive segment is missing or failed integrity validation */
+export class RawArchiveIntegrityError extends AppError {
+  readonly statusCode = 422 as const;
+
+  constructor(message = 'Raw PTY archive integrity verification failed', details?: Record<string, unknown>) {
+    super(message, 'RAW_ARCHIVE_INTEGRITY_FAILED', details);
+  }
+}
+
 /** 503 — service unavailable (upstream down, circuit breaker open) */
 export class ServiceUnavailableError extends AppError {
   readonly statusCode = 503 as const;

@@ -1,6 +1,6 @@
 {
-  "contractVersion": "10.0.0",
-  "generatedAt": "2026-07-19T14:39:12.855Z",
+  "contractVersion": "11.0.0",
+  "generatedAt": "2026-07-19T20:41:16.959Z",
   "routes": [
     {
       "method": "GET",
@@ -3907,9 +3907,15 @@
                   "dataBase64": {
                     "description": "Base64-encoded UTF-8 terminal input bytes from xterm.onData.",
                     "type": "string"
+                  },
+                  "generationToken": {
+                    "description": "Exact active PTY generation token",
+                    "format": "uuid",
+                    "type": "string"
                   }
                 },
                 "required": [
+                  "generationToken",
                   "dataBase64"
                 ],
                 "type": "object"
@@ -3929,7 +3935,7 @@
       "responseSchema": {
         "200": {}
       },
-      "hash": "sha256:f8a3f6aa2d5ae57add5776d2dcf8aa1d4d1e26f9f92443083c1cb7a5b5ff2754"
+      "hash": "sha256:2cf1e9e87e4fdf6f14a9e3d6514befe40dc24f4ffd24c392059d2d2d1a2bd5db"
     },
     {
       "method": "GET",
@@ -3990,6 +3996,14 @@
       "path": "/api/pipeline/runs/{runId}/output",
       "parameters": [
         {
+          "name": "Last-Event-ID",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
           "name": "runId",
           "in": "path",
           "required": true,
@@ -4007,6 +4021,24 @@
           }
         },
         {
+          "name": "generationToken",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        {
+          "name": "outputGenerationId",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        {
           "name": "outputSource",
           "in": "query",
           "required": false,
@@ -4016,6 +4048,14 @@
               "run_output_chunks"
             ],
             "type": "string"
+          }
+        },
+        {
+          "name": "recoverTerminal",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "boolean"
           }
         }
       ],
@@ -4030,7 +4070,36 @@
           }
         }
       },
-      "hash": "sha256:e68df8483ab6eb4f2fd764b8c6968219d140b7f9601c0486f18026f51cc6b6d0"
+      "hash": "sha256:ca36a1dc66789a1c44012909df215def540b38084d19222f55c3970eb421174b"
+    },
+    {
+      "method": "GET",
+      "path": "/api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}",
+      "parameters": [
+        {
+          "name": "checkpointId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        {
+          "name": "runId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {},
+        "422": {}
+      },
+      "hash": "sha256:7deaa77d1849fdbe288e5d37c9dbe3fea024b59844e7bfb011e6be5ee5e7b457"
     },
     {
       "method": "POST",
@@ -4049,6 +4118,11 @@
                     "minimum": 1,
                     "type": "integer"
                   },
+                  "generationToken": {
+                    "description": "Exact active PTY generation token",
+                    "format": "uuid",
+                    "type": "string"
+                  },
                   "rows": {
                     "maximum": 200,
                     "minimum": 1,
@@ -4056,6 +4130,7 @@
                   }
                 },
                 "required": [
+                  "generationToken",
                   "cols",
                   "rows"
                 ],
@@ -4076,7 +4151,7 @@
       "responseSchema": {
         "200": {}
       },
-      "hash": "sha256:e1b74808682335a01b0239173fae564c200d94feab43f6276447d0a3ba2d4231"
+      "hash": "sha256:90761864a665a7e02c8a8f6a440549b94847e23996030593a68528a05e4276c0"
     },
     {
       "method": "GET",
@@ -4604,7 +4679,8 @@
                     "type": "boolean"
                   },
                   "forceSequential": {
-                    "description": "Explicitly retain sequential execution even when wave options are otherwise present",
+                    "default": false,
+                    "description": "Force effective sequential execution.",
                     "type": "boolean"
                   },
                   "includeGraph": {
@@ -4627,9 +4703,14 @@
                     "description": "Override the execution model for this run",
                     "type": "string"
                   },
+                  "operator_keyboard_input": {
+                    "default": false,
+                    "description": "Explicitly request the reviewed native PTY profile with keyboard input; Pi otherwise uses its structured autonomous profile in ansi-html mode.",
+                    "type": "boolean"
+                  },
                   "orchestrationMode": {
                     "default": "sequential",
-                    "description": "Explicit run mode; graph preview never opts a run into parallel execution",
+                    "description": "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated.",
                     "enum": [
                       "sequential",
                       "wave-parallel"
@@ -4638,13 +4719,10 @@
                   },
                   "parallelism": {
                     "default": 1,
-                    "maximum": 4,
+                    "description": "Requested effective story parallelism. Values above 1 require the non-production experimental gate.",
+                    "maximum": 10,
                     "minimum": 1,
                     "type": "integer"
-                  },
-                  "qualificationReceiptId": {
-                    "description": "Operator-selected immutable qualification receipt identity required for production wave execution",
-                    "type": "string"
                   },
                   "readinessOverride": {
                     "description": "Explicitly run despite readiness blockers; usage is logged to WAL for auditability.",
@@ -4653,10 +4731,6 @@
                   "rerunFromScratch": {
                     "description": "Reset passed story state and execute the spec from the first non-excluded story.",
                     "type": "boolean"
-                  },
-                  "rolloutCohort": {
-                    "description": "Explicit governed rollout cohort required for production wave execution",
-                    "type": "string"
                   },
                   "specPath": {
                     "example": "forge/specs/approved/my-spec.json",
@@ -4747,9 +4821,10 @@
           }
         },
         "400": {},
-        "404": {}
+        "404": {},
+        "422": {}
       },
-      "hash": "sha256:2dd000714a02c5cc063b4b0f1b8012b09f2024a2dfc8126ebca76f1bfaafd4a1"
+      "hash": "sha256:08173cdf717250a248c5d3c595351e631d30e5181803ec2ef169f0faf263de1d"
     },
     {
       "method": "GET",

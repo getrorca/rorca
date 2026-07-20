@@ -7,7 +7,7 @@
 
 import { Router, Request, Response } from 'express';
 import { isUtf8 } from 'buffer';
-import { execFileSync, execSync, spawn } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -15,7 +15,14 @@ import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { validateBody } from '../lib/validate';
-import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
+import {
+  broadcastAll,
+  attachSSE,
+  createBoundedTopicSseSink,
+  subscribeTopic,
+  type BoundedTopicSseSink,
+  type WalEvent,
+} from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
 import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
@@ -51,6 +58,7 @@ import {
   type StoryChangePolicy,
 } from '../lib/story-execution-packet';
 import { persistStoryExecutionManifest } from '../lib/story-closeout';
+import { requiresPerStoryWorktree } from '../lib/parallel-wave-core';
 import { inspectApprovedSpecPasses, reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
 import { classifyRunLiveness } from '../lib/ssdlc-liveness';
 import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
@@ -71,22 +79,38 @@ import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired, isSuperUser } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
-import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
+import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, resolveOperatorInputTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
+import { isPtyGenerationReaderEnabled } from '../lib/pty-feature-flags';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
-import { normalizeRejectedStoryEvidence, sanitizeStoredRejectedStoryEvidence, type PortableRejectionEvidence } from '../lib/rejected-wave-closeout';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
+  RUN_OUTPUT_ANSI_SOURCE,
+  RUN_OUTPUT_CONTRACT_VERSION,
+  RUN_OUTPUT_PTY_SOURCE,
+  decodeRunOutputCursor,
+  encodeRunOutputCursor,
+  isRunOutputSource,
+  outputCursorMatches,
+  type RunOutputCursor,
+  type RunOutputSource,
+} from '../lib/run-output-contract';
+import {
+  getRunPtyGeneration,
   getRunPtySessionHealth,
-  getRunPtySessionStatus,
   getRunPtyOutputLimits,
   listRecentRunPtyChunks,
   listRunPtyChunks,
   requestRunPtyInput,
   requestRunPtyResize,
 } from '../lib/run-pty-store';
+import {
+  getLatestValidRunPtyCheckpoint,
+  getValidRunPtyCheckpointById,
+  runPtyCheckpointTopic,
+} from '../lib/pty-checkpoint-store';
 import { sweepOrphanProcesses } from '../worker';
 import { safelyRefreshReusableWorktree, validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 import { PipelineRetryJobPayload } from '../lib/pg-boss-schemas';
@@ -105,15 +129,6 @@ import {
   type RetryPreviewIdentity,
   type RetryPreviewPacket,
 } from '../lib/retry-governance';
-import {
-  createGovernedRetryDispatchIdentity,
-  deriveAuthoritativeRetryScope,
-  governedRetryQueuePayloadHash,
-  type AuthoritativeRetryScope,
-  type RetryCompletionEvidence,
-  type RetryIntegrationEvidence,
-  type RetryRunCloseoutEvidence,
-} from '../lib/governed-story-retry';
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
@@ -143,7 +158,12 @@ import {
 } from '../lib/execution-secret-references';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
-import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveParallelPolicy,
+  type EffectiveWaveParallelPolicy,
+  type WaveExecutionMode,
+} from '../lib/wave-parallel-policy';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -228,6 +248,61 @@ function autoSelectOrchestration(userStories: WaveUserStory[]): {
   };
 }
 
+function resolveTriggerWavePolicy(input: {
+  workspacePath: string;
+  stories: WaveUserStory[];
+  requestedMode?: WaveExecutionMode;
+  requestedParallelism?: number;
+  forceSequential?: boolean;
+  terminalMode: TerminalMode;
+  specificStory?: string;
+}): {
+  policy: EffectiveWaveParallelPolicy;
+  orchestration: ReturnType<typeof autoSelectOrchestration>;
+} {
+  const analysis = autoSelectOrchestration(input.stories);
+  let workspaceParallelRequested = false;
+  try {
+    const configPath = path.join(input.workspacePath, '.rorca', 'config.json');
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { execution?: { waveParallelism?: boolean } };
+      workspaceParallelRequested = config.execution?.waveParallelism === true;
+    }
+  } catch {
+    // Invalid/missing config is never authority to broaden execution.
+  }
+
+  const explicitlyParallel = input.requestedMode === 'wave-parallel'
+    || (input.requestedParallelism ?? 1) > 1;
+  const forcedSequential = input.forceSequential === true
+    || isPtyTerminalMode(input.terminalMode)
+    || Boolean(input.specificStory);
+  const parallelRequested = explicitlyParallel
+    || (workspaceParallelRequested && !forcedSequential);
+  const policy = enforceWaveParallelPolicy({
+    source: 'pipeline-trigger',
+    requestedMode: input.requestedMode ?? (parallelRequested ? 'wave-parallel' : 'sequential'),
+    requestedParallelism: parallelRequested
+      ? (input.requestedParallelism ?? Math.max(2, analysis.parallelism))
+      : 1,
+    forceSequential: forcedSequential,
+  }, currentWaveParallelPolicyEnvironment());
+
+  return {
+    policy,
+    orchestration: {
+      ...analysis,
+      mode: policy.mode,
+      parallelism: policy.parallelism,
+      reason: policy.mode === 'wave-parallel'
+        ? `experimental opt-in; ${analysis.reason}`
+        : forcedSequential
+          ? 'sequential execution explicitly or terminal/story scoped'
+          : 'safe control-plane default',
+    },
+  };
+}
+
 /** Extract user-visible text from pino JSON log lines before semantic parsing. */
 function unwrapSemanticLogLine(line: string): string {
   const trimmed = line.trim();
@@ -242,51 +317,46 @@ function unwrapSemanticLogLine(line: string): string {
 }
 
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
+function getSemanticSteps(text: string, agent: string): ReturnType<typeof parseLine> {
+  const allSteps: ReturnType<typeof parseLine> = [];
+  for (const line of text.split('\n')) {
+    allSteps.push(...parseLine(unwrapSemanticLogLine(line), agent));
+  }
+  return allSteps;
+}
+
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
-  const lines = text.split('\n');
-  for (const line of lines) {
-    const semanticLine = unwrapSemanticLogLine(line);
-    const steps = parseLine(semanticLine, agent);
-    for (const step of steps) {
-      res.write(`event: semantic_step\ndata: ${JSON.stringify(step)}\n\n`);
-    }
+  for (const step of getSemanticSteps(text, agent)) {
+    if (res.destroyed || res.writableEnded || (res.socket !== null && !res.socket.writable)) return;
+    res.write(`event: semantic_step\ndata: ${JSON.stringify(step)}\n\n`);
   }
 }
 
-const RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS = 10_000;
+function emitBoundedSemanticSteps(
+  text: string,
+  agent: string,
+  sink: BoundedTopicSseSink,
+  lastConfirmedCursor: string | null,
+): boolean {
+  for (const step of getSemanticSteps(text, agent)) {
+    if (!sink.send({ event: 'semantic_step', data: JSON.stringify(step) }, lastConfirmedCursor)) return false;
+  }
+  return true;
+}
 
-/**
- * Respect Node's writable high-water mark. Durable cursors make it safe to end
- * a stalled attachment and let EventSource replay, rather than buffering an
- * unbounded transcript in the server process for a slow consumer.
- */
-async function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): Promise<boolean> {
-  if (res.destroyed || res.writableEnded) return false;
-  const accepted = res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
-  if (accepted) return true;
-
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const finish = (result: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      res.off('drain', onDrain);
-      res.off('close', onClose);
-      res.off('error', onClose);
-      resolve(result);
-    };
-    const onDrain = () => finish(true);
-    const onClose = () => finish(false);
-    const timer = setTimeout(() => {
-      finish(false);
-      if (!res.destroyed) res.destroy();
-    }, RUN_OUTPUT_BACKPRESSURE_TIMEOUT_MS);
-    timer.unref?.();
-    res.once('drain', onDrain);
-    res.once('close', onClose);
-    res.once('error', onClose);
-  });
+/** A committed delta is acknowledged only when the bounded hub sink admits it. */
+async function writeOutputChunkEvent(
+  sink: BoundedTopicSseSink,
+  source: RunOutputSource,
+  generationId: string | null,
+  sequence: number,
+  chunk: Buffer,
+  lastConfirmedCursor: string | null,
+): Promise<string | null> {
+  const cursor = encodeRunOutputCursor(source, generationId, sequence);
+  return sink.send({ id: cursor, event: 'chunk', data: chunk.toString('base64') }, lastConfirmedCursor)
+    ? cursor
+    : null;
 }
 
 function readBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
@@ -300,9 +370,9 @@ function readBoundedIntegerEnv(name: string, fallback: number, min: number, max:
 // immediately, and Express reads those committed rows by sequence. Bounded
 // polling remains a recovery path for listener reconnects/notification loss.
 const RUN_OUTPUT_PTY_LIVE_TRANSPORT = 'postgres-notify+db-replay' as const;
-const RUN_OUTPUT_PTY_REPLAY_SOURCE = 'run_pty_output_chunks' as const;
-const RUN_OUTPUT_ANSI_REPLAY_SOURCE = 'run_output_chunks' as const;
-type RunOutputReplaySource = typeof RUN_OUTPUT_PTY_REPLAY_SOURCE | typeof RUN_OUTPUT_ANSI_REPLAY_SOURCE;
+const RUN_OUTPUT_PTY_REPLAY_SOURCE = RUN_OUTPUT_PTY_SOURCE;
+const RUN_OUTPUT_ANSI_REPLAY_SOURCE = RUN_OUTPUT_ANSI_SOURCE;
+type RunOutputReplaySource = RunOutputSource;
 const RUN_OUTPUT_PTY_POLL_INTERVAL_MS = readBoundedIntegerEnv('RORCA_PTY_OUTPUT_POLL_INTERVAL_MS', 2_000, 250, 10_000);
 const RUN_OUTPUT_PTY_EXPECTED_MAX_LATENCY_MS = RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 2;
 const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
@@ -337,9 +407,7 @@ function parseOutputResumeCursor(value: string, source: 'afterSequence' | 'Last-
 
 /** A durable cursor is valid only within one output store's sequence space. */
 function parseOutputReplaySource(value: string): RunOutputReplaySource {
-  if (value === RUN_OUTPUT_PTY_REPLAY_SOURCE || value === RUN_OUTPUT_ANSI_REPLAY_SOURCE) {
-    return value;
-  }
+  if (isRunOutputSource(value)) return value;
   throw new ValidationError('outputSource must be run_pty_output_chunks or run_output_chunks');
 }
 
@@ -360,6 +428,20 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     : Number.parseInt(String(health.total_output_bytes ?? 0), 10) || 0;
   const processAlive = health.status === 'active' && isPtyPidAlive(health.child_pid);
   return {
+    ptyGenerationId: health.generationId,
+    pty_generation_id: health.generationId,
+    ptyStoryId: health.storyId,
+    pty_story_id: health.storyId,
+    ptyAttempt: health.attempt,
+    pty_attempt: health.attempt,
+    ptyGenerationStatus: health.status,
+    pty_generation_status: health.status,
+    ptyGenerationActive: health.isActive,
+    pty_generation_active: health.isActive,
+    ptyGenerationSource: health.source,
+    pty_generation_source: health.source,
+    ptyGenerationReplaySource: health.replaySource,
+    pty_generation_replay_source: health.replaySource,
     ptySessionStatus: health.status,
     pty_session_status: health.status,
     ptyChildPid: health.child_pid,
@@ -370,8 +452,6 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_last_output_at: health.last_output_at,
     ptyLastHeartbeatAt: health.last_heartbeat_at,
     pty_last_heartbeat_at: health.last_heartbeat_at,
-    ptyCompletionMarker: health.completion_marker,
-    pty_completion_marker: health.completion_marker,
     ptyCompletionMarkerSeen: Boolean(health.completion_marker_seen_at),
     pty_completion_marker_seen: Boolean(health.completion_marker_seen_at),
     ptyCompletionMarkerSeenAt: health.completion_marker_seen_at,
@@ -380,20 +460,32 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
     pty_completion_file_seen: Boolean(health.completion_file_seen_at),
     ptyCompletionFileSeenAt: health.completion_file_seen_at,
     pty_completion_file_seen_at: health.completion_file_seen_at,
-    ptyCompletionFileError: health.completion_file_error,
-    pty_completion_file_error: health.completion_file_error,
+    ptyCompletionFileError: health.completion_file_error ? 'completion_file_invalid' : null,
+    pty_completion_file_error: health.completion_file_error ? 'completion_file_invalid' : null,
     ptyTerminalMarkerSeen: Boolean(health.terminal_marker_seen_at),
     pty_terminal_marker_seen: Boolean(health.terminal_marker_seen_at),
     ptyPromptReadinessStatus: health.prompt_readiness_status,
     pty_prompt_readiness_status: health.prompt_readiness_status,
-    ptyPromptReadinessReason: health.prompt_readiness_reason,
-    pty_prompt_readiness_reason: health.prompt_readiness_reason,
+    ptyPromptReadinessReason: health.prompt_readiness_reason ? 'readiness_state_recorded' : null,
+    pty_prompt_readiness_reason: health.prompt_readiness_reason ? 'readiness_state_recorded' : null,
     ptyPromptReadyAt: health.prompt_ready_at,
     pty_prompt_ready_at: health.prompt_ready_at,
     ptyPromptInjectedAt: health.prompt_injected_at,
     pty_prompt_injected_at: health.prompt_injected_at,
     ptyTotalOutputBytes: totalOutputBytes,
     pty_total_output_bytes: totalOutputBytes,
+    ptyNextOutputSequence: Number(health.next_output_sequence ?? 1),
+    pty_next_output_sequence: Number(health.next_output_sequence ?? 1),
+    ptyCheckpointSequence: Number(health.checkpoint_sequence ?? 0),
+    pty_checkpoint_sequence: Number(health.checkpoint_sequence ?? 0),
+    ptyCheckpointAgeMs: health.checkpoint_at ? Math.max(0, Date.now() - Date.parse(health.checkpoint_at)) : null,
+    pty_checkpoint_age_ms: health.checkpoint_at ? Math.max(0, Date.now() - Date.parse(health.checkpoint_at)) : null,
+    ptyFirstRetainedSequence: Number(health.first_retained_sequence ?? 1),
+    pty_first_retained_sequence: Number(health.first_retained_sequence ?? 1),
+    ptyRetainedOutputBytes: Number(health.retained_output_bytes ?? 0),
+    pty_retained_output_bytes: Number(health.retained_output_bytes ?? 0),
+    ptyCompactedByteCount: Number(health.compacted_byte_count ?? 0),
+    pty_compacted_byte_count: Number(health.compacted_byte_count ?? 0),
     ptyDroppedOutputBytes: Number(health.dropped_output_bytes ?? 0),
     pty_dropped_output_bytes: Number(health.dropped_output_bytes ?? 0),
     ptyOutputTruncated: Boolean(health.output_truncated_at),
@@ -403,9 +495,37 @@ function normalizePtyHealthPayload(health: Awaited<ReturnType<typeof getRunPtySe
   };
 }
 
-function writePtyHealthEvent(res: Response, healthPayload: Record<string, unknown> | null): void {
-  if (!healthPayload) return;
-  res.write(`event: pty_health\ndata: ${JSON.stringify(healthPayload)}\n\n`);
+function writePtyHealthEvent(
+  sink: BoundedTopicSseSink,
+  healthPayload: Record<string, unknown> | null,
+  lastConfirmedCursor: string | null,
+): boolean {
+  return !healthPayload || sink.send(
+    { event: 'pty_health', data: JSON.stringify(healthPayload) },
+    lastConfirmedCursor,
+  );
+}
+
+interface RunOutputEvidenceAvailability {
+  transcriptAvailable: boolean;
+  archiveAvailable: boolean;
+}
+
+async function getRunOutputEvidenceAvailability(generationId: string | null): Promise<RunOutputEvidenceAvailability> {
+  if (!generationId) return { transcriptAvailable: false, archiveAvailable: false };
+  const availability = await queryOne<{ transcript_available: boolean; archive_available: boolean }>(
+    `SELECT
+       EXISTS (SELECT 1 FROM pty_transcript_events WHERE generation_id = $1) AS transcript_available,
+       EXISTS (
+         SELECT 1 FROM pty_raw_archive_manifests
+         WHERE generation_id = $1 AND completion_state <> 'pruned'
+       ) AS archive_available`,
+    [generationId],
+  );
+  return {
+    transcriptAvailable: Boolean(availability?.transcript_available),
+    archiveAvailable: Boolean(availability?.archive_available),
+  };
 }
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
@@ -441,6 +561,7 @@ interface DispatchManifestProfile {
 
 interface DispatchManifestStory extends CapabilityStory {
   acceptance?: string;
+  dependsOn?: string[];
   excluded?: boolean;
   passes?: boolean;
   model?: string;
@@ -491,6 +612,27 @@ async function resolveAndPersistDispatchManifests(input: {
   const specRevision = deriveStoryContractRevision(input.specJson);
   const manifests: ImmutableStoryExecutionManifest[] = [];
   const dispatchAgent = resolveDispatchAgent(input.agent);
+  const isolatedStoryIds = new Set<string>();
+  if (input.parallelism > 1 && input.terminalMode !== 'pty') {
+    const compiled = compileWaves(stories.map((story) => ({
+      id: story.id,
+      title: story.title,
+      description: story.description,
+      acceptanceCriteria: acceptanceCriteriaForManifest(story),
+      dependsOn: story.dependsOn ?? [],
+      passes: story.passes,
+      excluded: story.excluded,
+    })));
+    if (isCycleError(compiled)) {
+      throw new UnprocessableError(
+        `PARALLEL_WAVE_MANIFEST_CYCLE: cannot freeze safe story working directories for ${compiled.involvedIds.join(', ')}`,
+      );
+    }
+    for (const wave of compiled) {
+      if (!requiresPerStoryWorktree(wave.stories.length)) continue;
+      for (const waveStory of wave.stories) isolatedStoryIds.add(waveStory.id);
+    }
+  }
 
   for (const story of stories.filter((item) => !item.excluded)) {
     const packet = buildStoryExecutionPacket(input.cwd, story, mode);
@@ -512,7 +654,11 @@ async function resolveAndPersistDispatchManifests(input: {
         resolvedStoryAgent = findCapableEngine(detectRequiredTools(story), resolvedStoryAgent) ?? resolvedStoryAgent;
       }
     }
-    const storyIsolated = input.parallelism > 1 && input.terminalMode !== 'pty';
+    // Only genuinely concurrent waves need per-story branches. A singleton wave
+    // executes directly on the run branch, so its immutable host-validation and
+    // command-safety authority are frozen against input.cwd rather than a branch
+    // which the engine must never create.
+    const storyIsolated = isolatedStoryIds.has(story.id);
     const storyWorktreePath = storyIsolated
       ? path.resolve(input.cwd, '..', `${path.basename(input.cwd)}-${story.id}-run-${input.runId}`)
       : input.cwd;
@@ -1131,11 +1277,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
- *               forceSequential: { type: boolean, description: "Explicitly retain sequential execution even when wave options are otherwise present" }
- *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Explicit run mode; graph preview never opts a run into parallel execution" }
- *               parallelism: { type: integer, minimum: 1, maximum: 4, default: 1 }
- *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity required for production wave execution" }
- *               rolloutCohort: { type: string, description: "Explicit governed rollout cohort required for production wave execution" }
+ *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated." }
+ *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Requested effective story parallelism. Values above 1 require the non-production experimental gate." }
+ *               forceSequential: { type: boolean, default: false, description: "Force effective sequential execution." }
  *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi], description: "Override the execution agent for this run" }
  *               modelOverride: { type: string, description: "Override the execution model for this run" }
@@ -1146,6 +1290,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists; does not reset passed story state." }
  *               rerunFromScratch: { type: boolean, description: "Reset passed story state and execute the spec from the first non-excluded story." }
  *               readinessOverride: { type: boolean, description: "Explicitly run despite readiness blockers; usage is logged to WAL for auditability." }
+ *               operator_keyboard_input: { type: boolean, default: false, description: "Explicitly request the reviewed native PTY profile with keyboard input; Pi otherwise uses its structured autonomous profile in ansi-html mode." }
  *               terminal_mode:
  *                 type: string
  *                 enum: [ansi-html, pty, native-pty]
@@ -1176,6 +1321,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                     activeRunId: { type: integer }
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "Spec is not executable or wave-parallel execution was denied by policy" }
  */
 const PipelineTriggerSchema = z.object({
   specPath: z.string().min(1),
@@ -1185,11 +1331,9 @@ const PipelineTriggerSchema = z.object({
   mergeStrategy: z.enum(['direct', 'pr', 'draft-pr', 'branch-only']).optional(),
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
-  forceSequential: z.boolean().optional(),
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional(),
-  parallelism: z.number().int().min(1).max(4).optional(),
-  qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]).optional(),
-  rolloutCohort: z.string().min(1).max(128).optional(),
+  parallelism: z.number().int().min(1).max(10).optional(),
+  forceSequential: z.boolean().optional(),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
@@ -1209,6 +1353,8 @@ const PipelineTriggerSchema = z.object({
   overrideReadinessGate: z.boolean().optional(),
   terminal_mode: z.string().nullable().optional(),
   terminalMode: z.string().nullable().optional(),
+  operator_keyboard_input: z.boolean().optional(),
+  operatorKeyboardInput: z.boolean().optional(),
   idempotencyKey: z.string().optional(),
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
@@ -1259,7 +1405,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, orchestrationMode, parallelism: requestedParallelism, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1270,7 +1416,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
-    const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    const requestedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    const resolvedTerminalMode = resolveOperatorInputTerminalMode(
+      requestedTerminalMode,
+      operator_keyboard_input === true || operatorKeyboardInput === true,
+    );
     assertTerminalModeAvailable(resolvedTerminalMode);
     const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
     await assertExecutionEnvironmentReady(resolvedExecutionEnvironment);
@@ -1409,6 +1559,26 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         dispatchStory.effort ?? resolvedReasoningEffort,
       );
     }
+
+    const waveStories: WaveUserStory[] = storiesForPreflight.map((story) => ({
+      id: story.id,
+      title: story.title ?? '',
+      description: story.description ?? '',
+      acceptanceCriteria: story.acceptanceCriteria ?? [],
+      dependsOn: (story as DispatchManifestStory & { dependsOn?: string[] }).dependsOn ?? [],
+      passes: story.passes,
+      excluded: story.excluded,
+    }));
+    const { policy: waveExecutionPolicy, orchestration } = resolveTriggerWavePolicy({
+      workspacePath: workspace.path,
+      stories: waveStories,
+      requestedMode: orchestrationMode,
+      requestedParallelism,
+      forceSequential,
+      terminalMode: resolvedTerminalMode,
+      specificStory: storyId,
+    });
+    const parallelism = waveExecutionPolicy.parallelism;
 
     // Lock initial SSDLC safety before the first mutation. Prose/_notes cannot
     // weaken these values; retries consume the persisted structured options.
@@ -1672,31 +1842,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const useExternalPiOrchestration = resolvedAgentType === 'pi'
       && isPiExternalOrchestrationEnabled()
       && !autonomousSafety.policyLocked
-      && !(orchestrationMode === 'wave-parallel' && Number(requestedParallelism) > 1);
+      && waveExecutionPolicy.mode === 'sequential';
 
     if (!queuedRunId && !reservedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
       if (queue && !useExternalPiOrchestration) {
-        if (orchestrationMode === 'wave-parallel' && Number(requestedParallelism) > 1) {
-          const queuePolicy = await resolveWaveProductionPolicy({
-            workspaceId: workspace.id,
-            workspacePath: workspace.path,
-            request: {
-              orchestrationMode,
-              parallelism: requestedParallelism,
-              qualificationReceiptId: qualificationReceiptId === undefined ? undefined : String(qualificationReceiptId),
-              rolloutCohort,
-            },
-          });
-          await auditWaveProductionDecision({
-            envelope: queuePolicy,
-            actor: String(pipelineUser?.id ?? 'local-operator'),
-            rationale: 'Queue reservation denied: wave authority must be evaluated at promotion dispatch',
-            eventType: 'deny',
-            outcome: 'denied',
-          });
-          throw new ValidationError('wave_parallel_denied:queue_reservations_are_sequential; dispatch explicitly when promoted');
-        }
         const MAX_QUEUE_DEPTH = 10;
         const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
@@ -1710,8 +1860,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
+        const queuedNeedsWorktree = effectiveAutoWorktreeRequest || waveExecutionPolicy.mode === 'wave-parallel';
         const queuedSpecSlug = path.basename(specPath, '.json').replace(/[^a-z0-9-]/gi, '-');
-        const queuedBranchName = effectiveAutoWorktreeRequest ? `feat/${queuedSpecSlug}` : null;
+        const queuedBranchName = queuedNeedsWorktree ? `feat/${queuedSpecSlug}` : null;
         const queuedWorktreePath = queuedBranchName
           ? path.resolve(workspace.path, '..', `${path.basename(workspace.path)}-${queuedBranchName.replace(/\//g, '-')}`)
           : null;
@@ -1724,7 +1875,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const queuedEffectiveOptions = buildEffectiveRunOptions({
           model: finalAgentModel,
           effort: resolvedReasoningEffort,
-          autoWorktree: effectiveAutoWorktreeRequest,
+          autoWorktree: queuedNeedsWorktree,
           worktreePath: queuedWorktreePath,
           branchName: queuedBranchName,
           mergeStrategy: queuedMergeStrategy,
@@ -1737,13 +1888,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         });
         const queuedBaseTriggerOptions = Object.fromEntries(
           Object.entries({
-            autoWorktree: effectiveAutoWorktreeRequest,
+            autoWorktree: queuedNeedsWorktree,
             autoMerge: queuedAutoMerge,
             mergeStrategy: queuedMergeStrategy,
             triggerType: triggerType === 'scheduled' ? 'scheduled' : 'manual',
-            forceSequential: true,
-            orchestrationMode: 'sequential',
-            parallelism: 1,
+            forceSequential: waveExecutionPolicy.mode === 'sequential',
+            orchestrationMode: waveExecutionPolicy.mode,
+            parallelism: waveExecutionPolicy.parallelism,
+            orchestration,
             agentOverride,
             modelOverride,
             storyId,
@@ -1764,19 +1916,19 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const queuedTriggerOptions = JSON.stringify({ ...(triggerOptions ?? {}), ...queuedBaseTriggerOptions });
         const queuedTaskManifestArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
         const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
-          (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via,
+          (spec_path, workspace_id, status, trigger_type, parallelism, queued_at, queue_position, triggered_via,
            auto_worktree, auto_merge, merge_strategy, include_graph, agent, agent_type, agent_model,
            terminal_mode, execution_environment, branch_name, worktree_path, effective_options,
-           idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
-           parallelism, orchestration_mode)
-          VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9, $10, $11,
-                  $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20::jsonb, 1, 'sequential')
+           idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+          VALUES ($1, $2, 'queued', $3, $4, NOW(), $5, 'queue', $6, $7, $8, $9, $10, $11, $12,
+                  $13, $14, $15, $16, $17::jsonb, $18, $19, $20::jsonb, $21::jsonb)
           RETURNING id`, [
           specPath,
           workspaceId,
           triggerType === 'scheduled' ? 'scheduled' : 'manual',
+          waveExecutionPolicy.parallelism,
           position,
-          effectiveAutoWorktreeRequest,
+          queuedNeedsWorktree,
           queuedAutoMerge,
           queuedMergeStrategy,
           includeGraph ?? false,
@@ -1805,6 +1957,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           terminal_mode: resolvedTerminalMode,
           executionEnvironment: resolvedExecutionEnvironment.effective,
           effectiveOptions: queuedEffectiveOptions,
+          orchestration,
           ...(idempotencyKey ? { idempotencyKey } : {}),
           ...(manifestId ? { manifestId } : {}),
           ...(taskManifestArtifacts ? { artifacts: taskManifestArtifacts } : {}),
@@ -1860,7 +2013,13 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     if (useExternalPiOrchestration) {
       const specId = path.basename(specPath, '.json');
       const serializedExternalArtifacts = taskManifestArtifacts ? JSON.stringify(taskManifestArtifacts) : null;
-      const serializedExternalTriggerOptions = triggerOptions ? JSON.stringify(triggerOptions) : null;
+      const externalTriggerOptions = {
+        ...(triggerOptions ?? {}),
+        orchestrationMode: waveExecutionPolicy.mode,
+        parallelism: waveExecutionPolicy.parallelism,
+        orchestration,
+      };
+      const serializedExternalTriggerOptions = JSON.stringify(externalTriggerOptions);
       let runId: number;
       if (existingRunId) {
         await execute(
@@ -1868,7 +2027,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
               SET spec_path = $1, workspace_id = $2, status = 'pi_native', trigger_type = $3,
                   agent = $4, agent_type = $5, agent_model = $6, started_at = NULL,
                   finished_at = NULL, pid = NULL, triggered_via = $7, terminal_mode = $8,
-                  execution_environment = $9, idempotency_key = COALESCE($10, idempotency_key),
+                  execution_environment = $9, parallelism = 1, idempotency_key = COALESCE($10, idempotency_key),
                   task_manifest_id = COALESCE($11, task_manifest_id),
                   task_manifest_artifacts = COALESCE($12::jsonb, task_manifest_artifacts),
                   trigger_options = COALESCE($13::jsonb, trigger_options)
@@ -1880,7 +2039,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         const runResult = await queryOne<{ id: number }>(
           `INSERT INTO pipeline_runs
              (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
-           VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12::jsonb, COALESCE($13::jsonb, '{}'::jsonb))
+           VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)
            RETURNING id`,
           [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode, resolvedExecutionEnvironment.effective, idempotencyKey ?? null, manifestId ?? null, serializedExternalArtifacts, serializedExternalTriggerOptions],
         );
@@ -1957,67 +2116,16 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         executionManifestPath: piNativeManifests.path,
         executionManifestHashes: piNativeManifests.manifests.map((manifest) => manifest.manifestHash),
         effectiveOptions: piNativeEffectiveOptions,
+        orchestration,
         specReadiness: (req as any)._specReadiness,
       });
       return;
     }
 
-    // 4b. Dependency analysis is advisory only. A run remains sequential unless
-    // the request explicitly supplies both wave-parallel mode and parallelism > 1.
-    let orchestration: ReturnType<typeof autoSelectOrchestration> | null = null;
-    try {
-      const specJsonForOrch = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-      const orchStories: WaveUserStory[] = (specJsonForOrch.userStories ?? []).map((s: any) => ({
-        id: s.id,
-        title: s.title ?? '',
-        description: s.description ?? '',
-        acceptanceCriteria: s.acceptanceCriteria ?? [],
-        dependsOn: s.dependsOn ?? [],
-        passes: s.passes,
-        excluded: s.excluded,
-      }));
-      orchestration = autoSelectOrchestration(orchStories);
-    } catch {
-      logger.info('[orchestration] Graph preview unavailable; sequential remains the default');
-    }
+    logger.info(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
 
-    const wavePolicyRequest = forceSequential === true
-      ? { orchestrationMode: 'sequential', parallelism: 1 }
-      : {
-          orchestrationMode,
-          parallelism: requestedParallelism,
-          qualificationReceiptId: qualificationReceiptId === undefined ? undefined : String(qualificationReceiptId),
-          rolloutCohort,
-        };
-    let wavePolicy = await resolveWaveProductionPolicy({
-      workspaceId: workspace.id,
-      workspacePath: workspace.path,
-      request: wavePolicyRequest,
-    });
-    const explicitWaveRequested = orchestrationMode === 'wave-parallel' && Number(requestedParallelism) > 1 && forceSequential !== true;
-    if (explicitWaveRequested && !wavePolicy.allowed) {
-      await auditWaveProductionDecision({
-        envelope: wavePolicy,
-        actor: String(pipelineUser?.id ?? 'local-operator'),
-        rationale: `API dispatch denied: ${wavePolicy.reason}`,
-      });
-      throw new ForbiddenError(`wave_parallel_denied:${wavePolicy.status}:${wavePolicy.reason}`);
-    }
-    if (explicitWaveRequested && isPtyTerminalMode(resolvedTerminalMode)) {
-      await auditWaveProductionDecision({
-        envelope: wavePolicy,
-        actor: String(pipelineUser?.id ?? 'local-operator'),
-        rationale: 'API dispatch denied: run-scoped PTY terminal is incompatible with wave-parallel execution',
-        eventType: 'deny',
-        outcome: 'denied',
-      });
-      throw new ValidationError('wave_parallel_denied:pty_terminal_requires_sequential');
-    }
-    let parallelism = wavePolicy.effective.parallelism;
-
-    // 5. Determine CWD — main workspace or new worktree. Graph advice alone
-    // never creates a worktree or changes execution mode.
-    const needsWorktree = effectiveAutoWorktreeRequest || parallelism > 1;
+    // 5. Determine CWD — main workspace or new worktree
+    const needsWorktree = effectiveAutoWorktreeRequest || waveExecutionPolicy.mode === 'wave-parallel';
     let cwd = workspace.path;
     let branchName: string | null = null;
     let worktreePath: string | null = null;
@@ -2064,7 +2172,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // A base-branch merge is opt-in. Worktree isolation alone must never imply
     // permission to merge its branch back into the workspace, and policy-locked
     // autonomous runs cannot acquire merge authority from request defaults.
-    const computedAutoMerge = autonomousSafety.policyLocked || parallelism > 1
+    const computedAutoMerge = autonomousSafety.policyLocked
       ? false
       : needsWorktree && autonomousSafety.autoMerge === true;
 
@@ -2095,9 +2203,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       }
     }
 
-    if (autonomousSafety.policyLocked || parallelism > 1) {
-      // Wave authority is execution authority only; it never implies merge,
-      // deployment, retry, or lifecycle approval.
+    if (autonomousSafety.policyLocked) {
       resolvedMergeStrategy = 'branch-only';
     }
 
@@ -2126,12 +2232,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         autoMerge: computedAutoMerge,
         mergeStrategy: resolvedMergeStrategy,
         triggerType: validTriggerType,
-        forceSequential,
-        orchestrationMode: wavePolicy.requested.orchestrationMode,
-        parallelism: wavePolicy.requested.parallelism,
-        qualificationReceiptId: wavePolicy.requested.qualificationReceiptId,
-        rolloutCohort: wavePolicy.requested.rolloutCohort,
-        wavePolicyFence: wavePolicy.fence,
+        forceSequential: waveExecutionPolicy.mode === 'sequential',
+        orchestrationMode: waveExecutionPolicy.mode,
+        parallelism: waveExecutionPolicy.parallelism,
         agentOverride,
         modelOverride,
         storyId,
@@ -2163,9 +2266,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const effectiveTaskManifestArtifacts = taskManifestArtifacts ?? persistedArtifacts;
     const effectiveTaskManifestArtifactRefs = taskManifestArtifactRefs ?? getStoredArtifactRefsFromTriggerOptions(existingTriggerOptions);
     const effectiveTriggerOptions = {
-      ...requestedTriggerOptions,
       ...(existingTriggerOptions ?? {}),
       ...(triggerOptions ?? {}),
+      ...requestedTriggerOptions,
+      orchestrationMode: waveExecutionPolicy.mode,
+      parallelism: waveExecutionPolicy.parallelism,
+      orchestration,
     };
 
     const serializedTaskManifestArtifacts = effectiveTaskManifestArtifacts
@@ -2186,56 +2292,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       runId = normalizeWorkerRunId(runResult?.id);
     }
 
-    // Re-evaluate after the durable run identity exists. This is the API/run-row
-    // fence and closes cap/cohort races before manifests or queue payloads exist.
-    wavePolicy = await resolveWaveProductionPolicy({
-      workspaceId: workspace.id,
-      workspacePath: workspace.path,
-      request: wavePolicyRequest,
-      runId,
-    });
-    if (explicitWaveRequested && !wavePolicy.allowed) {
-      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = $2 WHERE id = $1`, [runId, `wave_parallel_denied:${wavePolicy.reason}`]);
-      await auditWaveProductionDecision({
-        envelope: wavePolicy,
-        actor: String(pipelineUser?.id ?? 'local-operator'),
-        rationale: `Run-row dispatch fence denied: ${wavePolicy.reason}`,
-      });
-      throw new ForbiddenError(`wave_parallel_denied:${wavePolicy.status}:${wavePolicy.reason}`);
-    }
-    parallelism = wavePolicy.effective.parallelism;
-    effectiveTriggerOptions.orchestrationMode = wavePolicy.requested.orchestrationMode;
-    effectiveTriggerOptions.parallelism = wavePolicy.requested.parallelism;
-    effectiveTriggerOptions.qualificationReceiptId = wavePolicy.requested.qualificationReceiptId;
-    effectiveTriggerOptions.rolloutCohort = wavePolicy.requested.rolloutCohort;
-    effectiveTriggerOptions.wavePolicyFence = wavePolicy.fence;
-    await execute(
-      `UPDATE pipeline_runs
-          SET effective_options = $1::jsonb,
-              parallelism = $3,
-              orchestration_mode = $4,
-              wave_policy = $5::jsonb,
-              wave_policy_fence = $6,
-              wave_qualification_receipt_id = $7,
-              wave_source_revision = $8,
-              wave_rollout_cohort = $9,
-              trigger_options = $10::jsonb
-        WHERE id = $2`,
-      [
-        JSON.stringify(persistedDispatchOptions), runId, parallelism,
-        wavePolicy.effective.orchestrationMode, JSON.stringify(wavePolicy), wavePolicy.fence,
-        wavePolicy.receipt?.id ?? null, wavePolicy.receipt?.sourceRevision ?? null,
-        wavePolicy.requested.rolloutCohort, JSON.stringify(effectiveTriggerOptions),
-      ],
-    );
-    if (explicitWaveRequested) {
-      await auditWaveProductionDecision({
-        envelope: wavePolicy,
-        actor: String(pipelineUser?.id ?? 'local-operator'),
-        rationale: 'Explicit wave-parallel API/run-row dispatch fence enabled',
-      });
-    }
     const effectiveRunOptions = persistedDispatchOptions;
+    await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
+      JSON.stringify(effectiveRunOptions),
+      runId,
+    ]);
 
     // 7. Queue only non-secret options. pg-boss persists its payload, so all
     // workspace values and provider credentials travel as opaque references and
@@ -2388,11 +2449,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       branchName: branchName ?? null,
       terminalMode: effectiveTerminalMode,
       executionEnvironment: resolvedExecutionEnvironment.effective,
-      parallelism,
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
-      wavePolicy,
       safetyOptions: {
         deploy: autonomousSafety.deploy,
         externalSend: autonomousSafety.externalSend,
@@ -2404,6 +2463,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
       ...(storyId ? { specificStory: storyId } : {}),
       triggeredVia,
+      orchestrationMode: waveExecutionPolicy.mode,
+      parallelism: waveExecutionPolicy.parallelism,
       includeGraph: effectiveIncludeGraph,
       ...(agentOverride ? { agentOverride } : {}),
       ...(resolvedThinkingEnabled !== undefined ? { thinkingEnabled: resolvedThinkingEnabled } : {}),
@@ -2470,16 +2531,6 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       terminalMode: effectiveTerminalMode,
       terminal_mode: effectiveTerminalMode,
       effectiveOptions: effectiveRunOptions,
-      wavePolicy: {
-        status: wavePolicy.status,
-        requested: wavePolicy.requested,
-        effective: wavePolicy.effective,
-        receiptHash: wavePolicy.receipt?.reportHash ?? null,
-        sourceRevision: wavePolicy.receipt?.sourceRevision ?? null,
-        rolloutCohort: wavePolicy.rollout.cohort,
-        fencingPolicy: wavePolicy.fencingPolicy,
-        fence: wavePolicy.fence,
-      },
       lifecycleStatus: 'queued',
       lifecycle_status: 'queued',
       lifecyclePhase: 'queued',
@@ -3487,9 +3538,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       triggerType: 'manual',
       queue: false,
       reservedRunId: reservation.runId,
-      forceSequential: true,
-      orchestrationMode: 'sequential',
-      parallelism: 1,
+      forceSequential: requestBody.forceSequential === true,
       includeGraph: requestBody.includeGraph === true,
       readinessOverride: true,
       idempotencyKey: requestIdempotencyKey,
@@ -5822,95 +5871,6 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       .map((entry) => latestByStory.get(entry.storyId))
       .filter((entry): entry is StoryResultRow => Boolean(entry));
 
-    // Wave retries have a stricter authority boundary than legacy sequential
-    // retries: accepted work must agree across closeout decisions, finalized
-    // integration ledger rows, and run_closeout WAL evidence. Missing or
-    // contradictory evidence is never converted back into executable work.
-    const lineageRows = await query<{ id: number; depth: number }>(
-      `WITH RECURSIVE lineage AS (
-         SELECT id, retried_from_run_id, 0 AS depth FROM pipeline_runs WHERE id = $1
-         UNION ALL
-         SELECT parent.id, parent.retried_from_run_id, lineage.depth + 1
-         FROM pipeline_runs parent JOIN lineage ON parent.id = lineage.retried_from_run_id
-       ) SELECT id, depth FROM lineage ORDER BY depth DESC`,
-      [originalRunId],
-    );
-    const originalRunLineage = lineageRows.map((row) => Number(row.id));
-    const integrationRows = await query<RetryIntegrationEvidence>(
-      `SELECT run_id AS "runId", story_id AS "storyId", attempt, state,
-              source_commit AS "sourceCommit", resulting_head AS "resultingHead",
-              integration_order AS "integrationOrder"
-       FROM story_integration_ledger WHERE run_id = ANY($1::bigint[])
-       ORDER BY run_id, integration_order`,
-      [originalRunLineage],
-    ).catch(() => []);
-    let authoritativeScope: AuthoritativeRetryScope;
-    {
-      const decisions = await query<{
-        runId: number; storyId: string; attempt: number; status: 'accepted' | 'blocked'; decisionId: string;
-      }>(
-        `SELECT run_id AS "runId", story_id AS "storyId", attempt, status, decision_id AS "decisionId"
-         FROM story_closeout_decisions WHERE run_id = ANY($1::bigint[])
-         ORDER BY run_id, story_id, attempt`,
-        [originalRunLineage],
-      );
-      const ledgerByAttempt = new Map(integrationRows.map((row) => [`${row.runId}:${row.storyId}:${row.attempt}`, row]));
-      const completionEvidence: RetryCompletionEvidence[] = decisions.map((decision) => ({
-        runId: Number(decision.runId),
-        storyId: decision.storyId,
-        attempt: decision.attempt,
-        resultIdentity: decision.decisionId,
-        outcome: decision.status === 'accepted' ? 'accepted' : 'rejected',
-        sourceCommit: ledgerByAttempt.get(`${decision.runId}:${decision.storyId}:${decision.attempt}`)?.sourceCommit ?? null,
-      }));
-      for (const failed of failedStories) {
-        if (completionEvidence.some((row) => row.storyId === failed.story_id)) continue;
-        completionEvidence.push({
-          runId: originalRunId,
-          storyId: failed.story_id,
-          attempt: failed.retries + 1,
-          resultIdentity: `story_result:${failed.id}`,
-          outcome: failed.status === 'skip' ? 'unresolved' : 'failed',
-          sourceCommit: null,
-        });
-      }
-      const closeoutRows = await query<{ id: number; runId: string; status: string }>(
-        `SELECT id, payload->>'run_id' AS "runId", payload->>'status' AS status
-         FROM wal_events
-         WHERE event_type = 'run_closeout' AND (payload->>'run_id')::bigint = ANY($1::bigint[])
-         ORDER BY id`,
-        [originalRunLineage],
-      );
-      const retryTargetCwd = originalRun.worktree_path ?? workspace.path;
-      const integratedRevision = execSync('git rev-parse HEAD', { cwd: retryTargetCwd, encoding: 'utf8' }).trim();
-      const integrationAncestry = integrationRows.map((row) => row.resultingHead).filter((head): head is string => Boolean(head));
-      const acceptedByRun = new Map<number, string[]>();
-      for (const decision of decisions.filter((row) => row.status === 'accepted')) {
-        acceptedByRun.set(Number(decision.runId), [...(acceptedByRun.get(Number(decision.runId)) ?? []), decision.storyId]);
-      }
-      const closeoutEvidence: RetryRunCloseoutEvidence[] = closeoutRows.map((row) => ({
-        runId: Number(row.runId),
-        status: ['done', 'completed', 'failed', 'partial_failure'].includes(row.status)
-          ? row.status as RetryRunCloseoutEvidence['status']
-          : 'failed',
-        integratedRevision,
-        integrationAncestry: [...integrationAncestry, integratedRevision],
-        acceptedStoryIds: acceptedByRun.get(Number(row.runId)) ?? [],
-        evidenceIdentity: `wal:run_closeout:${row.id}`,
-      }));
-      try {
-        authoritativeScope = deriveAuthoritativeRetryScope({
-          originalRunLineage,
-          completions: completionEvidence,
-          integrations: integrationRows,
-          closeouts: closeoutEvidence,
-          requestedStoryIds: retryScope.executable.map((entry) => entry.storyId),
-        });
-      } catch (error) {
-        throw new ConflictError(error instanceof Error ? error.message : 'Authoritative retry evidence is inconsistent');
-      }
-    }
-
     if (previewHash && worktreePreflight?.classification === 'stale_base' && originalRun.worktree_path) {
       const refresh = safelyRefreshReusableWorktree({
         workspacePath: workspace.path,
@@ -5965,12 +5925,23 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       || replayedOptions.safety.deploy
       || replayedOptions.safety.externalSend;
     const highRisk = destructiveReplay || Boolean(worktreePreflight && worktreePreflight.classification !== 'fresh');
+    const retryParallelRequested = forceSequential === false && (originalRun.parallelism ?? 1) > 1;
+    const retryWavePolicy = enforceWaveParallelPolicy({
+      source: 'pipeline-retry',
+      requestedMode: retryParallelRequested ? 'wave-parallel' : 'sequential',
+      requestedParallelism: retryParallelRequested ? (originalRun.parallelism ?? 1) : 1,
+      forceSequential: forceSequential !== false || highRisk || isPtyTerminalMode(originalRun.terminal_mode),
+    }, currentWaveParallelPolicyEnvironment());
+    const retryOrchestration = {
+      mode: retryWavePolicy.mode,
+      parallelism: retryWavePolicy.parallelism,
+      experimental: retryWavePolicy.experimental,
+    };
     const retryPreview = createRetryPreview({
       originalRunId,
       scope: retryScope,
-      authority: authoritativeScope,
       options: replayedOptions,
-      forceSequential: Boolean(forceSequential || highRisk),
+      forceSequential: retryWavePolicy.mode === 'sequential',
       requiresApproval: destructiveReplay || unsafeWorktree,
     });
     const scopeHash = retryHash(retryPreview.scope.executable.map((entry) => entry.storyId));
@@ -6018,47 +5989,6 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
        FROM pipeline_retry_previews WHERE preview_hash = $1 AND original_run_id = $2`,
       [previewHash, originalRunId],
     );
-    const preparedDispatch = await queryOne<{
-      identity_hash: string; retry_run_id: number; state: string; job_payload: Record<string, unknown>;
-    }>(
-      `SELECT identity_hash, retry_run_id, state, job_payload
-       FROM governed_retry_dispatches WHERE preview_hash = $1`,
-      [previewHash],
-    ).catch(() => undefined);
-    if (preparedDispatch?.state === 'prepared') {
-      // Durable outbox replay: find a send that won before an API crash, or send
-      // the exact persisted packet now. Correlation is payload-owned; pg-boss
-      // still generates every UUID.
-      let recoveredJob = await queryOne<{ id: string }>(
-        `SELECT id::text FROM pgboss.job
-         WHERE name = 'pipeline:retry'
-           AND data->'dispatchIdentity'->>'identityHash' = $1
-           AND state IN ('created', 'active', 'retry') LIMIT 1`,
-        [preparedDispatch.identity_hash],
-      ).catch(() => undefined);
-      if (!recoveredJob) {
-        const replayBoss = getBoss();
-        await replayBoss.createQueue('pipeline:retry');
-        const replayJobId = await replayBoss.send('pipeline:retry', preparedDispatch.job_payload, {
-          retryLimit: 5, retryDelay: 30, expireInSeconds: 300,
-        });
-        if (!replayJobId) throw new ServiceUnavailableError('Retry queue rejected durable outbox replay');
-        recoveredJob = { id: replayJobId };
-      }
-      const recovered = await execute(
-        `UPDATE governed_retry_dispatches SET state = 'dispatched', boss_job_id = $2::uuid
-         WHERE identity_hash = $1 AND state = 'prepared' AND state_version = 1`,
-        [preparedDispatch.identity_hash, recoveredJob.id],
-      );
-      if (recovered.rowCount !== 1) throw new ConflictError('Retry outbox replay lost its optimistic concurrency fence');
-      await execute(
-        `UPDATE pipeline_retry_previews SET status = 'dispatched', boss_job_id = $2::uuid, dispatched_at = NOW()
-         WHERE preview_hash = $1 AND status = 'approved'`,
-        [previewHash, recoveredJob.id],
-      );
-      res.status(200).json({ ok: true, queued: true, duplicate: true, recovered: true, runId: preparedDispatch.retry_run_id, originalRunId, previewHash });
-      return;
-    }
     if (storedPreviewRow?.status === 'dispatched' && storedPreviewRow.retry_run_id) {
       await emitLifecycleInvalidation({
         workspaceId: originalRun.workspace_id,
@@ -6157,9 +6087,14 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     // 7. Create a NEW pipeline_run linked to the original while preserving the
     // host-enforced model, effort, worktree, merge, graph, terminal, and safety options.
     const retryTerminalMode = normalizeTerminalMode(approvedPreview.options.terminalMode);
-    // Retry approval does not carry production wave authority. A future
-    // parallel retry needs its own explicit governed request and receipt fence.
-    const retryParallelism = 1;
+    const retryParallelism = retryWavePolicy.parallelism;
+    const retryTriggerOptions = {
+      orchestrationMode: retryWavePolicy.mode,
+      parallelism: retryWavePolicy.parallelism,
+      orchestration: retryOrchestration,
+      forceSequential: retryWavePolicy.mode === 'sequential',
+      retriedFromRunId: originalRunId,
+    };
     const retryEffectiveOptions: EffectiveRunOptions = {
       ...originalEffectiveOptions,
       model: approvedPreview.options.model,
@@ -6173,9 +6108,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
        retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
-       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options, orchestration_mode)
+       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options, trigger_options)
       VALUES ($1, $2, 'queued', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15::jsonb, 'sequential')
+              $11, $12, $13, $14, $15::jsonb, $16::jsonb)
       RETURNING id`, [
       originalRun.spec_path,
       originalRun.workspace_id,
@@ -6192,6 +6127,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       approvedPreview.options.includeGraph,
       approvedPreview.options.merge.strategy,
       JSON.stringify(retryEffectiveOptions),
+      JSON.stringify(retryTriggerOptions),
     ]);
     const newRunId = normalizeWorkerRunId(newRunResult!.id);
     await execute(
@@ -6199,19 +6135,34 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       [previewHash, newRunId],
     );
 
-    // 8. Accepted siblings are represented only by immutable carry-forward
-    // evidence. Projecting copied pass rows into the retry run would make old
-    // validation look like new work and would permit accidental re-finalization.
+    // 8. Copy successful story results from the original run to the new run
+    for (const passed of passedStories) {
+      await execute(
+        `INSERT INTO story_results (run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          newRunId,
+          passed.story_id,
+          'pass',
+          passed.retries,
+          passed.log_path,
+          passed.started_at,
+          passed.finished_at,
+          passed.elapsed_seconds,
+          passed.input_tokens,
+          passed.output_tokens,
+        ]
+      );
+    }
 
-    // 9. Append a new one-based story attempt; never rewrite the source result.
-    const retriedStoryInfo: Array<{ storyId: string; attempt: number; previousAttempt: number }> = [];
+    // 9. Insert 'retry' placeholder rows for stories being retried + emit WAL events
+    const retriedStoryInfo: Array<{ storyId: string; attempt: number }> = [];
 
     for (const story of storiesToRetry) {
-      const previousAttempt = story.retries + 1;
-      const attempt = previousAttempt + 1;
+      const attempt = story.retries + 1;
       await execute(
         `INSERT INTO story_results (run_id, story_id, status, retries) VALUES ($1, $2, 'retry', $3)`,
-        [newRunId, story.story_id, attempt - 1]
+        [newRunId, story.story_id, attempt]
       );
 
       const walEvent = await queryOne<WalEvent>(
@@ -6219,12 +6170,12 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         [
           originalRun.workspace_id,
           story.story_id,
-          JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt, previous_attempt: previousAttempt }),
+          JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt }),
         ]
       );
       if (walEvent) broadcastAll(walEvent!);
 
-      retriedStoryInfo.push({ storyId: story.story_id, attempt, previousAttempt });
+      retriedStoryInfo.push({ storyId: story.story_id, attempt });
     }
 
     // 10. Read the original spec and write a temporary retry spec.
@@ -6278,7 +6229,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       specRevision: row.spec_revision,
       storyRevision: row.story_revision,
     }]));
-    const attemptByStory = new Map(retriedStoryInfo.map((story) => [story.storyId, story.attempt]));
+    const attemptByStory = new Map(retriedStoryInfo.map((story) => [story.storyId, story.attempt + 1]));
     const retryManifests = await resolveAndPersistDispatchManifests({
       workspaceId: workspace.id,
       specId: path.basename(originalRun.spec_path, '.json'),
@@ -6314,7 +6265,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new ConflictError('Generated retry execution plan differs from the approved preview');
     }
 
-    const queuePayloadAuthority = {
+    const jobPayload = PipelineRetryJobPayload.parse({
       runId: Number(newRunId),
       originalRunId,
       storyIds: planComparison.actual,
@@ -6330,128 +6281,30 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       worktreePath: approvedPreview.options.worktree.path,
       branchName: approvedPreview.options.worktree.branch,
       terminalMode: normalizeTerminalMode(approvedPreview.options.terminalMode),
+      orchestrationMode: retryWavePolicy.mode,
+      parallelism: retryWavePolicy.parallelism,
+      triggerOptions: retryTriggerOptions,
       sequenceOffset,
       executionManifestPath: retryManifests.path,
       envOverrides,
       secretReferences,
       includeGraph: approvedPreview.options.includeGraph,
       ...(approvedPreview.options.effort ? { effortLevel: approvedPreview.options.effort } : {}),
-    };
-    const integratedRevision = execSync('git rev-parse HEAD', { cwd: retryCwd, encoding: 'utf8' }).trim();
-    let recoveryRef = 'HEAD';
-    try {
-      recoveryRef = execSync('git symbolic-ref -q HEAD', { cwd: retryCwd, encoding: 'utf8' }).trim() || 'HEAD';
-    } catch { /* detached recovery refs remain bound by exact revision */ }
-    const recoveryRefRevision = execFileSync('git', ['rev-parse', recoveryRef], { cwd: retryCwd, encoding: 'utf8' }).trim();
-    const manifestByStory = new Map(retryManifests.manifests.map((manifest) => [manifest.identity.storyId, manifest]));
-    const executionManifestHash = retryHash(retryManifests.manifests.map((manifest) => manifest.manifestHash).sort());
-    const queuePayloadHash = governedRetryQueuePayloadHash(queuePayloadAuthority);
-    const effectiveAuthority = authoritativeScope;
-    if (effectiveAuthority.targetRevision !== integratedRevision) {
-      throw new ConflictError('Latest accepted run-branch head changed after preview; generate a new retry preview');
-    }
-    const leaseIdentity = retryHash({ previewHash, dispatchIdempotencyKey, retryRunId: newRunId });
-    const dispatchIdentity = createGovernedRetryDispatchIdentity({
-      workspaceId: workspace.id,
-      specId: path.basename(originalRun.spec_path, '.json'),
-      specRevision: retryManifests.manifests[0]?.revisions.specRevision ?? deriveStoryContractRevision(sourceSpecJson),
-      originalRunId,
-      originalRunLineage: effectiveAuthority.originalRunLineage,
-      retryRunId: Number(newRunId),
-      baseRevision: integratedRevision,
-      integratedRevision,
-      priorIntegrationAncestry: effectiveAuthority.priorIntegrationAncestry,
-      recoveryRef,
-      recoveryRefRevision,
-      fencingToken: 1,
-      leaseIdentity,
-      idempotencyKey: dispatchIdempotencyKey,
-      queueName: 'pipeline:retry',
-      queuePayloadHash,
-      executionManifestHash,
-      approvedPreviewHash: previewHash,
-      scopeHash,
-      evidenceHash: effectiveAuthority.evidenceHash,
-      storyAttempts: retriedStoryInfo.map((story) => ({
-        ...story,
-        sourceRunId: originalRunId,
-        idempotencyKey: `${dispatchIdempotencyKey}:${story.storyId}:${story.attempt}`,
-      })),
-      carriedForward: effectiveAuthority.carriedForward,
-    });
-    const jobPayload = PipelineRetryJobPayload.parse({ ...queuePayloadAuthority, dispatchIdentity });
-
-    // Persist the complete outbox and story-attempt uniqueness boundary before
-    // pg-boss send. An API restart can replay this exact payload; no process map
-    // or deterministic pg-boss job UUID is used as authority.
-    await transaction(async (client) => {
-      await client.query(
-        `INSERT INTO governed_retry_dispatches (
-           identity_hash, workspace_id, spec_id, spec_revision, original_run_id, retry_run_id,
-           original_run_lineage, base_revision, integrated_revision, prior_integration_ancestry,
-           recovery_ref, recovery_ref_revision, preview_hash, scope_hash, evidence_hash,
-           execution_manifest_hash, queue_payload_hash, job_payload, queue_name, idempotency_key,
-           lease_identity, fencing_token, state
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,'pipeline:retry',$19,$20,1,'prepared')`,
-        [
-          dispatchIdentity.identityHash, workspace.id, dispatchIdentity.specId, dispatchIdentity.specRevision,
-          originalRunId, newRunId, JSON.stringify(dispatchIdentity.originalRunLineage), integratedRevision,
-          integratedRevision, JSON.stringify(dispatchIdentity.priorIntegrationAncestry), recoveryRef,
-          recoveryRefRevision, previewHash, scopeHash, dispatchIdentity.evidenceHash,
-          executionManifestHash, queuePayloadHash, JSON.stringify(jobPayload), dispatchIdempotencyKey, leaseIdentity,
-        ],
-      );
-      for (const story of dispatchIdentity.storyAttempts) {
-        const manifest = manifestByStory.get(story.storyId);
-        if (!manifest) throw new ConflictError(`Retry execution manifest missing for ${story.storyId}`);
-        await client.query(
-          `INSERT INTO governed_retry_story_attempts (
-             attempt_identity, dispatch_identity_hash, workspace_id, spec_id, original_root_run_id,
-             source_run_id, retry_run_id, story_id, attempt, previous_attempt, idempotency_key,
-             manifest_hash, state, recovery_ref
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13)`,
-          [
-            retryHash({ dispatchIdentity: dispatchIdentity.identityHash, story }), dispatchIdentity.identityHash,
-            workspace.id, dispatchIdentity.specId, dispatchIdentity.originalRunLineage[0], story.sourceRunId,
-            newRunId, story.storyId, story.attempt, story.previousAttempt, story.idempotencyKey,
-            manifest.manifestHash, recoveryRef,
-          ],
-        );
-      }
-      for (const carried of dispatchIdentity.carriedForward) {
-        await client.query(
-          `INSERT INTO governed_retry_carry_forward (
-             dispatch_identity_hash, story_id, source_run_id, source_attempt, result_identity,
-             source_commit, resulting_head, integration_order, reason_code
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [dispatchIdentity.identityHash, carried.storyId, carried.sourceRunId, carried.sourceAttempt,
-            carried.resultIdentity, carried.sourceCommit, carried.resultingHead, carried.integrationOrder, carried.reasonCode],
-        );
-      }
     });
 
     // 14. Enqueue through the existing queue. Explicit queue creation is
-    // idempotent and pg-boss generates the UUID; run/attempt identities stay in data.
+    // idempotent and pg-boss generates the UUID; runId remains payload data.
     const boss = getBoss();
     await boss.createQueue('pipeline:retry');
     const bossJobId = await boss.send('pipeline:retry', jobPayload, {
-      retryLimit: 5,
-      retryDelay: 30,
+      retryLimit: 0,
       expireInSeconds: 300,
     });
     if (!bossJobId) {
       await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'pgboss_send_returned_null' WHERE preview_hash = $1`, [previewHash]);
-      await execute(`UPDATE governed_retry_dispatches SET state = 'failed', failure_evidence = $2::jsonb WHERE identity_hash = $1 AND state = 'prepared'`, [dispatchIdentity.identityHash, JSON.stringify({ reason: 'pgboss_send_returned_null' })]);
       await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'retry_dispatch_failed' WHERE id = $1`, [newRunId]);
       throw new ServiceUnavailableError('Retry queue rejected dispatch');
     }
-    const dispatchTransition = await execute(
-      `UPDATE governed_retry_dispatches
-       SET state = 'dispatched', boss_job_id = $2::uuid
-       WHERE identity_hash = $1 AND state = 'prepared' AND state_version = 1`,
-      [dispatchIdentity.identityHash, bossJobId],
-    );
-    if (dispatchTransition.rowCount !== 1) throw new ConflictError('Retry dispatch lost its optimistic concurrency fence');
     await execute(
       `UPDATE pipeline_retry_previews SET status = 'dispatched', retry_run_id = $2, boss_job_id = $3::uuid, dispatched_at = NOW() WHERE preview_hash = $1 AND status = 'approved'`,
       [previewHash, newRunId, bossJobId],
@@ -6476,6 +6329,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       retriedStories: retriedStoryInfo,
       copiedStories: passedStories.map(s => s.story_id),
       effectiveOptions: retryEffectiveOptions,
+      orchestration: retryOrchestration,
       passReconciliation,
     });
   } catch (error: any) {
@@ -7057,8 +6911,9 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [cols, rows]
+ *             required: [generationToken, cols, rows]
  *             properties:
+ *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
  *               cols: { type: integer, minimum: 1, maximum: 500 }
  *               rows: { type: integer, minimum: 1, maximum: 200 }
  *     responses:
@@ -7069,8 +6924,12 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     const runId = parseInt(String(req.params.runId), 10);
     const cols = parseInt(String(req.body?.cols), 10);
     const rows = parseInt(String(req.body?.rows), 10);
+    const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
 
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
+      throw new ValidationError('generationToken must be a UUID');
+    }
     if (!Number.isInteger(cols) || cols <= 0 || cols > MAX_PTY_COLS
       || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
       throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
@@ -7092,13 +6951,8 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const ptyStatus = await getRunPtySessionStatus(runId);
-    if (ptyStatus !== 'active') {
-      throw new ConflictError('Run PTY session is not active');
-    }
-
-    await requestRunPtyResize(runId, cols, rows);
-    res.json({ ok: true, runId, cols, rows });
+    const generation = await requestRunPtyResize(runId, generationToken, cols, rows);
+    res.json({ ok: true, runId, cols, rows, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Resize PTY run');
   }
@@ -7128,10 +6982,11 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *           schema:
  *             type: object
  *             properties:
+ *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
  *               dataBase64:
  *                 type: string
  *                 description: "Base64-encoded UTF-8 terminal input bytes from xterm.onData."
- *             required: [dataBase64]
+ *             required: [generationToken, dataBase64]
  *     responses:
  *       200: { description: PTY input request recorded }
  */
@@ -7145,6 +7000,10 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
 
+    const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
+      throw new ValidationError('generationToken must be a UUID');
+    }
     const dataBase64 = typeof req.body?.dataBase64 === 'string' ? req.body.dataBase64 : '';
     if (!dataBase64) {
       throw new ValidationError('dataBase64 is required');
@@ -7185,19 +7044,96 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const ptyStatus = await getRunPtySessionStatus(runId);
-    if (ptyStatus !== 'active') {
-      throw new ConflictError('Run PTY session is not active');
-    }
-
-    const accepted = await requestRunPtyInput(runId, input);
-    if (!accepted) {
+    const generation = await requestRunPtyInput(runId, generationToken, input);
+    if (!generation) {
       throw new ConflictError('PTY input queue is full or the session is no longer active');
     }
-    res.json({ ok: true, runId, bytes: input.length });
+    res.json({ ok: true, runId, bytes: input.length, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] PTY input');
   }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/pty/control:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Resolve the active PTY generation control credential over authenticated HTTP
+ *     operationId: getPipelinePtyControl
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "The generation credential grants terminal input/resize authority and must remain operator-only and outside SSE telemetry."
+ *     responses:
+ *       200: { description: Active generation identity and control credential }
+ *       404: { description: Run or active PTY generation not found }
+ */
+router.get('/runs/:runId/pty/control', async (req: Request, res: Response) => {
+  const runId = Number(req.params.runId);
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!isSuperUser(req.user)) throw new ForbiddenError('PTY controls require local operator admin access');
+  const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]);
+  if (!run) throw new NotFoundError('Run not found');
+  await assertPipelineWorkspaceAccess(req, run.workspace_id);
+  const generation = await getRunPtyGeneration(runId);
+  if (!generation?.isActive) throw new NotFoundError('Active PTY generation not found');
+  res.json({ generationId: generation.generationId, generationToken: generation.generationToken });
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Fetch a validated PTY terminal-state checkpoint
+ *     operationId: getPipelinePtyCheckpoint
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only, checksummed terminal recovery state for local run reattachment."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: checkpointId
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Validated terminal checkpoint with base64 serialized xterm state }
+ *       404: { description: Run or checkpoint not found }
+ *       422: { description: Checkpoint failed checksum, version, or compression validation }
+ */
+router.get('/runs/:runId/pty/checkpoints/:checkpointId', async (req: Request, res: Response) => {
+  const runId = Number(req.params.runId);
+  const checkpointId = String(req.params.checkpointId);
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(checkpointId)) {
+    throw new ValidationError('checkpointId must be a UUID');
+  }
+  const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]);
+  if (!run) throw new NotFoundError('Run not found');
+  await assertPipelineWorkspaceAccess(req, run.workspace_id);
+  const generation = await getRunPtyGeneration(runId);
+  if (!generation) throw new NotFoundError('PTY generation not found');
+  const checkpoint = await getValidRunPtyCheckpointById({
+    runId,
+    generationId: generation.generationId,
+    generationToken: generation.generationToken,
+    storyId: generation.storyId,
+  }, checkpointId);
+  res.json({
+    checkpointId: checkpoint.id,
+    generationId: checkpoint.generationId,
+    checkpointSeq: checkpoint.checkpointSequence,
+    firstRetainedSeq: checkpoint.firstRetainedSequence,
+    compactedByteCount: checkpoint.compactedByteCount,
+    version: checkpoint.version,
+    checksum: checkpoint.checksum,
+    terminalCols: checkpoint.terminalCols,
+    terminalRows: checkpoint.terminalRows,
+    dataBase64: checkpoint.serializedState.toString('base64'),
+    createdAt: checkpoint.createdAt,
+  });
 });
 
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
@@ -7215,12 +7151,17 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
  *     x-rorca-public-api: true
- *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store. Committed PostgreSQL notifications wake streams immediately, durable sequence replay supports reconnects, and bounded polling recovers from notification loss.
+ *     description: Server-Sent Events stream of base64 terminal deltas. Authoritative run_meta always precedes terminal_reset/checkpoint_ready and ordered chunk replay. New event IDs scope cursors to the selected output store and PTY generation; numeric Last-Event-ID remains accepted for old clients. PostgreSQL notifications are wakeups for committed-row queries, bounded polling recovers lost notifications, and slow consumers receive a retryable cursor-preserving disconnect.
  *     parameters:
  *       - in: path
  *         name: runId
  *         required: true
  *         schema: { type: integer }
+ *       - in: header
+ *         name: Last-Event-ID
+ *         required: false
+ *         schema: { type: string }
+ *         description: Generation-scoped SSE cursor from a prior chunk/checkpoint event; legacy numeric IDs remain accepted.
  *       - in: query
  *         name: afterSequence
  *         required: false
@@ -7231,6 +7172,21 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *         required: false
  *         schema: { type: string, enum: [run_pty_output_chunks, run_output_chunks] }
  *         description: Optional durable store identity paired with afterSequence. A changed source resets the cursor so independent PTY and ANSI sequence spaces cannot suppress fallback output.
+ *       - in: query
+ *         name: outputGenerationId
+ *         required: false
+ *         schema: { type: string, format: uuid }
+ *         description: Generation identity paired with afterSequence; mismatch resets the cursor to the always-current generation.
+ *       - in: query
+ *         name: recoverTerminal
+ *         required: false
+ *         schema: { type: boolean }
+ *         description: Request checkpoint-plus-delta reconstruction for a newly created terminal, even when a persisted sequence cursor exists.
+ *       - in: query
+ *         name: generationToken
+ *         required: false
+ *         schema: { type: string, format: uuid }
+ *         description: Explicit generation to replay. Omit to follow the active/newest generation.
  *     responses:
  *       200:
  *         description: SSE stream with chunk events (base64 data) and done event
@@ -7271,15 +7227,46 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   if (Array.isArray(outputSourceQuery)) {
     throw new ValidationError('outputSource must be a single replay source');
   }
-  const requestedReplaySource = typeof outputSourceQuery === 'string'
+  const requestedReplaySourceFromQuery = typeof outputSourceQuery === 'string'
     ? parseOutputReplaySource(outputSourceQuery)
     : null;
+  const parseOptionalUuidQuery = (name: 'generationToken' | 'outputGenerationId'): string | null => {
+    const value = req.query[name];
+    if (Array.isArray(value)) throw new ValidationError(`${name} must be a single UUID`);
+    if (value === undefined) return null;
+    if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+      throw new ValidationError(`${name} must be a UUID`);
+    }
+    return value;
+  };
+  const requestedGenerationToken = parseOptionalUuidQuery('generationToken');
+  const cursorGenerationId = parseOptionalUuidQuery('outputGenerationId');
+  const recoverTerminalValue = req.query.recoverTerminal;
+  if (Array.isArray(recoverTerminalValue) || (recoverTerminalValue !== undefined && recoverTerminalValue !== 'true' && recoverTerminalValue !== 'false')) {
+    throw new ValidationError('recoverTerminal must be true or false');
+  }
+  const recoverTerminal = recoverTerminalValue === 'true';
   const lastEventId = req.get('Last-Event-ID');
-  const resumeSource = afterSequence !== null ? 'afterSequence' : lastEventId !== undefined ? 'Last-Event-ID' : null;
-  let hasResumeCursor = resumeSource !== null;
-  let lastSequence = hasResumeCursor
-    ? parseOutputResumeCursor(afterSequence ?? lastEventId!, resumeSource!)
-    : 0;
+  let resumeCursor: RunOutputCursor | null = null;
+  if (afterSequence !== null) {
+    resumeCursor = {
+      version: 0,
+      source: requestedReplaySourceFromQuery,
+      generationId: cursorGenerationId,
+      sequence: parseOutputResumeCursor(afterSequence, 'afterSequence'),
+    };
+  } else if (lastEventId !== undefined) {
+    resumeCursor = decodeRunOutputCursor(lastEventId);
+  }
+  let hasResumeCursor = resumeCursor !== null;
+  let lastSequence = resumeCursor?.sequence ?? 0;
+  const generationReaderEnabled = isPtyGenerationReaderEnabled();
+  const preselectedPtyGeneration = isPtyTerminalMode(normalizeTerminalMode(runRow.terminal_mode)) && generationReaderEnabled
+    ? await getRunPtyGeneration(runId, requestedGenerationToken)
+    : null;
+  if (requestedGenerationToken && !preselectedPtyGeneration) {
+    throw new NotFoundError('PTY generation not found');
+  }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -7287,15 +7274,20 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  res.write('retry: 1000\n\n');
-  res.write(': connected\n\n');
+  const outputSink = createBoundedTopicSseSink(res, 1_000);
+  outputSink.send({ retryMs: 1_000 });
+  outputSink.send({ comment: 'connected' });
 
+  let lastConfirmedCursor: string | null = null;
   const hb = setInterval(() => {
-    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write(': hb\n\n');
+    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) {
+      outputSink.send({ comment: 'hb' }, lastConfirmedCursor);
+    }
   }, 15_000);
   let streamClosed = false;
   let pollInterval: NodeJS.Timeout | null = null;
   let unsubscribeOutputWakeup: (() => void) | null = null;
+  let unsubscribeCheckpointEvents: (() => void) | null = null;
   const cleanupOutputStream = () => {
     if (streamClosed) return;
     streamClosed = true;
@@ -7306,6 +7298,9 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     }
     unsubscribeOutputWakeup?.();
     unsubscribeOutputWakeup = null;
+    unsubscribeCheckpointEvents?.();
+    unsubscribeCheckpointEvents = null;
+    outputSink.close();
   };
   req.on('close', cleanupOutputStream);
 
@@ -7315,10 +7310,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const requestedTerminalMode = runMetadata.terminalMode;
   const terminalStatuses = ['done', 'failed', 'partial_failure', 'cancelled'];
   const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
-  const requestedPtyMode = isPtyTerminalMode(requestedTerminalMode);
-  const ptyStatusAtOpen = requestedPtyMode
-    ? await getRunPtySessionStatus(runId)
-    : null;
+  const configuredPtyMode = isPtyTerminalMode(requestedTerminalMode);
+  const requestedPtyMode = configuredPtyMode && generationReaderEnabled;
+  let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
+  const ptyStatusAtOpen = selectedPtyGeneration?.status ?? null;
   // An active PTY run is legitimately session-pending while context routing and
   // prompt assembly run. Never permanently demote it because the browser attached
   // before node-pty started. A terminal run with no session is a real fallback.
@@ -7326,39 +7321,72 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     && PTY_AVAILABLE
     && (ptyStatusAtOpen !== null || !runIsTerminalAtOpen);
   const ptyHealthPayloadAtOpen = usePtyCapture
-    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId))
+    ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken))
     : null;
   const terminalMode = usePtyCapture ? requestedTerminalMode : 'ansi-html';
   const isPty = usePtyCapture;
   const replaySource: RunOutputReplaySource = isPty ? RUN_OUTPUT_PTY_REPLAY_SOURCE : RUN_OUTPUT_ANSI_REPLAY_SOURCE;
-  // PTY and ANSI captures intentionally have independent sequence spaces. A
-  // resume cursor from the other source must never suppress freshly selected
-  // fallback output; force the same bounded first-attach semantics instead.
-  const cursorReset = hasResumeCursor && requestedReplaySource !== null && requestedReplaySource !== replaySource;
+  const outputGenerationId = selectedPtyGeneration?.generationId ?? null;
+  const requestedReplaySource = requestedReplaySourceFromQuery ?? resumeCursor?.source ?? null;
+  const requestedCursorGenerationId = cursorGenerationId ?? resumeCursor?.generationId ?? null;
+  // PTY generations and ANSI capture intentionally have independent sequence
+  // spaces. A cursor from either another store or another generation must be
+  // reset before any current byte can be filtered by its sequence.
+  const cursorReset = hasResumeCursor && (
+    (requestedReplaySource !== null && requestedReplaySource !== replaySource)
+    || (requestedCursorGenerationId !== null && requestedCursorGenerationId !== outputGenerationId)
+    || (resumeCursor !== null && !outputCursorMatches(resumeCursor, replaySource, outputGenerationId))
+  );
   if (cursorReset) {
     hasResumeCursor = false;
     lastSequence = 0;
+    resumeCursor = null;
+  } else if (hasResumeCursor) {
+    lastConfirmedCursor = encodeRunOutputCursor(replaySource, outputGenerationId, lastSequence);
   }
-  const ptyFallbackActive = requestedPtyMode && !isPty;
+  const ptyFallbackActive = configuredPtyMode && !isPty;
   const ptyFallbackReason = ptyFallbackActive
-    ? PTY_AVAILABLE
-      ? 'pty-session-unavailable'
-      : 'node-pty-unavailable'
+    ? !generationReaderEnabled
+      ? 'generation-reader-disabled'
+      : PTY_AVAILABLE
+        ? 'pty-session-unavailable'
+        : 'node-pty-unavailable'
     : null;
   const ptyUnavailableHint = ptyFallbackReason === 'node-pty-unavailable'
     ? PTY_UNAVAILABLE_HINT
     : ptyFallbackReason === 'pty-session-unavailable'
       ? 'Inspect engine startup logs; the requested PTY session was never created.'
-      : null;
+      : ptyFallbackReason === 'generation-reader-disabled'
+        ? 'Legacy terminal replay is active; generation checkpoints and transcripts are temporarily unavailable.'
+        : null;
   if (streamClosed || req.destroyed || res.destroyed) {
     cleanupOutputStream();
     return;
   }
 
-  // Emit run metadata so frontend knows which renderer to use. When a requested
-  // PTY stream has no PTY session, this is the canonical demotion signal for the
-  // TUI: keep the ANSI replay stream open and label it as degraded/replay-only.
-  res.write(`event: run_meta\ndata: ${JSON.stringify({
+  const evidenceAvailabilityAtOpen = await getRunOutputEvidenceAvailability(outputGenerationId);
+  const checkpointSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyCheckpointSequence ?? 0);
+  const firstRetainedSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyFirstRetainedSequence ?? 1);
+  // This authoritative identity frame must precede reset/checkpoint and deltas.
+  // Legacy aliases remain for old browser and CLI clients.
+  const metadataAccepted = outputSink.send({ event: 'run_meta', data: JSON.stringify({
+    contractVersion: RUN_OUTPUT_CONTRACT_VERSION,
+    outputSource: replaySource,
+    output_source: replaySource,
+    outputGenerationId,
+    output_generation_id: outputGenerationId,
+    storyId: selectedPtyGeneration?.storyId ?? null,
+    story_id: selectedPtyGeneration?.storyId ?? null,
+    attempt: selectedPtyGeneration?.attempt ?? null,
+    checkpointSequence: checkpointSequenceAtOpen,
+    checkpoint_sequence: checkpointSequenceAtOpen,
+    firstRetainedSequence: firstRetainedSequenceAtOpen,
+    first_retained_sequence: firstRetainedSequenceAtOpen,
+    active: selectedPtyGeneration?.isActive ?? !runIsTerminalAtOpen,
+    transcriptAvailable: evidenceAvailabilityAtOpen.transcriptAvailable,
+    transcript_available: evidenceAvailabilityAtOpen.transcriptAvailable,
+    archiveAvailable: evidenceAvailabilityAtOpen.archiveAvailable,
+    archive_available: evidenceAvailabilityAtOpen.archiveAvailable,
     agentType: runMetadata.agentType,
     agentModel: runMetadata.agentModel,
     terminalMode,
@@ -7375,8 +7403,6 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     ptyFallbackReason,
     ptyLiveTransport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
     pty_live_transport: isPty ? RUN_OUTPUT_PTY_LIVE_TRANSPORT : null,
-    outputSource: replaySource,
-    output_source: replaySource,
     cursorReset,
     cursor_reset: cursorReset,
     ptyReplaySource: replaySource,
@@ -7388,8 +7414,80 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     ptyUnavailableHint,
     pty_unavailable_hint: ptyUnavailableHint,
     ...(ptyHealthPayloadAtOpen ?? {}),
-  })}\n\n`);
-  writePtyHealthEvent(res, ptyHealthPayloadAtOpen);
+  }) }, lastConfirmedCursor);
+  if (!metadataAccepted) {
+    cleanupOutputStream();
+    return;
+  }
+
+  // Shared checkpoint notifications are wakeups only. The route always queries
+  // the committed checkpoint row before emitting its identity through this
+  // response's exact filtered hub sink.
+  let latestCheckpointSequenceEmitted = 0;
+  let recoveryFrameEmitted = false;
+  if (usePtyCapture && selectedPtyGeneration) {
+    const checkpointGeneration = {
+      runId,
+      generationId: selectedPtyGeneration.generationId,
+      generationToken: selectedPtyGeneration.generationToken,
+      storyId: selectedPtyGeneration.storyId,
+    };
+    const checkpoint = await getLatestValidRunPtyCheckpoint(checkpointGeneration);
+    const needsCheckpoint = checkpoint && (recoverTerminal || !hasResumeCursor || lastSequence < checkpoint.firstRetainedSequence);
+    if (checkpoint) latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+    if (checkpoint && needsCheckpoint) {
+      const checkpointCursor = encodeRunOutputCursor(replaySource, checkpoint.generationId, checkpoint.checkpointSequence);
+      const accepted = outputSink.send({
+        id: checkpointCursor,
+        event: 'checkpoint_ready',
+        data: JSON.stringify({
+          run_id: runId,
+          story_id: checkpoint.storyId,
+          generation_id: checkpoint.generationId,
+          checkpoint_id: checkpoint.id,
+          checkpoint_seq: checkpoint.checkpointSequence,
+          first_retained_seq: checkpoint.firstRetainedSequence,
+        }),
+      }, lastConfirmedCursor);
+      if (!accepted) {
+        cleanupOutputStream();
+        return;
+      }
+      latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+      lastSequence = checkpoint.checkpointSequence;
+      lastConfirmedCursor = checkpointCursor;
+      hasResumeCursor = true;
+      recoveryFrameEmitted = true;
+    }
+  }
+  if (!recoveryFrameEmitted && (cursorReset || recoverTerminal || !hasResumeCursor)) {
+    // A refreshed browser owns an empty xterm. If no valid checkpoint exists,
+    // a persisted cursor cannot reconstruct that viewport; replay a bounded
+    // current-generation tail instead of resuming after invisible bytes.
+    if (recoverTerminal) {
+      hasResumeCursor = false;
+      lastSequence = 0;
+      lastConfirmedCursor = null;
+    }
+    const accepted = outputSink.send({
+      event: 'terminal_reset',
+      data: JSON.stringify({
+        reason: cursorReset ? 'cursor_scope_changed' : recoverTerminal ? 'terminal_recovery' : 'first_attach',
+        outputSource: replaySource,
+        generationId: outputGenerationId,
+        checkpointSequence: 0,
+        firstRetainedSequence: firstRetainedSequenceAtOpen,
+      }),
+    }, lastConfirmedCursor);
+    if (!accepted) {
+      cleanupOutputStream();
+      return;
+    }
+  }
+  if (!writePtyHealthEvent(outputSink, ptyHealthPayloadAtOpen, lastConfirmedCursor)) {
+    cleanupOutputStream();
+    return;
+  }
 
   // ── Replay existing chunks (late-join/reconnect support) ──────────────────
   // EventSource sends Last-Event-ID automatically after a disconnect. The
@@ -7403,19 +7501,29 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let initialReplayMayHaveMore = false;
   if (usePtyCapture) {
     const existingChunks = hasResumeCursor
-      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS)
-      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS);
+      ? await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS, selectedPtyGeneration)
+      : await listRecentRunPtyChunks(runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS, selectedPtyGeneration);
     initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
     if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
-      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+      if (!outputSink.send({
+        event: 'replay_truncated',
+        data: JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS }),
+      }, lastConfirmedCursor)) {
+        cleanupOutputStream();
+        return;
+      }
     }
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+      const confirmed = await writeOutputChunkEvent(
+        outputSink, replaySource, outputGenerationId, row.sequence, chunkBuf, lastConfirmedCursor,
+      );
+      if (!confirmed) {
         cleanupOutputStream();
         return;
       }
       lastSequence = row.sequence;
+      lastConfirmedCursor = confirmed;
     }
   } else {
     const existingChunks = hasResumeCursor
@@ -7434,16 +7542,29 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
     initialReplayMayHaveMore = hasResumeCursor && existingChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
     if (!hasResumeCursor && existingChunks[0]?.sequence > 1) {
-      res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
-    }
-    for (const row of existingChunks) {
-      const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+      if (!outputSink.send({
+        event: 'replay_truncated',
+        data: JSON.stringify({ fromSequence: existingChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS }),
+      }, lastConfirmedCursor)) {
         cleanupOutputStream();
         return;
       }
-      emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+    }
+    for (const row of existingChunks) {
+      const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+      const confirmed = await writeOutputChunkEvent(
+        outputSink, replaySource, null, row.sequence, chunkBuf, lastConfirmedCursor,
+      );
+      if (!confirmed) {
+        cleanupOutputStream();
+        return;
+      }
       lastSequence = row.sequence;
+      lastConfirmedCursor = confirmed;
+      if (!emitBoundedSemanticSteps(chunkBuf.toString('utf8'), agent, outputSink, lastConfirmedCursor)) {
+        cleanupOutputStream();
+        return;
+      }
     }
   }
 
@@ -7456,8 +7577,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // ── If the run is already terminal, close immediately ────────────────────
   if (terminalStatuses.includes(runRow.status) && !initialReplayMayHaveMore) {
     clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
+    outputSink.end({ event: 'done', data: '' });
+    cleanupOutputStream();
     return;
   }
 
@@ -7471,16 +7592,121 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     let drainImmediately = false;
     try {
       let fetchedBatchIsFull = false;
+      let generationRolledOver = false;
       if (usePtyCapture) {
-        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS);
+        if (!requestedGenerationToken) {
+          const currentGeneration = await getRunPtyGeneration(runId);
+          if (currentGeneration && currentGeneration.generationId !== selectedPtyGeneration?.generationId) {
+            selectedPtyGeneration = currentGeneration;
+            generationRolledOver = true;
+            latestCheckpointSequenceEmitted = 0;
+            lastSequence = 0;
+            lastConfirmedCursor = null;
+            const generationHealth = normalizePtyHealthPayload(
+              await getRunPtySessionHealth(runId, currentGeneration.generationToken),
+            );
+            const evidenceAvailability = await getRunOutputEvidenceAvailability(currentGeneration.generationId);
+            const accepted = outputSink.send({ event: 'run_meta', data: JSON.stringify({
+              contractVersion: RUN_OUTPUT_CONTRACT_VERSION,
+              agentType: runMetadata.agentType,
+              agentModel: runMetadata.agentModel,
+              terminalMode,
+              terminal_mode: terminalMode,
+              requestedTerminalMode,
+              requested_terminal_mode: requestedTerminalMode,
+              isPty: true,
+              outputSource: replaySource,
+              output_source: replaySource,
+              outputGenerationId: currentGeneration.generationId,
+              output_generation_id: currentGeneration.generationId,
+              storyId: currentGeneration.storyId,
+              story_id: currentGeneration.storyId,
+              attempt: currentGeneration.attempt,
+              checkpointSequence: Number(generationHealth?.ptyCheckpointSequence ?? 0),
+              checkpoint_sequence: Number(generationHealth?.ptyCheckpointSequence ?? 0),
+              firstRetainedSequence: Number(generationHealth?.ptyFirstRetainedSequence ?? 1),
+              first_retained_sequence: Number(generationHealth?.ptyFirstRetainedSequence ?? 1),
+              active: currentGeneration.isActive,
+              transcriptAvailable: evidenceAvailability.transcriptAvailable,
+              transcript_available: evidenceAvailability.transcriptAvailable,
+              archiveAvailable: evidenceAvailability.archiveAvailable,
+              archive_available: evidenceAvailability.archiveAvailable,
+              cursorReset: true,
+              cursor_reset: true,
+              ...(generationHealth ?? {}),
+            }) }, lastConfirmedCursor);
+            if (!accepted) {
+              cleanupOutputStream();
+              return;
+            }
+          }
+        }
+        let emittedRolloverCheckpoint = false;
+        if (selectedPtyGeneration) {
+          const checkpoint = await getLatestValidRunPtyCheckpoint({
+            runId,
+            generationId: selectedPtyGeneration.generationId,
+            generationToken: selectedPtyGeneration.generationToken,
+            storyId: selectedPtyGeneration.storyId,
+          });
+          if (checkpoint && checkpoint.checkpointSequence > latestCheckpointSequenceEmitted) {
+            const checkpointCursor = encodeRunOutputCursor(replaySource, checkpoint.generationId, checkpoint.checkpointSequence);
+            const accepted = outputSink.send({
+              id: checkpointCursor,
+              event: 'checkpoint_ready',
+              data: JSON.stringify({
+                run_id: runId,
+                story_id: checkpoint.storyId,
+                generation_id: checkpoint.generationId,
+                checkpoint_id: checkpoint.id,
+                checkpoint_seq: checkpoint.checkpointSequence,
+                first_retained_seq: checkpoint.firstRetainedSequence,
+              }),
+            }, lastConfirmedCursor);
+            if (!accepted) {
+              cleanupOutputStream();
+              return;
+            }
+            latestCheckpointSequenceEmitted = checkpoint.checkpointSequence;
+            lastSequence = Math.max(lastSequence, checkpoint.checkpointSequence);
+            lastConfirmedCursor = checkpointCursor;
+            emittedRolloverCheckpoint = generationRolledOver;
+          }
+        }
+        if (generationRolledOver && !emittedRolloverCheckpoint) {
+          const accepted = outputSink.send({
+            event: 'terminal_reset',
+            data: JSON.stringify({
+              reason: 'generation_changed',
+              outputSource: replaySource,
+              generationId: selectedPtyGeneration?.generationId ?? null,
+              checkpointSequence: 0,
+              firstRetainedSequence: 1,
+            }),
+          }, lastConfirmedCursor);
+          if (!accepted) {
+            cleanupOutputStream();
+            return;
+          }
+        }
+        const newChunks = await listRunPtyChunks(runId, lastSequence, RUN_OUTPUT_REPLAY_BATCH_CHUNKS, selectedPtyGeneration);
         fetchedBatchIsFull = newChunks.length === RUN_OUTPUT_REPLAY_BATCH_CHUNKS;
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+          const confirmed = await writeOutputChunkEvent(
+            outputSink,
+            replaySource,
+            selectedPtyGeneration?.generationId ?? null,
+            row.sequence,
+            chunkBuf,
+            lastConfirmedCursor,
+          );
+          if (!confirmed) {
             cleanupOutputStream();
             return;
           }
           lastSequence = row.sequence;
+          lastConfirmedCursor = confirmed;
         }
       } else {
         const newChunks = await query<ChunkRow>(
@@ -7491,12 +7717,19 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+          const confirmed = await writeOutputChunkEvent(
+            outputSink, replaySource, null, row.sequence, chunkBuf, lastConfirmedCursor,
+          );
+          if (!confirmed) {
             cleanupOutputStream();
             return;
           }
-          emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
           lastSequence = row.sequence;
+          lastConfirmedCursor = confirmed;
+          if (!emitBoundedSemanticSteps(chunkBuf.toString('utf8'), agent, outputSink, lastConfirmedCursor)) {
+            cleanupOutputStream();
+            return;
+          }
         }
       }
 
@@ -7504,21 +7737,30 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         queryOne<{ status: string; lifecycle_status: string | null }>(
           'SELECT status, lifecycle_status FROM pipeline_runs WHERE id = $1', [runId],
         ),
-        usePtyCapture ? getRunPtySessionHealth(runId) : Promise.resolve(null),
+        usePtyCapture ? getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken) : Promise.resolve(null),
       ]);
       const ptyHealthPayload = normalizePtyHealthPayload(ptyHealth);
       if (ptyHealthPayload) {
         const now = Date.now();
         const signature = JSON.stringify(ptyHealthPayload);
         if (signature !== lastPtyHealthSignature || now - lastPtyHealthEmitAt > RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS) {
-          writePtyHealthEvent(res, ptyHealthPayload);
+          if (!writePtyHealthEvent(outputSink, ptyHealthPayload, lastConfirmedCursor)) {
+            cleanupOutputStream();
+            return;
+          }
           lastPtyHealthSignature = signature;
           lastPtyHealthEmitAt = now;
         }
       }
       const ptyStatus = ptyHealth?.status ?? null;
       const runBecameTerminal = Boolean(statusRow && terminalStatuses.includes(statusRow.status));
-      const ptyTerminal = usePtyCapture && ptyStatus !== null && ptyStatus !== 'active';
+      // A followed generation ending is a story boundary, not a run boundary.
+      // Keep the stream attached so the next story/retry can switch generations.
+      // An explicit historical generation replay may close when that generation ends.
+      const explicitPtyGenerationEnded = usePtyCapture
+        && requestedGenerationToken !== null
+        && ptyStatus !== null
+        && ptyStatus !== 'active';
 
       // An attached browser may have observed the legitimate PTY startup-pending
       // state before the engine later failed to create any session. Demote that
@@ -7533,7 +7775,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
            ) recent ORDER BY sequence ASC`,
           [runId, RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS],
         );
-        res.write(`event: run_meta\ndata: ${JSON.stringify({
+        const fallbackMetadataAccepted = outputSink.send({ event: 'run_meta', data: JSON.stringify({
+          contractVersion: RUN_OUTPUT_CONTRACT_VERSION,
           agentType: runMetadata.agentType,
           agentModel: runMetadata.agentModel,
           terminalMode: 'ansi-html',
@@ -7552,36 +7795,74 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
           pty_unavailable_hint: 'The requested PTY session was never created; showing the durable engine transcript.',
           outputSource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
           output_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
-          // This stream previously emitted PTY IDs. Tell the browser to reset
-          // its persisted cursor before accepting ANSI IDs from a new source.
+          outputGenerationId: null,
+          output_generation_id: null,
+          storyId: null,
+          story_id: null,
+          attempt: null,
+          checkpointSequence: 0,
+          checkpoint_sequence: 0,
+          firstRetainedSequence: fallbackChunks[0]?.sequence ?? 1,
+          first_retained_sequence: fallbackChunks[0]?.sequence ?? 1,
+          active: false,
+          transcriptAvailable: false,
+          transcript_available: false,
+          archiveAvailable: false,
+          archive_available: false,
           cursorReset: true,
           cursor_reset: true,
           ptyReplaySource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
           pty_replay_source: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
-        })}\n\n`);
-        if (fallbackChunks[0]?.sequence > 1) {
-          res.write(`event: replay_truncated\ndata: ${JSON.stringify({ fromSequence: fallbackChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS })}\n\n`);
+        }) }, lastConfirmedCursor);
+        lastSequence = 0;
+        lastConfirmedCursor = null;
+        if (!fallbackMetadataAccepted || !outputSink.send({
+          event: 'terminal_reset',
+          data: JSON.stringify({
+            reason: 'output_source_changed',
+            outputSource: RUN_OUTPUT_ANSI_REPLAY_SOURCE,
+            generationId: null,
+            checkpointSequence: 0,
+            firstRetainedSequence: fallbackChunks[0]?.sequence ?? 1,
+          }),
+        })) {
+          cleanupOutputStream();
+          return;
+        }
+        if (fallbackChunks[0]?.sequence > 1 && !outputSink.send({
+          event: 'replay_truncated',
+          data: JSON.stringify({ fromSequence: fallbackChunks[0].sequence, maxChunks: RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS }),
+        })) {
+          cleanupOutputStream();
+          return;
         }
         for (const row of fallbackChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          if (!(await writeOutputChunkEvent(res, row.sequence, chunkBuf))) {
+          const confirmed = await writeOutputChunkEvent(
+            outputSink, RUN_OUTPUT_ANSI_REPLAY_SOURCE, null, row.sequence, chunkBuf, lastConfirmedCursor,
+          );
+          if (!confirmed) {
             cleanupOutputStream();
             return;
           }
-          emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+          lastSequence = row.sequence;
+          lastConfirmedCursor = confirmed;
+          if (!emitBoundedSemanticSteps(chunkBuf.toString('utf8'), agent, outputSink, lastConfirmedCursor)) {
+            cleanupOutputStream();
+            return;
+          }
         }
       }
 
-      if (!statusRow || runBecameTerminal || ptyTerminal) {
+      if (!statusRow || runBecameTerminal || explicitPtyGenerationEnded) {
         // Never emit done before a bounded cursor batch has fully drained.
         // Queue another non-overlapping poll; an exact-multiple batch simply
         // performs one empty confirmation read before closing.
         if (fetchedBatchIsFull) {
           drainImmediately = true;
         } else {
+          outputSink.end({ event: 'done', data: '' });
           cleanupOutputStream();
-          res.write('event: done\ndata: \n\n');
-          res.end();
         }
       } else if (fetchedBatchIsFull) {
         // Active noisy streams drain in bounded slices without waiting for the
@@ -7594,12 +7875,19 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
       }
     } catch (err: unknown) {
       logger.warn({ err, runId, terminalMode }, '[pipeline-output] transient output poll failure; allowing SSE reconnect');
-      cleanupOutputStream();
       // A transport failure is not run completion. Emit a retryable error and
-      // end the HTTP response without a `done` marker so EventSource reconnects
-      // with Last-Event-ID and resumes exactly where it stopped.
-      res.write(`event: stream_error\ndata: ${JSON.stringify({ retryable: true, code: 'OUTPUT_POLL_FAILED', afterSequence: lastSequence })}\n\n`);
-      res.end();
+      // end without `done`; EventSource resumes from the last admitted scoped ID.
+      outputSink.end({
+        retryMs: 1_000,
+        event: 'stream_error',
+        data: JSON.stringify({
+          retryable: true,
+          code: 'OUTPUT_POLL_FAILED',
+          afterSequence: lastSequence,
+          cursor: lastConfirmedCursor,
+        }),
+      });
+      cleanupOutputStream();
     } finally {
       pollInFlight = false;
       if (drainImmediately && !streamClosed && !req.destroyed && !res.destroyed) {
@@ -7611,6 +7899,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // PostgreSQL NOTIFY provides immediate cross-process wakeups after durable
   // chunk commits. The interval remains as loss/reconnect protection.
   unsubscribeOutputWakeup = subscribeRunOutput(runId, () => { void pollOutput(); });
+  unsubscribeCheckpointEvents = subscribeTopic(runPtyCheckpointTopic(runId), () => { void pollOutput(); });
   pollInterval = setInterval(() => { void pollOutput(); }, RUN_OUTPUT_PTY_POLL_INTERVAL_MS);
   if (initialReplayMayHaveMore) void pollOutput();
 
@@ -7689,7 +7978,6 @@ async function recordTokenUsage(
  *               blockedBy: { type: array, items: { type: string }, nullable: true }
  *               activeSkills: { type: array, items: { type: string }, nullable: true }
  *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
- *               rejectionEvidence: { description: "Arbitrary rejected value; accepted only for fail outcomes and stored as bounded, secret/path-redacted portable evidence." }
  *     responses:
  *       201: { description: "Story result recorded" }
  *       400: { description: "Missing required fields or invalid status" }
@@ -7700,7 +7988,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey, rejectionEvidence,
+      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
@@ -7708,7 +7996,6 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
       completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
-      rejectionEvidence?: unknown;
     };
 
     if (!runId || !storyId || !status) {
@@ -7727,17 +8014,6 @@ router.post('/story-result', async (req: Request, res: Response) => {
     if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
       throw new ValidationError('completionPacket must be an object');
     }
-    if (rejectionEvidence !== undefined && status !== 'fail') {
-      throw new ValidationError('rejectionEvidence is valid only for fail outcomes');
-    }
-    const portableRejection = rejectionEvidence === undefined
-      ? undefined
-      : normalizeRejectedStoryEvidence(storyId, rejectionEvidence);
-    const safeCompletionPacket = completionPacket ? { ...completionPacket } : undefined;
-    if (safeCompletionPacket) delete safeCompletionPacket.rejectionEvidence;
-    const persistedCompletionPacket = portableRejection
-      ? { ...(safeCompletionPacket ?? {}), rejectionEvidence: portableRejection }
-      : safeCompletionPacket;
 
     const projection = await queryOne<{
       workspace_id: string;
@@ -7787,7 +8063,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
       activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
-      persistedCompletionPacket ? JSON.stringify(persistedCompletionPacket) : null,
+      completionPacket ? JSON.stringify(completionPacket) : null,
       specId,
       projection.spec_revision,
       projection.story_revision,
@@ -7944,7 +8220,6 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
  *                 failureReason: { type: string, nullable: true }
  *                 failureAttempts: { type: integer, nullable: true }
  *                 blockedBy: { type: array, items: { type: string }, nullable: true }
- *                 rejectionEvidence: { type: object, nullable: true, description: "Bounded portable rejection reason and stack; secrets and host paths are redacted." }
  *                 output: { type: array, items: { type: string } }
  *                 lineCount: { type: integer }
  *       400: { description: "Invalid runId" }
@@ -7976,7 +8251,6 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
     let blockedBy: string[] | null = null;
-    let rejectionEvidence: PortableRejectionEvidence | null = null;
     if (walEvent?.payload) {
       try {
         const payload = typeof walEvent.payload === 'string' ? JSON.parse(walEvent.payload) : walEvent.payload;
@@ -7984,14 +8258,6 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
         failureAttempts = payload.attempts ?? null;
         if (Array.isArray(payload.blockedBy)) blockedBy = payload.blockedBy;
       } catch { /* ignore */ }
-    }
-
-    const completionPacket = (storyResult as any).completion_packet as Record<string, unknown> | string | null;
-    if (completionPacket) {
-      try {
-        const parsed = typeof completionPacket === 'string' ? JSON.parse(completionPacket) : completionPacket;
-        rejectionEvidence = sanitizeStoredRejectedStoryEvidence(storyId, parsed?.rejectionEvidence);
-      } catch { /* malformed historical completion packet has no portable rejection projection */ }
     }
 
     // Also check story_results.blocked_by
@@ -8078,7 +8344,6 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
       failureReason,
       failureAttempts,
       blockedBy,
-      rejectionEvidence,
       output: outputLines,
       lineCount: outputLines.length,
     });

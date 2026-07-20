@@ -48,8 +48,8 @@ import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { isPtyTerminalMode, normalizeTerminalMode, type TerminalMode } from './terminal-mode';
-import { assertWavePolicyEnvelopeIntegrity, type WavePolicyEnvelope } from './wave-production-policy';
 import {
+  appendPtyCompletionInstructions,
   buildPtyCompletionMarker,
   buildPtyMarkerFilePath,
   getPtyReadinessTimeoutMs,
@@ -82,11 +82,24 @@ import {
   recordRunPtyHeartbeat,
   recordRunPtyPromptReadiness,
   startRunPtySession,
+  updateRunPtyChildPid,
+  type PtyGenerationRef,
 } from './run-pty-store';
 import { attachRunPtyLifecycle, transitionRunLifecycle } from './run-lifecycle';
+import { openRawPtyArchive, type RawPtyArchiveWriter } from './pty-raw-archive';
+import { PtyTranscriptRecorder } from './pty-transcript-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
+import {
+  createPiPromptFile,
+  createPiSessionDirectory,
+  detectPiStructuredCapability,
+  mapPiStructuredEvent,
+  PI_STRUCTURED_MIN_VERSION,
+  resolvePiExecutionProfile,
+} from './pi-structured-profile';
+import { UnprocessableError } from './errors';
 import {
   assertPtyCliCompatible,
   type PtyCliCapability,
@@ -184,22 +197,24 @@ import {
   getResumeContext,
 } from './run-state';
 import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
-import {
-  assertExpectedParentHead,
-  assertSingletonRunWorktree,
-  cleanupOwnedStoryWorktree,
-  commitGuardedMerge,
-  createOwnedStoryWorktree,
-  type StoryWorktreeOwnership,
-} from './story-worktree-lifecycle';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
 import { resolveMergeConflict, resolvePostureConsensus, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
 import { decideGitReinsGateAction } from './gitreins-gate';
 import { sanitizeCapturePayload } from './context-safety';
+import {
+  accountWaveSettlement,
+  assertSingleStoryWaveDirectExecution,
+  computeTransitivelyBlockedStories,
+  attemptCompleteFailureEvidence,
+  normalizeWaveRejection,
+  parallelRunExitCode,
+  requiresPerStoryWorktree,
+  selectWaveWorktreeCleanup,
+  type WaveAccountingState,
+} from './parallel-wave-core';
 import { runHostValidationRequirement } from './story-host-validation';
-import { executeStoryWithAdapter, type StoryExecutionAdapter } from './story-execution-adapter';
 import {
   adaptStoryCloseoutEvidence,
   createStoryAttemptResult,
@@ -692,7 +707,7 @@ async function ensurePlaywrightMcpServer(headless = true): Promise<string | null
     const mcpProc = spawn(
       'npx',
       ['@playwright/mcp', '--port', String(PLAYWRIGHT_MCP_PORT), ...(headless ? ['--headless'] : [])],
-      { detached: true, stdio: 'ignore', env: buildCleanEnv() },
+      { detached: true, stdio: 'ignore', env: { ...process.env } },
     );
     mcpProc.unref();
     _playwrightMcpServerPid = mcpProc.pid ?? null;
@@ -869,7 +884,7 @@ async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
     const stdioTransport = new StdioClientTransport({
       command: chromeMcpCmd,
       args: chromeMcpArgs,
-      env: buildCleanEnv(),
+      env: { ...process.env } as Record<string, string>,
     });
     const client = new Client({ name: 'rorca-chrome-bridge', version: '1.0.0' });
     await client.connect(stdioTransport);
@@ -1241,10 +1256,7 @@ async function postStoryResult(
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined
-      && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)
-      && k !== 'RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON'
-      && k !== 'RORCA_WAVE_PRODUCTION_ACTIVATION_KEY') {
+    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
       env[k] = v;
     }
   }
@@ -1262,7 +1274,7 @@ function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
 }
 
-function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
+export function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
   const decoder = new StringDecoder('utf8');
   let buffer = '';
 
@@ -1306,7 +1318,20 @@ async function startPiRpcServer(
   skillFiles: string[] = [],
   mcpServers?: Record<string, string>,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+  onStructuredRecord?: (event: unknown, stream: 'stdout' | 'stderr') => void,
+  onHumanLine?: (line: string, stream: 'stdout' | 'stderr') => void,
+  onSpawn?: (pid: number | undefined) => void,
+  sessionDir?: string,
 ): Promise<PiRpcServer> {
+  const status = detectPi();
+  const capability = detectPiStructuredCapability(status.piVersion);
+  if (!status.piInstalled || !status.piBinPath || !capability.supported) {
+    throw new UnprocessableError(
+      `Pi structured autonomous profile unavailable: ${capability.reason}`,
+      'PI_STRUCTURED_PROFILE_UNSUPPORTED',
+      { installedVersion: status.piVersion, requiredVersion: PI_STRUCTURED_MIN_VERSION, profile: 'rpc-jsonl-v1' },
+    );
+  }
   const thinkingLevel = resolvePiThinkingLevel(model, effortLevel);
   const mcpServersSignature = normalizePiMcpServers(mcpServers);
   const piSelection = resolvePiCliSelection(model);
@@ -1316,6 +1341,7 @@ async function startPiRpcServer(
     '--no-extensions',
     '--tools', 'read,bash,edit,write,grep,find,ls',
     '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
+    ...(sessionDir ? ['--session-dir', sessionDir] : []),
     ...explicitExtensions.flatMap(extensionPath => ['--extension', extensionPath]),
     ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
     ...(piSelection.model ? ['--model', piSelection.model] : []),
@@ -1353,25 +1379,48 @@ async function startPiRpcServer(
     detachedProcessGroup,
   };
 
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    server.stderr += chunk.toString();
-    if (server.stderr.length > 64 * 1024) {
-      server.stderr = server.stderr.slice(-64 * 1024);
+  // Cancellation authority must see the detached process group immediately.
+  // Register synchronously after spawn, before startup waits or any other await.
+  _piRpcServers.add(server);
+  onSpawn?.(child.pid);
+
+  const dispatchEvent = (data: unknown, stream: 'stdout' | 'stderr'): void => {
+    onStructuredRecord?.(data, stream);
+    for (const listener of [...server.eventListeners]) {
+      try {
+        listener(data);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
+      }
     }
-  });
+  };
+
+  const handleJsonlLine = (line: string, stream: 'stdout' | 'stderr'): unknown | undefined => {
+    const trimmed = line.endsWith('\r') ? line.slice(0, -1).trim() : line.trim();
+    if (!trimmed) return undefined;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      const malformed = { type: 'malformed_json', stream, line };
+      onStructuredRecord?.(malformed, stream);
+      onHumanLine?.(line.endsWith('\n') ? line : `${line}\n`, stream);
+      server.stderr += `\n[pi-rpc] Invalid JSONL from ${stream}: ${trimmed.slice(0, 500)}`;
+      return undefined;
+    }
+  };
+
+  const detachStderrReader = child.stderr
+    ? attachJsonlLineReader(child.stderr, (line) => {
+      const data = handleJsonlLine(line, 'stderr');
+      if (data !== undefined) dispatchEvent(data, 'stderr');
+    })
+    : () => {};
 
   const detachStdoutReader = child.stdout
     ? attachJsonlLineReader(child.stdout, (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-
-      let data: unknown;
-      try {
-        data = JSON.parse(trimmed);
-      } catch {
-        server.stderr += `\n[pi-rpc] Invalid JSONL from stdout: ${trimmed.slice(0, 500)}`;
-        return;
-      }
+      const data = handleJsonlLine(line, 'stdout');
+      if (data === undefined) return;
 
       if (
         typeof data === 'object'
@@ -1402,17 +1451,11 @@ async function startPiRpcServer(
             }
           }
         }
+        onStructuredRecord?.(data, 'stdout');
         return;
       }
 
-      for (const listener of [...server.eventListeners]) {
-        try {
-          listener(data);
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
-        }
-      }
+      dispatchEvent(data, 'stdout');
     })
     : () => {};
 
@@ -1429,6 +1472,7 @@ async function startPiRpcServer(
 
   child.on('exit', (code, signal) => {
     detachStdoutReader();
+    detachStderrReader();
     server.ready = false;
     _piRpcServers.delete(server);
     const exitMessage = `pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
@@ -1450,7 +1494,6 @@ async function startPiRpcServer(
   }
 
   server.ready = true;
-  _piRpcServers.add(server);
 
   if (!_piRpcExitCleanupRegistered) {
     _piRpcExitCleanupRegistered = true;
@@ -1606,6 +1649,9 @@ async function buildPiSessionOptions(
   });
 
   return {
+    runId,
+    workspaceId,
+    storyId: story.id,
     progressLogPath,
     directionText: directionText.trim() || undefined,
     doneChecklist: packet.doneChecklist,
@@ -1955,6 +2001,9 @@ interface PiRetryContext {
 }
 
 interface PiSessionOptions {
+  runId: number;
+  workspaceId: string | null;
+  storyId: string;
   progressLogPath: string;
   directionText?: string;
   doneChecklist?: string[];
@@ -1987,7 +2036,8 @@ interface PtyRunOptions {
   cols: number;
   rows: number;
   port?: number;
-  storyId?: string;
+  storyId: string;
+  attempt: number;
 }
 
 interface PtyProcessLike {
@@ -2262,6 +2312,10 @@ async function spawnAgentViaPty(
     let readinessState: PtyReadinessState | null = null;
     let adapter: InteractivePtyAgentAdapter | null = null;
     let outputBatcher: ReturnType<typeof createRunPtyOutputBatcher> | null = null;
+    let transcriptRecorder: PtyTranscriptRecorder | null = null;
+    let rawArchiveWriter: RawPtyArchiveWriter | null = null;
+    let rawArchiveWriteFailed = false;
+    let generationRef: PtyGenerationRef | null = null;
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -2300,8 +2354,6 @@ async function spawnAgentViaPty(
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to drain bounded PTY output writer', ptyOptions.runId, err);
       }
-      logStream.end();
-      ptyCommand?.cleanup?.();
       // A file alone never erases an unexpected process failure. The only
       // normalized non-zero exit is the SIGTERM we intentionally send after a
       // valid file has ended the interactive turn.
@@ -2315,13 +2367,36 @@ async function spawnAgentViaPty(
             : exitSignal
               ? 'killed'
               : 'failed';
+      try {
+        await rawArchiveWriter?.drain();
+      } catch (err: unknown) {
+        rawArchiveWriteFailed = true;
+        transcriptRecorder?.recordError(
+          'raw_archive_finalize_failed',
+          'Exact raw PTY archive could not be finalized; earlier verified segments remain available.',
+        );
+        logRunPtyStoreError('Failed to finalize exact raw PTY archive', ptyOptions.runId, err);
+      }
+      transcriptRecorder?.recordHostNotice('generation_closed', 'PTY generation process exited.', {
+        processStatus: status,
+        rawArchiveComplete: !rawArchiveWriteFailed,
+      });
+      try {
+        await transcriptRecorder?.drain();
+      } catch (err: unknown) {
+        // Transcript evidence failure is explicit operational telemetry, but it
+        // never changes the agent process/story result.
+        logRunPtyStoreError('Failed to finalize structured PTY transcript', ptyOptions.runId, err);
+      }
+      logStream.end();
+      ptyCommand?.cleanup?.();
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
-      if (!completionFileSeen) {
-        try { await recordRunPtyCompletionFileError(ptyOptions.runId, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
+      if (!completionFileSeen && generationRef) {
+        try { await recordRunPtyCompletionFileError(generationRef, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
       }
       try {
-        await completeRunPtySession(ptyOptions.runId, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
+        if (generationRef) await completeRunPtySession(generationRef, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
       }
@@ -2387,15 +2462,53 @@ async function spawnAgentViaPty(
     let sequenceRef: { value: number } | null = null;
 
     try {
-      sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
-      outputBatcher = createRunPtyOutputBatcher(ptyOptions.runId, sequenceRef);
-      const storyIdForMarker = ptyOptions.storyId ?? 'run';
+      const storyIdForMarker = ptyOptions.storyId;
       const completionMarker = buildPtyCompletionMarker(ptyOptions.runId, storyIdForMarker);
       const markerFilePath = buildPtyMarkerFilePath(ptyOptions.runId, storyIdForMarker);
       const markerFile = path.resolve(cwd, markerFilePath);
       // A retry must not inherit a prior attempt's completion file.
       try { fs.unlinkSync(markerFile); } catch (err: any) {
         if (err?.code !== 'ENOENT') throw err;
+      }
+      const requestedGenerationToken = randomUUID();
+      const generation = await startRunPtySession({
+        runId: ptyOptions.runId,
+        workspaceId: ptyOptions.workspaceId,
+        storyId: ptyOptions.storyId,
+        attempt: ptyOptions.attempt,
+        cwd,
+        agentType: ptyOptions.agentType,
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+        childPid: null,
+        generationToken: requestedGenerationToken,
+        completionMarker,
+      });
+      generationRef = {
+        runId: generation.runId,
+        generationId: generation.generationId,
+        generationToken: generation.generationToken,
+      };
+      sequenceRef = await initializeRunPtySequence(generationRef);
+      outputBatcher = createRunPtyOutputBatcher(generationRef, sequenceRef, {}, {
+        storyId: ptyOptions.storyId,
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+      });
+      transcriptRecorder = new PtyTranscriptRecorder(generationRef);
+      transcriptRecorder.recordHostNotice('generation_started', 'PTY generation started.', {
+        agentType: ptyOptions.agentType,
+        attempt: ptyOptions.attempt,
+      });
+      try {
+        rawArchiveWriter = await openRawPtyArchive(generationRef);
+      } catch (err: unknown) {
+        rawArchiveWriteFailed = true;
+        transcriptRecorder.recordError(
+          'raw_archive_initialization_failed',
+          'Exact raw PTY archive could not be initialized; the agent process will continue independently.',
+        );
+        logRunPtyStoreError('Failed to initialize exact raw PTY archive', ptyOptions.runId, err);
       }
       completionState = createPtyCompletionState(completionMarker);
       readinessState = createPtyReadinessState(ptyOptions.agentType);
@@ -2416,6 +2529,9 @@ async function spawnAgentViaPty(
         agentType: ptyOptions.agentType,
         completionMarker,
         markerFilePath,
+        generationId: generation.generationId,
+        generationToken: generation.generationToken,
+        attempt: generation.attempt,
       });
       ptyCommand = adapter.resolveCommand({
         agentType: ptyOptions.agentType,
@@ -2433,16 +2549,7 @@ async function spawnAgentViaPty(
         env: ptyCommand.env,
         encoding: null,
       });
-      await startRunPtySession({
-        runId: ptyOptions.runId,
-        workspaceId: ptyOptions.workspaceId,
-        cwd,
-        agentType: ptyOptions.agentType,
-        cols: ptyOptions.cols,
-        rows: ptyOptions.rows,
-        childPid: pty.pid ?? null,
-        completionMarker,
-      });
+      await updateRunPtyChildPid(generationRef, pty.pid);
       const ptyAttached = await attachRunPtyLifecycle(ptyOptions.runId, {
         transport: 'pty_attached',
         process: 'spawned',
@@ -2456,7 +2563,8 @@ async function spawnAgentViaPty(
       resetInactivity();
       heartbeatTimer = setInterval(() => {
         const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
-        void recordRunPtyHeartbeat(ptyOptions.runId)
+        if (!generationRef) return;
+        void recordRunPtyHeartbeat(generationRef)
           .catch((err: unknown) => logRunPtyStoreError('Failed to record PTY heartbeat', ptyOptions.runId, err));
         if (ptyOptions.port && ptyOptions.storyId) {
           void emitWalEvent(ptyOptions.port, 'story_heartbeat', ptyOptions.workspaceId, {
@@ -2475,9 +2583,11 @@ async function spawnAgentViaPty(
         void (async () => {
           if (!pty) return;
           try {
-            const resize = await claimLatestRunPtyResize(ptyOptions.runId);
+            if (!generationRef) return;
+            const resize = await claimLatestRunPtyResize(generationRef);
             if (resize) {
               pty.resize(resize.cols, resize.rows);
+              outputBatcher?.resize(resize.cols, resize.rows);
             }
           } catch (err: unknown) {
             logRunPtyStoreError('Failed to apply PTY resize request', ptyOptions.runId, err);
@@ -2491,7 +2601,8 @@ async function spawnAgentViaPty(
           if (!pty || inputPollInFlight) return;
           inputPollInFlight = true;
           try {
-            const requests = await claimPendingRunPtyInput(ptyOptions.runId);
+            if (!generationRef) return;
+            const requests = await claimPendingRunPtyInput(generationRef);
             for (const request of requests) {
               pty.write(request.input.toString('utf8'));
               resetInactivity();
@@ -2513,13 +2624,17 @@ async function spawnAgentViaPty(
           const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
           const valid = parsed.storyId === storyIdForMarker
             && Number(parsed.runId) === ptyOptions.runId
-            && parsed.marker === completionMarker;
+            && parsed.marker === completionMarker
+            && parsed.generationId === generationRef?.generationId
+            && parsed.generationToken === generationRef?.generationToken
+            && Number(parsed.attempt) === ptyOptions.attempt;
           if (!valid) {
-            await recordRunPtyCompletionFileError(ptyOptions.runId, 'marker_file_payload_mismatch');
+            if (generationRef) await recordRunPtyCompletionFileError(generationRef, 'marker_file_payload_mismatch');
             return;
           }
           completionFileSeen = true;
-          await markRunPtyCompletionFileSeen(ptyOptions.runId, completionMarker);
+          if (!generationRef) return;
+          await markRunPtyCompletionFileSeen(generationRef, completionMarker);
           if (ptyOptions.port && ptyOptions.storyId) {
             await emitWalEvent(ptyOptions.port, 'story_completion_file', ptyOptions.workspaceId, {
               run_id: ptyOptions.runId,
@@ -2539,7 +2654,7 @@ async function spawnAgentViaPty(
           }, 250).unref?.();
         } catch (err: unknown) {
           const reason = err instanceof Error ? err.message : String(err);
-          await recordRunPtyCompletionFileError(ptyOptions.runId, reason);
+          if (generationRef) await recordRunPtyCompletionFileError(generationRef, reason);
           logRunPtyStoreError('Failed to inspect PTY completion file', ptyOptions.runId, err);
         } finally {
           completionFileCheckInFlight = false;
@@ -2568,13 +2683,28 @@ async function spawnAgentViaPty(
           const signal = adapter.detectCompletion?.(text, completionState) ?? null;
           if (signal?.type === 'marker') {
             terminalMarkerSeen = true;
-            void markRunPtyCompletionMarkerSeen(ptyOptions.runId, signal.marker)
+            if (!generationRef) return;
+            void markRunPtyCompletionMarkerSeen(generationRef, signal.marker)
               .catch((err: unknown) => logRunPtyStoreError('Failed to record corroborating PTY terminal marker', ptyOptions.runId, err));
           }
         }
-        // node-pty is push-only. The bounded single writer batches durable
-        // inserts and accounts for overflow instead of retaining an unbounded
-        // promise chain when terminal output outpaces PostgreSQL.
+        // Archive bytes before normalization: only this path receives the exact
+        // node-pty Buffer, preserving order and every repaint/control byte.
+        if (rawArchiveWriter && !rawArchiveWriteFailed) {
+          try {
+            rawArchiveWriter.append(buf);
+          } catch (err: unknown) {
+            rawArchiveWriteFailed = true;
+            transcriptRecorder?.recordError(
+              'raw_archive_write_failed',
+              'Exact raw PTY archive write failed; earlier verified segments remain available.',
+            );
+            logRunPtyStoreError('Failed to append exact raw PTY archive bytes', ptyOptions.runId, err);
+          }
+        }
+        transcriptRecorder?.recordModelBytes(buf);
+        // node-pty is push-only. The bounded replay-ring writer batches durable
+        // inserts and accounts for overflow. It is not full-history authority.
         outputBatcher?.enqueue(buf);
       });
 
@@ -2602,8 +2732,9 @@ async function spawnAgentViaPty(
       });
       if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
       if (settled) return;
+      if (!generationRef) throw new Error('PTY_GENERATION_REQUIRED: generation disappeared before readiness');
       void recordRunPtyPromptReadiness(
-        ptyOptions.runId,
+        generationRef,
         readiness.timedOut ? 'timeout_fallback' : 'ready',
         readiness.reason,
       ).catch((err) => logRunPtyStoreError('Failed to record PTY readiness', ptyOptions.runId, err));
@@ -2619,7 +2750,7 @@ async function spawnAgentViaPty(
         logger.warn(`[engine] Bracketed PTY prompt injection failed for ${ptyOptions.agentType}; falling back to chunked typing: ${message}`);
         await injectPromptWithChunkedTyping(pty, ptyCommand.prompt);
       }
-      void recordRunPtyPromptReadiness(ptyOptions.runId, 'injected', readiness.reason)
+      void recordRunPtyPromptReadiness(generationRef, 'injected', readiness.reason)
         .catch((err) => logRunPtyStoreError('Failed to record PTY prompt injection', ptyOptions.runId, err));
       const ptyRunning = await transitionRunLifecycle(ptyOptions.runId, 'running', {
         transport: 'pty_attached',
@@ -2685,7 +2816,27 @@ async function spawnAgentViaPty(
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
       try {
-        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
+        await outputBatcher?.drain();
+      } catch (drainError) {
+        logRunPtyStoreError('Failed to drain PTY replay ring after spawn failure', ptyOptions.runId, drainError);
+      }
+      try {
+        await rawArchiveWriter?.drain();
+      } catch (archiveError) {
+        transcriptRecorder?.recordError(
+          'raw_archive_finalize_failed',
+          'Exact raw PTY archive could not be finalized after process startup failure.',
+        );
+        logRunPtyStoreError('Failed to finalize raw archive after spawn failure', ptyOptions.runId, archiveError);
+      }
+      transcriptRecorder?.recordError('pty_spawn_failed', 'PTY process startup failed before a normal generation exit.');
+      try {
+        await transcriptRecorder?.drain();
+      } catch (transcriptError) {
+        logRunPtyStoreError('Failed to finalize transcript after spawn failure', ptyOptions.runId, transcriptError);
+      }
+      try {
+        if (generationRef) await completeRunPtySession(generationRef, 'failed', 1, null);
       } catch { /* session may not have been persisted yet */ }
       logStream.end();
       ptyCommand?.cleanup?.();
@@ -2786,7 +2937,7 @@ function runAgent(
     return Promise.resolve(buildPromptDeliveryFailureResult(startTime));
   }
 
-  if (ptyOptions?.enabled) {
+  if (ptyOptions?.enabled && (agentType !== 'pi' || resolvePiExecutionProfile(ptyOptions.terminalMode) === 'interactive')) {
     return spawnAgentViaPty(
       ptyOptions,
       prompt,
@@ -3420,15 +3571,95 @@ async function spawnPiRpc(
   retryContext?: PiRetryContext,
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
   piServerSkillFiles: string[] = [],
-  _piSessionOptions?: PiSessionOptions,
+  piSessionOptions?: PiSessionOptions,
   mcpServers?: Record<string, string>,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Promise<AgentResult> {
   const startTime = Date.now();
   let serverForCleanup: PiRpcServer | null = null;
+  let promptFile: ReturnType<typeof createPiPromptFile> | null = null;
+  let transcriptRecorder: PtyTranscriptRecorder | null = null;
+  let generationRef: PtyGenerationRef | null = null;
+  let markerFile: string | null = null;
+  let completionMarker: string | null = null;
+  let finalExitCode = 1;
+
+  const capability = detectPiStructuredCapability(detectPi().piVersion);
+  if (!capability.supported) {
+    throw new UnprocessableError(
+      `Pi structured autonomous profile unavailable: ${capability.reason}`,
+      'PI_STRUCTURED_PROFILE_UNSUPPORTED',
+    );
+  }
+
+  if (piSessionOptions?.workspaceId) {
+    completionMarker = buildPtyCompletionMarker(piSessionOptions.runId, piSessionOptions.storyId);
+    const markerFilePath = buildPtyMarkerFilePath(piSessionOptions.runId, piSessionOptions.storyId);
+    markerFile = path.resolve(cwd, markerFilePath);
+    try { fs.unlinkSync(markerFile); } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const generation = await startRunPtySession({
+      runId: piSessionOptions.runId,
+      workspaceId: piSessionOptions.workspaceId,
+      storyId: piSessionOptions.storyId,
+      attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+      cwd,
+      agentType: 'pi',
+      cols: DEFAULT_PTY_COLS,
+      rows: DEFAULT_PTY_ROWS,
+      childPid: null,
+      completionMarker,
+    });
+    generationRef = {
+      runId: generation.runId,
+      generationId: generation.generationId,
+      generationToken: generation.generationToken,
+    };
+    transcriptRecorder = new PtyTranscriptRecorder(generationRef);
+    transcriptRecorder.recordHostNotice('generation_started', 'Pi structured RPC generation started.', {
+      profile: capability.profile,
+      attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+    });
+  }
+
+  const sessionDirectory = createPiSessionDirectory(
+    piSessionOptions?.runId ?? process.pid,
+    piSessionOptions?.storyId ?? 'story',
+  );
+  const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+  const mappedEvent = (event: unknown, stream: 'stdout' | 'stderr'): void => {
+    const mapped = mapPiStructuredEvent(event);
+    for (const transcript of mapped.transcripts) {
+      transcriptRecorder?.recordStructured(transcript);
+    }
+    logStream.write(`[PiEvent:${stream}] ${JSON.stringify(event)}\n`);
+  };
+  const humanLine = (line: string): void => {
+    process.stdout.write(line);
+    logStream.write(line);
+  };
   const launchPiRpcServer = async (): Promise<PiRpcServer> => {
-    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
-    const launchedServer = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers, effortLevel);
+    logger.info(`[pi-rpc] Starting pi RPC server (profile=${capability.profile}, model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
+    const launchedServer = await startPiRpcServer(
+      cwd,
+      model,
+      piServerSkillFiles,
+      mcpServers,
+      effortLevel,
+      mappedEvent,
+      humanLine,
+      (pid) => {
+        if (generationRef && pid) {
+          void updateRunPtyChildPid(generationRef, pid).catch((error: unknown) => {
+            transcriptRecorder?.recordError('structured_pid_persistence_failed', 'Pi process PID could not be persisted.', {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      },
+      sessionDirectory.path,
+    );
     serverForCleanup = launchedServer;
     logger.info('[pi-rpc] pi RPC server started');
     return launchedServer;
@@ -3465,7 +3696,6 @@ async function spawnPiRpc(
       });
     }
 
-    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     let storyTimedOut = false;
     let settled = false;
 
@@ -3627,22 +3857,60 @@ async function spawnPiRpc(
     }, timeoutMs);
 
     try {
-      logger.info('[pi-rpc] Dispatching prompt');
-      await sendPiRpcCommand(server, { type: 'prompt', message: prompt });
-      logger.info('[pi-rpc] Prompt accepted by RPC server; waiting for turn completion');
+      let deliveredPrompt = prompt;
+      if (generationRef && completionMarker && markerFile && piSessionOptions) {
+        deliveredPrompt = appendPtyCompletionInstructions({
+          basePrompt: prompt,
+          runId: piSessionOptions.runId,
+          storyId: piSessionOptions.storyId,
+          agentType: 'pi',
+          completionMarker,
+          markerFilePath: path.relative(cwd, markerFile),
+          generationId: generationRef.generationId,
+          generationToken: generationRef.generationToken,
+          attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+          executionProfile: 'structured-rpc',
+        });
+      }
+      promptFile = createPiPromptFile(
+        piSessionOptions?.runId ?? process.pid,
+        piSessionOptions?.storyId ?? 'story',
+        deliveredPrompt,
+      );
+      logger.info(`[pi-rpc] Dispatching ${promptFile.bytes} prompt bytes from private file over RPC stdin`);
+      const promptFromFile = fs.readFileSync(promptFile.path, 'utf8');
+      await sendPiRpcCommand(server, { type: 'prompt', message: promptFromFile });
+      logger.info('[pi-rpc] Prompt accepted by RPC server; waiting for settled completion');
       await storyDone;
-      logger.info('[pi-rpc] Story turn completed');
+      logger.info('[pi-rpc] Story RPC session settled');
+
+      if (generationRef && completionMarker && markerFile && piSessionOptions) {
+        if (!fs.existsSync(markerFile)) {
+          throw new Error('PI_COMPLETION_STATUS_MISSING: settled RPC output is not completion authority');
+        }
+        const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
+        const attempt = retryContext?.attempt ? retryContext.attempt + 1 : 1;
+        const valid = parsed.storyId === piSessionOptions.storyId
+          && Number(parsed.runId) === piSessionOptions.runId
+          && parsed.marker === completionMarker
+          && parsed.generationId === generationRef.generationId
+          && parsed.generationToken === generationRef.generationToken
+          && Number(parsed.attempt) === attempt;
+        if (!valid) throw new Error('PI_COMPLETION_STATUS_INVALID: status payload does not match this generation');
+        await markRunPtyCompletionFileSeen(generationRef, completionMarker);
+      }
+
       clearTimeout(timeout);
       cleanupListener();
-      logStream.end();
-      return finish(storyTimedOut ? 124 : 0);
+      finalExitCode = storyTimedOut ? 124 : 0;
+      return finish(finalExitCode);
     } catch (error: unknown) {
       clearTimeout(timeout);
       cleanupListener();
-      logStream.end();
       const message = error instanceof Error ? error.message : String(error);
+      finalExitCode = storyTimedOut ? 124 : 1;
       return {
-        exitCode: storyTimedOut ? 124 : 1,
+        exitCode: finalExitCode,
         stderrTail: `${server.stderr.slice(-4096)}${message ? `\n${message}` : ''}`.trim(),
         elapsedMs: Date.now() - startTime,
         piSessionId,
@@ -3652,6 +3920,30 @@ async function spawnPiRpc(
     if (serverForCleanup) {
       await stopPiRpcServer(serverForCleanup);
     }
+    promptFile?.cleanup();
+    sessionDirectory.cleanup();
+    transcriptRecorder?.recordHostNotice('generation_closed', 'Pi structured RPC generation closed.', {
+      exitCode: finalExitCode,
+      completionStatusObserved: finalExitCode === 0,
+    });
+    try {
+      await transcriptRecorder?.drain();
+    } catch (error: unknown) {
+      logRunPtyStoreError('Failed to finalize Pi structured transcript', piSessionOptions?.runId ?? 0, error);
+    }
+    if (generationRef) {
+      try {
+        await completeRunPtySession(
+          generationRef,
+          finalExitCode === 0 ? 'exited' : finalExitCode === 124 ? 'timed_out' : 'failed',
+          finalExitCode,
+          null,
+        );
+      } catch (error: unknown) {
+        logRunPtyStoreError('Failed to close Pi structured generation', piSessionOptions?.runId ?? 0, error);
+      }
+    }
+    logStream.end();
   }
 }
 
@@ -4003,6 +4295,22 @@ async function markStorySkipped(jsonPath: string, storyId: string): Promise<void
 
     fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
     logger.info(`Marked ${storyId} as skipped`);
+  });
+}
+
+/** A rejected executor promise is an explicit failed lifecycle state, never an unobserved gap. */
+async function markStoryPromiseRejected(jsonPath: string, storyId: string, reason: string): Promise<void> {
+  await withSpecLock(jsonPath, () => {
+    const raw = fs.readFileSync(jsonPath, 'utf8');
+    const spec: SpecJson = JSON.parse(raw);
+    const story = getStories(spec).find(item => item.id === storyId);
+    if (!story) throw new Error(`Cannot persist rejected wave story ${storyId}: story not found`);
+    story.passes = false;
+    story.status = 'failed';
+    delete story.skipped;
+    story.notes = `${reason} — preserved for inspection and safe retry`;
+    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+    logger.info(`Marked ${storyId} as failed after ${reason}`);
   });
 }
 
@@ -4583,7 +4891,6 @@ interface StoryWorktree {
   storyId: string;
   worktreePath: string;
   branchName: string;
-  ownership: StoryWorktreeOwnership;
   /** Immutable effective posture captured when this story actually executed. */
   resolverPosture?: MergeResolutionPosture;
 }
@@ -4628,19 +4935,6 @@ function getIntegrationCandidateFiles(cwd: string): string[] {
     return readGitLines(cwd, 'git diff --name-only HEAD');
   } catch {
     return [];
-  }
-}
-
-function hasMergeHead(cwd: string): boolean {
-  try {
-    execSync('git rev-parse -q --verify MERGE_HEAD', {
-      cwd,
-      env: buildCleanEnv(),
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -4840,36 +5134,32 @@ async function recordStoryMergeConflict(
 }
 
 function createStoryWorktree(
-  config: EngineConfig,
+  workspaceCwd: string,
   specSlug: string,
   storyId: string,
-  waveIndex: number,
   resolved?: StoryManifestWorktreeOptions,
-  attempt = 1,
 ): StoryWorktree | null {
-  const nonce = `${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const safeStoryId = storyId.replace(/[^A-Za-z0-9._-]+/g, '-');
-  const branchName = resolved?.branch
-    ?? `rorca/tmp/run-${config.runId}/wave-${waveIndex}/${safeStoryId}/attempt-${attempt}/${nonce}`;
-  const repoName = path.basename(config.cwd);
-  const worktreePath = resolved?.path ?? path.resolve(config.cwd, '..', `${repoName}-${specSlug}-${safeStoryId}-${nonce}`);
-  const qualificationNamespace = process.env.RORCA_QUALIFICATION_RUN_ID ?? `run-${config.runId}`;
+  const ts = Date.now();
+  const branchName = resolved?.branch ?? `feat/${specSlug}-${storyId}-${ts}`;
+  const repoName = path.basename(workspaceCwd);
+  const worktreePath = resolved?.path ?? path.resolve(workspaceCwd, '..', `${repoName}-${storyId}-${ts}`);
 
-  let ownership: StoryWorktreeOwnership | undefined;
   try {
-    ownership = createOwnedStoryWorktree({
-      repositoryPath: config.cwd,
-      worktreePath,
-      branchName,
-      runId: config.runId,
-      waveIndex,
-      storyId,
-      attempt,
-      baseRevision: resolved?.baseRevision ?? 'HEAD',
-      qualificationNamespace,
-    });
+    if (fs.existsSync(worktreePath)) {
+      const existingBranch = execSync('git branch --show-current', {
+        cwd: worktreePath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      if (existingBranch !== branchName) throw new Error(`existing worktree branch ${existingBranch} does not match ${branchName}`);
+      return { storyId, worktreePath, branchName };
+    }
+    execSync(
+      `git worktree add -b "${branchName}" "${worktreePath}" "${resolved?.baseRevision ?? 'HEAD'}"`,
+      { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
+    );
 
-    const runtimeSupport = ensureWorktreeRuntimeSupport(config.cwd, ownership.worktreeRealpath);
+    const runtimeSupport = ensureWorktreeRuntimeSupport(workspaceCwd, worktreePath);
     for (const rel of runtimeSupport.linkedDirs) {
       logger.info(`  [worktree] Linked ${rel} into story worktree`);
     }
@@ -4877,22 +5167,11 @@ function createStoryWorktree(
       logger.info(`  [worktree] Copied ${rel} to story worktree`);
     }
 
-    logger.info(`  [worktree] Created owned ${ownership.worktreeRealpath} (${branchName}, ${ownership.ownershipId.slice(0, 12)})`);
-    return { storyId, worktreePath: ownership.worktreeRealpath, branchName, ownership };
+    logger.info(`  [worktree] Created ${worktreePath} (${branchName})`);
+    return { storyId, worktreePath, branchName };
   } catch (err: unknown) {
     const msg = (err as Error).message ?? String(err);
-    logger.error(`  [worktree] FAILED to create owned worktree for ${storyId}: ${msg}`);
-    if (ownership) {
-      const cleanup = cleanupOwnedStoryWorktree({
-        repositoryPath: config.cwd,
-        ownership,
-        currentWaveAllowlist: new Set([ownership.ownershipId]),
-        expectedBaseRevision: ownership.baseRevision,
-        preserve: false,
-        outcome: 'rejected',
-      });
-      if (!cleanup.ok) logger.error(`  [worktree] Setup-failure cleanup preserved ${storyId}: ${cleanup.diagnostics.join('; ')}`);
-    }
+    logger.error(`  [worktree] FAILED to create worktree for ${storyId}: ${msg}`);
     return null;
   }
 }
@@ -4913,13 +5192,7 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
     logger.warn(`  [worktree] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
   }
 
-  const expectedParentHead = getGitHead(workspaceCwd);
-  if (!expectedParentHead) {
-    logger.error(`  [worktree] Cannot guard integration without an expected parent head`);
-    return false;
-  }
   try {
-    assertExpectedParentHead(workspaceCwd, expectedParentHead);
     execSync(
       `git merge --no-ff --no-commit "${wt.branchName}"`,
       { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 120_000 },
@@ -4934,12 +5207,11 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
     }
 
     try {
-      commitGuardedMerge(workspaceCwd, `merge: ${wt.storyId} from worktree`, expectedParentHead);
-    } catch (error: unknown) {
-      if (hasMergeHead(workspaceCwd) || getGitHead(workspaceCwd) !== expectedParentHead) throw error;
+      execSync(`git commit -m "merge: ${wt.storyId} from worktree"`, { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 30_000 });
+    } catch {
       logger.info(`  [worktree] ${wt.storyId} merge produced no new commit`);
     }
-    logger.info(`  [worktree] Merged ${wt.branchName} into workspace from guarded parent ${expectedParentHead.slice(0, 12)}`);
+    logger.info(`  [worktree] Merged ${wt.branchName} into workspace`);
     return true;
   } catch (mergeErr: unknown) {
     // Check if all conflicts are on runtime-only files (spec JSON, run-state.json).
@@ -4970,12 +5242,10 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
           return false;
         }
 
-        commitGuardedMerge(
-          workspaceCwd,
-          `merge: ${wt.storyId} from worktree (runtime conflicts auto-resolved)`,
-          expectedParentHead,
-        );
-        logger.info(`  [worktree] Merged ${wt.branchName} from guarded parent ${expectedParentHead.slice(0, 12)} (runtime conflicts auto-resolved)`);
+        execSync(`git commit -m "merge: ${wt.storyId} from worktree (runtime conflicts auto-resolved)"`, {
+          cwd: workspaceCwd, env, stdio: 'pipe',
+        });
+        logger.info(`  [worktree] Merged ${wt.branchName} (runtime conflicts auto-resolved)`);
         return true;
       }
     } catch {
@@ -5112,15 +5382,8 @@ async function mergeWave(
   for (const wt of sorted) {
     logger.info(`  [merge] Merging ${wt.branchName} (${wt.storyId})...`);
 
-    const expectedParentHead = getGitHead(cwd);
-    if (!expectedParentHead) {
-      mergeFailures.push({ storyId: wt.storyId, conflictingFiles: [] });
-      logger.error(`  [merge] Cannot guard ${wt.storyId} integration without an expected parent head`);
-      continue;
-    }
     let mergeClean: boolean;
     try {
-      assertExpectedParentHead(cwd, expectedParentHead);
       execSync(
         `git merge --no-ff --no-commit "${wt.branchName}"`,
         { cwd, env, stdio: 'pipe', timeout: 120_000 },
@@ -5142,11 +5405,10 @@ async function mergeWave(
       }
 
       try {
-        commitGuardedMerge(cwd, `merge: ${wt.storyId}`, expectedParentHead);
-        logger.info(`  [merge] ${wt.storyId} merged cleanly from guarded parent ${expectedParentHead.slice(0, 12)}`);
+        execSync(`git commit -m "merge: ${wt.storyId}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
+        logger.info(`  [merge] ${wt.storyId} merged cleanly`);
         if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
-      } catch (error: unknown) {
-        if (hasMergeHead(cwd) || getGitHead(cwd) !== expectedParentHead) throw error;
+      } catch {
         logger.info(`  [merge] ${wt.storyId} merged (no changes to commit)`);
       }
       continue;
@@ -5171,22 +5433,35 @@ async function mergeWave(
           mergeFailures.push({ storyId: wt.storyId, conflictingFiles: validation.files });
           continue;
         }
-        commitGuardedMerge(cwd, commitMsg, expectedParentHead);
+        execSync(
+          `git commit -m "${commitMsg}"`,
+          { cwd, env, stdio: 'pipe', timeout: 30_000 },
+        );
         totalConflictsResolved += resolution.resolvedFiles.length;
         logger.info(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
         if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
       } catch (commitErr: unknown) {
-        logger.error(`  [merge] Guarded commit after resolution failed for ${wt.storyId}: ${(commitErr as Error).message}`);
-        try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
-
-        let conflictingFiles: string[] = [];
+        // Fallback: try git merge --continue
+        logger.warn(`  [merge] git commit failed, trying merge --continue: ${(commitErr as Error).message}`);
         try {
-          const output = execSync('git diff --name-only --diff-filter=U', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-          conflictingFiles = output.trim().split('\n').filter(Boolean);
-        } catch { /* empty */ }
+          execSync('git -c core.editor=true merge --continue', { cwd, env, stdio: 'pipe', timeout: 30_000 });
+          totalConflictsResolved += resolution.resolvedFiles.length;
+          logger.info(`  [merge] ${wt.storyId} merged via --continue with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+          if (wt.resolverPosture) integratedPostures.push(wt.resolverPosture);
+        } catch (contErr: unknown) {
+          logger.error(`  [merge] Commit after resolution failed for ${wt.storyId}: ${(contErr as Error).message}`);
+          try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
 
-        mergeFailures.push({ storyId: wt.storyId, conflictingFiles });
-        continue;
+          let conflictingFiles: string[] = [];
+          try {
+            const output = execSync('git diff --name-only --diff-filter=U', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+            conflictingFiles = output.trim().split('\n').filter(Boolean);
+          } catch { /* empty */ }
+
+          // Continue to next story instead of returning immediately
+          mergeFailures.push({ storyId: wt.storyId, conflictingFiles });
+          continue;
+        }
       }
     } else {
       logger.error(`  [merge] Auto-resolution failed for ${wt.storyId} — continuing with other stories`);
@@ -5219,29 +5494,143 @@ async function mergeWave(
   return { success: true, conflictsResolved: totalConflictsResolved };
 }
 
-function removeStoryWorktree(
-  workspaceCwd: string,
-  wt: StoryWorktree,
-  currentWaveAllowlist: ReadonlySet<string>,
-  outcome: 'integrated' | 'rejected',
-  preserve = false,
-): void {
-  const result = cleanupOwnedStoryWorktree({
-    repositoryPath: workspaceCwd,
-    ownership: wt.ownership,
-    currentWaveAllowlist,
-    expectedBaseRevision: wt.ownership.baseRevision,
-    preserve,
-    outcome,
-  });
-  if (!result.ok) {
-    throw new Error(`Owned worktree cleanup failed for ${wt.storyId}; preserved=${result.preserved}; ${result.diagnostics.join('; ')}`);
+function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
+  try {
+    execSync(`git worktree remove --force "${wt.worktreePath}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 });
+  } catch { /* already removed */ }
+  try {
+    execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
+  } catch { /* branch may already be gone */ }
+  logger.info(`  [worktree] Removed ${wt.worktreePath}`);
+}
+
+function writeParallelFailureDiagnostic(
+  logDir: string,
+  storyId: string,
+  reasonCode: string,
+  runId: number,
+  waveIndex: number,
+  rawDiagnostic: string,
+): string {
+  const safeStoryId = storyId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'unknown-story';
+  const suffix = createHash('sha256').update(`${runId}:${waveIndex}:${storyId}:${reasonCode}`).digest('hex').slice(0, 10);
+  const diagnosticPath = path.join(logDir, `${safeStoryId}_${reasonCode}_${suffix}.log`);
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(diagnosticPath, rawDiagnostic, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(diagnosticPath, 0o600);
+  return diagnosticPath;
+}
+
+/**
+ * Persist every projection of an infrastructure-level story failure. Raw error
+ * material stays in the local mode-0600 log; only bounded redacted fields cross
+ * the WAL/story-result boundary.
+ */
+async function recordParallelStoryInfrastructureFailure(input: {
+  config: EngineConfig;
+  workspaceId: string | null;
+  logDir: string;
+  story: UserStory;
+  reasonCode: 'wave_promise_rejected' | 'pending_closeout_unresolved';
+  reason: unknown;
+  waveIndex: number;
+  worktree?: StoryWorktree;
+}): Promise<string[]> {
+  const diagnostic = normalizeWaveRejection(input.reason);
+  let diagnosticPath: string | undefined;
+  const localWriteFailures: Array<{ label: string; error: unknown }> = [];
+  try {
+    diagnosticPath = writeParallelFailureDiagnostic(
+      input.logDir,
+      input.story.id,
+      input.reasonCode,
+      input.config.runId,
+      input.waveIndex,
+      diagnostic.rawDiagnostic,
+    );
+  } catch (error: unknown) {
+    localWriteFailures.push({ label: 'raw-local-diagnostic', error });
   }
-  if (result.preserved) {
-    logger.warn(`  [worktree] Preserved ${wt.worktreePath}: ${result.diagnostics.join('; ')}`);
-  } else {
-    logger.info(`  [worktree] Removed owned ${wt.worktreePath}${result.recoveryRef ? `; recovery=${result.recoveryRef}` : ''}`);
+
+  logger.error({
+    runId: input.config.runId,
+    storyId: input.story.id,
+    wave: input.waveIndex,
+    reason: input.reasonCode,
+    message: diagnostic.message,
+    stack: diagnostic.stack,
+    diagnosticRef: diagnosticPath ? path.basename(diagnosticPath) : null,
+  }, '[engine] wave story failed outside the normal executor outcome contract');
+
+  const finishedAt = new Date().toISOString();
+  const evidenceFailures = await attemptCompleteFailureEvidence([
+    {
+      label: 'spec-story-failure',
+      run: () => markStoryPromiseRejected(input.config.jsonPath, input.story.id, input.reasonCode),
+    },
+    {
+      label: 'run-state-failure',
+      run: () => {
+        rsMarkStoryFailed(input.config.cwd, {
+          storyId: input.story.id,
+          title: input.story.title,
+          status: 'failed',
+          startedAt: finishedAt,
+          finishedAt,
+          agentType: input.config.agentType,
+          failReason: input.reasonCode,
+        });
+        writeProgressTxt(input.config.cwd);
+      },
+    },
+    ...(input.workspaceId ? [{
+      label: 'story_failed-wal',
+      run: () => emitWalEvent(input.config.port, 'story_failed', input.workspaceId!, {
+        run_id: input.config.runId,
+        story_id: input.story.id,
+        reason: input.reasonCode,
+        wave: input.waveIndex,
+        error_message: diagnostic.message,
+        error_stack: diagnostic.stack,
+        // The raw diagnostic may contain secrets. Its mode-0600 local path is
+        // deliberately not persisted because story output APIs dereference
+        // story-result log paths and would otherwise expose the raw material.
+        diagnostic_raw_local_only: true,
+        diagnostic_raw_truncated: diagnostic.rawTruncated,
+        ...(input.worktree ? {
+          worktree_path: input.worktree.worktreePath,
+          worktree_branch: input.worktree.branchName,
+          worktree_preserved: true,
+        } : {}),
+      }, input.story.id),
+    }] : []),
+    {
+      label: 'story-result-failure',
+      run: () => postStoryResult(input.config.port, {
+        runId: input.config.runId,
+        storyId: input.story.id,
+        status: 'fail',
+        reason: input.reasonCode,
+        ...(input.worktree ? {
+          worktreePath: input.worktree.worktreePath,
+          worktreeBranch: input.worktree.branchName,
+        } : {}),
+      }),
+    },
+  ]);
+
+  const failures = [...localWriteFailures, ...evidenceFailures];
+  for (const failure of failures) {
+    const normalized = normalizeWaveRejection(failure.error);
+    logger.error({
+      runId: input.config.runId,
+      storyId: input.story.id,
+      evidenceStep: failure.label,
+      message: normalized.message,
+      stack: normalized.stack,
+    }, '[engine] failed to persist complete wave rejection evidence');
   }
+  return failures.map(failure => failure.label);
 }
 
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
@@ -6143,50 +6532,28 @@ async function executeStory(
             rows: DEFAULT_PTY_ROWS,
             port: config.port,
             storyId: story.id,
+            attempt: retryAttempt + 1,
           } satisfies PtyRunOptions
         : undefined;
-      const productionAdapter: StoryExecutionAdapter<{ prompt: string }, AgentResult> = {
-        name: `production-${effectiveAgent}`,
-        async execute(request) {
-          const startedAt = new Date().toISOString();
-          const output = await runAgent(
-            effectiveAgent,
-            request.payload.prompt,
-            request.cwd,
-            request.timeoutMs,
-            storyLogFile,
-            currentModel,
-            effectiveAttach,
-            tokenUpdateCallback,
-            config.thinkingEnabled,
-            config.thinkingBudget,
-            currentEffort,
-            Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-            piRetryContext,
-            effectiveAgent === 'pi' ? emitStoryStarted : undefined,
-            piServerSkillFiles,
-            piSessionOptions,
-            ptyOptions,
-          );
-          return {
-            executionId: request.executionId,
-            storyId: request.storyId,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            exitCode: output.exitCode,
-            exitSignal: null,
-            output,
-          };
-        },
-      };
-      const execution = await executeStoryWithAdapter(productionAdapter, {
-        executionId: `story:${config.runId}:${randomUUID()}`,
-        storyId: story.id,
-        cwd: effectiveCwd,
-        timeoutMs: timeoutMin * 60 * 1000,
-        payload: { prompt: attemptPrompt },
-      });
-      const result = execution.output;
+      const result = await runAgent(
+        effectiveAgent,
+        attemptPrompt,
+        effectiveCwd,
+        timeoutMin * 60 * 1000,
+        storyLogFile,
+        currentModel,
+        effectiveAttach,
+        tokenUpdateCallback,
+        config.thinkingEnabled,
+        config.thinkingBudget,
+        currentEffort,
+        Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+        piRetryContext,
+        effectiveAgent === 'pi' ? emitStoryStarted : undefined,
+        piServerSkillFiles,
+        piSessionOptions,
+        ptyOptions,
+      );
       logger.info({
         component: 'execution-engine',
         event: 'story_agent_stage_completed',
@@ -7491,79 +7858,10 @@ async function runWithBoundedConcurrency<T>(
   return results;
 }
 
-// ─── Transitive Blocking ────────────────────────────────────────────────────
-
-function computeBlockedStories(
-  allStories: UserStory[],
-  failedIds: Set<string>,
-  alreadyProcessed: Set<string>,
-): Map<string, string[]> {
-  const blocked = new Map<string, string[]>();
-  const unprocessed = allStories.filter(s =>
-    !alreadyProcessed.has(s.id) && !failedIds.has(s.id) && !s.excluded && !s.skipped && !isPassed(s)
-  );
-
-  const allBlockedIds = new Set<string>(failedIds);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const story of unprocessed) {
-      if (allBlockedIds.has(story.id)) continue;
-      const deps = story.dependsOn ?? [];
-      const blockers = deps.filter(dep => allBlockedIds.has(dep));
-      if (blockers.length > 0) {
-        allBlockedIds.add(story.id);
-        blocked.set(story.id, blockers);
-        changed = true;
-      }
-    }
-  }
-
-  return blocked;
-}
-
 // ─── Main Loop ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const config = parseArgs();
-
-  if (config.parallelism > 1) {
-    const serializedPolicy = process.env.RORCA_GOVERNED_WAVE_POLICY;
-    if (!serializedPolicy) {
-      if (process.env.NODE_ENV === 'production' || process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL !== 'true') {
-        throw new Error('[wave-production-policy] direct parallel engine start lacks governed dispatch evidence');
-      }
-    } else {
-      let policy: WavePolicyEnvelope;
-      try {
-        policy = JSON.parse(serializedPolicy) as WavePolicyEnvelope;
-        assertWavePolicyEnvelopeIntegrity(policy);
-      } catch {
-        throw new Error('[wave-production-policy] engine dispatch envelope is invalid');
-      }
-      if (!policy.allowed
-        || policy.runId !== config.runId
-        || policy.workspaceId !== config.workspaceId
-        || policy.effective.orchestrationMode !== 'wave-parallel'
-        || policy.effective.parallelism !== config.parallelism
-        || policy.requested.rolloutCohort !== policy.rollout.cohort) {
-        throw new Error('[wave-production-policy] engine mode, parallelism, run, workspace, cohort, or fence differs from dispatch evidence');
-      }
-      const currentRevision = execSync('git rev-parse HEAD', { cwd: config.cwd, encoding: 'utf8' }).trim();
-      if (policy.receipt && policy.receipt.sourceRevision !== currentRevision) {
-        throw new Error('[wave-production-policy] engine source revision differs from dispatch receipt');
-      }
-      const productionPolicy = policy.status === 'canary-enabled' || policy.status === 'enabled';
-      if (process.env.NODE_ENV === 'production' || productionPolicy) {
-        if (process.env.RORCA_WAVE_PARALLEL_PRODUCTION_ENABLED !== 'true'
-          || !policy.receipt
-          || policy.receipt.id !== policy.requested.qualificationReceiptId
-          || policy.receipt.sourceRevision !== currentRevision) {
-          throw new Error('[wave-production-policy] production engine receipt or source revision is not current');
-        }
-      }
-    }
-  }
 
   if (process.env.RORCA_AGENT === 'pi' && process.env.RORCA_PROCESS_ROLE === 'engine' && isPiExternalOrchestrationEnabled()) {
     logger.info('[Pi-native] External Pi orchestration enabled — execution engine standing by');
@@ -7943,10 +8241,49 @@ async function runParallel(
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
+  const rejectedIds = new Set<string>();
+  const evidenceFailureIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
   const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
+
+  const persistNewlyBlockedStories = async (waveIndex: number): Promise<void> => {
+    const currentStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
+    const newlyBlocked = computeTransitivelyBlockedStories(currentStories, failedIds, processedIds);
+    for (const [blockedId, blockers] of newlyBlocked) {
+      if (processedIds.has(blockedId)) continue;
+      const blockedStory = currentStories.find(story => story.id === blockedId);
+      logger.info(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
+      failedIds.add(blockedId);
+      processedIds.add(blockedId);
+      await markStorySkipped(config.jsonPath, blockedId);
+      rsMarkStorySkipped(config.cwd, {
+        storyId: blockedId,
+        title: blockedStory?.title ?? blockedId,
+        status: 'skipped',
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: config.agentType,
+        failReason: `blocked_by: ${blockers.join(', ')}`,
+      });
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId,
+          story_id: blockedId,
+          reason: 'blocked_by',
+          blockedBy: blockers,
+          wave: waveIndex,
+        }, blockedId);
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: blockedId,
+          status: 'skip',
+          blockedBy: blockers,
+        });
+      }
+    }
+  };
 
   for (const wave of waves) {
     logger.info('==========================================');
@@ -7957,6 +8294,8 @@ async function runParallel(
     for (const waveStory of wave.stories) {
       const original = stories.find(s => s.id === waveStory.id);
       if (!original) continue;
+
+      if (processedIds.has(original.id)) continue;
 
       if (original.excluded || original.skipped) {
         processedIds.add(original.id);
@@ -7969,7 +8308,7 @@ async function runParallel(
         logger.info(`  ${original.id} BLOCKED by: ${blockers.join(', ')}`);
         failedIds.add(original.id);
         processedIds.add(original.id);
-        markStorySkipped(config.jsonPath, original.id);
+        await markStorySkipped(config.jsonPath, original.id);
         rsMarkStorySkipped(config.cwd, {
           storyId: original.id, title: original.title, status: 'skipped',
           startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
@@ -7995,27 +8334,24 @@ async function runParallel(
     }
 
     const worktreeMap = new Map<string, StoryWorktree>();
-    const currentWaveAllowlist = new Set<string>();
-    const singletonCompiledWave = wave.stories.length === 1 && executableStories.length === 1;
+    const preserveWorktreeIds = new Set<string>();
+    const cleanupWorktreeIds = new Set<string>();
+    const directSingleStoryWave = !requiresPerStoryWorktree(wave.stories.length);
 
-    if (!singletonCompiledWave) {
+    if (!directSingleStoryWave) {
       for (const story of executableStories) {
-        const manifest = config.executionManifests.get(story.id);
         const wt = createStoryWorktree(
-          config,
+          config.cwd,
           specSlug,
           story.id,
-          wave.index,
-          manifest?.execution.worktree,
-          manifest?.identity.attempt ?? 1,
+          config.executionManifests.get(story.id)?.execution.worktree,
         );
         if (wt) {
           worktreeMap.set(story.id, wt);
-          currentWaveAllowlist.add(wt.ownership.ownershipId);
         } else {
           failedIds.add(story.id);
           processedIds.add(story.id);
-          markStorySkipped(config.jsonPath, story.id);
+          await markStorySkipped(config.jsonPath, story.id);
           rsMarkStoryFailed(config.cwd, {
             storyId: story.id, title: story.title, status: 'failed',
             startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
@@ -8031,88 +8367,156 @@ async function runParallel(
         }
       }
     } else {
-      logger.info(`  [worktree] Singleton compiled wave executes on the run worktree`);
+      logger.info('  [wave] Single-story wave — executing directly on the run branch (no per-story worktree)');
     }
 
-    const dispatchStories = singletonCompiledWave
+    const scheduledStories = directSingleStoryWave
       ? executableStories
       : executableStories.filter(story => worktreeMap.has(story.id));
-
-    const tasks = dispatchStories.map(story => {
+    const waveExecutions = scheduledStories.map(story => {
       const wt = worktreeMap.get(story.id);
-      return async () => {
-        const manifest = config.executionManifests.get(story.id);
-        if (singletonCompiledWave && manifest) {
-          assertSingletonRunWorktree(config.cwd, {
-            ...manifest.execution.worktree,
-            guardedWorkingDirectory: manifest.commandSafety.guardedWorkingDirectory,
-          });
-        }
-        return executeStory(
+      return {
         story,
-        config,
-        mode,
-        playbook,
-        logDir,
-        workspaceId,
-        retryCounts,
-        wt?.worktreePath ?? config.cwd,
         wt,
-        undefined,
-        stories,
-        undefined,
-        undefined,
-        personaRegistry,
-        wave.index,
-        specForBrowserMcp,
-        pendingIntegratedPasses,
-        ).then(result => ({ storyId: story.id, result }));
+        task: async (): Promise<StoryExecutionOutcome> => {
+          if (directSingleStoryWave) {
+            assertSingleStoryWaveDirectExecution(
+              story.id,
+              config.cwd,
+              config.executionManifests.get(story.id)?.commandSafety.guardedWorkingDirectory,
+            );
+          }
+          return executeStory(
+            story,
+            config,
+            mode,
+            playbook,
+            logDir,
+            workspaceId,
+            retryCounts,
+            wt?.worktreePath ?? config.cwd,
+            wt,
+            undefined,
+            stories,
+            undefined,
+            undefined,
+            personaRegistry,
+            wave.index,
+            specForBrowserMcp,
+            pendingIntegratedPasses,
+          );
+        },
       };
     });
 
-    const results = await runWithBoundedConcurrency(tasks, singletonCompiledWave ? 1 : config.parallelism);
-
+    const results = await runWithBoundedConcurrency(waveExecutions.map(item => item.task), config.parallelism);
+    const accountingState: WaveAccountingState = {
+      failedIds,
+      processedIds,
+      rejectedIds,
+      preserveWorktreeIds,
+      cleanupWorktreeIds,
+    };
     const passedInWave: StoryWorktree[] = [];
-    const failedInWave: StoryWorktree[] = [];
 
-    for (const [resultIndex, settled] of results.entries()) {
-      const dispatchedStory = dispatchStories[resultIndex];
+    for (let resultIndex = 0; resultIndex < results.length; resultIndex++) {
+      const settled = results[resultIndex];
+      const execution = waveExecutions[resultIndex];
+      const storyId = execution.story.id;
       if (settled.status === 'fulfilled') {
-        const { storyId, result } = settled.value;
-        processedIds.add(storyId);
-        const wt = worktreeMap.get(storyId);
-        if (result !== 'passed') {
-          failedIds.add(storyId);
-          if (result === 'closeout_blocked' && wt) {
-            logger.info(`  [closeout] Preserve decision overrides cleanup for blocked worktree: ${wt.worktreePath}`);
-          } else if (wt) {
-            failedInWave.push(wt);
-          }
-        } else if (wt) {
-          passedInWave.push(wt);
+        accountWaveSettlement({
+          storyId,
+          settlement: 'fulfilled',
+          outcome: settled.value,
+          hasWorktree: Boolean(execution.wt),
+        }, accountingState);
+        if (settled.value === 'closeout_blocked' && execution.wt) {
+          logger.info(`  [closeout] Preserving blocked worktree for inspection: ${execution.wt.worktreePath}`);
+        } else if (settled.value === 'passed' && execution.wt) {
+          passedInWave.push(execution.wt);
         }
-      } else {
-        const storyId = dispatchedStory?.id ?? 'unknown';
-        logger.error(`[engine] Story ${storyId} rejected in wave ${wave.index}:`, settled.reason);
-        if (dispatchedStory) {
-          processedIds.add(storyId);
-          failedIds.add(storyId);
-          const wt = worktreeMap.get(storyId);
-          if (wt) failedInWave.push(wt);
-          rsMarkStoryFailed(config.cwd, {
-            storyId,
-            title: dispatchedStory.title,
-            status: 'failed',
-            startedAt: new Date().toISOString(),
-            finishedAt: new Date().toISOString(),
-            agentType: config.agentType,
-            failReason: `dispatch_rejected: ${settled.reason instanceof Error ? settled.reason.message.slice(0, 256) : 'unknown'}`,
-          });
-        }
+        continue;
+      }
+
+      // Settlement order is stable, so the rejected promise remains correlated
+      // with its input story even though it never returned a storyId value.
+      accountWaveSettlement({
+        storyId,
+        settlement: 'rejected',
+        hasWorktree: Boolean(execution.wt),
+      }, accountingState);
+      pendingIntegratedPasses.delete(storyId);
+      const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+        config,
+        workspaceId,
+        logDir,
+        story: execution.story,
+        reasonCode: 'wave_promise_rejected',
+        reason: settled.reason,
+        waveIndex: wave.index,
+        worktree: execution.wt,
+      });
+      if (evidenceFailures.length > 0) evidenceFailureIds.add(storyId);
+      if (execution.wt) {
+        logger.info(`  [worktree] Preserving rejected story worktree for inspection: ${execution.wt.worktreePath}`);
       }
     }
 
-    // Post-wave: merge passed worktrees
+    // Rejecting a story immediately closes every direct/transitive dependent
+    // before potentially expensive merge work begins.
+    await persistNewlyBlockedStories(wave.index);
+
+    const finalizeMergedWorktree = async (wt: StoryWorktree): Promise<boolean> => {
+      const pendingPass = pendingIntegratedPasses.get(wt.storyId);
+      if (!pendingPass) {
+        failedIds.add(wt.storyId);
+        processedIds.add(wt.storyId);
+        preserveWorktreeIds.add(wt.storyId);
+        const story = stories.find(item => item.id === wt.storyId) ?? {
+          id: wt.storyId,
+          title: wt.storyId,
+          description: 'Missing accepted closeout handoff',
+        };
+        const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+          config,
+          workspaceId,
+          logDir,
+          story,
+          reasonCode: 'pending_closeout_unresolved',
+          reason: new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`),
+          waveIndex: wave.index,
+          worktree: wt,
+        });
+        if (evidenceFailures.length > 0) evidenceFailureIds.add(wt.storyId);
+        return false;
+      }
+
+      try {
+        await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
+        pendingIntegratedPasses.delete(wt.storyId);
+        cleanupWorktreeIds.add(wt.storyId);
+        return true;
+      } catch (reason: unknown) {
+        failedIds.add(wt.storyId);
+        processedIds.add(wt.storyId);
+        preserveWorktreeIds.add(wt.storyId);
+        const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+          config,
+          workspaceId,
+          logDir,
+          story: pendingPass.story,
+          reasonCode: 'pending_closeout_unresolved',
+          reason,
+          waveIndex: wave.index,
+          worktree: wt,
+        });
+        if (evidenceFailures.length > 0) evidenceFailureIds.add(wt.storyId);
+        return false;
+      }
+    };
+
+    // Post-wave: merge passed worktrees. A singleton *compiled* wave never
+    // reaches this block because it executed directly on the run branch.
     if (passedInWave.length > 0) {
       if (passedInWave.length === 1) {
         logger.info(`  [worktree] Single-story wave — direct merge`);
@@ -8122,15 +8526,11 @@ async function runParallel(
         if (!merged) {
           logger.error(`  [worktree] ${wt.storyId} passed implementation but merge failed — marking as merge_conflict`);
           failedIds.add(wt.storyId);
+          preserveWorktreeIds.add(wt.storyId);
           await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
-          removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'rejected');
+          logger.info(`  [worktree] Preserving failed merge worktree for inspection: ${wt.worktreePath}`);
         } else {
-          if (!pendingPass) {
-            throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
-          }
-          await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-          pendingIntegratedPasses.delete(wt.storyId);
-          removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'integrated');
+          await finalizeMergedWorktree(wt);
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
@@ -8145,15 +8545,7 @@ async function runParallel(
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
           // Advance each story only after its contribution reached the run branch.
-          for (const wt of passedInWave) {
-            const pendingPass = pendingIntegratedPasses.get(wt.storyId);
-            if (!pendingPass) {
-              throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
-            }
-            await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-            pendingIntegratedPasses.delete(wt.storyId);
-          }
-          for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'integrated');
+          for (const wt of passedInWave) await finalizeMergedWorktree(wt);
         } else {
           // Some merges failed — add only the specific failed stories to failedIds
           const failures = mergeResult.mergeFailures || (mergeResult.blocked ? [mergeResult.blocked] : []);
@@ -8162,6 +8554,7 @@ async function runParallel(
           for (const failure of failures) {
             logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
             failedIds.add(failure.storyId);
+            preserveWorktreeIds.add(failure.storyId);
             const wt = worktreeMap.get(failure.storyId);
             if (wt) {
               await recordStoryMergeConflict(
@@ -8177,57 +8570,69 @@ async function runParallel(
             }
           }
 
-          // Finalize and clean up successfully merged worktrees (those NOT in the failure set).
+          // Finalize successfully integrated worktrees (those NOT in the failure set).
           for (const wt of passedInWave) {
-            if (!failedStoryIds.has(wt.storyId)) {
-              const pendingPass = pendingIntegratedPasses.get(wt.storyId);
-              if (!pendingPass) {
-                throw new Error(`Missing accepted closeout handoff for merged story ${wt.storyId}`);
-              }
-              await finalizeIntegratedStoryPass(config, workspaceId, pendingPass);
-              pendingIntegratedPasses.delete(wt.storyId);
-              removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'integrated');
-            }
+            if (!failedStoryIds.has(wt.storyId)) await finalizeMergedWorktree(wt);
           }
 
-          for (const failure of failures) {
-            const failedWorktree = worktreeMap.get(failure.storyId);
-            if (failedWorktree) removeStoryWorktree(config.cwd, failedWorktree, currentWaveAllowlist, 'rejected');
-          }
-          logger.info(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}; immutable recovery artifacts retained where needed.`);
+          logger.info(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}. Continuing run — remaining waves unaffected.`);
+          logger.info(`  [merge] Failed worktree branches preserved for inspection.`);
         }
       }
     }
 
-    for (const wt of failedInWave) removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'rejected');
-
-    const allStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
-    const newlyBlocked = computeBlockedStories(allStories, failedIds, processedIds);
-
-    for (const [blockedId, blockers] of newlyBlocked) {
-      if (!processedIds.has(blockedId)) {
-        logger.info(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
-        failedIds.add(blockedId);
-        processedIds.add(blockedId);
-        markStorySkipped(config.jsonPath, blockedId);
-        rsMarkStorySkipped(config.cwd, {
-          storyId: blockedId, title: blockedId, status: 'skipped',
-          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
-          agentType: config.agentType, failReason: `blocked_by: ${blockers.join(', ')}`,
-        });
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: blockedId,
-            reason: 'blocked_by', blockedBy: blockers,
-          }, blockedId);
-          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip', blockedBy: blockers });
-        }
-      }
+    const cleanupSelection = selectWaveWorktreeCleanup(
+      worktreeMap.keys(),
+      cleanupWorktreeIds,
+      preserveWorktreeIds,
+    );
+    for (const storyId of cleanupSelection.cleanupIds) {
+      const wt = worktreeMap.get(storyId);
+      if (wt) removeStoryWorktree(config.cwd, wt);
     }
+    for (const storyId of cleanupSelection.preservedIds) {
+      const wt = worktreeMap.get(storyId);
+      if (wt) logger.info(`  [worktree] Preserved ${storyId} for inspection: ${wt.worktreePath}`);
+    }
+
+    // Merge failures can introduce additional blockers after the immediate
+    // rejected-settlement pass above.
+    await persistNewlyBlockedStories(wave.index);
 
     logger.info('');
     await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+
+  // A pending implementation handoff without canonical pass finalization is
+  // never semantic success. Merge-failed stories already have canonical failure
+  // evidence; any otherwise-unaccounted handoff gets explicit failure evidence.
+  for (const [storyId, pending] of pendingIntegratedPasses) {
+    if (failedIds.has(storyId)) {
+      logger.error(`  [closeout] ${storyId} remains pending after an already-recorded story failure`);
+      continue;
+    }
+    failedIds.add(storyId);
+    processedIds.add(storyId);
+    const worktreePath = typeof pending.storyResultExtra.worktreePath === 'string'
+      ? pending.storyResultExtra.worktreePath
+      : undefined;
+    const worktreeBranch = typeof pending.storyResultExtra.worktreeBranch === 'string'
+      ? pending.storyResultExtra.worktreeBranch
+      : undefined;
+    const worktree = worktreePath && worktreeBranch
+      ? { storyId, worktreePath, branchName: worktreeBranch }
+      : undefined;
+    const evidenceFailures = await recordParallelStoryInfrastructureFailure({
+      config,
+      workspaceId,
+      logDir,
+      story: pending.story,
+      reasonCode: 'pending_closeout_unresolved',
+      reason: new Error(`Story ${storyId} ended wave execution with an unresolved pending closeout`),
+      waveIndex: waves.length,
+      worktree,
+    });
+    if (evidenceFailures.length > 0) evidenceFailureIds.add(storyId);
   }
 
   const finalSpec: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
@@ -8235,13 +8640,19 @@ async function runParallel(
   const finalProgress = getProgress(finalStories);
   logger.info('');
   logger.info(`All waves complete! ${finalProgress.passed}/${finalProgress.total} stories passed`);
-  if (failedIds.size > 0) {
-    logger.info(`Failed/blocked: ${[...failedIds].join(', ')}`);
-  }
+  if (failedIds.size > 0) logger.info(`Failed/blocked: ${[...failedIds].join(', ')}`);
+  if (rejectedIds.size > 0) logger.error(`Rejected executor promises: ${[...rejectedIds].join(', ')}`);
+  if (pendingIntegratedPasses.size > 0) logger.error(`Unresolved pending closeouts: ${[...pendingIntegratedPasses.keys()].join(', ')}`);
+  if (evidenceFailureIds.size > 0) logger.error(`Incomplete durable failure evidence: ${[...evidenceFailureIds].join(', ')}`);
   // CIE-007: Archive run-state.json and write final progress.txt
   writeProgressTxt(config.cwd);
   archiveRunState(config.cwd, config.runId);
-  return failedIds.size > 0 ? 1 : 0;
+  return parallelRunExitCode({
+    failedIds,
+    rejectedIds,
+    pendingCloseoutIds: new Set(pendingIntegratedPasses.keys()),
+    evidenceFailureIds,
+  });
 }
 
 // ─── Workspace Resolver ─────────────────────────────────────────────────────

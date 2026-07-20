@@ -69,15 +69,6 @@ interface ExecutionEnvironmentReadiness {
   secretProfileId: string | null;
 }
 
-interface WaveProductionStatus {
-  status: 'sequential-default' | 'experimental-nonproduction' | 'production-disabled' | 'receipt-missing' | 'receipt-stale' | 'canary-enabled' | 'halted' | 'draining' | 'enabled';
-  effective: { orchestrationMode: 'sequential' | 'wave-parallel'; parallelism: number };
-  reason: string;
-  receipt: { id: string; reportHash: string; sourceRevision: string } | null;
-  rollout: { cohort: string; maxParallelism: number };
-  productionEnableAvailable: boolean;
-}
-
 interface OrchestrationPreview {
   mode: 'sequential' | 'wave-parallel';
   parallelism: number;
@@ -203,8 +194,6 @@ export interface TriggerOptions {
   forceSequential?: boolean;
   orchestrationMode?: 'sequential' | 'wave-parallel';
   parallelism?: number;
-  qualificationReceiptId?: string;
-  rolloutCohort?: string;
   autoMerge?: boolean;
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   includeGraph?: boolean;
@@ -267,7 +256,6 @@ export default function TriggerPopover({
   const [agentConfig, setAgentConfig] = useState<AgentConfigSummary | null>(null);
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
   const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
-  const [waveStatus, setWaveStatus] = useState<WaveProductionStatus | null>(null);
   const [healthBadge, setHealthBadge] = useState<HealthBadge | null>(null);
   const [contextPreview, setContextPreview] = useState<ContextPreviewData | null>(null);
   const [contextExpanded, setContextExpanded] = useState(false);
@@ -368,18 +356,13 @@ export default function TriggerPopover({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ specPath, workspaceId }),
     })
-      .then(setOrchestration)
+      .then((result) => {
+        setOrchestration(result);
+        // Auto-enable worktrees for wave-parallel
+        if (result.mode === 'wave-parallel') setAutoWorktree(true);
+      })
       .catch(() => {});
   }, [specPath, workspaceId]);
-
-  // Fetch governed wave status. The status/receipt/cohort are evidence; the
-  // environment variable is intentionally never returned or displayed.
-  useEffect(() => {
-    if (!workspaceId) return;
-    apiFetch<WaveProductionStatus>(`/api/admin/wave-qualification/status?workspaceId=${encodeURIComponent(workspaceId)}`)
-      .then(setWaveStatus)
-      .catch(() => setWaveStatus(null));
-  }, [workspaceId]);
 
   // Fetch drift report + config on mount
   useEffect(() => {
@@ -470,8 +453,7 @@ export default function TriggerPopover({
   const showDriftWarning = driftCheckEnabled && driftErrors.length > 0;
 
   const isWaveParallel = orchestration?.mode === 'wave-parallel';
-  const waveOptInAvailable = waveStatus != null && ['experimental-nonproduction', 'canary-enabled', 'enabled'].includes(waveStatus.status);
-  const waveRequested = isWaveParallel && waveOptInAvailable && !forceSequential;
+  const waveParallelSelectable = Boolean(isWaveParallel && terminalMode === 'ansi-html');
 
   // Reasoning cost multipliers for the current model (used in ThinkingControls and dry-run preview)
   const reasoningCostMultipliers = getReasoningCostMultipliers(agentConfig?.agentModel ?? null);
@@ -866,25 +848,21 @@ export default function TriggerPopover({
             {/* Wave Parallel pill */}
             <button
               type="button"
-              onClick={() => {
-                if (isWaveParallel && waveOptInAvailable) {
-                  setForceSequential(false);
-                  setTerminalMode('ansi-html');
-                  setAutoMerge(false);
-                  setMergeStrategy('branch-only');
-                }
-              }}
-              disabled={!isWaveParallel || !waveOptInAvailable}
+              onClick={() => { if (waveParallelSelectable) setForceSequential(false); }}
+              disabled={!waveParallelSelectable}
               className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-[11px] font-medium transition-colors border ${
-                waveRequested
+                waveParallelSelectable && !forceSequential
                   ? 'bg-accent text-white border-accent'
-                  : isWaveParallel && waveOptInAvailable
+                  : waveParallelSelectable
                     ? 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'
                     : 'bg-[var(--bg)] text-muted/40 border-border/40 cursor-not-allowed'
               }`}
             >
               <Layers size={11} className="shrink-0" />
               <span>Wave Parallel</span>
+              {waveParallelSelectable && (
+                <span className="text-[8px] opacity-70">experimental</span>
+              )}
               {!isWaveParallel && orchestration && (
                 <span className="text-[9px] opacity-60 italic">no parallel stories</span>
               )}
@@ -894,12 +872,14 @@ export default function TriggerPopover({
             </button>
           </div>
 
-          <p className="text-[10px] text-muted leading-tight">
-            Governed status: <span className="font-medium text-[var(--text)]">{waveStatus?.status ?? 'sequential-default'}</span>
-          </p>
+          {waveParallelSelectable && (
+            <p className="text-[9px] leading-tight text-amber-400/90">
+              Experimental non-production validation only; production requests are refused.
+            </p>
+          )}
 
           {/* Context below the segmented control */}
-          {waveRequested && orchestration && (
+          {isWaveParallel && !forceSequential && orchestration && (
             <div className="space-y-1.5 pt-0.5">
               {orchestration.waves.map((w) => (
                 <div key={w.index}>
@@ -913,7 +893,7 @@ export default function TriggerPopover({
               ))}
             </div>
           )}
-          {!waveRequested && orchestration && (
+          {(!isWaveParallel || forceSequential) && orchestration && (
             <p className="text-[10px] text-muted leading-tight">
               {orchestration.totalStories} {orchestration.totalStories === 1 ? 'story' : 'stories'} · one at a time
             </p>
@@ -928,14 +908,14 @@ export default function TriggerPopover({
           <div className="relative flex items-center justify-center">
             <input
               type="checkbox"
-              checked={autoWorktree || waveRequested}
+              checked={autoWorktree || (isWaveParallel && !forceSequential)}
               onChange={(e) => {
-                if (waveRequested) return;
+                if (isWaveParallel && !forceSequential) return;
                 setAutoWorktree(e.target.checked);
                 if (e.target.checked) setAutoMerge(true);
                 else setAutoMerge(false);
               }}
-              disabled={waveRequested}
+              disabled={isWaveParallel && !forceSequential}
               className="peer sr-only"
             />
             <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-accent transition-colors" />
@@ -945,7 +925,7 @@ export default function TriggerPopover({
             <div className="flex items-center gap-1.5">
               <GitBranch size={12} className="text-muted shrink-0" />
               <span className="text-xs font-medium text-[var(--text)]">Isolate in worktree</span>
-              {waveRequested && (
+              {isWaveParallel && !forceSequential && (
                 <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent font-medium">required</span>
               )}
             </div>
@@ -953,7 +933,7 @@ export default function TriggerPopover({
         </label>
 
         {/* Merge Strategy — nested under worktrees */}
-        {(autoWorktree || waveRequested) && (
+        {(autoWorktree || (isWaveParallel && !forceSequential)) && (
           <div className="ml-11 py-1.5">
             <label htmlFor="trigger-merge-strategy" className="text-[11px] text-muted mb-1.5 block font-medium">Completion action</label>
             <select
@@ -1045,7 +1025,7 @@ export default function TriggerPopover({
               onChange={(event) => {
                 const nextMode = event.target.value as 'ansi-html' | 'pty' | 'native-pty';
                 setTerminalMode(nextMode);
-                if (nextMode === 'native-pty') setForceSequential(true);
+                if (nextMode !== 'ansi-html') setForceSequential(true);
               }}
               className="shrink-0 rounded-md border border-border bg-[var(--bg-elevated)] px-2 py-1 text-[11px] text-[var(--text)]"
             >
@@ -1086,16 +1066,15 @@ export default function TriggerPopover({
         {/* Run Now — primary */}
         <button
           onClick={() => {
-            const effectiveWorktree = autoWorktree || waveRequested;
+            const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
             const isClaude = agentConfig?.agentType === 'claude';
             const m = agentConfig?.agentModel?.toLowerCase() ?? '';
             const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+            const waveRequested = waveParallelSelectable && !forceSequential;
             onTrigger(effectiveWorktree, {
-              forceSequential: !waveRequested || terminalMode === 'native-pty' || undefined,
+              forceSequential: !waveRequested || undefined,
               orchestrationMode: waveRequested ? 'wave-parallel' : 'sequential',
-              parallelism: waveRequested ? Math.min(orchestration?.parallelism ?? 1, waveStatus?.rollout.maxParallelism ?? 1) : 1,
-              qualificationReceiptId: waveRequested ? waveStatus?.receipt?.id : undefined,
-              rolloutCohort: waveRequested ? waveStatus?.rollout.cohort : undefined,
+              parallelism: waveRequested ? orchestration?.parallelism ?? 2 : 1,
               autoMerge: effectiveWorktree ? autoMerge : undefined,
               mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
@@ -1103,7 +1082,9 @@ export default function TriggerPopover({
               effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
-              reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+              reasoningOverride: (modelCapability?.supportsReasoning ?? initialReasoning?.enabled === true)
+                ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined }
+                : undefined,
               executionEnvironment,
             });
           }}
@@ -1121,14 +1102,15 @@ export default function TriggerPopover({
         {onAddToQueue && (
           <button
             onClick={() => {
-              const effectiveWorktree = autoWorktree;
+              const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
               const isClaude = agentConfig?.agentType === 'claude';
               const m = agentConfig?.agentModel?.toLowerCase() ?? '';
               const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+              const waveRequested = waveParallelSelectable && !forceSequential;
               onAddToQueue(effectiveWorktree, {
-                forceSequential: true,
-                orchestrationMode: 'sequential',
-                parallelism: 1,
+                forceSequential: !waveRequested || undefined,
+                orchestrationMode: waveRequested ? 'wave-parallel' : 'sequential',
+                parallelism: waveRequested ? orchestration?.parallelism ?? 2 : 1,
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
                 mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,
@@ -1136,7 +1118,9 @@ export default function TriggerPopover({
                 effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
-                reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+                reasoningOverride: (modelCapability?.supportsReasoning ?? initialReasoning?.enabled === true)
+                  ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined }
+                  : undefined,
                 executionEnvironment,
               });
             }}

@@ -13,6 +13,7 @@ import { createBackup, pruneOldBackups } from './backup';
 import { logger } from './logger';
 import { pruneExpiredMcpAuditLogs, runMcpAuditAnomalyScan } from './mcp-audit';
 import { getRunPtyRetentionDays, pruneExpiredRunPtyCaptures } from './run-pty-store';
+import { runPtyRetention } from './pty-operations';
 
 interface ScheduleRow {
   id: number;
@@ -306,7 +307,8 @@ async function checkDailyRunPtyRetention(): Promise<void> {
   lastRunPtyPruneDate = today;
   const retentionDays = getRunPtyRetentionDays();
   const deletedRows = await pruneExpiredRunPtyCaptures(retentionDays);
-  logger.info({ deletedRows, retentionDays }, '[Scheduler] PTY capture retention run completed');
+  const artifactRetention = await runPtyRetention(false);
+  logger.info({ deletedRows, retentionDays, artifactRetention }, '[Scheduler] PTY capture retention run completed');
 }
 
 export function startRunPtyRetentionScheduler(): void {

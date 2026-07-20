@@ -12,6 +12,7 @@ import { Github } from './icons/GithubIcon';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
+import { reconcileRunCloseout, type RunViewStatus } from '../lib/run-closeout-reconciliation';
 
 /** Safely parse a WAL event payload into an object. Returns null if unparseable. */
 function parsePayload(payload: string | Record<string, unknown> | null): Record<string, unknown> | null {
@@ -93,6 +94,7 @@ interface ResumeSummary {
 interface RunStoryListProps {
   runId: number;
   walEvents: WalEvent[];
+  runStatus?: RunViewStatus;
   runState?: RunStateSnapshot | null;
   resumeSummary?: ResumeSummary | null;
   onStoryClick?: (storyId: string) => void;
@@ -106,7 +108,7 @@ interface RunStoryListProps {
   storyContext?: Map<string, StoryContextInfo>;
 }
 
-type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'blocked' | 'excluded' | 'skip' | 'retry' | 'rate_limited';
+type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'blocked' | 'excluded' | 'skip' | 'retry' | 'rate_limited' | 'no_result';
 
 const STATUS_CONFIG: Record<DerivedStatus, { icon: typeof CheckCircle2; color: string; label: string; rowClass?: string }> = {
   pending:      { icon: Circle,       color: 'text-gray-400',    label: 'Pending' },
@@ -117,7 +119,8 @@ const STATUS_CONFIG: Record<DerivedStatus, { icon: typeof CheckCircle2; color: s
   excluded:     { icon: SkipForward,  color: 'text-gray-400',    label: 'Excluded' },
   skip:         { icon: SkipForward,  color: 'text-gray-400',    label: 'Skipped' },
   retry:        { icon: Loader2,      color: 'text-yellow-500',  label: 'Retrying',     rowClass: 'border-l-2 border-l-yellow-500 bg-yellow-500/5' },
-  rate_limited: { icon: Clock,        color: 'text-amber-500',   label: 'Rate limited', rowClass: 'border-l-2 border-l-amber-500 bg-amber-500/5' },
+  rate_limited: { icon: Clock,        color: 'text-warning',     label: 'Rate limited', rowClass: 'border-l-2 border-l-warning bg-warning/5' },
+  no_result:    { icon: Circle,       color: 'text-warning',     label: 'No result',    rowClass: 'border-l-2 border-l-warning bg-warning/5' },
 };
 
 const ROW_HEIGHT = 48;
@@ -415,6 +418,9 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
       {/* Main row — fixed 48px height */}
       <div
         onClick={isExpandable ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
+        data-testid={`story-row-${story.storyId}`}
+        data-story-status={story.status}
+        aria-label={`${story.storyId}: ${cfg.label}`}
         className={`flex items-center gap-2 ${indented ? 'pl-6 pr-3' : 'px-3'} h-[${ROW_HEIGHT}px] border-b border-border/50 transition-colors ${
           isExpandable || isClickable ? 'cursor-pointer hover:bg-bg/50' : ''
         } ${isFocused ? 'ring-2 ring-inset ring-accent/50 bg-accent/5' : ''}`}
@@ -478,6 +484,9 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
             <FileText size={10} />
             View Log
           </button>
+        )}
+        {story.status === 'no_result' && (
+          <span className="text-[10px] font-medium text-warning shrink-0">No result</span>
         )}
         {/* Rate limit countdown */}
         {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
@@ -800,6 +809,7 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
 type VirtualItem =
   | { type: 'story'; story: MergedStory; indented?: boolean }
   | { type: 'wave-header'; waveIndex: number; storyCount: number; waveStatus: WaveStatus; counts: { passed: number; failed: number } }
+  | { type: 'carried-header'; count: number }
   | { type: 'excluded-header'; count: number }
   | { type: 'pending-header'; count: number; source: WavePlanSource };
 
@@ -808,6 +818,7 @@ type VirtualItem =
 export default function RunStoryList({
   runId,
   walEvents,
+  runStatus,
   runState,
   resumeSummary,
   onStoryClick,
@@ -819,6 +830,11 @@ export default function RunStoryList({
   const [storyResults, setStoryResults] = useState<StoryResult[]>([]);
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [triggerWavePlan, setTriggerWavePlan] = useState<RuntimeWavePlan | null>(null);
+  const [runEvidence, setRunEvidence] = useState<{ status: string; startedAt: string | null; retriedFromRunId: number | null }>({
+    status: 'running',
+    startedAt: null,
+    retriedFromRunId: null,
+  });
   const [loading, setLoading] = useState(true);
   const [collapsedWaves, setCollapsedWaves] = useState<Set<number>>(new Set());
   const [retryingStories, setRetryingStories] = useState<Set<string>>(new Set());
@@ -888,6 +904,12 @@ export default function RunStoryList({
       }>(`/api/pipeline/runs/${runId}`);
       setStoryResults(data.stories);
       setTriggerWavePlan(extractRuntimeWavePlanFromRun(data.run));
+      const runObject = parseObject(data.run);
+      setRunEvidence({
+        status: typeof runObject?.status === 'string' ? runObject.status : 'running',
+        startedAt: typeof runObject?.started_at === 'string' ? runObject.started_at : null,
+        retriedFromRunId: typeof runObject?.retried_from_run_id === 'number' ? runObject.retried_from_run_id : null,
+      });
       if (data.specStories && data.specStories.length > 0) {
         setSpecStories(data.specStories);
       }
@@ -918,11 +940,23 @@ export default function RunStoryList({
     return map;
   }, [storyResults]);
 
+  const closeoutReconciliation = useMemo(() => reconcileRunCloseout({
+    runId,
+    persistedStatus: runStatus ?? runEvidence.status,
+    runStartedAt: runEvidence.startedAt,
+    retriedFromRunId: runEvidence.retriedFromRunId,
+    events: effectiveWalEvents,
+    storyResults,
+    specStories,
+    runState,
+  }), [runId, runStatus, runEvidence, effectiveWalEvents, storyResults, specStories, runState]);
+
   // Build SSE-derived running stories (all concurrently running in wave mode)
   // Only consider events from the current run — old story_started events from
   // previous runs for the same story_id would otherwise show stale timers.
   const runningStoryIds = useMemo(() => {
     const running = new Set<string>();
+    if (closeoutReconciliation.terminal) return running;
     for (const evt of effectiveWalEvents) {
       if (!evt.story_id) continue;
       const p = parsePayload(evt.payload);
@@ -939,7 +973,7 @@ export default function RunStoryList({
       }
     }
     return running;
-  }, [effectiveWalEvents, runId]);
+  }, [effectiveWalEvents, runId, closeoutReconciliation.terminal]);
 
   // Build SSE-derived started-at timestamps for live elapsed
   // Filter by current runId so stale timestamps from prior runs don't bleed through.
@@ -1013,6 +1047,9 @@ export default function RunStoryList({
       if (result.status === 'excluded') set.add(result.story_id);
       if (result.status === 'skip' && result.reason === 'previously_passed') set.add(result.story_id);
     }
+    for (const story of specStories) {
+      if (story.excluded) set.add(story.id);
+    }
     for (const evt of effectiveWalEvents) {
       if (!evt.story_id) continue;
       const payload = parsePayload(evt.payload);
@@ -1021,7 +1058,7 @@ export default function RunStoryList({
       if (evt.event_type === 'story_skipped' && payload?.reason === 'previously_passed') set.add(evt.story_id);
     }
     return set;
-  }, [storyResults, effectiveWalEvents, runId]);
+  }, [storyResults, specStories, effectiveWalEvents, runId]);
 
   // Canonical runtime wave evidence. The execution engine emits wave_index on
   // story_started, which is the trustworthy source for runs that already exist
@@ -1185,51 +1222,20 @@ export default function RunStoryList({
     const carriedPassed = new Map((runState?.completedStories ?? []).map((story) => [story.storyId, story]));
     const carriedFailed = new Map((runState?.failedStories ?? []).map((story) => [story.storyId, story]));
     const carriedSkipped = new Map((runState?.skippedStories ?? []).map((story) => [story.storyId, story]));
-    if (carriedPassed.size === 0 && resumeSummary?.continueFromId) {
-      const continueIndex = source.findIndex((story) => story.id === resumeSummary.continueFromId);
-      if (continueIndex > 0) {
-        for (const prior of source.slice(0, continueIndex)) {
-          carriedPassed.set(prior.id, {
-            storyId: prior.id,
-            title: prior.title,
-            status: 'passed',
-            startedAt: '',
-            finishedAt: '',
-            agentType: 'resume',
-          });
-        }
-      }
-    }
 
     return source.map((spec): MergedStory => {
       const result = resultMap.get(spec.id);
       const carriedPass = carriedPassed.get(spec.id);
       const carriedFail = carriedFailed.get(spec.id);
       const carriedSkip = carriedSkipped.get(spec.id);
-      let status: DerivedStatus = 'pending';
+      let status = (closeoutReconciliation.storyStatuses.get(spec.id) ?? 'pending') as DerivedStatus;
       let blockedBy: string[] | null = null;
 
-      if (result) {
-        if (result.status === 'pass') status = 'pass';
-        else if (result.status === 'fail') status = 'fail';
-        else if (result.status === 'skip') {
-          // Distinguish between blocked (has blocked_by) and regular skip
-          if (result.blocked_by) {
-            try { blockedBy = JSON.parse(result.blocked_by); } catch { /* ignore */ }
-          }
-          status = blockedBy ? 'blocked' : 'skip';
-        }
-        else if (result.status === 'retry') status = 'retry';
-        else status = result.status as DerivedStatus;
-      } else if (carriedPass) {
-        status = 'pass';
-      } else if (carriedFail) {
-        status = 'fail';
-      } else if (carriedSkip) {
-        status = 'skip';
-      } else if (spec.passes === true) {
-        status = 'excluded';
+      if (result?.blocked_by) {
+        try { blockedBy = JSON.parse(result.blocked_by); } catch { /* ignore */ }
       }
+      // Mutable spec pass flags are intentionally not consumed here: they are
+      // not run-scoped completion evidence.
 
       // Also check WAL events for blocked_by info if not in story_results
       if (!blockedBy && (status === 'skip' || status === 'fail')) {
@@ -1249,19 +1255,18 @@ export default function RunStoryList({
 
       // SSE override: if this story is currently rate limited
       const rlInfo = rateLimitedStories.get(spec.id);
-      if (rlInfo) {
+      if (!closeoutReconciliation.terminal && rlInfo) {
         status = 'rate_limited';
       }
 
-      // SSE override: if this story is currently running
-      if (runningStoryIds.has(spec.id) && (!result || result.status === 'retry')) {
+      // Live-only overrides may never resurrect a terminal row.
+      if (!closeoutReconciliation.terminal && runningStoryIds.has(spec.id) && (!result || result.status === 'retry')) {
         status = 'running';
-      } else if (runState?.currentStory === spec.id && !result) {
+      } else if (!closeoutReconciliation.terminal && runState?.currentStory === spec.id && !result) {
         status = 'running';
       }
 
-      // Local retry override: show as running immediately after retry button click
-      if (retryingStories.has(spec.id)) {
+      if (!closeoutReconciliation.terminal && retryingStories.has(spec.id)) {
         status = 'running';
       }
 
@@ -1272,7 +1277,7 @@ export default function RunStoryList({
         recentlyPassed: recentlyPassedStoryIds.has(spec.id),
         elapsed: result?.elapsed_seconds ?? (carriedPass?.elapsedMs != null ? Math.round(carriedPass.elapsedMs / 1000) : carriedFail?.elapsedMs != null ? Math.round(carriedFail.elapsedMs / 1000) : carriedSkip?.elapsedMs != null ? Math.round(carriedSkip.elapsedMs / 1000) : null),
         retries: result?.retries ?? carriedFail?.retries ?? carriedSkip?.retries ?? null,
-        startedAt: storyStartTimes.get(spec.id) ?? (runState?.currentStory === spec.id ? Date.parse(runState.lastUpdatedAt) : null),
+        startedAt: storyStartTimes.get(spec.id) ?? (!closeoutReconciliation.terminal && runState?.currentStory === spec.id ? Date.parse(runState.lastUpdatedAt) : null),
         rateLimitRetryAt: rlInfo?.retryAt ?? null,
         rateLimitAttempt: rlInfo?.attempt ?? null,
         blockedBy,
@@ -1283,7 +1288,7 @@ export default function RunStoryList({
         retrieval: retrievalMap.get(spec.id) ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, effectiveWalEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState, recentlyPassedStoryIds]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, effectiveWalEvents, prSyncActive, graphHitsMap, browserMcpStoryIds, retrievalMap, runState, recentlyPassedStoryIds, closeoutReconciliation]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -1377,14 +1382,16 @@ export default function RunStoryList({
 
   // Counts
   const counts = useMemo(() => {
-    let passed = 0, failed = 0, blocked = 0;
+    let passed = 0, failed = 0, blocked = 0, skipped = 0, unresolved = 0;
     const total = mergedStories.length;
     for (const s of mergedStories) {
       if (s.status === 'pass') passed++;
       else if (s.status === 'fail') failed++;
       else if (s.status === 'blocked') blocked++;
+      else if (s.status === 'skip' || s.status === 'excluded') skipped++;
+      else if (s.status === 'no_result') unresolved++;
     }
-    return { passed, failed, blocked, total };
+    return { passed, failed, blocked, skipped, unresolved, total };
   }, [mergedStories]);
 
   // CTM-004: Aggregate context usage across stories for the header summary bar.
@@ -1412,12 +1419,22 @@ export default function RunStoryList({
 
       const waveCoveredIds = new Set(waves.flatMap(w => w.storyIds));
       const uncoveredStories = mergedStories.filter(s => !waveCoveredIds.has(s.storyId));
-      const carriedForwardStories = uncoveredStories.filter(s => preRunStoryIds.has(s.storyId) || s.status === 'excluded');
-      const unassignedStories = uncoveredStories.filter(s => !preRunStoryIds.has(s.storyId) && s.status !== 'excluded');
+      const carriedForwardStories = uncoveredStories.filter(s => closeoutReconciliation.carriedForwardStoryIds.has(s.storyId));
+      const explicitlyExcludedStories = uncoveredStories.filter(s =>
+        !closeoutReconciliation.carriedForwardStoryIds.has(s.storyId) && preRunStoryIds.has(s.storyId)
+      );
+      const unassignedStories = uncoveredStories.filter(s => !preRunStoryIds.has(s.storyId));
 
       if (carriedForwardStories.length > 0) {
-        items.push({ type: 'excluded-header', count: carriedForwardStories.length });
+        items.push({ type: 'carried-header', count: carriedForwardStories.length });
         for (const story of carriedForwardStories) {
+          items.push({ type: 'story', story, indented: true });
+        }
+      }
+
+      if (explicitlyExcludedStories.length > 0) {
+        items.push({ type: 'excluded-header', count: explicitlyExcludedStories.length });
+        for (const story of explicitlyExcludedStories) {
           items.push({ type: 'story', story, indented: true });
         }
       }
@@ -1455,7 +1472,7 @@ export default function RunStoryList({
 
     // Sequential mode: flat story list
     return mergedStories.map(story => ({ type: 'story' as const, story }));
-  }, [isWaveMode, waves, waveStatuses, collapsedWaves, mergedMap, mergedStories, preRunStoryIds, activeWavePlan]);
+  }, [isWaveMode, waves, waveStatuses, collapsedWaves, mergedMap, mergedStories, preRunStoryIds, activeWavePlan, closeoutReconciliation.carriedForwardStoryIds]);
 
   // ─── Virtual scroll setup ──────────────────────────────────────────────────
 
@@ -1469,6 +1486,7 @@ export default function RunStoryList({
       if (item.type === 'story') return `story:${item.story.storyId}:${index}`;
       if (item.type === 'wave-header') return `wave:${item.waveIndex}:${index}`;
       if (item.type === 'pending-header') return `pending:${item.count}:${index}`;
+      if (item.type === 'carried-header') return `carried:${item.count}:${index}`;
       return `excluded:${item.count}:${index}`;
     },
     overscan: 10,
@@ -1683,14 +1701,24 @@ export default function RunStoryList({
                     onToggle={() => toggleWave(item.waveIndex)}
                     counts={item.counts}
                   />
+                ) : item.type === 'carried-header' ? (
+                  <div
+                    className="flex items-center gap-2 px-3 border-b border-border bg-panel/50"
+                    style={{ height: ROW_HEIGHT }}
+                  >
+                    <CheckCircle2 size={10} className="text-success" />
+                    <span className="text-[10px] font-medium text-muted">
+                      {item.count} pre-passed
+                    </span>
+                  </div>
                 ) : item.type === 'excluded-header' ? (
                   <div
                     className="flex items-center gap-2 px-3 border-b border-border bg-panel/50"
                     style={{ height: ROW_HEIGHT }}
                   >
-                    <SkipForward size={10} className="text-gray-400" />
+                    <SkipForward size={10} className="text-muted" />
                     <span className="text-[10px] font-medium text-muted">
-                      {item.count} pre-passed
+                      {item.count} excluded
                     </span>
                   </div>
                 ) : item.type === 'pending-header' ? (
@@ -1721,12 +1749,22 @@ export default function RunStoryList({
           {counts.failed} failed
         </span>
         {counts.blocked > 0 && (
-          <span className="text-[11px] font-medium text-gray-400">
+          <span className="text-[11px] font-medium text-muted">
             {counts.blocked} blocked
           </span>
         )}
+        {counts.skipped > 0 && (
+          <span className="text-[11px] font-medium text-muted">
+            {counts.skipped} skipped/excluded
+          </span>
+        )}
+        {counts.unresolved > 0 && (
+          <span className="text-[11px] font-medium text-warning">
+            {counts.unresolved} no result
+          </span>
+        )}
         <span className="text-[11px] text-muted ml-auto">
-          {counts.passed + counts.failed + counts.blocked} / {counts.total}
+          {counts.passed + counts.failed + counts.blocked + counts.skipped} / {counts.total}
         </span>
       </div>
     </div>

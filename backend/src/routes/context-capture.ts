@@ -88,8 +88,6 @@ function assertInsideWorkspace(workspacePath: string, candidatePath: string, nam
   }
 }
 
-// Retained for compatibility with the reversible bootstrap verification contract.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function assertExpectedBootstrapPath(workspacePath: string, candidatePath: string, name: string, expectedRelativePath: string): void {
   assertInsideWorkspace(workspacePath, candidatePath, name);
   const expectedPath = path.resolve(workspacePath, expectedRelativePath);
@@ -189,41 +187,6 @@ function parseCandidateId(value: unknown): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new ValidationError('candidateId must be a positive integer');
   return parsed;
-}
-
-// Compatibility parsers retained while legacy import routes remain disabled.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function parsePolicyMode(value: unknown): CapturePolicyMode {
-  return normalizeCapturePolicyMode(value, 'metadata-only');
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function parseImportVendor(value: unknown): ExternalMemoryImportVendor {
-  const vendor = assertString(value, 'vendor') as ExternalMemoryImportVendor;
-  return vendor;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function parseImportFormat(value: unknown): ExternalMemoryImportFormat | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (value === 'json' || value === 'jsonl' || value === 'markdown') return value;
-  throw new ValidationError('Invalid import format', { format: value });
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function resolveWorkspaceSourceFile(workspacePath: string, value: unknown): string | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  const raw = assertString(value, 'sourceFile');
-  const resolved = path.isAbsolute(raw) ? raw : path.resolve(workspacePath, raw);
-  assertInsideWorkspace(workspacePath, resolved, 'sourceFile');
-  return resolved;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function isCliCapturePayload(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') return false;
-  const eventType = (payload as Record<string, unknown>).eventType;
-  return eventType === 'cli_command' || eventType === 'shell_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
 }
 
 function stringValue(value: unknown): string | null {
@@ -436,18 +399,26 @@ function publish(workspaceId: string, event: Record<string, unknown>): void { br
 router.post('/bootstrap/verify', async (req, res) => {
   const workspaceId = requiredString(req.body.workspaceId, 'workspaceId');
   const workspace = await loadWorkspace(workspaceId);
-  const workspacePath = path.resolve(requiredString(req.body.workspacePath, 'workspacePath'));
-  if (workspacePath !== path.resolve(workspace.path)) throw new ValidationError('workspacePath does not match registered workspace path');
-  if (!fs.existsSync(workspacePath)) throw new ValidationError('Registered workspace path does not exist');
-  const expected = {
-    queuePath: path.join(workspacePath, '.rorca-capture-queue.jsonl'),
-    redactionConfigPath: path.join(workspacePath, '.rorca', 'capture', 'redaction.json'),
-    captureIgnorePath: path.join(workspacePath, '.rorca-captureignore'),
-  };
-  for (const [name, value] of Object.entries(expected)) {
-    if (path.resolve(requiredString(req.body[name], name)) !== path.resolve(value)) throw new ValidationError(`${name} must be ${path.relative(workspacePath, value)}`);
-  }
-  res.json({ ok: true, workspace, checks: Object.entries(expected).map(([id, value]) => ({ id, ok: true, path: value })) });
+  const registeredPath = path.resolve(requiredString(req.body.workspacePath, 'workspacePath'));
+  if (registeredPath !== path.resolve(workspace.path)) throw new ValidationError('workspacePath does not match registered workspace path');
+  if (!fs.existsSync(registeredPath)) throw new ValidationError('Registered workspace path does not exist');
+
+  const queuePath = path.resolve(requiredString(req.body.queuePath, 'queuePath'));
+  const redactionConfigPath = path.resolve(requiredString(req.body.redactionConfigPath, 'redactionConfigPath'));
+  const captureIgnorePath = path.resolve(requiredString(req.body.captureIgnorePath, 'captureIgnorePath'));
+  assertExpectedBootstrapPath(registeredPath, queuePath, 'queuePath', '.rorca-capture-queue.jsonl');
+  assertExpectedBootstrapPath(registeredPath, redactionConfigPath, 'redactionConfigPath', path.join('.rorca', 'capture', 'redaction.json'));
+  assertExpectedBootstrapPath(registeredPath, captureIgnorePath, 'captureIgnorePath', '.rorca-captureignore');
+
+  res.json({
+    ok: true,
+    workspace,
+    checks: [
+      { id: 'queuePath', ok: true, path: queuePath },
+      { id: 'redactionConfigPath', ok: true, path: redactionConfigPath },
+      { id: 'captureIgnorePath', ok: true, path: captureIgnorePath },
+    ],
+  });
 });
 
 /**

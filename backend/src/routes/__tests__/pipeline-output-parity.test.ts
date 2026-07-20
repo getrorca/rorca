@@ -150,6 +150,10 @@ async function streamOutput(runId: number): Promise<string> {
   return response.body as string;
 }
 
+function eventSequences(events: Array<Record<string, string>>): string[] {
+  return events.map((event) => event.id?.split('|').at(-1) ?? '');
+}
+
 function parseSseEvents(body: string): Array<Record<string, string>> {
   return body
     .split('\n\n')
@@ -184,7 +188,7 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     const chunkEvents = events.filter((event) => event.event === 'chunk');
     const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
 
-    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3']);
+    expect(eventSequences(chunkEvents)).toEqual(['1', '2', '3']);
     expect(replayed).toEqual(raw);
     expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"ansi-html"');
     expect(events.at(-1)?.event).toBe('done');
@@ -213,7 +217,7 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
     const text = replayed.toString('utf8');
 
-    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3']);
+    expect(eventSequences(chunkEvents)).toEqual(['1', '2', '3']);
     expect(replayed).toEqual(raw);
     expect(text).toContain('\r');
     expect(text).toContain('\x1b[2K');
@@ -249,7 +253,7 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
     const semanticLabels = semanticEvents.map((event) => JSON.parse(event.data).label);
 
-    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
+    expect(eventSequences(chunkEvents)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
     expect(replayed).toEqual(raw);
     expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"agentType":"pi"');
     expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"ansi-html"');
@@ -288,7 +292,7 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
     const text = replayed.toString('utf8');
 
-    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3']);
+    expect(eventSequences(chunkEvents)).toEqual(['1', '2', '3']);
     expect(replayed).toEqual(raw);
     expect(text).toContain('"tool":"bash"');
     expect(text).toContain('Loading 1/3\\r\\u001b[2KLoading 2/3');
@@ -317,7 +321,7 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
     const semanticLabels = semanticEvents.map((event) => JSON.parse(event.data).label);
 
-    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
+    expect(eventSequences(chunkEvents)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
     expect(replayed).toEqual(readCodexFixtureBytes());
     expect(replayed.toString('utf8')).toContain('\x1b[33mwarning\x1b[0m: fixture stderr interleave');
     expect(replayed.toString('utf8')).toContain('\r\x1b[2K');
@@ -355,7 +359,7 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
     const text = replayed.toString('utf8');
 
-    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
+    expect(eventSequences(chunkEvents)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
     expect(replayed).toEqual(raw);
     expect(text).toContain('\x1b[33mwarning\x1b[0m: fixture stderr interleave');
     expect(text).toContain('\r\x1b[2K');

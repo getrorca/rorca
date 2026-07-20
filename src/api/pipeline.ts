@@ -32,6 +32,8 @@ export interface TriggerParams extends ApiOptions {
   dryRun?: boolean;
   storyId?: string;
   forceSequential?: boolean;
+  orchestrationMode?: 'sequential' | 'wave-parallel';
+  parallelism?: number;
   terminal_mode?: TerminalMode;
 }
 
@@ -71,6 +73,8 @@ export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
       dryRun: p.dryRun,
       storyId: p.storyId,
       forceSequential: p.forceSequential,
+      orchestrationMode: p.orchestrationMode,
+      parallelism: p.parallelism,
       terminal_mode: p.terminal_mode,
     }),
     signal: p.signal,

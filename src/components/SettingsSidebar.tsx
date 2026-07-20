@@ -10,7 +10,7 @@ import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Variable, Play, Webhook, Users,
   Keyboard, ArrowLeft, ChevronRight,
-  Code2, Rss, Wallet,
+  Code2, Rss, Wallet, MonitorCog,
   type LucideIcon,
 } from 'lucide-react';
 import type { PanelId } from './Sidebar';
@@ -54,6 +54,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'providers', label: 'Providers & Models', icon: Zap    },
       { id: 'direction', label: 'Direction',           icon: Layers },
       { id: 'pipeline',  label: 'Pipeline Config',     icon: Play   },
+      { id: 'pty-recovery', label: 'PTY Recovery',      icon: MonitorCog },
     ],
   },
   {

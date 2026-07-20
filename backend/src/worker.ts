@@ -66,6 +66,7 @@ import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
+import { shouldRouteCompletedRunWorktree } from './lib/parallel-wave-core';
 import { replayFallbackResults } from './lib/fallback-replay';
 import { compareRetryPlanToPreview, retryHash, verifyRetryPreview, type RetryPreviewPacket } from './lib/retry-governance';
 import { deriveStoryContractRevision } from './lib/story-execution-packet';
@@ -84,6 +85,12 @@ import {
   registerAutonomousPrDeliveryWorker,
   resumeAutonomousDeliveryAfterRecoveryRun,
 } from './lib/autonomous-pr-delivery';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveDispatchConsistency,
+  WaveParallelPolicyError,
+  type WaveExecutionMode,
+} from './lib/wave-parallel-policy';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -406,6 +413,47 @@ async function emitWalEvent(
   }
 }
 
+async function enforceWorkerWavePolicy(input: {
+  runId: number;
+  workspaceId: string;
+  rowParallelism: number | null;
+  payloadMode: WaveExecutionMode;
+  payloadParallelism: number;
+  triggerOptions?: Record<string, unknown>;
+  source: 'worker-run' | 'worker-retry';
+}): Promise<boolean> {
+  try {
+    enforceWaveDispatchConsistency({
+      source: input.source,
+      payloadMode: input.payloadMode,
+      payloadParallelism: input.payloadParallelism,
+      rowParallelism: input.rowParallelism,
+      triggerOptions: input.triggerOptions,
+      environment: currentWaveParallelPolicyEnvironment(),
+    });
+    return true;
+  } catch (error) {
+    if (!(error instanceof WaveParallelPolicyError)) throw error;
+    logger.error({ runId: input.runId, policy: error.toJSON() }, '[worker] wave-parallel dispatch refused');
+    await execute(
+      `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'wave_parallel_policy_denied' WHERE id = $1`,
+      [input.runId],
+    );
+    await transitionRunLifecycle(input.runId, 'failed', {
+      owner: input.source,
+      process: 'wave_parallel_policy',
+      reason: error.code,
+    });
+    await emitWalEvent('run_finished', input.workspaceId, {
+      run_id: input.runId,
+      status: 'failed',
+      reason: 'wave_parallel_policy_denied',
+      policy: error.toJSON(),
+    });
+    return false;
+  }
+}
+
 async function synthesizeInterruptedStoryFailure(params: {
   runId: number;
   workspaceId: string | number;
@@ -543,7 +591,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, executionManifestPath, envOverrides, secretReferences, startFromStoryId, specificStory, includeGraph, terminalMode, executionEnvironment, orchestrationMode, parallelism: payloadParallelism, triggerOptions, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -568,6 +616,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
+    if (!await enforceWorkerWavePolicy({
+      runId,
+      workspaceId,
+      rowParallelism: parallelism,
+      payloadMode: orchestrationMode,
+      payloadParallelism,
+      triggerOptions,
+      source: 'worker-run',
+    })) return;
 
     if (worktreePath) {
       const worktreeValidation = validateReusableWorktree({
@@ -714,7 +771,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       '--run-id', String(runId),
       '--workspace-id', workspaceId,
       '--port', backendPort,
-      '--parallelism', String(parallelism ?? 1),
+      '--parallelism', String(payloadParallelism),
       '--agent', agent,
       '--terminal-mode', terminalMode,
     ];
@@ -880,6 +937,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     });
 
     child.on('close', async () => {
+      let semanticCloseoutCompleted = false;
       try {
         await flushPending();
         // The engine flushes its bounded telemetry queue before process close.
@@ -921,9 +979,16 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           source: 'worker',
         });
 
+        // A clean process exit is not yet semantic success. Keep the public run
+        // non-terminal until merge/integration routing reaches closeout; adverse
+        // process outcomes may become terminal immediately.
+        const provisionalStatus = status === 'done' ? 'running' : status;
         await execute(
-          `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
-          [status, runId],
+          `UPDATE pipeline_runs
+              SET status = $1,
+                  finished_at = CASE WHEN $1 = 'running' THEN NULL ELSE NOW() END
+            WHERE id = $2`,
+          [provisionalStatus, runId],
         );
 
         if (wasCancelled) {
@@ -932,8 +997,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             cancelledAt: new Date().toISOString(),
             source: 'worker',
           });
+          semanticCloseoutCompleted = true;
         } else {
-          await emitWalEvent('run_finished', workspaceId, {
+          // Process exit is transport evidence only. Keep it on a distinct event
+          // so completion subscribers cannot act on a provisional success before
+          // merge/integration gates establish the semantic closeout.
+          await emitWalEvent('run_process_finished', workspaceId, {
             run_id: runId,
             status,
             exit_code: code,
@@ -946,9 +1015,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
           let allSpecStoriesPassed = false;
 
-          // Check spec JSON for story completion — regardless of exit code.
-          // The engine may exit non-zero (timeout, signal) while all stories
-          // actually passed across multiple incremental runs on the same worktree.
+          // Check run-branch spec completion only to gate successful post-run
+          // routing. The engine process outcome remains closeout authority; a
+          // non-zero exit is never promoted from spec flags alone.
           if (worktreePath && payload.branchName) {
             try {
               // Completion is first established on the isolated run branch.
@@ -957,9 +1026,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
               allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
               if (allSpecStoriesPassed && status !== 'done') {
-                logger.info({ runId, specPath, completionScope: 'run_branch' }, '[worker] All stories passed on the run branch despite exit status=%s — promoting execution closeout to done', status);
-                try { await execute(`UPDATE pipeline_runs SET status = 'done' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-                status = 'done';
+                // The engine process outcome is closeout authority. A rejected
+                // wave or unresolved pending handoff deliberately exits non-zero;
+                // stale/spec-only pass flags must never promote that failure.
+                logger.error({ runId, specPath, completionScope: 'run_branch', status, code, signal }, '[worker] Refusing to promote non-zero engine closeout despite complete-looking spec state');
               }
               if (!allSpecStoriesPassed) {
                 logger.info({ runId, specPath }, '[worker] Skipping post-run routing — spec not fully complete (not all stories passed)');
@@ -980,7 +1050,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             }
           }
 
-          if (worktreePath && payload.branchName && allSpecStoriesPassed) {
+          if (worktreePath && payload.branchName && shouldRouteCompletedRunWorktree({
+            status,
+            hasWorktreePath: true,
+            hasBranchName: true,
+            allSpecStoriesPassed,
+          })) {
             const mergeLog = (msg: string) => logger.info({ runId }, msg);
 
             switch (effectiveMergeStrategy) {
@@ -1205,7 +1280,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]);
             logger.error({ runId }, '[worker] required direct merge failed; run outcome changed to failed');
           }
-          await emitWalEvent('run_closeout', workspaceId, {
+          await execute(
+            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
+            [status, runId],
+          );
+          const semanticCloseoutPayload = {
             run_id: runId,
             status,
             completion_scope: worktreePath ? (mergeStatusAtCloseout === 'merged' ? 'base_integrated' : 'run_branch') : 'base_integrated',
@@ -1213,7 +1292,18 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             branch_name: payload.branchName ?? null,
             merge_strategy: effectiveMergeStrategy,
             merge_status: mergeStatusAtCloseout,
+          };
+          await emitWalEvent('run_closeout', workspaceId, semanticCloseoutPayload);
+          // `run_finished` is the broad subscriber contract. Emit it only after
+          // authoritative closeout and with that final semantic status.
+          await emitWalEvent('run_finished', workspaceId, {
+            ...semanticCloseoutPayload,
+            exit_code: code,
+            exit_signal: signal,
+            source: 'worker',
+            semantic_closeout: true,
           });
+          semanticCloseoutCompleted = true;
 
           // A bounded CI-recovery child resumes the original reviewed-delivery
           // state machine only after its branch push/closeout is durable.
@@ -1253,6 +1343,34 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         );
       } catch (err) {
         logger.error({ err, runId }, '[worker] close handler failed');
+        if (!semanticCloseoutCompleted) {
+          try {
+            await execute(
+              `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = 'worker_closeout_failed' WHERE id = $1`,
+              [runId],
+            );
+            await transitionRunLifecycle(runId, 'failed', {
+              owner: 'worker',
+              outcome: 'failed',
+              reason: 'worker_closeout_failed',
+            });
+            const failedCloseout = {
+              run_id: runId,
+              status: 'failed',
+              reason: 'worker_closeout_failed',
+              source: 'worker',
+              semantic_closeout: true,
+            };
+            await emitWalEvent('run_closeout', workspaceId, failedCloseout);
+            await emitWalEvent('run_finished', workspaceId, failedCloseout);
+            semanticCloseoutCompleted = true;
+          } catch (closeoutErr) {
+            logger.error({ err: closeoutErr, runId }, '[worker] failed to persist fail-closed semantic closeout');
+          }
+          advanceQueue(String(workspaceId)).catch(queueErr =>
+            logger.error({ err: queueErr, runId, workspaceId }, '[worker] advanceQueue failed after closeout failure'),
+          );
+        }
       }
     });
 
@@ -1321,6 +1439,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       secretReferences,
       includeGraph,
       terminalMode: payloadTerminalMode,
+      orchestrationMode,
+      parallelism: payloadParallelism,
+      triggerOptions,
       thinkingEnabled,
       thinkingBudget,
       effortLevel,
@@ -1380,6 +1501,15 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       logger.info({ runId, previewHash }, '[worker] retry cancelled before dispatch start');
       return;
     }
+    if (!await enforceWorkerWavePolicy({
+      runId,
+      workspaceId,
+      rowParallelism: parallelism,
+      payloadMode: orchestrationMode,
+      payloadParallelism,
+      triggerOptions,
+      source: 'worker-retry',
+    })) return;
     const previewRow = await queryOne<{ status: string }>(
       `SELECT status FROM pipeline_retry_previews WHERE preview_hash = $1 AND retry_run_id = $2`,
       [previewHash, runId],
@@ -1709,7 +1839,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       '--run-id', String(runId),
       '--workspace-id', workspaceId,
       '--port', backendPort,
-      '--parallelism', String(parallelism ?? 1),
+      '--parallelism', String(payloadParallelism),
       '--agent', agent,
       '--terminal-mode', effectiveTerminalMode,
     ];

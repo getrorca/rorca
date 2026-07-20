@@ -27,6 +27,14 @@ export function normalizeTerminalMode(value: string | null | undefined): Termina
   return isTerminalMode(value) ? value : DEFAULT_TERMINAL_MODE;
 }
 
+/** Explicit operator keyboard input always selects the reviewed native PTY profile. */
+export function resolveOperatorInputTerminalMode(
+  value: string | null | undefined,
+  operatorKeyboardInput: boolean,
+): TerminalMode {
+  return operatorKeyboardInput ? 'native-pty' : normalizeTerminalMode(value);
+}
+
 export function invalidTerminalModeMessage(value: string): string {
   return `Invalid terminal_mode: ${value}. Expected one of: ${TERMINAL_MODE_VALUES.join(', ')}`;
 }
