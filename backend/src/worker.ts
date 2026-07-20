@@ -65,6 +65,7 @@ import {
   relayUnacknowledgedTrustedRunEvents,
 } from './lib/trusted-wal';
 import { advanceQueue } from './lib/run-queue';
+import { terminalizeFreshRunPreflightFailure } from './lib/worker-preflight-terminalization';
 import { validateReusableWorktree } from './lib/worktree-freshness';
 import { resolveExecutionEngineEntrypoint } from './lib/execution-engine-entrypoint';
 import {
@@ -1043,20 +1044,17 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       : /egress|broker/i.test(reasonText)
         ? 'autonomous_model_egress_preflight_failed'
         : 'worker_preflight_failed';
-    const failed = await queryOne<{ workspace_id: string }>(`
-      UPDATE pipeline_runs
-         SET status = 'failed', finished_at = NOW(), summary = $2
-       WHERE id = $1 AND status NOT IN ('done', 'failed', 'partial_failure', 'cancelled')
-       RETURNING workspace_id
-    `, [runId, reason]);
-    if (failed) {
-      await transitionRunLifecycle(runId, 'failed', {
-        owner: 'worker', process: 'fresh_run_preflight', reason,
-      });
-      await emitWalEvent('run_finished', failed.workspace_id, {
-        run_id: runId, status: 'failed', reason, source: 'worker', infra_error: true,
-      });
-    }
+    await terminalizeFreshRunPreflightFailure(runId, reason, {
+      bindFailure: (id, failureReason) => queryOne<{ workspace_id: string }>(`
+        UPDATE pipeline_runs
+           SET status = 'failed', finished_at = NOW(), summary = $2
+         WHERE id = $1 AND status NOT IN ('done', 'failed', 'partial_failure', 'cancelled')
+         RETURNING workspace_id
+      `, [id, failureReason]),
+      transition: transitionRunLifecycle,
+      emit: emitWalEvent,
+      advance: advanceQueue,
+    });
     logger.error({ runId, reason }, '[worker] Fresh pipeline run rejected before spawn and was terminalized');
   }
   if (unboundFailures.length > 0) {

@@ -14,7 +14,10 @@ const queryOne = jest.fn();
 const getAuthority = jest.fn();
 const resolveToken = jest.fn();
 
-jest.mock('../../db/index', () => ({ queryOne: (...args: unknown[]) => queryOne(...args) }));
+jest.mock('../../db/index', () => ({
+  queryOne: (...args: unknown[]) => queryOne(...args),
+  withPgAdvisoryLock: async (_key: string, operation: () => Promise<unknown>) => operation(),
+}));
 jest.mock('../github-repository-authority', () => ({
   getGithubRepositoryAuthority: (...args: unknown[]) => getAuthority(...args),
 }));

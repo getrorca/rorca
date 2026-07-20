@@ -23,5 +23,8 @@ test('Check projections freeze exact repository and App authority without rebind
   expect(sql).toContain('GITHUB_CHECK_RUN_LEGACY_AUTHORITY_UNFROZEN');
   expect(sql).not.toContain('github_workspace_repository_authority');
   expect(sql).toContain('Check Run projection repository authority is immutable');
+  expect(sql).toContain('ALTER TABLE github_pr_delivery_evidence');
+  expect(sql).toContain('github_pr_evidence_repository_authority_ck');
+  expect(sql).toContain('GitHub PR evidence repository authority is immutable');
   expect(sql).not.toMatch(/pgboss\./i);
 });

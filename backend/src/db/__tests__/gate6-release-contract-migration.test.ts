@@ -17,9 +17,13 @@ test('next unique upgrade migration truthfully replaces the historical run statu
   const files = fs.readdirSync(migrations).filter((file) => file.endsWith('.sql')).sort();
   const prefixes = files.map((file) => file.match(/^(\d+)_/)?.[1]).filter(Boolean);
   expect(new Set(prefixes).size).toBe(prefixes.length);
-  expect(files.indexOf('20260718170000_gate6_release_contract.sql')).toBeGreaterThan(
-    files.indexOf('20260718140000_story_result_authority_and_github_projection.sql'),
-  );
+  const gate6Index = files.indexOf('20260718170000_gate6_release_contract.sql');
+  expect(gate6Index).toBeGreaterThan(files.indexOf('20260718140000_story_result_authority_and_github_projection.sql'));
+  for (const later of [
+    '20260719090000_pty_recovery_operations.sql',
+    '20260720090000_github_check_projection_authority.sql',
+    '20260720110000_pty_archive_health_authority.sql',
+  ]) expect(files.indexOf(later)).toBeGreaterThan(gate6Index);
   expect(init).not.toContain("'release_pending'");
   expect(releaseSource).toContain("status = CASE WHEN status = 'done' THEN status ELSE 'release_pending' END");
   expect(sql).toContain('DROP CONSTRAINT IF EXISTS pipeline_runs_status_check');
@@ -28,6 +32,15 @@ test('next unique upgrade migration truthfully replaces the historical run statu
   expect(sql).not.toMatch(/pgboss\./i);
   expect(sql).toContain('"actions":"read"');
   expect(sql).not.toContain('"actions":"write"');
+
+  const effectiveDefinitions = files.flatMap((file) => {
+    const source = fs.readFileSync(path.join(migrations, file), 'utf8');
+    return source.includes('ADD CONSTRAINT pipeline_runs_status_check') ? [{ file, source }] : [];
+  });
+  expect(effectiveDefinitions).toHaveLength(1);
+  expect(effectiveDefinitions[0]?.file).toBe('20260718170000_gate6_release_contract.sql');
+  expect(effectiveDefinitions[0]?.source).toContain("'release_pending'");
+  expect(effectiveDefinitions[0]?.source).toContain("'pi_native'");
 });
 
 test('migration freezes exact direct base, integration checkout, and unique provider release ref', () => {

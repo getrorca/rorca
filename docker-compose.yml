@@ -49,6 +49,9 @@ services:
       RORCA_AUTONOMOUS_ISOLATION: linux-bwrap
       RORCA_BWRAP_BIN: /usr/bin/bwrap
       RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS: ${RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS:-api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com}
+      RORCA_PTY_ARCHIVE_ROOT: /data/rorca/pty-archives
+    volumes:
+      - rorca_pty_archives:/data/rorca/pty-archives
     env_file:
       - path: .env
         required: false
@@ -97,6 +100,9 @@ services:
       # namespace has no direct interface/default route and cannot reach DB,
       # GitHub, localhost, or the Rorca control plane.
       RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS: ${RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS:-api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com}
+      RORCA_PTY_ARCHIVE_ROOT: /data/rorca/pty-archives
+    volumes:
+      - rorca_pty_archives:/data/rorca/pty-archives
     env_file:
       - path: .env
         required: false
@@ -126,4 +132,6 @@ services:
 
 volumes:
   rorca_pgdata:
+    driver: local
+  rorca_pty_archives:
     driver: local

@@ -1512,6 +1512,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           ptyUnavailableHint,
           ptyGenerationId: typeof nextGenerationId === 'string' ? nextGenerationId : null,
           evidenceGenerationId: typeof nextEvidenceGenerationId === 'string' ? nextEvidenceGenerationId : null,
+          // This flag also represents a live structured non-PTY evidence
+          // generation; RunTranscript uses it to poll newly arriving events.
+          ptyGenerationActive: generationIsActive,
           transcriptAvailable: meta.transcriptAvailable ?? meta.transcript_available ?? false,
           archiveAvailable: meta.archiveAvailable ?? meta.archive_available ?? false,
           expectedMaxLatencyMs: meta.ptyExpectedMaxLatencyMs ?? meta.pty_expected_max_latency_ms ?? null,

@@ -203,6 +203,22 @@ function getPool(): Pool {
   return _pool;
 }
 
+/**
+ * Cross-process/container cooperative authority fence. All provider actuators and
+ * authority replacement paths must use the same stable workspace-scoped key.
+ */
+export async function withPgAdvisoryLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  await ensureMigrations();
+  const client = await getPool().connect();
+  try {
+    await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [key]);
+    return await operation();
+  } finally {
+    try { await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [key]); }
+    finally { client.release(); }
+  }
+}
+
 /** Reserved for WAL ingestion and readiness so application pool pressure cannot starve them. */
 function getOperationalPool(): Pool {
   if (configuredPoolSizes().operational === 0) return getPool();

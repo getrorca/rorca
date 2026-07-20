@@ -542,6 +542,33 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
     expect(mockBoss.send).not.toHaveBeenCalled();
   });
 
+  test('rejects explicit local-user before workspace, reservation, artifact, or queue mutation', async () => {
+    const app = makeApp();
+    const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;
+    const execution = manifest.execution as JsonRecord;
+    execution.executionEnvironment = 'local-user';
+    execution.executionEnvironmentId = 'missing-local-bridge';
+    mockQuery.mockClear();
+    mockQueryOne.mockClear();
+    mockExecute.mockClear();
+    mockBoss.send.mockClear();
+
+    const response = await request(app).post('/api/pipeline/task-manifests/trigger').send({
+      workspaceId: 'ws-hermes', idempotencyKey: manifest.idempotencyKey, manifest,
+      executionEnvironment: 'local-user', executionEnvironmentId: 'missing-local-bridge',
+      autoWorktree: true, mergeStrategy: 'draft-pr',
+    });
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(mockAssertExecutionEnvironmentReadyForRun).not.toHaveBeenCalled();
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockQueryOne).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(taskManifestReservations).toHaveLength(0);
+    expect(pipelineRunInserts).toHaveLength(0);
+    expect(mockBoss.send).not.toHaveBeenCalled();
+  });
+
   test('accepts a Hermes manifest without optional executionEnvironment fields', async () => {
     const app = makeApp();
     const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;

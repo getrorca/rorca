@@ -20,6 +20,7 @@ jest.mock('../../db/index', () => ({
   query: (...args: unknown[]) => query(...args),
   execute: (...args: unknown[]) => execute(...args),
   transaction: (...args: unknown[]) => transaction(...args),
+  withPgAdvisoryLock: async (_key: string, operation: () => Promise<unknown>) => operation(),
 }));
 jest.mock('child_process', () => ({
   execSync: jest.fn(() => `${'b'.repeat(40)}\n`),

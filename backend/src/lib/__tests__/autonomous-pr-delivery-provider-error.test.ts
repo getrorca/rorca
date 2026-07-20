@@ -209,14 +209,16 @@ describe('autonomous exact-SHA merge provider errors', () => {
     const mergeFailureBodyRead = jest.spyOn(mergeFailureResponse, 'json');
     const fetchMock = jest.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
+        number: 42, html_url: evidence.pullRequest.url,
         state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: 'clean',
-        head: { sha: headSha, ref: 'rorca/release/run-42-aaaaaaaaaaaa' },
-        base: { sha: baseSha, ref: delivery.base_branch },
+        head: { sha: headSha, ref: 'rorca/release/run-42-aaaaaaaaaaaa', repo: { full_name: 'getrorca/rorca' } },
+        base: { sha: baseSha, ref: delivery.base_branch, repo: { full_name: 'getrorca/rorca' } },
       }), { status: 200, headers: { 'content-type': 'application/json' } }))
       .mockResolvedValueOnce(mergeFailureResponse)
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        merged: false,
-        head: { sha: headSha },
+        number: 42, html_url: evidence.pullRequest.url, state: 'open', draft: false, merged: false,
+        head: { sha: headSha, ref: evidence.pullRequest.headRef, repo: { full_name: 'getrorca/rorca' } },
+        base: { sha: baseSha, ref: evidence.pullRequest.baseRef, repo: { full_name: 'getrorca/rorca' } },
       }), { status: 200, headers: { 'content-type': 'application/json' } }));
     global.fetch = fetchMock as typeof fetch;
 

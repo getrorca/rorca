@@ -5,6 +5,10 @@
  * See LICENSE file in the project root for full license text.
  */
 
+jest.mock('../../db/index', () => ({
+  withPgAdvisoryLock: async (_key: string, operation: () => Promise<unknown>) => operation(),
+}));
+
 import { normalizedSha, observeGithubPrDeliveryEvidence } from '../github-pr-delivery-evidence';
 
 const headSha = 'a'.repeat(40);
@@ -60,6 +64,7 @@ function runRow(overrides: Record<string, unknown> = {}) {
     repo_owner: 'getrorca',
     repo_name: 'rorca',
     release_base_branch: 'main',
+    release_base_sha: baseSha,
     release_head_ref: providerReleaseRef,
     release_authorized_sha: headSha,
     repository_authority_source: 'pat-oauth-fallback',

@@ -387,17 +387,19 @@ export async function acceptCheckRunWalEvent(event: WalEvent): Promise<number | 
       || !['starting', 'pty_attached', 'running'].includes(authorized.run.lifecycleStatus)) return null;
     const headSha = await resolveBranchHead(authorized.run.id, authorized.run.workspaceId);
     if (!isFullGitObjectId(headSha)) return null;
-    const authority = await resolveProjectionAuthority(authorized.run.workspaceId, authorized.run.id, headSha);
-    await persistDesiredProjection({
-      event,
-      runId: authorized.run.id,
-      workspaceId: authorized.run.workspaceId,
-      specId: authorized.run.specId,
-      state: 'in_progress',
-      headSha: headSha.toLowerCase(),
-      conclusion: null,
-      payload: startedPayload(authorized.run.id),
-      authority,
+    await withGithubRepositoryAuthorityLock(authorized.run.workspaceId, '', '', async () => {
+      const authority = await resolveProjectionAuthority(authorized.run.workspaceId, authorized.run.id, headSha);
+      await persistDesiredProjection({
+        event,
+        runId: authorized.run.id,
+        workspaceId: authorized.run.workspaceId,
+        specId: authorized.run.specId,
+        state: 'in_progress',
+        headSha: headSha.toLowerCase(),
+        conclusion: null,
+        payload: startedPayload(authorized.run.id),
+        authority,
+      });
     });
     return authorized.run.id;
   }
@@ -413,17 +415,19 @@ export async function acceptCheckRunWalEvent(event: WalEvent): Promise<number | 
   const localHead = complete.finalCommitSha
     ?? await resolveBranchHead(complete.run.id, complete.run.workspaceId);
   if (!isFullGitObjectId(localHead)) return null;
-  const authority = await resolveProjectionAuthority(complete.run.workspaceId, complete.run.id, localHead);
-  await persistDesiredProjection({
-    event,
-    runId: complete.run.id,
-    workspaceId: complete.run.workspaceId,
-    specId: complete.run.specId,
-    state: 'completed',
-    headSha: localHead.toLowerCase(),
-    conclusion,
-    payload: terminalPayload(complete, conclusion),
-    authority,
+  await withGithubRepositoryAuthorityLock(complete.run.workspaceId, '', '', async () => {
+    const authority = await resolveProjectionAuthority(complete.run.workspaceId, complete.run.id, localHead);
+    await persistDesiredProjection({
+      event,
+      runId: complete.run.id,
+      workspaceId: complete.run.workspaceId,
+      specId: complete.run.specId,
+      state: 'completed',
+      headSha: localHead.toLowerCase(),
+      conclusion,
+      payload: terminalPayload(complete, conclusion),
+      authority,
+    });
   });
   return complete.run.id;
 }

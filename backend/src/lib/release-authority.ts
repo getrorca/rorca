@@ -281,6 +281,16 @@ export async function prepareRunReleaseIntent(input: PrepareRunReleaseInput): Pr
   await withRunReleaseLock(exact, async () => {
     await revalidateRunReleaseIdentity(exact);
     if (canonicalRepository && repository) {
+      const lockedAuthority = await getGithubRepositoryAuthority(authority.workspaceId, { requireActive: true });
+      if (!lockedAuthority
+        || lockedAuthority.owner.toLowerCase() !== repository.owner.toLowerCase()
+        || lockedAuthority.name.toLowerCase() !== repository.name.toLowerCase()
+        || lockedAuthority.source !== repository.source
+        || (lockedAuthority.bindingId ?? null) !== (repository.bindingId ?? null)
+        || Number(lockedAuthority.installationId ?? 0) !== Number(repository.installationId ?? 0)
+        || Number(lockedAuthority.repositoryId ?? 0) !== Number(repository.repositoryId ?? 0)) {
+        throw new Error('canonical repository authority changed before release intent freeze');
+      }
       const credential = await resolveWorkspaceGitHubToken(authority.workspaceId, {
         repository: { owner: canonicalRepository.owner, name: canonicalRepository.name },
         purpose: 'repository-read',
@@ -417,7 +427,8 @@ function assertCanonicalPullRequest(
   if (pr.number !== expectedNumber
     || pr.html_url !== `https://github.com/${authority.owner}/${authority.name}/pull/${expectedNumber}`
     || pr.state !== 'open'
-    || Boolean(pr.draft) !== draft
+    || typeof pr.draft !== 'boolean'
+    || pr.draft !== draft
     || pr.head?.sha?.toLowerCase() !== exact.authorizedSha
     || pr.head?.ref !== exact.providerReleaseRef
     || pr.head?.repo?.full_name?.toLowerCase() !== fullName

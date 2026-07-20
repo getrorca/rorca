@@ -469,9 +469,11 @@ router.post('/:id/github/app/bind', requireProviderMutationAuthority, requireWor
       const record = found.rows[0];
       if (!record || record.registration_id !== registration.id || Number(record.installation_id) !== installationId) throw new ConflictError('Installation identity conflicts with the active App registration');
       if (current) {
-        await client.query(`UPDATE github_app_workspace_bindings SET status = 'disabled', superseded_at = NOW(), superseded_by_principal = $2,
-          replacement_reason = $3, validation_error_code = 'superseded', status_changed_at = NOW() WHERE id = $1 AND superseded_at IS NULL`,
-          [current.bindingId, principal, replacementReason]);
+        const superseded = await client.query<{ id: string }>(`UPDATE github_app_workspace_bindings SET status = 'disabled', superseded_at = NOW(), superseded_by_principal = $2,
+          replacement_reason = $3, validation_error_code = 'superseded', status_changed_at = NOW()
+          WHERE id = $1 AND workspace_id = $4 AND superseded_at IS NULL AND status = 'active'
+          RETURNING id`, [current.bindingId, principal, replacementReason, workspaceId]);
+        if (superseded.rowCount !== 1) throw new ConflictError('Current GitHub App binding changed before replacement could be committed');
       }
       await client.query(`INSERT INTO github_app_workspace_bindings
         (id, workspace_id, registration_id, installation_record_id, installation_id, repository_id, repo_owner, repo_name,

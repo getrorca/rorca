@@ -11,7 +11,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { queryOne } from '../db/index';
+import { queryOne, withPgAdvisoryLock } from '../db/index';
 import { assertCanonicalRunCheckout } from './run-git-authority';
 import {
   getGithubRepositoryAuthority,
@@ -149,24 +149,26 @@ export async function withGithubRepositoryAuthorityLock<T>(
   name: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const key = `authority:${workspaceId}:${owner.toLowerCase()}/${name.toLowerCase()}`;
-  const target = path.join(os.tmpdir(), `rorca-release-${crypto.createHash('sha256').update(key).digest('hex')}.lock`);
-  const release = await acquireTarget(target, { runId: 0 } as RunReleaseIdentity);
-  try { return await operation(); }
-  finally { release(); }
+  // Workspace scope deliberately excludes owner/name: repository replacement
+  // A→B must serialize with A's in-flight provider actuation across API/worker containers.
+  void owner;
+  void name;
+  return withPgAdvisoryLock(`github-authority:${workspaceId}`, operation);
 }
 
 export async function withRunReleaseLock<T>(
   identity: RunReleaseIdentity,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const releases: Array<() => void> = [];
-  try {
-    for (const target of lockPaths(identity)) releases.push(await acquireTarget(target, identity));
-    return await operation();
-  } finally {
-    for (const release of releases.reverse()) release();
-  }
+  return withPgAdvisoryLock(`github-authority:${identity.workspaceId}`, async () => {
+    const releases: Array<() => void> = [];
+    try {
+      for (const target of lockPaths(identity)) releases.push(await acquireTarget(target, identity));
+      return await operation();
+    } finally {
+      for (const release of releases.reverse()) release();
+    }
+  });
 }
 
 /** Re-read DB paths and prove the exact canonical branch/HEAD while locked. */
@@ -231,11 +233,7 @@ export async function withGithubReleaseActuation<T>(
   return withRunReleaseLock(identity, async () => {
     await revalidateRunReleaseIdentity(identity);
     if (!identity.repository) throw new Error('release has no frozen repository authority');
-    return withGithubRepositoryAuthorityLock(
-      identity.workspaceId,
-      identity.repository.owner,
-      identity.repository.name,
-      async () => {
+    {
         const authority = await getGithubRepositoryAuthority(identity.workspaceId, {
           requireActive: true,
           expectedRepository: identity.repository!,
@@ -266,7 +264,6 @@ export async function withGithubReleaseActuation<T>(
         }
         await revalidateRunReleaseIdentity(identity);
         return actuator({ identity, authority: postTokenAuthority, credential });
-      },
-    );
+    }
   });
 }

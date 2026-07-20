@@ -225,16 +225,12 @@ function maskWorkspaceCredentialFiles(args: string[], cwd: string): void {
         candidates.push(candidate);
         continue;
       }
-      if (entry.isDirectory() && !['.git', 'node_modules', 'dist', 'build', '.next'].includes(entry.name)) {
-        stack.push(candidate);
-      }
+      // Git metadata is separately excluded by the sandbox mount plan. Every
+      // other subtree is inventoried; credential-shaped files in build output
+      // or dependencies are not trusted merely because of their directory name.
+      if (entry.isDirectory() && entry.name !== '.git') stack.push(candidate);
     }
   }
-  // Restricted raw PTY evidence belongs to the trusted host writer. Hide the
-  // host archive behind an isolated tmpfs whenever it already exists before
-  // the model namespace is created.
-  const rawArchive = path.join(cwd, '.rorca', 'pty-archives');
-  if (fs.existsSync(rawArchive)) candidates.push(rawArchive);
   for (const candidate of [...new Set(candidates)]) {
     const stat = fs.lstatSync(candidate);
     if (stat.isSymbolicLink()) throw new Error('Autonomous workspace credential/archive path cannot be a symbolic link');
@@ -342,15 +338,19 @@ function runBoundaryProbe(cwd: string, env: NodeJS.ProcessEnv): void {
   const sentinel = path.join(sentinelRoot, 'credentials');
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sandbox-worktree-'));
   const workspaceCredential = path.join(probeRoot, '.env');
+  const nestedCredential = path.join(probeRoot, 'node_modules', 'fixture', '.env.local');
+  fs.mkdirSync(path.dirname(nestedCredential), { recursive: true });
   fs.writeFileSync(sentinel, 'must-not-be-readable', { mode: 0o600 });
   fs.writeFileSync(workspaceCredential, 'must-not-be-readable', { mode: 0o600 });
+  fs.writeFileSync(nestedCredential, 'must-not-be-readable', { mode: 0o600 });
   const script = String.raw`
 const fs=require('fs'),net=require('net'),cp=require('child_process');
-const sentinel=process.argv[1],workspaceCredential=process.argv[2],tools=JSON.parse(process.argv[3]);
+const sentinel=process.argv[1],workspaceCredential=process.argv[2],nestedCredential=process.argv[3],tools=JSON.parse(process.argv[4]);
 const ancestorMarker=Buffer.from('RORCA_ANCESTOR_SECRET_PROBE=');
 for(const pid of fs.readdirSync('/proc').filter(v=>/^\d+$/.test(v))){try{if(fs.readFileSync('/proc/'+pid+'/environ').includes(ancestorMarker))process.exit(41)}catch{}}
 try{fs.readFileSync(sentinel);process.exit(42)}catch{}
 try{fs.readFileSync(workspaceCredential);process.exit(45)}catch{}
+try{fs.readFileSync(nestedCredential);process.exit(46)}catch{}
 for(const tool of tools){const r=cp.spawnSync(tool,['--version'],{encoding:'utf8'});if(r.status!==0)process.exit(43)}
 function denied(host,port){return new Promise((resolve,reject)=>{const s=net.connect({host,port});const t=setTimeout(()=>{s.destroy();reject(new Error('socket timeout'))},500);s.once('connect',()=>{clearTimeout(t);s.destroy();reject(new Error('socket connected'))});s.once('error',()=>{clearTimeout(t);resolve()})})}
 Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>process.exit(0),()=>process.exit(44));`;
@@ -371,7 +371,7 @@ Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>proc
       return tool;
     });
     const node = tools[0];
-    const probeArgs = ['-e', script, sentinel, workspaceCredential, JSON.stringify(tools)];
+    const probeArgs = ['-e', script, sentinel, workspaceCredential, nestedCredential, JSON.stringify(tools)];
     const launch = prepareAutonomousSandboxLaunch({
       command: node,
       args: probeArgs,

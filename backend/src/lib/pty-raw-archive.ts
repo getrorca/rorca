@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { gunzipSync, gzipSync } from 'zlib';
@@ -22,7 +23,23 @@ import { recordPtyByteTelemetry } from './pty-operational-telemetry';
 import type { PtyGenerationRef } from './run-pty-store';
 
 export const PTY_RAW_ARCHIVE_CONTRACT_VERSION = 1 as const;
-export const PTY_RAW_ARCHIVE_ROOT = path.join('.rorca', 'pty-archives');
+export const PTY_RAW_ARCHIVE_ROOT = '/data/rorca/pty-archives';
+
+function serviceArchiveRoot(): string {
+  const configured = process.env.RORCA_PTY_ARCHIVE_ROOT?.trim() || PTY_RAW_ARCHIVE_ROOT;
+  if (!path.isAbsolute(configured)) throw new RawArchiveWriteError('RORCA_PTY_ARCHIVE_ROOT must be absolute service-owned storage');
+  const resolved = path.resolve(configured);
+  if (fs.existsSync(resolved)) {
+    const stat = fs.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new RawArchiveWriteError('RORCA_PTY_ARCHIVE_ROOT must be a trusted real directory');
+  }
+  return resolved;
+}
+
+function workspaceArchiveRoot(workspaceId: string): string {
+  const key = crypto.createHash('sha256').update(workspaceId).digest('hex');
+  return path.join(serviceArchiveRoot(), key);
+}
 const DEFAULT_SEGMENT_MAX_RAW_BYTES = 8 * 1024 * 1024;
 const DEFAULT_RAW_ARCHIVE_RETENTION_DAYS = 30;
 const MIN_SEGMENT_BYTES = 4 * 1024;
@@ -113,6 +130,7 @@ export interface VerifiedRawArchive extends RawArchiveManifest {
 }
 
 interface PendingSegment {
+  fd: number;
   segmentIndex: number;
   relativePath: string;
   absolutePath: string;
@@ -155,11 +173,25 @@ export function resolveRawArchiveSegmentPath(
   segmentRelativePath: string,
   requireExisting = true,
 ): string {
-  const workspaceRoot = path.resolve(workspacePath);
-  const archiveRoot = path.resolve(workspaceRoot, archiveRootRelative);
-  const workspaceRelative = path.relative(workspaceRoot, archiveRoot);
-  if (workspaceRelative.startsWith('..') || path.isAbsolute(workspaceRelative)) {
-    throw new ForbiddenError('Raw archive root escapes its workspace');
+  void workspacePath;
+  const serviceRoot = serviceArchiveRoot();
+  const archiveRoot = path.resolve(archiveRootRelative);
+  const serviceRelative = path.relative(serviceRoot, archiveRoot);
+  if (!serviceRelative || serviceRelative.startsWith('..') || path.isAbsolute(serviceRelative)) {
+    throw new ForbiddenError('Raw archive root is outside service-owned storage');
+  }
+  try {
+    const archiveRootStat = fs.lstatSync(archiveRoot);
+    const realServiceRoot = fs.realpathSync(serviceRoot);
+    const realArchiveRoot = fs.realpathSync(archiveRoot);
+    const realServiceRelative = path.relative(realServiceRoot, realArchiveRoot);
+    if (archiveRootStat.isSymbolicLink() || !archiveRootStat.isDirectory()
+      || !realServiceRelative || realServiceRelative.startsWith('..') || path.isAbsolute(realServiceRelative)) {
+      throw new ForbiddenError('Raw archive root is not a contained real service directory');
+    }
+  } catch (error) {
+    if (error instanceof ForbiddenError) throw error;
+    throw new RawArchiveIntegrityError('Raw archive root is unavailable');
   }
 
   const candidate = path.resolve(archiveRoot, segmentRelativePath);
@@ -277,14 +309,21 @@ async function listSegmentRows(manifestId: string): Promise<ArchiveSegmentRow[]>
 }
 
 async function persistCompleteSegment(manifest: ArchiveManifestRow, segment: PendingSegment): Promise<void> {
-  const readFd = fs.openSync(segment.absolutePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  let compressed: Buffer;
-  try { compressed = fs.readFileSync(readFd); }
-  finally { fs.closeSync(readFd); }
-  const compressedSize = compressed.length;
-  const digest = hashContent(compressed);
-  const rawSize = segment.rawEnd - segment.rawStart;
-  await transaction(async (client) => {
+  try {
+    const stat = fs.fstatSync(segment.fd);
+    const pathStat = fs.lstatSync(segment.absolutePath);
+    if (!stat.isFile() || !pathStat.isFile() || pathStat.isSymbolicLink()
+      || stat.dev !== pathStat.dev || stat.ino !== pathStat.ino) {
+      throw new RawArchiveWriteError('Raw PTY archive segment path no longer identifies its retained descriptor');
+    }
+    const compressed = Buffer.alloc(stat.size);
+    if (stat.size > 0 && fs.readSync(segment.fd, compressed, 0, stat.size, 0) !== stat.size) {
+      throw new RawArchiveWriteError('Raw PTY archive segment descriptor could not be read completely');
+    }
+    const compressedSize = compressed.length;
+    const digest = hashContent(compressed);
+    const rawSize = segment.rawEnd - segment.rawStart;
+    await transaction(async (client) => {
     await client.query(
       `INSERT INTO pty_raw_archive_segments
         (manifest_id, generation_id, segment_index, relative_path, raw_start, raw_end,
@@ -305,13 +344,16 @@ async function persistCompleteSegment(manifest: ArchiveManifestRow, segment: Pen
        WHERE id = $1`,
       [manifest.id, segment.rawEnd],
     );
-  });
-  recordPtyByteTelemetry(
-    { generationId: manifest.generation_id, runId: Number(manifest.run_id), storyId: manifest.story_id },
-    'archived',
-    'archive',
-    rawSize,
-  );
+    });
+    recordPtyByteTelemetry(
+      { generationId: manifest.generation_id, runId: Number(manifest.run_id), storyId: manifest.story_id },
+      'archived',
+      'archive',
+      rawSize,
+    );
+  } finally {
+    fs.closeSync(segment.fd);
+  }
 }
 
 /** Exact synchronous file writes plus serialized asynchronous manifest commits. */
@@ -349,12 +391,7 @@ export class RawPtyArchiveWriter {
         const slice = bytes.subarray(offset, offset + take);
         // Each append is a complete gzip member. Concatenated members preserve
         // exact byte order and remain standards-compliant gzip streams.
-        const appendFd = fs.openSync(
-          this.current.absolutePath,
-          fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
-        );
-        try { fs.writeSync(appendFd, gzipSync(slice, { level: 6 })); }
-        finally { fs.closeSync(appendFd); }
+        fs.writeSync(this.current.fd, gzipSync(slice, { level: 6 }));
         this.current.rawEnd += slice.length;
         this.rawOffset += slice.length;
         offset += slice.length;
@@ -363,12 +400,17 @@ export class RawPtyArchiveWriter {
         }
       }
     } catch (error) {
+      const failedSegmentIndex = this.current?.segmentIndex;
+      if (this.current) {
+        try { fs.closeSync(this.current.fd); } catch { /* descriptor already closed */ }
+        this.current = null;
+      }
       this.failure = error instanceof RawArchiveWriteError
         ? error
         : new RawArchiveWriteError(undefined, {
             runId: Number(this.manifest.run_id),
             generationId: this.manifest.generation_id,
-            segmentIndex: this.current?.segmentIndex,
+            segmentIndex: failedSegmentIndex,
           });
       void this.markFailed(this.failure);
       throw this.failure;
@@ -387,13 +429,20 @@ export class RawPtyArchiveWriter {
       await this.markFailed(this.failure);
       throw this.failure;
     }
-    await execute(
-      `UPDATE pty_raw_archive_manifests
-       SET next_raw_offset = $2, completion_state = 'complete', completed_at = NOW(),
-           failure_code = NULL, failure_message = NULL, updated_at = NOW()
-       WHERE id = $1 AND completion_state <> 'pruned'`,
-      [this.manifest.id, this.rawOffset],
-    );
+    try {
+      await execute(
+        `UPDATE pty_raw_archive_manifests
+         SET next_raw_offset = $2, completion_state = 'complete', completed_at = NOW(),
+             failure_code = NULL, failure_message = NULL, updated_at = NOW()
+         WHERE id = $1 AND completion_state <> 'pruned'`,
+        [this.manifest.id, this.rawOffset],
+      );
+      await execute(`UPDATE pty_generations SET raw_archive_failure_code = NULL, raw_archive_failure_at = NULL WHERE id = $1`, [this.manifest.generation_id]);
+    } catch (error) {
+      const failure = new RawArchiveWriteError('Raw PTY archive finalization failed', { runId: Number(this.manifest.run_id), generationId: this.manifest.generation_id });
+      await this.markFailed(failure);
+      throw failure;
+    }
   }
 
   private createSegment(): PendingSegment {
@@ -412,11 +461,11 @@ export class RawPtyArchiveWriter {
     // Exclusive creation prevents a resumed writer from overwriting evidence.
     const fd = fs.openSync(
       absolutePath,
-      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
       0o600,
     );
-    fs.closeSync(fd);
     return {
+      fd,
       segmentIndex,
       relativePath,
       absolutePath,
@@ -446,11 +495,16 @@ export class RawPtyArchiveWriter {
 
   private async markFailed(error: RawArchiveWriteError): Promise<void> {
     try {
+      const failureCode = error.code ?? 'RAW_ARCHIVE_WRITE_FAILED';
       await execute(
         `UPDATE pty_raw_archive_manifests
          SET completion_state = 'failed', failure_code = $2, failure_message = $3,
              updated_at = NOW() WHERE id = $1 AND completion_state <> 'pruned'`,
-        [this.manifest.id, error.code ?? 'RAW_ARCHIVE_WRITE_FAILED', error.message.slice(0, 1000)],
+        [this.manifest.id, failureCode, error.message.slice(0, 1000)],
+      );
+      await execute(
+        `UPDATE pty_generations SET raw_archive_failure_code = $2, raw_archive_failure_at = NOW() WHERE id = $1 AND raw_archive_expected = TRUE`,
+        [this.manifest.generation_id, failureCode],
       );
     } catch (manifestError) {
       logger.error({ error: manifestError, manifestId: this.manifest.id }, '[pty-archive] unable to persist archive failure state');
@@ -458,22 +512,31 @@ export class RawPtyArchiveWriter {
   }
 }
 
-function ensureSecureArchiveGenerationDirectory(workspacePath: string, archiveRootRelative: string, generationId: string): string {
-  const workspaceRoot = fs.realpathSync(workspacePath);
-  let current = workspaceRoot;
-  for (const part of [...archiveRootRelative.split(/[\\/]/).filter(Boolean), generationId]) {
+function ensureSecureArchiveGenerationDirectory(archiveRoot: string, generationId: string): string {
+  const serviceRoot = serviceArchiveRoot();
+  fs.mkdirSync(serviceRoot, { recursive: true, mode: 0o700 });
+  const relativeRoot = path.relative(serviceRoot, archiveRoot);
+  if (!relativeRoot || relativeRoot.startsWith('..') || path.isAbsolute(relativeRoot)) {
+    throw new RawArchiveWriteError('Raw PTY archive root is outside service-owned storage');
+  }
+  let current = serviceRoot;
+  for (const part of [...relativeRoot.split(path.sep).filter(Boolean), generationId]) {
     current = path.join(current, part);
     if (!fs.existsSync(current)) fs.mkdirSync(current, { mode: 0o700 });
     const stat = fs.lstatSync(current);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new RawArchiveWriteError('Raw PTY archive directory is not a trusted real directory');
-    }
-    const relative = path.relative(workspaceRoot, fs.realpathSync(current));
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      throw new RawArchiveWriteError('Raw PTY archive directory escapes its workspace');
-    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new RawArchiveWriteError('Raw PTY archive directory is not a trusted real directory');
+    const relative = path.relative(fs.realpathSync(serviceRoot), fs.realpathSync(current));
+    if (relative.startsWith('..') || path.isAbsolute(relative)) throw new RawArchiveWriteError('Raw PTY archive directory escapes service-owned storage');
   }
   return current;
+}
+
+async function markGenerationArchiveFailure(generationId: string, code: string): Promise<void> {
+  await execute(
+    `UPDATE pty_generations SET raw_archive_failure_code = $2, raw_archive_failure_at = NOW()
+     WHERE id = $1 AND raw_archive_expected = TRUE`,
+    [generationId, code],
+  );
 }
 
 /** Create or safely resume a generation archive after reconciling prior files. */
@@ -492,23 +555,50 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
   if (!identity) throw new ConflictError('PTY generation identity is stale or mismatched');
   if (!identity.is_active) throw new ConflictError('Cannot open a raw archive writer for a closed PTY generation');
 
-  ensureSecureArchiveGenerationDirectory(identity.workspace_path, PTY_RAW_ARCHIVE_ROOT, generation.generationId);
+  const archiveRoot = workspaceArchiveRoot(identity.workspace_id);
+  await execute(
+    `UPDATE pty_generations
+     SET raw_archive_expected = TRUE, raw_archive_storage_scope = 'service-owned',
+         raw_archive_failure_code = NULL, raw_archive_failure_at = NULL
+     WHERE id = $1 AND run_id = $2 AND generation_token = $3`,
+    [generation.generationId, generation.runId, generation.generationToken],
+  );
+  try {
+    ensureSecureArchiveGenerationDirectory(archiveRoot, generation.generationId);
+  } catch (error) {
+    await markGenerationArchiveFailure(generation.generationId, 'RAW_ARCHIVE_INITIALIZATION_FAILED');
+    throw error;
+  }
   const retentionDays = getRawArchiveRetentionDays();
-  const rows = await query<ArchiveManifestRow>(
+  let rows: ArchiveManifestRow[];
+  try {
+    rows = await query<ArchiveManifestRow>(
     `INSERT INTO pty_raw_archive_manifests
       (generation_id, run_id, workspace_id, story_id, archive_root_relative,
        segment_max_raw_bytes, retention_days, retention_expires_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($7 * INTERVAL '1 day'))
      ON CONFLICT (generation_id) DO UPDATE SET reconciled_at = NOW(), updated_at = NOW()
      RETURNING *`,
-    [generation.generationId, generation.runId, identity.workspace_id, identity.story_id,
-      PTY_RAW_ARCHIVE_ROOT.split(path.sep).join('/'), getRawArchiveSegmentMaxBytes(), retentionDays],
-  );
+      [generation.generationId, generation.runId, identity.workspace_id, identity.story_id,
+        archiveRoot, getRawArchiveSegmentMaxBytes(), retentionDays],
+    );
+  } catch (error) {
+    await markGenerationArchiveFailure(generation.generationId, 'RAW_ARCHIVE_MANIFEST_INITIALIZATION_FAILED');
+    throw error;
+  }
   let manifest = rows[0];
-  if (!manifest) throw new RawArchiveWriteError('Raw PTY archive manifest could not be initialized');
+  if (!manifest) {
+    await markGenerationArchiveFailure(generation.generationId, 'RAW_ARCHIVE_MANIFEST_INITIALIZATION_FAILED');
+    throw new RawArchiveWriteError('Raw PTY archive manifest could not be initialized');
+  }
   manifest = { ...manifest, workspace_path: identity.workspace_path, generation_active: true };
 
-  await reconcileRawPtyArchive(manifest);
+  try {
+    await reconcileRawPtyArchive(manifest);
+  } catch (error) {
+    await markGenerationArchiveFailure(generation.generationId, 'RAW_ARCHIVE_RECONCILIATION_FAILED');
+    throw error;
+  }
   const reconciled = await queryOne<Pick<ArchiveManifestRow, 'completion_state' | 'gaps'>>(
     `SELECT completion_state, gaps FROM pty_raw_archive_manifests WHERE id = $1`,
     [manifest.id],
@@ -522,13 +612,18 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
   const segments = await listSegmentRows(manifest.id);
   const rawOffset = segments.reduce((max, segment) => Math.max(max, Number(segment.raw_end)), 0);
   const nextIndex = segments.reduce((max, segment) => Math.max(max, segment.segment_index + 1), 0);
-  await execute(
-    `UPDATE pty_raw_archive_manifests SET completion_state = 'writing',
-     next_raw_offset = $2, completed_at = NULL, failure_code = NULL,
-     failure_message = NULL, updated_at = NOW() WHERE id = $1`,
-    [manifest.id, rawOffset],
-  );
-  return new RawPtyArchiveWriter(manifest, nextIndex, rawOffset);
+  try {
+    await execute(
+      `UPDATE pty_raw_archive_manifests SET completion_state = 'writing',
+       next_raw_offset = $2, completed_at = NULL, failure_code = NULL,
+       failure_message = NULL, updated_at = NOW() WHERE id = $1`,
+      [manifest.id, rawOffset],
+    );
+    return new RawPtyArchiveWriter(manifest, nextIndex, rawOffset);
+  } catch (error) {
+    await markGenerationArchiveFailure(generation.generationId, 'RAW_ARCHIVE_WRITER_INITIALIZATION_FAILED');
+    throw error;
+  }
 }
 
 /** Rebuild segment metadata from disk and make every missing/corrupt range explicit. */
@@ -536,7 +631,6 @@ async function reconcileRawPtyArchive(manifest: ArchiveManifestRow): Promise<voi
   const workspacePath = manifest.workspace_path;
   if (!workspacePath) throw new RawArchiveIntegrityError('Archive workspace path is unavailable');
   const generationDir = ensureSecureArchiveGenerationDirectory(
-    workspacePath,
     manifest.archive_root_relative,
     manifest.generation_id,
   );

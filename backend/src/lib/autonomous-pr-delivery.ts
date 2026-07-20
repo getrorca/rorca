@@ -636,10 +636,15 @@ async function providerMerge(
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
   }));
   const currentPr = await preflight.json().catch(() => ({})) as {
-    state?: string; draft?: boolean; merged?: boolean; mergeable?: boolean; mergeable_state?: string;
-    head?: { sha?: string; ref?: string }; base?: { sha?: string; ref?: string };
+    number?: number; html_url?: string; state?: string; draft?: boolean; merged?: boolean; mergeable?: boolean; mergeable_state?: string;
+    head?: { sha?: string; ref?: string; repo?: { full_name?: string } }; base?: { sha?: string; ref?: string; repo?: { full_name?: string } };
   };
-  if (!preflight.ok || currentPr.state !== 'open' || currentPr.draft === true || currentPr.merged === true
+  const expectedRepository = `${delivery.repo_owner}/${delivery.repo_name}`.toLowerCase();
+  if (!preflight.ok || currentPr.number !== Number(delivery.pr_number)
+    || currentPr.html_url !== evidence.pullRequest.url
+    || currentPr.state !== 'open' || currentPr.draft !== false || currentPr.merged !== false
+    || currentPr.head?.repo?.full_name?.toLowerCase() !== expectedRepository
+    || currentPr.base?.repo?.full_name?.toLowerCase() !== expectedRepository
     || currentPr.head?.sha?.toLowerCase() !== delivery.current_head_sha
     || currentPr.head?.ref !== releaseIdentity.providerReleaseRef || currentPr.base?.ref !== releaseIdentity.baseBranch
     || currentPr.base?.sha?.toLowerCase() !== evidence.pullRequest.baseSha
@@ -905,15 +910,21 @@ export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Pr
       { headers: { Authorization: `Bearer ${credential.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
     ));
     const pr = await response.json().catch(() => ({})) as {
-      merged?: boolean;
+      number?: number; html_url?: string; state?: string; draft?: boolean; merged?: boolean;
       merged_at?: string;
       merge_commit_sha?: string;
-      head?: { sha?: string; ref?: string };
-      base?: { ref?: string };
+      head?: { sha?: string; ref?: string; repo?: { full_name?: string } };
+      base?: { sha?: string; ref?: string; repo?: { full_name?: string } };
     };
-    if (!response.ok || pr.merged !== true || pr.head?.sha?.toLowerCase() !== delivery.current_head_sha
+    const expectedRepository = `${delivery.repo_owner}/${delivery.repo_name}`.toLowerCase();
+    if (!response.ok || pr.number !== Number(delivery.pr_number) || pr.html_url !== evidence.pullRequest.url
+      || pr.state !== 'closed' || pr.draft !== false || pr.merged !== true
+      || pr.head?.repo?.full_name?.toLowerCase() !== expectedRepository
+      || pr.base?.repo?.full_name?.toLowerCase() !== expectedRepository
+      || pr.head?.sha?.toLowerCase() !== delivery.current_head_sha
       || pr.head?.ref !== releaseIdentity.providerReleaseRef
       || pr.base?.ref !== releaseIdentity.baseBranch
+      || pr.base?.sha?.toLowerCase() !== evidence.pullRequest.baseSha
       || !isFullGitObjectId(pr.merge_commit_sha)) return null;
     return pr;
   });

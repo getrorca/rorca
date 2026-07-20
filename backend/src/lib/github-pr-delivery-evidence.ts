@@ -29,6 +29,7 @@ import { MANUAL_CHECK_NAME } from './github-checks';
 import { isFullGitObjectId, requireGithubRepositoryAuthority } from './github-repository-authority';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { paginateQuery, type PaginatedResponse, type PaginationParams } from './paginate';
+import { withGithubRepositoryAuthorityLock } from './release-identity';
 
 export const GITHUB_PR_DELIVERY_EVIDENCE_SCHEMA_VERSION = 'rorca.github-pr-delivery-evidence.v1' as const;
 const MAX_PROVIDER_ITEMS = 500;
@@ -96,6 +97,12 @@ export interface GithubPrDeliveryEvidence {
   specSlug: string;
   policy: { id: string; digest: string } | null;
   repository: { owner: string; name: string };
+  repositoryAuthority?: {
+    source: string;
+    bindingId: string | null;
+    installationId: number | null;
+    repositoryId: number | null;
+  };
   pullRequest: {
     number: number;
     url: string;
@@ -137,6 +144,7 @@ interface RunBindingRow {
   repo_owner: string;
   repo_name: string;
   release_base_branch: string;
+  release_base_sha: string;
   release_head_ref: string | null;
   release_authorized_sha: string;
   repository_authority_source: string;
@@ -180,6 +188,10 @@ interface EvidenceRow {
   observed_by_principal_id: string;
   observed_by_display_label: string;
   payload_hash: `sha256:${string}`;
+  repository_authority_source: string;
+  repository_binding_id: string | null;
+  repository_installation_id: number | string | null;
+  repository_id: number | string | null;
   created_at: string | Date;
   spec_slug?: string;
 }
@@ -461,6 +473,12 @@ function mapEvidence(row: EvidenceRow, slug: string): GithubPrDeliveryEvidence {
     specSlug: row.spec_slug ?? slug,
     policy: row.policy_id && row.policy_digest ? { id: row.policy_id, digest: row.policy_digest } : null,
     repository: { owner: row.repo_owner, name: row.repo_name },
+    repositoryAuthority: {
+      source: row.repository_authority_source,
+      bindingId: row.repository_binding_id,
+      installationId: row.repository_installation_id == null ? null : Number(row.repository_installation_id),
+      repositoryId: row.repository_id == null ? null : Number(row.repository_id),
+    },
     pullRequest: {
       number: Number(row.pr_number), url: row.pr_url, state: row.pr_state, draft: row.draft,
       merged: row.merged, headRef: row.head_ref, baseRef: row.base_ref, headSha: row.head_sha,
@@ -492,7 +510,7 @@ function mapEvidence(row: EvidenceRow, slug: string): GithubPrDeliveryEvidence {
   };
 }
 
-export async function observeGithubPrDeliveryEvidence(
+async function observeGithubPrDeliveryEvidenceLocked(
   input: {
     workspaceId: string;
     runId: number;
@@ -509,6 +527,7 @@ export async function observeGithubPrDeliveryEvidence(
     `SELECT r.id, r.workspace_id, r.spec_path, r.branch_name, r.pr_number,
             i.repository_owner AS repo_owner, i.repository_name AS repo_name,
             i.base_branch AS release_base_branch,
+            i.base_sha AS release_base_sha,
             i.provider_release_ref AS release_head_ref,
             i.authorized_sha AS release_authorized_sha,
             i.repository_authority_source,
@@ -542,6 +561,20 @@ export async function observeGithubPrDeliveryEvidence(
     purpose: 'reviewed-delivery',
   });
   if (!token) throw new UnprocessableError('Workspace GitHub credential is unavailable', 'GITHUB_CREDENTIAL_UNAVAILABLE');
+  if (run.repository_authority_source === 'github-app-installation') {
+    const metadata = token.source === 'github-app-installation' && token.metadata && 'bindingId' in token.metadata
+      ? token.metadata : null;
+    if (!metadata
+      || metadata.bindingId !== run.repository_binding_id
+      || Number(metadata.installationId) !== Number(run.repository_installation_id)
+      || Number(metadata.repositoryId) !== Number(run.repository_id)
+      || metadata.repository.owner.toLowerCase() !== run.repo_owner.toLowerCase()
+      || metadata.repository.name.toLowerCase() !== run.repo_name.toLowerCase()) {
+      throw new ConflictError('Resolved GitHub App credential differs from immutable run release authority');
+    }
+  } else if (token.source === 'github-app-installation') {
+    throw new ConflictError('Resolved GitHub credential source differs from immutable run release authority');
+  }
   const owner = run.repo_owner;
   const repo = run.repo_name;
   const prNumber = Number(run.pr_number);
@@ -559,8 +592,9 @@ export async function observeGithubPrDeliveryEvidence(
   if (pr.number !== prNumber) throw new ConflictError('GitHub returned a different pull request identity');
   if (pr.head.ref !== run.release_head_ref) throw new ConflictError('Pull request head branch does not match the immutable provider release ref');
   if (pr.base.ref !== run.release_base_branch) throw new ConflictError('Pull request base branch does not match the immutable run release intent');
+  if (baseSha !== normalizedSha(run.release_base_sha, 'releaseIntent.baseSha')) throw new ConflictError('Pull request base SHA does not match the immutable run release intent');
   const expectedDraft = run.release_merge_strategy === 'draft-pr';
-  if (Boolean(pr.draft) !== expectedDraft) throw new ConflictError('Pull request draft posture differs from immutable release intent');
+  if (typeof pr.draft !== 'boolean' || pr.draft !== expectedDraft) throw new ConflictError('Pull request draft posture is missing or differs from immutable release intent');
   if (headSha !== expectedHeadSha) {
     throw new ConflictError('Pull request head SHA changed; observe again using the current immutable SHA', {
       expectedHeadSha,
@@ -678,6 +712,12 @@ export async function observeGithubPrDeliveryEvidence(
     specSlug: specSlug(run.spec_path),
     policy: policy ? { id: policy.id, digest: policy.policyDigest } : null,
     repository: { owner, name: repo },
+    repositoryAuthority: {
+      source: run.repository_authority_source,
+      bindingId: run.repository_binding_id,
+      installationId: run.repository_installation_id == null ? null : Number(run.repository_installation_id),
+      repositoryId: run.repository_id == null ? null : Number(run.repository_id),
+    },
     pullRequest: {
       number: prNumber, url: pr.html_url, state: pr.state, draft: Boolean(pr.draft), merged: Boolean(pr.merged),
       headRef: pr.head.ref, baseRef: pr.base.ref, headSha, baseSha,
@@ -711,10 +751,11 @@ export async function observeGithubPrDeliveryEvidence(
          merge_commit_sha, mergeable, mergeable_state, comparison_status, ahead_by, behind_by,
          branch_fresh, checks, checks_truncated, reviews, reviews_truncated, check_summary,
          review_summary, provider_observed_at, observed_by_principal_id,
-         observed_by_display_label, payload_hash)
+         observed_by_display_label, payload_hash, repository_authority_source,
+         repository_binding_id, repository_installation_id, repository_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
                $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26::jsonb, $27,
-               $28::jsonb, $29::jsonb, $30, $31, $32, $33)
+               $28::jsonb, $29::jsonb, $30, $31, $32, $33, $34, $35, $36, $37)
        ON CONFLICT (workspace_id, repo_owner, repo_name, pr_number, head_sha, payload_hash)
        DO NOTHING
        RETURNING *`,
@@ -724,7 +765,9 @@ export async function observeGithubPrDeliveryEvidence(
         stablePayload.pullRequest.mergeableState, comparisonStatus, aheadBy, behindBy, branchFresh,
         JSON.stringify(checks), checksTruncated, JSON.stringify(reviews), reviewPage.truncated,
         JSON.stringify(checkSummary), JSON.stringify(reviewSummary), providerObservedAt,
-        input.principal.principalId, input.principal.displayLabel, payloadHash],
+        input.principal.principalId, input.principal.displayLabel, payloadHash,
+        run.repository_authority_source, run.repository_binding_id,
+        run.repository_installation_id, run.repository_id],
     );
     if (!inserted.rows[0]) {
       const raced = await client.query<EvidenceRow>(
@@ -749,6 +792,13 @@ export async function observeGithubPrDeliveryEvidence(
     );
     return { evidence: mapEvidence({ ...inserted.rows[0], spec_slug: specSlug(run.spec_path) }, specSlug(run.spec_path)), replayed: false };
   });
+}
+
+export async function observeGithubPrDeliveryEvidence(
+  input: Parameters<typeof observeGithubPrDeliveryEvidenceLocked>[0],
+  overrides: Parameters<typeof observeGithubPrDeliveryEvidenceLocked>[1] = {},
+): ReturnType<typeof observeGithubPrDeliveryEvidenceLocked> {
+  return withGithubRepositoryAuthorityLock(input.workspaceId, '', '', () => observeGithubPrDeliveryEvidenceLocked(input, overrides));
 }
 
 export async function getGithubPrDeliveryEvidenceById(

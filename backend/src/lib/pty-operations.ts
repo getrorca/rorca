@@ -106,6 +106,8 @@ interface ByteAggregateRow {
   archive_missing_segments: number | string;
   archive_corrupt_segments: number | string;
   archive_failed_manifests: number | string;
+  archive_failed_generations: number | string;
+  archive_missing_expected_manifests: number | string;
 }
 
 function numeric(value: number | string | null | undefined): number {
@@ -161,7 +163,12 @@ export async function getPtyOperationsHealth(): Promise<Record<string, unknown>>
        COALESCE((SELECT COUNT(*) FROM pty_raw_archive_segments
                  WHERE completion_state = 'corrupt'), 0) AS archive_corrupt_segments,
        COALESCE((SELECT COUNT(*) FROM pty_raw_archive_manifests
-                 WHERE completion_state IN ('failed', 'corrupt')), 0) AS archive_failed_manifests`,
+                 WHERE completion_state IN ('failed', 'corrupt')), 0) AS archive_failed_manifests,
+       COALESCE((SELECT COUNT(*) FROM pty_generations
+                 WHERE raw_archive_expected = TRUE AND raw_archive_failure_code IS NOT NULL), 0) AS archive_failed_generations,
+       COALESCE((SELECT COUNT(*) FROM pty_generations g
+                 WHERE g.raw_archive_expected = TRUE
+                   AND NOT EXISTS (SELECT 1 FROM pty_raw_archive_manifests m WHERE m.generation_id = g.id)), 0) AS archive_missing_expected_manifests`,
   );
   const aggregates = row ?? {} as ByteAggregateRow;
   const byteMetrics = [
@@ -182,9 +189,11 @@ export async function getPtyOperationsHealth(): Promise<Record<string, unknown>>
   const corrupt = numeric(aggregates.archive_corrupt_segments);
   const failedManifests = numeric(aggregates.archive_failed_manifests);
   const unrecoverable = numeric(aggregates.unrecoverable_bytes);
+  const failedGenerations = numeric(aggregates.archive_failed_generations);
+  const missingExpectedManifests = numeric(aggregates.archive_missing_expected_manifests);
   const health = {
     contractVersion: 1,
-    status: missing + corrupt + failedManifests + unrecoverable > 0 ? 'degraded' : 'healthy',
+    status: missing + corrupt + failedManifests + failedGenerations + missingExpectedManifests + unrecoverable > 0 ? 'degraded' : 'healthy',
     schema,
     controls,
     byteMetrics,
@@ -197,6 +206,8 @@ export async function getPtyOperationsHealth(): Promise<Record<string, unknown>>
       missingSegments: missing,
       corruptSegments: corrupt,
       failedManifests,
+      failedGenerations,
+      missingExpectedManifests,
       unrecoverableBytes: unrecoverable,
     },
     storageBytes: {
